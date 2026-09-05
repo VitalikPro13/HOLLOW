@@ -771,6 +771,15 @@ pub(crate) struct PendingJoin {
     /// DEVICE id and add the wrong member key. Same lesson as `FriendReject`.
     /// Built once at request time and cached for re-sends.
     pub(crate) device_list: Option<SignedDeviceList>,
+    /// Base64 of our serialised MLS KeyPackage, minted ONCE when the row is
+    /// created and reused for the life of the row (a repeat ask keeps it and
+    /// only refreshes the nonce; OpenMLS accepts a re-add of the same package
+    /// once an old leaf is gone, and we hold its private half until a Welcome
+    /// consumes it). It rides the PARKED ring copy only, so a member reading
+    /// the ring with the joiner nowhere near can queue the LEAF in the same
+    /// batch that admits the membership — which is the difference between
+    /// coming back to a server you can read and one you can only see.
+    pub(crate) key_package: Option<String>,
 }
 
 /// How often a still-parked join re-deposits its copy into the `~join` ring.
@@ -1101,8 +1110,13 @@ pub(crate) enum NodeCommand {
         target_peer: String,
     },
     // -- Gossip relay tree commands (Phase 5D) --
-    /// Internal: check if a pending server join timed out.
-    CheckPendingJoinTimeout { server_id: String },
+    /// Internal: a pending join's window elapsed, so consider PARKING it.
+    ///
+    /// `only_if_empty` marks the SHORT window (see `JOIN_EMPTY_ROOM_WINDOW`):
+    /// it parks only when the relay has already told us the server room holds
+    /// nobody else. The long window sends `false` and is the authority for
+    /// every other case.
+    CheckPendingJoinTimeout { server_id: String, only_if_empty: bool },
     /// Internal: a pending join has gone unanswered past the coordinator's
     /// window — re-send the request so EVERY online member serves it, not just
     /// the elected one. The fast path is one responder; this is the safety net
@@ -1476,6 +1490,17 @@ pub(crate) enum HavenMessage {
         /// rejections written into the ring).
         #[serde(default)]
         parked: bool,
+        /// The joiner's MLS KeyPackage, base64 of the serialised package. Set
+        /// ONLY on the parked ring copy (`deposit_parked_join`); a live request
+        /// carries `None` and bootstraps on its SyncResponse instead.
+        ///
+        /// A KeyPackage is public material by construction — it is the thing
+        /// you hand out so that somebody can add you — so it rides a frame any
+        /// invite-holder can pull without widening what the ring exposes: peer
+        /// ids, a signed device list, a follow credential, and now a public key
+        /// package. Absent = a client from before rung 2.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        key_package: Option<String>,
     },
 
     #[serde(rename = "join_rejected")]

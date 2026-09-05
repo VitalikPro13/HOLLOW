@@ -1097,6 +1097,10 @@ impl MessageStore {
                 last_deposited_at INTEGER NOT NULL DEFAULT 0,
                 created_at        INTEGER NOT NULL
             )")?;
+        // -- Migration: the carried KeyPackage (pending joins, rung 2) --
+        // Nullable: a row written before rung 2 has no package and falls back
+        // to bootstrapping on co-presence, exactly as it did.
+        migrate(conn, "ALTER TABLE pending_server_joins ADD COLUMN key_package TEXT;");
 
         // -- Artist shop: art imported from a `.hollowpack` --
         // Keyed by the art's HASH, because that is the art's identity
@@ -3784,15 +3788,16 @@ impl MessageStore {
             .execute(
                 "INSERT INTO pending_server_joins
                     (server_id, requested_at, nsfw_confirmed, twitch_proof_json,
-                     state, reason, last_deposited_at, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                     state, reason, last_deposited_at, created_at, key_package)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
                  ON CONFLICT(server_id) DO UPDATE SET
                     requested_at      = excluded.requested_at,
                     nsfw_confirmed    = excluded.nsfw_confirmed,
                     twitch_proof_json = excluded.twitch_proof_json,
                     state             = excluded.state,
                     reason            = excluded.reason,
-                    last_deposited_at = excluded.last_deposited_at",
+                    last_deposited_at = excluded.last_deposited_at,
+                    key_package       = excluded.key_package",
                 params![
                     row.server_id,
                     row.requested_at,
@@ -3802,6 +3807,7 @@ impl MessageStore {
                     row.reason,
                     row.last_deposited_at,
                     row.created_at,
+                    row.key_package,
                 ],
             )
             .map_err(|e| format!("Failed to upsert pending join: {e}"))?;
@@ -3822,7 +3828,7 @@ impl MessageStore {
             .conn
             .prepare(
                 "SELECT server_id, requested_at, nsfw_confirmed, twitch_proof_json,
-                        state, reason, last_deposited_at, created_at
+                        state, reason, last_deposited_at, created_at, key_package
                  FROM pending_server_joins ORDER BY requested_at DESC",
             )
             .map_err(|e| format!("Failed to prepare pending join query: {e}"))?;
@@ -3837,6 +3843,7 @@ impl MessageStore {
                     reason: row.get(5)?,
                     last_deposited_at: row.get(6)?,
                     created_at: row.get(7)?,
+                    key_package: row.get(8)?,
                 })
             })
             .map_err(|e| format!("Failed to query pending joins: {e}"))?;
@@ -5628,6 +5635,11 @@ pub struct PendingJoinRow {
     /// Unix MILLISECONDS of the last `~join` ring deposit.
     pub last_deposited_at: i64,
     pub created_at: i64,
+    /// Base64 of the MLS KeyPackage this join will be added with (rung 2).
+    /// `None` for a row written before it existed, or a live join that never
+    /// parked. Persisted because the private half lives in the MLS store and
+    /// the answer can arrive days later, on another run of the app.
+    pub key_package: Option<String>,
 }
 
 /// Persisted conference room (host-local; reports/CONFERENCES_PLAN.md).

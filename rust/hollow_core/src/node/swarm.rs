@@ -1105,6 +1105,10 @@ async fn run_event_loop(
                         parked: true,
                         last_deposited_at: row.last_deposited_at,
                         device_list: device_list.clone(),
+                        // Rung 2: the same package the ring copy names. Its
+                        // private half came back with the MLS store, so a
+                        // re-deposit after a restart is the SAME leaf request.
+                        key_package: row.key_package,
                     });
                     restored += 1;
                 }
@@ -1142,6 +1146,14 @@ async fn run_event_loop(
     // Prevents spamming the owner on every MlsChannelMessage for an unknown group.
     // Value = when the request was sent; entries expire after MLS_BOOTSTRAP_TIMEOUT to allow retry.
     let mut mls_bootstrap_requested: HashMap<String, std::time::Instant> = HashMap::new();
+
+    // Groups a commit just evicted us from while we are still a member, and
+    // when. A remove + re-add is two commits from ONE batch tick and the
+    // removal goes out first, so the Welcome that puts us back is already in
+    // flight: asking for a leaf on seeing the removal mints a KeyPackage the
+    // next tick turns into another remove + re-add. Swept at the top of the
+    // batch tick, cleared by the Welcome. Key: the MLS group key.
+    let mut mls_welcome_grace: HashMap<String, std::time::Instant> = HashMap::new();
 
     // Per-(group, peer) cooldowns for MLS epoch-hint service and self-probes
     // (join-order SFrame race fix). Key: "{group_key}|{master}" for serving,
@@ -1393,6 +1405,7 @@ async fn run_event_loop(
                             &ws_room_peers, &cmd_tx,
                             server_id, twitch_proof_json, nsfw_confirmed,
                             &crdt_store, &master_keypair, &device_peer_id,
+                            &mls, &crypto_store, None,
                             &db_path, &db_passphrase,
                         ).await;
                     }
@@ -2760,7 +2773,7 @@ async fn run_event_loop(
 
                     NodeCommand::ConferenceRequestJoin { conf_id, display_name, avatar_hash, access_code } => {
                         super::conference::handle_conference_request_join(
-                            &mut mls, &ws_cmd_tx,
+                            &mut mls, &crypto_store, &ws_cmd_tx,
                             conf_id, display_name, avatar_hash, access_code,
                         );
                     }
@@ -2815,7 +2828,7 @@ async fn run_event_loop(
                     NodeCommand::DiscardPendingJoin { server_id } => {
                         sync_handler::handle_discard_pending_join(
                             &mut pending_server_joins, &event_tx, &ws_cmd_tx,
-                            server_id, &crdt_store,
+                            &mut mls, &crypto_store, server_id, &crdt_store,
                         ).await;
                     }
                     // "Request again": the same code path as the original ask,
@@ -2829,6 +2842,7 @@ async fn run_event_loop(
                                     &ws_room_peers, &cmd_tx,
                                     server_id, row.twitch_proof_json, row.nsfw_confirmed,
                                     &crdt_store, &master_keypair, &device_peer_id,
+                                    &mls, &crypto_store, row.key_package,
                                     &db_path, &db_passphrase,
                                 ).await;
                             }
@@ -2839,10 +2853,11 @@ async fn run_event_loop(
                     }
 
                     // -- Server join timeout --
-                    NodeCommand::CheckPendingJoinTimeout { server_id } => {
+                    NodeCommand::CheckPendingJoinTimeout { server_id, only_if_empty } => {
                         sync_handler::handle_check_pending_join_timeout(
                             &mut pending_server_joins, &event_tx, &ws_cmd_tx,
-                            server_id,
+                            &ws_room_peers, &local_peer_str, &device_peer_id,
+                            server_id, only_if_empty,
                             &crdt_store,
                         ).await;
                     }
@@ -2898,6 +2913,8 @@ async fn run_event_loop(
                                                                 &crdt_store,
                                 &mut pending_sync_requests, &mut mls,
                                 &mut mls_bootstrap_requested,
+                                &mut mls_welcome_grace,
+                                &mut relay_catchup_done,
                                 &mut pending_shard_assembly, &mut pending_file_streams,
                                 &mut pending_shard_streams, &mut early_file_streams,
                                 &mut pending_link_snapshots,
@@ -3232,6 +3249,12 @@ async fn run_event_loop(
                         key_request_in_flight.clear();
                         key_bundle_sent_to.clear();
                         mls_bootstrap_requested.clear();
+                        // The grace waits for a Welcome that was in flight on the
+                        // socket that just died. Dropping it together with the
+                        // throttle keeps the pair consistent: the new socket
+                        // re-bootstraps through the ordinary paths instead of
+                        // through a sweep holding a stale deadline.
+                        mls_welcome_grace.clear();
                         mls_epoch_hint_cooldown.clear();
                         if !pending_messages.is_empty() {
                             hollow_log!("[HOLLOW-WS] Keeping {} pending message queues for delivery after reconnect", pending_messages.len());
@@ -3306,7 +3329,7 @@ async fn run_event_loop(
                         // knocking on may be the HOST starting the meeting —
                         // re-send our join request (throttled, fresh KP).
                         if !is_fwd_room {
-                            super::conference::reknock_if_pending(&mut mls, &ws_cmd_tx, &room);
+                            super::conference::reknock_if_pending(&mut mls, &crypto_store, &ws_cmd_tx, &room);
                         }
 
                         // Recovery pool: when a peer joins our recovery room, send them our inventory.
@@ -3636,7 +3659,7 @@ async fn run_event_loop(
                                                     // We're a member but lost our MLS group — send
                                                     // KeyPackage to this peer for re-bootstrap.
                                                     hollow_log!("[HOLLOW-MLS] No group for {sid}, sending KeyPackage to {peer_id} for bootstrap (PeerJoined)");
-                                                    if let Ok(kp_bytes) = mls_mgr.generate_key_package() {
+                                                    if let Ok(kp_bytes) = crate::node::crypto_handler::mint_key_package(mls_mgr, &crypto_store) {
                                                         let kp_b64 = base64::engine::general_purpose::STANDARD.encode(&kp_bytes);
                                                         send_message_to_peer(
                                                             &ws_cmd_tx, &ws_room_peers,
@@ -3703,6 +3726,10 @@ async fn run_event_loop(
                                             requested_at: pending_server_joins.get(&room).map(|p| p.requested_at).unwrap_or(0),
                                             device_list: pending_server_joins.get(&room).and_then(|p| p.device_list.clone()),
                                             parked: false,
+                                            // Live copy: the responder is right
+                                            // here, so the leaf rides the
+                                            // SyncResponse bootstrap.
+                                            key_package: None,
                                         },
                                     );
                                     hollow_log!("[HOLLOW-CRDT] Sent pending join request to {peer_id} for {room}");
@@ -3933,7 +3960,7 @@ async fn run_event_loop(
                             // conf room we're knocking on — covers reconnects and
                             // "host already there" without waiting for a PeerJoined.
                             if !room_set.is_empty() {
-                                super::conference::reknock_if_pending(&mut mls, &ws_cmd_tx, &room);
+                                super::conference::reknock_if_pending(&mut mls, &crypto_store, &ws_cmd_tx, &room);
                             }
                         }
                         ws_room_peers.insert(room.clone(), room_set);
@@ -4007,37 +4034,10 @@ async fn run_event_loop(
                         // Gather the channel list first and drop the `server_states`
                         // borrow: the watermark lookup is awaited on the CrdtStore
                         // actor rather than opening a DB handle per channel here.
-                        let fresh_channels: Vec<String> = match server_states.get(&room) {
-                            Some(state) if state.relay_catchup_secs() > 0 => {
-                                sync_handler::register_relay_catchup(&ws_cmd_tx, state, &room);
-                                state
-                                    .channels
-                                    .values()
-                                    .filter(|ch| {
-                                        matches!(ch.channel_type, crate::crdt::server_state::ChannelType::Text)
-                                            && state.can_see_channel(&local_peer, &ch.channel_id)
-                                    })
-                                    .map(|ch| ch.channel_id.clone())
-                                    .filter(|cid| {
-                                        relay_catchup_done.insert((room.clone(), cid.clone()))
-                                    })
-                                    .collect()
-                            }
-                            _ => Vec::new(),
-                        };
-                        if !fresh_channels.is_empty() {
-                            let ages = sync_handler::catchup_watermark_ages(
-                                &crdt_store, &room, fresh_channels,
-                            ).await;
-                            for (cid, max_age_secs) in ages {
-                                hollow_log!("[HOLLOW-TOPIC] Catch-up request (connect) {room}/{cid} max_age={max_age_secs}s");
-                                let _ = ws_cmd_tx.send(super::ws_client::WsCommand::TopicCatchup {
-                                    room_code: room.clone(),
-                                    channel_id: cid,
-                                    max_age_secs,
-                                });
-                            }
-                        }
+                        sync_handler::request_channel_catchups(
+                            &ws_cmd_tx, &crdt_store, server_states.get(&room), &room,
+                            &local_peer, &mut relay_catchup_done, "connect",
+                        ).await;
 
                         // -- The JOIN ring (pending joins, rung 1) --
                         // Read once per connection, by BOTH roles: a member
@@ -4259,7 +4259,7 @@ async fn run_event_loop(
                                             if mls_mgr.has_group(sid) { continue; }
                                             if mls_bootstrap_requested.get(sid.as_str()).is_some_and(|t| t.elapsed() < MLS_BOOTSTRAP_TIMEOUT) { continue; }
                                             hollow_log!("[HOLLOW-MLS] No group for {sid}, sending KeyPackage to {pid_str} for bootstrap (RoomMembers)");
-                                            if let Ok(kp_bytes) = mls_mgr.generate_key_package() {
+                                            if let Ok(kp_bytes) = crate::node::crypto_handler::mint_key_package(mls_mgr, &crypto_store) {
                                                 let kp_b64 = base64::engine::general_purpose::STANDARD.encode(&kp_bytes);
                                                 send_message_to_peer(
                                                     &ws_cmd_tx, &ws_room_peers,
@@ -4449,6 +4449,10 @@ async fn run_event_loop(
                                             requested_at: pending_server_joins.get(&room).map(|p| p.requested_at).unwrap_or(0),
                                             device_list: pending_server_joins.get(&room).and_then(|p| p.device_list.clone()),
                                             parked: false,
+                                            // Live copy: the responder is right
+                                            // here, so the leaf rides the
+                                            // SyncResponse bootstrap.
+                                            key_package: None,
                                         },
                                     );
                                     hollow_log!("[HOLLOW-CRDT] Sent pending join request to {pid_str} for {room}");
@@ -5008,6 +5012,8 @@ async fn run_event_loop(
                                                                                 &crdt_store,
                                         &mut pending_sync_requests, &mut mls,
                                         &mut mls_bootstrap_requested,
+                                        &mut mls_welcome_grace,
+                                        &mut relay_catchup_done,
                                         &mut pending_shard_assembly, &mut pending_file_streams,
                                         &mut pending_shard_streams, &mut early_file_streams,
                                         &mut pending_link_snapshots,
@@ -5052,6 +5058,55 @@ async fn run_event_loop(
             _ = mls_batch_timer.tick() => {
                 arm_started = Some(("timer", "mls_batch", std::time::Instant::now()));
                 if let Some(ref mut mls_mgr) = mls {
+                    // Phase 0: the Welcome grace. A commit that evicted our own
+                    // leaf while we are still a member is half of a remove +
+                    // re-add, and the Welcome half is normally a few hundred ms
+                    // behind it. Asking for a leaf on the removal alone turns
+                    // one heal into an epoch treadmill, so the eviction only
+                    // ARMS this and we ask here, once, if the Welcome never
+                    // came. Runs before phase 1 so a KeyPackage it sends is
+                    // processed by the committer's NEXT tick, never half of
+                    // this one.
+                    if !mls_welcome_grace.is_empty() {
+                        let elapsed: Vec<String> = mls_welcome_grace
+                            .iter()
+                            .filter(|(_, t)| t.elapsed() >= crate::node::crypto_handler::MLS_WELCOME_GRACE)
+                            .map(|(k, _)| k.clone())
+                            .collect();
+                        for group_key in elapsed {
+                            mls_welcome_grace.remove(&group_key);
+                            if mls_mgr.has_group(&group_key) {
+                                continue; // the Welcome landed after all
+                            }
+                            let (sid, cid) = crate::crypto::split_group_key(&group_key);
+                            let Some(state) = server_states.get(&sid) else { continue };
+                            let still_eligible = state.members.keys()
+                                .any(|m| super::resolver::same_identity(m, &local_peer_str))
+                                && match &cid {
+                                    Some(c) => state.can_see_channel(&local_peer_str, c),
+                                    None => true,
+                                };
+                            if !still_eligible { continue; }
+                            hollow_log!("[HOLLOW-MLS] Welcome grace elapsed for {group_key}, requesting bootstrap");
+                            let requested = match &cid {
+                                Some(c) => {
+                                    crate::node::crypto_handler::request_subgroup_bootstrap(
+                                        mls_mgr, &crypto_store, &ws_cmd_tx, &ws_room_peers,
+                                        state, &sid, c, &local_peer_str,
+                                    );
+                                    true
+                                }
+                                None => crate::node::crypto_handler::request_server_group_bootstrap(
+                                    mls_mgr, &crypto_store, &ws_cmd_tx, &ws_room_peers,
+                                    state, &sid, &local_peer_str,
+                                ),
+                            };
+                            if requested {
+                                mls_bootstrap_requested.insert(group_key, std::time::Instant::now());
+                            }
+                        }
+                    }
+
                     // Phase 1: Batch removals (stale members + recovery re-adds) — single commit.
                     // Keys are MLS GROUP keys: a bare `server_id` (server-wide group)
                     // or `subgroup_id(server, channel)` (per-channel subgroup, Option B).
@@ -5145,16 +5200,43 @@ async fn run_event_loop(
                                     // Send Welcome to all new joiners.
                                     let welcome_data = serde_json::to_vec(&HavenMessage::MlsWelcome {
                                         server_id: server_id.clone(),
-                                        welcome: welcome_b64,
+                                        welcome: welcome_b64.clone(),
                                         channel_id: channel_id.clone(),
                                     }).unwrap_or_default();
                                     for peer_id_str in &added_peers {
-                                            if peer_is_reachable(&ws_room_peers, peer_id_str) {
-                                                send_raw_to_peer(
-                                                    &ws_cmd_tx, &ws_room_peers,
-                                                    peer_id_str, welcome_data.clone(),
-                                                );
-                                            }
+                                        if peer_is_reachable(&ws_room_peers, peer_id_str) {
+                                            send_raw_to_peer(
+                                                &ws_cmd_tx, &ws_room_peers,
+                                                peer_id_str, welcome_data.clone(),
+                                            );
+                                        } else {
+                                            // The device is not here. Rung 2 admits a
+                                            // PARKED joiner and seats its leaf in the
+                                            // same batch, so the common case for this
+                                            // branch is a Welcome for somebody who has
+                                            // not been online for days. Addressed into
+                                            // the server room by NAME, which is what the
+                                            // relay buffers under the target device and
+                                            // replays on its next join of that room —
+                                            // the same device-keyed queue the snapshot
+                                            // and the SyncResponse ride, and FIFO, so the
+                                            // Welcome lands AFTER the SyncResponse that
+                                            // completes the join and re-creates the
+                                            // server state it belongs to. Dropping it
+                                            // here (the old `if reachable` alone) is
+                                            // what left a returning parked joiner
+                                            // waiting for co-presence.
+                                            let room = crate::crypto::split_group_key(&group_key).0;
+                                            send_message_to_peer_in_room(
+                                                &ws_cmd_tx, &room,
+                                                peer_id_str, HavenMessage::MlsWelcome {
+                                                    server_id: server_id.clone(),
+                                                    welcome: welcome_b64.clone(),
+                                                    channel_id: channel_id.clone(),
+                                                },
+                                            );
+                                            hollow_log!("[HOLLOW-MLS] Buffered the Welcome for absent device {peer_id_str} in room {room} ({group_key})");
+                                        }
                                     }
 
                                     // Tier 1 (large-server scaling): broadcast the single
@@ -6519,6 +6601,8 @@ async fn handle_incoming_request(
     pending_sync_requests: &mut HashMap<String, Vec<(String, String, i64)>>,
     mls: &mut Option<MlsManager>,
     mls_bootstrap_requested: &mut HashMap<String, std::time::Instant>,
+    mls_welcome_grace: &mut HashMap<String, std::time::Instant>,
+    relay_catchup_done: &mut std::collections::HashSet<(String, String)>,
     pending_shard_assembly: &mut HashMap<String, PendingShardAssembly>,
     pending_file_streams: &mut HashMap<String, PendingFileStream>,
     pending_shard_streams: &mut HashMap<String, PendingShardStream>,
@@ -9946,7 +10030,18 @@ async fn handle_incoming_request(
                                         }
                                     }
 
-                                    // Broadcast pledge to connected members — MLS first, plaintext fallback.
+                                    // Broadcast the pledge op to connected members: MLS when we
+                                    // hold the group, PLUS the plaintext `CrdtOpBroadcast` twin
+                                    // UNCONDITIONALLY. A CRDT op is author-signed and idempotent,
+                                    // so a member with a working leaf just applies the same op
+                                    // twice; a member with NO leaf (a just-admitted parked joiner)
+                                    // or at a skewed epoch is otherwise invisible from here and
+                                    // would never learn our pledge. Duplication is free, silence
+                                    // is not (`feedback_mls_first_fallback_dead_targets`).
+                                    //
+                                    // `StoragePledgeChanged` does not touch `members`, so reading
+                                    // the target list after `apply_op` is safe here (unlike
+                                    // `ServerDeleted`, which DRAINS membership as part of apply).
                                     if let Ok(op_json) = serde_json::to_string(&pledge_op) {
                                         let mls_ok = mls.as_ref().is_some_and(|m| m.has_group(&server_id));
                                         if mls_ok {
@@ -9954,15 +10049,14 @@ async fn handle_incoming_request(
                                             if let Err(e) = send_mls_broadcast(mls.as_mut().unwrap(), ws_cmd_tx, &server_id, &envelope, crypto_store) {
                                                 hollow_log!("[HOLLOW-MLS] CrdtOp pledge broadcast failed: {e}");
                                             }
-                                        } else {
-                                            let pledge_data = serde_json::to_vec(&HavenMessage::CrdtOpBroadcast {
-                                                server_id: server_id.clone(),
-                                                op_json: op_json.clone(),
-                                            }).unwrap_or_default();
-                                            for member in state.members_list() {
-                                                if member.peer_id == local_peer { continue; }
-                                                send_raw_to_identity(ws_cmd_tx, ws_room_peers, &member.peer_id, pledge_data.clone());
-                                            }
+                                        }
+                                        let pledge_data = serde_json::to_vec(&HavenMessage::CrdtOpBroadcast {
+                                            server_id: server_id.clone(),
+                                            op_json: op_json.clone(),
+                                        }).unwrap_or_default();
+                                        for member in state.members_list() {
+                                            if member.peer_id == local_peer { continue; }
+                                            send_raw_to_identity(ws_cmd_tx, ws_room_peers, &member.peer_id, pledge_data.clone());
                                         }
                                     }
                                 }
@@ -9989,31 +10083,92 @@ async fn handle_incoming_request(
                                 }
                             }
 
-                            // MLS: if we don't have the MLS group after joining, send
-                            // our KeyPackage to the JOIN RESPONDER (`peer_str`) — the
-                            // device that just served us the SyncResponse. It is the
-                            // online member we synced from (the owner, or the
-                            // coordinator the owner delegated to), is provably in the
-                            // room (it just messaged us), and reaching it directly
-                            // avoids depending on a resolver link we may not have warmed
-                            // yet for a freshly-joined server. The responder's
-                            // MlsKeyPackage handler re-elects the real committer if it
-                            // isn't the right one. This mirrors the RoomMembers /
-                            // PeerJoined recovery paths, which send to the raw device id.
-                            if let Some(mls_mgr) = mls.as_ref() {
-                                if !mls_mgr.has_group(&server_id) {
-                                    if let Ok(kp_bytes) = mls_mgr.generate_key_package() {
-                                        let kp_b64 = base64::engine::general_purpose::STANDARD.encode(&kp_bytes);
-                                        send_message_to_peer(
-                                            ws_cmd_tx, ws_room_peers,
-                                            peer_str, HavenMessage::MlsKeyPackage {
-                                                server_id: server_id.clone(),
-                                                key_package: kp_b64,
-                                                channel_id: None,
-                                            },
-                                        );
-                                        hollow_log!("[HOLLOW-MLS] Sent bootstrap KeyPackage to join responder {peer_str} for {server_id}");
-                                    }
+                            // MLS: we hold the server but not a leaf in its group, so
+                            // ask for one.
+                            //
+                            // Exactly ONE KeyPackage may leave here. A second one from
+                            // the same device straddling a batch tick is a remove +
+                            // re-add: two commits, the removal one evicting the leaf
+                            // the first Welcome just gave us, and the eviction path
+                            // then asks for a third. A clean three-member join used to
+                            // land at epoch 5 for that reason.
+                            //
+                            // So the target is the one every other bootstrap path
+                            // already uses (`server_bootstrap_target`: the owner while
+                            // reachable, else the lowest reachable master), because the
+                            // receiving handler only ACTS as the owner or as a group
+                            // holder — a responder that is neither logs "not owner" and
+                            // drops it. When that send lands we STAMP the throttle,
+                            // which is what stops the message-triggered rescue firing
+                            // the duplicate the instant the admitter's MLS-encrypted
+                            // `MemberAdded` twin arrives (it always does).
+                            //
+                            // With no target — a resolver still cold for a server we
+                            // joined seconds ago, which is the ordinary field case — we
+                            // fall back to the raw responder id, which is provably in
+                            // the room because it just messaged us, and we do NOT stamp:
+                            // that send only lands a leaf when the responder happens to
+                            // BE the owner, so the rescue paths have to stay armed
+                            // behind it. Stamping here alone was tried and reverted; a
+                            // joiner whose responder was a group-less non-owner never
+                            // got a leaf at all.
+                            let want_leaf = mls.as_ref().is_some_and(|m| !m.has_group(&server_id));
+                            if want_leaf && completed.parked && completed.key_package.is_some() {
+                                // Rung 2: the ring copy of this request CARRIED a
+                                // KeyPackage, so the member that admitted us has
+                                // already seated our leaf and the Welcome is
+                                // waiting in our own relay buffer, behind the
+                                // SyncResponse we are handling right now. Asking
+                                // again would mint a second package and turn that
+                                // Welcome into a remove + re-add.
+                                //
+                                // Expecting a Welcome is exactly what the eviction
+                                // grace already means, so it is the same wait: if
+                                // none arrives inside it, the batch tick asks once,
+                                // through the ordinary bootstrap. Without that the
+                                // stall would be silent and long — a member that
+                                // answered our LIVE re-request instead of the ring
+                                // copy never saw the carried package, and nothing
+                                // else here is guaranteed to fire.
+                                mls_bootstrap_requested.insert(server_id.clone(), std::time::Instant::now());
+                                mls_welcome_grace.insert(server_id.clone(), std::time::Instant::now());
+                                hollow_log!("[HOLLOW-MLS] Parked join for {server_id} carried a KeyPackage; expecting a buffered Welcome");
+                            } else if want_leaf
+                                && let Some(mls_mgr) = mls.as_ref()
+                                && let Ok(kp_bytes) = crate::node::crypto_handler::mint_key_package(mls_mgr, crypto_store)
+                            {
+                                // ONE package per attempt, minted before we know
+                                // which of the two addresses it will go to. Every
+                                // mint writes a private init key and a private leaf
+                                // encryption key into the persisted MLS storage, and
+                                // only a Welcome consumes them: a second package
+                                // built for a fallback the first send made
+                                // unnecessary would sit there unused for the life of
+                                // the install. The frame is byte-identical either
+                                // way, so there is nothing to re-mint for.
+                                let kp_b64 = base64::engine::general_purpose::STANDARD.encode(&kp_bytes);
+                                let data = serde_json::to_vec(&HavenMessage::MlsKeyPackage {
+                                    server_id: server_id.clone(),
+                                    key_package: kp_b64,
+                                    channel_id: None,
+                                }).unwrap_or_default();
+                                let target = crate::node::crypto_handler::server_bootstrap_target(
+                                    state, local_peer_str, ws_room_peers,
+                                )
+                                .filter(|t| !super::resolver::same_identity(t, local_peer_str));
+                                let sent = match &target {
+                                    Some(t) => send_raw_to_identity(ws_cmd_tx, ws_room_peers, t, data.clone()),
+                                    None => 0,
+                                };
+                                if sent > 0 {
+                                    mls_bootstrap_requested.insert(server_id.clone(), std::time::Instant::now());
+                                    hollow_log!(
+                                        "[HOLLOW-MLS] Sent bootstrap KeyPackage to {} ({sent} device(s)) for {server_id}",
+                                        target.as_deref().unwrap_or_default(),
+                                    );
+                                } else {
+                                    send_raw_to_peer(ws_cmd_tx, ws_room_peers, peer_str, data);
+                                    hollow_log!("[HOLLOW-MLS] Sent bootstrap KeyPackage to join responder {peer_str} for {server_id} (no bootstrap target yet)");
                                 }
                             }
                         }
@@ -10097,7 +10252,7 @@ async fn handle_incoming_request(
         }
         HavenMessage::ServerJoinRequest {
             server_id, twitch_proof_json, nsfw_confirmed,
-            requested_at, device_list, parked,
+            requested_at, device_list, parked, key_package,
         } => {
             hollow_log!("[HOLLOW-CRDT] ServerJoinRequest from {peer_str} for server {server_id} (nonce {requested_at}, parked {parked})");
 
@@ -10429,7 +10584,20 @@ async fn handle_incoming_request(
                         }
                     }
 
-                    // Broadcast MemberAdded to other peers — MLS first, plaintext fallback.
+                    // Broadcast MemberAdded to other peers: MLS when we hold the
+                    // group, PLUS the plaintext `CrdtOpBroadcast` twin
+                    // UNCONDITIONALLY. Our own encrypt succeeding says nothing
+                    // about whether an existing member can DECRYPT: one with no
+                    // leaf (a parked joiner completes its CRDT half before
+                    // co-presence forms the leaf) or at a skewed epoch never saw
+                    // the new member appear, and nothing here showed it. The op
+                    // is author-signed and idempotent, so a member with a
+                    // working leaf simply applies it twice.
+                    //
+                    // Targets come from `ws_room_peers`, not `state.members`, so
+                    // the drain-on-apply concern that bit `ServerDeleted` does
+                    // not apply here. The joiner (`peer_str`) stays excluded: it
+                    // gets the full snapshot + op log below.
                     if let Ok(op_json) = serde_json::to_string(&op) {
                         admitted_op_json = Some(op_json.clone());
                         let mls_ok = mls.as_ref().is_some_and(|m| m.has_group(&server_id));
@@ -10438,20 +10606,18 @@ async fn handle_incoming_request(
                             if let Err(e) = send_mls_broadcast(mls.as_mut().unwrap(), ws_cmd_tx, &server_id, &envelope, crypto_store) {
                                 hollow_log!("[HOLLOW-MLS] CrdtOp MemberAdded broadcast failed: {e}");
                             }
-                        } else {
-                            // Plaintext fallback: broadcast to all WS room peers.
-                            if let Some(room_peers) = ws_room_peers.get(&server_id) {
-                                let crdt_data = serde_json::to_vec(&HavenMessage::CrdtOpBroadcast {
-                                    server_id: server_id.clone(),
-                                    op_json: op_json.clone(),
-                                }).unwrap_or_default();
-                                for other_str in room_peers.iter() {
-                                    if other_str == local_peer_str || other_str == peer_str { continue; }
-                                    send_raw_to_peer(
-                                        ws_cmd_tx, ws_room_peers,
-                                        other_str, crdt_data.clone(),
-                                    );
-                                }
+                        }
+                        if let Some(room_peers) = ws_room_peers.get(&server_id) {
+                            let crdt_data = serde_json::to_vec(&HavenMessage::CrdtOpBroadcast {
+                                server_id: server_id.clone(),
+                                op_json: op_json.clone(),
+                            }).unwrap_or_default();
+                            for other_str in room_peers.iter() {
+                                if other_str == local_peer_str || other_str == peer_str { continue; }
+                                send_raw_to_peer(
+                                    ws_cmd_tx, ws_room_peers,
+                                    other_str, crdt_data.clone(),
+                                );
                             }
                         }
                     }
@@ -10471,6 +10637,76 @@ async fn handle_incoming_request(
                                 addresses: vec![],
                             },
                         }).await;
+                    }
+                }
+
+                // RUNG 2: a PARKED request carries the joiner's KeyPackage, so
+                // the leaf goes in the same batch as the membership and the
+                // joiner comes back to a server it can READ rather than one it
+                // can only see.
+                //
+                // This sits here, and nowhere earlier, because everything above
+                // it is a gate on this exact request: the cryptographic
+                // attribution that produced `member_master`, the ban list, the
+                // Twitch credential, owner-verify, private, NSFW consent and the
+                // member cap. A leaf is the strongest thing a member can hand
+                // out, so it is queued only for a joiner the gates have already
+                // admitted.
+                //
+                // And only when the package's OWN credential identity is the
+                // device attribution named. A KeyPackage names the leaf it wants
+                // created; one naming a different id is asking us to seat
+                // somebody who never passed a gate, which is a refusal, not a
+                // log line.
+                if parked && let Some(kp_b64) = key_package.as_ref() {
+                    match base64::engine::general_purpose::STANDARD.decode(kp_b64) {
+                        Err(e) => hollow_log!("[HOLLOW-MLS] Carried KeyPackage from {peer_str} for {server_id} is not valid base64: {e}"),
+                        Ok(kp_bytes) => match crate::crypto::MlsManager::key_package_identity(&kp_bytes) {
+                            Err(e) => hollow_log!("[HOLLOW-MLS] Carried KeyPackage from {peer_str} for {server_id} does not parse: {e}"),
+                            Ok(id) if id != peer_str => hollow_log!(
+                                "[HOLLOW-SECURITY] Dropping carried KeyPackage from {peer_str}: credential identity {id} is not the attributed sender device"
+                            ),
+                            Ok(_) => {
+                                let is_owner = state.roles.get(local_peer_str)
+                                    .map(|r| *r.read() == crate::crdt::operations::MemberRole::Owner)
+                                    .unwrap_or(false);
+                                let mut queued = false;
+                                if let Some(mls_mgr) = mls.as_mut() {
+                                    // Lazily create the server group exactly as
+                                    // the MlsKeyPackage handler does: only the
+                                    // owner may, and only when nobody holds one.
+                                    if !mls_mgr.has_group(&server_id) && is_owner {
+                                        hollow_log!("[HOLLOW-MLS] Lazily creating MLS group {server_id} for a parked admission");
+                                        if let Err(e) = mls_mgr.create_group(&server_id) {
+                                            hollow_log!("[HOLLOW-MLS] Failed to create MLS group: {e}");
+                                        } else {
+                                            persist_mls_state(mls_mgr, crypto_store);
+                                        }
+                                    }
+                                    if mls_mgr.has_group(&server_id) {
+                                        let already_leaf = mls_mgr.group_members(&server_id)
+                                            .iter().any(|m| m == peer_str);
+                                        let already_queued = pending_mls_key_packages
+                                            .get(&server_id)
+                                            .is_some_and(|q| q.iter().any(|(p, _)| p == peer_str));
+                                        if !already_leaf && !already_queued {
+                                            pending_mls_key_packages
+                                                .entry(server_id.clone())
+                                                .or_default()
+                                                .push((peer_str.to_string(), kp_bytes));
+                                            hollow_log!("[HOLLOW-MLS] Queued the carried KeyPackage of parked joiner {peer_str} for {server_id}");
+                                        }
+                                        queued = true;
+                                    }
+                                }
+                                if !queued {
+                                    // Rung 1 behaviour, and an accepted residual:
+                                    // we can admit a member without holding the
+                                    // group, and only a holder can seat a leaf.
+                                    hollow_log!("[HOLLOW-MLS] Parked joiner {peer_str} admitted without a leaf on {server_id}: no group held here, its leaf waits for co-presence");
+                                }
+                            }
+                        },
                     }
                 }
 
@@ -10570,7 +10806,7 @@ async fn handle_incoming_request(
                     // permanently poisoned tile.
                     sync_handler::handle_join_refused(
                         pending_server_joins, event_tx, ws_cmd_tx, crdt_store_actor,
-                        server_id, reason,
+                        mls, crypto_store, server_id, reason,
                     ).await;
                     return;
                 }
@@ -10634,7 +10870,7 @@ async fn handle_incoming_request(
             }
             sync_handler::handle_join_refused(
                 pending_server_joins, event_tx, ws_cmd_tx, crdt_store_actor,
-                server_id, reason,
+                mls, crypto_store, server_id, reason,
             ).await;
         }
         HavenMessage::ServerDeleteBroadcast { server_id } => {
@@ -10727,8 +10963,19 @@ async fn handle_incoming_request(
         HavenMessage::ChannelSyncRequest { server_id, channel_id, since_timestamp, sender_timestamps } => {
             
 
-            // Room gating: only respond for servers we're a member of.
-            if !server_states.contains_key(&server_id) {
+            // Room gating: only respond for servers we're a member of, and only
+            // for a channel this requester is allowed to SEE. The per-channel MLS
+            // subgroup keeps a non-qualifier out of the live traffic; backfill was
+            // the way straight around it, because this responder used to serve any
+            // channel's stored rows (file headers and their AES keys included) to
+            // anybody holding the server. A rejection is a return, never a log line
+            // that carries on.
+            let visible = match server_states.get(&server_id) {
+                Some(state) => super::crypto_handler::channel_readable_by(state, peer_str, &channel_id),
+                None => return,
+            };
+            if !visible {
+                hollow_log!("[HOLLOW-SECURITY] REJECTED ChannelSyncRequest from {peer_str} for {channel_id}: not visible to that member");
                 return;
             }
 
@@ -10767,8 +11014,16 @@ async fn handle_incoming_request(
         HavenMessage::ChannelSyncProbe { server_id, channel_id, our_latest, msg_count: _probe_count } => {
             
 
-            // Room gating: only respond for servers we're a member of.
-            if !server_states.contains_key(&server_id) {
+            // Same visibility gate as the full request. A probe answers with the
+            // channel's message count and latest timestamp, which is exactly the
+            // metadata a hidden channel is hidden to withhold, and it is also what
+            // tells a non-qualifier there is history worth asking for.
+            let visible = match server_states.get(&server_id) {
+                Some(state) => super::crypto_handler::channel_readable_by(state, peer_str, &channel_id),
+                None => return,
+            };
+            if !visible {
+                hollow_log!("[HOLLOW-SECURITY] REJECTED ChannelSyncProbe from {peer_str} for {channel_id}: not visible to that member");
                 return;
             }
 
@@ -11105,6 +11360,7 @@ async fn handle_incoming_request(
                     requested_at: 0,
                     device_list: None,
                     parked: false,
+                    key_package: None,
                 },
             );
         }
@@ -11157,7 +11413,7 @@ async fn handle_incoming_request(
                             };
                             if may_bootstrap {
                                 if let Some(coordinator) = coordinator {
-                                    if let Ok(kp_bytes) = mls_mgr.generate_key_package() {
+                                    if let Ok(kp_bytes) = crate::node::crypto_handler::mint_key_package(mls_mgr, crypto_store) {
                                         let kp_b64 = base64::engine::general_purpose::STANDARD.encode(&kp_bytes);
                                         let data = serde_json::to_vec(&HavenMessage::MlsKeyPackage {
                                             server_id: server_id.clone(),
@@ -11917,7 +12173,7 @@ async fn handle_incoming_request(
                                         }
                                     };
                                     if let Some(coordinator) = coordinator {
-                                        if let Ok(kp_bytes) = mls_mgr.generate_key_package() {
+                                        if let Ok(kp_bytes) = crate::node::crypto_handler::mint_key_package(mls_mgr, crypto_store) {
                                             let kp_b64 = base64::engine::general_purpose::STANDARD.encode(&kp_bytes);
                                             let data = serde_json::to_vec(&HavenMessage::MlsKeyPackage {
                                                 server_id: server_id.clone(),
@@ -12150,6 +12406,9 @@ async fn handle_incoming_request(
                     Ok(()) => {
                         persist_mls_state(mls_mgr, crypto_store);
                         mls_bootstrap_requested.remove(&group_key);
+                        // The Welcome the eviction grace was holding for. The wait
+                        // is over whether or not this is the re-add that caused it.
+                        mls_welcome_grace.remove(&group_key);
                         mls_decrypt_failures.remove(&group_key);
                         hollow_log!("[HOLLOW-MLS] Joined MLS group {group_key}");
 
@@ -12163,6 +12422,28 @@ async fn handle_incoming_request(
                                 state: "ready".to_string(),
                                 reason: String::new(),
                             }).await;
+
+                            // And ask the relay for the channel rings again.
+                            //
+                            // On the way back in, `RoomMembers` for this room can
+                            // be processed BEFORE the buffered SyncResponse lands,
+                            // and at that instant the server is not in
+                            // `server_states` at all, so the connect-time sweep
+                            // requested nothing for it. Anything that DID replay
+                            // before this Welcome failed to decrypt and was
+                            // dropped, because there was no group to read it with.
+                            // Clear this room's "already pulled" marks first, or
+                            // the request filters itself away; dedup is by
+                            // message_id, so a frame we already stored is stored
+                            // once.
+                            if wl_channel_id.is_none() {
+                                relay_catchup_done.retain(|(r, _)| r != &server_id);
+                                sync_handler::request_channel_catchups(
+                                    ws_cmd_tx, crdt_store_actor, server_states.get(&server_id),
+                                    &server_id, local_peer_str, relay_catchup_done,
+                                    "parked join welcome",
+                                ).await;
+                            }
                         }
 
                         // Conference Welcome = we were ADMITTED (waiting room
@@ -12250,11 +12531,18 @@ async fn handle_incoming_request(
         HavenMessage::MlsCommit { server_id, commit, channel_id: cm_channel_id, epoch: cm_epoch } => {
             hollow_log!("[HOLLOW-MLS] MlsCommit from {peer_str} for {server_id} (cid={cm_channel_id:?})");
             if let Some(mls_mgr) = mls {
-                let _ = crate::node::crypto_handler::handle_mls_commit_frame(
+                let outcome = crate::node::crypto_handler::handle_mls_commit_frame(
                     mls_mgr, crypto_store, server_states, ws_cmd_tx, ws_room_peers,
                     mls_bootstrap_requested, event_tx, local_peer_str,
                     &server_id, &commit, &cm_channel_id, cm_epoch,
                 ).await;
+                if matches!(outcome, crate::node::crypto_handler::CommitApplyOutcome::Evicted) {
+                    let group_key = match &cm_channel_id {
+                        Some(cid) => crate::crypto::subgroup_id(&server_id, cid),
+                        None => server_id.clone(),
+                    };
+                    mls_welcome_grace.insert(group_key, std::time::Instant::now());
+                }
             }
         }
 
@@ -12317,6 +12605,13 @@ async fn handle_incoming_request(
                     ).await {
                         crate::node::crypto_handler::CommitApplyOutcome::Applied
                         | crate::node::crypto_handler::CommitApplyOutcome::Skipped => continue,
+                        // Evicted mid-replay: the group is gone, so nothing after
+                        // this frame can apply. Arm the Welcome grace and stop —
+                        // the re-add's Welcome is the only thing that can help.
+                        crate::node::crypto_handler::CommitApplyOutcome::Evicted => {
+                            mls_welcome_grace.insert(group_key.clone(), std::time::Instant::now());
+                            break;
+                        }
                         crate::node::crypto_handler::CommitApplyOutcome::NoGroup
                         | crate::node::crypto_handler::CommitApplyOutcome::Failed => break,
                     }
@@ -12349,7 +12644,7 @@ async fn handle_incoming_request(
                 if mls_mgr.has_group(&group_key) {
                     hollow_log!("[HOLLOW-MLS] KeyPackageRequest for {group_key} while we hold it — answering anyway (leaf repair)");
                 }
-                match mls_mgr.generate_key_package() {
+                match crate::node::crypto_handler::mint_key_package(mls_mgr, crypto_store) {
                     Ok(kp_bytes) => {
                         let kp_b64 = base64::engine::general_purpose::STANDARD.encode(&kp_bytes);
                         send_message_to_peer(
@@ -13868,7 +14163,17 @@ async fn handle_incoming_request(
                                 match (parts.next(), parts.next()) {
                                     (Some(sid), Some(cid)) => match server_states.get(sid) {
                                         Some(s) => (
-                                            s.is_member(&requester_master),
+                                            // Membership is not enough for a
+                                            // RESTRICTED channel: the header we
+                                            // would send back carries the file's
+                                            // AES key, so serving it to a member
+                                            // who cannot see the channel hands
+                                            // over exactly what the subgroup
+                                            // exists to withhold.
+                                            s.is_member(&requester_master)
+                                                && crate::node::crypto_handler::channel_readable_by(
+                                                    s, &requester_master, cid,
+                                                ),
                                             s.is_channel_public(cid),
                                         ),
                                         // We hold the file but no longer hold the

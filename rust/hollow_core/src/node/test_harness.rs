@@ -881,6 +881,19 @@ impl TestNode {
         crate::storage::MessageStore::open(&self.db_path, &self.passphrase)
             .expect("open node store")
     }
+
+    /// End this node's life and hand back the storage a RESTART needs: the DB
+    /// path and the tempdir that owns it.
+    ///
+    /// Aborting the join handle is what a process exit does to the event loop.
+    /// The store actors it owns die with it (their handles are locals of the
+    /// aborted task, so dropping them closes the actor channels and the
+    /// SQLCipher connections behind them), which is what lets the same file be
+    /// reopened by the replacement node.
+    fn into_storage(self) -> (String, tempfile::TempDir) {
+        self._join.abort();
+        (self.db_path, self._tmp)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1527,16 +1540,26 @@ async fn spawn_node_on_db(
     let passphrase = passphrase_for(&master);
     let db_path = db_path.to_string();
 
-    // Ensure an Olm account exists (spawn_node_mock expects one), without touching
-    // any friend/device-list rows the caller staged.
+    // LOAD the Olm account the way production does (`api::network::start_node`):
+    // the pickled account plus every stored session. Minting a fresh account on
+    // a DB that already has one hands the node a NEW identity key, so every
+    // peer's session with it silently stops decrypting — a restart test built on
+    // that would be measuring the harness rather than the code. Only a genuinely
+    // empty DB gets a new account.
     let olm = {
         let store = crate::storage::MessageStore::open(&db_path, &passphrase).expect("open store");
-        let mgr = OlmManager::new();
-        if store.load_olm_account().ok().flatten().is_none() {
-            let pickle = mgr.account_pickle_json().expect("pickle");
-            store.save_olm_account(&pickle).expect("save olm");
+        match store.load_olm_account().expect("load olm account") {
+            Some(account_json) => {
+                let sessions = store.load_all_olm_sessions().expect("load olm sessions");
+                OlmManager::from_pickles(&account_json, sessions).expect("restore olm")
+            }
+            None => {
+                let mgr = OlmManager::new();
+                let pickle = mgr.account_pickle_json().expect("pickle");
+                store.save_olm_account(&pickle).expect("save olm");
+                mgr
+            }
         }
-        mgr
     };
     let crypto_store = CryptoStore::open(db_path.clone(), passphrase.clone()).expect("crypto store");
     let crdt_store = CrdtStore::open(db_path.clone(), passphrase.clone()).expect("crdt store");
@@ -1575,6 +1598,38 @@ async fn spawn_node_on_db(
         _join: join,
         _tmp: tmp,
     }
+}
+
+/// Restart one node: take it off the relay, kill its event loop, and boot a new
+/// one on the SAME encrypted DB with the same master/device keys.
+///
+/// This is the only way to test what survives a process exit, and MLS state is
+/// the interesting half: the storage blob (which carries the private half of
+/// every KeyPackage this node has minted) is restored inside `run_event_loop`
+/// from the crypto store, so anything the node minted but did not persist is
+/// simply gone on the other side of this call.
+///
+/// The returned node's `event_rx` is fresh: events the old one had queued are
+/// dropped with it, exactly as a real restart loses them.
+async fn restart_node(
+    relay: &MockRelay,
+    node: TestNode,
+    master_tag: u8,
+    device_tag: u8,
+) -> TestNode {
+    let device_id = node.device_id.clone();
+    relay.set_online(&device_id, false);
+    assert!(
+        wait_until(10, async || !relay.online_devices().contains(&device_id)).await,
+        "{device_id} must be off the relay before its DB is reopened",
+    );
+    let (db_path, tmp) = node.into_storage();
+    // The old loop is aborted, so its store actors are closing. Give the
+    // SQLCipher handles a moment to go: there is no signal to poll for "a task
+    // that was aborted has finished dropping its locals", and reopening the
+    // file under the old writer costs a 4s busy_timeout on every query.
+    sleep_ms(300).await;
+    spawn_node_on_db(relay, master_tag, device_tag, &db_path, tmp).await
 }
 
 /// Drain a node's events until `pred` returns true or the timeout elapses.
@@ -16723,6 +16778,13 @@ async fn parked_join_completes_with_zero_overlap() {
     const O_MASTER: u8 = 55; // owner
     const A_MASTER: u8 = 56; // plain member: the one that comes back and admits
     const B_MASTER: u8 = 57; // stranger holding an invite
+    // B's transport id is NOT its master id, which is what every real install
+    // looks like, and here it also keeps the mock relay honest: it keys the
+    // offline buffer and the master mailbox by the same string, so a node whose
+    // device id equals its master id has its buffered server-room frames
+    // delivered twice, once by the undrained inbox replay. Production keeps
+    // those two queues apart.
+    const B_DEVICE: u8 = 227;
     let o_master = NativeKeypair::from_secret_bytes(&seed_bytes(O_MASTER)).peer_id();
     let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER)).peer_id();
     let b_master = NativeKeypair::from_secret_bytes(&seed_bytes(B_MASTER)).peer_id();
@@ -16770,7 +16832,7 @@ async fn parked_join_completes_with_zero_overlap() {
     );
 
     // --- The stranger asks into an empty room. That is a PARK, not a failure. ---
-    let mut b = spawn_node_with_friends(&relay, B_MASTER, B_MASTER, &[]).await;
+    let mut b = spawn_node_with_friends(&relay, B_MASTER, B_DEVICE, &[]).await;
     b.cmd_tx
         .send(NodeCommand::JoinServer {
             server_id: server_id.clone(),
@@ -16803,6 +16865,17 @@ async fn parked_join_completes_with_zero_overlap() {
         "a parked join must leave no half-built server behind"
     );
     expect_ring_request(&relay, &server_id, &b.device_id, 1).await;
+    // Rung 2: the parked copy names the LEAF it wants seated as well as the
+    // membership it is asking for.
+    assert!(
+        join_ring(&relay, &server_id).iter().any(|(from, msg)| from == &b.device_id
+            && matches!(
+                msg,
+                super::types::HavenMessage::ServerJoinRequest { parked: true, key_package: Some(_), .. }
+            )),
+        "the parked request must carry B's KeyPackage, got {:?}",
+        join_ring(&relay, &server_id),
+    );
 
     // --- B leaves. Nobody has ever been online with anybody. ---
     go_offline(&relay, &b, &server_id).await;
@@ -16824,6 +16897,40 @@ async fn parked_join_completes_with_zero_overlap() {
     expect_ring_parked_request(&relay, &server_id, &b.device_id).await;
     // A's admission, so a LATER member never re-serves this join.
     expect_ring_resolution(&relay, &server_id, &a.device_id, &b_master, true).await;
+
+    // Rung 2: the admission seated B's LEAF too, out of the KeyPackage the ring
+    // copy carried, with B nowhere near.
+    expect_mls_leaf(&a, &server_id, &b.device_id, 30).await;
+    // And the Welcome for it is WAITING in B's mailbox rather than having been
+    // dropped for being unreachable. Relay state after a node-state wait, so
+    // this has to be a wait of its own.
+    assert!(
+        wait_until(20, async || relay
+            .buffered_frames(&b.device_id)
+            .iter()
+            .any(|f| matches!(
+                serde_json::from_slice::<super::types::HavenMessage>(f),
+                Ok(super::types::HavenMessage::MlsWelcome { server_id: ref sid, .. }) if *sid == server_id
+            )))
+        .await,
+        "a Welcome must be buffered for the absent joiner, got {} frame(s)",
+        relay.buffered_frames(&b.device_id).len(),
+    );
+
+    // A says something into the channel and goes dark. B has never been online
+    // with A, and will not be for the rest of this phase.
+    a.cmd_tx
+        .send(NodeCommand::SendChannelMessage {
+            server_id: server_id.clone(),
+            channel_id: general.clone(),
+            text: "said before you got here".to_string(),
+            message_id: "parked-join-0".to_string(),
+            reply_to_mid: None,
+            link_preview: None,
+        })
+        .await
+        .unwrap();
+    expect_relay_drained(&relay, &a, "posted-before-return").await;
 
     // --- A leaves; B returns ALONE and completes. ---
     go_offline(&relay, &a, &server_id).await;
@@ -16849,16 +16956,36 @@ async fn parked_join_completes_with_zero_overlap() {
     );
     assert!(b.pending_joins().is_empty(), "a completed join deletes its row");
 
-    // --- Only now are the two ever online together: MLS forms, chat works. ---
-    relay.set_online(&a.device_id, true);
+    // --- Rung 2: still ALONE, B forms the group and reads the backlog. ---
     assert!(
         wait_event(&mut b, std::time::Duration::from_secs(40), |ev| matches!(
             ev, NetworkEvent::PendingJoinUpdated { server_id: sid, state, .. }
                 if *sid == server_id && state == "ready"
         ))
         .await,
-        "the tile flips to ready when B's MLS leaf finally forms"
+        "the tile flips to ready off the buffered Welcome, with nobody online"
     );
+    assert_eq!(
+        relay.online_devices(),
+        std::collections::HashSet::from([b.device_id.clone()]),
+        "B was the only node online for the whole of that",
+    );
+    expect_mls_group(&[&b], &server_id, 40).await;
+    // The message A sent before B returned. It replays out of the channel ring
+    // AFTER the Welcome (the post-Welcome catch-up re-issue): anything that
+    // arrived before the leaf existed could not be decrypted and was dropped.
+    assert!(
+        wait_until(30, async || b
+            .channel_messages(&server_id, &general)
+            .iter()
+            .any(|m| m.text == "said before you got here"))
+        .await,
+        "B decrypts the backlog it was admitted into, alone, got {:?}",
+        b.channel_messages(&server_id, &general).iter().map(|m| m.text.clone()).collect::<Vec<_>>(),
+    );
+
+    // --- Only now are the two ever online together: chat works live. ---
+    relay.set_online(&a.device_id, true);
     expect_mls_group(&[&a, &b], &server_id, 40).await;
     drain_events(&mut b);
     a.cmd_tx
@@ -16881,6 +17008,515 @@ async fn parked_join_completes_with_zero_overlap() {
     );
 
     drop(o);
+    drop(a);
+    drop(b);
+}
+
+// ---------------------------------------------------------------------------
+// A join costs exactly ONE epoch. Three members, two live joins, epoch 2.
+//
+// The joiner used to send its KeyPackage TWICE: once to the sync responder on
+// the join itself, and once again the instant the admitter's MLS-encrypted
+// `MemberAdded` twin arrived for a group it did not hold yet. Two KeyPackages
+// from one device straddling a batch tick are a remove + re-add, the removal
+// commit evicts the leaf the first Welcome just granted, and the eviction used
+// to ask for a THIRD. A clean three-member join landed at epoch 5.
+// ---------------------------------------------------------------------------
+
+/// The epoch every node in `nodes` reports for `group_id`, or `None` if they
+/// disagree or one of them did not answer. A timed-out snapshot is NOT an
+/// answer: `mls_epoch` returns None and so does this.
+async fn agreed_epoch(nodes: &[&TestNode], group_id: &str) -> Option<u64> {
+    let mut seen: Option<u64> = None;
+    for n in nodes {
+        let e = n.mls_epoch(group_id).await?;
+        match seen {
+            None => seen = Some(e),
+            Some(v) if v == e => {}
+            Some(_) => return None,
+        }
+    }
+    seen
+}
+
+/// Wait until `nodes` agree on an epoch for `group_id` AND still agree on the
+/// same one two batch ticks later. Returns that epoch.
+///
+/// "Formed" is not "settled": a remove + re-add treadmill passes through
+/// agreement at every rung, so one agreeing read can be the calm between two
+/// commits. The batch timer runs at 2s, so a second read 2500ms later with the
+/// value unmoved means a whole tick went by and committed nothing. There is no
+/// state to poll for "no commit happened", which is why that one window is real
+/// time rather than a condition.
+async fn expect_quiet_group(nodes: &[&TestNode], group_id: &str, secs: u64) -> u64 {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(secs);
+    loop {
+        if let Some(first) = agreed_epoch(nodes, group_id).await {
+            sleep_ms(2500).await;
+            if let Some(second) = agreed_epoch(nodes, group_id).await
+                && second == first
+            {
+                return first;
+            }
+        }
+        if tokio::time::Instant::now() >= deadline {
+            let mut seen = Vec::new();
+            for n in nodes {
+                seen.push((n.device_id.clone(), n.mls_epoch(group_id).await));
+            }
+            panic!("MLS group {group_id} never went quiet within {secs}s, got {seen:?}");
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn three_member_live_join_lands_at_minimal_epoch() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    const O_MASTER: u8 = 224; // owner
+    const M_MASTER: u8 = 225; // first joiner
+    const J_MASTER: u8 = 226; // second joiner
+    let o_master = NativeKeypair::from_secret_bytes(&seed_bytes(O_MASTER)).peer_id();
+    let m_master = NativeKeypair::from_secret_bytes(&seed_bytes(M_MASTER)).peer_id();
+    let j_master = NativeKeypair::from_secret_bytes(&seed_bytes(J_MASTER)).peer_id();
+
+    // Mutual friends so every pair's Olm session forms before the joins.
+    let mut o = spawn_node_with_friends(&relay, O_MASTER, O_MASTER, &[&m_master, &j_master]).await;
+    let m = spawn_node_with_friends(&relay, M_MASTER, M_MASTER, &[&o_master, &j_master]).await;
+    let j = spawn_node_with_friends(&relay, J_MASTER, J_MASTER, &[&o_master, &m_master]).await;
+    expect_dm_pair_ready(&relay, &o, &m, 25).await;
+    expect_dm_pair_ready(&relay, &o, &j, 25).await;
+    expect_dm_pair_ready(&relay, &m, &j, 25).await;
+    // Count what each joiner actually puts on the wire. The epoch is the
+    // SYMPTOM; "one KeyPackage per join" is the property, and it is the one a
+    // fast machine can still see when both copies happen to land in the same
+    // batch and get deduplicated into one add.
+    relay.set_recording(&m.device_id, true);
+    relay.set_recording(&j.device_id, true);
+
+    let server_id = create_server_and_wait(&mut o, "Minimal Epochs").await;
+
+    let general = general_channel_of(&server_id);
+
+    // --- M joins while the owner is online: one add, one epoch. ---
+    let mut m = m;
+    let mut j = j;
+    m.cmd_tx
+        .send(NodeCommand::JoinServer {
+            server_id: server_id.clone(),
+            twitch_proof_json: None,
+            nsfw_confirmed: false,
+        })
+        .await
+        .unwrap();
+    assert!(
+        wait_event(&mut m, std::time::Duration::from_secs(25), |ev| matches!(
+            ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id
+        ))
+        .await,
+        "M joins while the owner is online",
+    );
+    // A real server is not silent while a joiner waits for its leaf. The
+    // window between "the join completed" and "the Welcome landed" is one
+    // batch tick, and ANY MLS frame arriving inside it used to make the
+    // joiner mint a SECOND KeyPackage — the one the next tick turns into a
+    // remove + re-add. So post into the channel the moment the join lands,
+    // which is what a live room does by itself.
+    o.cmd_tx
+        .send(NodeCommand::SendChannelMessage {
+            server_id: server_id.clone(),
+            channel_id: general.clone(),
+            text: "welcome M".to_string(),
+            message_id: "min-epoch-1".to_string(),
+            reply_to_mid: None,
+            link_preview: None,
+        })
+        .await
+        .unwrap();
+    expect_mls_leaf(&o, &server_id, &m.device_id, 30).await;
+
+    // --- J joins the same way, into a room that is now two people. ---
+    j.cmd_tx
+        .send(NodeCommand::JoinServer {
+            server_id: server_id.clone(),
+            twitch_proof_json: None,
+            nsfw_confirmed: false,
+        })
+        .await
+        .unwrap();
+    assert!(
+        wait_event(&mut j, std::time::Duration::from_secs(25), |ev| matches!(
+            ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id
+        ))
+        .await,
+        "J joins while the owner is online",
+    );
+    o.cmd_tx
+        .send(NodeCommand::SendChannelMessage {
+            server_id: server_id.clone(),
+            channel_id: general.clone(),
+            text: "welcome J".to_string(),
+            message_id: "min-epoch-2".to_string(),
+            reply_to_mid: None,
+            link_preview: None,
+        })
+        .await
+        .unwrap();
+    expect_mls_leaf(&o, &server_id, &j.device_id, 30).await;
+
+    // --- Now let it settle and count what it cost. ---
+    let epoch = expect_quiet_group(&[&o, &m, &j], &server_id, 60).await;
+
+    let key_packages_sent = |dev: &str| {
+        relay
+            .recorded_frames(dev)
+            .iter()
+            .filter(|f| {
+                matches!(
+                    serde_json::from_slice::<super::types::HavenMessage>(f),
+                    Ok(super::types::HavenMessage::MlsKeyPackage { server_id: ref sid, channel_id: None, .. })
+                        if *sid == server_id
+                )
+            })
+            .count()
+    };
+    assert_eq!(
+        key_packages_sent(&m.device_id), 1,
+        "M asks for a leaf exactly once. A second KeyPackage from the same          device is a remove + re-add the moment the two straddle a batch tick.",
+    );
+    assert_eq!(
+        key_packages_sent(&j.device_id), 1,
+        "J asks for a leaf exactly once",
+    );
+    assert_eq!(
+        epoch, 2,
+        "a three-member server costs exactly two commits: create is epoch 0, \
+         +M is 1, +J is 2. Anything above means a KeyPackage was sent twice and \
+         the batch turned it into a remove + re-add.",
+    );
+
+    let mut expected = vec![o.device_id.clone(), m.device_id.clone(), j.device_id.clone()];
+    expected.sort();
+    assert_eq!(
+        o.mls_members_checked(&server_id).await,
+        Some(expected),
+        "the owner's group holds exactly the three devices, no stale leaves",
+    );
+    assert_eq!(m.mls_epoch(&server_id).await, Some(2), "M is at the same epoch");
+    assert_eq!(j.mls_epoch(&server_id).await, Some(2), "J is at the same epoch");
+
+    // --- And a LEAF REPAIR costs exactly two: one remove, one re-add. ---
+    //
+    // The owner asks J for a fresh KeyPackage (what `handle_epoch_hint`'s repair
+    // arm and the PeerJoined coordinator do when a leaf looks wrong). J answers,
+    // the owner removes the old leaf and adds the new one in ONE batch, and the
+    // removal commit reaches J BEFORE the Welcome that puts it back, because
+    // phase 1 goes out ahead of phase 2. Asking for a leaf on seeing that
+    // removal is what turned one repair into a treadmill: the fresh KeyPackage
+    // becomes the next tick's remove + re-add, and the Welcome that cleared the
+    // throttle means nothing throttles it. J now holds the eviction for a short
+    // grace instead, and the Welcome ends the wait.
+    let request = serde_json::to_vec(&super::types::HavenMessage::MlsKeyPackageRequest {
+        server_id: server_id.clone(),
+        channel_id: None,
+    })
+    .unwrap();
+    relay.inject_direct(&server_id, &o.device_id, &j.device_id, request);
+
+    let epoch = expect_quiet_group(&[&o, &m, &j], &server_id, 60).await;
+    assert_eq!(
+        epoch, 4,
+        "a leaf repair is one removal and one add: epoch 2 -> 3 -> 4. Higher \
+         means the evicted device asked for another leaf instead of waiting for \
+         the Welcome that was already on its way.",
+    );
+    assert_eq!(
+        key_packages_sent(&j.device_id), 2,
+        "J put two KeyPackages on the wire in its whole life: the one that \
+         joined it, and the one the owner asked for.",
+    );
+    let mut expected = vec![o.device_id.clone(), m.device_id.clone(), j.device_id.clone()];
+    expected.sort();
+    assert_eq!(
+        o.mls_members_checked(&server_id).await,
+        Some(expected),
+        "the repaired group still holds exactly the three devices, once each",
+    );
+
+    drop(o);
+    drop(m);
+    drop(j);
+}
+
+// ---------------------------------------------------------------------------
+// A parked join's KeyPackage has to be usable on the other side of a RESTART.
+//
+// The private half of a KeyPackage (its init key and its leaf encryption key)
+// lives in OpenMLS's storage, and nothing on the mint path used to write that
+// storage to disk. So the joiner could deposit a package into the ring, quit,
+// come back, and watch the member that admitted it seat a leaf it had no key
+// for: "Failed to process Welcome ... NoMatchingKeyPackage", forever. A parked
+// join is measured in days, so that window is the normal case, not a corner.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn parked_join_key_package_survives_a_restart_before_the_welcome() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    const A_MASTER: u8 = 234; // owner
+    const B_MASTER: u8 = 235; // stranger holding an invite
+    // Distinct device tag, the way every fresh install is: the mock relay keys
+    // its offline buffer and its master mailbox by the same string, so a node
+    // whose device id EQUALS its master id gets every buffered server-room
+    // frame delivered a second time by the inbox replay. Production keeps those
+    // two queues apart, and production device ids are never master ids.
+    const B_DEVICE: u8 = 236;
+    let b_master = NativeKeypair::from_secret_bytes(&seed_bytes(B_MASTER)).peer_id();
+
+    let mut a = spawn_node_with_friends(&relay, A_MASTER, A_MASTER, &[]).await;
+    let server_id = create_server_and_wait(&mut a, "Cold Restart").await;
+    // The ring is registered by MEMBERS, so waiting for it is waiting for the
+    // server to be joinable-while-empty at all.
+    assert!(
+        wait_until(15, async || relay.topic_registered(&server_id, super::types::JOIN_TOPIC)).await,
+        "the owner must register the join ring before it goes dark",
+    );
+    go_offline(&relay, &a, &server_id).await;
+
+    // --- B asks into an empty room and parks, KeyPackage and all. ---
+    let mut b = spawn_node_with_friends(&relay, B_MASTER, B_DEVICE, &[]).await;
+    b.cmd_tx
+        .send(NodeCommand::JoinServer {
+            server_id: server_id.clone(),
+            twitch_proof_json: None,
+            nsfw_confirmed: false,
+        })
+        .await
+        .unwrap();
+    assert!(
+        wait_event(&mut b, std::time::Duration::from_secs(30), |ev| matches!(
+            ev, NetworkEvent::ServerJoinParked { server_id: sid } if *sid == server_id
+        ))
+        .await,
+        "a join into an empty server parks",
+    );
+    expect_ring_request(&relay, &server_id, &b.device_id, 1).await;
+    assert!(
+        join_ring(&relay, &server_id).iter().any(|(from, msg)| from == &b.device_id
+            && matches!(
+                msg,
+                super::types::HavenMessage::ServerJoinRequest { parked: true, key_package: Some(_), .. }
+            )),
+        "the parked copy names the leaf it wants seated, got {:?}",
+        join_ring(&relay, &server_id),
+    );
+
+    // --- B quits and comes back. RAM is gone; the DB is the whole story. ---
+    let mut b = restart_node(&relay, b, B_MASTER, B_DEVICE).await;
+    assert_eq!(
+        b.pending_joins(),
+        vec![(server_id.clone(), "pending".to_string(), String::new())],
+        "the parked row is restored, so the joiner is still waiting on the same ask",
+    );
+    // Offline while the owner answers, so the admission comes from the RING
+    // copy rather than from a live re-request racing it.
+    go_offline(&relay, &b, &server_id).await;
+
+    // --- A returns alone, reads the ring, and seats B's leaf from the copy. ---
+    relay.set_online(&a.device_id, true);
+    expect_mls_leaf(&a, &server_id, &b.device_id, 40).await;
+
+    // --- B comes back and reads the Welcome that was waiting for it. ---
+    relay.set_online(&b.device_id, true);
+    assert!(
+        wait_event(&mut b, std::time::Duration::from_secs(40), |ev| matches!(
+            ev, NetworkEvent::PendingJoinUpdated { server_id: sid, state, .. }
+                if *sid == server_id && state == "ready"
+        ))
+        .await,
+        "the tile flips to ready: the leaf the owner seated is one B holds the key for",
+    );
+    expect_mls_group(&[&a, &b], &server_id, 40).await;
+
+    // One member, ONE commit. A second one would mean the leaf seated from the
+    // ring copy was dead and had to be removed and re-added with a fresh
+    // KeyPackage, which is exactly the failure this test exists for.
+    let epoch = expect_quiet_group(&[&a, &b], &server_id, 40).await;
+    assert_eq!(
+        epoch, 1,
+        "create is epoch 0 and B's add is epoch 1; anything higher means the \
+         restarted joiner could not use the KeyPackage it had deposited",
+    );
+    assert!(b.servers().contains(&server_id), "B holds the server");
+    assert!(b.pending_joins().is_empty(), "a completed join deletes its row");
+    assert!(
+        a.raw_crdt_member_keys(&server_id).contains(&b_master),
+        "the owner keyed B by its MASTER, from the device list the ring copy carried, got {:?}",
+        a.raw_crdt_member_keys(&server_id),
+    );
+
+    drop(a);
+    drop(b);
+}
+
+// ---------------------------------------------------------------------------
+// A join into a room with NOBODY in it should say so quickly.
+//
+// Parking is not a failure, it is the honest answer to "everyone who could
+// admit you is asleep", and the tile that says it is the whole point of rung 1.
+// Sitting on a spinner for fifteen seconds to reach an answer the relay already
+// gave us (the room is empty) is just a worse way of saying it. So an empty room
+// parks after a short window and a room with somebody in it keeps the full one:
+// a member who is present may still be a few seconds from answering, and parking
+// under them would put a "waiting for a member" tile in front of a join that is
+// about to complete.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn empty_server_join_parks_within_the_short_window() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    const A_MASTER: u8 = 228; // owner
+    const B_MASTER: u8 = 229; // stranger holding an invite
+    const B_DEVICE: u8 = 246;
+
+    let mut a = spawn_node_with_friends(&relay, A_MASTER, A_MASTER, &[]).await;
+    let server_id = create_server_and_wait(&mut a, "Nobody Home").await;
+    assert!(
+        wait_until(15, async || relay.topic_registered(&server_id, super::types::JOIN_TOPIC)).await,
+        "the owner must register the join ring before it goes dark",
+    );
+    go_offline(&relay, &a, &server_id).await;
+
+    let mut b = spawn_node_with_friends(&relay, B_MASTER, B_DEVICE, &[]).await;
+    let started = tokio::time::Instant::now();
+    b.cmd_tx
+        .send(NodeCommand::JoinServer {
+            server_id: server_id.clone(),
+            twitch_proof_json: None,
+            nsfw_confirmed: false,
+        })
+        .await
+        .unwrap();
+    // Generous ceiling on purpose: the interesting failure is "it parked, but
+    // only after the long window", and that reads as an elapsed-time assertion
+    // rather than as a timeout with nothing to say.
+    let parked = wait_event(&mut b, std::time::Duration::from_secs(30), |ev| matches!(
+        ev, NetworkEvent::ServerJoinParked { server_id: sid } if *sid == server_id
+    ))
+    .await;
+    let elapsed = started.elapsed();
+    assert!(parked, "a join into an empty server parks; it must never just fail");
+    assert!(
+        elapsed < std::time::Duration::from_secs(6),
+        "an empty room is known to be empty the moment the relay answers our room join, \
+         so the tile must appear on the short window and not on the long one, got {elapsed:?}",
+    );
+    // And it is a real park, not just an event: the request is in the ring for
+    // whoever comes back.
+    expect_ring_request(&relay, &server_id, &b.device_id, 1).await;
+    assert_eq!(
+        b.pending_joins(),
+        vec![(server_id.clone(), "pending".to_string(), String::new())],
+        "the early park is PERSISTED like any other",
+    );
+
+    drop(a);
+    drop(b);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn join_with_a_silent_member_present_keeps_the_long_window() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    const A_MASTER: u8 = 237; // owner, gone by the time B asks
+    const B_MASTER: u8 = 238; // stranger holding an invite
+    const B_DEVICE: u8 = 247;
+    const GHOST_DEVICE: u8 = 248; // a socket in the room with nothing behind it
+
+    let mut a = spawn_node_with_friends(&relay, A_MASTER, A_MASTER, &[]).await;
+    let server_id = create_server_and_wait(&mut a, "Somebody Is In").await;
+    assert!(
+        wait_until(15, async || relay.topic_registered(&server_id, super::types::JOIN_TOPIC)).await,
+        "the owner must register the join ring before it goes dark",
+    );
+    go_offline(&relay, &a, &server_id).await;
+
+    // A device in the server room that answers NOTHING. This is the case the
+    // long window exists for and the one a bare "is the room empty" check would
+    // get wrong in the other direction: presence is not responsiveness, but it
+    // IS a reason to give the join its full chance before saying nobody is home.
+    let ghost = NativeKeypair::from_secret_bytes(&seed_bytes(GHOST_DEVICE)).peer_id();
+    let ghost_sock = raw_socket(&relay, &ghost);
+    ghost_sock
+        .cmd_tx
+        .send(super::ws_client::WsCommand::JoinRoom { room_code: server_id.clone() })
+        .unwrap();
+    assert!(
+        wait_until(10, async || relay.room_devices(&server_id).contains(&ghost)).await,
+        "the silent device must be in the room before the joiner looks, got {:?}",
+        relay.room_devices(&server_id),
+    );
+
+    let mut b = spawn_node_with_friends(&relay, B_MASTER, B_DEVICE, &[]).await;
+    let started = tokio::time::Instant::now();
+    b.cmd_tx
+        .send(NodeCommand::JoinServer {
+            server_id: server_id.clone(),
+            twitch_proof_json: None,
+            nsfw_confirmed: false,
+        })
+        .await
+        .unwrap();
+
+    // ABSENCE, and there is nothing to poll for a decision that must NOT be
+    // taken, so this is a real six-second window. It rides `wait_event` rather
+    // than a sleep because the thing being waited out is an event: returning
+    // early with `true` is the failure, and the wait says which event it was.
+    let parked_early = wait_event(&mut b, std::time::Duration::from_secs(6), |ev| matches!(
+        ev, NetworkEvent::ServerJoinParked { server_id: sid } if *sid == server_id
+    ))
+    .await;
+    assert!(
+        !parked_early,
+        "somebody is in the room, so the join keeps the full live window: they may \
+         be one round trip from answering, and a parked tile under them is a lie",
+    );
+
+    // The long window still ends in a park, because the presence was never an answer.
+    let parked = wait_event(&mut b, std::time::Duration::from_secs(20), |ev| matches!(
+        ev, NetworkEvent::ServerJoinParked { server_id: sid } if *sid == server_id
+    ))
+    .await;
+    let elapsed = started.elapsed();
+    assert!(parked, "a silent room still parks, on the long window");
+    assert!(
+        elapsed >= std::time::Duration::from_secs(6),
+        "the park must be the LONG window's, got {elapsed:?}",
+    );
+    expect_ring_request(&relay, &server_id, &b.device_id, 1).await;
+
+    drop(ghost_sock);
     drop(a);
     drop(b);
 }
@@ -17285,6 +17921,7 @@ async fn parked_join_with_a_bad_carried_device_list_is_dropped() {
         requested_at: now,
         device_list: Some(tampered),
         parked: true,
+        key_package: None,
     })
     .unwrap();
     relay.inject_topic(&server_id, super::types::JOIN_TOPIC, &tampered_device, bad);
@@ -17300,6 +17937,7 @@ async fn parked_join_with_a_bad_carried_device_list_is_dropped() {
         requested_at: now,
         device_list: None,
         parked: true,
+        key_package: None,
     })
     .unwrap();
     relay.inject_topic(&server_id, super::types::JOIN_TOPIC, &legacy_device, legacy);
@@ -17938,6 +18576,1180 @@ async fn server_deleted_reaches_a_parked_member_with_no_mls_leaf() {
     drop(b);
 }
 
+
+// ---------------------------------------------------------------------------
+// The MLS-first / fallback sweep: a member who cannot read the MLS copy.
+//
+// Two shapes of "cannot read", and they are NOT the same failure:
+//
+//   * DEAF — the member holds a perfectly good leaf, but its socket never
+//     consumes a 0x03 room broadcast (relay backpressure drop, a join race).
+//     The MLS copy of a broadcast rides SendToRoom; the plaintext twin rides
+//     SendDirect. Only an UNCONDITIONAL twin reaches this member, which is why
+//     CRDT ops and VC signals send one every time instead of `if !mls_sent`.
+//
+//   * LEAF-LESS — the member is a CRDT member and is reachable, but holds no
+//     leaf in the sender's copy of the group, so an MLS frame is undecryptable
+//     for it no matter how many sockets consume it. A parked joiner completes
+//     its CRDT half BEFORE co-presence forms the leaf, by design, so this is
+//     ordinary rather than exotic. Encrypted content and ephemeral signals send
+//     their fallback copy to exactly these devices (`leafless_member_devices`).
+//
+// The sender can see NEITHER condition, which is the whole bug class: its own
+// encrypt succeeding measures the wrong end of the wire.
+// ---------------------------------------------------------------------------
+
+/// Count the events already queued on `node` that match `pred`, without
+/// blocking. Used for the "and the member WITH a leaf got it exactly once"
+/// half of the complement rule: a duplicate is as much a regression as a
+/// silence, and only a count can tell them apart.
+fn count_queued(node: &mut TestNode, mut pred: impl FnMut(&NetworkEvent) -> bool) -> usize {
+    let mut n = 0;
+    while let Ok(ev) = node.event_rx.try_recv() {
+        if pred(&ev) {
+            n += 1;
+        }
+    }
+    n
+}
+
+// ---------------------------------------------------------------------------
+// CRDT ops reach a member that cannot consume a room broadcast: `MemberAdded`
+// (owner-authored, at admission) and the joiner's own auto-`StoragePledgeChanged`.
+//
+// Both used to send the plaintext `CrdtOpBroadcast` twin only in the `else` of
+// `if mls_ok`, so a member whose socket drops 0x03 frames silently kept a stale
+// member panel and never learned anybody's pledge. Nothing on the sender side
+// showed it: the encrypt succeeded.
+//
+// The member here is a relay socket rather than a node, for two reasons that
+// both matter. It is deaf by construction as well as by the relay's drop lever,
+// so the MLS copy provably cannot reach it. And it never runs the co-presence
+// sync — which is the whole reason a node would be the wrong instrument: a real
+// member and the new joiner exchange state vectors the moment they see each
+// other, so the op arrives through the sync round trip whether or not the twin
+// was ever sent, and the test would pass against the broken guard. Reading the
+// frames the sender actually delivered removes that ambiguity: the assertion is
+// that the op went out in the clear, aimed at a member that could not have read
+// it any other way.
+//
+// The socket is a genuine CRDT member: it parks a join carrying no KeyPackage
+// (a client older than the carried-KeyPackage join) and is admitted from the
+// ring, so it also holds no MLS leaf, which is the state rung 1 creates.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn member_added_and_pledge_ops_reach_a_deaf_member() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    const O_MASTER: u8 = 231; // owner, author of MemberAdded
+    const A_MASTER: u8 = 232; // member WITH a leaf, so the MLS leg is real
+    const B_MASTER: u8 = 233; // the deaf member
+    const C_MASTER: u8 = 234; // joins live, author of the auto-pledge
+    let o_master = NativeKeypair::from_secret_bytes(&seed_bytes(O_MASTER)).peer_id();
+    let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER)).peer_id();
+    let b_device = NativeKeypair::from_secret_bytes(&seed_bytes(B_MASTER)).peer_id();
+    let c_master = NativeKeypair::from_secret_bytes(&seed_bytes(C_MASTER)).peer_id();
+
+    let mut o = spawn_node_with_friends(&relay, O_MASTER, O_MASTER, &[&a_master, &c_master]).await;
+    let mut a = spawn_node_with_friends(&relay, A_MASTER, A_MASTER, &[&o_master]).await;
+    expect_dm_pair_ready(&relay, &o, &a, 20).await;
+
+    let server_id = create_server_and_wait(&mut o, "Twin Server").await;
+    a.cmd_tx
+        .send(NodeCommand::JoinServer {
+            server_id: server_id.clone(),
+            twitch_proof_json: None,
+            nsfw_confirmed: false,
+        })
+        .await
+        .unwrap();
+    assert!(
+        wait_event(&mut a, std::time::Duration::from_secs(15), |ev| matches!(
+            ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id
+        ))
+        .await,
+        "A joins normally and gets a leaf"
+    );
+    expect_mls_group(&[&o, &a], &server_id, 25).await;
+    assert!(
+        wait_until(15, async || relay.topic_registered(&server_id, super::types::JOIN_TOPIC)).await,
+        "the join ring must be registered before anyone parks into it"
+    );
+
+    // --- Everybody dark; the deaf member parks a join carrying no KeyPackage. ---
+    drain_events(&mut a);
+    relay.set_online(&o.device_id, false);
+    assert!(
+        wait_event(&mut a, std::time::Duration::from_secs(15), |ev| matches!(
+            ev, NetworkEvent::PeerDisconnected { peer_id } if *peer_id == o.device_id
+        ))
+        .await,
+        "A must see the owner drop, or it elects a ghost coordinator on its return"
+    );
+    go_offline(&relay, &a, &server_id).await;
+
+    let mut sock = raw_socket(&relay, &b_device);
+    let legacy = serde_json::to_vec(&super::types::HavenMessage::ServerJoinRequest {
+        server_id: server_id.clone(),
+        twitch_proof_json: None,
+        nsfw_confirmed: false,
+        requested_at: super::types::now_ms(),
+        device_list: None,
+        parked: true,
+        key_package: None,
+    })
+    .unwrap();
+    relay.inject_topic(&server_id, super::types::JOIN_TOPIC, &b_device, legacy);
+
+    relay.set_online(&a.device_id, true);
+    assert!(
+        wait_until(40, async || a.raw_crdt_member_keys(&server_id).contains(&b_device)).await,
+        "A must admit the parked member from the ring, got {:?}",
+        a.raw_crdt_member_keys(&server_id),
+    );
+    expect_ring_resolution(&relay, &server_id, &a.device_id, &b_device, true).await;
+
+    relay.set_online(&o.device_id, true);
+    assert!(
+        wait_until(40, async || o.raw_crdt_member_keys(&server_id).contains(&b_device)).await,
+        "the owner must learn the admitted member from A, got {:?}",
+        o.raw_crdt_member_keys(&server_id),
+    );
+
+    // Deaf: the relay stops delivering 0x03 room frames to it, which is where
+    // the MLS copy of every broadcast rides. Targeted 0x04 frames still flow.
+    relay.set_broadcast_deaf(&b_device, true);
+    sock.cmd_tx
+        .send(WsCommand::JoinRoom { room_code: server_id.clone() })
+        .unwrap();
+    assert!(
+        wait_until(20, async || {
+            let devices = relay.room_devices(&server_id);
+            devices.contains(&o.device_id)
+                && devices.contains(&a.device_id)
+                && devices.contains(&b_device)
+        })
+        .await,
+        "owner, leafed member and deaf member must all be in the server room, got {:?}",
+        relay.room_devices(&server_id),
+    );
+    expect_relay_drained(&relay, &o, "pre-c-join").await;
+    expect_relay_drained(&relay, &a, "pre-c-join").await;
+
+    // The premise: the owner really does hold a formed group, so `mls_ok` is
+    // true on the send path under test and the twin is the ONLY thing that can
+    // reach this member.
+    let leaves = o.mls_members(&server_id).await;
+    assert!(
+        leaves.contains(&o.device_id) && leaves.contains(&a.device_id),
+        "the owner must hold a formed group with A in it, got {leaves:?}"
+    );
+
+    // --- C joins live: the owner mints MemberAdded, C mints its own pledge. ---
+    let mut c = spawn_node_with_friends(&relay, C_MASTER, C_MASTER, &[&o_master]).await;
+    expect_dm_pair_ready(&relay, &o, &c, 20).await;
+    c.cmd_tx
+        .send(NodeCommand::JoinServer {
+            server_id: server_id.clone(),
+            twitch_proof_json: None,
+            nsfw_confirmed: false,
+        })
+        .await
+        .unwrap();
+    assert!(
+        wait_event(&mut c, std::time::Duration::from_secs(20), |ev| matches!(
+            ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id
+        ))
+        .await,
+        "C joins live"
+    );
+
+    let payloads = sock.direct_payloads(6000).await;
+    let ops: Vec<crate::crdt::operations::CrdtOp> = payloads
+        .iter()
+        .filter_map(|f| serde_json::from_slice::<super::types::HavenMessage>(f).ok())
+        .filter_map(|m| match m {
+            super::types::HavenMessage::CrdtOpBroadcast { server_id: sid, op_json }
+                if sid == server_id =>
+            {
+                serde_json::from_str::<crate::crdt::operations::CrdtOp>(&op_json).ok()
+            }
+            _ => None,
+        })
+        .collect();
+
+    assert!(
+        ops.iter().any(|op| matches!(&op.payload,
+            crate::crdt::operations::CrdtPayload::MemberAdded { peer_id, .. } if *peer_id == c_master)),
+        "the owner's MemberAdded must ride the plaintext twin to a member that cannot \
+         read a room broadcast. The twin is UNCONDITIONAL for exactly this reason: our \
+         own encrypt succeeding says nothing about whether this member can decrypt. \
+         Got {ops:?}"
+    );
+    assert!(
+        ops.iter().any(|op| matches!(&op.payload,
+            crate::crdt::operations::CrdtPayload::StoragePledgeChanged { peer_id, pledge_bytes }
+                if *peer_id == c_master && *pledge_bytes > 0)),
+        "the joiner's auto-pledge must ride the same unconditional twin, got {ops:?}"
+    );
+
+    drop(o);
+    drop(a);
+    drop(c);
+}
+
+// ---------------------------------------------------------------------------
+// A VC state signal reaches a DEAF member (site 7).
+//
+// `broadcast_vc_state_signal` carried the literal `if !mls_sent` this sweep is
+// named after, so a deaf member's tile kept showing somebody unmuted who had
+// muted minutes earlier. `broadcast_vc_presence` next to it was already right,
+// which is why join/leave arrived and only the state did not.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn vc_state_signal_reaches_a_deaf_member() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    const A_MASTER: u8 = 234; // owner + sender
+    const B_MASTER: u8 = 235; // the deaf member
+    let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER)).peer_id();
+    let b_master = NativeKeypair::from_secret_bytes(&seed_bytes(B_MASTER)).peer_id();
+
+    let mut a = spawn_node_with_friends(&relay, A_MASTER, A_MASTER, &[&b_master]).await;
+    let mut b = spawn_node_with_friends(&relay, B_MASTER, B_MASTER, &[&a_master]).await;
+    expect_dm_pair_ready(&relay, &a, &b, 20).await;
+
+    let server_id = create_server_and_wait(&mut a, "VC Twin Server").await;
+    a.cmd_tx
+        .send(NodeCommand::CreateChannel {
+            server_id: server_id.clone(),
+            channel_id: crate::node::new_channel_id(&server_id),
+            name: "Voice".to_string(),
+            category: None,
+            channel_type: "voice".to_string(),
+        })
+        .await
+        .unwrap();
+    let mut voice_cid = None;
+    assert!(
+        wait_event(&mut a, std::time::Duration::from_secs(5), |ev| {
+            if let NetworkEvent::ChannelAdded { channel_id, channel_type, .. } = ev {
+                if channel_type == "voice" {
+                    voice_cid = Some(channel_id.clone());
+                    return true;
+                }
+            }
+            false
+        })
+        .await,
+        "owner creates a voice channel"
+    );
+    let voice_cid = voice_cid.expect("voice channel id");
+
+    b.cmd_tx
+        .send(NodeCommand::JoinServer {
+            server_id: server_id.clone(),
+            twitch_proof_json: None,
+            nsfw_confirmed: false,
+        })
+        .await
+        .unwrap();
+    assert!(
+        wait_event(&mut b, std::time::Duration::from_secs(10), |ev| matches!(
+            ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id
+        ))
+        .await,
+        "B joins the server"
+    );
+    // A real leaf on both sides, so the MLS leg genuinely encrypts and the only
+    // thing standing between it and B is the dropped room broadcast.
+    expect_mls_group(&[&a, &b], &server_id, 25).await;
+
+    relay.set_broadcast_deaf(&b.device_id, true);
+    expect_relay_drained(&relay, &a, "pre-vc").await;
+    expect_relay_drained(&relay, &b, "pre-vc").await;
+
+    // Both in the voice channel. Presence itself already sends an unconditional
+    // plaintext twin (the reference shape), so the deaf member still sees the
+    // join — that is the contrast this test is drawing.
+    for (node, who) in [(&mut b, "B"), (&mut a, "A")] {
+        node.cmd_tx
+            .send(NodeCommand::VoiceChannelJoin {
+                server_id: server_id.clone(),
+                channel_id: voice_cid.clone(),
+            })
+            .await
+            .unwrap();
+        let joined = wait_event(node, std::time::Duration::from_secs(6), |ev| {
+            matches!(ev, NetworkEvent::VoiceChannelJoined { channel_id, is_self, .. }
+                if *channel_id == voice_cid && *is_self)
+        })
+        .await;
+        assert!(joined, "{who} joins the voice channel");
+    }
+    assert!(
+        wait_event(&mut b, std::time::Duration::from_secs(10), |ev| matches!(
+            ev, NetworkEvent::VoiceChannelJoined { channel_id, is_self, .. }
+                if *channel_id == voice_cid && !*is_self
+        ))
+        .await,
+        "the deaf member sees the owner enter the voice channel (presence twin)"
+    );
+    drain_events(&mut b);
+
+    a.cmd_tx
+        .send(NodeCommand::VoiceChannelSendSignal {
+            server_id: server_id.clone(),
+            channel_id: voice_cid.clone(),
+            // Broadcast class: the Rust send path ignores peer_id here.
+            peer_id: String::new(),
+            signal_type: "audio_state".to_string(),
+            payload: serde_json::json!({"call_id": voice_cid, "muted": true, "deafened": false})
+                .to_string(),
+        })
+        .await
+        .unwrap();
+
+    assert!(
+        wait_event(&mut b, std::time::Duration::from_secs(10), |ev| matches!(
+            ev, NetworkEvent::VoiceChannelSignal { signal_type, .. } if signal_type == "audio_state"
+        ))
+        .await,
+        "a deaf member must still receive the audio_state signal: the MLS copy \
+         rides a room broadcast its socket drops, so the plaintext twin has to go \
+         out every time, not only when our own encrypt failed"
+    );
+
+    drop(a);
+    drop(b);
+}
+
+// ---------------------------------------------------------------------------
+// Channel typing (site 1) and a profile update (site 2) reach a member device
+// that holds NO LEAF, and reach a member device that DOES hold one exactly once.
+//
+// Modelling leaf-lessness honestly needs care. A live node co-present with the
+// group's coordinator is pulled in within about a second — measured: the
+// coordinator asks for a KeyPackage on PeerJoined, the node answers, the 2s
+// batch timer commits, and the Welcome rides a targeted frame. A parked joiner
+// now carries its KeyPackage inside the join request, so even that gap closes
+// at admission. Racing either window would make this test pass or fail on
+// machine load rather than on the code.
+//
+// What stays leaf-less is a member that never offers a KeyPackage at all: a
+// client older than the carried-KeyPackage join, admitted from the ring on its
+// request alone. Its device is a plain relay socket here — a CRDT member,
+// online, reachable by targeted frames, and permanently invisible to MLS
+// because nothing behind it answers an MlsKeyPackageRequest. That is the state
+// the complement rule exists for, held still.
+//
+// The receiver-side assertion is therefore on the FRAME the sender delivered
+// rather than on a stored row, which is the stronger statement anyway: it pins
+// the exact wire form the leaf-less member was sent, and it COUNTS, so a
+// duplicate is as visible as a silence.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn channel_typing_and_profile_update_reach_a_member_without_a_leaf() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    const O_MASTER: u8 = 236; // owner + sender
+    const A_MASTER: u8 = 237; // member WITH a leaf
+    const B_MASTER: u8 = 238; // member WITHOUT a leaf (a socket, never answers MLS)
+    let o_master = NativeKeypair::from_secret_bytes(&seed_bytes(O_MASTER)).peer_id();
+    let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER)).peer_id();
+    let b_device = NativeKeypair::from_secret_bytes(&seed_bytes(B_MASTER)).peer_id();
+
+    let mut o = spawn_node_with_friends(&relay, O_MASTER, O_MASTER, &[&a_master]).await;
+    let mut a = spawn_node_with_friends(&relay, A_MASTER, A_MASTER, &[&o_master]).await;
+    expect_dm_pair_ready(&relay, &o, &a, 20).await;
+
+    let server_id = create_server_and_wait(&mut o, "Complement Server").await;
+    let general = general_channel_of(&server_id);
+    a.cmd_tx
+        .send(NodeCommand::JoinServer {
+            server_id: server_id.clone(),
+            twitch_proof_json: None,
+            nsfw_confirmed: false,
+        })
+        .await
+        .unwrap();
+    assert!(
+        wait_event(&mut a, std::time::Duration::from_secs(15), |ev| matches!(
+            ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id
+        ))
+        .await,
+        "A joins normally and gets a leaf"
+    );
+    expect_mls_group(&[&o, &a], &server_id, 25).await;
+    assert!(
+        wait_until(15, async || relay.topic_registered(&server_id, super::types::JOIN_TOPIC)).await,
+        "the join ring must be registered before anyone parks into it"
+    );
+
+    // --- Everybody dark; the old client parks a join carrying no KeyPackage. ---
+    drain_events(&mut a);
+    relay.set_online(&o.device_id, false);
+    assert!(
+        wait_event(&mut a, std::time::Duration::from_secs(15), |ev| matches!(
+            ev, NetworkEvent::PeerDisconnected { peer_id } if *peer_id == o.device_id
+        ))
+        .await,
+        "A must see the owner drop, or it elects a ghost coordinator on its return"
+    );
+    go_offline(&relay, &a, &server_id).await;
+
+    let mut sock = raw_socket(&relay, &b_device);
+    let legacy = serde_json::to_vec(&super::types::HavenMessage::ServerJoinRequest {
+        server_id: server_id.clone(),
+        twitch_proof_json: None,
+        nsfw_confirmed: false,
+        requested_at: super::types::now_ms(),
+        device_list: None,
+        parked: true,
+        key_package: None,
+    })
+    .unwrap();
+    relay.inject_topic(&server_id, super::types::JOIN_TOPIC, &b_device, legacy);
+
+    relay.set_online(&a.device_id, true);
+    assert!(
+        wait_until(40, async || a.raw_crdt_member_keys(&server_id).contains(&b_device)).await,
+        "A must admit the old client from the ring, got {:?}",
+        a.raw_crdt_member_keys(&server_id),
+    );
+    expect_ring_resolution(&relay, &server_id, &a.device_id, &b_device, true).await;
+
+    // The owner returns and learns the new member from A. It never saw a
+    // KeyPackage for that member, so it never created a leaf for it.
+    relay.set_online(&o.device_id, true);
+    assert!(
+        wait_until(40, async || o.raw_crdt_member_keys(&server_id).contains(&b_device)).await,
+        "the owner must learn the admitted member from A, got {:?}",
+        o.raw_crdt_member_keys(&server_id),
+    );
+
+    sock.cmd_tx
+        .send(WsCommand::JoinRoom { room_code: server_id.clone() })
+        .unwrap();
+    assert!(
+        wait_until(20, async || {
+            let devices = relay.room_devices(&server_id);
+            devices.contains(&o.device_id)
+                && devices.contains(&a.device_id)
+                && devices.contains(&b_device)
+        })
+        .await,
+        "owner, leafed member and leaf-less member must all be in the server room, got {:?}",
+        relay.room_devices(&server_id),
+    );
+    expect_relay_drained(&relay, &o, "pre-send").await;
+    expect_relay_drained(&relay, &a, "pre-send").await;
+
+    // The premise, stated before the sends: the sender holds the group, A is in
+    // it, the old client is not.
+    let leaves = o.mls_members(&server_id).await;
+    assert!(
+        leaves.contains(&o.device_id) && leaves.contains(&a.device_id),
+        "the owner must hold a formed group with A in it, got {leaves:?}"
+    );
+    assert!(
+        !leaves.contains(&b_device),
+        "the member under test must hold NO leaf in the sender's group, got {leaves:?}"
+    );
+
+    drain_events(&mut a);
+    o.cmd_tx
+        .send(NodeCommand::SendTypingIndicator {
+            server_id: server_id.clone(),
+            channel_id: general.clone(),
+        })
+        .await
+        .unwrap();
+    o.cmd_tx
+        .send(NodeCommand::UpdateProfile {
+            display_name: "Owner Renamed".to_string(),
+            status: "online".to_string(),
+            about_me: String::new(),
+            avatar_bytes: None,
+            banner_bytes: None,
+            twitch_username: String::new(),
+            showcase_board: None,
+            showcase_assets: None,
+            avatar_frame: None,
+            avatar_anim: None,
+            banner_anim: None,
+            support_creds: None,
+        })
+        .await
+        .unwrap();
+
+    // One window, both frames. This doubles as the duplicate check's settle: by
+    // the time it returns, anything A was going to receive has been queued.
+    let payloads = sock.direct_payloads(6000).await;
+    let decoded: Vec<super::types::HavenMessage> = payloads
+        .iter()
+        .filter_map(|f| serde_json::from_slice::<super::types::HavenMessage>(f).ok())
+        .collect();
+
+    let typing = decoded
+        .iter()
+        .filter(|m| matches!(m, super::types::HavenMessage::TypingIndicator { server_id: sid, channel_id: cid }
+            if *sid == server_id && *cid == general))
+        .count();
+    assert_eq!(
+        typing, 1,
+        "the leaf-less member must be sent the plaintext typing indicator exactly \
+         once: the MLS copy is undecryptable for it, and the complement copy is \
+         aimed at precisely the devices with no leaf"
+    );
+
+    let profiles = decoded
+        .iter()
+        .filter(|m| matches!(m, super::types::HavenMessage::ProfileUpdate { display_name, .. }
+            if display_name == "Owner Renamed"))
+        .count();
+    assert_eq!(
+        profiles, 1,
+        "the leaf-less member must be sent the plaintext profile update exactly \
+         once: `mls_reached` now holds only the masters that actually hold a leaf, \
+         so a leaf-less member is no longer skipped as already reached"
+    );
+
+    // The other half of the complement rule: the member WITH a leaf reads the
+    // MLS copy and is not also sent a plaintext duplicate.
+    let a_typing = count_queued(&mut a, |ev| {
+        matches!(ev, NetworkEvent::TypingStarted { peer_id, server_id: sid, channel_id: cid }
+            if *peer_id == o_master && *sid == server_id && *cid == general)
+    });
+    assert_eq!(a_typing, 1, "the member with a leaf must see the typing exactly once");
+
+    // Still leaf-less at the end, so nothing above landed because the group
+    // quietly healed underneath the assertions.
+    let leaves_after = o.mls_members(&server_id).await;
+    assert!(
+        !leaves_after.contains(&b_device),
+        "the member under test must still hold no leaf, got {leaves_after:?}"
+    );
+
+    drop(o);
+    drop(a);
+}
+
+// ---------------------------------------------------------------------------
+// A channel FileHeader and the members with no leaf in the group that carried
+// it (site 8).
+//
+// The group here is a restricted channel's SUBGROUP, which is where a
+// qualifying member stays leaf-less on its own: subgroup membership is
+// reconciled on lifecycle events, not on co-presence, so a member who was
+// offline when the channel became restricted qualifies for it and holds no leaf
+// in it. The owner posts a file there; the caption is MLS and stays unreadable,
+// but the header must still arrive, or the member renders a message with no
+// file card and no way to ask for the bytes. The fallback is Olm, never
+// plaintext: a header names a file and carries its key.
+//
+// A member who does not qualify for the channel is not a leaf-less member, it
+// is somebody who must never be sent the header at all, so the complement set
+// is filtered through `can_see_channel`. The plain Member here is present to
+// hold that shape in view; see the note further down for why its absence is not
+// asserted.
+//
+// Read this as a regression guard rather than a discriminator. Channel content
+// has several independent redelivery paths to a member that failed to decrypt
+// (the relay's per-channel ring, turned off here, and the decrypt-failure
+// scoped channel sync, which cannot be turned off), so the arrival on its own
+// does not prove which leg carried it. What the test does pin is the sender's
+// state at the moment it chose recipients: a formed subgroup with neither
+// member's leaf in it.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn channel_file_header_reaches_a_member_without_a_leaf() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    const O_MASTER: u8 = 239; // owner + sender
+    const B_MASTER: u8 = 240; // Admin: qualifies, holds no subgroup leaf
+    const M_MASTER: u8 = 241; // plain Member: does NOT qualify
+    let o_master = NativeKeypair::from_secret_bytes(&seed_bytes(O_MASTER)).peer_id();
+    let b_master = NativeKeypair::from_secret_bytes(&seed_bytes(B_MASTER)).peer_id();
+    let m_master = NativeKeypair::from_secret_bytes(&seed_bytes(M_MASTER)).peer_id();
+
+    let mut o = spawn_node_with_friends(&relay, O_MASTER, O_MASTER, &[&b_master, &m_master]).await;
+    let mut b = spawn_node_with_friends(&relay, B_MASTER, B_MASTER, &[&o_master]).await;
+    let mut m = spawn_node_with_friends(&relay, M_MASTER, M_MASTER, &[&o_master]).await;
+    expect_dm_pair_ready(&relay, &o, &b, 25).await;
+    expect_dm_pair_ready(&relay, &o, &m, 25).await;
+
+    let server_id = create_server_and_wait(&mut o, "Header Server").await;
+    // Relay catch-up OFF, before anybody registers a ring: otherwise a member
+    // that heals after failing to decrypt is simply replayed the frame it
+    // missed, and the fallback under test is not what delivered anything.
+    o.cmd_tx
+        .send(NodeCommand::UpdateServerSetting {
+            server_id: server_id.clone(),
+            key: "relay_catchup_secs".to_string(),
+            value: "0".to_string(),
+        })
+        .await
+        .unwrap();
+    assert!(
+        wait_until(15, async || o
+            .live_server_state(&server_id)
+            .await
+            .is_some_and(|s| s.relay_catchup_secs() == 0))
+            .await,
+        "the owner must turn relay catch-up off before anyone joins"
+    );
+
+    for (node, who) in [(&mut b, "B"), (&mut m, "M")] {
+        node.cmd_tx
+            .send(NodeCommand::JoinServer {
+                server_id: server_id.clone(),
+                twitch_proof_json: None,
+                nsfw_confirmed: false,
+            })
+            .await
+            .unwrap();
+        let joined = wait_event(node, std::time::Duration::from_secs(15), |ev| {
+            matches!(ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id)
+        })
+        .await;
+        assert!(joined, "{who} joins the server");
+    }
+    expect_mls_group(&[&o, &b, &m], &server_id, 30).await;
+    // The Olm fallback only writes to devices with a session, so both sessions
+    // are a precondition of the test rather than part of what it measures.
+    expect_olm_confirmed(&o, &b, 30).await;
+    expect_olm_confirmed(&o, &m, 30).await;
+
+    // B is an Admin, so it QUALIFIES for the restricted channel below. M stays a
+    // plain Member and must never be sent anything from it.
+    o.cmd_tx
+        .send(NodeCommand::ChangeRole {
+            server_id: server_id.clone(),
+            peer_id: b_master.clone(),
+            new_role: "admin".to_string(),
+        })
+        .await
+        .unwrap();
+    assert!(
+        wait_until(20, async || {
+            b.live_role(&server_id, &b_master).await
+                == crate::crdt::operations::MemberRole::Admin
+        })
+        .await,
+        "B must be Admin before the channel is restricted"
+    );
+
+    // Both go dark, and the channel becomes restricted while they are away. The
+    // subgroup reconcile only pulls in ONLINE qualifying members, and nothing
+    // re-runs it on co-presence, so B comes back qualifying and leaf-less.
+    go_offline(&relay, &b, &server_id).await;
+    go_offline(&relay, &m, &server_id).await;
+
+    o.cmd_tx
+        .send(NodeCommand::CreateChannel {
+            server_id: server_id.clone(),
+            channel_id: crate::node::new_channel_id(&server_id),
+            name: "vault".to_string(),
+            category: None,
+            channel_type: "text".to_string(),
+        })
+        .await
+        .unwrap();
+    let mut restricted_cid = None;
+    assert!(
+        wait_event(&mut o, std::time::Duration::from_secs(8), |ev| {
+            if let NetworkEvent::ChannelAdded { channel_id, name, .. } = ev {
+                if name == "vault" {
+                    restricted_cid = Some(channel_id.clone());
+                    return true;
+                }
+            }
+            false
+        })
+        .await,
+        "owner creates the channel"
+    );
+    let restricted_cid = restricted_cid.expect("channel id");
+
+    o.cmd_tx
+        .send(NodeCommand::SetChannelVisibility {
+            server_id: server_id.clone(),
+            channel_id: restricted_cid.clone(),
+            visibility: "admin".to_string(),
+        })
+        .await
+        .unwrap();
+    let subgroup = crate::crypto::subgroup_id(&server_id, &restricted_cid);
+    expect_mls_leaf(&o, &subgroup, &o.device_id, 25).await;
+
+    relay.set_online(&b.device_id, true);
+    relay.set_online(&m.device_id, true);
+    assert!(
+        wait_until(25, async || {
+            let devices = relay.room_devices(&server_id);
+            devices.contains(&b.device_id) && devices.contains(&m.device_id)
+        })
+        .await,
+        "both members must be back in the server room, got {:?}",
+        relay.room_devices(&server_id),
+    );
+    assert!(
+        wait_until(25, async || o
+            .live_server_state(&server_id)
+            .await
+            .is_some_and(|s| s.can_see_channel(&b_master, &restricted_cid)
+                && !s.can_see_channel(&m_master, &restricted_cid)))
+            .await,
+        "B must qualify for the restricted channel and M must not"
+    );
+    expect_relay_drained(&relay, &o, "pre-file").await;
+    expect_relay_drained(&relay, &b, "pre-file").await;
+    expect_relay_drained(&relay, &m, "pre-file").await;
+
+    // The premise: the owner holds the subgroup and neither member is in it, so
+    // both are leaf-less and only the visibility filter separates them.
+    let sub_leaves = o.mls_members(&subgroup).await;
+    assert!(
+        sub_leaves.contains(&o.device_id)
+            && !sub_leaves.contains(&b.device_id)
+            && !sub_leaves.contains(&m.device_id),
+        "the owner must hold the subgroup with neither member's leaf, got {sub_leaves:?}"
+    );
+
+    drain_events(&mut b);
+    drain_events(&mut m);
+    let src = global_tmp.path().join("ledger.txt");
+    std::fs::write(&src, b"restricted channel file body").expect("write src file");
+    o.cmd_tx
+        .send(NodeCommand::SendFile(Box::new(super::types::SendFilePayload {
+            peer_id: None,
+            server_id: Some(server_id.clone()),
+            channel_id: Some(restricted_cid.clone()),
+            file_path: src.to_str().unwrap().to_string(),
+            message_id: "restricted-file-1".to_string(),
+            message_text: "ledger".to_string(),
+            vthumb: None,
+            override_width: None,
+            override_height: None,
+            share_ref: None,
+            voice: false,
+            poster: None,
+        })))
+        .await
+        .unwrap();
+
+    let mut got_fid: Option<String> = None;
+    wait_event(&mut b, std::time::Duration::from_secs(20), |ev| {
+        if let NetworkEvent::FileHeaderReceived { file_id, file_name, .. } = ev {
+            if file_name.starts_with("ledger") {
+                got_fid = Some(file_id.clone());
+                return true;
+            }
+        }
+        false
+    })
+    .await;
+    let fid = got_fid.expect(
+        "the header must reach the qualifying member with no leaf in the group \
+         that carried it: the MLS topic copy is undecryptable for it, so the Olm \
+         copy goes to exactly the leaf-less devices",
+    );
+    let meta = b.file_meta(&fid).expect("header persisted on the leaf-less member");
+    assert_eq!(meta.file_name, "ledger.txt", "the header names the file");
+
+    // NOT asserted here, though it belongs to this site: that a member who does
+    // NOT qualify for the restricted channel is never sent the header. The
+    // complement set IS filtered through `can_see_channel` for exactly that
+    // reason, and the filter holds — but a plain Member still ends up holding
+    // the file, because two OTHER paths hand it over with no visibility gate at
+    // all: `replicate_channel_file_full` streams the bytes to every member
+    // device, and the channel-sync responder serves the restricted channel's
+    // rows to anyone who asks. Both predate this sweep and both are somebody
+    // else's fix; asserting the absence here would only fail on them.
+
+    // No assertion on the subgroup AFTER the send, on purpose. A leaf-less
+    // member that reads an undecryptable frame asks to be bootstrapped — that is
+    // the system working — so its leaf state a second later is not a stable fact
+    // to pin. The pre-send assertions fix the state the sender was in when it
+    // chose who to send to, which is what this site decides.
+
+    drop(o);
+    drop(b);
+    drop(m);
+}
+
+// ---------------------------------------------------------------------------
+// A restricted channel's HISTORY and FILES never reach a member who cannot see
+// it (backfill access control).
+//
+// The per-channel MLS subgroup only protects LIVE traffic. Backfill went round
+// it three separate ways, and all three were reachable by any plain Member of
+// the server:
+//
+//   * `ChannelSyncRequest` / `ChannelSyncProbe` gated on holding the SERVER and
+//     served ANY channel's stored rows — file headers, which carry the file's
+//     AES key, included. The probe alone leaked the hidden channel's message
+//     count and latest timestamp.
+//   * `replicate_channel_file_full` streamed the ciphertext to every member
+//     device with no visibility check at all.
+//   * the `FileRequest` responder checked membership and public-ness, but not
+//     whether the requester could see the channel the file lives in.
+//
+// So: O owns an Admin-only channel, C is an Admin and B is a plain Member. Both
+// are members, both online, both hold an Olm session with O. C must end with
+// the message and the file; B must end with nothing about either, having asked
+// for all three (its own sync round on reconnect, and an explicit FileRequest).
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn restricted_channel_history_and_files_never_reach_a_non_qualifier() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    const O_MASTER: u8 = 242; // owner
+    const B_MASTER: u8 = 243; // plain Member: must never see the channel
+    const C_MASTER: u8 = 244; // Admin: must see everything
+    let o_master = NativeKeypair::from_secret_bytes(&seed_bytes(O_MASTER)).peer_id();
+    let b_master = NativeKeypair::from_secret_bytes(&seed_bytes(B_MASTER)).peer_id();
+    let c_master = NativeKeypair::from_secret_bytes(&seed_bytes(C_MASTER)).peer_id();
+
+    let mut o = spawn_node_with_friends(&relay, O_MASTER, O_MASTER, &[&b_master, &c_master]).await;
+    let mut b = spawn_node_with_friends(&relay, B_MASTER, B_MASTER, &[&o_master]).await;
+    let mut c = spawn_node_with_friends(&relay, C_MASTER, C_MASTER, &[&o_master]).await;
+    expect_dm_pair_ready(&relay, &o, &b, 25).await;
+    expect_dm_pair_ready(&relay, &o, &c, 25).await;
+
+    let server_id = create_server_and_wait(&mut o, "Vault Server").await;
+    let general = general_channel_of(&server_id);
+    for (node, who) in [(&mut b, "B"), (&mut c, "C")] {
+        node.cmd_tx
+            .send(NodeCommand::JoinServer {
+                server_id: server_id.clone(),
+                twitch_proof_json: None,
+                nsfw_confirmed: false,
+            })
+            .await
+            .unwrap();
+        let joined = wait_event(node, std::time::Duration::from_secs(15), |ev| {
+            matches!(ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id)
+        })
+        .await;
+        assert!(joined, "{who} joins the server");
+    }
+    expect_mls_group(&[&o, &b, &c], &server_id, 30).await;
+    // Olm both ways for both, so a silence later is a REFUSAL and not a missing
+    // session: every path under test would use these if it decided to serve.
+    expect_olm_confirmed(&o, &b, 30).await;
+    expect_olm_confirmed(&o, &c, 30).await;
+
+    o.cmd_tx
+        .send(NodeCommand::ChangeRole {
+            server_id: server_id.clone(),
+            peer_id: c_master.clone(),
+            new_role: "admin".to_string(),
+        })
+        .await
+        .unwrap();
+    assert!(
+        wait_until(20, async || {
+            o.live_role(&server_id, &c_master).await
+                == crate::crdt::operations::MemberRole::Admin
+        })
+        .await,
+        "C must be Admin before the channel is restricted"
+    );
+
+    o.cmd_tx
+        .send(NodeCommand::CreateChannel {
+            server_id: server_id.clone(),
+            channel_id: crate::node::new_channel_id(&server_id),
+            name: "vault".to_string(),
+            category: None,
+            channel_type: "text".to_string(),
+        })
+        .await
+        .unwrap();
+    let mut restricted_cid = None;
+    assert!(
+        wait_event(&mut o, std::time::Duration::from_secs(8), |ev| {
+            if let NetworkEvent::ChannelAdded { channel_id, name, .. } = ev {
+                if name == "vault" {
+                    restricted_cid = Some(channel_id.clone());
+                    return true;
+                }
+            }
+            false
+        })
+        .await,
+        "owner creates the channel"
+    );
+    let restricted_cid = restricted_cid.expect("channel id");
+
+    o.cmd_tx
+        .send(NodeCommand::SetChannelVisibility {
+            server_id: server_id.clone(),
+            channel_id: restricted_cid.clone(),
+            visibility: "admin".to_string(),
+        })
+        .await
+        .unwrap();
+    let subgroup = crate::crypto::subgroup_id(&server_id, &restricted_cid);
+    expect_mls_leaf(&o, &subgroup, &o.device_id, 25).await;
+    expect_mls_leaf(&c, &subgroup, &c.device_id, 25).await;
+    expect_no_mls_leaf(&o, &subgroup, &b.device_id, 20).await;
+
+    // B must KNOW the channel exists (it is in the CRDT for everyone) — that is
+    // what makes its own sync coordinator probe and request it, which is the
+    // path under test. Hiding it from the CRDT would prove nothing.
+    assert!(
+        wait_until(25, async || b
+            .live_server_state(&server_id)
+            .await
+            .is_some_and(|s| s.channels.contains_key(&restricted_cid)
+                && !s.can_see_channel(&b_master, &restricted_cid)))
+            .await,
+        "B must hold the channel in its CRDT and not qualify for it"
+    );
+
+    drain_events(&mut b);
+    drain_events(&mut c);
+    o.cmd_tx
+        .send(NodeCommand::SendChannelMessage {
+            server_id: server_id.clone(),
+            channel_id: restricted_cid.clone(),
+            text: "admins only".to_string(),
+            message_id: "vault-msg-1".to_string(),
+            reply_to_mid: None,
+            link_preview: None,
+        })
+        .await
+        .unwrap();
+    let src = global_tmp.path().join("payroll.txt");
+    std::fs::write(&src, b"restricted channel file body").expect("write src file");
+    o.cmd_tx
+        .send(NodeCommand::SendFile(Box::new(super::types::SendFilePayload {
+            peer_id: None,
+            server_id: Some(server_id.clone()),
+            channel_id: Some(restricted_cid.clone()),
+            file_path: src.to_str().unwrap().to_string(),
+            message_id: "vault-file-1".to_string(),
+            message_text: "payroll".to_string(),
+            vthumb: None,
+            override_width: None,
+            override_height: None,
+            share_ref: None,
+            voice: false,
+            poster: None,
+        })))
+        .await
+        .unwrap();
+
+    // The qualifying member gets both.
+    let mut got_fid: Option<String> = None;
+    wait_event(&mut c, std::time::Duration::from_secs(25), |ev| {
+        if let NetworkEvent::FileHeaderReceived { file_id, file_name, .. } = ev {
+            if file_name.starts_with("payroll") {
+                got_fid = Some(file_id.clone());
+                return true;
+            }
+        }
+        false
+    })
+    .await;
+    let fid = got_fid.expect("the Admin must receive the restricted channel's FileHeader");
+    assert!(
+        wait_until(20, async || c
+            .channel_messages(&server_id, &restricted_cid)
+            .iter()
+            .any(|m| m.text == "admins only"))
+            .await,
+        "the Admin must receive the restricted channel's message"
+    );
+
+    // --- B now asks for all three, and must be refused every time. ---
+    //
+    // A reconnect is what makes B's own sync coordinator fire a probe and a
+    // request for EVERY channel it holds, this one included; the explicit
+    // RequestFile covers the third path. B has no way to learn the file id on
+    // its own, which is the point, so the test hands it the one C was told.
+    //
+    // The owner also posts in #general while B is away, so the same run proves
+    // the gate does not OVER-block: B is a member of that channel and must be
+    // served its backfill through the very responders that just refused it the
+    // restricted one.
+    drain_events(&mut b);
+    go_offline(&relay, &b, &server_id).await;
+    o.cmd_tx
+        .send(NodeCommand::SendChannelMessage {
+            server_id: server_id.clone(),
+            channel_id: general.clone(),
+            text: "general chatter".to_string(),
+            message_id: "general-msg-1".to_string(),
+            reply_to_mid: None,
+            link_preview: None,
+        })
+        .await
+        .unwrap();
+    relay.set_online(&b.device_id, true);
+    assert!(
+        wait_until(25, async || relay.room_devices(&server_id).contains(&b.device_id)).await,
+        "B must rejoin the server room so its sync round runs, got {:?}",
+        relay.room_devices(&server_id),
+    );
+    expect_olm_confirmed(&o, &b, 30).await;
+    b.cmd_tx
+        .send(NodeCommand::RequestFile {
+            file_id: fid.clone(),
+            peer_id: o_master.clone(),
+            chunks: Vec::new(),
+        })
+        .await
+        .unwrap();
+
+    // NEGATIVES, so they wait out a real window rather than polling for a state
+    // that must never exist. The window covers the sync round trip and the file
+    // request; C's arrival above is the proof the sender was willing and able.
+    let b_leaked = wait_event(&mut b, std::time::Duration::from_secs(8), |ev| {
+        matches!(ev, NetworkEvent::FileHeaderReceived { file_name, .. }
+            if file_name.starts_with("payroll"))
+            || matches!(ev, NetworkEvent::ChannelMessageReceived { text, .. }
+                if text == "admins only")
+    })
+    .await;
+    assert!(
+        !b_leaked,
+        "a plain Member must receive neither the restricted channel's message nor \
+         its FileHeader: the sync responders and the FileRequest responder gate on \
+         `can_see_channel`, not on server membership"
+    );
+    assert!(
+        b.file_meta(&fid).is_none(),
+        "and nothing about the file may be stored on it: the header carries the \
+         AES key, and full replication no longer streams the bytes to a member \
+         who cannot see the channel"
+    );
+    assert!(
+        b.channel_messages(&server_id, &restricted_cid).is_empty(),
+        "and no row from the channel either, got {:?}",
+        b.channel_messages(&server_id, &restricted_cid),
+    );
+    assert!(
+        !b.missing_file_ids().contains(&fid),
+        "not even a placeholder row it would keep re-requesting"
+    );
+
+    // NOT over-blocked: B is a member of #general, so the same responders that
+    // just refused it the restricted channel must serve it that backfill.
+    assert!(
+        wait_until(25, async || b
+            .channel_messages(&server_id, &general)
+            .iter()
+            .any(|m| m.text == "general chatter"))
+            .await,
+        "a member must still be served the channels it CAN see, got {:?}",
+        b.channel_messages(&server_id, &general),
+    );
+
+    // --- And a NON-MEMBER in the room gets nothing, for a channel whose
+    //     visibility is Everyone and which is not public. ---
+    //
+    // `can_see_channel` on its own is not a gate here: an unknown peer's role
+    // resolves to plain Member, so the visibility ladder says yes to every
+    // Everyone channel. Membership is the first rung, and a socket that never
+    // joined the server is the honest way to hold a non-member still. The probe
+    // response is the discriminating frame because it goes out in the CLEAR;
+    // the full sync batch rides Olm, which a socket could not read anyway.
+    const X_MASTER: u8 = 245; // never joins the server
+    let x_device = NativeKeypair::from_secret_bytes(&seed_bytes(X_MASTER)).peer_id();
+    assert!(
+        !o.live_server_state(&server_id)
+            .await
+            .expect("owner state")
+            .is_member(&x_device),
+        "the stranger must not be a member"
+    );
+    let mut x = raw_socket(&relay, &x_device);
+    x.cmd_tx
+        .send(WsCommand::JoinRoom { room_code: server_id.clone() })
+        .unwrap();
+    assert!(
+        wait_until(20, async || relay.room_devices(&server_id).contains(&x_device)).await,
+        "the stranger must be in the server room, got {:?}",
+        relay.room_devices(&server_id),
+    );
+    let probe = serde_json::to_vec(&super::types::HavenMessage::ChannelSyncProbe {
+        server_id: server_id.clone(),
+        channel_id: general.clone(),
+        our_latest: 0,
+        msg_count: 0,
+    })
+    .unwrap();
+    let req = serde_json::to_vec(&super::types::HavenMessage::ChannelSyncRequest {
+        server_id: server_id.clone(),
+        channel_id: general.clone(),
+        since_timestamp: 0,
+        sender_timestamps: HashMap::new(),
+    })
+    .unwrap();
+    for frame in [probe, req] {
+        x.cmd_tx
+            .send(WsCommand::SendDirect {
+                room_code: server_id.clone(),
+                target_peer: o.device_id.clone(),
+                data: frame,
+            })
+            .unwrap();
+    }
+    let stranger_frames = x.direct_payloads(6000).await;
+    let served = stranger_frames
+        .iter()
+        .filter_map(|f| serde_json::from_slice::<super::types::HavenMessage>(f).ok())
+        .filter(|m| matches!(m, super::types::HavenMessage::ChannelSyncProbeResponse { channel_id, .. }
+            if *channel_id == general))
+        .count();
+    assert_eq!(
+        served, 0,
+        "a NON-MEMBER must be served nothing for a non-public channel, not even the          probe's message count and latest timestamp: membership is the first rung of          the gate, and the visibility ladder alone says yes to every Everyone channel"
+    );
+
+    // The qualifying member is unaffected by the gates.
+    let meta = c.file_meta(&fid).expect("the Admin still holds the header");
+    assert_eq!(meta.file_name, "payroll.txt", "the header names the file");
+
+    drop(o);
+    drop(b);
+    drop(c);
+}
+
 // ---------------------------------------------------------------------------
 // CI guard: the harness's FIXED-sleep budget.
 // ---------------------------------------------------------------------------
@@ -17983,7 +19795,15 @@ fn harness_fixed_sleep_budget_does_not_grow() {
     // which is the whole point of the first test and therefore has no arrival
     // to wait for by construction. Both tests still run in about four seconds,
     // down from twenty-two before the de-sleeping.
-    const BUDGET_MS: u64 = 579_000;
+    // Raised 579_000 -> 581_800 on 2026-09-05 for exactly 2800ms across two new
+    // fixed sleeps. `expect_quiet_group` sleeps 2500ms between its two reads:
+    // it is proving that a whole batch tick went by and committed NOTHING, and
+    // there is no arrival to poll for a commit that must not happen.
+    // `restart_node` sleeps 300ms after aborting a node event loop: an aborted
+    // task finishing the drop of its SQLCipher handles has no signal either, and
+    // reopening the file under the old writer costs a 4s busy_timeout per query.
+    // Everything else the three new tests wait on settles on a condition.
+    const BUDGET_MS: u64 = 581_800;
 
     let src = include_str!("test_harness.rs");
     // Built from pieces so this scan does not count its own source text.

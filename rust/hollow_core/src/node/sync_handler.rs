@@ -770,6 +770,64 @@ pub(crate) async fn catchup_watermark_ages(
         .collect()
 }
 
+/// Ask the relay to replay every Text channel ring in `room` this connection
+/// has not pulled yet, for the channels we can actually see.
+///
+/// ONE definition, called from two places that need identical behaviour: the
+/// connect-time sweep in the `RoomMembers` arm, and again after the Welcome
+/// that ends a parked join. The second call exists because a returning parked
+/// joiner can process `RoomMembers` BEFORE its buffered `SyncResponse` lands —
+/// at that instant the server is not in `server_states` at all, so no channel
+/// catch-up was requested for it — and because any channel frame that DID
+/// replay before the leaf formed failed to decrypt and was dropped. The
+/// re-issue fetches them once there is a group to read them with; dedup is by
+/// message_id, so a frame that arrived twice is stored once.
+///
+/// `relay_catchup_done` is the per-connection "already pulled" set. The caller
+/// clears the room's entries before a re-issue, otherwise this filters the
+/// whole request away.
+pub(crate) async fn request_channel_catchups(
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    crdt_store: &CrdtStore,
+    state: Option<&ServerState>,
+    room: &str,
+    local_peer: &str,
+    relay_catchup_done: &mut std::collections::HashSet<(String, String)>,
+    tag: &str,
+) {
+    // Gather the channel list and DROP the borrow before crossing the await:
+    // the watermark lookup is answered on the CrdtStore actor's long-lived
+    // connection, never by opening a SQLCipher handle per channel here.
+    let fresh_channels: Vec<String> = match state {
+        Some(state) if state.relay_catchup_secs() > 0 => {
+            register_relay_catchup(ws_cmd_tx, state, room);
+            state
+                .channels
+                .values()
+                .filter(|ch| {
+                    matches!(ch.channel_type, crate::crdt::server_state::ChannelType::Text)
+                        && state.can_see_channel(local_peer, &ch.channel_id)
+                })
+                .map(|ch| ch.channel_id.clone())
+                .filter(|cid| relay_catchup_done.insert((room.to_string(), cid.clone())))
+                .collect()
+        }
+        _ => Vec::new(),
+    };
+    if fresh_channels.is_empty() {
+        return;
+    }
+    let ages = catchup_watermark_ages(crdt_store, room, fresh_channels).await;
+    for (cid, max_age_secs) in ages {
+        hollow_log!("[HOLLOW-TOPIC] Catch-up request ({tag}) {room}/{cid} max_age={max_age_secs}s");
+        let _ = ws_cmd_tx.send(super::ws_client::WsCommand::TopicCatchup {
+            room_code: room.to_string(),
+            channel_id: cid,
+            max_age_secs,
+        });
+    }
+}
+
 // ── 2. CreateChannel ──────────────────────────────────────────────────
 
 pub(crate) async fn handle_create_channel(
@@ -1125,6 +1183,11 @@ pub(crate) fn pending_join_row(
         // Only used on INSERT: the upsert preserves the original on conflict,
         // so a repeat request keeps saying when the user first asked.
         created_at: pending.requested_at,
+        // The private half lives in the MLS store, which survives a restart on
+        // its own; this is the public half the ring copy carries, and it has to
+        // survive with it or a restarted joiner deposits a DIFFERENT package
+        // than the one already in the ring.
+        key_package: pending.key_package.clone(),
     }
 }
 
@@ -1152,6 +1215,12 @@ pub(crate) fn deposit_parked_join(
         requested_at: pending.requested_at,
         device_list: pending.device_list.clone(),
         parked: true,
+        // Rung 2: the ring copy carries the LEAF as well as the membership, so
+        // the member that admits it can add us to the MLS group in the same
+        // batch instead of leaving that to a future co-presence. Only the
+        // parked copy: a live join is answered by somebody who is right there
+        // and bootstraps on its SyncResponse.
+        key_package: pending.key_package.clone(),
     })
     .unwrap_or_default();
     let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendToRoomTopic {
@@ -1197,6 +1266,40 @@ pub(crate) fn publish_join_resolution(
     hollow_log!("[HOLLOW-CRDT] Published join resolution for {joiner_master} on {server_id} (admitted {admitted})");
 }
 
+/// Drop the MLS KeyPackage a join will now never use.
+///
+/// The package's private half (its init key and its leaf encryption key) sits
+/// in the MLS store from the moment it is minted until a Welcome consumes it.
+/// A join that ends in a refusal or a discard has no Welcome coming, so without
+/// this the private material would sit in the persisted storage blob for the
+/// life of the install. Best effort: a package we cannot parse is one we did
+/// not write, and there is nothing to reclaim.
+///
+/// Called LAST, after the row and the events that describe the decision. It
+/// writes the whole MLS storage blob through the crypto store, and that write
+/// sits on the same SQLCipher file the pending-join row does: run it first and
+/// the row a caller is about to read is still queued behind it.
+fn discard_join_key_package(
+    mls: &mut Option<MlsManager>,
+    crypto_store: &CryptoStore,
+    server_id: &str,
+    key_package_b64: Option<&str>,
+) {
+    let Some(kp_b64) = key_package_b64 else { return };
+    let Some(mls_mgr) = mls.as_mut() else { return };
+    let Ok(kp) = base64::engine::general_purpose::STANDARD.decode(kp_b64) else {
+        hollow_log!("[HOLLOW-MLS] Join KeyPackage for {server_id} is not valid base64, nothing to discard");
+        return;
+    };
+    match mls_mgr.discard_key_package(&kp) {
+        Ok(()) => {
+            super::crypto_handler::persist_mls_state(mls_mgr, crypto_store);
+            hollow_log!("[HOLLOW-MLS] Discarded the unused join KeyPackage for {server_id}");
+        }
+        Err(e) => hollow_log!("[HOLLOW-MLS] Could not discard the join KeyPackage for {server_id}: {e}"),
+    }
+}
+
 /// A refusal that is really a QUESTION: the member is asking the joiner for
 /// something (NSFW consent, a Twitch proof) and the next request will carry it.
 ///
@@ -1215,18 +1318,27 @@ pub(crate) fn is_interactive_reason(reason: &str) -> bool {
 /// Always leaves the room: "no row means we are not in that room" is the
 /// invariant that makes both a refusal and a discard stick, because it is what
 /// stops the relay replaying a late admission's buffered snapshot at us.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_join_refused(
     pending_server_joins: &mut HashMap<String, PendingJoin>,
     event_tx: &mpsc::Sender<NetworkEvent>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     crdt_store: &CrdtStore,
+    mls: &mut Option<MlsManager>,
+    crypto_store: &CryptoStore,
     server_id: String,
     reason: String,
 ) {
-    let Some(pending) = pending_server_joins.remove(&server_id) else { return };
+    let Some(mut pending) = pending_server_joins.remove(&server_id) else { return };
     let _ = ws_cmd_tx.send(super::ws_client::WsCommand::LeaveRoom {
         room_code: server_id.clone(),
     });
+    // Whichever branch we take below, this ask is over: the interactive one
+    // deletes the row so the user's answer can mint a fresh package, and the
+    // final one keeps a row that is a tile, not a join in flight. The package
+    // is taken off the entry HERE (so neither branch writes a row naming a
+    // package that no longer exists) and reclaimed at the end of the branch.
+    let spent = pending.key_package.take();
 
     if is_interactive_reason(&reason) {
         // The row goes. The user answers the dialog, and their answer
@@ -1248,9 +1360,10 @@ pub(crate) async fn handle_join_refused(
             reason: String::new(),
         }).await;
         let _ = event_tx.send(NetworkEvent::TwitchJoinRejected {
-            server_id,
+            server_id: server_id.clone(),
             reason,
         }).await;
+        discard_join_key_package(mls, crypto_store, &server_id, spent.as_deref());
         return;
     }
 
@@ -1268,10 +1381,11 @@ pub(crate) async fn handle_join_refused(
         }).await;
     }
     let _ = event_tx.send(NetworkEvent::PendingJoinUpdated {
-        server_id,
+        server_id: server_id.clone(),
         state: "rejected".to_string(),
         reason,
     }).await;
+    discard_join_key_package(mls, crypto_store, &server_id, spent.as_deref());
 }
 
 /// Refuse a join, by both legs.
@@ -1323,6 +1437,12 @@ pub(crate) async fn handle_join_server(
     crdt_store: &CrdtStore,
     master_keypair: &crate::identity::native_identity::NativeKeypair,
     device_peer_id: &str,
+    mls: &Option<MlsManager>,
+    crypto_store: &CryptoStore,
+    // The KeyPackage a persisted row already holds ("request again"). Reused
+    // rather than re-minted, so a re-ask does not orphan the package the ring
+    // copy already names.
+    stored_key_package: Option<String>,
     db_path: &str,
     db_passphrase: &str,
 ) {
@@ -1337,6 +1457,26 @@ pub(crate) async fn handle_join_server(
     let device_list = super::crypto_handler::build_local_device_list(
         master_keypair, device_peer_id, db_path, db_passphrase,
     );
+    // The KeyPackage this join will be added with (pending joins, rung 2).
+    // Minted ONCE per row: a re-ask refreshes the nonce and keeps the package,
+    // because the ring may already hold a copy naming it and because OpenMLS is
+    // happy to re-add the same package once the old leaf is gone. `mint_key_package`
+    // persists the private half immediately, which is what makes the package
+    // still usable when the answer comes back days and one restart later.
+    let key_package = stored_key_package.or_else(|| {
+        pending_server_joins
+            .get(&server_id)
+            .and_then(|p| p.key_package.clone())
+    }).or_else(|| {
+        let mls = mls.as_ref()?;
+        match super::crypto_handler::mint_key_package(mls, crypto_store) {
+            Ok(kp) => Some(base64::engine::general_purpose::STANDARD.encode(kp)),
+            Err(e) => {
+                hollow_log!("[HOLLOW-MLS] Join KeyPackage mint failed for {server_id}: {e}");
+                None
+            }
+        }
+    });
     let pending = PendingJoin {
         twitch_proof_json: twitch_proof_json.clone(),
         nsfw_confirmed,
@@ -1344,6 +1484,7 @@ pub(crate) async fn handle_join_server(
         parked: false,
         last_deposited_at: 0,
         device_list,
+        key_package,
     };
     // Persist BEFORE anything can go wrong: a crash inside the 15s live window
     // still leaves a row the boot path picks up, and a join that completes
@@ -1368,6 +1509,9 @@ pub(crate) async fn handle_join_server(
                     requested_at,
                     device_list: pending.device_list.clone(),
                     parked: false,
+                    // A live request is answered by somebody who is right here;
+                    // the leaf rides the SyncResponse bootstrap, not the wire.
+                    key_package: None,
                 },
             );
             hollow_log!("[HOLLOW-CRDT] Sent join request to {peer} for {server_id}");
@@ -1392,16 +1536,24 @@ pub(crate) async fn handle_join_server(
         }).await;
     });
 
-    // Spawn the 15s window. If nobody answered by then the join PARKS (it does
-    // not fail): see `handle_check_pending_join_timeout`.
-    let timeout_cmd_tx = cmd_tx.clone();
-    let timeout_sid = server_id.clone();
-    tokio::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_secs(15)).await;
-        let _ = timeout_cmd_tx.send(NodeCommand::CheckPendingJoinTimeout {
-            server_id: timeout_sid,
-        }).await;
-    });
+    // Both windows. The short one parks only when the relay has already told us
+    // the room is empty; the long one is the authority for everything else.
+    // Either is a no-op once the join has completed or been discarded, so a
+    // "request again" inherits the pair with nothing extra to arrange.
+    for (window, only_if_empty) in [
+        (JOIN_EMPTY_ROOM_WINDOW, true),
+        (JOIN_LIVE_WINDOW, false),
+    ] {
+        let timeout_cmd_tx = cmd_tx.clone();
+        let timeout_sid = server_id.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(window).await;
+            let _ = timeout_cmd_tx.send(NodeCommand::CheckPendingJoinTimeout {
+                server_id: timeout_sid,
+                only_if_empty,
+            }).await;
+        });
+    }
 }
 
 // ── 8b. RetryPendingJoin ──────────────────────────────────────────────
@@ -1432,6 +1584,7 @@ pub(crate) fn handle_retry_pending_join(
                 requested_at: pending.requested_at,
                 device_list: pending.device_list.clone(),
                 parked: false,
+                key_package: None,
             },
         );
     }
@@ -2756,20 +2909,45 @@ pub(crate) async fn handle_set_storage_pledge(
     ).await;
 }
 
-// ── 17. CheckPendingJoinTimeout: the live window elapsed, so PARK ─────
+// ── 17. CheckPendingJoinTimeout: a window elapsed, so PARK ───────────
 
-/// Nobody answered inside the live window. That is not a failure any more.
+/// How long a join waits for a member who is THERE.
+///
+/// The coordinator election, its 4s retry, a full state snapshot and the whole
+/// op log all have to cross the wire inside this, and a member one round trip
+/// from answering is the normal case, not the slow one. Parking under them
+/// would put a "waiting for a member to finish setup" tile in front of a join
+/// that is about to complete.
+pub(crate) const JOIN_LIVE_WINDOW: Duration = Duration::from_secs(15);
+
+/// How long a join waits when the relay has already answered the question.
+///
+/// Two windows exist because "nobody answered" has two very different causes.
+/// A room with somebody in it needs [`JOIN_LIVE_WINDOW`]. A room the relay
+/// described to us as EMPTY needs nothing: there is no member to wait for, and
+/// holding a spinner for fifteen seconds is just a slower way of saying what we
+/// already know. Saying it early costs nothing, because parking is not a
+/// failure: the request goes into the `~join` ring, the live paths stay armed,
+/// and a member that comes back still completes the join.
+pub(crate) const JOIN_EMPTY_ROOM_WINDOW: Duration = Duration::from_secs(3);
+
+/// Nobody answered inside the window. That is not a failure any more.
 ///
 /// The request is marked parked, deposited into the server room's `~join` ring
 /// and left there: the next member to come back reads the ring, answers, and
 /// publishes the answer back into it. We STAY IN THE ROOM, because that is how
 /// both legs of the answer reach us later (the relay's buffered targeted frames
 /// replay on a room join, and the ring catch-up is gated on room membership).
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_check_pending_join_timeout(
     pending_server_joins: &mut HashMap<String, PendingJoin>,
     event_tx: &mpsc::Sender<NetworkEvent>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    local_peer_str: &str,
+    local_device_id: &str,
     server_id: String,
+    only_if_empty: bool,
     crdt_store: &CrdtStore,
 ) {
     // Already gone = the join completed or was discarded; already parked = a
@@ -2778,7 +2956,30 @@ pub(crate) async fn handle_check_pending_join_timeout(
     if pending.parked {
         return;
     }
-    hollow_log!("[HOLLOW-CRDT] No answer within the live window for {server_id} — parking the join");
+    if only_if_empty {
+        // The short window speaks only for a room the relay has actually
+        // described to us. An entry appears the moment `RoomMembers` answers our
+        // join (an empty room included) and is dropped on disconnect, so NO
+        // entry means we have not looked yet rather than that nobody is there,
+        // and a park on that would be a guess.
+        //
+        // OUR OWN ids are filtered here rather than trusted to be absent. The
+        // `RoomMembers` and `DiscoveredPeers` sites both drop them, but the
+        // `PeerJoined` site inserts whatever id the relay named, and a room the
+        // socket joins twice makes the relay announce US to ourselves: the
+        // second join sees the first still listed, so the joiner is in its own
+        // "existing members" set. The room then reads as occupied by nobody but
+        // us, which is exactly the case this window exists for.
+        let known_empty = ws_room_peers.get(&server_id).is_some_and(|peers| {
+            peers.iter().all(|p| p == local_peer_str || p == local_device_id)
+        });
+        if !known_empty {
+            return;
+        }
+        hollow_log!("[HOLLOW-CRDT] Nobody is in the room for {server_id}; parking the join after the short window");
+    } else {
+        hollow_log!("[HOLLOW-CRDT] No answer within the live window for {server_id} — parking the join");
+    }
     pending.parked = true;
     pending.last_deposited_at = super::types::now_ms();
     deposit_parked_join(ws_cmd_tx, &server_id, pending);
@@ -2795,24 +2996,28 @@ pub(crate) async fn handle_check_pending_join_timeout(
 /// Nothing reaches the relay: the ring copy cannot be recalled and just ages
 /// out. What makes the discard STICK is local — no row, so no boot rejoin of
 /// that room, so a late admission's buffered snapshot is never collected.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_discard_pending_join(
     pending_server_joins: &mut HashMap<String, PendingJoin>,
     event_tx: &mpsc::Sender<NetworkEvent>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    mls: &mut Option<MlsManager>,
+    crypto_store: &CryptoStore,
     server_id: String,
     crdt_store: &CrdtStore,
 ) {
     hollow_log!("[HOLLOW-CRDT] Discarding pending join for {server_id}");
-    pending_server_joins.remove(&server_id);
+    let spent = pending_server_joins.remove(&server_id).and_then(|p| p.key_package);
     crdt_store.delete_pending_join(server_id.clone());
     let _ = ws_cmd_tx.send(super::ws_client::WsCommand::LeaveRoom {
         room_code: server_id.clone(),
     });
     let _ = event_tx.send(NetworkEvent::PendingJoinUpdated {
-        server_id,
+        server_id: server_id.clone(),
         state: "discarded".to_string(),
         reason: String::new(),
     }).await;
+    discard_join_key_package(mls, crypto_store, &server_id, spent.as_deref());
 }
 
 // ── 18. flush_pending_sync_requests ───────────────────────────────────
@@ -3205,7 +3410,18 @@ pub(crate) async fn handle_envelope_channel_sync_req(
     db_path: &str,
     db_passphrase: &str,
 ) {
-    if !server_states.contains_key(&sid) { return; }
+    // Visibility gate, identical to the plaintext responder in swarm.rs: this
+    // is the MLS/Olm twin of the same request and shares `build_channel_sync_batch`,
+    // so gating one leg and not the other would leave the hole open on the leg a
+    // formed group actually uses.
+    let visible = match server_states.get(&sid) {
+        Some(state) => super::crypto_handler::channel_readable_by(state, sender_peer_id, &cid),
+        None => return,
+    };
+    if !visible {
+        hollow_log!("[HOLLOW-SECURITY] REJECTED ChannelSyncRequest from {sender_peer_id} for {cid}: not visible to that member");
+        return;
+    }
     let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) else { return };
     let Ok((batch, count)) = build_channel_sync_batch(&store, &sid, &cid, since_timestamp, &sender_timestamps) else { return };
     if count == 0 { return; }
@@ -3233,7 +3449,15 @@ pub(crate) async fn handle_envelope_channel_probe(
     db_path: &str,
     db_passphrase: &str,
 ) {
-    if !server_states.contains_key(&sid) { return; }
+    // Visibility gate, identical to the plaintext probe responder in swarm.rs.
+    let visible = match server_states.get(&sid) {
+        Some(state) => super::crypto_handler::channel_readable_by(state, &sender_peer_id, &cid),
+        None => return,
+    };
+    if !visible {
+        hollow_log!("[HOLLOW-SECURITY] REJECTED ChannelSyncProbe from {sender_peer_id} for {cid}: not visible to that member");
+        return;
+    }
     if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
         let our_latest = store.get_latest_channel_timestamp(&sid, &cid)
             .unwrap_or(None).unwrap_or(0);

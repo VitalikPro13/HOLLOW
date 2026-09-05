@@ -1748,7 +1748,7 @@ async fn send_channel_file(
         } else {
             replicate_channel_file_full(
                 state, ws_cmd_tx, ws_room_peers, webrtc_peers,
-                pending_webrtc_sends, event_tx, local_peer, file_id,
+                pending_webrtc_sends, event_tx, local_peer, cid, file_id,
                 &temp_path, ct_size,
             ).await;
         }
@@ -1853,40 +1853,59 @@ async fn broadcast_channel_file_header(
         sid.to_string()
     };
     let mls_ok = mls.as_ref().is_some_and(|m| m.has_group(&group_key));
-    if mls_ok {
-        if let Err(e) = send_mls_broadcast_topic(mls.as_mut().unwrap(), ws_cmd_tx, sid, cid, use_subgroup, header, crypto_store) {
-            hollow_log!("[HOLLOW-MLS] FileHeader broadcast failed: {e}");
-        }
+    if mls_ok
+        && let Err(e) = send_mls_broadcast_topic(mls.as_mut().unwrap(), ws_cmd_tx, sid, cid, use_subgroup, header, crypto_store)
+    {
+        hollow_log!("[HOLLOW-MLS] FileHeader broadcast failed: {e}");
+    }
+    // PLUS the Olm copy to exactly the online member devices with no leaf in the
+    // group we just encrypted under. The old `else` measured OUR OWN encrypt,
+    // which says nothing about whether a member can decrypt: one with no leaf
+    // (a just-admitted parked joiner) saw the message caption with no file card
+    // at all, forever, and nothing here reported it. A fully formed group costs
+    // zero extra frames because the leaf-less set is then empty.
+    //
+    // `group_key` is the SUBGROUP id for a restricted channel, so leaf-less is
+    // measured against the group that actually carried the header. A member who
+    // does not qualify for a restricted channel is not a leaf-less member, it is
+    // somebody who must never receive the header, hence the visibility filter.
+    let leafless = if use_subgroup {
+        super::crypto_handler::leafless_member_devices_where(
+            mls, &group_key, state, ws_room_peers, local_peer,
+            |master| state.can_see_channel(master, cid),
+        )
     } else {
+        super::crypto_handler::leafless_member_devices(
+            mls, &group_key, state, ws_room_peers, local_peer,
+        )
+    };
+    if !leafless.is_empty() {
         olm_fallback_channel_file_header(
-            state, olm, crypto_store, ws_cmd_tx, ws_room_peers, event_tx,
-            header_json, local_peer,
+            olm, crypto_store, ws_cmd_tx, ws_room_peers, event_tx,
+            header_json, &leafless,
         ).await;
     }
 }
 
-/// Olm fallback: send the FileHeader to each ONLINE DEVICE of each member.
+/// Olm copy of the FileHeader to the given ONLINE DEVICE ids (the leaf-less
+/// member devices computed by the caller).
 #[allow(clippy::too_many_arguments)]
 async fn olm_fallback_channel_file_header(
-    state: &ServerState,
     olm: &mut OlmManager,
     crypto_store: &CryptoStore,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     event_tx: &mpsc::Sender<NetworkEvent>,
     header_json: &str,
-    local_peer: &str,
+    devices: &[String],
 ) {
-    for member_peer_str in state.members.keys() {
-        if super::resolver::same_identity(member_peer_str, local_peer) { continue; }
-        for dev in super::crypto_handler::online_devices_for(ws_room_peers, member_peer_str) {
-            if olm.has_session(&dev) {
-                send_encrypted_message(
-                    olm, crypto_store,
-                    &dev, header_json, event_tx,
-                    ws_cmd_tx, ws_room_peers,
-                ).await;
-            }
+    for dev in devices {
+        if olm.has_session(dev) {
+            send_encrypted_message(
+                olm, crypto_store,
+                dev, header_json, event_tx,
+                ws_cmd_tx, ws_room_peers,
+            ).await;
         }
     }
 }
@@ -1952,12 +1971,19 @@ async fn replicate_channel_file_full(
     pending_webrtc_sends: &mut HashMap<String, (String, ws_stream_transfer::StreamKind, String, PathBuf, u64)>,
     event_tx: &mpsc::Sender<NetworkEvent>,
     local_peer: &str,
+    cid: &str,
     file_id: &str,
     temp_path: &std::path::Path,
     ct_size: u64,
 ) {
     for member_peer_str in state.members.keys() {
         if super::resolver::same_identity(member_peer_str, local_peer) { continue; }
+        // A restricted channel's bytes go only to members who can SEE it. Full
+        // replication used to push the ciphertext at every member device with no
+        // visibility check at all, so a plain Member ended up holding an
+        // Admin-only channel's file and only needed the header's AES key to read
+        // it. Membership is not entitlement here; the channel ladder is.
+        if !super::crypto_handler::channel_readable_by(state, member_peer_str, cid) { continue; }
         for dev in super::crypto_handler::online_devices_for(ws_room_peers, member_peer_str) {
             stream_to_peer(
                 ws_cmd_tx, ws_room_peers,
@@ -1998,7 +2024,9 @@ fn channel_fallback_holder(
     if meta.context_type != "channel" {
         return None;
     }
-    let server_id = meta.context_id.split(':').next()?;
+    let mut ctx = meta.context_id.splitn(2, ':');
+    let server_id = ctx.next()?;
+    let channel_id = ctx.next()?;
     let state = server_states.get(server_id)?;
     // Members are MASTER-keyed; sends must target DEVICE ids. Deterministic
     // single pick (sorted, first) — NEVER a fan-out: each holder re-encrypts
@@ -2011,6 +2039,10 @@ fn channel_fallback_holder(
         {
             continue;
         }
+        // Only a member who can SEE the channel is a legitimate holder of its
+        // bytes; rerouting to anybody else would ask a non-qualifier to serve
+        // content it should never have been given in the first place.
+        if !super::crypto_handler::channel_readable_by(state, member, channel_id) { continue; }
         candidates.extend(super::crypto_handler::online_devices_for(ws_room_peers, member));
     }
     candidates.sort();

@@ -992,7 +992,15 @@ pub(crate) fn handle_send_typing_indicator(
             "[HOLLOW-TYPING] DM typing → master {recipient_master}: sent to {sent_to} device(s)"
         );
     } else {
-        // Channel typing: MLS broadcast first, plaintext fallback.
+        // Channel typing: MLS broadcast to the group, PLUS the plaintext copy to
+        // exactly the online member devices that hold no leaf in our group.
+        //
+        // COMPLEMENT rule, not `if !mls_ok`: our own encrypt succeeding says
+        // nothing about whether a given member can DECRYPT. A member with no
+        // leaf (the ordinary case for a just-admitted parked joiner) would
+        // never see "typing…" as long as anybody else's leaf existed. A fully
+        // formed group still costs zero extra frames, because the leaf-less set
+        // is then empty, so nobody gets a duplicate.
         let mls_ok = mls.as_ref().is_some_and(|m| m.has_group(&server_id));
         hollow_log!("[HOLLOW-TYPING] Channel typing send for {server_id}/{channel_id} (mls={mls_ok})");
         if mls_ok {
@@ -1000,16 +1008,16 @@ pub(crate) fn handle_send_typing_indicator(
             if let Err(e) = send_mls_broadcast(mls.as_mut().unwrap(), &ws_cmd_tx, &server_id, &envelope, crypto_store) {
                 hollow_log!("[HOLLOW-MLS] Typing broadcast failed: {e}");
             }
-        } else {
-            // Plaintext fallback: members are MASTER-keyed and the master has no
-            // socket — fan each out to its online devices (was dropping before).
-            if let Some(server) = server_states.get(&server_id) {
+        }
+        if let Some(server) = server_states.get(&server_id) {
+            let leafless = super::crypto_handler::leafless_member_devices(
+                mls, &server_id, server, ws_room_peers, local_peer_str,
+            );
+            if !leafless.is_empty() {
                 let data = serde_json::to_vec(&msg).unwrap_or_default();
-                for member_peer_str in server.members.keys() {
-                    if super::resolver::same_identity(member_peer_str, local_peer_str) { continue; }
-                    super::crypto_handler::send_raw_to_identity(
-                        &ws_cmd_tx, &ws_room_peers, member_peer_str, data.clone(),
-                    );
+                hollow_log!("[HOLLOW-TYPING] Plaintext typing copy to {} leaf-less device(s)", leafless.len());
+                for dev in &leafless {
+                    send_raw_to_peer(ws_cmd_tx, ws_room_peers, dev, data.clone());
                 }
             }
         }
@@ -1192,15 +1200,25 @@ pub(crate) async fn handle_update_profile(
     };
     let mut mls_reached: std::collections::HashSet<String> = std::collections::HashSet::new();
     // Send via MLS to each server we're in.
-    for (sid, state) in server_states.iter() {
+    for sid in server_states.keys() {
         let mls_ok = mls.as_ref().is_some_and(|m| m.has_group(sid));
         if mls_ok {
             if let Err(e) = send_mls_broadcast(mls.as_mut().unwrap(), &ws_cmd_tx, sid, &envelope, crypto_store) {
                 hollow_log!("[HOLLOW-MLS] Profile broadcast to server {sid} failed: {e}");
             } else {
-                // Track members reached via MLS so we skip them in plaintext.
-                for member in state.members.keys() {
-                    mls_reached.insert(member.clone());
+                // Track members ACTUALLY reached via MLS so we skip them in
+                // plaintext. "Reached" = holds at least one LEAF in this
+                // group, not "is listed in `state.members`": our encrypt
+                // succeeding says nothing about whether a given member can
+                // decrypt. Marking every member of the server reached is how a
+                // leaf-less member (the ordinary case for a just-admitted
+                // parked joiner) never got the plaintext copy either, so its
+                // view of everyone's profile froze at whatever it had.
+                // The leaf ids are DEVICE ids; `mls_reached` is master-keyed.
+                if let Some(m) = mls.as_ref() {
+                    for dev in m.group_members(sid) {
+                        mls_reached.insert(super::resolver::resolve(&dev));
+                    }
                 }
             }
         }

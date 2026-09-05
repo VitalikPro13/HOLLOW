@@ -113,6 +113,7 @@ pub(crate) fn clear_pending_knock(conf_id: &str) {
 /// dedups by peer anyway. Called from the PeerJoined/RoomMembers arms.
 pub(crate) fn reknock_if_pending(
     mls: &mut Option<MlsManager>,
+    crypto_store: &CryptoStore,
     ws_cmd_tx: &mpsc::UnboundedSender<WsCommand>,
     room_code: &str,
 ) {
@@ -128,7 +129,7 @@ pub(crate) fn reknock_if_pending(
         (knock.display_name.clone(), knock.avatar_hash.clone(), knock.access_hash.clone())
     };
     let Some(mls_mgr) = mls.as_mut() else { return; };
-    let kp = match mls_mgr.generate_key_package() {
+    let kp = match super::crypto_handler::mint_key_package(mls_mgr, crypto_store) {
         Ok(kp) => base64::engine::general_purpose::STANDARD.encode(kp),
         Err(e) => {
             hollow_log!("[HOLLOW-CONF] Re-knock KeyPackage generation failed for {conf_id}: {e}");
@@ -236,6 +237,7 @@ pub(crate) fn handle_conference_end(
 /// fresh KeyPackage (light-announce rule: avatar HASH only, never blob bytes).
 pub(crate) fn handle_conference_request_join(
     mls: &mut Option<MlsManager>,
+    crypto_store: &CryptoStore,
     ws_cmd_tx: &mpsc::UnboundedSender<WsCommand>,
     conf_id: String,
     display_name: String,
@@ -247,7 +249,7 @@ pub(crate) fn handle_conference_request_join(
         hollow_log!("[HOLLOW-CONF] Cannot request join {conf_id}: MLS not initialized");
         return;
     };
-    let kp = match mls_mgr.generate_key_package() {
+    let kp = match super::crypto_handler::mint_key_package(mls_mgr, crypto_store) {
         Ok(kp) => base64::engine::general_purpose::STANDARD.encode(kp),
         Err(e) => {
             hollow_log!("[HOLLOW-CONF] KeyPackage generation failed for {conf_id}: {e}");

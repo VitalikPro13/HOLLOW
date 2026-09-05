@@ -1243,7 +1243,7 @@ async fn broadcast_channel_envelope(
     if bootstrap_subgroup && use_subgroup {
         if let Some(mls_mgr) = mls.as_mut() {
             super::crypto_handler::request_subgroup_bootstrap(
-                mls_mgr, ws_cmd_tx, ws_room_peers, server,
+                mls_mgr, crypto_store, ws_cmd_tx, ws_room_peers, server,
                 server_id, channel_id, local_peer_str,
             );
         }

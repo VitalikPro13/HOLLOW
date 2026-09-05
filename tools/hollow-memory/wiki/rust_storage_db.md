@@ -546,6 +546,8 @@ A persisted server join that has not completed yet. Survives restarts on purpose
 - `last_deposited_at: i64`: Unix MILLISECONDS of the last `~join` ring deposit.
 - `created_at: i64`
 
+
+**2026-09-05 (rung 2):** `ALTER TABLE pending_server_joins ADD COLUMN key_package TEXT` (nullable, idempotent `migrate`): the base64 KeyPackage the parked copy carries, persisted so a restart re-deposits the SAME package the ring already names (its private half lives in the MLS store, restored by `run_event_loop`). `PendingJoinRow.key_package`; upsert writes it, list reads it.
 ## Stored Structs
 
 ### StoredMessage

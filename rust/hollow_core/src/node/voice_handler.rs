@@ -633,7 +633,7 @@ pub(crate) async fn handle_voice_channel_join(
     // Emit current MLS epoch key BEFORE the join event — Dart caches it,
     // then applies it after creating the VoiceChannelService.
     emit_vc_sframe_key(
-        mls, ws_cmd_tx, ws_room_peers, server_states,
+        mls, crypto_store, ws_cmd_tx, ws_room_peers, server_states,
         &server_id, &channel_id, restricted, local_peer_str,
         mls_epoch_hint_cooldown, event_tx,
     ).await;
@@ -669,6 +669,12 @@ fn fan_plaintext_to_members(
 /// Announce voice-channel presence (join/leave): MLS broadcast when the server
 /// group is held, PLUS always the plaintext member fan-out — voice presence
 /// must arrive even with stale MLS epochs.
+///
+/// This is the REFERENCE SHAPE for every VC signal: MLS plus an UNCONDITIONAL
+/// plaintext twin, never `if !mls_sent`. Our own encrypt succeeding measures
+/// the wrong end of the wire — a member can be reachable and still hold no
+/// leaf (a just-admitted parked joiner) or sit at a skewed epoch, and neither
+/// is visible from here. `broadcast_vc_state_signal` mirrors it.
 #[allow(clippy::too_many_arguments)]
 fn broadcast_vc_presence(
     mls: &mut Option<MlsManager>,
@@ -705,6 +711,7 @@ fn broadcast_vc_presence(
 #[allow(clippy::too_many_arguments)]
 async fn emit_vc_sframe_key(
     mls: &mut Option<MlsManager>,
+    crypto_store: &CryptoStore,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     server_states: &HashMap<String, ServerState>,
@@ -747,7 +754,7 @@ async fn emit_vc_sframe_key(
                 if let Some(state) = server_states.get(server_id) {
                     hollow_log!("[HOLLOW-VC-SFRAME] Subgroup {group_key} not held — requesting bootstrap");
                     super::crypto_handler::request_subgroup_bootstrap(
-                        mls_mgr, ws_cmd_tx, ws_room_peers,
+                        mls_mgr, crypto_store, ws_cmd_tx, ws_room_peers,
                         state, server_id, channel_id, local_peer_str,
                     );
                 }
@@ -759,7 +766,7 @@ async fn emit_vc_sframe_key(
                 if let Some(state) = server_states.get(server_id) {
                     hollow_log!("[HOLLOW-VC-SFRAME] Server group {group_key} not held — requesting bootstrap");
                     super::crypto_handler::request_server_group_bootstrap(
-                        mls_mgr, ws_cmd_tx, ws_room_peers,
+                        mls_mgr, crypto_store, ws_cmd_tx, ws_room_peers,
                         state, server_id, local_peer_str,
                     );
                 }
@@ -872,12 +879,12 @@ pub(crate) async fn handle_voice_sframe_heal(
         {
             if restricted {
                 super::crypto_handler::request_subgroup_bootstrap(
-                    mls_mgr, ws_cmd_tx, ws_room_peers,
+                    mls_mgr, crypto_store, ws_cmd_tx, ws_room_peers,
                     state, &server_id, &channel_id, local_peer_str,
                 );
                 mls_bootstrap_requested.insert(group_key.clone(), std::time::Instant::now());
             } else if super::crypto_handler::request_server_group_bootstrap(
-                mls_mgr, ws_cmd_tx, ws_room_peers, state, &server_id, local_peer_str,
+                mls_mgr, crypto_store, ws_cmd_tx, ws_room_peers, state, &server_id, local_peer_str,
             ) {
                 mls_bootstrap_requested.insert(group_key.clone(), std::time::Instant::now());
             }
@@ -940,7 +947,7 @@ pub(crate) async fn handle_voice_sframe_heal(
         hollow_log!("[HOLLOW-VC-SFRAME] HEAL: dropping {group_key} and re-bootstrapping from {authority}");
         mls_mgr.remove_group(&group_key);
         super::crypto_handler::persist_mls_state(mls_mgr, crypto_store);
-        match mls_mgr.generate_key_package() {
+        match super::crypto_handler::mint_key_package(mls_mgr, crypto_store) {
             Ok(kp_bytes) => {
                 let kp_b64 = base64::engine::general_purpose::STANDARD.encode(&kp_bytes);
                 let data = serde_json::to_vec(&HavenMessage::MlsKeyPackage {
@@ -1293,7 +1300,16 @@ fn origin_json_value(o: &StreamOrigin) -> serde_json::Value {
 }
 
 /// Broadcast a VC state signal (audio/screen/camera state): MLS broadcast when
-/// the server group is held; on failure or no group, plaintext member fan-out.
+/// the server group is held, PLUS always the plaintext member fan-out — the
+/// same shape as `broadcast_vc_presence`.
+///
+/// This used to run the plaintext leg only `if !mls_sent`, i.e. only when OUR
+/// OWN encrypt failed. That is the wrong end of the wire: a member with no leaf
+/// in the group (the ordinary case for a just-admitted parked joiner) or at a
+/// skewed epoch is perfectly reachable and simply could not read the frame, so
+/// its member tile kept showing somebody unmuted who had muted minutes ago and
+/// nothing here reported a problem. These signals are small, idempotent
+/// last-writer-wins state, so the duplicate a formed group receives is free.
 #[allow(clippy::too_many_arguments)]
 fn broadcast_vc_state_signal(
     signal_type: &str,
@@ -1309,20 +1325,22 @@ fn broadcast_vc_state_signal(
     local_peer_str: &str,
 ) {
     let mls_ok = mls.as_ref().is_some_and(|m| m.has_group(server_id));
-    let mls_sent = mls_ok && send_mls_broadcast(mls.as_mut().unwrap(), ws_cmd_tx, server_id, envelope, crypto_store).is_ok();
-    if !mls_sent {
-        // Plaintext fallback: iterate members.
-        let plaintext_msg = build_vc_plaintext_state(signal_type, server_id, channel_id, payload);
-        if let Some(msg) = plaintext_msg
-            && let Some(state) = server_states.get(server_id)
-        {
-            fan_plaintext_to_members(ws_cmd_tx, ws_room_peers, state, local_peer_str, &msg);
-        }
+    if mls_ok {
+        let _ = send_mls_broadcast(mls.as_mut().unwrap(), ws_cmd_tx, server_id, envelope, crypto_store);
+    }
+    // UNCONDITIONAL plaintext twin, exactly like `broadcast_vc_presence`.
+    let plaintext_msg = build_vc_plaintext_state(signal_type, server_id, channel_id, payload);
+    if let Some(msg) = plaintext_msg
+        && let Some(state) = server_states.get(server_id)
+    {
+        fan_plaintext_to_members(ws_cmd_tx, ws_room_peers, state, local_peer_str, &msg);
     }
 }
 
-/// Plaintext `HavenMessage` twin of a broadcast VC state signal (used only as
-/// the MLS-failure fallback). Non-state types yield `None`.
+/// Plaintext `HavenMessage` twin of a broadcast VC state signal, sent alongside
+/// the MLS copy on every broadcast (not only when our own encrypt fails — a
+/// receiver with no leaf is invisible from the sender). Non-state types yield
+/// `None`.
 fn build_vc_plaintext_state(
     signal_type: &str,
     server_id: &str,

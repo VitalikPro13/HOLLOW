@@ -441,24 +441,33 @@ pub(crate) async fn handle_vault_upload_prepared(
                     chid: channel_id.clone(),
                     manifest: manifest_json,
                 };
+                // MLS to the group when we hold it, PLUS the Olm copy to exactly
+                // the online member devices that hold no leaf in it. The old
+                // `else` measured OUR encrypt, not the receiver's ability to
+                // decrypt, so a leaf-less member simply never learned the
+                // manifest existed and could not repair a shard it was holding.
+                // A fully formed group costs zero extra frames (the leaf-less
+                // set is empty). Never a plaintext fallback here: the manifest
+                // is encrypted content.
                 let mls_ok = mls.as_ref().is_some_and(|m| m.has_group(&server_id));
-                if mls_ok {
-                    if let Err(e) = send_mls_broadcast(mls.as_mut().unwrap(), &ws_cmd_tx, &server_id, &manifest_envelope, crypto_store) {
-                        hollow_log!("[HOLLOW-MLS] VaultManifest broadcast failed: {e}");
-                    }
-                } else {
+                if mls_ok
+                    && let Err(e) = send_mls_broadcast(mls.as_mut().unwrap(), &ws_cmd_tx, &server_id, &manifest_envelope, crypto_store)
+                {
+                    hollow_log!("[HOLLOW-MLS] VaultManifest broadcast failed: {e}");
+                }
+                let leafless = super::crypto_handler::leafless_member_devices(
+                    mls, &server_id, state, &ws_room_peers, &local_peer,
+                );
+                if !leafless.is_empty() {
                     let manifest_env_json = serde_json::to_string(&manifest_envelope).unwrap_or_default();
-                    for member_peer_str in state.members.keys() {
-                        if super::resolver::same_identity(member_peer_str, &local_peer) { continue; }
-                        // Olm is per-device: send to each online device of the member.
-                        for dev in super::crypto_handler::online_devices_for(&ws_room_peers, member_peer_str) {
-                            if olm.has_session(&dev) {
-                                send_encrypted_message(
-                                    &mut *olm, crypto_store,
-                                    &dev, &manifest_env_json, &event_tx,
-                                    &ws_cmd_tx, &ws_room_peers,
-                                ).await;
-                            }
+                    // Olm is per-device: send to each leaf-less online device.
+                    for dev in &leafless {
+                        if olm.has_session(dev) {
+                            send_encrypted_message(
+                                &mut *olm, crypto_store,
+                                dev, &manifest_env_json, &event_tx,
+                                &ws_cmd_tx, &ws_room_peers,
+                            ).await;
                         }
                     }
                 }
@@ -517,24 +526,29 @@ pub(crate) async fn handle_delete_vault_content(
             sid: server_id.clone(),
             cid: content_id.clone(),
         };
-        // Broadcast ShardDelete via MLS or Olm fallback.
+        // MLS to the group when we hold it, PLUS the Olm copy to exactly the
+        // online member devices that hold no leaf in it. Same complement rule as
+        // the manifest broadcast: a leaf-less member that keeps a shard we just
+        // deleted would otherwise hold it forever, and the sender sees nothing.
+        // Never a plaintext fallback here: this is encrypted content.
         let mls_ok = mls.as_ref().is_some_and(|m| m.has_group(&server_id));
-        if mls_ok {
-            if let Err(e) = send_mls_broadcast(mls.as_mut().unwrap(), &ws_cmd_tx, &server_id, &delete_envelope, crypto_store) {
-                hollow_log!("[HOLLOW-MLS] ShardDelete broadcast failed: {e}");
-            }
-        } else {
+        if mls_ok
+            && let Err(e) = send_mls_broadcast(mls.as_mut().unwrap(), &ws_cmd_tx, &server_id, &delete_envelope, crypto_store)
+        {
+            hollow_log!("[HOLLOW-MLS] ShardDelete broadcast failed: {e}");
+        }
+        let leafless = super::crypto_handler::leafless_member_devices(
+            mls, &server_id, state, &ws_room_peers, &local_peer,
+        );
+        if !leafless.is_empty() {
             let delete_json = serde_json::to_string(&delete_envelope).unwrap_or_default();
-            for member_peer_str in state.members.keys() {
-                if super::resolver::same_identity(member_peer_str, &local_peer) { continue; }
-                for dev in super::crypto_handler::online_devices_for(&ws_room_peers, member_peer_str) {
-                    if olm.has_session(&dev) {
-                        send_encrypted_message(
-                            &mut *olm, crypto_store,
-                            &dev, &delete_json, &event_tx,
-                            &ws_cmd_tx, &ws_room_peers,
-                        ).await;
-                    }
+            for dev in &leafless {
+                if olm.has_session(dev) {
+                    send_encrypted_message(
+                        &mut *olm, crypto_store,
+                        dev, &delete_json, &event_tx,
+                        &ws_cmd_tx, &ws_room_peers,
+                    ).await;
                 }
             }
         }

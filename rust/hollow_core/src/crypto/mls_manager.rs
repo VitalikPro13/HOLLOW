@@ -250,6 +250,52 @@ impl MlsManager {
             .map_err(|e| format!("Failed to serialize KeyPackage: {e:?}"))
     }
 
+    /// Drop a KeyPackage we minted but will never be Welcomed for.
+    ///
+    /// `KeyPackage::builder().build()` writes the whole bundle — the public
+    /// package plus the private init key AND the private leaf encryption key —
+    /// into the provider store under the package's hash reference, and
+    /// `join_from_welcome` is what normally consumes and deletes it. A mint
+    /// that never becomes a Welcome (a pending join the user discards, a join a
+    /// member refuses) would otherwise leave that private material in the
+    /// persisted storage blob for the life of the install. One delete is the
+    /// whole delete: both private halves live in that one bundle, which is why
+    /// OpenMLS's own Welcome path calls exactly this and nothing else.
+    ///
+    /// The caller persists afterwards.
+    pub fn discard_key_package(&self, kp_bytes: &[u8]) -> Result<(), String> {
+        use openmls_traits::storage::StorageProvider;
+        let kp_in: KeyPackageIn = TlsDeserialize::tls_deserialize_exact(kp_bytes)
+            .map_err(|e| format!("Failed to deserialize KeyPackage: {e:?}"))?;
+        let kp = kp_in
+            .validate(self.provider.crypto(), ProtocolVersion::Mls10)
+            .map_err(|e| format!("KeyPackage validation failed: {e:?}"))?;
+        let hash_ref = kp
+            .hash_ref(self.provider.crypto())
+            .map_err(|e| format!("Failed to hash KeyPackage: {e:?}"))?;
+        self.provider
+            .storage()
+            .delete_key_package(&hash_ref)
+            .map_err(|e| format!("Failed to delete KeyPackage: {e:?}"))
+    }
+
+    /// The credential identity carried in a serialised KeyPackage's leaf.
+    ///
+    /// Hollow leaf credentials are bare `device_peer_id`s, so this is "which
+    /// device is this KeyPackage asking to be added as". Read from the payload
+    /// rather than from a validated package on purpose: the value is a CLAIM,
+    /// and the caller's job is to refuse it unless it equals the identity the
+    /// transport already attributed the frame to. The package itself is fully
+    /// validated later, by `add_members_batch`, before any leaf is created.
+    pub fn key_package_identity(kp_bytes: &[u8]) -> Result<String, String> {
+        let kp_in: KeyPackageIn = TlsDeserialize::tls_deserialize_exact(kp_bytes)
+            .map_err(|e| format!("Failed to deserialize KeyPackage: {e:?}"))?;
+        Ok(String::from_utf8_lossy(
+            kp_in.unverified_credential().credential.serialized_content(),
+        )
+        .to_string())
+    }
+
     /// Create a new MLS group for a server (called by server owner).
     pub fn create_group(&mut self, server_id: &str) -> Result<(), String> {
         let group_id = GroupId::from_slice(server_id.as_bytes());

@@ -94,7 +94,7 @@ camera, ICE failure, real byte-transfer stalls) — those you see/hear immediate
 ### Remaining (optional, heavier setup)
 - Vault shard transfer + reconstruction with a POPULATED vault (the membership/handshake is green; the
   full upload→shard→distribute→recover with real erasure shards is a heavier scenario, not yet built).
-- Device LINKING end-to-end (needs a relay link-code map in the mock + an import/restart simulation;
+- Device LINKING end-to-end (needs a relay link-code map in the mock; the restart half exists since 2026-09-05 as `restart_node`, which reboots a node over its own DB with the Olm account and MLS store reloaded;
   revocation — the higher-value half of device lifecycle — is done).
 
 When the harness is green, the claim is precisely: **"the distributed-logic core + the control/signaling

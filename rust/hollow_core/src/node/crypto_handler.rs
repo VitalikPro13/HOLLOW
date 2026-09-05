@@ -2029,6 +2029,29 @@ pub(crate) fn persist_mls_state(mls: &MlsManager, crypto_store: &crate::crypto::
     crypto_store.save_mls_identity(signer, cred, storage);
 }
 
+/// Mint a KeyPackage AND persist the MLS state that holds its private half.
+///
+/// [`MlsManager::generate_key_package`] writes the bundle — the private init
+/// key and the private leaf encryption key — into OpenMLS's in-RAM storage
+/// only. Nothing on the mint path used to touch the DB, so a restart before
+/// some UNRELATED persist (a commit, a Welcome, a removal) dropped the private
+/// half while the public KeyPackage was already out on the wire: every Welcome
+/// built from it then failed forever with `NoMatchingKeyPackage` inside "Failed
+/// to process Welcome", and the device sat in the group's tree with no way to
+/// read it. A parked join makes that window days long by design.
+///
+/// This is therefore the ONLY place `generate_key_package` is called from
+/// anywhere in `node/` — `key_package_mints_persist_mls_state` reads the
+/// sources and fails if a second call site appears.
+pub(crate) fn mint_key_package(
+    mls: &MlsManager,
+    crypto_store: &crate::crypto::CryptoStore,
+) -> Result<Vec<u8>, String> {
+    let kp_bytes = mls.generate_key_package()?;
+    persist_mls_state(mls, crypto_store);
+    Ok(kp_bytes)
+}
+
 /// Check if a peer is reachable via WS relay.
 ///
 /// Multi-device (Phase 6): the relay reports DEVICE peer_ids in rooms, but the
@@ -2125,6 +2148,103 @@ pub(crate) fn online_devices_for(
         set.remove(&master);
     }
     set.into_iter().collect()
+}
+
+/// Online member DEVICES that cannot read an MLS frame for `group_key` because
+/// they hold no leaf in OUR copy of the group. The MLS-first / fallback sites
+/// send their fallback copy to exactly these. Excludes our own identity.
+///
+/// This is the COMPLEMENT rule for encrypted content and ephemeral signals.
+/// The old shape ("send the fallback only when OUR OWN encrypt failed")
+/// measures the wrong end of the wire: a member can be perfectly reachable and
+/// still unable to read an MLS frame, because it holds no leaf yet (a parked
+/// join completes its CRDT half BEFORE co-presence forms the leaf, by design)
+/// or sits at a skewed epoch. Neither is visible from the sender. Sending the
+/// fallback to exactly the leaf-less devices costs a fully formed group ZERO
+/// extra frames while making a leaf-less member reachable again.
+pub(crate) fn leafless_member_devices(
+    mls: &Option<MlsManager>,
+    group_key: &str,
+    state: &crate::crdt::server_state::ServerState,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    local_peer: &str,
+) -> Vec<String> {
+    leafless_member_devices_where(mls, group_key, state, ws_room_peers, local_peer, |_| true)
+}
+
+/// [`leafless_member_devices`] with an extra per-MASTER predicate, so a caller
+/// working on a per-channel SUBGROUP can drop members that do not qualify for
+/// the channel at all (a non-qualifier is not a "leaf-less member", it is a
+/// member who must never receive the content).
+pub(crate) fn leafless_member_devices_where(
+    mls: &Option<MlsManager>,
+    group_key: &str,
+    state: &crate::crdt::server_state::ServerState,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    local_peer: &str,
+    member_allowed: impl Fn(&str) -> bool,
+) -> Vec<String> {
+    // Computed ONCE, not per device: `group_members` walks every leaf.
+    let (holds_group, leaves) = match mls.as_ref() {
+        Some(m) if m.has_group(group_key) => {
+            let set: std::collections::HashSet<String> =
+                m.group_members(group_key).into_iter().collect();
+            (true, set)
+        }
+        // No MLS at all, or we do not hold this group: nobody can read our
+        // (non-existent) frame, so every online member device is leaf-less.
+        _ => (false, std::collections::HashSet::new()),
+    };
+
+    let mut out: Vec<String> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for member in state.members.keys() {
+        if super::resolver::same_identity(member, local_peer) { continue; }
+        if !member_allowed(member) { continue; }
+        for dev in online_devices_for(ws_room_peers, member) {
+            if holds_group && leaves.contains(&dev) { continue; }
+            if seen.insert(dev.clone()) {
+                out.push(dev);
+            }
+        }
+    }
+    out
+}
+
+/// Whether `requester_peer_id` may READ `channel_id`'s stored content in
+/// `state`: its message history, its file headers (which carry the file's AES
+/// key) and its bytes.
+///
+/// The per-channel MLS subgroup only protects LIVE traffic. Backfill was the
+/// bypass: the sync responder gated on holding the server and served any
+/// channel's rows to any member, and the file paths replicated bytes to every
+/// member device, so a plain Member could read an Admin-only channel's whole
+/// history and download its files. Every serving path now asks this first.
+///
+/// MEMBERSHIP IS THE FIRST RUNG. `can_see_channel` alone is not a gate: an
+/// unknown peer's role resolves to plain `Member`, so a stranger who joined the
+/// server's WS room would pass the visibility ladder for every
+/// `Everyone`-visibility channel. The serving paths ask for both.
+///
+/// The public carve-out is the one exception, and it changes nothing about
+/// today's behaviour: a PUBLIC channel is readable by anyone, which is what
+/// public means. Guests already read those through the relay ring and
+/// `PublicChannelMessage`, and the `FileRequest` responder already pairs its
+/// membership flag with a separate `public_ok`. Every NON-public channel now
+/// requires membership on every serving path.
+///
+/// ONE ladder for the visibility half: `ServerState::can_see_channel`, never a
+/// re-derivation from roles. It already collapses device to master internally;
+/// resolving here too keeps the intent visible at the call sites, which are
+/// handed raw sender ids.
+pub(crate) fn channel_readable_by(
+    state: &crate::crdt::server_state::ServerState,
+    requester_peer_id: &str,
+    channel_id: &str,
+) -> bool {
+    let master = super::resolver::resolve(requester_peer_id);
+    (state.is_member(&master) || state.is_channel_public(channel_id))
+        && state.can_see_channel(&master, channel_id)
 }
 
 /// Collapse a list of online MLS leaf credential ids (device ids, post-Step-6;
@@ -2310,8 +2430,10 @@ pub(crate) fn elect_subgroup_coordinator(
 /// (the membership reconciler creates+populates the group on our side) or when
 /// nobody qualifying is online. The KeyPackage is tagged with `channel_id` so
 /// the coordinator adds us to the SUBGROUP, not the server group.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn request_subgroup_bootstrap(
     mls: &mut MlsManager,
+    crypto_store: &CryptoStore,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     server: &crate::crdt::server_state::ServerState,
@@ -2323,7 +2445,7 @@ pub(crate) fn request_subgroup_bootstrap(
         Some(c) if c != local_peer => c,
         _ => return, // we're the coordinator (reconciler handles it) or nobody online
     };
-    let kp_bytes = match mls.generate_key_package() {
+    let kp_bytes = match mint_key_package(mls, crypto_store) {
         Ok(kp) => kp,
         Err(e) => { hollow_log!("[HOLLOW-MLS] subgroup KP gen failed: {e}"); return; }
     };
@@ -2348,6 +2470,7 @@ pub(crate) fn request_subgroup_bootstrap(
 /// Returns true when a KeyPackage actually went out (caller may arm cooldowns).
 pub(crate) fn request_server_group_bootstrap(
     mls: &mut MlsManager,
+    crypto_store: &CryptoStore,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     server: &crate::crdt::server_state::ServerState,
@@ -2362,7 +2485,7 @@ pub(crate) fn request_server_group_bootstrap(
     let Some(owner) = owner else { return false };
     if super::resolver::same_identity(owner, local_peer) { return false; }
     if !peer_is_reachable(ws_room_peers, owner) { return false; }
-    let kp_bytes = match mls.generate_key_package() {
+    let kp_bytes = match mint_key_package(mls, crypto_store) {
         Ok(kp) => kp,
         Err(e) => { hollow_log!("[HOLLOW-MLS] server-group KP gen failed: {e}"); return false; }
     };
@@ -3023,8 +3146,15 @@ pub(crate) fn broadcast_mls_commit(
 /// Outcome of applying one MlsCommit frame (broadcast or catch-up replay).
 pub(crate) enum CommitApplyOutcome {
     /// Processed and merged (epoch advanced, `MlsEpochChanged` emitted) — or
-    /// merged-then-evicted with the recovery already fired.
+    /// merged-then-evicted with no recovery owed (a kick or a ban).
     Applied,
+    /// Processed and merged, and the commit removed OUR OWN leaf while we are
+    /// still a member: a remove + re-add whose Welcome is on its way. The group
+    /// is dropped and the bootstrap throttle is stamped, so nothing asks for a
+    /// new leaf yet; the caller arms the Welcome grace and the batch tick asks
+    /// only if no Welcome arrives inside it. Control-flow-wise this is an
+    /// `Applied`.
+    Evicted,
     /// Skipped: we're already at/past the frame's epoch.
     Skipped,
     /// We don't hold this group — nothing to do.
@@ -3032,6 +3162,19 @@ pub(crate) enum CommitApplyOutcome {
     /// Processing failed; the drop-group + re-bootstrap recovery may have run.
     Failed,
 }
+
+/// How long an evicted device waits for the re-add's Welcome before asking for
+/// a leaf itself.
+///
+/// A remove + re-add is TWO commits from one batch tick, and phase 1 (the
+/// removal) goes out BEFORE phase 2's Welcome. The evicted device therefore
+/// sees itself removed a moment before the Welcome that puts it back, and
+/// asking for a leaf in that moment mints a third KeyPackage which the NEXT
+/// tick turns into another remove + re-add: the loop that made a clean
+/// three-member join land at epoch 5. Two batch intervals (2s each) plus slack
+/// covers the round trip; if the Welcome really was lost, the sweep in the
+/// batch tick asks then.
+pub(crate) const MLS_WELCOME_GRACE: std::time::Duration = std::time::Duration::from_secs(6);
 
 /// Apply one MlsCommit frame — the shared body of the `HavenMessage::MlsCommit`
 /// broadcast arm and the `MlsCommitCatchup` replay loop, so both paths get
@@ -3108,30 +3251,25 @@ pub(crate) async fn handle_mls_commit_frame(
                 let still_member = server_states.get(server_id).is_some_and(|s| {
                     s.members.keys().any(|m| super::resolver::same_identity(m, local_peer_str))
                 });
-                let cooldown_ok = mls_bootstrap_requested.get(&group_key)
-                    .is_none_or(|t| t.elapsed() >= super::swarm::MLS_BOOTSTRAP_TIMEOUT);
-                let Some(state) = server_states.get(server_id) else {
+                if !still_member {
+                    // A kick or a ban. There is no Welcome coming and we are not
+                    // entitled to one; the dropped group is the whole response.
                     return CommitApplyOutcome::Applied;
-                };
-                if still_member && cooldown_ok {
-                    let requested = match channel_id {
-                        Some(cid) => {
-                            request_subgroup_bootstrap(
-                                mls_mgr, ws_cmd_tx, ws_room_peers,
-                                state, server_id, cid, local_peer_str,
-                            );
-                            true
-                        }
-                        None => request_server_group_bootstrap(
-                            mls_mgr, ws_cmd_tx, ws_room_peers,
-                            state, server_id, local_peer_str,
-                        ),
-                    };
-                    if requested {
-                        mls_bootstrap_requested.insert(group_key.clone(), std::time::Instant::now());
-                    }
                 }
-                return CommitApplyOutcome::Applied;
+                // A remove + re-add. The removal commit (batch phase 1) always
+                // arrives BEFORE the Welcome (phase 2), so asking for a leaf
+                // right here answers a question that is already being answered
+                // and starts the loop again: the new KeyPackage becomes the next
+                // tick's remove + re-add, whose removal commit lands here again.
+                // Stamp the throttle WITHOUT sending — that alone silences the
+                // message-triggered, PeerJoined and RoomMembers opportunistic
+                // sends — and let the caller hold a short grace for the Welcome.
+                mls_bootstrap_requested.insert(group_key.clone(), std::time::Instant::now());
+                hollow_log!(
+                    "[HOLLOW-MLS] Commit evicted us from {group_key}; holding {}s for a Welcome before re-bootstrapping",
+                    MLS_WELCOME_GRACE.as_secs(),
+                );
+                return CommitApplyOutcome::Evicted;
             }
 
             // Emit epoch change for SFrame key rotation. For a subgroup
@@ -3171,7 +3309,7 @@ pub(crate) async fn handle_mls_commit_frame(
                             .map(|m| m.peer_id.clone()),
                     };
                     if let Some(target) = target
-                        && let Ok(kp_bytes) = mls_mgr.generate_key_package()
+                        && let Ok(kp_bytes) = mint_key_package(mls_mgr, crypto_store)
                     {
                         let kp_b64 = base64::engine::general_purpose::STANDARD.encode(&kp_bytes);
                         let data = serde_json::to_vec(&HavenMessage::MlsKeyPackage {
@@ -4822,7 +4960,7 @@ mod tests {
         match serde_json::from_str::<HavenMessage>(old_wire).unwrap() {
             HavenMessage::ServerJoinRequest {
                 server_id, twitch_proof_json, nsfw_confirmed,
-                requested_at, device_list, parked,
+                requested_at, device_list, parked, key_package,
             } => {
                 assert_eq!(server_id, "abc");
                 assert!(twitch_proof_json.is_none());
@@ -4830,6 +4968,7 @@ mod tests {
                 assert_eq!(requested_at, 0, "no nonce = a legacy client");
                 assert!(device_list.is_none(), "old wire carries no device list");
                 assert!(!parked, "old wire is always a live request");
+                assert!(key_package.is_none(), "old wire carries no KeyPackage");
             }
             other => panic!("expected ServerJoinRequest, got {other:?}"),
         }
@@ -4845,10 +4984,37 @@ mod tests {
                 requested_at: 7,
                 device_list: None,
                 parked: true,
+                key_package: None,
             })
             .unwrap(),
             r#"{"type":"join_request","server_id":"abc","nsfw_confirmed":false,"requested_at":7,"parked":true}"#,
         );
+
+        // The PARKED copy carries the joiner's KeyPackage (pending joins, rung
+        // 2), which is what lets the admitting member seat the leaf in the same
+        // batch as the membership. It is skipped when absent, so a live request
+        // is still byte-for-byte the old frame.
+        let with_kp = serde_json::to_string(&HavenMessage::ServerJoinRequest {
+            server_id: "abc".to_string(),
+            twitch_proof_json: None,
+            nsfw_confirmed: false,
+            requested_at: 9,
+            device_list: None,
+            parked: true,
+            key_package: Some("a2V5cGFja2FnZQ".to_string()),
+        })
+        .unwrap();
+        assert_eq!(
+            with_kp,
+            r#"{"type":"join_request","server_id":"abc","nsfw_confirmed":false,"requested_at":9,"parked":true,"key_package":"a2V5cGFja2FnZQ"}"#,
+        );
+        match serde_json::from_str::<HavenMessage>(&with_kp).unwrap() {
+            HavenMessage::ServerJoinRequest { key_package: Some(kp), parked, .. } => {
+                assert!(parked);
+                assert_eq!(kp, "a2V5cGFja2FnZQ", "the carried package survives the wire");
+            }
+            other => panic!("expected a KeyPackage-carrying ServerJoinRequest, got {other:?}"),
+        }
 
         // A request WITH a list round-trips it verifiable: this is the
         // attribution a member serving it from the ring depends on.
@@ -4862,6 +5028,7 @@ mod tests {
             requested_at: 42,
             device_list: Some(list.clone()),
             parked: true,
+            key_package: None,
         })
         .unwrap();
         match serde_json::from_str::<HavenMessage>(&wire).unwrap() {
@@ -5287,6 +5454,71 @@ mod tests {
         assert!(
             !verify_carried_bundle(&our_master, &list, &sign_at(now + KEY_EXCHANGE_SKEW_SECS + 60)),
             "a bundle from the future is a REJECT",
+        );
+    }
+
+    /// Every KeyPackage mint in `node/` goes through [`mint_key_package`], so
+    /// every mint persists the private half it just created.
+    ///
+    /// A SOURCE scan rather than a type-system guard, because
+    /// `generate_key_package` has to stay reachable for the crypto module's own
+    /// unit tests, and because a new call site is a SILENT regression: the
+    /// KeyPackage works perfectly right up until the process restarts before
+    /// some unrelated persist, and from then on every Welcome built from it
+    /// fails with `NoMatchingKeyPackage` forever, with the device sitting in the
+    /// group's tree unable to read a word. Same technique as
+    /// `harness_fixed_sleep_budget_does_not_grow`.
+    #[test]
+    fn key_package_mints_persist_mls_state() {
+        // Built from pieces so this test's own source text is not a hit.
+        let needle = concat!("generate_key", "_package(");
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src")
+            .join("node");
+        let mut hits: Vec<String> = Vec::new();
+        let mut files = 0usize;
+        for entry in std::fs::read_dir(&dir).expect("read src/node") {
+            let path = entry.expect("dir entry").path();
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            let name = path.file_name().unwrap().to_string_lossy().to_string();
+            let src = std::fs::read_to_string(&path).expect("read node source");
+            files += 1;
+            let mut current = "<file scope>".to_string();
+            for line in src.lines() {
+                let trimmed = line.trim_start();
+                if let Some(rest) = trimmed
+                    .strip_prefix("pub(crate) async fn ")
+                    .or_else(|| trimmed.strip_prefix("pub(crate) fn "))
+                    .or_else(|| trimmed.strip_prefix("pub async fn "))
+                    .or_else(|| trimmed.strip_prefix("pub fn "))
+                    .or_else(|| trimmed.strip_prefix("async fn "))
+                    .or_else(|| trimmed.strip_prefix("fn "))
+                    && let Some(n) = rest.split('(').next()
+                {
+                    current = n.to_string();
+                }
+                if trimmed.starts_with("//") {
+                    continue;
+                }
+                if line.contains(needle) {
+                    hits.push(format!("{name}::{current} -> {}", trimmed));
+                }
+            }
+        }
+        assert!(
+            files >= 20,
+            "the scan found only {files} node source files, so the path must have moved",
+        );
+        assert_eq!(
+            hits.len(),
+            1,
+            "every KeyPackage mint in node/ must go through crypto_handler::mint_key_package,              which persists the freshly written private half before the public half can              reach anybody. Found: {hits:#?}",
+        );
+        assert!(
+            hits[0].starts_with("crypto_handler.rs::mint_key_package "),
+            "the one permitted call is the one inside the wrapper, got {hits:#?}",
         );
     }
 }
