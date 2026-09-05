@@ -1,0 +1,68 @@
+{
+  "_": [
+    "Rung 1 of the fleet ladder on the MOBILE shell: friend request, accept,",
+    "DM both ways, between two iOS Simulators on the Mac mini.",
+    "",
+    "Same journey as friend_dm.json, different surface. What differs on mobile",
+    "and cost a run each to find (2026-09-05): the Friends and Chats tabs carry",
+    "their badge in the semantics label ('Friends, 1 friend request'), which",
+    "the semantics: target now tolerates; a friend row's label is not itself",
+    "hit-testable, the row is, which the tap guard now accepts; the composer",
+    "is 'Type a message...' and sends with the Send button, never Enter; and",
+    "the Chats list only grows a row for a friend once a message exists, so a",
+    "opens the DM from Chats only after b has written.",
+    "",
+    "${RUN} is unique per run and belongs in every message: the relay holds",
+    "undelivered traffic for three days and these identities are stable, so a",
+    "fixed string can be matched by an earlier run's message.",
+    "",
+    "run (on the Mac mini): pwsh scripts/fleet.ps1 -Scenario mobile_friend_dm"
+  ],
+  "peers": ["a", "b"],
+  "steps": [
+    { "peer": "all", "op": "wait_for", "provider": "connection", "equals": "connected", "timeout_ms": 120000 },
+    { "peer": "a", "op": "capture", "from": "provider", "key": "peerId", "as": "PEER_A" },
+
+    { "peer": "b", "op": "tap", "target": "semantics:Friends", "index": 0 },
+    { "peer": "b", "op": "tap", "target": "text:Add Friend", "index": 0 },
+    { "peer": "b", "op": "enter_text", "target": "hint:Peer ID or nickname...", "value": "${PEER_A}" },
+    { "peer": "b", "op": "wait_for", "target": "text:${PEER_A}", "timeout_ms": 10000 },
+    { "peer": "b", "op": "tap", "target": "text:Send Friend Request", "index": 0 },
+
+    { "peer": "a", "op": "wait_for", "target": "semantics:Accept friend request", "timeout_ms": 60000 },
+    { "peer": "a", "op": "tap", "target": "semantics:Friends", "index": 0 },
+    { "peer": "a", "op": "tap", "target": "semantics:Accept friend request", "index": 0 },
+
+    { "peer": "a", "op": "log", "message": "the accepted friend must reach the UI on BOTH sides, not just the friends table" },
+    { "peer": "a", "op": "wait_for", "target": "text:probe-b", "timeout_ms": 60000 },
+    { "peer": "b", "op": "wait_for", "target": "text:probe-a", "timeout_ms": 60000 },
+
+    { "peer": "b", "op": "tap", "target": "text:probe-a" },
+    { "peer": "b", "op": "wait_for", "target": "hint:Type a message...", "timeout_ms": 15000 },
+    { "peer": "b", "op": "tap", "target": "hint:Type a message...", "index": 0 },
+    { "peer": "b", "op": "enter_text", "target": "hint:Type a message...", "value": "dm from b ${RUN}" },
+    { "peer": "b", "op": "tap", "target": "semantics:Send", "index": 0 },
+    { "peer": "b", "op": "wait_for", "target": "text:dm from b ${RUN}", "timeout_ms": 15000 },
+
+    { "peer": "a", "op": "wait_for", "target": "text:dm from b ${RUN}", "timeout_ms": 60000 },
+    { "peer": "a", "op": "tap", "target": "semantics:Chats", "index": 0 },
+    { "peer": "a", "op": "tap", "target": "text:probe-b" },
+    { "peer": "a", "op": "wait_for", "target": "hint:Type a message...", "timeout_ms": 15000 },
+    { "peer": "a", "op": "tap", "target": "hint:Type a message...", "index": 0 },
+    { "peer": "a", "op": "enter_text", "target": "hint:Type a message...", "value": "dm from a ${RUN}" },
+    { "peer": "a", "op": "tap", "target": "semantics:Send", "index": 0 },
+    { "peer": "a", "op": "wait_for", "target": "text:dm from a ${RUN}", "timeout_ms": 15000 },
+
+    { "peer": "b", "op": "wait_for", "target": "text:dm from a ${RUN}", "timeout_ms": 60000 },
+
+    { "peer": "a", "op": "log", "message": "one row per message in the open chat; the Chats list preview may add a second match, so the count is reported, not asserted" },
+    { "peer": "a", "op": "expect_count", "target": "text:dm from a ${RUN}", "value": 1, "soft": true },
+    { "peer": "b", "op": "expect_count", "target": "text:dm from b ${RUN}", "value": 1, "soft": true },
+
+    { "peer": "all", "op": "shot", "name": "converged" },
+    { "peer": "all", "op": "dump", "name": "converged" }
+  ],
+  "cleanup": [
+    { "peer": "all", "op": "log", "message": "nothing to undo: every run restores the fixture data directories, so the friendship and the DMs are gone before the next one starts." }
+  ]
+}

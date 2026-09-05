@@ -13,3 +13,11 @@
 
 // Your 10-character Apple Developer Team ID, e.g. ABCDE12345
 HOLLOW_DEVELOPMENT_TEAM =
+
+// scripts/build_macos_release.sh writes this file for you from release.local.env,
+// so a publishing machine never has to remember it.
+//
+// The signing identity. The committed default is "-" (ad-hoc), which builds and
+// runs on the local machine with no certificate at all. A notarized release
+// needs a Developer ID certificate in the login keychain for the team above:
+HOLLOW_CODE_SIGN_IDENTITY = Developer ID Application

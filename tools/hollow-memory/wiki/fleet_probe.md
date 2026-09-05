@@ -355,3 +355,82 @@ Two things the scenario teaches about writing these:
   Assert the rail mark, tap it, THEN assert the line.
 - **A `HollowPressable` with a `semanticLabel` matches `semantics:X` TWICE.** Use
   `index: 0` to tap it and a unique `tooltip:` target to count it.
+
+## The iOS Simulator backend: the same fleet on the Mac mini (2026-09-05)
+
+The fleet runs on two iOS Simulators on Vitalik's Mac mini with the SAME three scripts, the same
+op vocabulary, the same scenario format and the same send script. `fleet_lib.ps1` picks the
+backend from `$IsMacOS` (absent under Windows PowerShell 5.1, so nothing changes there). pwsh 7
+lives at `~/powershell/7/pwsh`, linked into `/opt/homebrew/bin`; every command below is run
+over LAN SSH from Windows (`ssh jabun@192.168.18.2`, memory `reference_mac_ssh_build`).
+
+```
+pwsh scripts/fleet.ps1 -Build -Peers a,b                 # flutter build ios --simulator -t integration_test/ui_probe_test.dart, install into each
+pwsh scripts/fleet.ps1 -Onboard -Fresh -Peers a,b        # the MOBILE welcome flow, stamps ~/hollow_fleet/fixtures/<peer>
+pwsh scripts/fleet.ps1 -Live -Peers a,b                  # 15 s from fixtures
+pwsh scripts/fleet.ps1 -Scenario mobile_friend_dm         # 38 s, 33 steps, both directions
+pwsh scripts/fleet_send.ps1 -Command "$(cat /tmp/cmd.json)"   # peer-tagged batch, exactly as on Windows
+pwsh scripts/fleet.ps1 -Stop
+```
+
+**What differs, and only this:**
+
+- **One simulator per peer**, named `hollow-<peer>`, created on first use from the newest iOS
+  runtime (`FLEET_SIM_DEVICE` picks the type, default iPhone 17 Pro). `Stop-Fleet` terminates
+  the app in every `hollow-*` device and nothing else.
+- **Everything the app writes lives in its own container.** An iOS app can write nowhere else,
+  so the data directory is `<container>/Documents/hollow` and the probe output is
+  `<container>/Documents/probe_out`; `build/fleet_out/<peer>` is a SYMLINK there, refreshed on
+  every launch (the container UUID changes with every `simctl install`), so every reader of an
+  out directory keeps its usual path. Fixtures are mirrored with rsync, not robocopy.
+- **Configuration is a file, not the environment.** `Platform.environment` is EMPTY on iOS
+  (zero variables, measured, while `ps eww` on the same process showed every `SIMCTL_CHILD_`
+  value present). `Start-Peer` writes `<container>/Documents/probe.env` (KEY=VALUE lines) and
+  the probe reads it in `setUpAll` through path_provider (`probe_env.dart`). The probe also
+  calls `setDataDir` + `overrideHollowDataDir` itself for a file-sourced data dir, because the
+  real app does that in `main()` and the probe never runs `main()`.
+- **Simulator.app must be showing the devices** (`Start-SimDevice` opens it). A headless boot
+  renders one frame and then produces none, and the probe's first `tester.pump` waits forever
+  with an empty stack. That cost an hour to find; the VM service's `pause`+`getStack` on the
+  isolate is what showed the idle loop.
+- **The mobile onboarding walk** (`$onboardStepsMobile`): no `Connected` text anywhere, so the
+  node coming up is `wait_for` on the `connection` PROVIDER; the Settings profile row is
+  addressed by its subtitle (`text:Name, status, avatar & banner`); typing the name raises the
+  software keyboard, which pushes `Save profile` off screen, so `scroll` first; `semantics:Back`
+  instead of Escape.
+- **Firebase.** The probe initialises Firebase on mobile the way `main()` does. Before that the
+  push service's synchronous throw (`No Firebase App '[DEFAULT]'`) escaped `catchError` and
+  marked a running, relay-connected node as `NodeStatus.error`; `node_provider.dart` now guards
+  the push init with a try/catch too, because push is optional and the node is not.
+
+**Runner improvements the mobile shell forced, all platform-neutral:**
+
+- `wait_for` takes `provider` + `equals`/`matches` (polls the dump's provider snapshot).
+- The dump reads `overallConnectionProvider` directly once the node and the relay-status
+  notifier exist; it is derived, so nothing but a watching widget ever created it, and the
+  mobile shell watches it only inside a chat.
+- A target with no `index` and several matches picks the first one a finger can REACH. The
+  mobile shell keeps every tab mounted (faded, ignoring pointers), so a friend's name exists once
+  per tab within four pixels of itself, and tree order says nothing about which one shows. An
+  explicit `index` stays literal.
+- The tap guard accepts a hit on a box ABOVE the target when that box is on the target's own
+  ancestor chain (a row whose label is not itself hit-testable). The failure text now also
+  names the target's chain, so "a sibling under a common parent" and "an overlapping surface"
+  read differently.
+- `semantics:X` also matches a label that starts with `X,`: a badge turns the tab into
+  `Friends, 1 friend request` and must not make it unaddressable.
+- `UI_PROBE_TRACE=1` narrates the three boot awaits.
+
+**Mobile scenario notes (`mobile_friend_dm.json`):** `Send Friend Request` (not `Send Request`),
+`hint:Type a message...` + `semantics:Send` (Enter does not send), tap the composer before typing,
+and the Chats list grows a row for a friend only once a message exists, so the receiver opens
+the DM from Chats only after the sender has written. Everything else is the desktop journey.
+
+**Desktop trap found while re-running `friend_dm` on Windows (2026-09-05):** `key escape` after
+Send Request and the waits that follow reached nothing (focus had left the dialog), the Friends
+dialog stayed open, and its barrier covered the DM tab at step 21. Escape from a focused field
+works in isolation; a scenario cannot know where focus is by then. Dialogs are now closed by
+their control, `tap type:_FriendsManager > semantics:Close` + `wait_for gone type:_FriendsManager`
+(the Friends manager is a Material dialog, not a `HollowDialog`, so the `dialog` target does not see
+it), and the scope is not optional: a bare `semantics:Close` matches the window title bar's close
+button first in tree order, and that tap ends the process (it did). Predates the simulator work.

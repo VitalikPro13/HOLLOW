@@ -19,6 +19,7 @@ import 'package:hollow/src/ui/chat/chat_drop_zone.dart';
 import 'package:hollow/src/ui/shop/hollowpack_import.dart';
 
 import 'probe_dump.dart';
+import 'probe_env.dart';
 import 'probe_targets.dart';
 
 /// Executes probe steps. A step is a JSON object, so the same runner serves a
@@ -94,7 +95,7 @@ class ProbeRunner {
 
   /// Which instance this is, when there is more than one (`UI_PROBE_PEER`).
   /// Stamped on every answer so a tail of several outboxes stays readable.
-  final String? peer = Platform.environment['UI_PROBE_PEER'];
+  final String? peer = probeEnv['UI_PROBE_PEER'];
 
   bool get failed => results.any((r) => r['ok'] == false);
 
@@ -129,8 +130,11 @@ class ProbeRunner {
         shotKey.currentContext?.findRenderObject() as RenderRepaintBoundary?;
     if (boundary == null) return null;
     String? path;
+    final trace = probeEnv['UI_PROBE_TRACE'] == '1';
+    if (trace) debugPrint('[ui-probe] trace: shot $name -> toImage');
     await tester.runAsync(() async {
       final image = await boundary.toImage(pixelRatio: 1.0);
+      if (trace) debugPrint('[ui-probe] trace: shot $name <- toImage');
       final data = await image.toByteData(format: ui.ImageByteFormat.png);
       image.dispose();
       if (data == null) return;
@@ -627,11 +631,24 @@ class ProbeRunner {
     if (count == 0) {
       throw _ProbeFailure('nothing matches "$target".\n${_nearby(target)}');
     }
-    final index = step['index'] as int? ?? 0;
-    if (index >= count) {
-      throw _ProbeFailure('"$target" matched $count widgets, no index $index');
+    final index = step['index'] as int?;
+    if (index != null) {
+      if (index >= count) {
+        throw _ProbeFailure('"$target" matched $count widgets, no index $index');
+      }
+      return finder.at(index);
     }
-    return finder.at(index);
+    // No index given and several matches: the first one a finger could
+    // actually reach. The mobile shell keeps every tab mounted (faded out and
+    // ignoring pointers), so a friend's name exists once per tab at nearly
+    // the same coordinates, and tree order says nothing about which one is
+    // showing. An explicit index stays literal.
+    if (count > 1) {
+      for (var i = 0; i < count; i++) {
+        if (_hitBlockers(finder.at(i)) == null) return finder.at(i);
+      }
+    }
+    return finder.first;
   }
 
   /// What a failed target might have meant: the visible text and labels that
@@ -763,10 +780,11 @@ class ProbeRunner {
   /// holds, so it proves a disappearance, not a permanent absence. To assert
   /// something never shows up, `wait` a fixed time and then `expect_no_text`.
   Future<String> _waitFor(Map<String, dynamic> step) async {
+    if (step['provider'] != null) return _waitForProvider(step);
     final target = step['target'] as String?;
     final gone = step['gone'] as String? ?? step['absent'] as String?;
     if (target == null && gone == null) {
-      throw _ProbeFailure('wait_for needs a "target" or a "gone"');
+      throw _ProbeFailure('wait_for needs a "target", a "gone" or a "provider"');
     }
     final want = step['count'] as int?;
     final timeout = Duration(milliseconds: step['timeout_ms'] as int? ?? 15000);
@@ -802,6 +820,45 @@ class ProbeRunner {
     throw _ProbeFailure(
         '"$target" did not ${want == null ? 'appear' : 'reach $want matches'} '
         'within ${ms}ms (last count $last).\n${_nearby(target!)}');
+  }
+
+  /// `wait_for` on app STATE rather than on the screen: polls one key of the
+  /// dump's provider snapshot until it `equals` a value or `matches` a regex.
+  ///
+  /// Built for "is this instance connected yet": the desktop shell prints
+  /// `Connected` on its Home tab, the mobile shell prints nothing and paints a
+  /// bar, and the provider behind both is the same. The same call therefore
+  /// serves every platform, and it is the stronger check anyway, because the
+  /// screen only ever shows a rendering of the state.
+  Future<String> _waitForProvider(Map<String, dynamic> step) async {
+    final key = '${step['provider']}';
+    final equals = step['equals'];
+    final pattern = step['matches'] as String?;
+    if (equals == null && pattern == null) {
+      throw _ProbeFailure('wait_for on a provider needs "equals" or "matches"');
+    }
+    final regex = pattern == null ? null : RegExp(pattern);
+    final timeout = Duration(milliseconds: step['timeout_ms'] as int? ?? 15000);
+    final started = DateTime.now();
+    var polls = 0;
+    String last = 'null';
+    while (true) {
+      polls++;
+      final held = ProbeDump.providerSnapshot(container)[key];
+      last = held == null ? 'null' : (held is String ? held : jsonEncode(held));
+      final ok = regex != null ? regex.hasMatch(last) : last == '$equals';
+      if (ok) {
+        final ms = DateTime.now().difference(started).inMilliseconds;
+        return 'provider $key = "$last" after ${ms}ms ($polls polls)';
+      }
+      if (DateTime.now().difference(started) >= timeout) break;
+      await settle(frames: 4, step: const Duration(milliseconds: 50));
+    }
+    final ms = DateTime.now().difference(started).inMilliseconds;
+    final known = ProbeDump.providerSnapshot(container).keys.toList()..sort();
+    throw _ProbeFailure('provider $key never '
+        '${regex != null ? 'matched /$pattern/' : 'equalled "$equals"'} '
+        'within ${ms}ms (last value "$last"). Readable: ${known.join(", ")}');
   }
 
   /// Reads a value out of the app and remembers it as `${as}`.
@@ -907,8 +964,8 @@ class ProbeRunner {
       return value.replaceAllMapped(RegExp(r'\$\{(\w+)\}'), (match) {
         final name = match.group(1)!;
         return captured[name] ??
-            Platform.environment[name] ??
-            Platform.environment['UI_PROBE_$name'] ??
+            probeEnv[name] ??
+            probeEnv['UI_PROBE_$name'] ??
             match.group(0)!;
       });
     }
@@ -949,13 +1006,52 @@ class ProbeRunner {
   /// something.
   void _requireHittable(Finder finder, Map<String, dynamic> step) {
     if (step['allowMiss'] == true) return;
+    final blockers = _hitBlockers(finder);
+    if (blockers == null) return;
+    final point = tester.getCenter(finder);
+    final what = blockers.isEmpty
+        ? 'Nothing was hit there at all.'
+        : 'What is hit there instead: ${blockers.join(" < ")}';
+    throw _ProbeFailure(
+        '"${step['target']}" is on screen but a click at its centre '
+        '(${point.dx.round()},${point.dy.round()}) does not reach it: '
+        'it is clipped, covered, or not hit-testable.\n'
+        '$what\n'
+        'Scroll it fully into view, target a different widget, or pass '
+        '"allowMiss": true if the click is meant to land elsewhere.');
+  }
+
+  /// Null when a tap at the centre of [finder]'s first match reaches it (or a
+  /// box above it that owns the gesture); otherwise what is there instead,
+  /// named for the failure message.
+  List<String>? _hitBlockers(Finder finder) {
     final target = finder.evaluate().first.renderObject;
-    if (target is! RenderBox || !target.hasSize) return;
+    if (target is! RenderBox || !target.hasSize) return null;
 
     final point = tester.getCenter(finder);
     final result = tester.hitTestOnBinding(point);
     for (final entry in result.path) {
-      if (identical(entry.target, target)) return;
+      if (identical(entry.target, target)) return null;
+    }
+    // The point reached a box ABOVE the target instead: a list row whose
+    // label sits under an IgnorePointer is hit as the row, and the row is
+    // what a user's finger lands on too (the mobile Friends list, 2026-09-05).
+    // Only the DEEPEST box counts, and only when it is on the target's own
+    // ancestor chain; a pinned footer painted over a half-scrolled row is
+    // neither, and stays the named failure below.
+    RenderBox? deepest;
+    for (final entry in result.path) {
+      if (entry.target is RenderBox) {
+        deepest = entry.target as RenderBox;
+        break;
+      }
+    }
+    if (deepest != null) {
+      RenderObject? node = target.parent;
+      while (node != null) {
+        if (identical(node, deepest)) return null;
+        node = node.parent;
+      }
     }
 
     // Name what IS there instead, so the next attempt is informed.
@@ -974,16 +1070,25 @@ class ProbeRunner {
       if (blockers.length >= 4) break;
     }
 
-    final what = blockers.isEmpty
-        ? 'Nothing was hit there at all.'
-        : 'What is hit there instead: ${blockers.join(" < ")}';
-    throw _ProbeFailure(
-        '"${step['target']}" is on screen but a click at its centre '
-        '(${point.dx.round()},${point.dy.round()}) does not reach it: '
-        'it is clipped, covered, or not hit-testable.\n'
-        '$what\n'
-        'Scroll it fully into view, target a different widget, or pass '
-        '"allowMiss": true if the click is meant to land elsewhere.');
+    // Where the TARGET sits, for comparison: a shared widget between the two
+    // chains means the click reached a sibling under a common parent; none
+    // shared means it reached an overlapping surface (another tab, an overlay).
+    final chain = <String>[];
+    Element? node = finder.evaluate().first;
+    while (node != null && chain.length < 8) {
+      final description = _describeElement(node);
+      if (description != null && !chain.contains(description)) {
+        chain.add(description);
+      }
+      Element? parent;
+      node.visitAncestorElements((ancestor) {
+        parent = ancestor;
+        return false;
+      });
+      node = parent;
+    }
+    blockers.add('(target sits in: ${chain.join(" < ")})');
+    return blockers;
   }
 
   /// A short human name for a widget, for the blocker list above.

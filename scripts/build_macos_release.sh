@@ -55,6 +55,28 @@ echo "    identity: $ID"
 
 cd "$ROOT_DIR"
 
+# --- 0a. Local signing config -------------------------------------------
+# The Xcode project resolves its identity and team from the gitignored
+# macos/Flutter/LocalSigning.xcconfig; the committed defaults are ad-hoc and
+# no team, so any clone builds and runs. A release needs both set, and this
+# file already knows them, so the config is written here rather than
+# remembered: a publishing Mac that never had the file (or has an older one
+# with only the team) signs with the Developer ID on its next run, and the
+# Xcode Archive flow finds its team as well.
+LOCAL_SIGNING="$ROOT_DIR/macos/Flutter/LocalSigning.xcconfig"
+if ! grep -qs "^HOLLOW_DEVELOPMENT_TEAM = ${MAC_TEAM_ID}\$" "$LOCAL_SIGNING" \
+   || ! grep -qs "^HOLLOW_CODE_SIGN_IDENTITY = Developer ID Application\$" "$LOCAL_SIGNING"; then
+  echo "==> 0a. writing ${LOCAL_SIGNING#$ROOT_DIR/} (team ${MAC_TEAM_ID}, Developer ID Application)"
+  {
+    echo '// Written by scripts/build_macos_release.sh from release.local.env. Gitignored.'
+    echo '// Delete it to build ad-hoc again (any clone does, without this file).'
+    echo "HOLLOW_DEVELOPMENT_TEAM = ${MAC_TEAM_ID}"
+    echo 'HOLLOW_CODE_SIGN_IDENTITY = Developer ID Application'
+  } > "$LOCAL_SIGNING"
+else
+  echo "==> 0a. ${LOCAL_SIGNING#$ROOT_DIR/} already names team ${MAC_TEAM_ID} + Developer ID Application"
+fi
+
 # --- 0. Build -----------------------------------------------------------
 echo "==> 0. flutter build macos --release"
 flutter build macos --release

@@ -47,6 +47,25 @@
 # `cleanup`, which runs even when the run fails.
 #
 # Windows PowerShell 5.1 is what is installed here, so no pwsh-only syntax.
+#
+# ## The iOS Simulator backend (pwsh on the Mac mini)
+#
+# The same script, run with pwsh on macOS, drives iOS Simulators instead of
+# exe copies: one simulator per peer named hollow-<peer>, the probe target
+# (`flutter build ios --simulator -t integration_test/ui_probe_test.dart`)
+# installed into each, and the SAME scenario files, send script and op
+# vocabulary. What differs is only where things live: an iOS app can write
+# nowhere but its own container, so the data directory and the probe output
+# are inside it and build/fleet_out/<peer> is a symlink there; and
+# Platform.environment is empty on iOS, so the configuration goes in as
+# Documents/probe.env instead of environment variables. Simulator.app must be
+# showing the devices (the script opens it): a headless simulator produces no
+# frames and the probe's first pump never returns.
+#
+#   pwsh scripts/fleet.ps1 -Build -Peers a,b     # build once, install into both simulators
+#   pwsh scripts/fleet.ps1 -Onboard -Peers a,b   # mobile welcome flow, stamp the fixtures
+#   pwsh scripts/fleet.ps1 -Live -Peers a,b
+#   pwsh scripts/fleet_send.ps1 -Command '[{"peer":"a","op":"look"}]'
 
 param(
     # A file in scripts\probe_scenarios\fleet (without .json).
@@ -90,8 +109,8 @@ $repoRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $repoRoot
 
 $script:FleetRepo = $repoRoot
-$script:FleetStageRoot = Join-Path $repoRoot 'build\fleet'
-$script:FleetOutRoot = Join-Path $repoRoot 'build\fleet_out'
+$script:FleetStageRoot = Join-Path (Join-Path $repoRoot 'build') 'fleet'
+$script:FleetOutRoot = Join-Path (Join-Path $repoRoot 'build') 'fleet_out'
 # `${RUN}` is unique per run, and scenarios should put it in every message they
 # send. The relay's availability cache holds undelivered traffic for three days
 # and the fixture identities are STABLE across runs, so a message from an
@@ -103,9 +122,18 @@ $script:FleetVars = @{ RUN = (Get-Date -Format 'HHmmss') }
 
 $stageRoot   = $script:FleetStageRoot
 $outRoot     = $script:FleetOutRoot
-$fixtureRoot = Join-Path $env:TEMP 'hollow_fleet\fixtures'
-$runRoot     = Join-Path $env:TEMP 'hollow_fleet\run'
-$buildOutput = Join-Path $repoRoot 'build\windows\x64\runner\Debug'
+if (Test-SimBackend) {
+    # Fixtures under $HOME rather than the temp dir, which macOS purges after
+    # three idle days; a run directory does not exist here, each peer's data
+    # lives inside its simulator container (Get-PeerDataDir).
+    $fixtureRoot = Join-Path (Join-Path $HOME 'hollow_fleet') 'fixtures'
+    $runRoot     = $null
+    $buildOutput = Join-Path (Join-Path (Join-Path $repoRoot 'build') 'ios') (Join-Path 'iphonesimulator' 'Runner.app')
+} else {
+    $fixtureRoot = Join-Path $env:TEMP 'hollow_fleet\fixtures'
+    $runRoot     = Join-Path $env:TEMP 'hollow_fleet\run'
+    $buildOutput = Join-Path $repoRoot 'build\windows\x64\runner\Debug'
+}
 
 # Fixtures hold real Ed25519 keys, so they live outside the repo where no
 # `git add -A` can reach them.
@@ -119,6 +147,20 @@ function Write-Step($message, $colour = 'Cyan') {
 # a different data directory, so it does not conflict with anything here, and
 # killing it would be a rude surprise in the middle of a conversation.
 function Stop-Fleet {
+    if (Test-SimBackend) {
+        $stopped = 0
+        foreach ($udid in Get-SimFleetUdids) {
+            if (Get-SimAppPid $udid) {
+                & xcrun simctl terminate $udid com.anonlisten.hollow 2>&1 | Out-Null
+                $stopped++
+            }
+        }
+        if ($stopped -gt 0) {
+            Write-Step "stopping $stopped fleet instance(s)" 'Yellow'
+            Start-Sleep -Milliseconds 1200
+        }
+        return
+    }
     $running = Get-Process -Name 'hollow' -ErrorAction SilentlyContinue |
         Where-Object {
             try { $_.Path -and $_.Path.StartsWith($stageRoot, 'OrdinalIgnoreCase') }
@@ -158,9 +200,9 @@ if ($ScenarioFile -or $Scenario) {
         if (-not (Test-Path $ScenarioFile)) { throw "scenario file not found: $ScenarioFile" }
         $path = (Resolve-Path $ScenarioFile).Path
     } else {
-        $path = Join-Path $repoRoot "scripts\probe_scenarios\fleet\$Scenario.json"
+        $dir = Join-Path (Join-Path (Join-Path $repoRoot 'scripts') 'probe_scenarios') 'fleet'
+        $path = Join-Path $dir "$Scenario.json"
         if (-not (Test-Path $path)) {
-            $dir = Join-Path $repoRoot 'scripts\probe_scenarios\fleet'
             $known = ''
             if (Test-Path $dir) {
                 $known = (Get-ChildItem $dir -Filter *.json | ForEach-Object { $_.BaseName }) -join ', '
@@ -206,14 +248,41 @@ Write-Step "peers: $($peerList -join ', ')$attachNote"
 # --------------------------------------------------------------------------
 
 function Invoke-Build {
+    if (Test-SimBackend) {
+        Write-Step 'building the probe target for the iOS Simulator'
+        & flutter build ios --simulator --debug -t integration_test/ui_probe_test.dart
+        if ($LASTEXITCODE -ne 0) { throw "flutter build failed with $LASTEXITCODE" }
+        return
+    }
     Write-Step 'building the probe target as a standalone exe'
     & flutter build windows --debug -t integration_test/ui_probe_test.dart
     if ($LASTEXITCODE -ne 0) { throw "flutter build failed with $LASTEXITCODE" }
 }
 
+# Whether a peer has a copy of the probe to launch: an exe folder here, an
+# installed app in its simulator there.
+function Test-PeerStaged($peer) {
+    if (Test-SimBackend) {
+        $udid = Get-SimUdid $peer
+        if (-not $udid) { return $false }
+        Start-SimDevice $udid
+        $null = & xcrun simctl get_app_container $udid com.anonlisten.hollow 2>$null
+        return ($LASTEXITCODE -eq 0)
+    }
+    return (Test-Path (Join-Path (Join-Path $stageRoot $peer) 'hollow.exe'))
+}
+
 function Stage-Peer($peer) {
     if (-not (Test-Path $buildOutput)) {
         throw "no build output at $buildOutput. Run with -Build first."
+    }
+    if (Test-SimBackend) {
+        $udid = Get-SimUdid $peer -Create
+        Start-SimDevice $udid
+        Write-Step "installing into simulator hollow-$peer"
+        & xcrun simctl install $udid $buildOutput 2>&1 | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "simctl install for $peer failed with $LASTEXITCODE" }
+        return
     }
     $dest = Join-Path $stageRoot $peer
     Write-Step "staging $peer"
@@ -234,8 +303,7 @@ if ($Build) {
 
 if (-not $Attach) {
     foreach ($peer in $peerList) {
-        $exe = Join-Path $stageRoot "$peer\hollow.exe"
-        if (-not (Test-Path $exe)) {
+        if (-not (Test-PeerStaged $peer)) {
             Write-Step "$peer is not staged yet" 'Yellow'
             Stage-Peer $peer
         }
@@ -246,9 +314,15 @@ if (-not $Attach) {
 # Data directories
 # --------------------------------------------------------------------------
 
+# Where a peer's app keeps its identity and database while it runs.
+function Get-PeerDataDir($peer) {
+    if (Test-SimBackend) { return Get-SimDataDir (Get-SimUdid $peer) }
+    return Join-Path $runRoot $peer
+}
+
 function Reset-PeerData($peer) {
     $fixture = Join-Path $fixtureRoot $peer
-    $run = Join-Path $runRoot $peer
+    $run = Get-PeerDataDir $peer
     if ($Onboard) {
         # Onboarding walks the WELCOME flow, which only exists when there is no
         # identity yet. Restoring a fixture here would leave the app in the
@@ -275,9 +349,7 @@ function Reset-PeerData($peer) {
     if (Test-Path $run) { Remove-Item $run -Recurse -Force }
     New-Item -ItemType Directory -Path $run -Force | Out-Null
     if (Test-Path $fixture) {
-        robocopy $fixture $run /MIR /MT:8 /XF 'hollow.lock' /NFL /NDL /NJH /NJS /NP | Out-Null
-        if ($LASTEXITCODE -ge 8) { throw "restoring the $peer fixture failed with $LASTEXITCODE" }
-        $global:LASTEXITCODE = 0
+        Copy-Mirror $fixture $run
     } else {
         Write-Step "$peer has no fixture identity yet - it will onboard from scratch. Run -Onboard to stamp one." 'Yellow'
     }
@@ -285,13 +357,11 @@ function Reset-PeerData($peer) {
 
 function Save-Fixture($peer) {
     $fixture = Join-Path $fixtureRoot $peer
-    $run = Join-Path $runRoot $peer
+    $run = Get-PeerDataDir $peer
     New-Item -ItemType Directory -Path $fixture -Force | Out-Null
     # The WAL has to be folded in before a copy, and the app does that on exit,
     # so this only ever runs after the instances are stopped.
-    robocopy $run $fixture /MIR /MT:8 /XF 'hollow.lock' /NFL /NDL /NJH /NJS /NP | Out-Null
-    if ($LASTEXITCODE -ge 8) { throw "stamping the $peer fixture failed with $LASTEXITCODE" }
-    $global:LASTEXITCODE = 0
+    Copy-Mirror $run $fixture
     Write-Step "stamped the $peer fixture -> $fixture" 'Green'
 }
 
@@ -303,9 +373,42 @@ $script:processes = @{}
 $script:onboardOk = $false
 
 function Start-Peer($peer) {
+    $out = Join-Path $outRoot $peer
+    if (Test-SimBackend) {
+        $udid = Get-SimUdid $peer
+        Start-SimDevice $udid
+        $documents = Join-Path (Get-SimContainer $udid) 'Documents'
+        $data = Join-Path $documents 'hollow'
+        $probeOut = Join-Path $documents 'probe_out'
+        New-Item -ItemType Directory -Path $data -Force | Out-Null
+        if (Test-Path $probeOut) { Remove-Item $probeOut -Recurse -Force }
+        New-Item -ItemType Directory -Path $probeOut -Force | Out-Null
+        # build/fleet_out/<peer> points into the container, so every reader of
+        # an out directory keeps its usual path. rm, not Remove-Item: a symlink
+        # to a directory must go as a link, never as the directory behind it.
+        New-Item -ItemType Directory -Path $outRoot -Force | Out-Null
+        & rm -rf $out
+        & ln -sfn $probeOut $out
+        # The configuration the probe reads in place of the environment.
+        $config = @(
+            "UI_PROBE_OUT=$probeOut",
+            'UI_PROBE_MODE=live',
+            "UI_PROBE_PEER=$peer",
+            "UI_PROBE_IDLE_MINUTES=$IdleMinutes",
+            "HOLLOW_DATA_DIR=$data"
+        )
+        [System.IO.File]::WriteAllText((Join-Path $documents 'probe.env'),
+            (($config -join "`n") + "`n"), (New-Object System.Text.UTF8Encoding($false)))
+        $launched = "$(& xcrun simctl launch --terminate-running-process $udid com.anonlisten.hollow 2>&1)"
+        if ($LASTEXITCODE -ne 0) { throw "simctl launch for $peer failed: $launched" }
+        $launchedPid = 0
+        if ($launched -match ':\s*(\d+)\s*$') { $launchedPid = [int]$Matches[1] }
+        $script:processes[$peer] = [pscustomobject]@{ Id = $launchedPid; Udid = $udid }
+        Write-Step "launched $peer (pid $launchedPid, simulator hollow-$peer) data=$data"
+        return
+    }
     $dest = Join-Path $stageRoot $peer
     $data = Join-Path $runRoot $peer
-    $out = Join-Path $outRoot $peer
     New-Item -ItemType Directory -Path $data -Force | Out-Null
     if (Test-Path $out) { Remove-Item $out -Recurse -Force }
     New-Item -ItemType Directory -Path $out -Force | Out-Null
@@ -361,6 +464,8 @@ function Wait-Ready($peers) {
 # a bug.
 function Set-FleetWindows($peers) {
     if (-not $Tile) { return }
+    # Simulator.app lays its device windows out itself.
+    if (Test-SimBackend) { return }
     if (-not ('HollowWin32.Native' -as [type])) {
         Add-Type -Namespace HollowWin32 -Name Native -MemberDefinition @'
 [DllImport("user32.dll")] public static extern bool MoveWindow(IntPtr h, int x, int y, int w, int t, bool repaint);
@@ -426,6 +531,34 @@ function Invoke-Steps($steps, $label, $alwaysSoft = $false) {
 # Fresh identities have to walk the welcome flow, and doing that on every run
 # doubles the runtime and puts the flakiest UI in the app in front of every
 # test. Walk it ONCE and keep the data directory as a fixture.
+# The mobile shell's version of the same walk. Three things differ, each of
+# which cost a run to find (2026-09-05): there is no `Connected` text anywhere,
+# so the node coming up is read from the connection provider; the profile row
+# in Settings is labelled by its subtitle, not "Profile"; and typing the name
+# raises the software keyboard, which pushes "Save profile" off screen, so the
+# page is scrolled before the tap. Back is a button, not Escape.
+$onboardStepsMobile = @(
+    @{ op = 'wait_for'; target = 'text:Create New Identity'; timeout_ms = 60000 },
+    @{ op = 'tap'; target = 'text:Create New Identity'; frames = 60 },
+    @{ op = 'wait_for'; target = 'text:Your Recovery Phrase'; timeout_ms = 60000 },
+    @{ op = 'tap'; target = "text:I've saved it"; frames = 40 },
+    @{ op = 'wait_for'; gone = 'text:Your Recovery Phrase'; timeout_ms = 30000 },
+    @{ op = 'wait_for'; provider = 'connection'; equals = 'connected'; timeout_ms = 120000 },
+    @{ op = 'tap'; target = 'semantics:Settings'; index = 0; frames = 40 },
+    @{ op = 'wait_for'; target = 'text:Name, status, avatar & banner'; timeout_ms = 20000 },
+    @{ op = 'tap'; target = 'text:Name, status, avatar & banner'; index = 0; frames = 40 },
+    @{ op = 'wait_for'; target = 'hint:Display name'; timeout_ms = 20000 },
+    @{ op = 'enter_text'; target = 'hint:Display name'; value = 'probe-${PEER}' },
+    @{ op = 'scroll'; target = 'hint:Display name'; dy = -500 },
+    @{ op = 'wait_for'; target = 'text:Save profile'; timeout_ms = 10000 },
+    @{ op = 'tap'; target = 'text:Save profile'; index = 0; frames = 40 },
+    @{ op = 'wait'; ms = 2500 },
+    @{ op = 'tap'; target = 'semantics:Back'; index = 0; frames = 40; soft = $true },
+    @{ op = 'wait_for'; target = 'text:probe-${PEER}'; timeout_ms = 20000 },
+    @{ op = 'tap'; target = 'semantics:Chats'; index = 0; frames = 30 },
+    @{ op = 'dump'; name = 'onboarded' }
+)
+
 $onboardSteps = @(
     @{ op = 'wait_for'; target = 'text:Create New Identity'; timeout_ms = 60000 },
     @{ op = 'tap'; target = 'text:Create New Identity'; frames = 60 },
@@ -450,6 +583,7 @@ $onboardSteps = @(
     @{ op = 'wait_for'; target = 'text:probe-${PEER}'; timeout_ms = 20000 },
     @{ op = 'dump'; name = 'onboarded' }
 )
+if (Test-SimBackend) { $onboardSteps = $onboardStepsMobile }
 
 # --------------------------------------------------------------------------
 # Run
@@ -525,13 +659,19 @@ try {
         # replaying the twenty steps that worked.
         if ($scenarioFailed) { Write-Step 'left running so you can look at it' 'Yellow' }
         Write-Step "instances up (idle timeout ${IdleMinutes}m). Drive them with:" 'Cyan'
-        Write-Host '  powershell -File scripts\fleet_send.ps1 -Command ''[{"peer":"a","op":"look"}]'''
-        Write-Host '  powershell -File scripts\fleet.ps1 -Scenario <name> -Attach'
-        Write-Host '  powershell -File scripts\fleet.ps1 -Stop'
+        if (Test-SimBackend) {
+            Write-Host '  pwsh scripts/fleet_send.ps1 -Command ''[{"peer":"a","op":"look"}]'''
+            Write-Host '  pwsh scripts/fleet.ps1 -Scenario <name> -Attach'
+            Write-Host '  pwsh scripts/fleet.ps1 -Stop'
+        } else {
+            Write-Host '  powershell -File scripts\fleet_send.ps1 -Command ''[{"peer":"a","op":"look"}]'''
+            Write-Host '  powershell -File scripts\fleet.ps1 -Scenario <name> -Attach'
+            Write-Host '  powershell -File scripts\fleet.ps1 -Stop'
+        }
     } else {
         Stop-Fleet
     }
 }
 
-Write-Step "artifacts: $outRoot\<peer>\ (results.jsonl, map-*.md, *.png, errors.log)"
+Write-Step "artifacts: $(Join-Path $outRoot '<peer>') (results.jsonl, map-*.md, *.png, errors.log)"
 exit $exitCode

@@ -1,17 +1,21 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:hollow/src/core/hollow_data_dir.dart';
 import 'package:hollow/src/core/providers/shop_unlock_provider.dart';
 import 'package:hollow/src/core/reduce_motion.dart';
 import 'package:hollow/src/core/shop_availability.dart';
+import 'package:hollow/src/rust/api/identity.dart' as identity_api;
 import 'package:hollow/src/rust/frb_generated.dart';
 import 'package:hollow/src/ui/app.dart';
 import 'package:integration_test/integration_test.dart';
 import 'package:window_manager/window_manager.dart';
 
+import 'probe/probe_env.dart';
 import 'probe/probe_runner.dart';
 
 /// Drives the REAL app against a COPY of a real data directory, so a change
@@ -49,10 +53,13 @@ import 'probe/probe_runner.dart';
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
 
-  final env = Platform.environment;
-  final outDir = env['UI_PROBE_OUT'] ?? 'build/ui_probe';
-  final mode = env['UI_PROBE_MODE'] ?? 'script';
-  final idleMinutes = int.tryParse(env['UI_PROBE_IDLE_MINUTES'] ?? '') ?? 20;
+  // Filled in by setUpAll once the configuration has been read: on iOS and
+  // Android it comes from a file in the app container (Platform.environment is
+  // empty there), and locating that file takes a platform channel, which is
+  // not available this early. Until then these hold the desktop defaults.
+  var outDir = 'build/ui_probe';
+  var mode = 'script';
+  var idleMinutes = 20;
 
   // RustLib.init() MUST run here, not inside the test body. It does real
   // async work (loading the native lib and handshaking), and the test body
@@ -60,7 +67,43 @@ void main() {
   // silently leaves every FFI-backed provider throwing "not initialized" and
   // the first widget that reads one takes the whole run down.
   setUpAll(() async {
+    await loadProbeEnv();
+    final env = probeEnv;
+    outDir = env['UI_PROBE_OUT'] ?? outDir;
+    mode = env['UI_PROBE_MODE'] ?? mode;
+    idleMinutes = int.tryParse(env['UI_PROBE_IDLE_MINUTES'] ?? '') ?? idleMinutes;
+    // One line, always: the first thing to read when a run did something
+    // other than what it was told, because "the config never arrived" looks
+    // exactly like "the app ignored it" from the outside.
+    debugPrint('[ui-probe] config: mode=$mode peer=${env['UI_PROBE_PEER']} '
+        'out=$outDir data=${env['HOLLOW_DATA_DIR']} '
+        '(from $probeEnvSource, ${Platform.environment.length} env vars)');
+
+    // main() initialises Firebase before anything asks for a push token; the
+    // push service assumes it happened. Without it the Firebase getters throw
+    // and, until the node provider learned to contain that, the throw marked
+    // a running node as failed. Optional here: the Simulator has no APNs.
+    if (Platform.isAndroid || Platform.isIOS) {
+      try {
+        await Firebase.initializeApp();
+      } catch (e) {
+        debugPrint('[ui-probe] Firebase init failed (push stays off): $e');
+      }
+    }
+
     await RustLib.init();
+    // The probe never runs main(), which is where the real app tells Rust and
+    // the Dart getter the same data root. On desktop the HOLLOW_DATA_DIR
+    // environment variable reaches both by itself; a value that came from
+    // probe.env reaches neither, so it is applied here explicitly.
+    final dataDir = env['HOLLOW_DATA_DIR'];
+    if (dataDir != null &&
+        dataDir.isNotEmpty &&
+        Platform.environment['HOLLOW_DATA_DIR'] != dataDir) {
+      Directory(dataDir).createSync(recursive: true);
+      await identity_api.setDataDir(path: dataDir);
+      overrideHollowDataDir(dataDir);
+    }
     // The real app primes this in main() before runApp; the probe builds the
     // widget tree itself, so without this the Hollow Shop button never
     // exists here (a store build and an unprimed build look the same).
@@ -107,14 +150,13 @@ void main() {
   // finished. Measured: 1s launching plain, 45s (the timeout) with redirection.
   // Overriding debugPrint costs nothing, cannot leak a handle, and catches the
   // same lines - every [ui-probe] step and every Flutter error dump.
-  final logFile = File('$outDir/stdout.log');
   final previousDebugPrint = debugPrint;
   debugPrint = (String? message, {int? wrapWidth}) {
     previousDebugPrint(message, wrapWidth: wrapWidth);
     try {
       final dir = Directory(outDir);
       if (!dir.existsSync()) dir.createSync(recursive: true);
-      logFile.writeAsStringSync('${message ?? ''}\n', mode: FileMode.append);
+      File('$outDir/stdout.log').writeAsStringSync('${message ?? ''}\n', mode: FileMode.append);
     } catch (_) {
       // A log that cannot be written must never be the thing that fails a run.
     }
@@ -174,10 +216,23 @@ void main() {
       ),
     );
     // Identity unlock, DB open and the first channel load all happen here.
+    //
+    // UI_PROBE_TRACE=1 narrates the three boot awaits. It exists because a
+    // simulator launch once sat here for minutes with an empty stack: the
+    // first frame was on screen, the isolate was idle, and nothing said which
+    // of these futures was the one never completing.
+    final trace = (probeEnv['UI_PROBE_TRACE'] ?? '') == '1';
+    if (trace) {
+      debugPrint('[ui-probe] trace: first frame pumped, '
+          'lifecycle=${WidgetsBinding.instance.lifecycleState}, '
+          'out=$outDir');
+    }
     await runner.settle(frames: 80, step: const Duration(milliseconds: 100));
+    if (trace) debugPrint('[ui-probe] trace: boot settle done');
     await runner.shot('00-boot');
+    if (trace) debugPrint('[ui-probe] trace: boot shot done');
 
-    final steps = _loadSteps(env);
+    final steps = _loadSteps(probeEnv);
     if (mode == 'live') {
       debugPrint('[ui-probe] mode=live, idle timeout ${idleMinutes}m');
       if (steps != null) await runner.runScript(steps);

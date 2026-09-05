@@ -35,8 +35,8 @@ $repoRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $repoRoot
 
 $script:FleetRepo = $repoRoot
-$script:FleetStageRoot = Join-Path $repoRoot 'build\fleet'
-$script:FleetOutRoot = Join-Path $repoRoot 'build\fleet_out'
+$script:FleetStageRoot = Join-Path (Join-Path $repoRoot 'build') 'fleet'
+$script:FleetOutRoot = Join-Path (Join-Path $repoRoot 'build') 'fleet_out'
 . (Join-Path $PSScriptRoot 'fleet_lib.ps1')
 
 $live = Get-LivePeers

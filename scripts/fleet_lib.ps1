@@ -9,7 +9,129 @@
 # Callers set $script:FleetRepo, $script:FleetOutRoot and $script:FleetStageRoot
 # before using anything here.
 #
-# Windows PowerShell 5.1: no pwsh-only syntax.
+# Windows PowerShell 5.1: no pwsh-only syntax. The same files run under pwsh 7
+# on the Mac mini, where the backend is the iOS Simulator (see Test-SimBackend).
+
+# pwsh 7.4+ turns a non-zero native exit code into a terminating error while
+# $ErrorActionPreference is Stop. Half of simctl's normal answers are non-zero
+# ("already booted", "not installed"), so the exit codes are read by hand.
+$PSNativeCommandUseErrorActionPreference = $false
+
+# Which machine this is. Windows PowerShell 5.1 has no $IsMacOS, so the variable
+# is simply absent there and reads as false.
+if ($IsMacOS) { $script:FleetBackend = 'sim' } else { $script:FleetBackend = 'windows' }
+
+# The iOS Simulator backend: one simulator per peer (named hollow-<peer>), the
+# probe target installed into each, the data directory and the probe output
+# inside the app's own container, which is the only place an iOS app can
+# write, reached from the scripts through a symlink per peer under
+# build/fleet_out. Configuration goes in as Documents/probe.env, because
+# Platform.environment is empty on iOS.
+function Test-SimBackend { return $script:FleetBackend -eq 'sim' }
+
+# The shell a child fleet run is started with.
+function Get-PowerShellExe { if (Test-SimBackend) { return 'pwsh' } else { return 'powershell' } }
+
+$script:SimUdids = @{}
+
+# Every simulator this tooling created, whatever peers this run happens to use.
+function Get-SimFleetUdids {
+    $found = @()
+    $json = & xcrun simctl list devices -j | ConvertFrom-Json
+    foreach ($runtime in $json.devices.PSObject.Properties) {
+        foreach ($device in @($runtime.Value)) {
+            if ($device.name -like 'hollow-*' -and $device.isAvailable) { $found += $device.udid }
+        }
+    }
+    return $found
+}
+
+# The simulator for a peer, created on first use from the newest installed iOS
+# runtime. FLEET_SIM_DEVICE picks the device type (default iPhone 17 Pro).
+function Get-SimUdid($peer, [switch]$Create) {
+    if ($script:SimUdids.ContainsKey($peer)) { return $script:SimUdids[$peer] }
+    $name = "hollow-$peer"
+    $json = & xcrun simctl list devices -j | ConvertFrom-Json
+    foreach ($runtime in $json.devices.PSObject.Properties) {
+        foreach ($device in @($runtime.Value)) {
+            if ($device.name -eq $name -and $device.isAvailable) {
+                $script:SimUdids[$peer] = $device.udid
+                return $device.udid
+            }
+        }
+    }
+    if (-not $Create) { return $null }
+    $runtimes = @((& xcrun simctl list runtimes -j | ConvertFrom-Json).runtimes |
+        Where-Object { $_.platform -eq 'iOS' -and $_.isAvailable } |
+        Sort-Object { [version]$_.version } -Descending)
+    if ($runtimes.Count -eq 0) { throw 'no iOS Simulator runtime is installed (Xcode > Settings > Components)' }
+    $type = $env:FLEET_SIM_DEVICE
+    if (-not $type) { $type = 'iPhone 17 Pro' }
+    $udid = "$(& xcrun simctl create $name $type $runtimes[0].identifier)".Trim()
+    if ($LASTEXITCODE -ne 0 -or -not $udid) { throw "could not create simulator $name ($type)" }
+    Write-Host "[fleet] created simulator $name ($type, $($runtimes[0].name)) $udid" -ForegroundColor Cyan
+    $script:SimUdids[$peer] = $udid
+    return $udid
+}
+
+function Get-SimState($udid) {
+    $json = & xcrun simctl list devices -j | ConvertFrom-Json
+    foreach ($runtime in $json.devices.PSObject.Properties) {
+        foreach ($device in @($runtime.Value)) {
+            if ($device.udid -eq $udid) { return $device.state }
+        }
+    }
+    return 'Unknown'
+}
+
+# Boots the device if it is not up and makes sure Simulator.app is showing it.
+# The window is not decoration: a probe launched against a headless boot sat in
+# its first pump forever (2026-09-05), because no frames are produced for a
+# device nothing is displaying.
+function Start-SimDevice($udid) {
+    if ((Get-SimState $udid) -ne 'Booted') {
+        & xcrun simctl boot $udid 2>&1 | Out-Null
+        & xcrun simctl bootstatus $udid -b 2>&1 | Out-Null
+    }
+    & open -a Simulator 2>&1 | Out-Null
+}
+
+function Get-SimContainer($udid) {
+    $path = "$(& xcrun simctl get_app_container $udid com.anonlisten.hollow data 2>$null)".Trim()
+    if ($LASTEXITCODE -ne 0 -or -not $path) {
+        throw "the probe is not installed in simulator $udid. Run with -Build first."
+    }
+    return $path
+}
+
+function Get-SimDataDir($udid) {
+    return Join-Path (Join-Path (Get-SimContainer $udid) 'Documents') 'hollow'
+}
+
+# The pid of the app inside a simulator, or $null when it is not running.
+function Get-SimAppPid($udid) {
+    $lines = & xcrun simctl spawn $udid launchctl list 2>$null
+    foreach ($line in @($lines)) {
+        if ("$line" -match '^\s*(\d+)\s+\S+\s+UIKitApplication:com\.anonlisten\.hollow') {
+            return [int]$Matches[1]
+        }
+    }
+    return $null
+}
+
+# Mirrors one directory into another, deletions included, skipping the lock
+# file. robocopy on Windows, rsync on the Mac.
+function Copy-Mirror($source, $destination) {
+    if (Test-SimBackend) {
+        New-Item -ItemType Directory -Path $destination -Force | Out-Null
+        & rsync -a --delete --exclude 'hollow.lock' "$source/" "$destination/"
+        if ($LASTEXITCODE -ne 0) { throw "rsync $source -> $destination failed with $LASTEXITCODE" }
+        return
+    }
+    robocopy $source $destination /MIR /MT:8 /XF 'hollow.lock' /NFL /NDL /NJH /NJS /NP | Out-Null
+    if ($LASTEXITCODE -ge 8) { throw "mirroring $source -> $destination failed with $LASTEXITCODE" }
+    $global:LASTEXITCODE = 0
+}
 
 # Values captured by a `capture` step, expanded into later steps as ${NAME}.
 # This is what carries an invite link from the instance that generated it to the
@@ -35,6 +157,13 @@ function Expand-FleetVars($value) {
 # A fleet instance is identified by where its exe lives, so nothing here can
 # ever match a real Hollow the user happens to have open.
 function Get-PeerProcess($peer) {
+    if (Test-SimBackend) {
+        $udid = Get-SimUdid $peer
+        if (-not $udid) { return $null }
+        $running = Get-SimAppPid $udid
+        if (-not $running) { return $null }
+        return [pscustomobject]@{ Id = $running; Udid = $udid }
+    }
     $prefix = Join-Path $script:FleetStageRoot $peer
     return Get-Process -Name 'hollow' -ErrorAction SilentlyContinue |
         Where-Object {
@@ -50,11 +179,29 @@ function Get-PeerProcess($peer) {
 # next to the exe. All three are worth a look and none is reliably the one.
 function Get-CrashTail($peer) {
     $lines = @()
+    $outDir = Join-Path $script:FleetOutRoot $peer
     $sources = @(
-        @{ name = 'errors.log'; path = (Join-Path $script:FleetOutRoot "$peer\errors.log") },
-        @{ name = 'stdout'; path = (Join-Path $script:FleetOutRoot "$peer\stdout.log") },
-        @{ name = 'hollow_debug'; path = (Join-Path $script:FleetStageRoot "$peer\hollow_debug.log") }
+        @{ name = 'errors.log'; path = (Join-Path $outDir 'errors.log') },
+        @{ name = 'stdout'; path = (Join-Path $outDir 'stdout.log') }
     )
+    if (Test-SimBackend) {
+        $udid = Get-SimUdid $peer
+        if ($udid) {
+            try {
+                $sources += @{ name = 'hollow_debug'; path = (Join-Path (Get-SimDataDir $udid) 'hollow_debug.log') }
+            } catch { }
+            # The simulator's own log keeps the app's last words when it died
+            # before writing anything of its own.
+            $simLog = @(& xcrun simctl spawn $udid log show --last 3m --style compact --predicate 'process == "Runner"' 2>$null |
+                Where-Object { "$_" -match 'flutter:' } | Select-Object -Last 20)
+            if ($simLog.Count -gt 0) {
+                $lines += "--- simulator log ---"
+                $lines += $simLog
+            }
+        }
+    } else {
+        $sources += @{ name = 'hollow_debug'; path = (Join-Path (Join-Path $script:FleetStageRoot $peer) 'hollow_debug.log') }
+    }
     foreach ($item in $sources) {
         if (-not (Test-Path $item.path)) { continue }
         $tail = @(Get-Content $item.path -Tail 20 -ErrorAction SilentlyContinue) |
@@ -63,12 +210,12 @@ function Get-CrashTail($peer) {
         $lines += "--- $($item.name) ---"
         $lines += $tail
     }
-    if ($lines.Count -eq 0) { return "Nothing in the logs. Look in $script:FleetOutRoot\$peer." }
+    if ($lines.Count -eq 0) { return "Nothing in the logs. Look in $(Join-Path $script:FleetOutRoot $peer)." }
     return ($lines -join "`n")
 }
 
 function Test-PeerLive($peer) {
-    return (Test-Path (Join-Path $script:FleetOutRoot "$peer\live-ready"))
+    return (Test-Path (Join-Path (Join-Path $script:FleetOutRoot $peer) 'live-ready'))
 }
 
 # Which instances are up right now, by looking at what is running rather than
@@ -77,7 +224,11 @@ function Test-PeerLive($peer) {
 function Get-LivePeers {
     $root = $script:FleetOutRoot
     if (-not (Test-Path $root)) { return @() }
-    return @(Get-ChildItem $root -Directory | ForEach-Object { $_.Name } |
+    # Not -Directory: on the simulator backend each entry is a symlink into an
+    # app container, and a symlink only counts as a directory once followed.
+    return @(Get-ChildItem $root -Force |
+        Where-Object { Test-Path -LiteralPath $_.FullName -PathType Container } |
+        ForEach-Object { $_.Name } |
         Where-Object { (Test-PeerLive $_) -and (Get-PeerProcess $_) })
 }
 
@@ -149,10 +300,10 @@ function Send-FleetStep($peer, $step, $timeoutSeconds = 180) {
 # inherit no handle of ours - so capturing this output cannot wedge the way
 # trap 2 wedges a redirected launch.
 function Invoke-FleetScript($fleetArgs) {
-    $fleet = Join-Path $script:FleetRepo 'scripts\fleet.ps1'
+    $fleet = Join-Path (Join-Path $script:FleetRepo 'scripts') 'fleet.ps1'
     if (-not (Test-Path $fleet)) { throw "fleet.ps1 not found at $fleet" }
     $all = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $fleet) + $fleetArgs
-    & powershell @all | ForEach-Object { Write-Host "    | $_" -ForegroundColor DarkGray }
+    & (Get-PowerShellExe) @all | ForEach-Object { Write-Host "    | $_" -ForegroundColor DarkGray }
     if ($LASTEXITCODE -ne 0) {
         throw "fleet.ps1 $($fleetArgs -join ' ') failed with $LASTEXITCODE"
     }

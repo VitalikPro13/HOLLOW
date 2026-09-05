@@ -21,6 +21,7 @@ import 'package:hollow/src/core/providers/unread_provider.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_tooltip.dart';
+import 'package:hollow/src/core/providers/node_provider.dart';
 
 import 'probe_targets.dart';
 
@@ -378,7 +379,19 @@ class ProbeDump {
       out['identityLoaded'] = identity.isLoaded;
       if (identity.error != null) out['identityError'] = identity.error;
     }
-    out['connection'] = read(overallConnectionProvider)?.name;
+    // overallConnectionProvider is derived, so only a widget watching it ever
+    // creates it, and the mobile shell watches it inside a chat and nowhere
+    // else. Its two inputs are what carry the state (the node, and the relay
+    // status notifier the event stream feeds), so it is read directly once
+    // both of those exist; deriving from them has no side effect.
+    if (container.exists(nodeProvider) &&
+        container.exists(connectionStatusProvider)) {
+      try {
+        out['connection'] = container.read(overallConnectionProvider).name;
+      } catch (e) {
+        out['errors'] = [...(out['errors'] as List? ?? []), 'connection: $e'];
+      }
+    }
 
     final friends = read(friendsProvider);
     if (friends != null) {

@@ -88,7 +88,10 @@ class ProbeTargets {
       case 'contains':
         return [find.textContaining(value, findRichText: true)];
       case 'semantics':
-        return [byLabel(value)];
+        // Exact first; then the label with a status appended after a comma,
+        // the way a tab reads "Friends, 1 friend request" while a request is
+        // pending. A badge must not make the control unaddressable.
+        return [byLabel(value), byLabelPrefix('$value,')];
       case 'icon':
         final code = iconCodePointFor(value);
         if (code == null) return [find.byWidgetPredicate((_) => false)];
@@ -156,6 +159,13 @@ class ProbeTargets {
       (w is Semantics && w.properties.label == label) ||
       (w is HollowPressable && w.semanticLabel == label) ||
       (w is HollowButton && w.semanticLabel == label));
+
+  /// [byLabel] for a label that STARTS with [prefix]; see the `semantics:`
+  /// case for why.
+  static Finder byLabelPrefix(String prefix) => find.byWidgetPredicate((w) =>
+      (w is Semantics && (w.properties.label ?? '').startsWith(prefix)) ||
+      (w is HollowPressable && (w.semanticLabel ?? '').startsWith(prefix)) ||
+      (w is HollowButton && (w.semanticLabel ?? '').startsWith(prefix)));
 
   /// Matches by runtime type NAME, so a private widget (`_ChannelTile`,
   /// `_HollowMenuHost`) is addressable from outside its library.

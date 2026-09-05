@@ -62,10 +62,21 @@ class NodeNotifier extends Notifier<NodeState> {
       autoJoinGuestRooms(ref);
 
       // Initialize push notifications on mobile (registers FCM token with relay).
+      //
+      // Both guards are needed. The Firebase getters throw SYNCHRONOUSLY when
+      // no Firebase app exists (a probe launch, a build without the config
+      // file), and a synchronous throw never reaches catchError: it fell
+      // straight through to the outer catch below and marked a node that was
+      // up and connected as NodeStatus.error. Push is optional; the node is
+      // not, so nothing here may fail it.
       if (Platform.isAndroid || Platform.isIOS) {
-        PushNotificationService().initialize().catchError((e) {
+        try {
+          PushNotificationService().initialize().catchError((e) {
+            debugPrint('[HOLLOW] Push notification init failed: $e');
+          });
+        } catch (e) {
           debugPrint('[HOLLOW] Push notification init failed: $e');
-        });
+        }
       }
     } catch (e) {
       debugPrint('[HOLLOW] Node start error: $e');
