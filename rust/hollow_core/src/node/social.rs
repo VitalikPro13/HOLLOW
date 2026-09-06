@@ -64,6 +64,12 @@ fn out_bundle_key(target_master: &str) -> String {
     format!("friendreq_out:{target_master}")
 }
 
+/// KV key of the removal tombstone for `master`. Written by every removal, read only
+/// when no friend row exists, so it never needs clearing: a re-add writes a row.
+pub(crate) fn removed_key(master: &str) -> String {
+    format!("friend_removed:{master}")
+}
+
 /// `app_settings` key for the VERIFIED bundle a requester sent US. Read at accept
 /// time. Kept after acceptance (never deleted) so a second, idempotent accept
 /// still finds it; the `has_session` guard stops it building a second session on
@@ -355,6 +361,36 @@ pub(crate) fn deposit_friend_request_to_inbox(
 pub(crate) fn send_friend_reject(
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+/// Builds the accept for the request stamped `requested_at`; 0 means no row was
+/// found and the accept goes out bare, as a pre-0.11.1 client would send it.
+pub(crate) fn friend_accept_msg(requested_at: i64) -> HavenMessage {
+    HavenMessage::FriendAccept { requested_at: (requested_at > 0).then_some(requested_at) }
+}
+
+/// Sends an accept to `device` inside the deterministic DM room. A copy for a device
+/// that is not there yet parks under that room at the relay, never under a room the
+/// device already left, where it would replay on an unrelated later join.
+pub(crate) fn send_friend_accept(
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    local_peer_str: &str,
+    master: &str,
+    device: &str,
+    requested_at: i64,
+) {
+    let dm_room = dm_room_code(local_peer_str, master);
+    send_message_to_peer_in_room(ws_cmd_tx, &dm_room, device, friend_accept_msg(requested_at));
+}
+
+/// True when `master` is an accepted friend on disk. A queued accept for anyone else
+/// outlived a removal (a sibling removed them, or the queue was seeded before it).
+pub(crate) fn holds_accepted_friend(db_path: &str, db_passphrase: &str, master: &str) -> bool {
+    crate::storage::MessageStore::open(db_path, db_passphrase)
+        .ok()
+        .and_then(|st| st.get_friend_status(master).ok().flatten())
+        .as_deref()
+        == Some("accepted")
+}
+
     peer_id_str: &str,
     master: &str,
     requested_at: i64,
@@ -571,12 +607,21 @@ pub(crate) async fn handle_send_friend_request(
         deposit_friend_request_to_inbox(ws_cmd_tx, &master, &request_msg);
         hollow_log!("[HOLLOW-FRIENDS] Peer {peer_id_str} not reachable yet, deposited friend request in inbox:{master} and queued it");
     }
+    // The accept names the request it answers; `save_friend` freezes that stamp on
+    // the row, so it is read back after the write.
+    let mut answered_at = 0i64;
 
     let _ = event_tx.send(NetworkEvent::FriendRequestReceived {
         peer_id: peer_id_str,
     }).await;
 }
 
+            answered_at = store
+                .get_friend_row(&master)
+                .ok()
+                .flatten()
+                .map(|(_, _, t)| t)
+                .unwrap_or(0);
 /// Handle `NodeCommand::AcceptFriendRequest`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_accept_friend_request(
@@ -695,7 +740,7 @@ pub(crate) async fn handle_accept_friend_request(
                         // room so the relay buffers it for an absent requester (a
                         // first-match room lookup finds nothing when they are gone).
                         send_message_to_peer_in_room(
-                            ws_cmd_tx, &dm_room, &device, HavenMessage::FriendAccept,
+                            ws_cmd_tx, &dm_room, &device, friend_accept_msg(answered_at),
                         );
                         if olm.has_session(&device) {
                             hollow_log!("[HOLLOW-FRIENDS] Carried bundle from {device}: session already exists, skipping bootstrap");
@@ -730,22 +775,14 @@ pub(crate) async fn handle_accept_friend_request(
 
     let targets = friend_device_targets(&ws_room_peers, &peer_id_str, &master);
     for t in &targets {
-        send_message_to_peer(
-            &ws_cmd_tx, &ws_room_peers,
-            t, HavenMessage::FriendAccept,
-        );
+        send_message_to_peer_in_room(ws_cmd_tx, &dm_room, t, friend_accept_msg(answered_at));
     }
     // ALWAYS queue the acceptance for redelivery, keyed by the requester's MASTER.
-    // The requester's device can race the accept: it delivers the request, then
-    // leaves our inbox, and its DM-room join may not have populated our
-    // `ws_room_peers` yet at the instant we accept — so `friend_device_targets`
-    // can be EMPTY here even though the device shows up a beat later. It can also
-    // simply be offline by the time the human clicks Accept. Without a queue, the
-    // FriendAccept is lost and the requester never learns we accepted (their row
-    // stays "pending outgoing" forever — the exact bug). The pending-accepts drain
-    // on PeerJoined/RoomMembers re-sends it the moment the requester's device
-    // appears; FriendAccept is idempotent (the receiver just re-saves "accepted").
-    pending_friend_accepts.insert(master.clone(), now);
+    // The requester's device can race the accept: it delivers the request, leaves
+    // our inbox, and its DM-room join may not have populated `ws_room_peers` yet,
+    // so `friend_device_targets` can be EMPTY here. Without a queue the accept is
+    // lost and their row stays "pending outgoing" forever; the re-send is idempotent.
+    pending_friend_accepts.insert(master.clone(), answered_at);
     hollow_log!(
         "[HOLLOW-FRIENDS] Accepted {master}: sent FriendAccept to {} device(s) now, queued for redelivery",
         targets.len()
@@ -824,6 +861,7 @@ pub(crate) async fn handle_reject_friend_request(
                 let _ = store.migrate_friend_to_master(&peer_id_str, &master);
             }
             original_requested_at = store
+        let _ = store.save_setting(&removed_key(&master), "1");
                 .get_friend_row(&master)
                 .ok()
                 .flatten()

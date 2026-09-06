@@ -65,7 +65,7 @@ pub(crate) fn dm_room_code(peer_a: &str, peer_b: &str) -> String {
     sorted.sort();
     let combined = format!("dm-{}-{}", sorted[0], sorted[1]);
     let hash = Sha256::digest(combined.as_bytes());
-    hex::encode(&hash[..16]) // 128-bit / 32 hex chars
+    hex::encode(&hash[..16])
 }
 
 /// A discovered peer on the local network.
@@ -1915,7 +1915,14 @@ pub(crate) enum HavenMessage {
     },
 
     #[serde(rename = "friend_accept")]
-    FriendAccept,
+    FriendAccept {
+        /// Stamp of the request this accept answers. The receiver drops a stamped
+        /// accept older than its current request (a relay-parked or mailbox-replayed
+        /// copy after a remove and re-add); absent from pre-0.11.1 senders, which
+        /// stay honoured.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        requested_at: Option<i64>,
+    },
 
     #[serde(rename = "friend_reject")]
     FriendReject {
@@ -4430,7 +4437,7 @@ impl SyncCoordinator {
                 // for redundancy, unless we have very few peers.
                 let peers = &sync.available_peers;
                 let peer_count = peers.len();
-                let use_backup = peer_count >= 3; // Only use backup peers if we have enough
+                let use_backup = peer_count >= 3;
 
                 let mut assignments: HashMap<String, Vec<(String, i64)>> = HashMap::new();
 

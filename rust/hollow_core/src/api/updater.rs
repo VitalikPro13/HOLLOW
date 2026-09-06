@@ -1485,7 +1485,7 @@ org.freedesktop.portal.Desktop=talk
     fn write_exec(path: &Path, body: &str) {
         fs::write(path, body).expect("write fake binary");
         let mut perms = fs::metadata(path).expect("stat").permissions();
-        perms.set_mode(0o755);
+        perms.set_mode(0o700);
         fs::set_permissions(path, perms).expect("chmod");
     }
 

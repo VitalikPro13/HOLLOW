@@ -9719,14 +9719,170 @@ async fn readd_while_online_requires_fresh_consent() {
     drop(b);
 }
 
-// ---------------------------------------------------------------------------
-// The startup CANONICALIZATION sweep heals a friend row stranded under a DEVICE
-// id (the legacy temp-nickname-add shape). We pre-seed: (1) a friend row keyed
-// by the friend's DEVICE id, and (2) a persisted device list mapping that device
-// → its master. On start, the resolver warms from the device list and the sweep
-// folds the row to the master — no re-add, no network. This is what repairs an
-// existing broken DB on the next launch.
-// ---------------------------------------------------------------------------
+/// A copy of an accept that answered an EARLIER request (parked by the relay for a
+/// room the requester had left, replayed from a mailbox, or simply late) must neither
+/// recreate a friendship after its removal nor flip the request that follows the
+/// removal. An accept with no stamp is a pre-0.11.1 client and stays honoured while a
+/// request of ours is open.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests vs the global resolver
+async fn stale_friend_accept_replayed_after_readd_is_dropped() {
+    let _g = test_guard();
+    super::blocklist::clear_for_test();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+    const A_MASTER: u8 = 27;
+    const A_DEV: u8 = 128;
+    const B_MASTER: u8 = 129;
+    const B_DEV: u8 = 168;
+    let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER)).peer_id();
+    let b_master = NativeKeypair::from_secret_bytes(&seed_bytes(B_MASTER)).peer_id();
+
+    let mut a = spawn_node_with_friends(&relay, A_MASTER, A_DEV, &[]).await;
+    let mut b = spawn_node_with_friends(&relay, B_MASTER, B_DEV, &[]).await;
+    let a_dev = a.device_id.clone();
+    let b_dev = b.device_id.clone();
+    let dm_room = super::types::dm_room_code(&a_master, &b_master);
+    assert!(
+        wait_until(10, async || {
+            let on = relay.online_devices();
+            on.contains(&a_dev) && on.contains(&b_dev)
+        })
+        .await,
+        "both nodes must be connected"
+    );
+    drain_events(&mut a);
+    drain_events(&mut b);
+    relay.set_recording(&b_dev, true);
+
+    let accepted = |n: &TestNode, m: &str| {
+        friend_row(n, m).map(|(s, _)| s) == Some("accepted".to_string())
+    };
+    let is_accept = |f: &Vec<u8>| {
+        std::str::from_utf8(f).map(|s| s.contains("\"friend_accept\"")).unwrap_or(false)
+    };
+
+    a.cmd_tx
+        .send(NodeCommand::SendFriendRequest { peer_id: b_master.clone() })
+        .await
+        .unwrap();
+    let mut a_id_as_b_saw = None;
+    assert!(
+        wait_event(&mut b, std::time::Duration::from_secs(8), |ev| {
+            if let NetworkEvent::FriendRequestReceived { peer_id } = ev {
+                a_id_as_b_saw = Some(peer_id.clone());
+                true
+            } else {
+                false
+            }
+        })
+        .await,
+        "B must receive A's first request"
+    );
+    b.cmd_tx
+        .send(NodeCommand::AcceptFriendRequest { peer_id: a_id_as_b_saw.expect("A's id") })
+        .await
+        .unwrap();
+    assert!(
+        wait_until(10, async || accepted(&a, &b_master) && accepted(&b, &a_master)).await,
+        "precondition: both accepted, A {:?} B {:?}",
+        friend_row(&a, &b_master),
+        friend_row(&b, &a_master)
+    );
+    relay.set_recording(&b_dev, false);
+    let stale_accept = relay
+        .recorded_frames(&b_dev)
+        .into_iter()
+        .find(is_accept)
+        .expect("B's accept crossed the relay in the clear");
+    let first_stamp = friend_row_full(&a, &b_master).map(|(_, _, t)| t).expect("A's accepted row");
+    assert_eq!(
+        relay.buffered_frames(&a_dev).iter().filter(|f| is_accept(f)).count(),
+        0,
+        "the accept goes to the DM room A sits in, never to a room it already left"
+    );
+
+    a.cmd_tx
+        .send(NodeCommand::RemoveFriend { peer_id: b_master.clone() })
+        .await
+        .unwrap();
+    assert!(
+        wait_event(&mut b, std::time::Duration::from_secs(8), |ev| {
+            matches!(ev, NetworkEvent::FriendRemoved { .. })
+        })
+        .await,
+        "B must receive the FriendRemove"
+    );
+    assert!(
+        wait_until(5, async || {
+            friend_row(&a, &b_master).is_none() && friend_row(&b, &a_master).is_none()
+        })
+        .await,
+        "both rows must be gone after the removal"
+    );
+    drain_events(&mut a);
+    drain_events(&mut b);
+
+    relay.inject_direct(&dm_room, &b_dev, &a_dev, stale_accept.clone());
+    relay.inject_direct(&dm_room, &b_dev, &a_dev, br#"{"type":"friend_accept"}"#.to_vec());
+    assert!(
+        !wait_until(3, async || friend_row(&a, &b_master).is_some()).await,
+        "after a removal no copy of the old accept, stamped or bare, may recreate the friendship, A row {:?}",
+        friend_row(&a, &b_master)
+    );
+
+    a.cmd_tx
+        .send(NodeCommand::SendFriendRequest { peer_id: b_master.clone() })
+        .await
+        .unwrap();
+    assert!(
+        wait_event(&mut b, std::time::Duration::from_secs(8), |ev| {
+            matches!(ev, NetworkEvent::FriendRequestReceived { .. })
+        })
+        .await,
+        "B must surface the re-add as a new request"
+    );
+    let second_stamp = friend_row_full(&a, &b_master)
+        .map(|(_, _, t)| t)
+        .expect("A's fresh outgoing row");
+    assert!(
+        second_stamp > first_stamp,
+        "the re-add carries a newer stamp ({second_stamp} vs {first_stamp})"
+    );
+
+    relay.inject_direct(&dm_room, &b_dev, &a_dev, stale_accept);
+    let flipped = wait_until(3, async || accepted(&a, &b_master)).await;
+    assert!(
+        !flipped,
+        "a replayed accept for the FIRST request must not flip the re-add, A row {:?}",
+        friend_row(&a, &b_master)
+    );
+    assert_eq!(
+        friend_row(&a, &b_master),
+        Some(("pending".to_string(), "outgoing".to_string()))
+    );
+    assert_eq!(
+        friend_row(&b, &a_master),
+        Some(("pending".to_string(), "incoming".to_string())),
+        "B never consented"
+    );
+
+    relay.inject_direct(&dm_room, &b_dev, &a_dev, br#"{"type":"friend_accept"}"#.to_vec());
+    assert!(
+        wait_until(5, async || accepted(&a, &b_master)).await,
+        "an accept without a stamp is a pre-0.11.1 client and stays honoured"
+    );
+
+    drop(a);
+    drop(b);
+}
+
+// The startup CANONICALIZATION sweep heals a friend row stranded under a DEVICE id,
+// the legacy temp-nickname shape. With a persisted device list mapping that device
+// to its master, the resolver warms and the sweep folds the row to the master with
+// no re-add and no network, repairing an existing DB on the next launch.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)]

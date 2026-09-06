@@ -4834,12 +4834,26 @@ mod tests {
         // FriendAccept stays a UNIT variant. Turning it into a struct would change
         // the wire shape and an old client's bare accept would stop parsing.
         assert_eq!(
-            serde_json::to_string(&HavenMessage::FriendAccept).unwrap(),
+            serde_json::to_string(&HavenMessage::FriendAccept { requested_at: None }).unwrap(),
             r#"{"type":"friend_accept"}"#,
         );
         assert!(matches!(
             serde_json::from_str::<HavenMessage>(r#"{"type":"friend_accept"}"#).unwrap(),
-            HavenMessage::FriendAccept,
+            HavenMessage::FriendAccept { requested_at: None },
+        ));
+        assert_eq!(
+            serde_json::to_string(&HavenMessage::FriendAccept { requested_at: Some(7) }).unwrap(),
+            r#"{"type":"friend_accept","requested_at":7}"#,
+        );
+        #[derive(serde::Deserialize)]
+        #[serde(tag = "type")]
+        enum LegacyWire {
+            #[serde(rename = "friend_accept")]
+            FriendAccept,
+        }
+        assert!(matches!(
+            serde_json::from_str::<LegacyWire>(r#"{"type":"friend_accept","requested_at":7}"#).unwrap(),
+            LegacyWire::FriendAccept,
         ));
 
         // A NEW request round-trips its bundle intact.

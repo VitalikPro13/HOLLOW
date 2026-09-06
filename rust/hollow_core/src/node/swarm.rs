@@ -3380,6 +3380,7 @@ async fn run_event_loop(
                             if let Some(pool) = recovery_pool_state.as_ref() {
                                 if room == pool.room_code() && peer_id != local_peer_str && peer_id != device_peer_id {
                                     hollow_log!("[RECOVERY-POOL] Peer {peer_id} joined — sending our inventory");
+                                        && social::holds_accepted_friend(&db_path, &db_passphrase, &joined_master)
                                     if let Some(our_inv) = pool.members.get(&local_peer_str) {
                                         let welcome = HavenMessage::RecoveryWelcome {
                                             manifest_ids: our_inv.manifest_ids.clone(),
@@ -3566,14 +3567,15 @@ async fn run_event_loop(
                                 // it fires at most once per friend per session.
                                 {
                                     let joined_master = super::resolver::resolve(&peer_id);
-                                    if (pending_friend_accepts.remove(&joined_master).is_some()
-                                        || pending_friend_accepts.remove(&peer_id).is_some())
+                                    let queued = pending_friend_accepts
+                                        .remove(&joined_master)
+                                        .or_else(|| pending_friend_accepts.remove(&peer_id));
+                                    if let Some(stamp) = queued
                                         && !super::blocklist::is_blocked(&peer_id)
                                     {
                                         hollow_log!("[HOLLOW-FRIENDS] Peer {peer_id} appeared (master {joined_master}), (re)sending FriendAccept");
-                                        send_message_to_peer(
-                                            &ws_cmd_tx, &ws_room_peers,
-                                            &peer_id, HavenMessage::FriendAccept,
+                                        social::send_friend_accept(
+                                            &ws_cmd_tx, &local_peer_str, &joined_master, &peer_id, stamp,
                                         );
                                     }
                                 }
@@ -4208,6 +4210,7 @@ async fn run_event_loop(
                                     social::send_own_profile_to_peer(
                                         &ws_cmd_tx, &ws_room_peers,
                                         &local_peer_str, &master_keypair, &device_peer_id, pid_str,
+                                        && social::holds_accepted_friend(&db_path, &db_passphrase, &joined_master)
                                         is_invisible,
                                         &db_path, &db_passphrase,
                                     );
@@ -4478,14 +4481,15 @@ async fn run_event_loop(
                                         }
                                     }
                                     // (Re)deliver a queued FriendAccept to the requester.
-                                    if (pending_friend_accepts.remove(&joined_master).is_some()
-                                        || pending_friend_accepts.remove(&pid_str.to_string()).is_some())
+                                    let queued = pending_friend_accepts
+                                        .remove(&joined_master)
+                                        .or_else(|| pending_friend_accepts.remove(&pid_str.to_string()));
+                                    if let Some(stamp) = queued
                                         && !super::blocklist::is_blocked(pid_str)
                                     {
                                         hollow_log!("[HOLLOW-FRIENDS] Peer {pid_str} appeared in RoomMembers (master {joined_master}), (re)sending FriendAccept");
-                                        send_message_to_peer(
-                                            &ws_cmd_tx, &ws_room_peers,
-                                            pid_str, HavenMessage::FriendAccept,
+                                        social::send_friend_accept(
+                                            &ws_cmd_tx, &local_peer_str, &joined_master, pid_str, stamp,
                                         );
                                     }
                                 }
@@ -12227,6 +12231,9 @@ async fn handle_incoming_request(
                                 // Only attempt recovery if we're still a member (skip if banned/removed).
                                 // Members are master-keyed; our master is the key. For a
                                 // subgroup we must also still QUALIFY for the channel.
+                    if master != peer_str {
+                        let _ = store.migrate_friend_to_master(peer_str, &master);
+                    }
                                 let still_eligible = state.members.contains_key(&local_peer)
                                     && match &msg_channel_id {
                                         Some(cid) => state.can_see_channel(&local_peer, cid),
@@ -12239,6 +12246,24 @@ async fn handle_incoming_request(
                                     // send to one of its online DEVICES. Subgroup uses the
                                     // qualifying-member candidate set.
                                     let coordinator = match &msg_channel_id {
+                    // An accept answers a request of ours. With a row, a stamp older than
+                    // it is a relay-parked or mailbox-replayed copy, not consent for the
+                    // re-add (a bare stamp is a pre-0.11.1 sender and passes). With no row
+                    // after a removal, every copy is stale, stamped or not.
+                    match store.get_friend_row(&master).ok().flatten() {
+                        Some((_, _, stored)) => {
+                            if let Some(stamp) = requested_at && stamp < stored {
+                                hollow_log!("[HOLLOW-FRIENDS] Ignoring stale FriendAccept from {peer_str}: answers request {stamp}, current is {stored}");
+                                return;
+                            }
+                        }
+                        None => {
+                            if store.load_setting(&social::removed_key(&master)).ok().flatten().is_some() {
+                                hollow_log!("[HOLLOW-FRIENDS] Ignoring FriendAccept from {peer_str}: no open request for {master} since we removed them");
+                                return;
+                            }
+                        }
+                    }
                                         Some(cid) => crate::node::crypto_handler::elect_subgroup_coordinator(
                                             state, cid, &local_peer, ws_room_peers,
                                         ).filter(|c| c != &local_peer),
@@ -12378,6 +12403,7 @@ async fn handle_incoming_request(
                             .filter(|m| !super::resolver::same_identity(peer_str, m))
                             .filter(|m| m.as_str() == local_peer_str || peer_is_reachable(&ws_room_peers, m))
                             .cloned()
+                    let _ = store.save_setting(&social::removed_key(&master), "1");
                             .collect();
                         masters.sort();
                         masters.dedup();
@@ -12985,9 +13011,6 @@ async fn handle_incoming_request(
             {
                 if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
                     let master = super::resolver::resolve(&peer_str);
-                    if master != peer_str {
-                        let _ = store.migrate_friend_to_master(&peer_str, &master);
-                    }
                     let _ = store.save_friend(&master, "pending", "incoming", requested_at);
                 }
             }
@@ -13033,7 +13056,7 @@ async fn handle_incoming_request(
             }).await;
         }
 
-        HavenMessage::FriendAccept => {
+        HavenMessage::FriendAccept { requested_at } => {
 
             // Update our outgoing request to accepted, keyed by the friend's MASTER.
             // The accepter's `peer_str` may be a device id (multi-device / nickname);
