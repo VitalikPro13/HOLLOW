@@ -228,6 +228,13 @@ target's coordinates before and after are not comparable — re-resolve, do not 
 6. **The Accept button only exists on the INCOMING tab.** Waiting for it from the Friends tab is a
    30-second timeout that reads exactly like a delivery failure, while the provider dump says
    `pending (incoming)` the whole time. Read the dump before believing the timeout.
+9. **Two `hover` steps in one journey killed the instance (fixed 2026-09-06).** `_hover` cached
+   its mouse gesture but called `addPointer` on EVERY hover, so the second hover added the same
+   pointer twice and `MouseTracker` asserted (`(event is PointerAddedEvent) == (lastEvent is
+   PointerRemovedEvent)`), which ends the process with nothing in the app logs. The pointer is now
+   added once and only moved afterwards. Related: the hover bar is an `OverlayEntry` that hides
+   60 ms after the row loses the mouse, so park the pointer somewhere harmless (the composer hint)
+   before tapping a control the bar could sit over.
 
 ## What the dump adds for a fleet
 
@@ -327,6 +334,22 @@ rather than trust that PowerShell will reject a bad flag on its own: it will not
 identities before onboarding, same as the friend journeys: the relay's availability rings hold this
 server's traffic for three days under a STABLE identity, so a reused fixture can be served an EARLIER
 run's parked join or resolution.
+
+## fleet_file_card_states.ps1 (honest file card states, 2026-09-05/06)
+
+Two peers, fresh identities, non-image 600 KB `.bin` files (no inline-bytes path, no thumbnail).
+G1 friends + DM both ways; G2 b returns alone to a DM file, taps Download, the card names the
+offline sender, a returns and the bytes land with NO tap (the queued ask self-heals); G2b hover the
+row, `Stop waiting for this file` in the bar, the card is back to Download, ask again, re-queued;
+G3 a's own copy of file two is deleted from disk while a is closed, a returns, b's card reads
+`probe-a no longer has this file` (the chat-open sweep asks on its own under the default
+auto-download threshold, so the caption can appear BEFORE any tap: every download step waits for
+the control OR the caption); G4 the same round trip in #general with the channel wording; C the
+owner deletes the server. Files land on disk as `{file_id}.{ext}`, so copies are matched by
+size + SHA-256, never by name (the sender's `.stream_send_*.tmp` ciphertext has the right size and
+the wrong bytes). "Nothing to delete" throws, because a holder that never held is not the case
+under test. State 4 (retention) is not fleet-drivable (30-minute sweep, day-scale windows);
+the harness and the widget test cover it. Memory `project_file_card_honest_states`.
 
 ## Honest scope
 

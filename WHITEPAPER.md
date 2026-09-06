@@ -565,6 +565,14 @@ Automatic downloading is a receiver-side policy (a global size threshold with pe
 
 As an optimization, a device may advertise its effective threshold for a conversation to its DM peers so that a compliant sender skips transmitting bytes the receiver would discard. This advertisement is a single size value carried in a plaintext control message (comparable to a typing indicator); it contains no content and is advisory only: enforcement never depends on it, and a sender that ignores it merely wastes its own bandwidth against the receiver's local policy. Voice messages, being small and conversational, are exempt from the policy on both sides.
 
+### 7.5 Re-requests and the Negative Answer
+
+A message can arrive long before its bytes: the metadata travels through the encrypted channel and is buffered for offline members, while the bytes are only ever pulled from a device that holds them. A receiver that lacks the bytes asks one holder at a time (every holder re-encrypts its copy under a fresh per-transfer key, so parallel answers could not be decrypted against one another), and keeps the request queued across reconnects: a holder that was unreachable when the request was made is asked the moment it appears.
+
+A holder that is entitled to answer but cannot serve the bytes (it evicted them under its storage cap, cleared its downloads, or its retention policy removed them) says so explicitly instead of staying silent, so the requester can move to the next holder or report the true state. This negative answer is sent only after the same entitlement check the bytes themselves require, and only for a file the responder knows: a blocked, unknown or non-entitled requester receives silence either way, because answering "unknown" would let an outsider distinguish a device that holds a reference to a file from one that does not.
+
+On the requesting side a negative answer is accepted only from a device this request was actually sent to; an unsolicited one changes nothing. A claim that the file expired under retention is verified against the requester's own copy of the server's retention setting and the file's own age before the requester marks its own record; otherwise it is treated as an ordinary miss. A member therefore cannot expire another member's file by asserting it. The user-facing result is a card that states which case applies (a request in flight, no reachable holder, a holder that no longer has the file, or a retention removal) rather than a download control that silently does nothing.
+
 ---
 
 ## 8. Hollow Share (Private P2P File Distribution)

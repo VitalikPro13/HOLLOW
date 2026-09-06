@@ -850,6 +850,16 @@ Future<void> requestFileFromPeer({
   chunks: chunks,
 );
 
+/// Stop waiting for a file: drop the queued ask and its explicit-pull receipt.
+///
+/// The receipt goes with the ask on purpose. An answer already in flight then
+/// arrives with no receipt to bypass anything, so the size cap and the
+/// auto-download gate judge it exactly as they judge an unsolicited push,
+/// which is what "stop waiting" means. Nothing is emitted: the card clears its
+/// own state on the tap, and an event here would race it.
+Future<void> cancelFileRequest({required String fileId}) =>
+    RustLib.instance.api.crateApiNetworkCancelFileRequest(fileId: fileId);
+
 /// Convert a WebP image file to another format (PNG/JPEG).
 /// Used for "Save As" functionality.
 Future<Uint8List> convertImageFormat({
@@ -2039,6 +2049,15 @@ sealed class NetworkEvent with _$NetworkEvent {
     required String fileId,
     required String error,
   }) = NetworkEvent_FileFailed;
+
+  /// Honest file-card state for a file whose bytes are not on disk.
+  /// `state`: "requesting" | "waiting" | "gone" | "expired". `peer_id` is the
+  /// MASTER identity the state is about ("" when none).
+  const factory NetworkEvent.fileAvailability({
+    required String fileId,
+    required String state,
+    required String peerId,
+  }) = NetworkEvent_FileAvailability;
 
   /// Time-limited TURN credentials from the relay (over the authed WS).
   const factory NetworkEvent.turnCredentials({

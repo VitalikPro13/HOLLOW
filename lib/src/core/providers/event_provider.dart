@@ -1288,6 +1288,22 @@ class EventStreamNotifier extends Notifier<bool> {
           ref.read(fileTransferProvider.notifier).onFileFailed(fileId, error);
         }
 
+      // Honest file card states (tmp.txt item 1): why the bytes are not here
+      // yet, so the card can say it instead of offering a button that would
+      // do nothing.
+      case NetworkEvent_FileAvailability(
+            :final fileId, :final state, :final peerId):
+        debugPrint('[HOLLOW] File availability: $fileId — $state ($peerId)');
+        ref
+            .read(fileTransferProvider.notifier)
+            .onFileAvailability(fileId, state, peerId);
+        if (state == FileAvailabilityState.expired) {
+          // Rust has stamped expired_at on our own row; reload so the message
+          // re-renders from the DB as the expired card rather than a caption
+          // that a rebuild could lose.
+          _reloadChatForFile(fileId);
+        }
+
       // -- Vault shard events (Phase 4) --
       case NetworkEvent_ShardStored(:final serverId, :final contentId,
             fromPeer: _):

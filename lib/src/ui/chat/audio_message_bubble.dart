@@ -17,6 +17,7 @@ import 'package:hollow/src/core/services/audio_transcode_service.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
+import 'package:hollow/src/ui/chat/file_card_status.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 
@@ -39,7 +40,17 @@ class AudioMessageBubble extends ConsumerStatefulWidget {
   /// that triggers this callback (same flow as the image placeholder).
   final VoidCallback? onDownload;
 
-  const AudioMessageBubble({super.key, required this.attachment, this.onDownload});
+  /// Why the bytes are not here yet (tmp.txt item 1): the caption the meta row
+  /// carries, and what the leading control does. Defaults to the plain
+  /// Download button, which is what "nothing known" has always meant.
+  final FileCardStatus status;
+
+  const AudioMessageBubble({
+    super.key,
+    required this.attachment,
+    this.onDownload,
+    this.status = const FileCardStatus(control: FileCardControl.download),
+  });
 
   @override
   ConsumerState<AudioMessageBubble> createState() =>
@@ -406,11 +417,18 @@ class _AudioMessageBubbleState extends ConsumerState<AudioMessageBubble> {
     final canPlay = _canPlay() && isComplete;
     // Undownloaded and idle (issue #41 carry-over): the play button would be
     // a dead dimmed control — make it a live download button instead.
-    final showDownload = !canPlay &&
-        !isComplete &&
-        !isDownloading &&
-        vaultPhase == null &&
-        widget.onDownload != null;
+    final idle = !canPlay && !isComplete && !isDownloading && vaultPhase == null;
+    final control = widget.status.control;
+    final showDownload = idle &&
+        widget.onDownload != null &&
+        (control == FileCardControl.download ||
+            control == FileCardControl.retry);
+    // A request is out: the button's footprint holds a spinner and takes no
+    // taps. Nothing to press at all when the ask is queued or dead — the
+    // caption below says why (tmp.txt item 1).
+    final showBusy = idle && control == FileCardControl.busy;
+    final showBlocked = idle && control == FileCardControl.none;
+    final caption = idle ? widget.status.caption : null;
     final durationText = _probedDurationMs != null
         ? _formatDuration(_probedDurationMs!)
         : null;
@@ -418,7 +436,13 @@ class _AudioMessageBubbleState extends ConsumerState<AudioMessageBubble> {
     return Row(
       children: [
         // Play button (or download button while the bytes aren't local).
-        if (showDownload)
+        if (showBusy || showBlocked)
+          _StatusCircle(
+            busy: showBusy,
+            color: showBusy ? hollow.accent : hollow.elevated,
+            iconColor: hollow.textSecondary,
+          )
+        else if (showDownload)
           _PlayButton(
             icon: LucideIcons.download,
             color: hollow.accent,
@@ -459,7 +483,7 @@ class _AudioMessageBubbleState extends ConsumerState<AudioMessageBubble> {
               const SizedBox(height: HollowSpacing.xxs),
               Row(
                 children: [
-                  if (durationText != null) ...[
+                  if (durationText != null && caption == null) ...[
                     Text(
                       durationText,
                       style: HollowTypography.caption.copyWith(
@@ -475,17 +499,22 @@ class _AudioMessageBubbleState extends ConsumerState<AudioMessageBubble> {
                       ),
                     ),
                   ],
-                  Text(
-                    vaultPhase != null
-                        ? '$vaultPhase  ${widget.attachment.formattedSize}'
-                        : isDownloading && bytesReceived > 0
-                            ? '${_formatBytes(bytesReceived)} / ${widget.attachment.formattedSize}'
-                            : isDownloading
-                                ? 'Downloading... ${widget.attachment.formattedSize}'
-                                : widget.attachment.formattedSize,
-                    style: HollowTypography.caption.copyWith(
-                      color: hollow.textSecondary,
-                      fontSize: 11,
+                  // The caption is the card's answer for a tap, so it takes
+                  // the size line rather than crowding in beside it.
+                  Flexible(
+                    child: Text(
+                      caption ??
+                          (vaultPhase != null
+                              ? '$vaultPhase  ${widget.attachment.formattedSize}'
+                              : isDownloading && bytesReceived > 0
+                                  ? '${_formatBytes(bytesReceived)} / ${widget.attachment.formattedSize}'
+                                  : isDownloading
+                                      ? 'Downloading... ${widget.attachment.formattedSize}'
+                                      : widget.attachment.formattedSize),
+                      style: HollowTypography.caption.copyWith(
+                        color: hollow.textSecondary,
+                        fontSize: 11,
+                      ),
                     ),
                   ),
                 ],
@@ -616,6 +645,44 @@ class _AudioMessageBubbleState extends ConsumerState<AudioMessageBubble> {
     if (b < 1024) return '$b B';
     if (b < 1024 * 1024) return '${(b / 1024).toStringAsFixed(1)} KB';
     return '${(b / (1024 * 1024)).toStringAsFixed(1)} MB';
+  }
+}
+
+/// The play/download circle's non-interactive twin (tmp.txt item 1): a
+/// spinner while a request is out, a cloud-off glyph when there is nothing to
+/// press. Not a [HollowPressable] on purpose — a control that takes no taps
+/// must not be offered to a screen reader as a button either.
+class _StatusCircle extends StatelessWidget {
+  final bool busy;
+  final Color color;
+  final Color iconColor;
+
+  const _StatusCircle({
+    required this.busy,
+    required this.color,
+    required this.iconColor,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: 36,
+      height: 36,
+      decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+      child: Center(
+        child: busy
+            ? SizedBox(
+                width: 16,
+                height: 16,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2,
+                  valueColor: const AlwaysStoppedAnimation(Colors.white),
+                  backgroundColor: Colors.white.withValues(alpha: 0.24),
+                ),
+              )
+            : Icon(LucideIcons.cloudOff, color: iconColor, size: 16),
+      ),
+    );
   }
 }
 

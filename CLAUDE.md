@@ -81,6 +81,7 @@ All UI = custom Hollow widgets, no Material defaults (`src/ui/components/`): Hol
 - **Storage & profiles (#47):** data root `dirs::data_dir()/hollow` (override `set_data_dir()`/`HOLLOW_DATA_DIR`); desktop precedence env > `--portable` > profiles.json PIN > marker > `hollow_data` WITH identity data (NEVER `data`); keychain = PER-PROFILE slots. `project_portable_mode`, `project_issue47_sframe_keystore_fix`.
 - **CRITICAL: self-restart ONLY via `relaunchApp()`** (Rust waiter — anything Dart spawns dies pre-Flutter). `project_profile_switcher_issue47`.
 - **CRITICAL: auto-download gate (#41):** pull paths gated in DART; pushes can't be cancelled (discard + `declined` pin); senders pre-negotiate via `auto_dl_pref`; VOICE exempt; RequestFile receipts bypass cap + gate, NEVER remove; `accept_header_thumb` = the ONE thumb filter. `project_autodownload_gate`.
+- **CRITICAL: file pulls = `node/file_asks.rs` (asset-rail PendingAsk shape):** ONE holder at a time, EVERY dispatch re-stamps the receipt; `file_unavail` answered ONLY behind the same gate as the bytes (silence for unknown/not entitled); ingest = asked-set HARD DROP, `expired` verified LOCALLY before `mark_file_expired`. Card wording = ONE helper `file_card_status.dart`; hover bar/menu/mobile sheet mirror it via `fileBarAction` (stop = `cancel_file_request`, drops ask + receipt). `project_file_card_honest_states`.
 - **CRITICAL: bundled ffmpeg is MINIMAL:** test flags against `vendor/ffmpeg`'s binary, NEVER system ffmpeg. `project_ffmpeg_minimal_build`.
 
 ## Coding Conventions

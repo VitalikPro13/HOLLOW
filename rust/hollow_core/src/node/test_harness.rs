@@ -3689,6 +3689,1188 @@ async fn dm_voice_message_bypasses_auto_download_gate() {
     super::file_handler::set_auto_download_conf(169, std::collections::HashMap::new());
 }
 
+// ---------------------------------------------------------------------------
+// Honest file card states (tmp.txt item 1). A file whose bytes are not on disk
+// used to show a Download button that could silently do nothing: a holder that
+// no longer had the bytes stayed SILENT, so the asker could not tell "offline"
+// from "gone". `HavenMessage::FileUnavailable` is the negative answer, and
+// `node/file_asks.rs` is the asker-side pending table that rotates on it and
+// tells the card which of the four states it is in.
+// ---------------------------------------------------------------------------
+
+/// State 3, both shapes of "I lost the bytes". The holder still has the ROW
+/// (so it is entitled to answer at all) but cannot serve: first its disk file
+/// is deleted underneath it (the row's `disk_path` still points at nothing,
+/// which is what an eviction between two sweeps looks like), then the row's
+/// path is nulled the way "clear cached file bytes" leaves it. Both must come
+/// back as `gone`, and neither may complete.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn dm_file_request_gets_honest_gone_answer_when_holder_lost_bytes() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    const A_MASTER: u8 = 203;
+    const B_MASTER: u8 = 204;
+    let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER)).peer_id();
+    let b_master = NativeKeypair::from_secret_bytes(&seed_bytes(B_MASTER)).peer_id();
+
+    let mut a = spawn_node_with_friends(&relay, A_MASTER, A_MASTER, &[&b_master]).await;
+    sleep_ms(1200).await;
+    let mut b = spawn_node_with_friends(&relay, B_MASTER, B_MASTER, &[&a_master]).await;
+    expect_dm_pair_ready(&relay, &a, &b, 15).await;
+    // Residual, and it earns its place: a file send PRE-NEGOTIATES the
+    // recipient's auto-download preference and that advert has no live probe.
+    // See dm_file_transfer_completes_and_decrypts for the full note.
+    sleep_ms(1000).await;
+    drain_events(&mut a);
+    drain_events(&mut b);
+
+    // Auto-download OFF for this DM: B keeps the card's metadata row and no
+    // bytes, which is the only way a manual Download can be under test.
+    super::file_handler::set_auto_download_conf(
+        169,
+        std::collections::HashMap::from([(format!("dm:{a_master}"), false)]),
+    );
+
+    // -- Shape 1: the bytes vanish from disk, the row still names the path --
+    let one = global_tmp.path().join("lost_one.bin");
+    std::fs::write(&one, b"the holder will lose these bytes").expect("write src one");
+    a.cmd_tx
+        .send(NodeCommand::SendFile(Box::new(super::types::SendFilePayload {
+            peer_id: Some(b.master_id.clone()),
+            server_id: None,
+            channel_id: None,
+            file_path: one.to_str().unwrap().to_string(),
+            message_id: "lost-one".to_string(),
+            message_text: String::new(),
+            vthumb: None,
+            override_width: None,
+            override_height: None,
+            share_ref: None,
+            voice: false,
+            poster: None,
+        })))
+        .await
+        .unwrap();
+    let mut fid_one = None;
+    let got = wait_event(&mut b, std::time::Duration::from_secs(8), |ev| {
+        if let NetworkEvent::FileHeaderReceived { file_id, file_name, .. } = ev
+            && file_name.starts_with("lost_one")
+        {
+            fid_one = Some(file_id.clone());
+            return true;
+        }
+        false
+    })
+    .await;
+    assert!(got, "B must get the gated card for file one");
+    let fid_one = fid_one.expect("file one id");
+
+    // The sender's own copy disappears (a storage-cap eviction between two
+    // `reset_stale_file_paths` passes leaves exactly this: a row that still
+    // names a path and no file behind it).
+    let a_disk = a
+        .file_meta(&fid_one)
+        .and_then(|m| m.disk_path)
+        .expect("A holds file one on disk");
+    std::fs::remove_file(&a_disk).expect("delete A's copy of file one");
+    assert!(
+        b.file_meta(&fid_one).map(|m| m.completed_at.is_none()).unwrap_or(true),
+        "B must not hold file one's bytes"
+    );
+    drain_events(&mut b);
+
+    b.cmd_tx
+        .send(NodeCommand::RequestFile {
+            file_id: fid_one.clone(),
+            peer_id: a_master.clone(),
+            chunks: Vec::new(),
+        })
+        .await
+        .unwrap();
+    let mut completed_one = false;
+    let honest_one = wait_event(&mut b, std::time::Duration::from_secs(3), |ev| {
+        if matches!(ev, NetworkEvent::FileCompleted { file_id, .. } if *file_id == fid_one) {
+            completed_one = true;
+        }
+        matches!(
+            ev,
+            NetworkEvent::FileAvailability { file_id, state, peer_id }
+                if *file_id == fid_one && state == "gone" && *peer_id == a_master
+        )
+    })
+    .await;
+    assert!(
+        honest_one,
+        "a holder whose disk file vanished must answer gone, naming the holder"
+    );
+    assert!(!completed_one, "nothing may complete when the bytes are gone");
+
+    // -- Shape 2: the row's path is NULL (downloads cleared) --
+    let two = global_tmp.path().join("lost_two.bin");
+    std::fs::write(&two, b"and these too").expect("write src two");
+    drain_events(&mut b);
+    a.cmd_tx
+        .send(NodeCommand::SendFile(Box::new(super::types::SendFilePayload {
+            peer_id: Some(b.master_id.clone()),
+            server_id: None,
+            channel_id: None,
+            file_path: two.to_str().unwrap().to_string(),
+            message_id: "lost-two".to_string(),
+            message_text: String::new(),
+            vthumb: None,
+            override_width: None,
+            override_height: None,
+            share_ref: None,
+            voice: false,
+            poster: None,
+        })))
+        .await
+        .unwrap();
+    let mut fid_two = None;
+    let got = wait_event(&mut b, std::time::Duration::from_secs(8), |ev| {
+        if let NetworkEvent::FileHeaderReceived { file_id, file_name, .. } = ev
+            && file_name.starts_with("lost_two")
+        {
+            fid_two = Some(file_id.clone());
+            return true;
+        }
+        false
+    })
+    .await;
+    assert!(got, "B must get the gated card for file two");
+    let fid_two = fid_two.expect("file two id");
+
+    // "Clear all cached file bytes" on the holder: rows survive, paths do not.
+    a.store().null_disk_path_all().expect("clear A's cached bytes");
+    drain_events(&mut b);
+
+    b.cmd_tx
+        .send(NodeCommand::RequestFile {
+            file_id: fid_two.clone(),
+            peer_id: a_master.clone(),
+            chunks: Vec::new(),
+        })
+        .await
+        .unwrap();
+    let mut completed_two = false;
+    let honest_two = wait_event(&mut b, std::time::Duration::from_secs(3), |ev| {
+        if matches!(ev, NetworkEvent::FileCompleted { file_id, .. } if *file_id == fid_two) {
+            completed_two = true;
+        }
+        matches!(
+            ev,
+            NetworkEvent::FileAvailability { file_id, state, peer_id }
+                if *file_id == fid_two && state == "gone" && *peer_id == a_master
+        )
+    })
+    .await;
+    assert!(
+        honest_two,
+        "a holder whose row lost its path must answer gone, not stay silent"
+    );
+    assert!(!completed_two, "nothing may complete when the path is gone");
+
+    super::file_handler::set_auto_download_conf(169, std::collections::HashMap::new());
+    drop(a);
+    drop(b);
+}
+
+/// State 2, and the whole point of the pending table: the only holder is
+/// offline when the user taps Download, so the card says so and the request is
+/// QUEUED. The asker's own socket then dies and comes back (which is what
+/// clears `requested_file_receipts`), the holder returns, and the queued ask
+/// fires on the fresh room roster with NO further command from the user. It
+/// can only complete if the retry re-stamped the explicit-pull receipt: the
+/// conversation is gated, so an unstamped answer would be declined.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn dm_file_request_waits_for_offline_holder_then_fetches_on_return() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    const A_MASTER: u8 = 205;
+    const B_MASTER: u8 = 206;
+    let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER)).peer_id();
+    let b_master = NativeKeypair::from_secret_bytes(&seed_bytes(B_MASTER)).peer_id();
+
+    let mut a = spawn_node_with_friends(&relay, A_MASTER, A_MASTER, &[&b_master]).await;
+    sleep_ms(1200).await;
+    let mut b = spawn_node_with_friends(&relay, B_MASTER, B_MASTER, &[&a_master]).await;
+    expect_dm_pair_ready(&relay, &a, &b, 15).await;
+    sleep_ms(1000).await; // auto-download advert settle; see the note above
+    drain_events(&mut a);
+    drain_events(&mut b);
+
+    super::file_handler::set_auto_download_conf(
+        169,
+        std::collections::HashMap::from([(format!("dm:{a_master}"), false)]),
+    );
+
+    let src = global_tmp.path().join("waiting.bin");
+    let contents: &[u8] = b"these bytes arrive when the holder comes back";
+    std::fs::write(&src, contents).expect("write src file");
+    a.cmd_tx
+        .send(NodeCommand::SendFile(Box::new(super::types::SendFilePayload {
+            peer_id: Some(b.master_id.clone()),
+            server_id: None,
+            channel_id: None,
+            file_path: src.to_str().unwrap().to_string(),
+            message_id: "waiting-file".to_string(),
+            message_text: String::new(),
+            vthumb: None,
+            override_width: None,
+            override_height: None,
+            share_ref: None,
+            voice: false,
+            poster: None,
+        })))
+        .await
+        .unwrap();
+    let mut got_fid = None;
+    let got = wait_event(&mut b, std::time::Duration::from_secs(8), |ev| {
+        if let NetworkEvent::FileHeaderReceived { file_id, file_name, .. } = ev
+            && file_name.starts_with("waiting")
+        {
+            got_fid = Some(file_id.clone());
+            return true;
+        }
+        false
+    })
+    .await;
+    assert!(got, "B must get the gated card");
+    let fid = got_fid.expect("file id from header");
+    assert!(
+        b.file_meta(&fid).map(|m| m.completed_at.is_none()).unwrap_or(true),
+        "B must hold the row and none of the bytes"
+    );
+
+    // The holder leaves. Wait on B's OWN view of the roster, not the relay's:
+    // an ask dispatched against a stale room table would go to a dead socket.
+    let dm_room = super::types::dm_room_code(&a_master, &b_master);
+    let a_device = a.device_id.clone();
+    go_offline(&relay, &a, &dm_room).await;
+    let b_saw_it = wait_event(&mut b, std::time::Duration::from_secs(10), |ev| {
+        matches!(ev, NetworkEvent::PeerDisconnected { peer_id } if *peer_id == a_device)
+    })
+    .await;
+    assert!(b_saw_it, "B's own presence view must lose A before the ask");
+    drain_events(&mut b);
+
+    b.cmd_tx
+        .send(NodeCommand::RequestFile {
+            file_id: fid.clone(),
+            peer_id: a_master.clone(),
+            chunks: Vec::new(),
+        })
+        .await
+        .unwrap();
+    let waiting = wait_event(&mut b, std::time::Duration::from_secs(5), |ev| {
+        matches!(
+            ev,
+            NetworkEvent::FileAvailability { file_id, state, peer_id }
+                if *file_id == fid && state == "waiting" && *peer_id == a_master
+        )
+    })
+    .await;
+    assert!(waiting, "an unreachable holder must produce the waiting state");
+
+    // B's socket dies and comes back. This is what makes the retry's receipt
+    // re-stamp load-bearing: `requested_file_receipts` is cleared on
+    // Disconnected, so the queued ask has to arm the gate again by itself.
+    relay.set_online(&b.device_id, false);
+    assert!(
+        wait_until(10, async || !relay.online_devices().contains(&b.device_id)).await,
+        "B must be off the relay"
+    );
+    relay.set_online(&a.device_id, true);
+    assert!(
+        wait_until(15, async || relay.room_devices(&dm_room).contains(&a_device)).await,
+        "A must be back in the DM room"
+    );
+    relay.set_online(&b.device_id, true);
+
+    // No further command: the queued ask fires on the fresh roster alone.
+    let done = wait_event(&mut b, std::time::Duration::from_secs(30), |ev| {
+        matches!(ev, NetworkEvent::FileCompleted { file_id, .. } if *file_id == fid)
+    })
+    .await;
+    assert!(done, "the queued ask must fetch the file when the holder returns");
+    let meta = b.file_meta(&fid).expect("B persisted the files row");
+    let disk = meta.disk_path.expect("completed file has a disk path");
+    assert_eq!(
+        std::fs::read(&disk).expect("read the received file"),
+        contents,
+        "the queued fetch must decrypt to the original contents"
+    );
+
+    super::file_handler::set_auto_download_conf(169, std::collections::HashMap::new());
+    drop(a);
+    drop(b);
+}
+
+/// The asked-set rule, the file-ask twin of the asset rail's: a device we never
+/// asked cannot steer our walk or delete our ask by volunteering a miss. C is a
+/// friend of B (so it has a room and the frame really does route), was never
+/// asked anything, and says "I don't have it" about a file B is waiting on.
+/// Nothing may move, and the ask must still find its own holder.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn file_unavailable_from_unasked_device_changes_nothing() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    const A_MASTER: u8 = 207;
+    const B_MASTER: u8 = 208;
+    const C_MASTER: u8 = 209;
+    let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER)).peer_id();
+    let b_master = NativeKeypair::from_secret_bytes(&seed_bytes(B_MASTER)).peer_id();
+    let c_master = NativeKeypair::from_secret_bytes(&seed_bytes(C_MASTER)).peer_id();
+
+    let mut a = spawn_node_with_friends(&relay, A_MASTER, A_MASTER, &[&b_master]).await;
+    sleep_ms(1200).await;
+    let mut b = spawn_node_with_friends(&relay, B_MASTER, B_MASTER, &[&a_master, &c_master]).await;
+    let c = spawn_node_with_friends(&relay, C_MASTER, C_MASTER, &[&b_master]).await;
+    expect_dm_pair_ready(&relay, &a, &b, 15).await;
+    expect_dm_pair_ready(&relay, &c, &b, 15).await;
+    sleep_ms(1000).await; // auto-download advert settle; see the note above
+    drain_events(&mut a);
+    drain_events(&mut b);
+
+    super::file_handler::set_auto_download_conf(
+        169,
+        std::collections::HashMap::from([(format!("dm:{a_master}"), false)]),
+    );
+
+    let src = global_tmp.path().join("unasked.bin");
+    let contents: &[u8] = b"only A ever holds these bytes";
+    std::fs::write(&src, contents).expect("write src file");
+    a.cmd_tx
+        .send(NodeCommand::SendFile(Box::new(super::types::SendFilePayload {
+            peer_id: Some(b.master_id.clone()),
+            server_id: None,
+            channel_id: None,
+            file_path: src.to_str().unwrap().to_string(),
+            message_id: "unasked-file".to_string(),
+            message_text: String::new(),
+            vthumb: None,
+            override_width: None,
+            override_height: None,
+            share_ref: None,
+            voice: false,
+            poster: None,
+        })))
+        .await
+        .unwrap();
+    let mut got_fid = None;
+    let got = wait_event(&mut b, std::time::Duration::from_secs(8), |ev| {
+        if let NetworkEvent::FileHeaderReceived { file_id, file_name, .. } = ev
+            && file_name.starts_with("unasked")
+        {
+            got_fid = Some(file_id.clone());
+            return true;
+        }
+        false
+    })
+    .await;
+    assert!(got, "B must get the gated card");
+    let fid = got_fid.expect("file id from header");
+
+    let dm_room = super::types::dm_room_code(&a_master, &b_master);
+    let a_device = a.device_id.clone();
+    go_offline(&relay, &a, &dm_room).await;
+    let b_saw_it = wait_event(&mut b, std::time::Duration::from_secs(10), |ev| {
+        matches!(ev, NetworkEvent::PeerDisconnected { peer_id } if *peer_id == a_device)
+    })
+    .await;
+    assert!(b_saw_it, "B's own presence view must lose A before the ask");
+    drain_events(&mut b);
+
+    b.cmd_tx
+        .send(NodeCommand::RequestFile {
+            file_id: fid.clone(),
+            peer_id: a_master.clone(),
+            chunks: Vec::new(),
+        })
+        .await
+        .unwrap();
+    let waiting = wait_event(&mut b, std::time::Duration::from_secs(5), |ev| {
+        matches!(
+            ev,
+            NetworkEvent::FileAvailability { file_id, state, .. }
+                if *file_id == fid && state == "waiting"
+        )
+    })
+    .await;
+    assert!(waiting, "the ask must be queued against the offline holder");
+    drain_events(&mut b);
+
+    // C, who was never asked anything, volunteers a miss for the same file.
+    let bc_room = super::types::dm_room_code(&b_master, &c_master);
+    relay.inject_direct(
+        &bc_room,
+        &c.device_id,
+        &b.device_id,
+        serde_json::to_vec(&super::types::HavenMessage::FileUnavailable {
+            file_id: fid.clone(),
+            reason: "gone".to_string(),
+        })
+        .expect("serialize FileUnavailable"),
+    );
+    let moved = wait_event(&mut b, std::time::Duration::from_secs(3), |ev| {
+        matches!(
+            ev,
+            NetworkEvent::FileAvailability { file_id, state, .. }
+                if *file_id == fid && (state == "gone" || state == "expired")
+        )
+    })
+    .await;
+    assert!(!moved, "an unasked device's miss must not move the card off waiting");
+
+    // The ask still belongs to A, and it completes when A comes back.
+    relay.set_online(&a.device_id, true);
+    let done = wait_event(&mut b, std::time::Duration::from_secs(30), |ev| {
+        matches!(ev, NetworkEvent::FileCompleted { file_id, .. } if *file_id == fid)
+    })
+    .await;
+    assert!(done, "the surviving ask must still find its own holder");
+    let meta = b.file_meta(&fid).expect("B persisted the files row");
+    let disk = meta.disk_path.expect("completed file has a disk path");
+    assert_eq!(
+        std::fs::read(&disk).expect("read the received file"),
+        contents,
+        "the surviving ask must land the holder's bytes byte-exact"
+    );
+
+    super::file_handler::set_auto_download_conf(169, std::collections::HashMap::new());
+    drop(a);
+    drop(b);
+    drop(c);
+}
+
+/// The negative answer is gated exactly like the positive one. A stranger that
+/// learned a file_id gets SILENCE, because an "I don't have it" to anyone who
+/// asks would let them tell "this device holds a row for X" (silence) from "it
+/// does not" (an answer), which is a membership leak. The entitled DM party
+/// gets the answer for the same file in the same run, so silence cannot be an
+/// accident of routing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn file_unavailable_never_answers_a_non_entitled_requester() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    const A_MASTER: u8 = 215;
+    const B_MASTER: u8 = 216;
+    const D_MASTER: u8 = 217;
+    let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER)).peer_id();
+    let b_master = NativeKeypair::from_secret_bytes(&seed_bytes(B_MASTER)).peer_id();
+    let d_master = NativeKeypair::from_secret_bytes(&seed_bytes(D_MASTER)).peer_id();
+
+    // D is a friend of A (so a frame from D routes to A and A COULD answer it)
+    // but has nothing to do with the A/B conversation the file lives in.
+    let mut a = spawn_node_with_friends(&relay, A_MASTER, A_MASTER, &[&b_master, &d_master]).await;
+    sleep_ms(1200).await;
+    let mut b = spawn_node_with_friends(&relay, B_MASTER, B_MASTER, &[&a_master]).await;
+    let d = spawn_node_with_friends(&relay, D_MASTER, D_MASTER, &[&a_master]).await;
+    expect_dm_pair_ready(&relay, &a, &b, 15).await;
+    expect_dm_pair_ready(&relay, &a, &d, 15).await;
+    sleep_ms(1000).await; // auto-download advert settle; see the note above
+    drain_events(&mut a);
+    drain_events(&mut b);
+
+    super::file_handler::set_auto_download_conf(
+        169,
+        std::collections::HashMap::from([(format!("dm:{a_master}"), false)]),
+    );
+
+    let src = global_tmp.path().join("gatecheck.bin");
+    std::fs::write(&src, b"a private DM attachment").expect("write src file");
+    a.cmd_tx
+        .send(NodeCommand::SendFile(Box::new(super::types::SendFilePayload {
+            peer_id: Some(b.master_id.clone()),
+            server_id: None,
+            channel_id: None,
+            file_path: src.to_str().unwrap().to_string(),
+            message_id: "gatecheck-file".to_string(),
+            message_text: String::new(),
+            vthumb: None,
+            override_width: None,
+            override_height: None,
+            share_ref: None,
+            voice: false,
+            poster: None,
+        })))
+        .await
+        .unwrap();
+    let mut got_fid = None;
+    let got = wait_event(&mut b, std::time::Duration::from_secs(8), |ev| {
+        if let NetworkEvent::FileHeaderReceived { file_id, file_name, .. } = ev
+            && file_name.starts_with("gatecheck")
+        {
+            got_fid = Some(file_id.clone());
+            return true;
+        }
+        false
+    })
+    .await;
+    assert!(got, "B must get the gated card");
+    let fid = got_fid.expect("file id from header");
+
+    // A loses the bytes: from here on every ENTITLED ask gets `gone`.
+    a.store().null_disk_path_all().expect("clear A's cached bytes");
+    relay.set_recording(&a.device_id, true);
+
+    // The stranger asks, raw, exactly the frame the DM party would send.
+    let ad_room = super::types::dm_room_code(&a_master, &d_master);
+    relay.inject_direct(
+        &ad_room,
+        &d.device_id,
+        &a.device_id,
+        serde_json::to_vec(&super::types::HavenMessage::FileRequest {
+            file_id: fid.clone(),
+            chunks: Vec::new(),
+            offset: 0,
+        })
+        .expect("serialize FileRequest"),
+    );
+    // An absence proof, polled: it fails the moment A answers the stranger.
+    let leaked = wait_until(2, async || {
+        frames_of_type(&relay, &a.device_id, "file_unavail")
+            .iter()
+            .any(|v| v.get("file_id").and_then(|f| f.as_str()) == Some(fid.as_str()))
+    })
+    .await;
+    assert!(
+        !leaked,
+        "a non-entitled requester must get silence, never a file_unavail answer"
+    );
+
+    // The DM party asks for the SAME file and IS answered.
+    b.cmd_tx
+        .send(NodeCommand::RequestFile {
+            file_id: fid.clone(),
+            peer_id: a_master.clone(),
+            chunks: Vec::new(),
+        })
+        .await
+        .unwrap();
+    let answered = wait_until(10, async || {
+        frames_of_type(&relay, &a.device_id, "file_unavail")
+            .iter()
+            .any(|v| v.get("file_id").and_then(|f| f.as_str()) == Some(fid.as_str()))
+    })
+    .await;
+    assert!(answered, "the entitled DM party must get the negative answer");
+
+    super::file_handler::set_auto_download_conf(169, std::collections::HashMap::new());
+    drop(a);
+    drop(b);
+    drop(d);
+}
+
+/// A channel file has more than one holder: full replication (<6 members) put
+/// the bytes on every member that was online. The asker targets the SENDER, the
+/// sender no longer has the bytes, and the ask must ROTATE to the next holder
+/// on the negative rather than dying there. The card narrates the walk:
+/// requesting the sender, then requesting the second holder, then done.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn channel_file_request_rotates_to_next_holder_after_gone() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    const A_MASTER: u8 = 218; // sender / owner
+    const C_MASTER: u8 = 219; // the other holder (online at send time)
+    const B_MASTER: u8 = 249; // the asker (offline at send time)
+    let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER)).peer_id();
+    let c_master = NativeKeypair::from_secret_bytes(&seed_bytes(C_MASTER)).peer_id();
+    let b_master = NativeKeypair::from_secret_bytes(&seed_bytes(B_MASTER)).peer_id();
+
+    let mut a = spawn_node_with_friends(&relay, A_MASTER, A_MASTER, &[&c_master, &b_master]).await;
+    sleep_ms(1200).await;
+    let mut c = spawn_node_with_friends(&relay, C_MASTER, C_MASTER, &[&a_master]).await;
+    sleep_ms(1200).await;
+    let mut b = spawn_node_with_friends(&relay, B_MASTER, B_MASTER, &[&a_master]).await;
+    expect_dm_pair_ready(&relay, &a, &b, 15).await;
+
+    let server_id = create_server_and_wait(&mut a, "Rotation Files").await;
+    let general = general_channel_of(&server_id);
+
+    for (label, node) in [("C", &mut c), ("B", &mut b)] {
+        node.cmd_tx
+            .send(NodeCommand::JoinServer {
+                server_id: server_id.clone(),
+                twitch_proof_json: None,
+                nsfw_confirmed: false,
+            })
+            .await
+            .unwrap();
+        let joined = wait_event(node, std::time::Duration::from_secs(10), |ev| {
+            matches!(ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id)
+        })
+        .await;
+        assert!(joined, "{label} should join the server");
+    }
+    // 3 members < 6 = full replication, and the group forming is the settle.
+    expect_mls_group(&[&a, &c, &b], &server_id, 25).await;
+    drain_events(&mut a);
+    drain_events(&mut c);
+    drain_events(&mut b);
+
+    // The asker is offline while the file is posted, so it learns the row from
+    // the relay's catch-up and never sees the bytes.
+    relay.set_online(&b.device_id, false);
+    sleep_ms(2000).await;
+    drain_events(&mut a);
+    drain_events(&mut b);
+
+    let contents: &[u8] = b"rotate to the second holder";
+    let src = global_tmp.path().join("rotate.bin");
+    std::fs::write(&src, contents).expect("write src file");
+    a.cmd_tx
+        .send(NodeCommand::SendFile(Box::new(super::types::SendFilePayload {
+            peer_id: None,
+            server_id: Some(server_id.clone()),
+            channel_id: Some(general.clone()),
+            file_path: src.to_str().unwrap().to_string(),
+            message_id: "rotate-file-1".to_string(),
+            message_text: "rotate-caption".to_string(),
+            vthumb: None,
+            override_width: None,
+            override_height: None,
+            share_ref: None,
+            voice: false,
+            poster: None,
+        })))
+        .await
+        .unwrap();
+
+    let mut got_fid: Option<String> = None;
+    wait_event(&mut c, std::time::Duration::from_secs(10), |ev| {
+        if let NetworkEvent::FileHeaderReceived { file_id, file_name, .. } = ev
+            && file_name.starts_with("rotate")
+        {
+            got_fid = Some(file_id.clone());
+        }
+        got_fid.is_some()
+    })
+    .await;
+    let fid = got_fid.expect("C must receive the channel FileHeader");
+    let c_done = wait_event(&mut c, std::time::Duration::from_secs(10), |ev| {
+        matches!(ev, NetworkEvent::FileCompleted { file_id, .. } if *file_id == fid)
+    })
+    .await;
+    assert!(c_done, "the online member must receive the full bytes");
+
+    // The SENDER loses its copy (its own storage cap evicted it); C's copy and
+    // C's row are untouched.
+    a.store().null_disk_path_all().expect("clear A's cached bytes");
+    relay.set_recording(&a.device_id, true);
+
+    // The asker returns and learns the file exists through catch-up.
+    relay.set_online(&b.device_id, true);
+    let b_header = wait_event(&mut b, std::time::Duration::from_secs(15), |ev| {
+        matches!(ev, NetworkEvent::FileHeaderReceived { file_id, .. } if *file_id == fid)
+    })
+    .await;
+    assert!(b_header, "the asker must learn the file via relay catch-up");
+    sleep_ms(500).await;
+    assert!(
+        b.file_meta(&fid).map(|m| m.completed_at.is_none()).unwrap_or(true),
+        "the asker must not hold the bytes yet"
+    );
+    drain_events(&mut b);
+
+    // The UI targets the SENDER, the only holder it knows about.
+    b.cmd_tx
+        .send(NodeCommand::RequestFile {
+            file_id: fid.clone(),
+            peer_id: a_master.clone(),
+            chunks: Vec::new(),
+        })
+        .await
+        .unwrap();
+
+    let mut seq: Vec<(String, String)> = Vec::new();
+    let done = wait_event(&mut b, std::time::Duration::from_secs(30), |ev| match ev {
+        NetworkEvent::FileAvailability { file_id, state, peer_id } if *file_id == fid => {
+            seq.push((state.clone(), peer_id.clone()));
+            false
+        }
+        NetworkEvent::FileCompleted { file_id, .. } if *file_id == fid => true,
+        _ => false,
+    })
+    .await;
+    assert!(done, "the rotated ask must complete, got states {seq:?}");
+    assert_eq!(
+        seq.first().map(|(s, p)| (s.as_str(), p.as_str())),
+        Some(("requesting", a_master.as_str())),
+        "the walk starts at the sender, got {seq:?}"
+    );
+    assert!(
+        seq.iter().any(|(s, p)| s == "requesting" && *p == c_master),
+        "the negative must rotate the walk to the second holder, got {seq:?}"
+    );
+    assert!(
+        !seq.iter().any(|(s, _)| s == "gone" || s == "expired"),
+        "a rotation that succeeds must never show a dead-end state, got {seq:?}"
+    );
+
+    // The sender's negative said `gone`, and it said it on the wire.
+    let said_gone = frames_of_type(&relay, &a.device_id, "file_unavail").iter().any(|v| {
+        v.get("file_id").and_then(|f| f.as_str()) == Some(fid.as_str())
+            && v.get("reason").and_then(|r| r.as_str()) == Some("gone")
+    });
+    assert!(said_gone, "the sender must have answered gone, not stayed silent");
+
+    let meta = b.file_meta(&fid).expect("the asker persisted the files row");
+    let disk = meta.disk_path.expect("completed file has a disk path");
+    assert_eq!(
+        std::fs::read(&disk).expect("read the received file"),
+        contents,
+        "the rotated fetch must decrypt to the original contents"
+    );
+
+    // A completed file is finished: no dead-end state trails it. An ABSENCE, so
+    // it costs a real window; the sweep ticks every second under cfg(test), so
+    // this covers a full pass.
+    let trailing = wait_event(&mut b, std::time::Duration::from_millis(1500), |ev| {
+        matches!(
+            ev,
+            NetworkEvent::FileAvailability { file_id, state, .. }
+                if *file_id == fid && (state == "gone" || state == "expired" || state == "waiting")
+        )
+    })
+    .await;
+    assert!(!trailing, "a completed file must not fall back into a pending state");
+
+    drop(a);
+    drop(b);
+    drop(c);
+}
+
+/// State 4 is the ONE remote answer that can write to our own row, so it is
+/// verified locally before we believe it: a member cannot expire someone else's
+/// file by lying. Case A: the row is fresh, the `expired` answer is downgraded
+/// to `gone` and our row keeps `expired_at = NULL`. Case B: the row really is
+/// past the server's own retention window, so the same answer marks it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn expired_answer_is_verified_locally_before_marking_our_row() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    const A_MASTER: u8 = 98; // owner / sender / the asked holder
+    const B_MASTER: u8 = 99; // the asker
+    let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER)).peer_id();
+    let b_master = NativeKeypair::from_secret_bytes(&seed_bytes(B_MASTER)).peer_id();
+
+    let mut a = spawn_node_with_friends(&relay, A_MASTER, A_MASTER, &[&b_master]).await;
+    sleep_ms(1200).await;
+    let mut b = spawn_node_with_friends(&relay, B_MASTER, B_MASTER, &[&a_master]).await;
+    expect_dm_pair_ready(&relay, &a, &b, 15).await;
+
+    let server_id = create_server_and_wait(&mut a, "Retention Server").await;
+    let general = general_channel_of(&server_id);
+    a.cmd_tx
+        .send(NodeCommand::UpdateServerSetting {
+            server_id: server_id.clone(),
+            key: "retention_files".to_string(),
+            value: "30d".to_string(),
+        })
+        .await
+        .unwrap();
+    sleep_ms(500).await;
+
+    b.cmd_tx
+        .send(NodeCommand::JoinServer {
+            server_id: server_id.clone(),
+            twitch_proof_json: None,
+            nsfw_confirmed: false,
+        })
+        .await
+        .unwrap();
+    let joined = wait_event(&mut b, std::time::Duration::from_secs(10), |ev| {
+        matches!(ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id)
+    })
+    .await;
+    assert!(joined, "the asker should join the server");
+    let policy_synced = wait_until(15, async || {
+        b.server_state(&server_id)
+            .and_then(|s| s.settings.get("retention_files").map(|r| r.read().clone()))
+            .as_deref()
+            == Some("30d")
+    })
+    .await;
+    assert!(policy_synced, "the asker must know the server's retention policy");
+    expect_mls_group(&[&a, &b], &server_id, 25).await;
+    drain_events(&mut a);
+    drain_events(&mut b);
+
+    // The asker is offline for the send, so it holds the row and no bytes.
+    relay.set_online(&b.device_id, false);
+    sleep_ms(2000).await;
+    drain_events(&mut a);
+    drain_events(&mut b);
+
+    let src = global_tmp.path().join("retained.bin");
+    std::fs::write(&src, b"a file with a retention policy").expect("write src file");
+    a.cmd_tx
+        .send(NodeCommand::SendFile(Box::new(super::types::SendFilePayload {
+            peer_id: None,
+            server_id: Some(server_id.clone()),
+            channel_id: Some(general.clone()),
+            file_path: src.to_str().unwrap().to_string(),
+            message_id: "retained-file-1".to_string(),
+            message_text: "retention-caption".to_string(),
+            vthumb: None,
+            override_width: None,
+            override_height: None,
+            share_ref: None,
+            voice: false,
+            poster: None,
+        })))
+        .await
+        .unwrap();
+    let mut got_fid: Option<String> = None;
+    wait_event(&mut a, std::time::Duration::from_secs(10), |ev| {
+        if let NetworkEvent::FileCompleted { file_id, .. } = ev {
+            got_fid = Some(file_id.clone());
+        }
+        got_fid.is_some()
+    })
+    .await;
+    let fid = got_fid.expect("the sender's own FileCompleted carries the file id");
+
+    // The HOLDER's row is genuinely expired, so it answers `expired` for real.
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    {
+        let vault_dir = global_tmp.path().join("vault_a");
+        let cs = crate::vault::content_store::ContentStore::open(
+            &a.db_path, &a.passphrase, &vault_dir,
+        )
+        .expect("open the holder's content store");
+        assert!(
+            cs.mark_file_expired(&fid, now_secs).expect("mark the holder's row expired"),
+            "the holder's row must actually flip to expired"
+        );
+    }
+
+    relay.set_online(&b.device_id, true);
+    let b_header = wait_event(&mut b, std::time::Duration::from_secs(15), |ev| {
+        matches!(ev, NetworkEvent::FileHeaderReceived { file_id, .. } if *file_id == fid)
+    })
+    .await;
+    assert!(b_header, "the asker must learn the file via relay catch-up");
+    sleep_ms(500).await;
+    drain_events(&mut b);
+
+    // -- Case A: our row is FRESH, so `expired` is not ours to believe --
+    b.cmd_tx
+        .send(NodeCommand::RequestFile {
+            file_id: fid.clone(),
+            peer_id: a_master.clone(),
+            chunks: Vec::new(),
+        })
+        .await
+        .unwrap();
+    let downgraded = wait_event(&mut b, std::time::Duration::from_secs(15), |ev| {
+        matches!(
+            ev,
+            NetworkEvent::FileAvailability { file_id, state, .. }
+                if *file_id == fid && (state == "gone" || state == "expired")
+        )
+    })
+    .await;
+    assert!(downgraded, "the asker must reach a dead-end state");
+    let case_a = b.file_meta(&fid).expect("the asker holds the row");
+    assert!(
+        case_a.expired_at.is_none(),
+        "a fresh row must NOT be marked expired on a peer's say-so"
+    );
+
+    // -- Case B: our row really is past the server's own retention window --
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64;
+    {
+        let conn = rusqlite::Connection::open(&b.db_path).expect("open the asker's DB");
+        conn.execute_batch(&format!("PRAGMA key = \"x'{}'\";", b.passphrase))
+            .expect("key the asker's DB");
+        conn.execute_batch("PRAGMA busy_timeout = 8000;").expect("busy timeout");
+        conn.execute(
+            "UPDATE files SET created_at = ?1 WHERE file_id = ?2",
+            rusqlite::params![now_ms - 40 * 86_400_000i64, &fid],
+        )
+        .expect("age the asker's row past the retention window");
+    }
+    drain_events(&mut b);
+
+    b.cmd_tx
+        .send(NodeCommand::RequestFile {
+            file_id: fid.clone(),
+            peer_id: a_master.clone(),
+            chunks: Vec::new(),
+        })
+        .await
+        .unwrap();
+    let expired = wait_event(&mut b, std::time::Duration::from_secs(15), |ev| {
+        matches!(
+            ev,
+            NetworkEvent::FileAvailability { file_id, state, .. }
+                if *file_id == fid && state == "expired"
+        )
+    })
+    .await;
+    assert!(expired, "a row past its server's retention window must read as expired");
+    let case_b = wait_until(5, async || {
+        b.file_meta(&fid).map(|m| m.expired_at.is_some()).unwrap_or(false)
+    })
+    .await;
+    assert!(case_b, "the verified expiry must be written to our own row");
+
+    drop(a);
+    drop(b);
+}
+
+/// "Stop waiting for this file" has to stop BOTH halves of the pull, and the
+/// second half is the one that is easy to forget.
+///
+/// (a) The queued ask is gone, so the holder coming back no longer fires it:
+///     the whole point of the queue is that a return is what would have fired
+///     it, so that return is the moment the absence has to be proved at.
+/// (b) The explicit-pull RECEIPT is gone with it. An answer already on its way
+///     then arrives with nothing to bypass the size cap or the auto-download
+///     gate with, so it is judged exactly as an unsolicited push would be. With
+///     the receipt still standing the very same header COMPLETES, which is what
+///     `dm_auto_download_off_declines_push_then_manual_request_completes`
+///     shows, so the refusal here is the proof that the receipt went.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn cancel_file_request_drops_the_queued_ask_and_its_receipt() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    const A_MASTER: u8 = 166;
+    const B_MASTER: u8 = 167;
+    let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER)).peer_id();
+    let b_master = NativeKeypair::from_secret_bytes(&seed_bytes(B_MASTER)).peer_id();
+
+    let mut a = spawn_node_with_friends(&relay, A_MASTER, A_MASTER, &[&b_master]).await;
+    sleep_ms(1200).await;
+    let mut b = spawn_node_with_friends(&relay, B_MASTER, B_MASTER, &[&a_master]).await;
+    expect_dm_pair_ready(&relay, &a, &b, 15).await;
+    sleep_ms(1000).await; // auto-download advert settle; see the note above
+    drain_events(&mut a);
+    drain_events(&mut b);
+
+    super::file_handler::set_auto_download_conf(
+        169,
+        std::collections::HashMap::from([(format!("dm:{a_master}"), false)]),
+    );
+
+    // -- (a) a cancelled queue does not fire when the holder returns --
+    let one = global_tmp.path().join("cancel_one.bin");
+    std::fs::write(&one, b"nobody is waiting for these any more").expect("write src one");
+    a.cmd_tx
+        .send(NodeCommand::SendFile(Box::new(super::types::SendFilePayload {
+            peer_id: Some(b.master_id.clone()),
+            server_id: None,
+            channel_id: None,
+            file_path: one.to_str().unwrap().to_string(),
+            message_id: "cancel-one".to_string(),
+            message_text: String::new(),
+            vthumb: None,
+            override_width: None,
+            override_height: None,
+            share_ref: None,
+            voice: false,
+            poster: None,
+        })))
+        .await
+        .unwrap();
+    let mut fid_one = None;
+    let got = wait_event(&mut b, std::time::Duration::from_secs(8), |ev| {
+        if let NetworkEvent::FileHeaderReceived { file_id, file_name, .. } = ev
+            && file_name.starts_with("cancel_one")
+        {
+            fid_one = Some(file_id.clone());
+            return true;
+        }
+        false
+    })
+    .await;
+    assert!(got, "B must get the gated card for file one");
+    let fid_one = fid_one.expect("file one id");
+
+    let dm_room = super::types::dm_room_code(&a_master, &b_master);
+    let a_device = a.device_id.clone();
+    go_offline(&relay, &a, &dm_room).await;
+    let b_saw_it = wait_event(&mut b, std::time::Duration::from_secs(10), |ev| {
+        matches!(ev, NetworkEvent::PeerDisconnected { peer_id } if *peer_id == a_device)
+    })
+    .await;
+    assert!(b_saw_it, "B's own presence view must lose A before the ask");
+    drain_events(&mut b);
+
+    b.cmd_tx
+        .send(NodeCommand::RequestFile {
+            file_id: fid_one.clone(),
+            peer_id: a_master.clone(),
+            chunks: Vec::new(),
+        })
+        .await
+        .unwrap();
+    let waiting = wait_event(&mut b, std::time::Duration::from_secs(5), |ev| {
+        matches!(
+            ev,
+            NetworkEvent::FileAvailability { file_id, state, .. }
+                if *file_id == fid_one && state == "waiting"
+        )
+    })
+    .await;
+    assert!(waiting, "the ask must be queued before it can be cancelled");
+
+    b.cmd_tx
+        .send(NodeCommand::CancelFileRequest { file_id: fid_one.clone() })
+        .await
+        .unwrap();
+    drain_events(&mut b);
+
+    // The holder returns, which is exactly what would have fired the queue.
+    relay.set_online(&a.device_id, true);
+    assert!(
+        wait_until(15, async || relay.room_devices(&dm_room).contains(&a_device)).await,
+        "A must be back in the DM room for the absence to mean anything"
+    );
+    let fired = wait_event(&mut b, std::time::Duration::from_secs(6), |ev| {
+        matches!(ev, NetworkEvent::FileCompleted { file_id, .. } if *file_id == fid_one)
+            || matches!(
+                ev,
+                NetworkEvent::FileAvailability { file_id, .. } if *file_id == fid_one
+            )
+    })
+    .await;
+    assert!(!fired, "a cancelled ask must not fire when the holder comes back");
+    assert!(
+        b.file_meta(&fid_one).map(|m| m.completed_at.is_none()).unwrap_or(true),
+        "no bytes may land for a cancelled ask"
+    );
+
+    // -- (b) the receipt went with the ask --
+    let two = global_tmp.path().join("cancel_two.bin");
+    std::fs::write(&two, b"this answer arrives after the cancel").expect("write src two");
+    drain_events(&mut b);
+    a.cmd_tx
+        .send(NodeCommand::SendFile(Box::new(super::types::SendFilePayload {
+            peer_id: Some(b.master_id.clone()),
+            server_id: None,
+            channel_id: None,
+            file_path: two.to_str().unwrap().to_string(),
+            message_id: "cancel-two".to_string(),
+            message_text: String::new(),
+            vthumb: None,
+            override_width: None,
+            override_height: None,
+            share_ref: None,
+            voice: false,
+            poster: None,
+        })))
+        .await
+        .unwrap();
+    let mut fid_two = None;
+    let got = wait_event(&mut b, std::time::Duration::from_secs(8), |ev| {
+        if let NetworkEvent::FileHeaderReceived { file_id, file_name, .. } = ev
+            && file_name.starts_with("cancel_two")
+        {
+            fid_two = Some(file_id.clone());
+            return true;
+        }
+        false
+    })
+    .await;
+    assert!(got, "B must get the gated card for file two");
+    let fid_two = fid_two.expect("file two id");
+    // By now B's gating preference has been advertised, so A pre-negotiated and
+    // sent a METADATA-ONLY header: no AES material, so the receive gate had
+    // nothing to refuse and said nothing. Any refusal from here on can only be
+    // the answer to the request below.
+    assert!(
+        b.file_meta(&fid_two).map(|m| m.completed_at.is_none()).unwrap_or(true),
+        "the pre-negotiated push must leave the row without bytes"
+    );
+    drain_events(&mut b);
+
+    // Both commands are queued on B's own channel before A can even receive the
+    // request, so the cancel is processed first and the answering header lands
+    // on a node that has already stopped waiting.
+    b.cmd_tx
+        .send(NodeCommand::RequestFile {
+            file_id: fid_two.clone(),
+            peer_id: a_master.clone(),
+            chunks: Vec::new(),
+        })
+        .await
+        .unwrap();
+    b.cmd_tx
+        .send(NodeCommand::CancelFileRequest { file_id: fid_two.clone() })
+        .await
+        .unwrap();
+
+    let mut completed = false;
+    let refused = wait_event(&mut b, std::time::Duration::from_secs(10), |ev| {
+        if matches!(ev, NetworkEvent::FileCompleted { file_id, .. } if *file_id == fid_two) {
+            completed = true;
+        }
+        matches!(
+            ev,
+            NetworkEvent::FileFailed { file_id, error }
+                if *file_id == fid_two && error == "auto_download_off"
+        )
+    })
+    .await;
+    assert!(
+        refused,
+        "with the receipt cancelled the answering header must face the gate like any push"
+    );
+    assert!(!completed, "a cancelled pull must not complete");
+    assert!(
+        b.file_meta(&fid_two).map(|m| m.completed_at.is_none()).unwrap_or(true),
+        "no bytes may land for a cancelled pull"
+    );
+
+    super::file_handler::set_auto_download_conf(169, std::collections::HashMap::new());
+    drop(a);
+    drop(b);
+}
+
 /// FILE-2 regression — the voice exemption is not a free pass for bytes.
 ///
 /// The exemption used to read `voice || name`, and both of those are fields
@@ -19803,7 +20985,22 @@ fn harness_fixed_sleep_budget_does_not_grow() {
     // task finishing the drop of its SQLCipher handles has no signal either, and
     // reopening the file under the old writer costs a 4s busy_timeout per query.
     // Everything else the three new tests wait on settles on a condition.
-    const BUDGET_MS: u64 = 581_800;
+    // Raised 581_800 -> 599_700 on 2026-09-05 for exactly 17_900ms across the
+    // six honest-file-card tests. What is left in them has nothing to poll:
+    // the spawn stagger; the 1000ms auto-download advert window, which every
+    // test in this family already carries because the pre-negotiation exchange
+    // has no live probe (see `dm_file_transfer_completes_and_decrypts`); the
+    // 2000ms after a member drops so the SENDER's room view is settled before
+    // it fans a file, copied verbatim from
+    // `channel_file_request_reroutes_to_online_holder_when_sender_offline`; and
+    // the 500ms before reading a RUNNING node's files row, which this module's
+    // own `wait_until` doc forbids polling. The MLS settles that DID have a
+    // signal use `expect_mls_group` instead.
+    // Raised 599_700 -> 601_900 on 2026-09-06 for exactly 2200ms:
+    // `cancel_file_request_drops_the_queued_ask_and_its_receipt` carries the
+    // same spawn stagger and 1000ms auto-download advert window as the rest of
+    // that family, and nothing else in it is slept on.
+    const BUDGET_MS: u64 = 601_900;
 
     let src = include_str!("test_harness.rs");
     // Built from pieces so this scan does not count its own source text.

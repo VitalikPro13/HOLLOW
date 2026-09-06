@@ -99,6 +99,10 @@ Extracts `hollow://` links from message text (code blocks stripped first via reg
 
 When `message.fileAttachment != null`: renders `FileAttachmentWidget` with `xs` top padding.
 
+**Honest states (2026-09-05, memory `project_file_card_honest_states`).** A file whose bytes are not on disk no longer shows one Download button that can silently do nothing. `lib/src/ui/chat/file_card_status.dart::fileCardStatus()` is the ONE decision point (caption + control) read by the generic file card, the image placeholder, `AudioMessageBubble`, `VideoMessageBubble` and `StickerPackCard`; mobile reuses the same bubbles. Precedence: expired (`attachment.isExpired`, caption `Removed by this server's retention policy`, no control) > share-backed with zero seeders (`Waiting for a peer who has this file`, tap to retry) > Rust's `FileAvailability` state on the transfer row (`requesting` = the button's footprint holds a spinner, caption `Requesting...`; `waiting` = no control, DM caption `<name> is offline. Hollow will fetch it when they return.` / channel caption `Waiting for a peer who has this file`; `gone` = no control, `<name> no longer has this file`) > default Download. The caption replaces the size line. The `Requesting file...` toasts are gone on the FileRequest branch: the card is the feedback.
+
+**The hover bar, the right-click menu row and the mobile long-press sheet mirror the card** through `fileBarAction()` in the same helper (2026-09-06): `download` (label `Download`, mobile `Save File`), `stopWaiting` (busy or waiting: `SlashedIcon` download glyph, label `Stop waiting for this file`, tap = `cancelFileRequest` FFI then `clearAvailability`), `tryAgain` (gone: the plain action relabelled), `none` (expired). `MessageHoverWrapper` computes it with `ref.read` at hover time (the bar is a transient overlay). Guard tests: `test/file_card_states_test.dart`.
+
 ### Reaction Bar Widget
 
 When `message.reactions` is non-empty: renders `ReactionBar` passing `localPeerId` and `onToggleReaction`.
@@ -197,6 +201,7 @@ Row:
 ```
 
 Status text in idle mode varies:
+- the honest-state caption from `fileCardStatus()` when the bytes are missing and Rust reported why (requesting / waiting / gone / expired); the play/download button then becomes a non-pressable circle (spinner when requesting, cloud-off otherwise)
 - Vault phase text (e.g. "Collecting shards...") if available
 - `"{bytesReceived} / {formattedSize}"` if downloading with progress
 - `"Downloading... {formattedSize}"` if downloading without progress

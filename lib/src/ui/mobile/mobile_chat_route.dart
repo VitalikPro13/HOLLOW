@@ -38,6 +38,7 @@ import 'package:hollow/src/ui/chat/hollow_link_utils.dart';
 import 'package:hollow/src/ui/chat/message_bubble.dart';
 import 'package:hollow/src/ui/chat/channel_message_bubble.dart';
 import 'package:hollow/src/ui/chat/emoji_picker.dart';
+import 'package:hollow/src/ui/chat/file_card_status.dart';
 import 'package:hollow/src/ui/chat/gif_picker.dart';
 import 'package:hollow/src/ui/chat/sticker_picker.dart';
 import 'package:hollow/src/ui/chat/emote_composer.dart';
@@ -1365,9 +1366,8 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     // Manual pull: lift the auto-download-gate pin so real progress renders.
     ref.read(fileTransferProvider.notifier).clearDeclined(attachment.fileId);
     try {
-      if (mounted) {
-        HollowToast.show(context, 'Requesting file from peer...', type: HollowToastType.info);
-      }
+      // No toast: the card itself answers the tap now, saying "Requesting..."
+      // and then what came back (tmp.txt item 1). Failures still toast.
       await network_api.requestFileFromPeer(
         fileId: attachment.fileId,
         peerId: senderId,
@@ -2372,6 +2372,8 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
           : null,
       onCopy: _copyActionFor(msg.text),
       onDownload: _downloadActionFor(msg.fileAttachment, widget.peerId!),
+      fileAction: _fileActionFor(msg.fileAttachment),
+      onStopWaiting: _stopWaitingActionFor(msg.fileAttachment),
       onReaction: msg.messageId != null
           ? (emoji) => _toggleDmReaction(msg, emoji)
           : null,
@@ -2416,6 +2418,8 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
           : null,
       onCopy: _copyActionFor(msg.text),
       onDownload: _downloadActionFor(msg.fileAttachment, msg.senderId),
+      fileAction: _fileActionFor(msg.fileAttachment),
+      onStopWaiting: _stopWaitingActionFor(msg.fileAttachment),
       onReaction: msg.messageId != null
           ? (emoji) => _toggleChannelReaction(msg, emoji)
           : null,
@@ -2470,6 +2474,33 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
                   type: HollowToastType.success);
             }
           : null;
+
+  /// What the sheet's file row offers, mirroring the card (tmp.txt item 1).
+  /// Read as the sheet opens: the sheet is a snapshot, not a live surface.
+  FileBarAction _fileActionFor(FileAttachment? attachment) {
+    if (attachment == null) return FileBarAction.download;
+    return fileBarAction(
+      attachment: attachment,
+      transfer: ref.read(fileTransferProvider)[attachment.fileId],
+    );
+  }
+
+  /// Cancel the outstanding ask, then let the card fall back to its plain
+  /// Download button without waiting for the next event.
+  VoidCallback? _stopWaitingActionFor(FileAttachment? attachment) {
+    if (attachment == null) return null;
+    return () async {
+      try {
+        await ref
+            .read(fileTransferProvider.notifier)
+            .stopWaitingForFile(attachment.fileId);
+      } catch (e) {
+        if (!mounted) return;
+        HollowToast.show(context, 'Could not stop the request: $e',
+            type: HollowToastType.error);
+      }
+    };
+  }
 
   VoidCallback? _downloadActionFor(FileAttachment? attachment,
       String senderId) {

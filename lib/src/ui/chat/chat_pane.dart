@@ -1111,9 +1111,8 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
     // Manual pull: lift the auto-download-gate pin so real progress renders.
     ref.read(fileTransferProvider.notifier).clearDeclined(attachment.fileId);
     try {
-      if (mounted) {
-        HollowToast.show(context, 'Requesting file from peer...', type: HollowToastType.info);
-      }
+      // No toast: the card itself answers the tap now, saying "Requesting..."
+      // and then what came back (tmp.txt item 1). Failures still toast.
       await network_api.requestFileFromPeer(
         fileId: attachment.fileId,
         peerId: senderId,
@@ -2193,6 +2192,9 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
           ? (emoji) => _toggleReaction(msg, emoji)
           : null,
       onDownload: _downloadFor(context, msg),
+      // The hover bar and the message menu mirror the card: no Download
+      // while nobody can serve the file (tmp.txt item 1).
+      fileAttachment: msg.fileAttachment,
       onCopy: _copyFor(context, msg),
       onCopyImage: _copyImageFor(context, msg),
       onInfo: _infoFor(context, msg),

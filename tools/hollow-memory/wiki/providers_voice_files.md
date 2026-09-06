@@ -523,6 +523,7 @@ State is a `Map<String, FileTransferState>` keyed by file ID (which is the messa
 | `shareRootHash` | `String?` | `null` | Share root hash for share-backed files (>34 MB channel files). |
 | `seeders` | `int?` | `null` | Active seeder count (updated from ShareProgress events). |
 | `declined` | `bool` | `false` | Auto-download gate pin (issue #41). Set by `markDeclined()` on the `FileFailed("auto_download_off")` sentinel; while true, `onFileProgress` IGNORES progress from ANY source (Rust WS poll AND the Dart WebRTC data-channel receive) so the bubble keeps its Download button while the unwanted push is discarded. Cleared by `clearDeclined()` (called from every manual-download entry point) and on completion. |
+| `availability` | `FileAvailabilityState?` | `null` | Why the bytes are not here yet, from Rust's `FileAvailability` event (`requesting` / `waiting` / `gone` / `expired` + the MASTER peer the state is about). Set by `onFileAvailability()` (creates a minimal entry when none exists, clears a stale `declined` pin on `requesting`), cleared by `clearAvailability()`, `onFileProgress`, `onFileCompleted` and a header for the same file. `stopWaitingForFile()` = `cancelFileRequest` FFI then the clear. Read through `fileCardStatus()` / `fileBarAction()` (`lib/src/ui/chat/file_card_status.dart`). Memory `project_file_card_honest_states`. |
 
 **Computed:** `progress` -- `chunksReceived / totalChunks` (0.0-1.0).
 

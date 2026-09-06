@@ -394,6 +394,7 @@ use super::crypto_handler::{
     send_mls_broadcast, send_encrypted_message,
     send_message_to_peer, send_message_to_peer_in_room, send_raw_to_peer, send_raw_to_identity,
 };
+use super::file_asks;
 use super::file_handler;
 use super::forwarder_client;
 use super::link_handler;
@@ -643,6 +644,14 @@ async fn run_event_loop(
     // still gets asked when it appears, which is what a message replayed from
     // the relay's offline ring needs.
     let mut pending_asset_asks: std::collections::HashMap<String, emotes::PendingAsk> =
+        std::collections::HashMap::new();
+
+    // Outstanding FILE pulls, keyed by file_id — the asset rail's table applied
+    // to file bytes (node/file_asks.rs). It SURVIVES a disconnect: a holder who
+    // was offline when the user tapped Download still gets asked when it turns
+    // up, and until then the card can say so instead of showing a button that
+    // did nothing.
+    let mut pending_file_asks: std::collections::HashMap<String, file_asks::PendingFileAsk> =
         std::collections::HashMap::new();
 
     // Guest public-file downloads: file_id -> (server_id, requested-at). The
@@ -2488,15 +2497,34 @@ async fn run_event_loop(
 
                     NodeCommand::RequestFile { file_id, peer_id: peer_id_str, chunks } => {
                         // Explicit pull: the response header must pass the size
-                        // cap and the auto-download gate (issue #41).
+                        // cap and the auto-download gate (issue #41). The ask
+                        // table re-stamps both on every retry, but the rowless
+                        // path below it never reaches the table, so stamp here.
                         requested_file_receipts.insert(file_id.clone(), std::time::Instant::now());
                         declined_file_ids.remove(&file_id);
                         file_handler::handle_request_file(
                             file_id, peer_id_str, chunks,
                             &ws_cmd_tx, &ws_room_peers,
                             &pending_ws_transfers,
-                            &server_states, &local_peer_str,
+                            &server_states, &event_tx,
+                            &mut pending_file_asks,
+                            &mut requested_file_receipts,
+                            &mut declined_file_ids,
+                            &local_peer_str, &device_peer_id,
                             &db_path, &db_passphrase,
+                        ).await;
+                    }
+
+                    NodeCommand::CancelFileRequest { file_id } => {
+                        // Stop waiting: the queued ask and its explicit-pull
+                        // receipt go together, so an answer already on its way
+                        // faces the size cap and the auto-download gate as the
+                        // unsolicited push it now is.
+                        hollow_log!("[HOLLOW-FILE] Cancelling the pending ask for {file_id}");
+                        file_asks::cancel(
+                            &mut pending_file_asks,
+                            &mut requested_file_receipts,
+                            &file_id,
                         );
                     }
 
@@ -2940,6 +2968,8 @@ async fn run_event_loop(
                                 &mut pending_friend_removals,
                                 &mut reject_resent,
                                 &mut pending_asset_asks,
+                                &mut pending_file_asks,
+                                &pending_ws_transfers,
                                 &mut pending_public_file_requests,
                                 &mut requested_file_receipts,
                                 &mut declined_file_ids,
@@ -3233,6 +3263,10 @@ async fn run_event_loop(
                         // who was asked over the dead connection is dropped,
                         // because a new socket means a fresh set of holders.
                         emotes::reset_asked_on_disconnect(&mut pending_asset_asks);
+                        // File pulls outlive the socket for the same reason:
+                        // the queued Download waits for its holder, and only
+                        // what the dead connection told us is dropped.
+                        file_asks::reset_on_disconnect(&mut pending_file_asks);
                         pending_public_file_requests.clear();
                         // Explicit-pull receipts die with the socket (the pending
                         // request can't be answered on a new connection anyway);
@@ -3301,6 +3335,15 @@ async fn run_event_loop(
                             &ws_cmd_tx, &ws_room_peers, &mut pending_asset_asks,
                             &room, &peer_id, &local_peer_str,
                         );
+                        // A holder for a queued file download may have just
+                        // arrived: ask it, and let the card say so.
+                        file_asks::retry_asks_for_peer(
+                            &ws_cmd_tx, &ws_room_peers, &server_states, &event_tx,
+                            &mut pending_file_asks,
+                            &mut requested_file_receipts, &mut declined_file_ids,
+                            &pending_ws_transfers,
+                            &room, &peer_id, &local_peer_str, &device_peer_id,
+                        ).await;
 
                         // Media-forwarder control-plane room: run the MINIMAL path
                         // (Olm session + queued fwd envelope drain) and skip the whole
@@ -3974,6 +4017,17 @@ async fn run_event_loop(
                             &ws_cmd_tx, &ws_room_peers, &mut pending_asset_asks,
                             &room, &local_peer_str,
                         );
+                        // Same for file pulls: after a reconnect the ask table
+                        // is full of holders that were unreachable on the old
+                        // socket, and this roster is the first moment anybody is
+                        // known to be reachable again.
+                        file_asks::retry_asks_in_room(
+                            &ws_cmd_tx, &ws_room_peers, &server_states, &event_tx,
+                            &mut pending_file_asks,
+                            &mut requested_file_receipts, &mut declined_file_ids,
+                            &pending_ws_transfers,
+                            &room, &local_peer_str, &device_peer_id,
+                        ).await;
 
                         for gone in vanished {
                             // Phase 2: authoritative snapshot purged a peer
@@ -5039,6 +5093,8 @@ async fn run_event_loop(
                                         &mut pending_friend_removals,
                                         &mut reject_resent,
                                         &mut pending_asset_asks,
+                                        &mut pending_file_asks,
+                                        &pending_ws_transfers,
                                         &mut pending_public_file_requests,
                                         &mut requested_file_receipts,
                                         &mut declined_file_ids,
@@ -5569,6 +5625,13 @@ async fn run_event_loop(
 
                             // 2b. Retention for channel files not tracked by vault manifests
                             // (full-replication <6 member servers, or any channel files in ~/.hollow/files/)
+                            //
+                            // Rows we never FETCHED come back here too: only the
+                            // ones that reached disk have a path to delete, but
+                            // EVERY row past the window is marked, so a card the
+                            // user never downloaded reads "removed by this
+                            // server's retention policy" instead of asking
+                            // holders that deleted it for the same reason.
                             let prefix = format!("{}:", server_id);
                             if let Ok(files) = cs.find_expirable_channel_files(&prefix, cutoff) {
                                 for (file_id, disk_path) in &files {
@@ -5926,6 +5989,17 @@ async fn run_event_loop(
                     &ws_cmd_tx, &ws_room_peers, &mut pending_asset_asks,
                     &local_peer_str, &db_path, &db_passphrase,
                 );
+                // The file-ask twin: a holder that never answered (an old
+                // client, a dropped frame) is a silent miss, so rotate it and,
+                // when nobody is left, say which dead end it is.
+                file_asks::retry_stale_asks(
+                    &ws_cmd_tx, &ws_room_peers, &server_states, &event_tx,
+                    &mut pending_file_asks,
+                    &mut requested_file_receipts, &mut declined_file_ids,
+                    &pending_ws_transfers,
+                    &local_peer_str, &device_peer_id,
+                    &db_path, &db_passphrase,
+                ).await;
             }
 
             // Peer liveness check — ask the relay if "offline" friends are actually alive.
@@ -6638,6 +6712,8 @@ async fn handle_incoming_request(
     pending_friend_removals: &mut std::collections::HashSet<String>,
     reject_resent: &mut std::collections::HashSet<String>,
     pending_asset_asks: &mut HashMap<String, emotes::PendingAsk>,
+    pending_file_asks: &mut HashMap<String, file_asks::PendingFileAsk>,
+    pending_ws_transfers: &HashMap<String, super::ws_stream_transfer::WsTransferState>,
     pending_public_file_requests: &mut HashMap<String, (String, std::time::Instant)>,
     requested_file_receipts: &mut HashMap<String, std::time::Instant>,
     declined_file_ids: &mut std::collections::HashSet<String>,
@@ -8508,6 +8584,8 @@ async fn handle_incoming_request(
                     if explicitly_requested {
                         declined_file_ids.remove(&fid);
                     }
+                    // The answer to a queued pull arrived: the ask is over.
+                    file_asks::retire(pending_file_asks, &fid);
 
                     // SECURITY: Validate file size against server limit (or default 34MB for DMs).
                     // Skip for share-backed files — Share handles delivery with no size limit.
@@ -14189,139 +14267,182 @@ async fn handle_incoming_request(
                             hollow_log!("[HOLLOW-SECURITY] REJECTED FileRequest from {peer_str} for {file_id} — not entitled ({} file)", file_meta.context_type);
                             return;
                         }
-                        if let Some(ref disk_path) = file_meta.disk_path {
-                            if let Ok(file_data) = std::fs::read(disk_path) {
-                                // AES-encrypt and stream the file.
-                                if let Ok(enc) = crate::vault::pipeline::aes_encrypt(&file_data) {
-                                    // UNIQUE temp file per encryption (suffix = this
-                                    // request's random AES nonce). A fixed
-                                    // `.stream_send_{file_id}.tmp` was CLOBBERED when the
-                                    // receiver re-requested rapidly (the decrypt-fail
-                                    // retry / thread-open retry): request B's
-                                    // re-encryption (new key) overwrote the temp while
-                                    // request A's stream was still reading it, so A
-                                    // streamed B's ciphertext under A's header key →
-                                    // AES-GCM decrypt failed every time, fixed only by an
-                                    // app restart (which serializes a single clean
-                                    // request). Per-nonce path lets concurrent requests
-                                    // each stream their own matching ciphertext.
-                                    let nonce_hex = hex::encode(enc.nonce);
-                                    let temp_path = file_transfer::files_dir().join(format!(".stream_send_{file_id}_{nonce_hex}.tmp"));
-                                    if let Ok(()) = std::fs::write(&temp_path, &enc.ciphertext) {
-                                        // Extract server/channel IDs from context.
-                                        let (resp_sid, resp_cid) = if file_meta.context_type == "channel" {
-                                            let parts: Vec<&str> = file_meta.context_id.splitn(2, ':').collect();
-                                            if parts.len() == 2 {
-                                                (Some(parts[0].to_string()), Some(parts[1].to_string()))
-                                            } else {
-                                                (None, None)
-                                            }
-                                        } else {
-                                            (None, None)
-                                        };
-                                        if requester_is_member {
-                                            // Members / DM parties: Olm-wrapped header (existing path).
-                                            let header = MessageEnvelope::FileHeader {
-                                                inner: Box::new(FileHeaderPayload {
-                                                    fid: file_id.clone(),
-                                                    name: file_meta.file_name.clone(),
-                                                    ext: file_meta.file_ext.clone(),
-                                                    mime: file_meta.mime_type.clone(),
-                                                    size: file_meta.size_bytes,
-                                                    chunks: 0,
-                                                    img: file_meta.is_image,
-                                                    w: file_meta.width,
-                                                    h: file_meta.height,
-                                                    mid: file_meta.message_id.clone(),
-                                                    sid: resp_sid,
-                                                    cid: resp_cid,
-                                                    ts: file_meta.created_at,
-                                                    sig: None,
-                                                    pk: None,
-                                                    aes_key: Some(hex::encode(enc.key)),
-                                                    aes_nonce: Some(hex::encode(enc.nonce)),
-                                                    target: None,
-                                                    vthumb: file_meta.video_thumb.clone(),
-                                                    share_ref: None,
-                                                    // Bytes re-serve for an EXISTING message row —
-                                                    // no sentinel insert happens (no inline_bytes),
-                                                    // so no ordering stamp to carry.
-                                                    order_us: None,
-                                                    inline_bytes: None,
-                                                    thumb: file_meta.thumb_b64.clone(),
-                                                    // Explicit-pull response — the receiver's
-                                                    // receipt bypasses the gate; no voice flag
-                                                    // is persisted to rehydrate from.
-                                                    voice: false,
-                                                }),
-                                            };
-                                            // Send FileHeader via Olm (targeted) + SendDirect.
-                                            let header_json = serde_json::to_string(&header).unwrap_or_default();
-                                            send_encrypted_message(
-                                                olm, crypto_store,
-                                                &peer_str, &header_json, event_tx,
-                                                ws_cmd_tx, ws_room_peers,
-                                            ).await;
-                                        } else {
-                                            // Non-member on a PUBLIC channel (guest browser):
-                                            // plaintext header — the guest may hold no Olm
-                                            // session, and the content is public anyway.
-                                            super::crypto_handler::send_message_to_peer(
-                                                ws_cmd_tx, ws_room_peers, peer_str,
-                                                HavenMessage::PublicFileHeader {
-                                                    file_id: file_id.clone(),
-                                                    name: file_meta.file_name.clone(),
-                                                    ext: file_meta.file_ext.clone(),
-                                                    mime: file_meta.mime_type.clone(),
-                                                    size: file_meta.size_bytes,
-                                                    img: file_meta.is_image,
-                                                    w: file_meta.width,
-                                                    h: file_meta.height,
-                                                    mid: file_meta.message_id.clone(),
-                                                    sid: resp_sid.clone().unwrap_or_default(),
-                                                    cid: resp_cid.clone().unwrap_or_default(),
-                                                    ts: file_meta.created_at,
-                                                    aes_key: hex::encode(enc.key),
-                                                    aes_nonce: hex::encode(enc.nonce),
-                                                },
-                                            );
-                                        }
-
-                                            if offset > 0 {
-                                                // Resumed transfer: skip FileHeader, stream from offset via WS.
-                                                if let Some(room) = ws_room_for_peer(ws_room_peers, &peer_str) {
-                                                    super::ws_stream_transfer::ws_stream_send(
-                                                        ws_cmd_tx, &room, &peer_str,
-                                                        &super::ws_stream_transfer::StreamKind::File,
-                                                        &file_id, &temp_path, enc.ciphertext.len() as u64,
-                                                        offset,
-                                                    ).await;
-                                                }
-                                                hollow_log!("[HOLLOW-FILE] Resumed file {} to {peer_str} from offset {offset}", file_id);
-                                            } else {
-                                                // Fresh transfer: stream via WebRTC or WS relay.
-                                                file_handler::stream_to_peer(
-                                                    ws_cmd_tx, ws_room_peers,
-                                                    webrtc_peers, pending_webrtc_sends, event_tx,
-                                                    &peer_str, &super::ws_stream_transfer::StreamKind::File,
-                                                    &file_id, &temp_path, enc.ciphertext.len() as u64,
-                                                ).await;
-                                                hollow_log!("[HOLLOW-FILE] Streamed file {} to {peer_str}", file_id);
-                                            }
-                                            // Clean up the re-served ciphertext temp once the WS-relay
-                                            // stream is queued. A WebRTC send still in flight owns the
-                                            // temp (removed on WebRtcTransferComplete), so only delete
-                                            // when none is pending — otherwise this leaked a duplicate
-                                            // encrypted copy on every file re-request.
-                                            if !pending_webrtc_sends.contains_key(&file_id) {
-                                                let _ = std::fs::remove_file(&temp_path);
-                                            }
+                        // HONEST NEGATIVE ANSWER (tmp.txt item 1). The gate above
+                        // has passed, so this requester is entitled to these
+                        // bytes and we simply do not have them. Saying nothing
+                        // leaves the asker unable to tell "they are offline"
+                        // from "they deleted it", which is the silent failure
+                        // behind a Download button that does nothing. Note what
+                        // is NOT answered: a blocked requester, an unknown
+                        // file_id and a non-entitled requester still get
+                        // silence, because an answer to those would let anyone
+                        // tell "this device holds a row for X" from "it does
+                        // not" — a membership leak. Their retry timer covers it.
+                        let served_bytes = if file_meta.expired_at.is_some() {
+                            Err("expired")
+                        } else {
+                            match file_meta.disk_path.as_ref() {
+                                Some(p) => std::fs::read(p).map_err(|_| "gone"),
+                                None => Err("gone"),
+                            }
+                        };
+                        let file_data = match served_bytes {
+                            Ok(bytes) => bytes,
+                            Err(reason) => {
+                                hollow_log!("[HOLLOW-FILE] Cannot serve {file_id} to {peer_str} ({reason}) — answering file_unavail");
+                                super::crypto_handler::send_message_to_peer(
+                                    ws_cmd_tx, ws_room_peers, &peer_str,
+                                    HavenMessage::FileUnavailable {
+                                        file_id: file_id.clone(),
+                                        reason: reason.to_string(),
+                                    },
+                                );
+                                return;
+                            }
+                        };
+                        // AES-encrypt and stream the file.
+                        if let Ok(enc) = crate::vault::pipeline::aes_encrypt(&file_data) {
+                            // UNIQUE temp file per encryption (suffix = this
+                            // request's random AES nonce). A fixed
+                            // `.stream_send_{file_id}.tmp` was CLOBBERED when the
+                            // receiver re-requested rapidly (the decrypt-fail
+                            // retry / thread-open retry): request B's
+                            // re-encryption (new key) overwrote the temp while
+                            // request A's stream was still reading it, so A
+                            // streamed B's ciphertext under A's header key →
+                            // AES-GCM decrypt failed every time, fixed only by an
+                            // app restart (which serializes a single clean
+                            // request). Per-nonce path lets concurrent requests
+                            // each stream their own matching ciphertext.
+                            let nonce_hex = hex::encode(enc.nonce);
+                            let temp_path = file_transfer::files_dir().join(format!(".stream_send_{file_id}_{nonce_hex}.tmp"));
+                            if let Ok(()) = std::fs::write(&temp_path, &enc.ciphertext) {
+                                // Extract server/channel IDs from context.
+                                let (resp_sid, resp_cid) = if file_meta.context_type == "channel" {
+                                    let parts: Vec<&str> = file_meta.context_id.splitn(2, ':').collect();
+                                    if parts.len() == 2 {
+                                        (Some(parts[0].to_string()), Some(parts[1].to_string()))
+                                    } else {
+                                        (None, None)
                                     }
+                                } else {
+                                    (None, None)
+                                };
+                                if requester_is_member {
+                                    // Members / DM parties: Olm-wrapped header (existing path).
+                                    let header = MessageEnvelope::FileHeader {
+                                        inner: Box::new(FileHeaderPayload {
+                                            fid: file_id.clone(),
+                                            name: file_meta.file_name.clone(),
+                                            ext: file_meta.file_ext.clone(),
+                                            mime: file_meta.mime_type.clone(),
+                                            size: file_meta.size_bytes,
+                                            chunks: 0,
+                                            img: file_meta.is_image,
+                                            w: file_meta.width,
+                                            h: file_meta.height,
+                                            mid: file_meta.message_id.clone(),
+                                            sid: resp_sid,
+                                            cid: resp_cid,
+                                            ts: file_meta.created_at,
+                                            sig: None,
+                                            pk: None,
+                                            aes_key: Some(hex::encode(enc.key)),
+                                            aes_nonce: Some(hex::encode(enc.nonce)),
+                                            target: None,
+                                            vthumb: file_meta.video_thumb.clone(),
+                                            share_ref: None,
+                                            // Bytes re-serve for an EXISTING message row —
+                                            // no sentinel insert happens (no inline_bytes),
+                                            // so no ordering stamp to carry.
+                                            order_us: None,
+                                            inline_bytes: None,
+                                            thumb: file_meta.thumb_b64.clone(),
+                                            // Explicit-pull response — the receiver's
+                                            // receipt bypasses the gate; no voice flag
+                                            // is persisted to rehydrate from.
+                                            voice: false,
+                                        }),
+                                    };
+                                    // Send FileHeader via Olm (targeted) + SendDirect.
+                                    let header_json = serde_json::to_string(&header).unwrap_or_default();
+                                    send_encrypted_message(
+                                        olm, crypto_store,
+                                        &peer_str, &header_json, event_tx,
+                                        ws_cmd_tx, ws_room_peers,
+                                    ).await;
+                                } else {
+                                    // Non-member on a PUBLIC channel (guest browser):
+                                    // plaintext header — the guest may hold no Olm
+                                    // session, and the content is public anyway.
+                                    super::crypto_handler::send_message_to_peer(
+                                        ws_cmd_tx, ws_room_peers, peer_str,
+                                        HavenMessage::PublicFileHeader {
+                                            file_id: file_id.clone(),
+                                            name: file_meta.file_name.clone(),
+                                            ext: file_meta.file_ext.clone(),
+                                            mime: file_meta.mime_type.clone(),
+                                            size: file_meta.size_bytes,
+                                            img: file_meta.is_image,
+                                            w: file_meta.width,
+                                            h: file_meta.height,
+                                            mid: file_meta.message_id.clone(),
+                                            sid: resp_sid.clone().unwrap_or_default(),
+                                            cid: resp_cid.clone().unwrap_or_default(),
+                                            ts: file_meta.created_at,
+                                            aes_key: hex::encode(enc.key),
+                                            aes_nonce: hex::encode(enc.nonce),
+                                        },
+                                    );
                                 }
+
+                                    if offset > 0 {
+                                        // Resumed transfer: skip FileHeader, stream from offset via WS.
+                                        if let Some(room) = ws_room_for_peer(ws_room_peers, &peer_str) {
+                                            super::ws_stream_transfer::ws_stream_send(
+                                                ws_cmd_tx, &room, &peer_str,
+                                                &super::ws_stream_transfer::StreamKind::File,
+                                                &file_id, &temp_path, enc.ciphertext.len() as u64,
+                                                offset,
+                                            ).await;
+                                        }
+                                        hollow_log!("[HOLLOW-FILE] Resumed file {} to {peer_str} from offset {offset}", file_id);
+                                    } else {
+                                        // Fresh transfer: stream via WebRTC or WS relay.
+                                        file_handler::stream_to_peer(
+                                            ws_cmd_tx, ws_room_peers,
+                                            webrtc_peers, pending_webrtc_sends, event_tx,
+                                            &peer_str, &super::ws_stream_transfer::StreamKind::File,
+                                            &file_id, &temp_path, enc.ciphertext.len() as u64,
+                                        ).await;
+                                        hollow_log!("[HOLLOW-FILE] Streamed file {} to {peer_str}", file_id);
+                                    }
+                                    // Clean up the re-served ciphertext temp once the WS-relay
+                                    // stream is queued. A WebRTC send still in flight owns the
+                                    // temp (removed on WebRtcTransferComplete), so only delete
+                                    // when none is pending — otherwise this leaked a duplicate
+                                    // encrypted copy on every file re-request.
+                                    if !pending_webrtc_sends.contains_key(&file_id) {
+                                        let _ = std::fs::remove_file(&temp_path);
+                                    }
                             }
                         }
                 }
             }
+        }
+
+        // Negative answer to a FileRequest we sent. The owner of the pending
+        // ask table decides what it means (asked-set rule, rotation, and the
+        // local retention check that gates the one store write this can cause).
+        HavenMessage::FileUnavailable { file_id, reason } => {
+            file_asks::handle_file_unavailable(
+                ws_cmd_tx, ws_room_peers, server_states, event_tx,
+                pending_file_asks, requested_file_receipts, declined_file_ids,
+                pending_ws_transfers,
+                &peer_str, file_id, reason,
+                local_peer_str, device_peer_id,
+                db_path, db_passphrase,
+            ).await;
         }
 
         // -- WebRTC signaling (Phase 5A) --

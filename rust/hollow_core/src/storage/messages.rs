@@ -5102,6 +5102,10 @@ impl MessageStore {
     /// Get file_ids from messages that have a file_id but no completed file entry.
     /// Used to find files that need downloading after message sync.
     /// Also checks disk — skips files that already exist in ~/.hollow/files/.
+    ///
+    /// A row the retention sweep marked EXPIRED is never returned: those bytes
+    /// are gone by policy, so re-requesting them only asks holders that deleted
+    /// them for the same reason.
     pub fn get_missing_file_ids(&self) -> Result<Vec<String>, String> {
         let mut stmt = self
             .conn
@@ -5109,10 +5113,12 @@ impl MessageStore {
                 "SELECT DISTINCT cm.file_id FROM channel_messages cm
                  WHERE cm.file_id IS NOT NULL
                  AND cm.file_id NOT IN (SELECT file_id FROM files WHERE completed_at IS NOT NULL)
+                 AND cm.file_id NOT IN (SELECT file_id FROM files WHERE expired_at IS NOT NULL)
                  UNION
                  SELECT DISTINCT m.file_id FROM messages m
                  WHERE m.file_id IS NOT NULL
-                 AND m.file_id NOT IN (SELECT file_id FROM files WHERE completed_at IS NOT NULL)",
+                 AND m.file_id NOT IN (SELECT file_id FROM files WHERE completed_at IS NOT NULL)
+                 AND m.file_id NOT IN (SELECT file_id FROM files WHERE expired_at IS NOT NULL)",
             )
             .map_err(|e| format!("Failed to prepare missing files query: {e}"))?;
 
@@ -5162,7 +5168,8 @@ impl MessageStore {
                 "SELECT DISTINCT m.file_id FROM messages m
                  WHERE m.peer_id = ?1
                  AND m.file_id IS NOT NULL
-                 AND m.file_id NOT IN (SELECT file_id FROM files WHERE completed_at IS NOT NULL)",
+                 AND m.file_id NOT IN (SELECT file_id FROM files WHERE completed_at IS NOT NULL)
+                 AND m.file_id NOT IN (SELECT file_id FROM files WHERE expired_at IS NOT NULL)",
             )
             .map_err(|e| format!("Failed to prepare missing DM files query: {e}"))?;
 
@@ -5181,7 +5188,8 @@ impl MessageStore {
                 "SELECT DISTINCT cm.file_id FROM channel_messages cm
                  WHERE cm.server_id = ?1
                  AND cm.file_id IS NOT NULL
-                 AND cm.file_id NOT IN (SELECT file_id FROM files WHERE completed_at IS NOT NULL)",
+                 AND cm.file_id NOT IN (SELECT file_id FROM files WHERE completed_at IS NOT NULL)
+                 AND cm.file_id NOT IN (SELECT file_id FROM files WHERE expired_at IS NOT NULL)",
             )
             .map_err(|e| format!("Failed to prepare missing server files query: {e}"))?;
 
@@ -5394,7 +5402,8 @@ impl MessageStore {
                  JOIN files f ON cm.file_id = f.file_id
                  WHERE cm.server_id = ?1
                  AND f.is_image = 1
-                 AND f.completed_at IS NULL",
+                 AND f.completed_at IS NULL
+                 AND f.expired_at IS NULL",
             )
             .map_err(|e| format!("Failed to prepare missing image files query: {e}"))?;
 

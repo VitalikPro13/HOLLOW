@@ -1998,61 +1998,60 @@ async fn replicate_channel_file_full(
     }
 }
 
-/// Pick ONE online device of a server member OTHER than the requested identity
-/// (and not ourselves) to serve a CHANNEL file whose original target is
-/// offline. Full replication (<6-member servers) means every member online at
-/// send time holds the bytes — the classic gap this closes: the sender went
-/// offline, another member has the file, but the request only ever targeted
-/// the sender (HOLLOW_PLAN line 2016). Best-effort: a picked member without
-/// the bytes silently ignores the request (the responder needs a disk_path);
-/// the viewport sweep re-fires on later passes. Returns None for DM files —
-/// only the two parties + siblings hold those, and the Dart DM sweep already
-/// picks online sources with a sibling fallback.
-fn channel_fallback_holder(
-    file_id: &str,
-    requested: &str,
+/// Every online DEVICE that may LEGITIMATELY hold a channel file's bytes, in
+/// ascending device-id order so the walk is reproducible.
+///
+/// Full replication (<6-member servers) means every member online at send time
+/// holds the bytes, which is the classic gap this closes: the sender went
+/// offline, another member has the file, but the request only ever targeted the
+/// sender (HOLLOW_PLAN line 2016). Membership alone is NOT entitlement here: a
+/// restricted channel's bytes only ever went to members who can SEE it, so
+/// rerouting to anybody else would ask a non-qualifier to serve content it
+/// should never have been given. That predicate lives here and nowhere else;
+/// `file_asks` walks this list one holder at a time.
+///
+/// Best effort by design: a picked member without the bytes now answers
+/// `FileUnavailable` and the walk moves on.
+pub(crate) fn channel_holder_candidates(
+    state: &ServerState,
+    channel_id: &str,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
-    server_states: &HashMap<String, ServerState>,
     local_peer: &str,
-    db_path: &str,
-    db_passphrase: &str,
-) -> Option<String> {
-    // Lazy store open ONLY on this fallback path — zero cost when the target
-    // is online (same inline-open pattern as the FileRequest responder).
-    let store = crate::storage::MessageStore::open(db_path, db_passphrase).ok()?;
-    let meta = store.get_file_metadata(file_id).ok().flatten()?;
-    if meta.context_type != "channel" {
-        return None;
-    }
-    let mut ctx = meta.context_id.splitn(2, ':');
-    let server_id = ctx.next()?;
-    let channel_id = ctx.next()?;
-    let state = server_states.get(server_id)?;
-    // Members are MASTER-keyed; sends must target DEVICE ids. Deterministic
-    // single pick (sorted, first) — NEVER a fan-out: each holder re-encrypts
-    // its stream with its own AES key, and multiple streams poison the one
-    // FileHeader key the receiver kept (see the comment in the caller).
+) -> Vec<String> {
+    // Members are MASTER-keyed; sends must target DEVICE ids.
     let mut candidates: Vec<String> = Vec::new();
     for member in state.members.keys() {
-        if super::resolver::same_identity(member, local_peer)
-            || super::resolver::same_identity(member, requested)
-        {
+        if super::resolver::same_identity(member, local_peer) {
             continue;
         }
-        // Only a member who can SEE the channel is a legitimate holder of its
-        // bytes; rerouting to anybody else would ask a non-qualifier to serve
-        // content it should never have been given in the first place.
-        if !super::crypto_handler::channel_readable_by(state, member, channel_id) { continue; }
+        if !super::crypto_handler::channel_readable_by(state, member, channel_id) {
+            continue;
+        }
         candidates.extend(super::crypto_handler::online_devices_for(ws_room_peers, member));
     }
     candidates.sort();
-    candidates.into_iter().next()
+    candidates.dedup();
+    candidates
 }
 
-/// Handle NodeCommand::RequestFile — request file from peer.
-/// Checks for a partial WS transfer and includes the byte offset for resumption.
+/// Handle NodeCommand::RequestFile — the explicit pull (the Download button,
+/// the chat-open sweep, a guest download).
+///
+/// The request goes through the PENDING ASK TABLE (`node/file_asks.rs`) whenever
+/// we hold a row for the file, which is the normal case: that is what lets an
+/// unanswerable request be QUEUED instead of dropped on the floor, rotated to
+/// the next holder when one says it no longer has the bytes, and narrated to the
+/// card so the user is never left with a button that did nothing.
+///
+/// CRITICAL — request from ONE device, NOT a fan-out. A DM file is fanned out at
+/// SEND time to the recipient's devices AND siblings, so MULTIPLE devices hold a
+/// copy, but each holder re-encrypts its stream with its OWN random AES key.
+/// Requesting from several means several streams arrive while the receiver kept
+/// only ONE FileHeader's AES key, so every other stream fails AES-GCM decrypt and
+/// auto-re-requests: an infinite FileHeader/stream/decrypt-fail loop (the "stuck
+/// loading forever, 16.2/16.2 KB" plus 4.5k log lines bug).
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn handle_request_file(
+pub(crate) async fn handle_request_file(
     file_id: String,
     peer_id_str: String,
     chunks: Vec<u32>,
@@ -2060,68 +2059,104 @@ pub(crate) fn handle_request_file(
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     pending_ws_transfers: &HashMap<String, super::ws_stream_transfer::WsTransferState>,
     server_states: &HashMap<String, ServerState>,
+    event_tx: &tokio::sync::mpsc::Sender<crate::node::NetworkEvent>,
+    pending_file_asks: &mut HashMap<String, super::file_asks::PendingFileAsk>,
+    requested_file_receipts: &mut HashMap<String, std::time::Instant>,
+    declined_file_ids: &mut std::collections::HashSet<String>,
     local_peer: &str,
+    device_peer_id: &str,
     db_path: &str,
     db_passphrase: &str,
 ) {
-    let offset = pending_ws_transfers.get(&file_id)
-        .map(|s| s.bytes_received)
-        .unwrap_or(0);
+    // Where may this file be pulled from? Read off OUR row, ONE store open on
+    // this path (the same inline-open pattern the FileRequest responder uses),
+    // and cached in the ask entry from here on.
+    let row = crate::storage::MessageStore::open(db_path, db_passphrase)
+        .ok()
+        .and_then(|store| store.get_file_metadata(&file_id).ok().flatten())
+        .and_then(|meta| {
+            let sender = super::resolver::resolve(&meta.sender_id);
+            match meta.context_type.as_str() {
+                "dm" => Some((
+                    super::file_asks::FileAskContext::Dm {
+                        peer: meta.context_id.clone(),
+                    },
+                    sender,
+                )),
+                "channel" => {
+                    let mut parts = meta.context_id.splitn(2, ':');
+                    match (parts.next(), parts.next()) {
+                        (Some(sid), Some(cid)) => Some((
+                            super::file_asks::FileAskContext::Channel {
+                                server_id: sid.to_string(),
+                                channel_id: cid.to_string(),
+                            },
+                            sender,
+                        )),
+                        _ => None,
+                    }
+                }
+                _ => None,
+            }
+        });
 
-    if offset > 0 {
-        hollow_log!("[HOLLOW-FILE] Resuming file {file_id} from offset {offset} from peer {peer_id_str}");
-    } else {
-        hollow_log!("[HOLLOW-FILE] Requesting file {file_id} from peer {peer_id_str}");
+    if let Some((context, sender)) = row {
+        // A live device id from the caller is the preferred first hop; a master
+        // id is not a socket anybody authenticates as, so it is not a target.
+        let prefer = ws_room_peers
+            .values()
+            .any(|peers| peers.contains(&peer_id_str))
+            .then(|| peer_id_str.clone());
+        super::file_asks::upsert_and_advance(
+            ws_cmd_tx,
+            ws_room_peers,
+            server_states,
+            event_tx,
+            pending_file_asks,
+            requested_file_receipts,
+            declined_file_ids,
+            pending_ws_transfers,
+            &file_id,
+            context,
+            sender,
+            prefer.as_deref(),
+            local_peer,
+            device_peer_id,
+        )
+        .await;
+        return;
     }
 
-    // Multi-device: `peer_id_str` is the conversation MASTER (the UI/friend key),
-    // which no socket authenticates as — sending the FileRequest directly would be
-    // silently dropped, so the file bytes never arrive (FileHeader synced but the
-    // image/Download stays broken). Resolve to EXACTLY ONE online device.
-    //
-    // CRITICAL — request from ONE device, NOT a fan-out. A DM file is fanned out
-    // at SEND time to the recipient's devices AND siblings, so MULTIPLE devices
-    // hold a copy — but each holder re-encrypts its stream with its OWN random
-    // AES key. Requesting from several → several streams arrive, but the receiver
-    // only kept ONE FileHeader's AES key → every other stream fails AES-GCM
-    // decrypt and auto-re-requests, an infinite FileHeader/stream/decrypt-fail
-    // loop (the "stuck loading forever, 16.2/16.2 KB" + 4.5k log lines bug).
-    // Deterministic single pick (lowest device id). If the requester already
-    // knows a live device id, use it as-is. Single-device → the raw id unchanged.
+    // No row of our own (a guest pull, a file we only know by id): today's
+    // behaviour verbatim, a single direct send to whichever device of the named
+    // identity is reachable. There is no context to queue against, so there is
+    // no ask to keep.
+    let offset = pending_ws_transfers
+        .get(&file_id)
+        .map(|s| s.bytes_received)
+        .unwrap_or(0);
     let target = if ws_room_peers.values().any(|peers| peers.contains(&peer_id_str)) {
-        // Already a live device id — request from it directly.
         Some(peer_id_str.clone())
     } else {
-        let mut devices = super::crypto_handler::online_devices_for(&ws_room_peers, &peer_id_str);
+        let mut devices = super::crypto_handler::online_devices_for(ws_room_peers, &peer_id_str);
         devices.sort();
-        devices.into_iter().next()
-            .or_else(|| peer_is_reachable(&ws_room_peers, &peer_id_str).then(|| peer_id_str.clone()))
+        devices
+            .into_iter()
+            .next()
+            .or_else(|| peer_is_reachable(ws_room_peers, &peer_id_str).then(|| peer_id_str.clone()))
     };
     match target {
         Some(t) => {
+            hollow_log!("[HOLLOW-FILE] Requesting rowless file {file_id} from {t} (offset {offset})");
             send_message_to_peer(
-                &ws_cmd_tx, &ws_room_peers,
-                &t, HavenMessage::FileRequest { file_id, chunks, offset },
+                ws_cmd_tx,
+                ws_room_peers,
+                &t,
+                HavenMessage::FileRequest { file_id, chunks, offset },
             );
         }
         None => {
-            // The requested identity is offline. Channel files are fully
-            // replicated — reroute to one online device of another member.
-            match channel_fallback_holder(
-                &file_id, &peer_id_str, ws_room_peers, server_states,
-                local_peer, db_path, db_passphrase,
-            ) {
-                Some(dev) => {
-                    hollow_log!("[HOLLOW-FILE] {peer_id_str} offline — rerouting FileRequest for {file_id} to server member device {dev}");
-                    send_message_to_peer(
-                        &ws_cmd_tx, &ws_room_peers,
-                        &dev, HavenMessage::FileRequest { file_id, chunks, offset },
-                    );
-                }
-                None => {
-                    hollow_log!("[HOLLOW-FILE] No online device for {peer_id_str} — FileRequest for {file_id} not sent");
-                }
-            }
+            hollow_log!("[HOLLOW-FILE] No online device for {peer_id_str} — FileRequest for {file_id} not sent");
         }
     }
 }

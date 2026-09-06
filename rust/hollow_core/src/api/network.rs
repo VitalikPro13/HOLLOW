@@ -291,6 +291,14 @@ pub enum NetworkEvent {
         file_id: String,
         error: String,
     },
+    /// Honest file-card state for a file whose bytes are not on disk.
+    /// `state`: "requesting" | "waiting" | "gone" | "expired". `peer_id` is the
+    /// MASTER identity the state is about ("" when none).
+    FileAvailability {
+        file_id: String,
+        state: String,
+        peer_id: String,
+    },
     /// Time-limited TURN credentials from the relay (over the authed WS).
     TurnCredentials { username: String, password: String, ttl: u64, uris: Vec<String> },
     // -- Multi-device link snapshot events (Step 4) --
@@ -1072,6 +1080,9 @@ fn to_ffi_event(event: node::NetworkEvent) -> NetworkEvent {
         }
         node::NetworkEvent::FileFailed { file_id, error } => {
             NetworkEvent::FileFailed { file_id, error }
+        }
+        node::NetworkEvent::FileAvailability { file_id, state, peer_id } => {
+            NetworkEvent::FileAvailability { file_id, state, peer_id }
         }
         // -- Multi-device link snapshot events (Step 4) --
         node::NetworkEvent::TurnCredentials { username, password, ttl, uris } => {
@@ -3825,6 +3836,30 @@ pub fn request_file_from_peer(
                 peer_id,
                 chunks,
             }),
+    )
+    .map_err(|e| format!("Failed to send command: {e}"))?;
+
+    Ok(())
+}
+
+/// Stop waiting for a file: drop the queued ask and its explicit-pull receipt.
+///
+/// The receipt goes with the ask on purpose. An answer already in flight then
+/// arrives with no receipt to bypass anything, so the size cap and the
+/// auto-download gate judge it exactly as they judge an unsolicited push,
+/// which is what "stop waiting" means. Nothing is emitted: the card clears its
+/// own state on the tap, and an event here would race it.
+#[frb]
+pub fn cancel_file_request(file_id: String) -> Result<(), String> {
+    let node = get_node();
+    let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let state = guard.as_ref().ok_or("Node is not running")?;
+
+    let rt = get_runtime();
+    rt.block_on(
+        state
+            .cmd_tx
+            .send(node::NodeCommand::CancelFileRequest { file_id }),
     )
     .map_err(|e| format!("Failed to send command: {e}"))?;
 

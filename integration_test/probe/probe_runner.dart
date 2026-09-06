@@ -982,10 +982,19 @@ class ProbeRunner {
   /// mouse is over the thing, and `tester.tap` sends a touch-like pointer that
   /// arrives and leaves. The gesture is deliberately NOT removed: the next
   /// step usually wants to click what the hover just revealed.
+  ///
+  /// The pointer is ADDED once and only moved afterwards. `addPointer` on an
+  /// already-added mouse is what a second `hover` step used to do, and
+  /// `MouseTracker` asserts on it (`(event is PointerAddedEvent) == (lastEvent
+  /// is PointerRemovedEvent)`), which kills the instance — so every journey
+  /// that hovered twice died on its second hover, wherever it pointed.
   Future<void> _hover(Offset point) async {
-    final gesture = _hoverGesture ??=
-        await tester.createGesture(kind: PointerDeviceKind.mouse);
-    await gesture.addPointer(location: point);
+    var gesture = _hoverGesture;
+    if (gesture == null) {
+      gesture = await tester.createGesture(kind: PointerDeviceKind.mouse);
+      _hoverGesture = gesture;
+      await gesture.addPointer(location: point);
+    }
     await gesture.moveTo(point);
   }
 

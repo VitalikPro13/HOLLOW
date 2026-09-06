@@ -10,6 +10,50 @@ import 'package:path/path.dart' as p;
 
 import '../services/video_thumbnail_service.dart';
 
+/// Why the bytes of a file are not here yet, as Rust's pending-ask walk sees
+/// it (tmp.txt item 1: "honest file card states").
+///
+/// A file card whose bytes are missing used to show one Download button that
+/// could silently do nothing. Rust now says which of the four cases it is, so
+/// the card can explain itself instead of pretending.
+class FileAvailabilityState {
+  /// A request is out to a holder and has not been answered yet.
+  static const String requesting = 'requesting';
+
+  /// Nobody who has the file is reachable; the ask is queued and self-heals.
+  static const String waiting = 'waiting';
+
+  /// A holder we asked answered "I do not have it".
+  static const String gone = 'gone';
+
+  /// The server's retention policy removed it.
+  static const String expired = 'expired';
+
+  /// One of [requesting], [waiting], [gone], [expired]. Kept as a string
+  /// because it crosses the FFI as one; unknown values render as nothing
+  /// known, which is the old Download button.
+  final String state;
+
+  /// The MASTER identity the state is about (empty when none): the holder
+  /// being asked, the DM counterparty who is offline, or the peer that
+  /// answered "I do not have it".
+  final String peerId;
+
+  const FileAvailabilityState({required this.state, required this.peerId});
+
+  @override
+  bool operator ==(Object other) =>
+      other is FileAvailabilityState &&
+      other.state == state &&
+      other.peerId == peerId;
+
+  @override
+  int get hashCode => Object.hash(state, peerId);
+
+  @override
+  String toString() => 'FileAvailabilityState($state, $peerId)';
+}
+
 /// State for a single file transfer (sending or receiving).
 class FileTransferState {
   final String fileId;
@@ -46,6 +90,11 @@ class FileTransferState {
   /// Cleared when the user starts a manual download or the file completes.
   final bool declined;
 
+  /// Why the bytes are not here yet (tmp.txt item 1). Null means nothing is
+  /// known, which is the plain Download button. Cleared the moment real bytes
+  /// move (progress, completion) or a header answers the ask.
+  final FileAvailabilityState? availability;
+
   const FileTransferState({
     required this.fileId,
     required this.fileName,
@@ -66,11 +115,14 @@ class FileTransferState {
     this.shareRootHash,
     this.seeders,
     this.declined = false,
+    this.availability,
   });
 
   double get progress =>
       totalChunks > 0 ? chunksReceived / totalChunks : 0;
 
+  /// [clearAvailability] is the only way back to "nothing known": the plain
+  /// `??` merge below can never null a field out.
   FileTransferState copyWith({
     int? chunksReceived,
     bool? isComplete,
@@ -82,6 +134,8 @@ class FileTransferState {
     network_api.VideoThumbRef? videoThumb,
     int? seeders,
     bool? declined,
+    FileAvailabilityState? availability,
+    bool clearAvailability = false,
   }) {
     return FileTransferState(
       fileId: fileId,
@@ -103,6 +157,8 @@ class FileTransferState {
       shareRootHash: shareRootHash,
       seeders: seeders ?? this.seeders,
       declined: declined ?? this.declined,
+      availability:
+          clearAvailability ? null : (availability ?? this.availability),
     );
   }
 }
@@ -494,7 +550,18 @@ class FileTransferNotifier
   }) {
     // Don't overwrite an existing entry (e.g., from a sync batch that already
     // set isComplete, or a prior live transfer). Only create new entries.
-    if (state.containsKey(fileId)) return;
+    final existing = state[fileId];
+    if (existing != null) {
+      // A header for a file we were asking about IS the positive answer to
+      // that ask, so the "Requesting..." caption has to go even though the
+      // entry itself is left alone.
+      if (existing.availability != null) {
+        final cleared = Map<String, FileTransferState>.from(state);
+        cleared[fileId] = existing.copyWith(clearAvailability: true);
+        state = cleared;
+      }
+      return;
+    }
     final updated = Map<String, FileTransferState>.from(state);
     updated[fileId] = FileTransferState(
       fileId: fileId,
@@ -534,6 +601,63 @@ class FileTransferNotifier
       declined: true,
     );
     state = updated;
+  }
+
+  /// Record why the bytes are not here yet (tmp.txt item 1). Rust's ask walk
+  /// emits one of `requesting` / `waiting` / `gone` / `expired`; the card
+  /// reads it through `fileCardStatus()` and says so instead of offering a
+  /// button that would do nothing.
+  ///
+  /// Creates a minimal entry when none exists, the way [markDeclined] does —
+  /// a file that was never fetched has no transfer row of its own.
+  void onFileAvailability(String fileId, String availability, String peerId) {
+    final current = state[fileId];
+    if (current?.isComplete == true) return;
+    final next =
+        FileAvailabilityState(state: availability, peerId: peerId);
+    final updated = Map<String, FileTransferState>.from(state);
+    if (current == null) {
+      updated[fileId] = FileTransferState(
+        fileId: fileId,
+        fileName: '',
+        sizeBytes: 0,
+        totalChunks: 0,
+        availability: next,
+      );
+    } else {
+      updated[fileId] = current.copyWith(
+        availability: next,
+        // We are the ones asking, so an old auto-download-gate pin must not
+        // survive to swallow the progress of the answer (issue #41): Rust
+        // re-stamps the receipt on every re-dispatch, and a stale `declined`
+        // here would drop the very bytes we asked for.
+        declined: availability == FileAvailabilityState.requesting
+            ? false
+            : current.declined,
+      );
+    }
+    state = updated;
+  }
+
+  /// Forget why the bytes were missing, so the card and the hover bar go back
+  /// to their plain Download button at once. A no-op when there is no entry.
+  void clearAvailability(String fileId) {
+    final current = state[fileId];
+    if (current == null || current.availability == null) return;
+    final updated = Map<String, FileTransferState>.from(state);
+    updated[fileId] = current.copyWith(clearAvailability: true);
+    state = updated;
+  }
+
+  /// Stop waiting for a file: cancel the outstanding ask in Rust, then drop
+  /// the local explanation so the card offers Download again immediately
+  /// rather than after the next event.
+  ///
+  /// Rethrows, so the caller can toast a failure: a cancel that silently did
+  /// nothing is the same broken promise this feature exists to end.
+  Future<void> stopWaitingForFile(String fileId) async {
+    await network_api.cancelFileRequest(fileId: fileId);
+    clearAvailability(fileId);
   }
 
   /// Clear the declined flag — called by every manual-download entry point so
@@ -579,7 +703,11 @@ class FileTransferNotifier
         height: current.height,
       );
     } else {
-      updated[fileId] = current.copyWith(chunksReceived: chunksReceived);
+      // Bytes are moving: whatever the card was explaining is over.
+      updated[fileId] = current.copyWith(
+        chunksReceived: chunksReceived,
+        clearAvailability: true,
+      );
     }
     state = updated;
   }
@@ -595,6 +723,7 @@ class FileTransferNotifier
         diskPath: diskPath,
         chunksReceived: current.totalChunks > 0 ? current.totalChunks : 1,
         declined: false,
+        clearAvailability: true,
       );
     } else {
       // File completed without a prior header (e.g., received via sync then stream).

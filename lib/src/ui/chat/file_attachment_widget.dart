@@ -8,6 +8,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/models/file_attachment.dart';
 import 'package:hollow/src/core/providers/event_provider.dart';
 import 'package:hollow/src/core/providers/file_transfer_provider.dart';
+import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:hollow/src/rust/api/network.dart' as network_api;
@@ -21,6 +22,7 @@ import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/chat/audio_message_bubble.dart';
+import 'package:hollow/src/ui/chat/file_card_status.dart';
 import 'package:hollow/src/ui/chat/sticker_pack_card.dart';
 import 'package:hollow/src/ui/chat/video_message_bubble.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -67,8 +69,23 @@ class FileAttachmentWidget extends ConsumerWidget {
         : attachment.sizeBytes;
     final bytesReceived = (progress * totalBytes).round();
 
+    // Why the bytes are not here yet (tmp.txt item 1). ONE helper decides the
+    // caption and the control for every surface below. Only the peer the
+    // state is about is watched — a file bubble must not rebuild when an
+    // unrelated profile changes — and a name asked for any other id falls
+    // back to its short form, which is what an absent profile gives anyway.
+    final statusPeer = transfer?.availability?.peerId ?? '';
+    final statusProfile = statusPeer.isEmpty
+        ? null
+        : ref.watch(profileProvider.select((p) => p[statusPeer]));
+    final status = fileCardStatus(
+      attachment: attachment,
+      transfer: transfer,
+      nameOf: (master) => displayNameForPeer(statusProfile, master),
+    );
+
     if (attachment.isExpired) {
-      return _buildExpiredCard(hollow);
+      return _buildExpiredCard(hollow, status);
     }
 
     // Manual download entry (issue #41): the same flow as the hover-bar
@@ -78,11 +95,8 @@ class FileAttachmentWidget extends ConsumerWidget {
     void onDownload() => _startManualDownload(context, ref);
 
     // Share-backed file with no seeders and not yet downloaded.
-    if (transfer?.shareRootHash != null &&
-        !isComplete &&
-        (transfer?.seeders ?? -1) == 0 &&
-        (transfer?.chunksReceived ?? 0) == 0) {
-      return _buildUnavailableCard(hollow, onDownload);
+    if (status.control == FileCardControl.retry) {
+      return _buildUnavailableCard(hollow, status, onDownload);
     }
 
     // Phase 6.75: Video preview takes priority over generic file rendering.
@@ -93,14 +107,16 @@ class FileAttachmentWidget extends ConsumerWidget {
     // button while the bytes aren't local, progress, then play — so the video
     // keeps one face instead of hopping between a placeholder and the bubble.
     if (_isVideoAttachment()) {
-      return VideoMessageBubble(attachment: attachment, onDownload: onDownload);
+      return VideoMessageBubble(
+          attachment: attachment, onDownload: onDownload, status: status);
     }
 
     // Phase 6.75: Audio preview — inline playback card. The bubble owns its
     // undownloaded state: the play button becomes a download button (issue
     // #41 carry-over).
     if (_isAudioAttachment()) {
-      return AudioMessageBubble(attachment: attachment, onDownload: onDownload);
+      return AudioMessageBubble(
+          attachment: attachment, onDownload: onDownload, status: status);
     }
 
     // A shared sticker pack is an ordinary file on the wire — only its face
@@ -118,13 +134,14 @@ class FileAttachmentWidget extends ConsumerWidget {
         isDownloading: isDownloading,
         progress: progress,
         onDownload: onDownload,
+        status: status,
       );
     }
 
     if (attachment.isImage) {
-      return _buildImagePreview(context, hollow, isComplete, diskPath, isDownloading, progress, bytesReceived, vaultPhase, onDownload);
+      return _buildImagePreview(context, hollow, isComplete, diskPath, isDownloading, progress, bytesReceived, vaultPhase, status, onDownload);
     }
-    return _buildFileCard(hollow, isComplete, isDownloading, progress, bytesReceived, vaultPhase, onDownload);
+    return _buildFileCard(hollow, isComplete, isDownloading, progress, bytesReceived, vaultPhase, status, onDownload);
   }
 
   /// Start a manual download for this attachment — the pressable placeholder
@@ -156,6 +173,11 @@ class FileAttachmentWidget extends ConsumerWidget {
       final isChannel = contextType == 'channel' && contextId.contains(':');
       final serverId = isChannel ? contextId.split(':').first : '';
 
+      // A FileRequest answers itself on the card: it turns into "Requesting..."
+      // and then says what came back. The other two branches have no such
+      // state, so they keep their toast.
+      var announce = true;
+
       if (shareRoot != null && shareKey != null) {
         final isVideo =
             _videoExtensions.contains(attachment.fileExt.toLowerCase());
@@ -181,8 +203,9 @@ class FileAttachmentWidget extends ConsumerWidget {
         }
         await network_api.requestFileFromPeer(
             fileId: attachment.fileId, peerId: target, chunks: []);
+        announce = false;
       }
-      if (context.mounted) {
+      if (announce && context.mounted) {
         HollowToast.show(context, 'Requesting file...',
             type: HollowToastType.info);
       }
@@ -210,7 +233,7 @@ class FileAttachmentWidget extends ConsumerWidget {
     return _audioExtensions.contains(attachment.fileExt.toLowerCase());
   }
 
-  Widget _buildExpiredCard(HollowTheme hollow) {
+  Widget _buildExpiredCard(HollowTheme hollow, FileCardStatus status) {
     return Container(
       constraints: const BoxConstraints(maxWidth: 280),
       clipBehavior: Clip.antiAlias,
@@ -242,7 +265,7 @@ class FileAttachmentWidget extends ConsumerWidget {
                   ),
                   const SizedBox(height: HollowSpacing.xxs),
                   Text(
-                    'File expired · ${attachment.formattedSize}',
+                    status.caption ?? kFileCardExpiredCaption,
                     style: HollowTypography.caption.copyWith(
                       color: hollow.textSecondary,
                       fontStyle: FontStyle.italic,
@@ -257,7 +280,8 @@ class FileAttachmentWidget extends ConsumerWidget {
     );
   }
 
-  Widget _buildUnavailableCard(HollowTheme hollow, VoidCallback onDownload) {
+  Widget _buildUnavailableCard(
+      HollowTheme hollow, FileCardStatus status, VoidCallback onDownload) {
     return HollowPressable(
       onTap: onDownload,
       semanticLabel: 'Retry download of ${attachment.fileName}',
@@ -293,7 +317,7 @@ class FileAttachmentWidget extends ConsumerWidget {
                     ),
                     const SizedBox(height: HollowSpacing.xxs),
                     Text(
-                      'No seeders · tap to retry · ${attachment.formattedSize}',
+                      status.caption ?? kFileCardWaitingCaption,
                       style: HollowTypography.caption.copyWith(
                         color: hollow.textSecondary,
                         fontStyle: FontStyle.italic,
@@ -345,7 +369,7 @@ class FileAttachmentWidget extends ConsumerWidget {
   }
 
   Widget _buildImagePreview(
-      BuildContext context, HollowTheme hollow, bool isComplete, String? diskPath, bool isDownloading, double progress, int bytesReceived, String? vaultPhase, VoidCallback onDownload) {
+      BuildContext context, HollowTheme hollow, bool isComplete, String? diskPath, bool isDownloading, double progress, int bytesReceived, String? vaultPhase, FileCardStatus status, VoidCallback onDownload) {
     const maxWidth = _previewMaxWidth;
     const maxHeight = _previewMaxHeight;
     final box = _displayBoxSize();
@@ -376,7 +400,7 @@ class FileAttachmentWidget extends ConsumerWidget {
                         diskPath: diskPath,
                         fit: BoxFit.contain,
                         errorWidget: _buildPlaceholder(
-                            hollow, displayWidth, displayHeight, false, 1.0, 0, null),
+                            hollow, displayWidth, displayHeight, false, 1.0, 0, null, status),
                       )
                     : Image.file(
                         File(diskPath),
@@ -390,7 +414,7 @@ class FileAttachmentWidget extends ConsumerWidget {
                                 MediaQuery.devicePixelRatioOf(context))
                             .ceil(),
                         errorBuilder: (_, e, st) => _buildPlaceholder(
-                            hollow, displayWidth, displayHeight, false, 1.0, 0, null),
+                            hollow, displayWidth, displayHeight, false, 1.0, 0, null, status),
                       ),
               ),
             ),
@@ -400,11 +424,11 @@ class FileAttachmentWidget extends ConsumerWidget {
     }
 
     // Show placeholder with progress or downloading indicator.
-    return _buildPlaceholder(hollow, displayWidth, displayHeight, isDownloading, progress, bytesReceived, vaultPhase, onDownload: onDownload);
+    return _buildPlaceholder(hollow, displayWidth, displayHeight, isDownloading, progress, bytesReceived, vaultPhase, status, onDownload: onDownload);
   }
 
   Widget _buildPlaceholder(
-      HollowTheme hollow, double width, double height, bool isDownloading, double progress, int bytesReceived, String? vaultPhase, {VoidCallback? onDownload}) {
+      HollowTheme hollow, double width, double height, bool isDownloading, double progress, int bytesReceived, String? vaultPhase, FileCardStatus status, {VoidCallback? onDownload}) {
     // Placeholder box shell: when the header carried a tiny thumbnail (issue
     // #41 carry-over), it renders BLURRED under the content with a
     // theme-correct scrim so the download button / progress labels keep
@@ -442,28 +466,54 @@ class FileAttachmentWidget extends ConsumerWidget {
 
     // Idle (not downloading, no partial progress) + a download hook = the
     // pressable placeholder (issue #41): image dimensions box with a download
-    // button in it instead of a dead rectangle.
+    // button in it instead of a dead rectangle. When the card knows why the
+    // bytes are missing it says so here too, and the circle stops taking taps
+    // that would do nothing (tmp.txt item 1).
     if (!isDownloading && !(progress > 0 && progress < 1) && onDownload != null) {
-      return HollowPressable(
-        onTap: onDownload,
-        semanticLabel: 'Download ${attachment.fileName}',
-        borderRadius: BorderRadius.circular(hollow.radiusSm),
-        child: shell(
-          Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Container(
-                width: 44,
-                height: 44,
-                decoration: BoxDecoration(
-                  color: hollow.elevated,
-                  shape: BoxShape.circle,
-                  border: Border.all(color: hollow.border),
-                ),
-                child: Icon(LucideIcons.download,
-                    size: 20, color: hollow.textPrimary),
+      // Same circle, three faces: the button, its busy spinner, or the reason
+      // there is nothing to press.
+      final Widget circleContent = switch (status.control) {
+        FileCardControl.busy => Padding(
+            padding: const EdgeInsets.all(12),
+            child: CircularProgressIndicator(
+              strokeWidth: 2,
+              valueColor: AlwaysStoppedAnimation(hollow.textPrimary),
+              backgroundColor: hollow.border,
+            ),
+          ),
+        FileCardControl.none => Icon(LucideIcons.cloudOff,
+            size: 20, color: hollow.textSecondary),
+        _ => Icon(LucideIcons.download, size: 20, color: hollow.textPrimary),
+      };
+      final body = shell(
+        Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Container(
+              width: 44,
+              height: 44,
+              decoration: BoxDecoration(
+                color: hollow.elevated,
+                shape: BoxShape.circle,
+                border: Border.all(color: hollow.border),
               ),
-              const SizedBox(height: HollowSpacing.sm),
+              child: circleContent,
+            ),
+            const SizedBox(height: HollowSpacing.sm),
+            if (status.caption != null)
+              Padding(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: HollowSpacing.sm),
+                child: Text(
+                  status.caption!,
+                  textAlign: TextAlign.center,
+                  style: HollowTypography.caption.copyWith(
+                    color: hollow.textSecondary,
+                    fontSize: 10,
+                  ),
+                ),
+              )
+            else
               Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
@@ -484,9 +534,20 @@ class FileAttachmentWidget extends ConsumerWidget {
                   ),
                 ],
               ),
-            ],
-          ),
+          ],
         ),
+      );
+      // A queued or dead ask has nothing to press: no tap target, and no
+      // Download label for a screen reader to offer.
+      if (status.control == FileCardControl.busy ||
+          status.control == FileCardControl.none) {
+        return body;
+      }
+      return HollowPressable(
+        onTap: onDownload,
+        semanticLabel: 'Download ${attachment.fileName}',
+        borderRadius: BorderRadius.circular(hollow.radiusSm),
+        child: body,
       );
     }
     return shell(
@@ -557,8 +618,15 @@ class FileAttachmentWidget extends ConsumerWidget {
     return '${(b / (1024 * 1024 * 1024)).toStringAsFixed(1)} GB';
   }
 
-  Widget _buildFileCard(HollowTheme hollow, bool isComplete, bool isDownloading, double progress, int bytesReceived, String? vaultPhase, VoidCallback onDownload) {
-    final showDownload = !isComplete && !isDownloading && vaultPhase == null;
+  Widget _buildFileCard(HollowTheme hollow, bool isComplete, bool isDownloading, double progress, int bytesReceived, String? vaultPhase, FileCardStatus status, VoidCallback onDownload) {
+    final idle = !isComplete && !isDownloading && vaultPhase == null;
+    final showDownload = idle && status.control == FileCardControl.download;
+    // The button's own busy state (tmp.txt item 1): same footprint, a spinner,
+    // no tap target, so a second press cannot queue a second ask.
+    final showBusy = idle && status.control == FileCardControl.busy;
+    // The caption is the card's answer for the tap, so it replaces the size
+    // line rather than crowding in beside it.
+    final showCaption = idle && status.caption != null;
     return Container(
       constraints: const BoxConstraints(maxWidth: 280),
       clipBehavior: Clip.antiAlias,
@@ -598,7 +666,9 @@ class FileAttachmentWidget extends ConsumerWidget {
                       ),
                       const SizedBox(height: HollowSpacing.xxs),
                       Text(
-                        vaultPhase != null
+                        showCaption
+                            ? status.caption!
+                            : vaultPhase != null
                             ? '$vaultPhase  ${attachment.formattedSize}'
                             : isDownloading && progress > 0
                                 ? '${_formatSize(bytesReceived)} / ${attachment.formattedSize}'
@@ -627,6 +697,20 @@ class FileAttachmentWidget extends ConsumerWidget {
                     padding: const EdgeInsets.all(HollowSpacing.xs),
                     child: Icon(LucideIcons.download,
                         size: 18, color: hollow.textPrimary),
+                  ),
+                ] else if (showBusy) ...[
+                  const SizedBox(width: HollowSpacing.md),
+                  Padding(
+                    padding: const EdgeInsets.all(HollowSpacing.xs),
+                    child: SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        valueColor: AlwaysStoppedAnimation(hollow.textPrimary),
+                        backgroundColor: hollow.border,
+                      ),
+                    ),
                   ),
                 ],
               ],

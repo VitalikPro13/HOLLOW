@@ -22,6 +22,7 @@ import 'package:hollow/src/rust/api/share.dart' as share_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
+import 'package:hollow/src/ui/chat/file_card_status.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_focus_ring.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
@@ -59,7 +60,17 @@ class VideoMessageBubble extends ConsumerStatefulWidget {
   /// download → progress → play), never a separate placeholder widget.
   final VoidCallback? onDownload;
 
-  const VideoMessageBubble({super.key, required this.attachment, this.onDownload});
+  /// Why the bytes are not here yet (tmp.txt item 1): the caption under the
+  /// poster, and what the center control does. Defaults to the plain Download
+  /// button, which is what "nothing known" has always meant.
+  final FileCardStatus status;
+
+  const VideoMessageBubble({
+    super.key,
+    required this.attachment,
+    this.onDownload,
+    this.status = const FileCardStatus(control: FileCardControl.download),
+  });
 
   @override
   ConsumerState<VideoMessageBubble> createState() => _VideoMessageBubbleState();
@@ -477,21 +488,27 @@ class _VideoMessageBubbleState extends ConsumerState<VideoMessageBubble> {
     // video thumbnail continuously.
     final transfer = ref.watch(
         fileTransferProvider.select((t) => t[widget.attachment.fileId]));
-    final isShareBacked = transfer?.shareRootHash != null;
     final isDownloading = transfer != null &&
         !transfer.isComplete &&
         !transfer.declined &&
         (transfer.isDownloading || transfer.totalChunks > 0);
     final progress = isDownloading ? transfer.progress : 0.0;
-    final noSeeders = isShareBacked &&
-        !transfer!.isComplete &&
-        (transfer.seeders ?? -1) == 0 &&
-        transfer.chunksReceived == 0;
+    final control = widget.status.control;
+    // Why the bytes are missing, said over the poster instead of behind an
+    // inert button (tmp.txt item 1). "No seeders" folds into it: a share with
+    // an empty swarm is one more peer we are waiting for.
+    final blocked = !canPlay &&
+        !isDownloading &&
+        widget.status.caption != null &&
+        control != FileCardControl.download;
     // No local bytes, nothing in flight → the center control is a download
     // button (issue #41 carry-over: undownloaded videos used to render an
     // inert play button over a black slab).
-    final showDownload =
-        !canPlay && !isDownloading && !noSeeders && widget.onDownload != null;
+    final showDownload = !canPlay &&
+        !isDownloading &&
+        widget.onDownload != null &&
+        (control == FileCardControl.download ||
+            control == FileCardControl.retry);
     // Show "Keep & Seed" if the file lives in vault_cache/ (cached channel download).
     final resolvedDiskPath = transfer?.diskPath ?? widget.attachment.diskPath;
     final isInVaultCache = resolvedDiskPath != null &&
@@ -503,9 +520,11 @@ class _VideoMessageBubbleState extends ConsumerState<VideoMessageBubble> {
     final tapAction = canPlay
         ? _onPlayTapped
         : (showDownload ? () => widget.onDownload!() : null);
+    // A surface that takes no taps must not be announced as a button, and
+    // must not offer "Download" to a screen reader either.
     final semanticLabel = canPlay
         ? 'Play ${widget.attachment.fileName}'
-        : 'Download ${widget.attachment.fileName}';
+        : (showDownload ? 'Download ${widget.attachment.fileName}' : null);
 
     return HollowFocusRing(
       enabled: tapAction != null,
@@ -522,19 +541,37 @@ class _VideoMessageBubbleState extends ConsumerState<VideoMessageBubble> {
           fit: StackFit.expand,
           children: [
             _posterLayer(thumbPath),
-            if (noSeeders)
+            if (blocked)
               Container(
                 color: Colors.black.withValues(alpha: 0.65),
                 child: Center(
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(LucideIcons.cloudOff, color: hollow.textSecondary, size: 32),
-                      const SizedBox(height: HollowSpacing.xs),
-                      Text('No seeders',
-                        style: HollowTypography.caption.copyWith(
-                          color: hollow.textSecondary, fontSize: 11)),
-                    ],
+                  child: Padding(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: HollowSpacing.md),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        if (control == FileCardControl.busy)
+                          SizedBox(
+                            width: 32,
+                            height: 32,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 3,
+                              valueColor:
+                                  AlwaysStoppedAnimation(hollow.textSecondary),
+                              backgroundColor: Colors.white24,
+                            ),
+                          )
+                        else
+                          Icon(LucideIcons.cloudOff,
+                              color: hollow.textSecondary, size: 32),
+                        const SizedBox(height: HollowSpacing.xs),
+                        Text(widget.status.caption!,
+                          textAlign: TextAlign.center,
+                          style: HollowTypography.caption.copyWith(
+                            color: hollow.textSecondary, fontSize: 11)),
+                      ],
+                    ),
                   ),
                 ),
               )

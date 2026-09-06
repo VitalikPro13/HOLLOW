@@ -9,6 +9,7 @@ import '../../theme/hollow_theme.dart';
 import '../../theme/hollow_typography.dart';
 import '../components/hollow_button.dart';
 import '../components/hollow_toast.dart';
+import 'file_card_status.dart';
 
 /// The file extension a shared sticker pack carries (issue #36).
 const String kStickerPackExtension = 'hollow-pack';
@@ -52,6 +53,11 @@ class StickerPackCard extends ConsumerStatefulWidget {
   /// contexts that cannot fetch (an archive viewer).
   final VoidCallback? onDownload;
 
+  /// Why the bytes are not here yet (tmp.txt item 1): the subtitle to show
+  /// instead of "Sticker pack", and whether the Download button is offered at
+  /// all. Defaults to the plain Download button.
+  final FileCardStatus status;
+
   const StickerPackCard({
     super.key,
     required this.diskPath,
@@ -59,6 +65,7 @@ class StickerPackCard extends ConsumerStatefulWidget {
     this.isDownloading = false,
     this.progress = 0,
     this.onDownload,
+    this.status = const FileCardStatus(control: FileCardControl.download),
   });
 
   @override
@@ -157,7 +164,9 @@ class _StickerPackCardState extends ConsumerState<StickerPackCard> {
         final pct = (widget.progress.clamp(0.0, 1.0) * 100).round();
         return pct > 0 ? 'Downloading… $pct%' : 'Downloading…';
       }
-      return 'Sticker pack';
+      // Why the bytes are missing beats the generic label: this is the row
+      // that used to offer a Download button that could do nothing.
+      return widget.status.caption ?? 'Sticker pack';
     }
     final count = preview.count;
     final label = '$count sticker${count == 1 ? '' : 's'}';
@@ -229,7 +238,10 @@ class _StickerPackCardState extends ConsumerState<StickerPackCard> {
                 ),
               ],
             ),
-            if (_needsDownload && widget.onDownload != null) ...[
+            if (_needsDownload &&
+                widget.onDownload != null &&
+                (widget.status.control == FileCardControl.download ||
+                    widget.status.control == FileCardControl.retry)) ...[
               const SizedBox(height: HollowSpacing.sm),
               SizedBox(
                 width: double.infinity,
@@ -238,6 +250,27 @@ class _StickerPackCardState extends ConsumerState<StickerPackCard> {
                   onPressed: widget.onDownload,
                   semanticLabel: 'Download this sticker pack',
                   child: const Text('Download pack'),
+                ),
+              ),
+            ] else if (_needsDownload &&
+                widget.status.control == FileCardControl.busy) ...[
+              // Slow FFI behind a button is a busy state, never a second tap:
+              // the button keeps its footprint and stops taking them.
+              const SizedBox(height: HollowSpacing.sm),
+              SizedBox(
+                width: double.infinity,
+                child: HollowButton.ghost(
+                  icon: SizedBox(
+                    width: 14,
+                    height: 14,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      valueColor: AlwaysStoppedAnimation(hollow.textSecondary),
+                    ),
+                  ),
+                  onPressed: null,
+                  semanticLabel: 'Requesting this sticker pack',
+                  child: const Text('Requesting...'),
                 ),
               ),
             ],

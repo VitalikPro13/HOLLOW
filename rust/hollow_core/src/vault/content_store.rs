@@ -780,6 +780,20 @@ impl ContentStore {
 
     /// Find channel files eligible for retention expiry.
     /// `server_id_prefix` should be `"{server_id}:"` to match context_id patterns.
+    ///
+    /// A row we never FETCHED counts too (`completed_at IS NULL`). It used to be
+    /// skipped, so a file past its server's retention that had never been
+    /// downloaded stayed a live Download button forever: it asked holders that
+    /// had deleted it and read "no longer has this file" instead of "removed by
+    /// this server's retention policy".
+    ///
+    /// `created_at` is written in MILLISECONDS by every send and receive path
+    /// (`order_us / 1000`) while `before_timestamp` is a UNIX SECONDS cutoff, so
+    /// the comparison normalises. Comparing the two units directly is a silent
+    /// no-op: a millisecond stamp is roughly a thousand times the seconds
+    /// cutoff, so nothing ever matched and channel-file retention never fired.
+    /// A value below the year-2001 millisecond mark can only be a seconds stamp
+    /// from an older row.
     pub fn find_expirable_channel_files(
         &self,
         server_id_prefix: &str,
@@ -792,9 +806,9 @@ impl ContentStore {
                 "SELECT file_id, disk_path FROM files
                  WHERE context_type = 'channel'
                    AND context_id LIKE ?1
-                   AND created_at < ?2
-                   AND expired_at IS NULL
-                   AND completed_at IS NOT NULL",
+                   AND (CASE WHEN created_at > 100000000000
+                             THEN created_at / 1000 ELSE created_at END) < ?2
+                   AND expired_at IS NULL",
             )
             .map_err(|e| format!("Failed to prepare expirable files query: {e}"))?;
 
@@ -989,6 +1003,85 @@ mod tests {
     }
 
     // ── DB + disk tests ──────────────────────────────────────
+
+    /// Retention has to see the rows nobody ever downloaded.
+    ///
+    /// The query used to require `completed_at IS NOT NULL`, so a channel file
+    /// past its server's window that had never been fetched was never marked:
+    /// the card kept a live Download button forever, asked holders that had
+    /// deleted it for the same policy reason, and read "no longer has this file"
+    /// instead of "removed by this server's retention policy". A row that is
+    /// already expired stays out (nothing to do twice), and once a row IS
+    /// expired the missing-file sweeps must stop asking for it.
+    #[test]
+    fn retention_query_includes_never_fetched_rows() {
+        let tmp = TempDir::new().unwrap();
+        let db = tmp.path().join("retention.db").to_str().unwrap().to_string();
+        let pass = "00112233445566778899aabbccddeeff";
+
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        let old_ms = now_ms - 400 * 86_400_000;
+
+        {
+            let ms = crate::storage::MessageStore::open(&db, pass).unwrap();
+            for id in ["never", "fetched", "already_expired"] {
+                ms.insert_file_metadata(
+                    id, id, "bin", "application/octet-stream", 10,
+                    1, false, None, None, Some(id), "channel", "srv1:general",
+                    "sender", false, old_ms, None, None,
+                )
+                .unwrap();
+                // The message row is what the missing-file sweep walks.
+                ms.insert_channel_message(
+                    "srv1", "general", "sender", "", false,
+                    old_ms, None, None, Some(id), None, Some(id), None,
+                )
+                .unwrap();
+            }
+            // Only one of them ever reached disk.
+            ms.mark_file_complete("fetched", "/tmp/fetched.bin").unwrap();
+        }
+
+        let store = ContentStore::open(&db, pass, tmp.path()).unwrap();
+        store.mark_file_expired("already_expired", 1).unwrap();
+
+        let cutoff = now_ms / 1000 - 30 * 86_400;
+        let found: Vec<String> = store
+            .find_expirable_channel_files("srv1:", cutoff)
+            .unwrap()
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        assert!(
+            found.contains(&"never".to_string()),
+            "a row past the window that was never fetched must be expirable, got {found:?}"
+        );
+        assert!(
+            found.contains(&"fetched".to_string()),
+            "a downloaded row past the window is still expirable, got {found:?}"
+        );
+        assert!(
+            !found.contains(&"already_expired".to_string()),
+            "an already expired row must not come back, got {found:?}"
+        );
+
+        // Once a row is expired the sweeps stop asking peers for it: those bytes
+        // are gone by policy, so every holder deleted them for the same reason.
+        let ms = crate::storage::MessageStore::open(&db, pass).unwrap();
+        let missing = ms.get_missing_file_ids().unwrap();
+        assert!(
+            !missing.contains(&"already_expired".to_string()),
+            "an expired row must never be re-requested, got {missing:?}"
+        );
+        assert!(
+            missing.contains(&"never".to_string()),
+            "a merely undownloaded row is still missing, got {missing:?}"
+        );
+    }
+
 
     #[test]
     fn store_and_read_shard() {

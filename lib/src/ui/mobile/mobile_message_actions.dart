@@ -3,8 +3,10 @@ import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/chat/emoji_picker.dart';
+import 'package:hollow/src/ui/chat/file_card_status.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
+import 'package:hollow/src/ui/components/slashed_icon.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 const _kQuickReactionCount = 6;
@@ -25,6 +27,10 @@ void showMobileMessageActions({
   VoidCallback? onPin,
   bool isPinned = false,
   String? serverId,
+  /// What the file row offers, mirroring the card (tmp.txt item 1). The
+  /// caller reads it from `fileBarAction()` as the sheet opens.
+  FileBarAction fileAction = FileBarAction.download,
+  VoidCallback? onStopWaiting,
 }) {
   final hollow = HollowTheme.of(context);
   showModalBottomSheet(
@@ -51,6 +57,8 @@ void showMobileMessageActions({
       onPin: onPin,
       isPinned: isPinned,
       serverId: serverId,
+      fileAction: fileAction,
+      onStopWaiting: onStopWaiting,
     ),
   );
 }
@@ -72,6 +80,8 @@ class _MessageActionsSheet extends StatefulWidget {
   final VoidCallback? onPin;
   final bool isPinned;
   final String? serverId;
+  final FileBarAction fileAction;
+  final VoidCallback? onStopWaiting;
 
   const _MessageActionsSheet({
     required this.messageText,
@@ -88,6 +98,8 @@ class _MessageActionsSheet extends StatefulWidget {
     this.onPin,
     this.isPinned = false,
     this.serverId,
+    this.fileAction = FileBarAction.download,
+    this.onStopWaiting,
   });
 
   @override
@@ -145,7 +157,40 @@ class _MessageActionsSheetState extends State<_MessageActionsSheet> {
     );
   }
 
+  /// The file row, mirroring the card (tmp.txt item 1): Save File, Try again,
+  /// a stop control, or nothing at all once retention has removed the file.
+  /// Null means the sheet offers no file row.
+  Widget? _fileActionRow() {
+    final action = widget.fileAction;
+    final download = widget.onDownload;
+    if (download == null || action == FileBarAction.none) return null;
+    if (action == FileBarAction.stopWaiting) {
+      final stop = widget.onStopWaiting;
+      // A surface with no stop hook offers nothing rather than a control
+      // that cannot fire.
+      if (stop == null) return null;
+      return _ActionRow(
+        icon: LucideIcons.download,
+        slashed: true,
+        label: fileBarActionLabel(action),
+        onTap: () {
+          Navigator.pop(context);
+          stop();
+        },
+      );
+    }
+    return _ActionRow(
+      icon: LucideIcons.download,
+      label: fileBarActionLabel(action, download: 'Save File'),
+      onTap: () {
+        Navigator.pop(context);
+        download();
+      },
+    );
+  }
+
   Widget _buildActionsView(HollowTheme hollow) {
+    final fileRow = _fileActionRow();
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
@@ -198,15 +243,7 @@ class _MessageActionsSheetState extends State<_MessageActionsSheet> {
               widget.onCopy!();
             },
           ),
-        if (widget.onDownload != null)
-          _ActionRow(
-            icon: LucideIcons.download,
-            label: 'Save File',
-            onTap: () {
-              Navigator.pop(context);
-              widget.onDownload!();
-            },
-          ),
+        ?fileRow,
         if (widget.onInfo != null)
           _ActionRow(
             icon: LucideIcons.shieldCheck,
@@ -463,11 +500,16 @@ class _ActionRow extends StatelessWidget {
   final VoidCallback onTap;
   final Color? color;
 
+  /// Cuts the icon the way Lucide's `*Off` glyphs are cut. Lucide has no
+  /// `downloadOff`, and a `ban` or an `x` here would read as delete.
+  final bool slashed;
+
   const _ActionRow({
     required this.icon,
     required this.label,
     required this.onTap,
     this.color,
+    this.slashed = false,
   });
 
   @override
@@ -484,7 +526,16 @@ class _ActionRow extends StatelessWidget {
         ),
         child: Row(
           children: [
-            Icon(icon, size: 18, color: c),
+            if (slashed)
+              SlashedIcon(
+                icon: icon,
+                size: 18,
+                color: c,
+                // The sheet's own surface, so the slash cuts the glyph.
+                backgroundColor: hollow.surface,
+              )
+            else
+              Icon(icon, size: 18, color: c),
             const SizedBox(width: HollowSpacing.md),
             Text(label, style: HollowTypography.body.copyWith(color: c)),
           ],

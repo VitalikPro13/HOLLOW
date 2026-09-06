@@ -1,8 +1,11 @@
 ﻿import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/ui/components/overlay_anchor.dart';
 import 'package:flutter/services.dart';
+import 'package:hollow/src/core/models/file_attachment.dart';
+import 'package:hollow/src/core/providers/file_transfer_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/ui/components/hover_scope.dart';
@@ -10,8 +13,11 @@ import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_menu.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
+import 'package:hollow/src/ui/components/hollow_tooltip.dart';
+import 'package:hollow/src/ui/components/slashed_icon.dart';
 import 'package:hollow/src/ui/chat/emoji_picker.dart';
 import 'package:hollow/src/ui/chat/emote_image.dart';
+import 'package:hollow/src/ui/chat/file_card_status.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Coordinates action bar visibility across all messages in a list.
@@ -76,7 +82,7 @@ class _MessageActionBarScopeState extends State<MessageActionBarScope> {
 ///
 /// Both are Overlay entries — they float on top and never touch the
 /// message's layout. The message container stays completely clean.
-class MessageHoverWrapper extends StatefulWidget {
+class MessageHoverWrapper extends ConsumerStatefulWidget {
   final Widget child;
   final bool isMe;
   final String? messageId;
@@ -98,6 +104,13 @@ class MessageHoverWrapper extends StatefulWidget {
   /// is a toggle either way. Surfaces without pins (DMs) leave it false.
   final bool isPinned;
 
+  /// This message's file, when it has one. The bar mirrors the CARD through
+  /// `fileBarAction()`: offering Download while the card says "waiting for a
+  /// peer" is a button that visibly does nothing (tmp.txt item 1). Surfaces
+  /// with no live transfers (the archive viewers) leave it null and keep
+  /// today's plain Download.
+  final FileAttachment? fileAttachment;
+
   const MessageHoverWrapper({
     super.key,
     required this.child,
@@ -117,13 +130,15 @@ class MessageHoverWrapper extends StatefulWidget {
     this.onCopyImage,
     this.onInfo,
     this.isPinned = false,
+    this.fileAttachment,
   });
 
   @override
-  State<MessageHoverWrapper> createState() => _MessageHoverWrapperState();
+  ConsumerState<MessageHoverWrapper> createState() =>
+      _MessageHoverWrapperState();
 }
 
-class _MessageHoverWrapperState extends State<MessageHoverWrapper> {
+class _MessageHoverWrapperState extends ConsumerState<MessageHoverWrapper> {
   bool _hovered = false;
   bool _barHovered = false;
 
@@ -217,6 +232,44 @@ class _MessageHoverWrapperState extends State<MessageHoverWrapper> {
     _editFocusNode.dispose();
     _rowHovered.dispose();
     super.dispose();
+  }
+
+  /// What the bar and the menu offer for this message's file, mirroring the
+  /// card through the one helper.
+  ///
+  /// `read`, not `watch`: the bar is an overlay built the moment the pointer
+  /// arrives, and watching the transfer map from a message row would rebuild
+  /// every row in the pane on every chunk of every unrelated download.
+  FileBarAction _fileAction() {
+    final attachment = widget.fileAttachment;
+    if (attachment == null) return FileBarAction.download;
+    return fileBarAction(
+      attachment: attachment,
+      transfer: ref.read(fileTransferProvider)[attachment.fileId],
+    );
+  }
+
+  /// Cancel the outstanding ask, then let the card fall back to its plain
+  /// Download button without waiting for the next event.
+  Future<void> _stopWaitingForFile(String fileId) async {
+    try {
+      await ref.read(fileTransferProvider.notifier).stopWaitingForFile(fileId);
+    } catch (e) {
+      if (!mounted) return;
+      HollowToast.show(context, 'Could not stop the request: $e',
+          type: HollowToastType.error);
+    }
+  }
+
+  /// The stop tap for the bar and the menu, or null when this surface has no
+  /// file to stop asking for.
+  VoidCallback? _stopWaitingTap() {
+    final attachment = widget.fileAttachment;
+    if (attachment == null) return null;
+    return () {
+      _dismissNow();
+      _stopWaitingForFile(attachment.fileId);
+    };
   }
 
   void _showOverlays() {
@@ -321,6 +374,10 @@ class _MessageHoverWrapperState extends State<MessageHoverWrapper> {
                       widget.onDownload?.call();
                     }
                   : null,
+              // The bar says what the card says: Download, Try again, a stop
+              // control, or nothing at all (tmp.txt item 1).
+              fileAction: _fileAction(),
+              onStopWaiting: _stopWaitingTap(),
               onCopyImage: widget.onCopyImage != null
                   ? () {
                       _dismissNow();
@@ -467,6 +524,7 @@ class _MessageHoverWrapperState extends State<MessageHoverWrapper> {
       ]);
     }
 
+    final fileAction = _fileAction();
     final edit = <HollowMenuEntry>[
       if (widget.onCopy != null)
         HollowMenuItem(
@@ -480,11 +538,15 @@ class _MessageHoverWrapperState extends State<MessageHoverWrapper> {
           label: 'Copy image',
           onTap: widget.onCopyImage,
         ),
-      if (widget.onDownload != null)
+      // Same rule as the hover bar: a menu row that re-asks for a file
+      // nobody can serve is the button that does nothing, one layer down.
+      if (widget.onDownload != null && fileAction != FileBarAction.none)
         HollowMenuItem(
           icon: LucideIcons.download,
-          label: 'Download',
-          onTap: widget.onDownload,
+          label: fileBarActionLabel(fileAction),
+          onTap: fileAction == FileBarAction.stopWaiting
+              ? _stopWaitingTap()
+              : widget.onDownload,
         ),
       if (widget.onPin != null)
         HollowMenuItem(
@@ -630,6 +692,12 @@ class _ActionBarContent extends StatelessWidget {
   final VoidCallback? onCopyImage;
   final VoidCallback? onInfo;
 
+  /// What the file control offers, mirroring the card.
+  final FileBarAction fileAction;
+
+  /// Cancels the outstanding ask (the [FileBarAction.stopWaiting] tap).
+  final VoidCallback? onStopWaiting;
+
   /// Opens the full message menu. Receives the button's WINDOW position, the
   /// same thing a right click hands over.
   final void Function(Offset globalPosition)? onMore;
@@ -645,6 +713,8 @@ class _ActionBarContent extends StatelessWidget {
     this.onDownload,
     this.onCopyImage,
     this.onInfo,
+    this.fileAction = FileBarAction.download,
+    this.onStopWaiting,
     this.onMore,
   });
 
@@ -667,16 +737,11 @@ class _ActionBarContent extends StatelessWidget {
         mainAxisSize: MainAxisSize.min,
         children: [
           if (onDownload != null)
-            HollowPressable(
-              onTap: onDownload,
-              semanticLabel: 'Download',
-              borderRadius: BorderRadius.circular(hollow.radiusSm),
-              padding: const EdgeInsets.all(6),
-              child: Icon(
-                LucideIcons.download,
-                size: 14,
-                color: hollow.accent,
-              ),
+            _FileActionButton(
+              hollow: hollow,
+              action: fileAction,
+              onDownload: onDownload,
+              onStopWaiting: onStopWaiting,
             ),
           if (onCopy != null)
             HollowPressable(
@@ -767,6 +832,58 @@ class _ActionBarContent extends StatelessWidget {
           if (onMore != null)
             _MoreButton(hollow: hollow, onMore: onMore!),
         ],
+      ),
+    );
+  }
+}
+
+/// The bar's file control, mirroring the card (tmp.txt item 1).
+///
+/// Download and Try again are the same action under different words; stop is
+/// a different action and gets a different glyph, because a tap on Download
+/// while the ask is queued re-issues a request that visibly does nothing.
+class _FileActionButton extends StatelessWidget {
+  final HollowTheme hollow;
+  final FileBarAction action;
+  final VoidCallback? onDownload;
+  final VoidCallback? onStopWaiting;
+
+  const _FileActionButton({
+    required this.hollow,
+    required this.action,
+    required this.onDownload,
+    required this.onStopWaiting,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    if (action == FileBarAction.none) return const SizedBox.shrink();
+    final stop = action == FileBarAction.stopWaiting;
+    final onTap = stop ? onStopWaiting : onDownload;
+    // A surface with no stop hook (an archive viewer) offers nothing rather
+    // than a control that cannot fire.
+    if (onTap == null) return const SizedBox.shrink();
+    final label = fileBarActionLabel(action);
+    return HollowTooltip(
+      message: label,
+      child: HollowPressable(
+        onTap: onTap,
+        semanticLabel: label,
+        borderRadius: BorderRadius.circular(hollow.radiusSm),
+        padding: const EdgeInsets.all(6),
+        child: stop
+            ? SlashedIcon(
+                icon: LucideIcons.download,
+                size: 14,
+                color: hollow.accent,
+                // The bar's own surface, so the slash cuts the glyph.
+                backgroundColor: hollow.elevated,
+              )
+            : Icon(
+                LucideIcons.download,
+                size: 14,
+                color: hollow.accent,
+              ),
       ),
     );
   }

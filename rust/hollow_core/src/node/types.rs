@@ -395,6 +395,16 @@ pub(crate) enum NetworkEvent {
         file_id: String,
         error: String,
     },
+    /// Honest file-card state for a file whose bytes are not on disk (tmp.txt
+    /// item 1). `state` is one of "requesting" | "waiting" | "gone" |
+    /// "expired"; `peer_id` is the MASTER the state is about ("" when none):
+    /// the holder being asked, the DM counterparty who is offline, or the peer
+    /// that answered "I don't have it".
+    FileAvailability {
+        file_id: String,
+        state: String,
+        peer_id: String,
+    },
     /// Time-limited TURN credentials from the relay (over the authed WS).
     /// Dart's iceConfigProvider consumes these; Rust owns the refresh cadence
     /// (on connect + 50-min interval).
@@ -1007,6 +1017,14 @@ pub(crate) enum NodeCommand {
         peer_id: String,
         chunks: Vec<u32>,
     },
+    /// Stop waiting for a file (the hover bar's "Stop waiting for this file").
+    /// Drops the pending ask AND the explicit-pull receipt, so an answer that
+    /// is already on its way is treated as an unsolicited push: the size cap
+    /// and the auto-download gate decide it exactly as they would for any
+    /// push. Emits nothing; the card clears its own state on the tap.
+    CancelFileRequest {
+        file_id: String,
+    },
     /// The auto-download config changed (set_auto_download_config FFI) —
     /// re-advertise `auto_dl_pref` to every connected DM peer / sibling so
     /// senders stop (or resume) pushing file bytes to us accordingly.
@@ -1286,6 +1304,7 @@ impl NodeCommand {
             Self::SendFile(..) => "SendFile",
             Self::SendFileConverted(..) => "SendFileConverted",
             Self::RequestFile { .. } => "RequestFile",
+            Self::CancelFileRequest { .. } => "CancelFileRequest",
             Self::ReadvertiseAutoDlPref => "ReadvertiseAutoDlPref",
             Self::VaultDownloadFile { .. } => "VaultDownloadFile",
             Self::VaultUploadFile(..) => "VaultUploadFile",
@@ -2268,6 +2287,27 @@ pub(crate) enum HavenMessage {
         /// Byte offset to resume from (0 = start from beginning).
         #[serde(default)]
         offset: u64,
+    },
+
+    /// Negative answer to `FileRequest`: we know this file_id, you are entitled
+    /// to its bytes, and we do not hold them. Same shape and purpose as the
+    /// `missing` field on `EmoteAssets` (2026-09-05): the asker rotates to
+    /// another holder instead of waiting out a timer, and the card can say WHY.
+    ///
+    /// Sent ONLY after the same entitlement gate the positive answer passes, and
+    /// only when a row exists. A blocked requester, an unknown file_id and a
+    /// non-entitled requester all keep getting silence: answering "unknown" to
+    /// strangers would let anyone tell "this device holds a row for X" (silence)
+    /// from "it does not" (an answer), which is a membership leak.
+    #[serde(rename = "file_unavail")]
+    FileUnavailable {
+        file_id: String,
+        /// "gone" (evicted by the storage cap / downloads cleared / never
+        /// landed) or "expired" (the sender's retention sweep marked it). Old
+        /// clients ignore unknown variants, so this whole message is invisible
+        /// to them.
+        #[serde(default)]
+        reason: String,
     },
 
     /// Plaintext FileHeader answering a FileRequest from a NON-member for a
