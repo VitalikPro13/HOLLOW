@@ -5236,7 +5236,7 @@ async fn voice_channel_join_leave_and_signal_routing() {
         .await
         .unwrap();
     let leaked = wait_event(&mut o, std::time::Duration::from_millis(800), |ev| {
-        matches!(ev, NetworkEvent::VoiceChannelSignal { .. })
+        matches!(ev, NetworkEvent::VoiceChannelSignal { signal_type, .. } if signal_type == "made-up-vc-signal")
     })
     .await;
     assert!(!leaked, "an unknown VC signal type must be silently dropped");
@@ -18795,10 +18795,12 @@ async fn parked_join_rejection_reaches_an_offline_joiner() {
         .await,
         "the refusal reaches a joiner that was never online with the refuser"
     );
-    assert_eq!(
+    // The event is emitted before the store write lands, so poll the row.
+    let rejected = vec![(server_id.clone(), "rejected".to_string(), "banned".to_string())];
+    assert!(
+        wait_until(5, async || b.pending_joins() == rejected).await,
+        "the row stays so the tile can say WHY, got {:?}",
         b.pending_joins(),
-        vec![(server_id.clone(), "rejected".to_string(), "banned".to_string())],
-        "the row stays so the tile can say WHY"
     );
     assert!(!b.servers().contains(&server_id), "a rejected join builds no server");
     assert!(
@@ -22753,6 +22755,15 @@ async fn asset_pull_ignores_missing_from_a_peer_we_did_not_ask() {
     relay.set_online(&a.device_id, false);
     let gone = wait_until(10, async || !relay.online_devices().contains(&a.device_id)).await;
     assert!(gone, "A must be off the relay before B asks");
+    // The relay's view is not B's: until the PeerLeft lands, B still holds A
+    // in its room and an ask to A would be legitimate.
+    assert!(
+        wait_event(&mut b, std::time::Duration::from_secs(10), |ev| matches!(
+            ev, NetworkEvent::PeerDisconnected { peer_id } if *peer_id == a.device_id
+        ))
+        .await,
+        "B must see A drop before it is asked"
+    );
     drain_events(&mut b);
     relay.set_recording(&b.device_id, true);
 
