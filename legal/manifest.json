@@ -14,7 +14,8 @@
       "notes": "Right-Click Menus, Chat Scrollbar, Unread Line, Avatar Frames & Performance",
       "sha256_windows": "4858e1d9f33325cd6063bd85c107e858c6d3c9e018583950d04e11434fd503ad",
       "sha256_macos": "8442a6a3da8991e778bf77a70e1fdd6afe75227a7c68bdde1ca1c5e7b6db30b3",
-      "sha256_linux": "580eecc457acd3eb4901de89c1334b11fcd469693f93760b392af7a72d0bd6d2"
+      "sha256_linux": "67c214cc2fc2a4116bb576a5ea807e70a5d6d3b7d1cefddaf9c8ac4aa4867131",
+      "sha256_linux_targz": "7a5b53fb203371a3a7880cd83516e74f419ae9044ea0b3ebe487489f3c323df2"
     }
   ]
 }

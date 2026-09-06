@@ -19,8 +19,13 @@ ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 # --- Load machine config -------------------------------------------------
 ENV_FILE="$SCRIPT_DIR/release.local.env"
 [ -f "$ENV_FILE" ] || { echo "ERROR: $ENV_FILE not found (copy release.local.env.example)"; exit 1; }
+# An explicit FLATPAK_* environment value beats the file, so a test build can
+# aim at a scratch OSTree repo without editing machine config. `set -a` would
+# otherwise overwrite it with the file's value.
+_ENV_FLATPAK="$(export -p | grep -E '^(declare -x |export )FLATPAK_' || true)"
 # shellcheck disable=SC1090
 set -a; . "$ENV_FILE"; set +a
+eval "$_ENV_FLATPAK"
 
 # PATH for non-interactive shells (flutter + cargo).
 export PATH="${LINUX_FLUTTER_BIN}:$HOME/.cargo/bin:$PATH"
@@ -100,6 +105,18 @@ bash build-flatpak.sh
 FLATPAK="hollow-$VERSION-linux-x86_64.flatpak"
 [ -f "$ROOT_DIR/flatpak/$FLATPAK" ] || { echo "ERROR: flatpak bundle not produced: $FLATPAK"; exit 1; }
 echo "    -> $ROOT_DIR/flatpak/$FLATPAK"
+
+# --- 4. Publish the flatpak repository (opt in) --------------------------
+# build-flatpak.sh has already committed this version into the persistent
+# OSTree repo (FLATPAK_REPO_DIR) and signed it. Pushing that repo LIVE is a
+# separate decision the release orchestrator makes, so it stays off here
+# unless FLATPAK_PUBLISH=1 is exported.
+if [ "${FLATPAK_PUBLISH:-0}" = "1" ]; then
+  echo "==> 4. Publish flatpak repository"
+  bash "$ROOT_DIR/scripts/publish_flatpak_repo.sh"
+else
+  echo "==> 4. Publish skipped (export FLATPAK_PUBLISH=1 to push the repo live)"
+fi
 
 echo ""
 echo "==== DONE — Linux $VERSION ===="

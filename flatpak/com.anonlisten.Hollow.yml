@@ -26,6 +26,13 @@ finish-args:
   # every user had to grant this by hand in Flatseal first (issue #59).
   - --socket=session-bus
   - --own-name=com.anonlisten.Hollow
+  # In-app updater. It downloads the signed, hash-verified .flatpak bundle and
+  # installs it on the HOST via `flatpak-spawn --host flatpak install`, then
+  # relaunches through `flatpak run`. --socket=session-bus above already grants
+  # the org.freedesktop.Flatpak name that flatpak-spawn talks to; this line
+  # states the dependency so nobody narrows the bus filter and silently kills
+  # Linux updates.
+  - --talk-name=org.freedesktop.Flatpak
   # Desktop notifications
   - --talk-name=org.freedesktop.Notifications
   # Tray icon (AppIndicator)

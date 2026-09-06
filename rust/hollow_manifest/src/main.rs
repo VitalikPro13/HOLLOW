@@ -23,10 +23,13 @@ hollow-manifest <command> [args]
       paste into MANIFEST_SIGNING_PUBKEYS. Refuses to overwrite.
 
   fill-hashes <manifest.json> [--dir <folder>]
-      For every url_windows / url_macos / url_linux in every version entry,
-      write the matching sha256_windows / sha256_macos / sha256_linux field.
-      A file is read from --dir by its URL basename when present there,
-      otherwise DOWNLOADED from the URL, so the hash is of what is served.
+      For every url_windows / url_macos / url_linux / url_linux_targz in every
+      version entry, write the matching sha256_windows / sha256_macos /
+      sha256_linux / sha256_linux_targz field. url_linux is the Flatpak bundle
+      and url_linux_targz the portable Linux tarball, so a Linux release
+      carries two hashes. A file is read from --dir by its URL basename when
+      present there, otherwise DOWNLOADED from the URL, so the hash is of what
+      is served.
 
   sign <manifest.json> --key <key-file> [--out <manifest.json.sig>]
       Write the base64 Ed25519 signature over the manifest's exact bytes.
@@ -160,7 +163,9 @@ fn fill_hashes(args: &[String]) -> Result<(), String> {
         let obj = entry
             .as_object_mut()
             .ok_or("versions[] entry is not an object")?;
-        for platform in ["windows", "macos", "linux"] {
+        // "linux" is the Flatpak bundle, "linux_targz" the portable tarball:
+        // one Linux release ships both, and each needs its own hash.
+        for platform in ["windows", "macos", "linux", "linux_targz"] {
             let Some(url) = obj
                 .get(&format!("url_{platform}"))
                 .and_then(|u| u.as_str())

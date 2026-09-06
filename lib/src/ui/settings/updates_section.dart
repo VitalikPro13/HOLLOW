@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/updater_provider.dart';
@@ -182,7 +184,7 @@ class _UpdatesTabState extends ConsumerState<UpdatesTab> {
                 const SizedBox(width: HollowSpacing.sm),
                 Text(
                   state.status == UpdateStatus.extracting
-                      ? 'Extracting v${state.selectedVersion}...'
+                      ? '${_applyVerb()} v${state.selectedVersion}...'
                       : 'Downloading v${state.selectedVersion}...',
                   style: HollowTypography.body.copyWith(
                     color: hollow.textPrimary,
@@ -232,8 +234,19 @@ class _UpdatesTabState extends ConsumerState<UpdatesTab> {
     ];
   }
 
+  /// What the indeterminate step after the download is doing here: a zip
+  /// is extracted, a Linux tarball is unpacked and staged, and a flatpak is
+  /// already being installed by the host (the longest of the three).
+  static String _applyVerb() {
+    if (!Platform.isLinux) return 'Extracting';
+    return isFlatpakInstall ? 'Installing' : 'Preparing';
+  }
+
   List<Widget> _readyChildren(
       HollowTheme hollow, UpdateState state, UpdateNotifier notifier) {
+    // A flatpak is installed by the time we get here; only the restart is
+    // left, so the card must not promise an install that already happened.
+    final installed = Platform.isLinux && isFlatpakInstall;
     return [
       const SizedBox(height: HollowSpacing.lg),
       Container(
@@ -253,7 +266,9 @@ class _UpdatesTabState extends ConsumerState<UpdatesTab> {
                     size: 18, color: hollow.accent),
                 const SizedBox(width: HollowSpacing.sm),
                 Text(
-                  'Ready to install v${state.selectedVersion}',
+                  installed
+                      ? 'v${state.selectedVersion} is installed'
+                      : 'Ready to install v${state.selectedVersion}',
                   style: HollowTypography.body.copyWith(
                     color: hollow.textPrimary,
                     fontWeight: FontWeight.w600,
@@ -265,11 +280,13 @@ class _UpdatesTabState extends ConsumerState<UpdatesTab> {
             HollowButton.filled(
               onPressed: () => notifier.installAndRestart(),
               icon: const Icon(LucideIcons.rotateCcw, size: 16),
-              child: const Text('Install & restart'),
+              child: Text(installed ? 'Restart now' : 'Install & restart'),
             ),
             const SizedBox(height: HollowSpacing.sm),
             Text(
-              'Hollow will close and relaunch automatically.',
+              installed
+                  ? 'Hollow will close and come back on the new version.'
+                  : 'Hollow will close and relaunch automatically.',
               style: HollowTypography.caption.copyWith(
                 color: hollow.textSecondary,
               ),

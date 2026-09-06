@@ -1,0 +1,5 @@
+# The flatpak repository signing key is a binary OpenPGP keyring. Git's own
+# heuristic already sees the NUL bytes and leaves it alone, but say it out
+# loud: one CRLF conversion on a Windows checkout and every Linux client
+# rejects our repo signature.
+flatpak/hollow-flatpak.gpg binary

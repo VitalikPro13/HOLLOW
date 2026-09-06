@@ -6,10 +6,17 @@
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `detect_common_prefix`, `download_inner`, `extract_zip_to`, `fetch_bytes`, `normalise_expected_sha256`, `relaunch_snippet`, `signature_url`, `spawn_waiter`, `verify_manifest_signature_with`, `verify_manifest_signature`
+// These functions are ignored because they are not marked as `pub`: `apply_update_impl`, `detect_common_prefix`, `download_inner`, `extract_zip_to`, `fetch_bytes`, `install_kind_impl`, `launch_update_script_impl`, `normalise_expected_sha256`, `relaunch_snippet`, `signature_url`, `spawn_waiter`, `verify_manifest_signature_with`, `verify_manifest_signature`
 
 String getCurrentVersion() =>
     RustLib.instance.api.crateApiUpdaterGetCurrentVersion();
+
+/// How this Linux copy of Hollow was installed: `"flatpak"` or `"tarball"`.
+/// Empty on every other platform. Dart branches its update UI on this (a
+/// flatpak has a read-only `/app`, so the "can I write to the app dir" probe
+/// is meaningless there), and every Linux path below reads the SAME detection.
+String linuxInstallKind() =>
+    RustLib.instance.api.crateApiUpdaterLinuxInstallKind();
 
 /// Fetches `manifest.json` AND its `manifest.json.sig` sidecar, and returns
 /// the manifest text only when the signature verifies against
@@ -50,6 +57,13 @@ Future<String> applyUpdate({
   appDir: appDir,
   version: version,
 );
+
+/// Starts the script [`apply_update`] returned so that it OUTLIVES this
+/// process. Linux only; Dart calls this and then exits.
+Future<void> launchUpdateScript({required String scriptPath}) => RustLib
+    .instance
+    .api
+    .crateApiUpdaterLaunchUpdateScript(scriptPath: scriptPath);
 
 /// Spawn a detached, windowless waiter that idles until this process exits,
 /// then relaunches the app. Call right before a self-restart `exit(0)`.

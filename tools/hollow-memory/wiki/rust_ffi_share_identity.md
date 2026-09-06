@@ -213,7 +213,11 @@ Returns the stored Twitch username, or `None` if empty/missing.
 
 ## Updater API (`api/updater.rs`)
 
-Cross-platform application self-update system (Windows + macOS). Fetches a version manifest from a remote URL, downloads update ZIPs with progress streaming, and generates a platform-specific helper script that replaces the app while it is closed, then relaunches it. Linux returns "Auto-update is not supported on this platform yet" (Flatpak updates via Flathub).
+Cross-platform application self-update system (Windows, macOS, and since 2026-09-06 Linux for both install kinds). Fetches a signed version manifest from a remote URL, downloads the platform artifact with progress streaming and a SHA-256 pin, and generates a platform-specific helper script that replaces the app while it is closed, then relaunches it. Linux: a portable tarball swaps its own bundle directory; a Flatpak installs the downloaded bundle on the HOST through `flatpak-spawn` and relaunches through `flatpak run` (memory `project_linux_auto_update`).
+
+### `linux_install_kind() -> String`
+
+Sync. `"flatpak"` when `/.flatpak-info` exists, `"tarball"` on any other Linux, `""` elsewhere. The ONE detector: `apply_update`, `launch_update_script` and `spawn_relaunch_waiter` all branch on it, and Dart reads it once (lazy top-level `linuxInstallKind` in `updater_provider.dart`) to pick the download URL/checksum, the download file name (`<v>.flatpak` / `<v>.tar.gz`), whether to probe the app dir for writability (never inside a flatpak, `/app` is read-only by design), and the Settings copy ("Installing" vs "Preparing", "v<x> is installed" + "Restart now").
 
 ### Constants
 
@@ -241,7 +245,7 @@ Fetches `manifest.json` AND its `manifest.json.sig` sidecar (same URL plus `.sig
 
 Plain GET (same client settings, NO signature) for the display-only feeds in the release folder: `news.json` (`news_provider.dart`) and `status.json` (`status_provider.dart`). Nothing fetched through here is installed or executed. The update manifest must never use it.
 
-**Per-platform manifest URLs (no legacy single `url` field as of v0.5.0):** each version entry has `url_windows`, `url_macos` (zip, used by the updater), `url_macos_dmg` (DMG, used by the website's new-user download button), `url_linux` (Flatpak), `url_android` (APK). Dart `VersionInfo.platformUrl` (in `updater_provider.dart`) selects by `Platform`.
+**Per-platform manifest URLs (no legacy single `url` field as of v0.5.0):** each version entry has `url_windows`, `url_macos` (zip, used by the updater), `url_macos_dmg` (DMG, used by the website's new-user download button), `url_linux` (Flatpak bundle, checksum `sha256_linux`), `url_linux_targz` (portable tarball, checksum `sha256_linux_targz`, both filled by `hollow-manifest fill-hashes`), `url_android` (APK). Dart `VersionInfo.platformUrl` / `platformSha256` (in `updater_provider.dart`) select by `Platform` and, on Linux, by `linuxInstallKind`. A Linux release therefore needs BOTH artifacts uploaded before the manifest is signed.
 
 ### `download_update(url: String, dest_path: String, expected_sha256: String, sink: StreamSink<DownloadProgress>) -> Result<(), String>`
 
@@ -261,7 +265,17 @@ Extracts the update and generates a platform-specific helper script that perform
 2. Finds the single `*.app` bundle in staging.
 3. Generates an executable `update.sh`: waits via `pgrep -f "<installed_app>/Contents/MacOS/"` for the app to quit, `rm -rf` the old bundle, `ditto` the staged bundle into `app_dir`, strips quarantine (`xattr -dr com.apple.quarantine`), cleans staging + ZIP, relaunches with `open -n`. Logs to `~/.hollow/updates/update.log`. `app_dir` is the bundle's containing folder (e.g. `/Applications`).
 
-**Linux / other:** returns an error ("not supported yet").
+**Linux, tarball** (`apply_update_tarball()`):
+1. `tar xzf` (never the `zip` crate: it drops exec bits and symlinks, and the bundle carries `hollow`, `screen_audio_capturer`, `lib/*.so`) into `<data>/updates/staging-{version}`; locates `bundle/hollow` (or a top-level `hollow`), refuses anything else and a non-executable binary.
+2. Writes `<data>/updates/update.sh` (0700): waits for OUR pid with `kill -0`, `mv app app.old`, `mv staged app` (puts `.old` back if that fails), relaunches with `nohup` forwarding the original argv (NOT `setsid`: the script's shell is already a session leader, so `setsid` forks and `$!` would name a helper that exits at once), sleeps 8 s and if the new binary is gone swaps `.old` back and relaunches the previous version; on success removes `.old`, the staging dir and the archive. Logs to `<data>/updates/update.log`. `app_dir` is the user's extracted `bundle/` folder (any name); Dart probes it AND its parent for writability first.
+
+**Linux, flatpak** (`apply_update_flatpak()`): parses `/.flatpak-info` (`[Instance]` `app-path` decides `--user` vs `--system`, `instance-id` is what `flatpak ps` prints), then runs SYNCHRONOUSLY `flatpak-spawn --host flatpak install -y --noninteractive <scope> <bundle>` (the running instance keeps its old deployment; "already installed" counts as success because `--or-update` does not apply to bundles and a retry after a failed relaunch must still relaunch). Writes `<data>/updates/relaunch.sh`, a HOST-side script: delete the bundle, wait until our instance id leaves `flatpak ps --columns=instance`, export `DBUS_SESSION_BUS_ADDRESS=unix:path=$XDG_RUNTIME_DIR/bus` when that socket exists (the env forwarded by flatpak-spawn carries the sandbox's bus address), `exec flatpak run com.anonlisten.Hollow <argv>`. If `flatpak-spawn` is missing or prints the "only works when the Flatpak is allowed to talk to org.freedesktop.Flatpak" hint, the error tells the user to run `flatpak update com.anonlisten.Hollow`.
+
+**Other targets:** returns an error ("not supported yet").
+
+### `launch_update_script(script_path: String) -> Result<(), String>`
+
+Linux only. Starts the script `apply_update` returned so that it OUTLIVES this process, then Dart `exit(0)`s. Tarball: `setsid /bin/sh <script>` detached (plain `/bin/sh` if util-linux is absent). Flatpak: `flatpak-spawn --host sh -c 'setsid nohup sh <script> >/dev/null 2>&1 &'`, AWAITED, because everything inside the sandbox dies with the app (bwrap is pid 1 of the PID namespace) and waiting for flatpak-spawn is what guarantees the host has forked the script before the exit. macOS and Windows keep their Dart-side detached launches.
 
 ### `detect_common_prefix(archive) -> Option<String>`
 
@@ -269,7 +283,7 @@ Internal helper (Windows path only). Iterates all ZIP entries and checks if they
 
 ### `spawn_relaunch_waiter() -> Result<(), String>`
 
-App SELF-RESTART (no update involved): spawns a detached, windowless waiter that idles until THIS process exits, then starts the exe again — **forwarding the ORIGINAL argv** (2026-08-05: a relaunch that dropped `--portable` came back on a DIFFERENT data root than the running profile, alternating identities between the waiter relaunch and the next manual launch). Called by Dart's `relaunchApp()` (`lib/src/core/app_relaunch.dart`), the single restart path for the profile switcher (#47), device-link restart, relay Apply & Restart, and the revocation self-nuke. **The spawn MUST live in Rust:** a child spawned directly from Dart dies against the Windows runner's pre-Flutter `SendAppLinkToInstance()` while the old window is alive, and Dart's detached mode can't run the waiter itself (kills powershell instantly — no console, no `CREATE_NO_WINDOW`; a detached cmd batch wedges its `tasklist|find` pipeline). Windows: powershell with `creation_flags(CREATE_NO_WINDOW)`, `Get-Process -Id <pid>` poll loop, then `Start-Process`. Unix: `/bin/sh` `kill -0` loop; macOS relaunches the `.app` via `open`, Linux `exec`s the binary. Guarded by cargo test `relaunch_waiter_tests` (Windows-only). See memory `project_profile_switcher_issue47`.
+App SELF-RESTART (no update involved): spawns a detached, windowless waiter that idles until THIS process exits, then starts the exe again — **forwarding the ORIGINAL argv** (2026-08-05: a relaunch that dropped `--portable` came back on a DIFFERENT data root than the running profile, alternating identities between the waiter relaunch and the next manual launch). Called by Dart's `relaunchApp()` (`lib/src/core/app_relaunch.dart`), the single restart path for the profile switcher (#47), device-link restart, relay Apply & Restart, and the revocation self-nuke. **The spawn MUST live in Rust:** a child spawned directly from Dart dies against the Windows runner's pre-Flutter `SendAppLinkToInstance()` while the old window is alive, and Dart's detached mode can't run the waiter itself (kills powershell instantly — no console, no `CREATE_NO_WINDOW`; a detached cmd batch wedges its `tasklist|find` pipeline). Windows: powershell with `creation_flags(CREATE_NO_WINDOW)`, `Get-Process -Id <pid>` poll loop, then `Start-Process`. Unix: `/bin/sh` `kill -0` loop; macOS relaunches the `.app` via `open`, Linux tarball `exec`s the binary. **Linux flatpak (2026-09-06):** the in-sandbox waiter was silently dead (the sandbox PID namespace dies with the app and kills it), so inside a flatpak the waiter is the same HOST-side recipe as the update relaunch (`spawn_flatpak_relaunch_waiter()`: wait for our instance id to leave `flatpak ps`, restore the session bus address, `exec flatpak run com.anonlisten.Hollow <argv>`), started through `flatpak-spawn --host`. Guarded by cargo test `relaunch_waiter_tests` (Windows-only) and `linux_updater_tests` (Linux-only, run on the VM). See memory `project_profile_switcher_issue47`.
 
 ## Archive API (`api/archive.rs`)
 

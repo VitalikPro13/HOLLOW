@@ -8,12 +8,31 @@ import 'package:hollow/src/rust/api/updater.dart' as updater_api;
 
 const kManifestUrl = 'https://anonlisten.com/hollow/releases/manifest.json';
 
+/// How this copy of Hollow was installed on Linux, from the ONE detector in
+/// Rust (`/.flatpak-info` present = `flatpak`, anything else = `tarball`).
+/// Empty on every other platform. The two kinds update differently: a
+/// tarball swaps its own bundle folder, a flatpak hands the downloaded bundle
+/// to the host's `flatpak install` and relaunches through `flatpak run`.
+///
+/// Read once (a lazy top-level), so the progress card that rebuilds every
+/// frame while its bar animates never repeats the lookup.
+final String linuxInstallKind =
+    Platform.isLinux ? updater_api.linuxInstallKind() : '';
+
+/// True inside a Flatpak sandbox (Linux only).
+bool get isFlatpakInstall => linuxInstallKind == 'flatpak';
+
 class VersionInfo {
   final String version;
   final String date;
   final String urlWindows;
   final String urlMacos;
+
+  /// The Flatpak bundle (`url_linux`) and the portable tarball
+  /// (`url_linux_targz`): a Linux install downloads the one matching its own
+  /// kind, never the other.
   final String urlLinux;
+  final String urlLinuxTargz;
 
   /// SHA-256 (hex) of each platform's download, written into the signed
   /// manifest by `hollow-manifest fill-hashes`. Rust refuses to hand a zip
@@ -22,6 +41,7 @@ class VersionInfo {
   final String sha256Windows;
   final String sha256Macos;
   final String sha256Linux;
+  final String sha256LinuxTargz;
   final String notes;
 
   const VersionInfo({
@@ -30,9 +50,11 @@ class VersionInfo {
     this.urlWindows = '',
     this.urlMacos = '',
     this.urlLinux = '',
+    this.urlLinuxTargz = '',
     this.sha256Windows = '',
     this.sha256Macos = '',
     this.sha256Linux = '',
+    this.sha256LinuxTargz = '',
     required this.notes,
   });
 
@@ -42,16 +64,19 @@ class VersionInfo {
         urlWindows: json['url_windows'] as String? ?? '',
         urlMacos: json['url_macos'] as String? ?? '',
         urlLinux: json['url_linux'] as String? ?? '',
+        urlLinuxTargz: json['url_linux_targz'] as String? ?? '',
         sha256Windows: json['sha256_windows'] as String? ?? '',
         sha256Macos: json['sha256_macos'] as String? ?? '',
         sha256Linux: json['sha256_linux'] as String? ?? '',
+        sha256LinuxTargz: json['sha256_linux_targz'] as String? ?? '',
         notes: json['notes'] as String? ?? '',
       );
 
-  /// The download URL for the current platform (empty if unsupported).
+  /// The download URL for the current platform and install kind (empty if
+  /// unsupported).
   String get platformUrl {
     if (Platform.isMacOS) return urlMacos;
-    if (Platform.isLinux) return urlLinux;
+    if (Platform.isLinux) return isFlatpakInstall ? urlLinux : urlLinuxTargz;
     return urlWindows; // Windows
   }
 
@@ -59,8 +84,19 @@ class VersionInfo {
   /// carries none, which the updater treats as "not installable").
   String get platformSha256 {
     if (Platform.isMacOS) return sha256Macos;
-    if (Platform.isLinux) return sha256Linux;
+    if (Platform.isLinux) {
+      return isFlatpakInstall ? sha256Linux : sha256LinuxTargz;
+    }
     return sha256Windows; // Windows
+  }
+
+  /// File name the download lands under: the tool that applies it cares
+  /// about the extension (`flatpak install`, `tar`, the zip extractor).
+  String get downloadFileName {
+    if (Platform.isLinux) {
+      return isFlatpakInstall ? '$version.flatpak' : '$version.tar.gz';
+    }
+    return '$version.zip';
   }
 
   /// Whether an update is actually downloadable on this platform.
@@ -166,7 +202,7 @@ class UpdateNotifier extends Notifier<UpdateState> {
   Future<void> downloadVersion(VersionInfo version) async {
     final dataDir = hollowDataDir;
     final sep = Platform.pathSeparator;
-    final destPath = '$dataDir${sep}updates$sep${version.version}.zip';
+    final destPath = '$dataDir${sep}updates$sep${version.downloadFileName}';
 
     // Fail closed before a single byte moves: a manifest entry with no
     // checksum for this platform is not something the updater installs.
@@ -248,17 +284,29 @@ class UpdateNotifier extends Notifier<UpdateState> {
       // The update script copies into appDir with its errors swallowed —
       // probe writability here so a read-only location (portable copy on a
       // locked USB stick, Program Files) fails visibly instead of silently.
-      try {
-        final probe =
-            File('$appDir${Platform.pathSeparator}.hollow_write_probe');
-        probe.writeAsStringSync('probe');
-        probe.deleteSync();
-      } catch (_) {
+      // A flatpak never writes to its own /app: the host's `flatpak install`
+      // deploys the bundle, so there is nothing to probe there.
+      final flatpak = Platform.isLinux && isFlatpakInstall;
+      if (!flatpak && !_dirWritable(appDir)) {
         state = state.copyWith(
           status: UpdateStatus.error,
           error: 'The app folder is not writable, so the update cannot be '
               'installed in place. Move the app to a writable location and '
               'try again.',
+        );
+        return;
+      }
+      // The Linux tarball update renames the whole bundle folder aside and
+      // moves the new one into its place, which needs the PARENT folder too
+      // (a root-owned /opt extract must fail here, loudly, not half-apply).
+      if (Platform.isLinux &&
+          !flatpak &&
+          !_dirWritable(Directory(appDir).parent.path)) {
+        state = state.copyWith(
+          status: UpdateStatus.error,
+          error: 'The folder that contains Hollow is not writable, so the '
+              'update cannot swap the app in place. Move Hollow to a folder '
+              'you own and try again.',
         );
         return;
       }
@@ -280,11 +328,40 @@ class UpdateNotifier extends Notifier<UpdateState> {
     }
   }
 
+  /// Whether we can create and delete a file inside [dir].
+  static bool _dirWritable(String dir) {
+    try {
+      final probe = File('$dir${Platform.pathSeparator}.hollow_write_probe');
+      probe.writeAsStringSync('probe');
+      probe.deleteSync();
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
   Future<void> installAndRestart() async {
     final scriptPath = state.batPath;
     if (scriptPath == null) return;
 
-    if (Platform.isMacOS) {
+    if (Platform.isLinux) {
+      // Rust starts the script so that it outlives this process: a detached
+      // session for the tarball swap, the HOST (through flatpak-spawn) for a
+      // flatpak relaunch, because everything inside the sandbox dies with us.
+      try {
+        await updater_api.launchUpdateScript(scriptPath: scriptPath);
+      } catch (e) {
+        final flatpak = isFlatpakInstall;
+        state = state.copyWith(
+          status: UpdateStatus.error,
+          error: flatpak
+              ? 'The update is installed, but Hollow could not schedule its '
+                  'own restart: $e. Close and reopen Hollow to finish.'
+              : 'Hollow could not start the update script: $e',
+        );
+        return;
+      }
+    } else if (Platform.isMacOS) {
       // Detached shell script: waits for us to quit, swaps the .app, relaunches.
       await Process.start('/bin/sh', [scriptPath],
           mode: ProcessStartMode.detached);

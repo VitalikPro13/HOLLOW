@@ -798,6 +798,14 @@ let _ = state.apply_op(&op);
 
 **Where:** `flatpak/com.anonlisten.Hollow.yml` finish-args, `linux/runner/main.cc` line 6.
 
+### The in-app updater inside a Flatpak needs the host: org.freedesktop.Flatpak, and every relaunch runs on the host
+
+**Rule:** `flatpak/com.anonlisten.Hollow.yml` must keep `--socket=session-bus` (or at least `--talk-name=org.freedesktop.Flatpak`, stated explicitly since 2026-09-06). The updater installs the downloaded, hash-verified bundle through `flatpak-spawn --host flatpak install` and relaunches through `flatpak-spawn --host ... flatpak run`; `spawn_relaunch_waiter()` (profile switch, relay apply, device link, self-nuke) does the same inside a flatpak.
+
+**Why:** `/app` is a read-only OSTree deployment and the sandbox's PID namespace dies with the app (bwrap is pid 1), so nothing spawned inside it survives the exit. Narrowing the bus filter silently turns every Linux flatpak update into "Hollow is not allowed to talk to the host" and every in-app restart into a plain exit. Also: an UNSIGNED bundle is refused over an install whose origin is the signed repo, so release bundles come only from `build-flatpak.sh` with `FLATPAK_GPG_KEY` set.
+
+**Where:** `rust/hollow_core/src/api/updater.rs` (`apply_update_flatpak`, `launch_host_shell_script`, `spawn_flatpak_relaunch_waiter`), the manifest finish-args, `flatpak/build-flatpak.sh`. Memory `project_linux_auto_update`.
+
 ## Multi-Device Gotchas (Phase 6)
 
 ### peer_is_reachable honors MASTER ids — and reachability gates must never feed raw sends (audit fix 2026-07-02)

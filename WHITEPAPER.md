@@ -1640,6 +1640,8 @@ The host that serves release archives and the version manifest is assumed to be 
 
 Auxiliary feeds served from the same location (release notes, service status) are display-only and unsigned; nothing fetched through them is executed or installed. Outside this mechanism sit the signing key itself, which lives with the release engineer and never in the repository, and the installers distributed through the website, which rely on platform code signing rather than the manifest.
 
+**Linux.** A Linux client is installed either as a portable directory or as a Flatpak, and the manifest carries a separate pinned archive for each, so an install can only ever fetch the artifact its own kind can apply. The portable kind replaces its own directory in place once the running process has exited and restores the previous build if the new one does not stay up. The Flatpak kind cannot modify its own read-only deployment at all: it hands the verified bundle to the host's Flatpak installer through the sandbox's host-command interface, and the restart is likewise performed from the host, since nothing started inside the sandbox outlives the application. The same bundles are also published in a self-hosted repository whose commits and summaries carry a GPG signature under a key embedded in every bundle and repository description, so the system-level update path verifies the publisher independently of the transport; an unsigned bundle is refused over an installation that originates from that repository.
+
 ---
 
 ## 24. Limitations and Future Work
