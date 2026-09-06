@@ -2,22 +2,22 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:hollow/src/core/hollow_data_dir.dart';
 import 'package:hollow/src/core/version_compare.dart';
 import 'package:hollow/src/rust/api/updater.dart' as updater_api;
 
 const kManifestUrl = 'https://anonlisten.com/hollow/releases/manifest.json';
 
-/// How this copy of Hollow was installed on Linux, from the ONE detector in
-/// Rust (`/.flatpak-info` present = `flatpak`, anything else = `tarball`).
-/// Empty on every other platform. The two kinds update differently: a
-/// tarball swaps its own bundle folder, a flatpak hands the downloaded bundle
-/// to the host's `flatpak install` and relaunches through `flatpak run`.
-///
-/// Read once (a lazy top-level), so the progress card that rebuilds every
-/// frame while its bar animates never repeats the lookup.
-final String linuxInstallKind =
+/// `flatpak` or `tarball` on Linux, from the one detector in Rust; empty
+/// elsewhere. Read once, since the progress card rebuilds every frame.
+String get linuxInstallKind => linuxInstallKindOverride ?? _linuxInstallKind;
+final String _linuxInstallKind =
     Platform.isLinux ? updater_api.linuxInstallKind() : '';
+
+/// Tests set this: the Rust bridge is never initialised in a widget test.
+@visibleForTesting
+String? linuxInstallKindOverride;
 
 /// True inside a Flatpak sandbox (Linux only).
 bool get isFlatpakInstall => linuxInstallKind == 'flatpak';

@@ -45,7 +45,13 @@ void main() {
   test('the download file name carries the extension the installer needs', () {
     final v = VersionInfo.fromJson(jsonDecode(entry) as Map<String, dynamic>);
     if (Platform.isLinux) {
-      expect(v.downloadFileName, anyOf('0.10.1.flatpak', '0.10.1.tar.gz'));
+      addTearDown(() => linuxInstallKindOverride = null);
+      linuxInstallKindOverride = 'flatpak';
+      expect(v.downloadFileName, '0.10.1.flatpak');
+      expect(v.platformUrl, endsWith('.flatpak'));
+      linuxInstallKindOverride = 'tarball';
+      expect(v.downloadFileName, '0.10.1.tar.gz');
+      expect(v.platformUrl, endsWith('.tar.gz'));
     } else {
       expect(v.downloadFileName, '0.10.1.zip');
       // Outside Linux the platform URL never points at a Linux artifact.

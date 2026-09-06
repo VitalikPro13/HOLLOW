@@ -81,14 +81,14 @@ Your identity is a cryptographic keypair. Zero registrations. One recovery phras
 
 | Platform | Links |
 |----------|------|
-| Windows (10+) | [.exe](https://anonlisten.com/hollow/releases/hollow-0.10.1-win64-setup.exe) / [.zip](https://anonlisten.com/hollow/releases/hollow-0.10.1-win64.zip) |
-| macOS (12+) | [.dmg](https://anonlisten.com/hollow/releases/hollow-0.10.1.dmg) |
-| Linux | [Flatpak](https://anonlisten.com/hollow/releases/hollow-0.10.1-linux-x86_64.flatpak) / [.tar.gz](https://anonlisten.com/hollow/releases/hollow-0.10.1-linux.tar.gz) |
-| Android (7+) | [.apk](https://anonlisten.com/hollow/releases/hollow-0.10.1-android.apk) |
+| Windows (10+) | [.exe](https://anonlisten.com/hollow/releases/hollow-0.11.0-win64-setup.exe) / [.zip](https://anonlisten.com/hollow/releases/hollow-0.11.0-win64.zip) |
+| macOS (12+) | [.dmg](https://anonlisten.com/hollow/releases/hollow-0.11.0.dmg) |
+| Linux | [Flatpak](https://anonlisten.com/hollow/releases/hollow-0.11.0-linux-x86_64.flatpak) / [.tar.gz](https://anonlisten.com/hollow/releases/hollow-0.11.0-linux.tar.gz) |
+| Android (7+) | [.apk](https://anonlisten.com/hollow/releases/hollow-0.11.0-android.apk) |
 | iOS (16+) | [TestFlight](https://testflight.apple.com/join/5YG2S5e8) |
 | Web | Not planned |
 
-Current Progress: I finally did proper optimization and it's amazing how bad it can be... reminds me when game devs don't do it. Basically the same, but getting my CPU usage down from 10% to 1%-2% is a good thing, that's for sure. Other optimizations are included with the new version too plus cool avatar frames.
+Current Progress: No comments, honestly. Way too much for my own sanity, but tons of security, stability and bandwidth issues are fixed now. Check out the changelog, as usual, and enjoy! I'll continue thinking about the code... *sigh*
 
 ## Tech Stack
 
