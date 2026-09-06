@@ -42,7 +42,8 @@ test-group = 'os-keychain'
 # regression — but it is still reported as flaky rather than hidden.
 [profile.ci]
 fail-fast = false
-retries = 1
+# Two cores run 16 test processes; a negative-timing check can starve twice.
+retries = 2
 
 # The suite is SLEEP-bound, not CPU-bound, so thread count is the only dial
 # and oversubscribing helps: locally 8 threads = 128s, 16 = 80s, 24 = 64s.

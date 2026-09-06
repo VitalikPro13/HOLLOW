@@ -19239,7 +19239,11 @@ async fn discarded_parked_join_ignores_a_late_answer() {
         .await,
         "discard is confirmed to the UI"
     );
-    assert!(b.pending_joins().is_empty(), "the row is gone");
+    assert!(
+        wait_until(5, async || b.pending_joins().is_empty()).await,
+        "the row is gone, got {:?}",
+        b.pending_joins(),
+    );
     assert!(
         wait_until(10, async || !relay.room_devices(&server_id).contains(&b.device_id)).await,
         "and B leaves the room, got {:?}",

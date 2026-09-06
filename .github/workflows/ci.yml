@@ -190,6 +190,9 @@ jobs:
   sonar:
     name: Analyze
     needs: rust
+    # Dependabot runs never receive repository secrets, so SONAR_TOKEN is
+    # empty there and the scan can only fail.
+    if: github.actor != 'dependabot[bot]'
     runs-on: ubuntu-latest
 
     steps:
