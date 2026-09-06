@@ -12,7 +12,7 @@ use super::network::get_runtime;
 use crate::frb_generated::StreamSink;
 use crate::identity::data_dir;
 
-pub(crate) const APP_VERSION: &str = "0.10.1";
+pub(crate) const APP_VERSION: &str = "0.11.0";
 
 /// Ed25519 public keys (hex) allowed to sign the update manifest. The private
 /// half lives with the release engineer, never in the repo: `hollow-manifest

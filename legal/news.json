@@ -1,5 +1,11 @@
 [
   {
+    "id": "2026-09-06-v011",
+    "date": "September 06, 2026",
+    "title": "v0.11 - Call Resilience, Offline Friend Requests, Offline Server Joins, Signed Server Operations & Linux Auto-Updates (BREAKING for calls and servers)",
+    "body": "0.11 does not work with 0.10.1 for servers, one-to-one calls or Twitch-gated joins, so everybody in a server should update together. Every change to a server is signed now and call setup is encrypted, so the older unsigned and plaintext ones are refused. Direct messages, files, voice channels and screen shares are unaffected.\n\nBoth of those come out of a security review I ran this month, which also tightened the updater and closed a few holes I would rather not have shipped. Calls survive bad internet now, and voice channels finally recover from a drop the way DM calls do.\n\nFriend requests, declines and server joins work while the other side is offline. A file that is not on your machine tells you why instead of showing a Download button that does nothing, and channel messages are kept forever by default.\n\nLinux updates itself now, both the tarball and the Flatpak, and the relay's 10 GB per day limit is gone because it counted the wrong thing. Everything else is in the [changelog](https://github.com/VitalikPro13/HOLLOW/blob/main/changelog.txt). Thanks for using Hollow!"
+  },
+  {
     "id": "2026-08-23-v0101",
     "date": "August 23, 2026",
     "title": "v0.10.1 - Right-Click Menus, Chat Scrollbar, Unread Line, Avatar Frames & Performance",

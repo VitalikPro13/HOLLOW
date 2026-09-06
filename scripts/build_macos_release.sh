@@ -77,12 +77,21 @@ else
   echo "==> 0a. ${LOCAL_SIGNING#$ROOT_DIR/} already names team ${MAC_TEAM_ID} + Developer ID Application"
 fi
 
+# --- 0b. Screen-share audio helper ---------------------------------------
+# The Xcode "Bundle screen audio capturer" phase only COPIES the binary that
+# scripts/build_screen_audio.sh produces; it never builds it, and when the
+# binary is missing the phase prints a warning and the release ships without
+# screen-share audio. Build it first, the way the Linux script does.
+echo "==> 0b. screen_audio_capturer"
+bash "$ROOT_DIR/scripts/build_screen_audio.sh"
+
 # --- 0. Build -----------------------------------------------------------
 echo "==> 0. flutter build macos --release"
 flutter build macos --release
 
 [ -d "$APP" ] || { echo "ERROR: $APP not found"; exit 1; }
 [ -f "$ENT" ] || { echo "ERROR: entitlements not found at $ENT"; exit 1; }
+[ -f "$APP/Contents/Resources/screen_audio_capturer" ] || { echo "ERROR: screen_audio_capturer missing from the bundle (the release would ship without screen-share audio)"; exit 1; }
 cd "$REL"
 
 # --- 1. Sign nested dylibs / framework executables (inside-out) ----------

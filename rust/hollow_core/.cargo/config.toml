@@ -4,7 +4,7 @@
 OPENSSL_DIR = "C:\\Program Files\\OpenSSL-Win64"
 OPENSSL_LIB_DIR = "C:\\Program Files\\OpenSSL-Win64\\lib\\VC\\x64\\MD"
 OPENSSL_INCLUDE_DIR = "C:\\Program Files\\OpenSSL-Win64\\include"
-# Android: static OpenSSL 1.1.1w (prebuilt in .cargo/android-openssl-headers/)
+# Android: static OpenSSL 3.5.8 (built from source on the Linux VM, see .cargo/android-openssl-headers/README.md)
 X86_64_LINUX_ANDROID_OPENSSL_STATIC = "1"
 AARCH64_LINUX_ANDROID_OPENSSL_STATIC = "1"
 ARMV7_LINUX_ANDROIDEABI_OPENSSL_STATIC = "1"

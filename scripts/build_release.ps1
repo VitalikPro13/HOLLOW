@@ -234,8 +234,21 @@ if (-not $SkipAndroid) {
     Step 6 'flutter build apk --release'
     Push-Location $repo
     try {
-        & flutter build apk --release
+        # Run through cmd so the native tools' stderr merges into stdout: under
+        # $ErrorActionPreference = 'Stop', PowerShell 5.1 turns a redirected
+        # native stderr line (a CMake deprecation warning is enough) into a
+        # terminating error. The log is kept because Gradle does NOT fail when
+        # cargokit's Rust build fails: it packages whatever libhollow_core.so is
+        # already in the output (2026-09-06, the 0.11 APK shipped 0.10.1's core
+        # after a SQLCipher/OpenSSL compile error), so the log is scanned for it.
+        $apkLog = Join-Path $env:TEMP 'hollow_build_apk.log'
+        cmd /c "flutter build apk --release 2>&1" | Tee-Object -FilePath $apkLog
         if ($LASTEXITCODE -ne 0) { throw "flutter build apk failed with exit code $LASTEXITCODE" }
+        $native = Select-String -Path $apkLog -Pattern '^SEVERE:|error occurred in cc-rs|warning: build failed' | Select-Object -First 3
+        if ($native) {
+            $native | ForEach-Object { Write-Host "  $($_.Line)" -ForegroundColor Red }
+            throw "flutter build apk reported native (cargokit) build errors; the APK may carry a STALE libhollow_core.so. Full log: $apkLog"
+        }
     } finally { Pop-Location }
     $builtApk = Join-Path $repo 'build\app\outputs\flutter-apk\app-release.apk'
     if (Test-Path $builtApk) {

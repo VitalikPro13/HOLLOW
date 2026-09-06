@@ -244,9 +244,16 @@ pub fn verify_bytes(manifest: &[u8], sig_text: &str, pubkey_hex: &str) -> Result
 fn verify(args: &[String]) -> Result<(), String> {
     let pubkey = flag(args, "--pubkey").ok_or("verify needs --pubkey <hex>")?;
     let (manifest, sig_text, label) = if let Some(url) = flag(args, "--url") {
-        let sig_url = format!("{url}.sig");
+        // Same cache buster on both files as the app uses: without it the CDN
+        // can pair a fresh manifest with a still-cached old signature.
+        let t = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let sig_url = format!("{url}.sig?t={t}");
+        let manifest_url = format!("{url}?t={t}");
         (
-            fetch(&url)?,
+            fetch(&manifest_url)?,
             String::from_utf8_lossy(&fetch(&sig_url)?).into_owned(),
             url,
         )

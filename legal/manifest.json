@@ -1,21 +1,21 @@
 {
-  "latest": "0.10.1",
+  "latest": "0.11.0",
   "versions": [
     {
-      "version": "0.10.1",
-      "date": "August 23, 2026",
-      "url_windows": "https://anonlisten.com/hollow/releases/hollow-0.10.1-win64.zip",
-      "url_windows_setup": "https://anonlisten.com/hollow/releases/hollow-0.10.1-win64-setup.exe",
-      "url_macos": "https://anonlisten.com/hollow/releases/hollow-0.10.1-macos.zip",
-      "url_macos_dmg": "https://anonlisten.com/hollow/releases/hollow-0.10.1.dmg",
-      "url_linux": "https://anonlisten.com/hollow/releases/hollow-0.10.1-linux-x86_64.flatpak",
-      "url_linux_targz": "https://anonlisten.com/hollow/releases/hollow-0.10.1-linux.tar.gz",
-      "url_android": "https://anonlisten.com/hollow/releases/hollow-0.10.1-android.apk",
-      "notes": "Right-Click Menus, Chat Scrollbar, Unread Line, Avatar Frames & Performance",
-      "sha256_windows": "4858e1d9f33325cd6063bd85c107e858c6d3c9e018583950d04e11434fd503ad",
-      "sha256_macos": "8442a6a3da8991e778bf77a70e1fdd6afe75227a7c68bdde1ca1c5e7b6db30b3",
-      "sha256_linux": "67c214cc2fc2a4116bb576a5ea807e70a5d6d3b7d1cefddaf9c8ac4aa4867131",
-      "sha256_linux_targz": "7a5b53fb203371a3a7880cd83516e74f419ae9044ea0b3ebe487489f3c323df2"
+      "version": "0.11.0",
+      "date": "September 6, 2026",
+      "url_windows": "https://anonlisten.com/hollow/releases/hollow-0.11.0-win64.zip",
+      "url_windows_setup": "https://anonlisten.com/hollow/releases/hollow-0.11.0-win64-setup.exe",
+      "url_macos": "https://anonlisten.com/hollow/releases/hollow-0.11.0-macos.zip",
+      "url_macos_dmg": "https://anonlisten.com/hollow/releases/hollow-0.11.0.dmg",
+      "url_linux": "https://anonlisten.com/hollow/releases/hollow-0.11.0-linux-x86_64.flatpak",
+      "url_linux_targz": "https://anonlisten.com/hollow/releases/hollow-0.11.0-linux.tar.gz",
+      "url_android": "https://anonlisten.com/hollow/releases/hollow-0.11.0-android.apk",
+      "notes": "Call Resilience, Offline Friend Requests, Offline Server Joins, Signed Server Operations & Linux Auto-Updates",
+      "sha256_windows": "a9f4400759b41fd37974ec288e3c964dfef0b2e382ce099f3dbe393c52c340f0",
+      "sha256_macos": "05375b02a50533cce1155e6eb6f352330802dfea082910b716bbaebb3ec0164f",
+      "sha256_linux": "0c1493416e0dc6009d248f4bdc8405451de05d248a9887d3a9abd07bc1effd2f",
+      "sha256_linux_targz": "2e4c2639a47b11fdb9a0a1f92351b0b31def9207ce9e465ce2cd9fe377f365d5"
     }
   ]
 }

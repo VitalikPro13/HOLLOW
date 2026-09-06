@@ -1,3 +1,131 @@
+v0.11 - Call Resilience, Offline Friend Requests, Offline Server Joins, Signed Server Operations & Linux Auto-Updates (BREAKING for calls and servers)
+
+BREAKING CHANGE: 0.11 cannot share a server, a one-to-one call, or a Twitch-gated join with 0.10.1 or older. Every change to a server is signed now and an unsigned one is refused, so members on different versions stop agreeing on the server. Call setup is encrypted now and a call signal in the clear is refused, so a call between versions fails outright. Direct messages, files, server voice channels and screen shares still work, but everyone in a server should update together.
+
+SECURITY
+
+- Every change to a server is now signed, so nobody can forge one as the owner
+- One-to-one call setup is encrypted now, so the relay never sees the key to your call
+- Fixed an inline image being able to write a file outside its own folder
+- A signed device list is accepted only for a device named inside it
+- Profile updates verify the profile signature before reading a device list
+- Stored channel history is now served only to people allowed to see that channel
+- Ban, private and member cap checks now apply to the person, not one of their devices
+- The exemption that auto-downloads voice messages is now capped by size and checked by type
+- Backup vault shards each carry their own integrity hash
+- Images are now checked against their declared size before anything is decoded
+- A timestamp from another peer is clamped, so nobody can freeze a field with a future date
+- The updater now trusts a signed version list and a hash per download, not the download host
+- Only a strictly newer version counts as an update, so nothing can walk you backwards
+- Transfer IDs are restricted to known characters, because an id names a file on disk
+- On Android, the identity key and database stay out of OS cloud backups and device transfers
+- The relay gained buffer caps, brute-force protection on link codes, a push budget and tighter checks
+- Dependencies moved up, including OpenMLS 0.9 and the SQLCipher database engine, past a known vulnerability
+- Identity secrets are wiped from memory when dropped, and a dependency audit runs on every build
+
+CALLS & VOICE
+
+- A call no longer ends because the connection stuttered for a couple of seconds
+- A lapse now holds the call open for 45 seconds and steps the video down
+- Cameras now carry a bitrate cap, which is what made calls collapse on a weak connection
+- Losing the relay no longer ends a call, since the call has its own connection
+- Recovery rebuilds the call with the same call and key, instead of restarting the old connection
+- The relay retries every second while a call is live instead of backing off
+- Voice channels now recover from a dropped connection the way DM calls do
+- Fixed a reconnecting member being able to send in a voice channel but never receive
+- A voice channel member whose connection does not return is redialled instead of left there silent
+- Fixed a DM call forgetting your camera when both sides recovered at once
+- Fixed deafen and per-peer volume being forgotten whenever a call connection was rebuilt
+- Fixed the intermittent call that sits on "Connecting..." and never finishes
+- Fixed two people pressing Call at the same moment rejecting each other as busy
+- The connection quality flair now shows on voice channel participant rows, not only on camera tiles
+- Fixed the voice panel header reading "Voice Connected" while the relay was down
+- Fixed the join chime firing for people who never left
+
+FRIENDS
+
+- A friend request now reaches somebody who has never been online at the same time
+- Fixed a returning device turning an accepted friend back into an incoming request
+- A decline now reaches a requester who was offline and stays declined on both sides
+- Fixed an accept overwriting a decline that had already happened
+- An incoming request shows the sender's name and avatar instead of a raw identity string
+- A declined request offers Add Friend again
+- An outgoing request says it will be delivered when the recipient is next online
+
+SERVERS, CHANNELS & JOINING
+
+- Joining a server whose members are all offline now works, with a pending tile meanwhile
+- The pending tile offers Discard, Copy invite and Request again
+- The answer is written back, so a member returning later cannot admit or refuse you twice
+- A parked join sets up your encryption too, so the server is readable at your next launch
+- A join into an empty server room now parks after three seconds instead of fifteen
+- A member still waiting for encryption setup no longer misses what is sent meanwhile
+- Fixed a returning server owner silently missing messages after sleeping through a key change
+- Joining a busy server costs far less traffic, because one member serves it instead of all
+- Fixed a deleted server staying in the list forever for some members
+- Fixed public channel captions, edits, deletes, reactions and link previews not arriving after catch-up
+- Fixed opening a channel before joining its room using up that connection's one catch-up
+- Channel messages are now kept forever by default instead of being pruned after a year
+- Files keep the one-year default, and the owner can still set a window
+
+FILES & ATTACHMENTS
+
+- A file that is not on your machine now says why instead of a dead Download button
+- The card says whether the request is in flight, the holder is offline, or the file is gone
+- A file removed by the server's retention policy reads as removed
+- A request now survives a reconnect and asks the next holder as people appear
+- A holder that no longer has a file now answers instead of staying silent
+- A claim that a file expired is checked against your own retention setting first
+- The hover bar, right-click menu and mobile sheet offer the same action the card does
+- A queued request can be stopped, and a refused one can be tried again
+- Fixed channel file retention never running at all, so the setting now does what it says
+- GIFs, stickers and custom emotes sent while you were away now arrive once a holder appears
+
+TWITCH VERIFICATION
+
+- Twitch verification for joining a server is now a credential checked offline against your identity
+- The server owner contacts nobody and learns only the channel, your follow step and your subscription
+- A credential covers 90 days and is then renewed the same way it was issued
+- A Twitch-gated server can now be joined while its members are offline, like any other server
+- The minimum follow time is now a picker of ten steps rather than a free number
+- The Twitch chip on a profile now comes from a verified credential, not a typed field
+
+PROFILES
+
+- Avatars are stored at 512 pixels and banners at up to 1200x480, both up to 2 MB
+- A person's banner is now 2.5:1 rather than 3:1, and server banners keep their own 3:1
+- Avatar frames can now be a square of up to 512 pixels instead of exactly 128
+- Every frame that already exists stays valid
+- An animated frame that passes through untouched is now checked and re-encoded when it cannot pass
+- Somebody still on 0.10.1 may not receive an animation authored at the new ceilings
+
+RELAY
+
+- The 10 GB per day limit per address is gone, because it counted the wrong traffic
+- TURN now carries Hollow clients to each other and nothing else, instead of relaying for anyone
+- The relay shares its line fairly while it is full, rather than counting anybody's bytes
+- The bandwidth meter is gone from the relay cards, since there is no budget to report
+
+LINUX
+
+- Hollow updates itself on Linux now, on both the tarball and the Flatpak install
+- A tarball update swaps the folder and restores the previous build if the new one fails
+- A Flatpak update is installed on the host, so it works from inside the sandbox
+- The Flatpak comes from our own signed repository, so flatpak update and software centres see releases
+- Every download is checked against the signed version list before it is installed
+- Updating to 0.11 itself is still a manual download on Linux, since 0.10.1 shipped without it
+- The update card in Settings says "Installing" and "Restart now," which is what happens
+
+INTERFACE & MOBILE
+
+- Fixed background motion stuttering, which the idle CPU work in 0.10.1 introduced
+- Fixed push notification setup being able to report a working mobile connection as failed
+
+TESTING
+
+- The build now runs the app's interface tests, which it never did before
+- The tests wait for conditions instead of sleeping, and can now drive iPhone simulators like a desktop window
+
 v0.10.1 - Right-Click Menus, Chat Scrollbar, Unread Line, Avatar Frames & Performance
 
 RIGHT-CLICK MENUS (issue #61)
