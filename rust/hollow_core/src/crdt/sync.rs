@@ -8,8 +8,8 @@ use super::server_state::ServerState;
 
 /// Compact summary of what a peer has seen for a given server.
 ///
-/// Maps each actor (originator peer ID) to the latest HLC timestamp
-/// we've seen from them. Used to compute deltas during sync.
+/// Maps each actor to the latest HLC timestamp we have seen from them, which is what
+/// computes a sync delta.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StateVector {
     pub server_id: String,
@@ -67,20 +67,18 @@ pub struct MergeReport {
 
 /// Apply incoming ops to a server state. Skips duplicates (idempotent).
 ///
-/// SECURITY: every op passes `ServerState::admit_remote_op` first. This is the
-/// gate for ALL THREE SyncResponse ingest paths (plaintext, Olm fallback, MLS
-/// envelope) — a sync batch is the easiest place to smuggle a forged op in,
-/// because the batch's sender is not its author and never had to be.
+/// SECURITY: every op passes `ServerState::admit_remote_op` first, the gate for ALL
+/// THREE SyncResponse ingest paths. A sync batch is the easiest place to smuggle a
+/// forged op in, because its sender is not its author and never had to be.
 ///
-/// An op that fails to apply (e.g. wrong server_id) is skipped rather than
-/// aborting the merge — one foreign op must not block the rest of a sync.
+/// An op that fails to apply is skipped rather than aborting the merge: one foreign op
+/// must not block the rest of a sync.
 pub fn merge_ops(state: &mut ServerState, incoming_ops: &[CrdtOp]) -> Result<MergeReport, String> {
     merge_ops_with(state, incoming_ops, |_| {})
 }
 
-/// `merge_ops` with a hook that fires for every ADMITTED op, in batch order,
-/// before it is applied. Callers persist from here so the `crdt_ops` table
-/// only ever receives ops that passed the gate.
+/// `merge_ops` with a hook that fires for every ADMITTED op in batch order, before it
+/// is applied, so callers persist only ops that passed the gate.
 pub fn merge_ops_with(
     state: &mut ServerState,
     incoming_ops: &[CrdtOp],
@@ -110,9 +108,8 @@ pub fn merge_ops_with(
     Ok(report)
 }
 
-/// Variant name for a rejection log line. Never the payload itself: an op's
-/// contents can carry a nickname or a channel name, and a security log is not
-/// the place to spill them.
+/// Variant name for a rejection log line, never the payload: an op's contents can carry
+/// a nickname or a channel name, and a security log is not the place to spill them.
 pub fn payload_name(payload: &super::operations::CrdtPayload) -> &'static str {
     use super::operations::CrdtPayload as P;
     match payload {
@@ -301,9 +298,8 @@ mod tests {
         assert_eq!(report, MergeReport { applied: 0, rejected: 0 });
     }
 
-    /// The sync batch is where a forged op is easiest to smuggle in: its
-    /// sender is not its author and never had to be. `merge_ops` refuses it
-    /// and says so in the report.
+    /// The sync batch is where a forged op is easiest to smuggle in, since its sender is
+    /// not its author. `merge_ops` refuses it and says so in the report.
     #[test]
     fn merge_ops_rejects_a_forged_op_in_the_batch() {
         let (mut state_a, a_id, mut state_b, _b_id) = two_member_server();

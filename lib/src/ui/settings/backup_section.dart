@@ -10,8 +10,7 @@ import 'package:hollow/src/ui/settings/security_section.dart';
 import 'package:hollow/src/ui/settings/settings_shared.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-/// Backup category — identity backup export. Split out of the old Security
-/// tab (proof verification lives in the Security category).
+/// Backup category: identity backup export.
 class BackupCategoryView extends StatefulWidget {
   const BackupCategoryView({super.key});
   @override
@@ -21,9 +20,8 @@ class BackupCategoryView extends StatefulWidget {
 class _BackupCategoryViewState extends State<BackupCategoryView> {
   bool _includeVault = false;
   bool _includeFiles = false;
-  // Gates the Export button while exportBackup runs (encrypts identity +
-  // messages + optionally files — multi-second). The mobile twin
-  // (_BackupExportButton) always had this; desktop was missing it.
+  // Gates the Export button while exportBackup runs, which encrypts the
+  // identity, the messages and optionally the files and takes seconds.
   bool _exporting = false;
 
   Future<void> _exportBackup() async {
@@ -113,9 +111,8 @@ class _BackupCategoryViewState extends State<BackupCategoryView> {
               _checkbox(hollow, _includeVault, 'Include vault shard data',
                   () => setState(() => _includeVault = !_includeVault)),
               const SizedBox(height: HollowSpacing.md),
-              // Outline (not filled): a secondary utility — matches the
-              // mobile Settings "Export Backup"; "Link a device" is the
-              // section's one filled primary.
+              // Outline, not filled: "Link a device" is the section's one
+              // filled primary.
               HollowButton.outline(
                 onPressed: _exporting ? null : _exportBackup,
                 icon: _exporting

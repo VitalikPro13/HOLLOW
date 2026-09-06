@@ -75,7 +75,6 @@ class AccentPresetsNotifier extends Notifier<List<double>> {
   }
 
   Future<void> addPreset(double hue) async {
-    // Don't duplicate
     if (state.any((h) => (h - hue).abs() < 1)) return;
     state = [...state, hue];
     await _save();

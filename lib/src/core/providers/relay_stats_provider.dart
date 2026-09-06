@@ -59,13 +59,10 @@ class RelayStats {
   }
 }
 
-/// Demand-driven (autoDispose): the 7s poll runs ONLY while something
-/// actually watches this provider — it used to start at app launch and run
-/// forever (all four mobile tabs stay mounted), making it the worst mobile
-/// battery drain in the app. The mobile Settings tab gates its watch on the
-/// tab being the active one; leaving the tab drops the last listener, which
-/// disposes the notifier and cancels the timer. Re-entering re-creates it
-/// (immediate fetch + fresh timer).
+/// Demand-driven (autoDispose): the 7s poll runs ONLY while something watches
+/// this. It used to start at app launch and run forever (all four mobile tabs
+/// stay mounted), which made it the worst mobile battery drain in the app.
+/// Leaving the tab drops the last listener, disposing the timer.
 class RelayStatsNotifier extends AutoDisposeNotifier<RelayStats> {
   Timer? _timer;
   final HttpClient _client = HttpClient();
@@ -85,9 +82,8 @@ class RelayStatsNotifier extends AutoDisposeNotifier<RelayStats> {
   }
 
   Future<void> _fetch() async {
-    // Skip polls while the app is backgrounded/hidden (a watcher can stay
-    // attached through a suspend). `inactive` still polls — a visible but
-    // unfocused desktop window should keep updating.
+    // Skip polls while the app is backgrounded/hidden. `inactive` still polls: a
+    // visible but unfocused desktop window should keep updating.
     final lifecycle = WidgetsBinding.instance.lifecycleState;
     if (lifecycle == AppLifecycleState.paused ||
         lifecycle == AppLifecycleState.hidden ||
@@ -117,9 +113,8 @@ class RelayStatsNotifier extends AutoDisposeNotifier<RelayStats> {
         );
       }
     } catch (_) {
-      // Keep last known stats on failure, but re-emit so `isFresh` recomputes
-      // — otherwise the dot would stay green forever after connectivity drops
-      // (a failed poll never produces a new state on its own).
+      // Keep last known stats on failure but re-emit so `isFresh` recomputes, or
+      // the dot stays green forever after connectivity drops.
       state = RelayStats(
         memTotalKb: state.memTotalKb,
         memUsedKb: state.memUsedKb,

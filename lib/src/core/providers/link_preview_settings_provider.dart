@@ -3,22 +3,17 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 
-/// Settings that govern link previews (issue #45).
-///
-/// Both live here rather than in the compose panes because all three panes
-/// (DM, channel, mobile) have to agree, and both values are pushed into Rust
-/// at startup the way `gifProxyUrlProvider` is — see `hollow_shell._bootstrap`.
+/// Settings that govern link previews (issue #45). Here rather than in the
+/// compose panes because all three panes must agree, and both values are pushed
+/// into Rust at startup (see `hollow_shell._bootstrap`).
 
 const _kPreviewsEnabledKey = 'link_previews_enabled';
 const _kEmbedProxyKey = 'embed_proxy_url';
 
 /// Whether typing a URL fetches its preview at all.
 ///
-/// On by default. Turning it off means the compose box never touches the
-/// pasted URL, so the site learns nothing — the strongest version of the
-/// privacy story, at the cost of no cards on anything you send. Receiving
-/// is unaffected: cards other people attached still render, because
-/// rendering never involves a request.
+/// On by default. Off means the compose box never touches the pasted URL, so
+/// the site learns nothing. Receiving is unaffected: rendering never fetches.
 class LinkPreviewsEnabledNotifier extends Notifier<bool> {
   @override
   bool build() => true;
@@ -46,11 +41,8 @@ final linkPreviewsEnabledProvider =
 /// Optional proxy for the social-post lookups (X, TikTok). Empty = direct,
 /// which is the default and what ships.
 ///
-/// Direct is not a degraded mode. FxEmbed reads the post server-side, so X
-/// never sees the user's IP for the metadata either way, and someone pasting
-/// an x.com link has almost always just opened it in a browser. What direct
-/// does expose is the lookup itself to FxEmbed's operator, which is the
-/// reason this override exists for anyone who would rather it didn't.
+/// Direct is not a degraded mode: FxEmbed reads the post server-side, so X
+/// never sees the user's IP. What it exposes is the lookup to FxEmbed's operator.
 class EmbedProxyUrlNotifier extends Notifier<String> {
   @override
   String build() => '';

@@ -34,10 +34,9 @@ pub struct TwitchDeviceFlowResult {
 
 /// What [`twitch_verify_owner`] came back with.
 ///
-/// Not a `Result`: a refusal from the shop (a stale token, a rate limit,
-/// Twitch itself being down) is an ANSWER, and the caller shows its sentence
-/// rather than treating it as a crash. `Err` is kept for the things that stop
-/// the call happening at all, like no connected account.
+/// Not a `Result`: a refusal from the shop is an ANSWER, and the caller shows its
+/// sentence rather than treating it as a crash. `Err` is kept for the things that
+/// stop the call happening at all, like no connected account.
 pub struct TwitchVerifyOutcome {
     /// The credential is minted, kept and announced.
     pub verified: bool,
@@ -86,15 +85,12 @@ pub fn twitch_poll_for_token(device_code: String, interval_secs: u64) -> Result<
     let rt = get_runtime();
     let token_resp = rt.block_on(twitch::poll_for_token(&device_code, interval_secs))?;
 
-    // Validate to get user_id.
     let validate = rt.block_on(twitch::validate_token(&token_resp.access_token))?;
 
-    // Persist refresh token + user_id to SQLCipher.
     save_tw_setting(KEY_REFRESH_TOKEN, &token_resp.refresh_token)?;
     save_tw_setting(KEY_USER_ID, &validate.user_id)?;
     save_tw_setting(KEY_TWITCH_USERNAME, &validate.login)?;
 
-    // Cache access token in memory.
     let now = std::time::Instant::now();
     let expires_at = now + std::time::Duration::from_secs(token_resp.expires_in.saturating_sub(60));
     let mut cache = get_token_cache().lock().map_err(|e| format!("Lock poisoned: {e}"))?;
@@ -111,12 +107,10 @@ pub fn twitch_poll_for_token(device_code: String, interval_secs: u64) -> Result<
 pub fn twitch_ensure_token() -> Result<bool, String> {
     let now = std::time::Instant::now();
 
-    // Check if we have a cached token that's still valid.
     {
         let cache = get_token_cache().lock().map_err(|e| format!("Lock poisoned: {e}"))?;
         if let Some(ref cached) = *cache {
             if now < cached.expires_at {
-                // Token still valid. Check if hourly validation is needed.
                 let since_validated = now.duration_since(cached.last_validated);
                 if since_validated < std::time::Duration::from_secs(3600) {
                     return Ok(true);
@@ -126,7 +120,6 @@ pub fn twitch_ensure_token() -> Result<bool, String> {
         }
     }
 
-    // Try to refresh from stored refresh token.
     let refresh_token = load_tw_setting(KEY_REFRESH_TOKEN)?;
     let refresh_token = match refresh_token {
         Some(t) if !t.is_empty() => t,
@@ -137,23 +130,20 @@ pub fn twitch_ensure_token() -> Result<bool, String> {
     let token_resp = match rt.block_on(twitch::refresh_access_token(&refresh_token)) {
         Ok(resp) => resp,
         Err(_) => {
-            // Refresh failed (expired or revoked). Clear stored tokens.
             let _ = save_tw_setting(KEY_REFRESH_TOKEN, "");
             return Ok(false);
         }
     };
 
-    // Save new refresh token (one-time use — old one is now invalid).
+    // Twitch refresh tokens are one-time use, so the old one is already invalid.
     save_tw_setting(KEY_REFRESH_TOKEN, &token_resp.refresh_token)?;
 
-    // Validate to confirm token is good + refresh stored username.
     let validate = rt.block_on(twitch::validate_token(&token_resp.access_token));
     let validated_now = validate.is_ok();
     if let Ok(ref v) = validate {
         let _ = save_tw_setting(KEY_TWITCH_USERNAME, &v.login);
     }
 
-    // Cache the new access token.
     let expires_at = now + std::time::Duration::from_secs(token_resp.expires_in.saturating_sub(60));
     let mut cache = get_token_cache().lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     *cache = Some(CachedToken {
@@ -167,7 +157,6 @@ pub fn twitch_ensure_token() -> Result<bool, String> {
 
 #[frb]
 pub fn twitch_generate_proof(broadcaster_id: String) -> Result<String, String> {
-    // Ensure we have a valid token.
     let has_token = twitch_ensure_token()?;
     if !has_token {
         return Err("No Twitch account connected. Please authenticate first.".to_string());
@@ -191,10 +180,9 @@ pub fn twitch_generate_proof(broadcaster_id: String) -> Result<String, String> {
 
 #[frb]
 pub fn twitch_disconnect() -> Result<(), String> {
-    // The chip goes with the connection, and it goes FIRST: the credential
-    // outlives the token by design (it is a 90-day fact, verified offline by
-    // everyone who sees it), so wiping the token alone would leave a verified
-    // Twitch chip on a profile whose owner just disconnected.
+    // The chip goes with the connection, and FIRST: the credential outlives the token
+    // by design, so wiping the token alone would leave a verified chip on the profile
+    // of somebody who just disconnected.
     match shop::forget_twitch_owner_creds() {
         Ok(Some((master, json))) => {
             let _ = shop::announce_support_creds(&master, json);
@@ -218,11 +206,9 @@ pub fn twitch_disconnect() -> Result<(), String> {
 
 // ── Verified Twitch credentials ─────────────────────────────────────
 //
-// The token never leaves this machine for anyone but the shop's verifier,
-// which reads it, asks Twitch, and blind-signs what Twitch said. What comes
-// back binds OUR master peer id and nothing else, so the shop cannot tell
-// which Hollow identity it vouched for and a viewer needs nothing but the
-// pinned root to check it.
+// The token never leaves this machine for anyone but the shop's verifier, which reads
+// it, asks Twitch and blind-signs what Twitch said. What comes back binds OUR master
+// peer id and nothing else, so the shop cannot tell which identity it vouched for.
 
 /// A fresh access token, or the sentence to show instead.
 fn access_token() -> Result<String, String> {
@@ -242,9 +228,8 @@ fn verifier() -> TwitchVerifier<'static> {
 
 /// Verify the connected Twitch account and wear the credential.
 ///
-/// What the Connect flow ends with, and what the purple chip draws from. The
-/// credential is kept and announced in one profile save; nothing else on the
-/// profile changes.
+/// What the Connect flow ends with and what the chip draws from. The credential is
+/// kept and announced in one profile save; nothing else on the profile changes.
 #[frb]
 pub fn twitch_verify_owner() -> Result<TwitchVerifyOutcome, String> {
     let master = super::network::get_local_peer_id()
@@ -265,10 +250,9 @@ pub fn twitch_verify_owner() -> Result<TwitchVerifyOutcome, String> {
 
 /// Verify that we follow `broadcaster_id`, and answer the credential as JSON.
 ///
-/// This is what rides a join request to a Twitch-gated server. It never
-/// touches the profile: a follow credential names a channel somebody watches,
-/// which is theirs to hand to that channel's server and to nobody else
-/// (`support_creds::keep_verified` caps it at zero in both directions).
+/// This rides a join request to a Twitch-gated server and never touches the profile: a
+/// follow credential names a channel somebody watches, which is theirs to hand to
+/// that channel's server and to nobody else.
 #[frb]
 pub fn twitch_verify_follow(broadcaster_id: String) -> Result<String, String> {
     let bid = broadcaster_id.trim().to_string();
@@ -287,14 +271,13 @@ static LAST_MAINTAIN: OnceLock<Mutex<Option<std::time::Instant>>> = OnceLock::ne
 
 /// Keep the account credential fresh, silently.
 ///
-/// A credential is minted for a 90-day window and verifies for that window
-/// and the one after it, so there is a whole window in which to renew it from
-/// the persisted refresh token without asking the user for anything. Called
-/// at start-up; the cooldown below is what keeps a long-running app from
-/// asking the shop more than once a day.
+/// A credential is minted for a 90-day window and verifies for that window and the
+/// next, so there is a whole window in which to renew it from the persisted refresh
+/// token without asking the user. Called at start-up, with a cooldown so a
+/// long-running app asks the shop at most once a day.
 ///
-/// Answers whether a fresh credential was minted. Every refusal is a `false`,
-/// never an error the user sees: this runs behind their back.
+/// Answers whether a fresh credential was minted; every refusal is `false`, never an
+/// error the user sees.
 #[frb]
 pub fn twitch_maintain_owner_credential() -> Result<bool, String> {
     {
@@ -313,9 +296,8 @@ pub fn twitch_maintain_owner_credential() -> Result<bool, String> {
     if !twitch_is_connected().unwrap_or(false) {
         return Ok(false);
     }
-    // Already minted in the window we are standing in: nothing to do. An
-    // absent credential is a build that connected Twitch before credentials
-    // existed, and it wants one.
+    // Already minted in the window we are standing in. An absent credential is a build
+    // that connected Twitch before credentials existed, and it wants one.
     if let Some(entry) = shop::own_twitch_owner_entry() {
         if entry.period == support_creds::now_period() {
             return Ok(false);

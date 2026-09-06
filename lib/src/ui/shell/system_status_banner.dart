@@ -12,13 +12,12 @@ import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/ui/components/hollow_focus_ring.dart';
 
-/// Visual mapping for a [StatusLevel] — the single source of truth shared by
-/// the global banner and the Home status line so both stay consistent.
+/// Visual mapping for a [StatusLevel], shared by the global banner and the Home
+/// status line so the two cannot drift.
 ///
-/// There is no dedicated blue/info theme token, so `info` reuses the app accent
-/// (teal): visually distinct from the amber alarm levels and the red critical
-/// one, which is what keeps a neutral/playful "info" note from reading as an
-/// incident.
+/// There is no info theme token, so `info` reuses the app accent: distinct from
+/// the amber alarm levels and the red critical one, which keeps a neutral note
+/// from reading as an incident.
 ({Color color, IconData icon}) statusVisual(
     StatusLevel level, HollowTheme hollow) {
   switch (level) {
@@ -37,13 +36,9 @@ import 'package:hollow/src/ui/components/hollow_focus_ring.dart';
 
 /// A live, self-ticking countdown to an absolute UTC instant.
 ///
-/// Renders `<label> <remaining>` (e.g. "Starts in 14:23"). When the target
-/// passes it flips to "In progress now" and stops ticking — for maintenance
-/// that's the moment users most need to know it's happening NOW, so the notice
-/// stays (the author clears status.json when the work is done).
-///
-/// Pure text, so it is inherently reduce-motion-safe. One [Timer.periodic] that
-/// is cancelled on dispose; it re-bases when the target changes.
+/// Once the target passes it flips to "In progress now" and stops ticking: for
+/// maintenance that is the moment users most need it, so the notice stays until
+/// the author clears status.json. Pure text, so it is reduce-motion-safe.
 class StatusCountdown extends StatefulWidget {
   final DateTime until; // UTC
   final String label;
@@ -81,8 +76,8 @@ class _StatusCountdownState extends State<StatusCountdown> {
 
   void _start() {
     _timer?.cancel();
-    // Only tick while the target is still in the future; once it passes the
-    // label is static ("In progress"), so no timer is needed.
+    // Only ticks while the target is in the future; past it the label is
+    // static, so no timer is needed.
     if (DateTime.now().toUtc().isBefore(widget.until)) {
       _timer = Timer.periodic(const Duration(seconds: 1), (_) {
         if (!mounted) return;
@@ -140,7 +135,7 @@ class _StatusCountdownState extends State<StatusCountdown> {
             color: widget.color,
             fontSize: widget.fontSize,
             fontWeight: FontWeight.w600,
-            // Tabular figures keep the countdown from jittering as digits change.
+            // Tabular figures stop the countdown jittering as digits change.
             fontFeatures: const [FontFeature.tabularFigures()],
           ),
         ),
@@ -149,27 +144,19 @@ class _StatusCountdownState extends State<StatusCountdown> {
   }
 }
 
-/// Which edge the banner's divider sits on. Desktop mounts it as a top-strip
-/// (divider BELOW it); mobile bottom-anchors it above the nav/input bar
-/// (divider ABOVE it) so it reads as separate from the bar beneath.
+/// Which edge the banner's divider sits on: below it on desktop, above it on
+/// mobile so it reads as separate from the bar beneath.
 enum StatusBannerAnchor { top, bottom }
 
-/// The global, dismissible system-status strip. Desktop mounts it directly
-/// under the always-visible Friends bar (anchor: top); mobile bottom-anchors it
-/// above the nav bar / chat input / under the call-sheet name (anchor: bottom).
-/// Renders ONLY for banner-worthy, non-dismissed notices — when the feed is
-/// operational/empty it collapses to nothing (silence = healthy).
+/// The global, dismissible system-status strip. Renders ONLY for banner-worthy,
+/// non-dismissed notices, so an operational feed collapses it to nothing.
 ///
-/// Tap-to-expand: collapsed it's a compact one-liner (title + message ellipsised
-/// — which on a narrow phone truncates both to near-nothing), so tapping the bar
-/// expands it to the FULL untruncated title + wrapped message. Starts collapsed
-/// (the notice appears unprompted, so it should announce itself quietly and let
-/// the user opt into the detail) with a chevron hint that there's more. The X
-/// dismisses without toggling expansion; a new notice id resets to collapsed.
+/// Starts collapsed, because the notice appears unprompted and should announce
+/// itself quietly; tapping expands to the full untruncated text, which on a
+/// narrow phone is the difference between a notice and an ellipsis. The X
+/// dismisses without toggling expansion, and a new notice id resets it.
 class SystemStatusBanner extends ConsumerStatefulWidget {
-  /// Which edge carries the divider line. [StatusBannerAnchor.top] = the banner
-  /// is itself at the top of a region, divider below (desktop). `.bottom` = the
-  /// banner sits just above a bar, divider above it (mobile).
+  /// Which edge carries the divider line.
   final StatusBannerAnchor anchor;
 
   const SystemStatusBanner({super.key, this.anchor = StatusBannerAnchor.top});
@@ -199,16 +186,14 @@ class _SystemStatusBannerState extends ConsumerState<SystemStatusBanner> {
     final vis = statusVisual(status.level, hollow);
     final color = vis.color;
 
-    // A fresh notice re-announces quietly: reset to collapsed when the id flips.
+    // A fresh notice re-announces quietly, so a new id resets to collapsed.
     if (status.id != _lastId) {
       _lastId = status.id;
       _expanded = false;
     }
 
-    // Headline: prefer the title, fall back to the message if title is empty.
     final headline = status.title.isNotEmpty ? status.title : status.message;
-    // Only worth a tap if there's truncatable detail (a message AND a title, or
-    // a long message). Keep it simple: expandable whenever a message exists.
+    // Only worth a tap when there is truncatable detail to show.
     final hasDetail = status.message.isNotEmpty;
 
     final divider = BorderSide(color: hollow.border.withValues(alpha: 0.3));
@@ -220,7 +205,7 @@ class _SystemStatusBannerState extends ConsumerState<SystemStatusBanner> {
                 ref.read(statusProvider.notifier).dismissCurrent(),
             borderRadius: BorderRadius.circular(hollow.radiusSm),
             child: GestureDetector(
-              // Absorb the tap so dismissing doesn't also toggle expansion.
+              // Absorbed so dismissing does not also toggle expansion.
               behavior: HitTestBehavior.opaque,
               onTap: () => ref.read(statusProvider.notifier).dismissCurrent(),
               child: MouseRegion(
@@ -286,7 +271,6 @@ class _SystemStatusBannerState extends ConsumerState<SystemStatusBanner> {
           )
         : null;
 
-    // ── Collapsed: compact single line (icon · headline · message… · time · ⌄ · ✕)
     Widget collapsed = Row(
       children: [
         Icon(vis.icon, size: 15, color: color),
@@ -347,7 +331,6 @@ class _SystemStatusBannerState extends ConsumerState<SystemStatusBanner> {
       ],
     );
 
-    // ── Expanded: full title + wrapped message, then countdown + Details row.
     Widget expanded = Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -379,7 +362,7 @@ class _SystemStatusBannerState extends ConsumerState<SystemStatusBanner> {
             ],
           ],
         ),
-        // Full message, no truncation — the whole point of expanding.
+        // Full message, no truncation: the whole point of expanding.
         if (status.title.isNotEmpty && status.message.isNotEmpty) ...[
           const SizedBox(height: 4),
           Padding(
@@ -416,7 +399,7 @@ class _SystemStatusBannerState extends ConsumerState<SystemStatusBanner> {
       liveRegion: true,
       label: 'System status: $headline',
       child: GestureDetector(
-        // Tapping the bar toggles expansion (only when there's detail to show).
+        // Tapping the bar toggles expansion, when there is detail to show.
         behavior: HitTestBehavior.opaque,
         onTap: hasDetail ? () => setState(() => _expanded = !_expanded) : null,
         child: AnimatedSize(
@@ -430,10 +413,9 @@ class _SystemStatusBannerState extends ConsumerState<SystemStatusBanner> {
               vertical: 9,
             ),
             decoration: BoxDecoration(
-              // Tinted CHROME, not a 10% wash: this strip sits above the chat
-              // area, and over a wallpaper a translucent fill let the image
-              // straight through so the bar stopped looking like part of the
-              // app (issue #54).
+              // Tinted CHROME, not a translucent wash: over a wallpaper a
+              // translucent fill lets the image straight through and the bar
+              // stops looking like part of the app (issue #54).
               color: hollow.noticeSurface(color),
               border: Border(
                 top: widget.anchor == StatusBannerAnchor.bottom
@@ -452,20 +434,12 @@ class _SystemStatusBannerState extends ConsumerState<SystemStatusBanner> {
   }
 }
 
-/// The calm Home-dashboard status line that REPLACES the Recovery Phrase card.
-/// Unlike the banner, this renders the healthy "All systems operational" green
-/// state too — Home is a low-traffic surface you deliberately land on, so a
-/// reassuring steady-state line is welcome rather than nagging. For
-/// info/maintenance/warning/critical it shows the same colour + headline +
-/// countdown as the banner.
+/// The calm Home-dashboard status line.
 ///
-/// Tap-to-expand mirrors the global banner: collapsed, the headline and message
-/// clamp to 2 lines each and the Details link is hidden entirely — on a narrow
-/// Home column that ellipsises a notice down to near-nothing. Tapping expands to
-/// the FULL untruncated text plus the Details link. Starts collapsed, and a new
-/// notice id resets it (the card is glanceable by default, detail on request).
-/// The healthy "All systems operational" state has no detail, so it stays a
-/// plain non-interactive line — no chevron, not in the focus chain.
+/// Unlike the banner it renders the healthy state too: Home is a low-traffic
+/// surface you deliberately land on, so a reassuring line is welcome rather than
+/// nagging. Tap-to-expand mirrors the banner. The healthy state has no detail,
+/// so it stays a plain non-interactive line, out of the focus chain.
 class HomeStatusCard extends ConsumerStatefulWidget {
   const HomeStatusCard({super.key});
 
@@ -490,8 +464,7 @@ class _HomeStatusCardState extends ConsumerState<HomeStatusCard> {
     final st = ref.watch(statusProvider);
     final status = st.status;
 
-    // Before the first fetch resolves, assume healthy (don't flicker an empty
-    // box). After fetch, an empty/operational feed shows the green line.
+    // Healthy until the first fetch resolves, so no empty box flickers.
     final vis = statusVisual(status.level, hollow);
     final color = vis.color;
 
@@ -505,14 +478,13 @@ class _HomeStatusCardState extends ConsumerState<HomeStatusCard> {
             ? status.message
             : null);
 
-    // A fresh notice re-announces quietly: reset to collapsed when the id flips.
+    // A fresh notice re-announces quietly, so a new id resets to collapsed.
     if (status.id != _lastId) {
       _lastId = status.id;
       _expanded = false;
     }
 
-    // Only worth a tap when the collapsed card actually hides something: a
-    // message (clamped to 2 lines) or a Details link (never shown collapsed).
+    // Only worth a tap when the collapsed card actually hides something.
     final bool hasDetail =
         !operational && (status.message.isNotEmpty || status.link.isNotEmpty);
     final bool showFull = _expanded && hasDetail;
@@ -581,8 +553,7 @@ class _HomeStatusCardState extends ConsumerState<HomeStatusCard> {
                     fontSize: 10,
                   ),
                 ],
-                // The Details link is expand-only — collapsed, the card is a
-                // glanceable summary, and an underlined link in it would
+                // Expand-only: an underlined link in a glanceable summary would
                 // compete with the tap-to-expand affordance.
                 if (showFull && status.link.isNotEmpty) ...[
                   const SizedBox(height: 5),
@@ -591,8 +562,8 @@ class _HomeStatusCardState extends ConsumerState<HomeStatusCard> {
                     onActivate: () => _openLink(status.link),
                     borderRadius: BorderRadius.circular(hollow.radiusSm),
                     child: GestureDetector(
-                      // Absorb the tap so following the link doesn't also
-                      // collapse the card out from under the user.
+                      // Absorbed so following the link does not also collapse
+                      // the card out from under the user.
                       behavior: HitTestBehavior.opaque,
                       onTap: () => _openLink(status.link),
                       child: MouseRegion(
@@ -644,7 +615,7 @@ class _HomeStatusCardState extends ConsumerState<HomeStatusCard> {
       child: card,
     );
 
-    // Healthy steady state carries no detail — keep it a plain, inert line
+    // The healthy state carries no detail, so it stays a plain inert line
     // rather than a control that expands into nothing.
     if (!hasDetail) {
       return Semantics(

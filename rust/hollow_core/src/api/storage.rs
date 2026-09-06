@@ -30,10 +30,9 @@ pub(crate) fn get_store() -> &'static Mutex<Option<MessageStore>> {
     STORE.get_or_init(|| Mutex::new(None))
 }
 
-/// Install a store into the process-global slot so a unit test can drive the
-/// `#[frb]` functions that read it. Pair every use with [`store_test_lock`] —
-/// `STORE` is process-wide and `cargo test` runs test functions in parallel
-/// threads (the `api::gifs::settings_lock` precedent).
+/// Install a store into the process-global slot so a unit test can drive the `#[frb]`
+/// functions that read it. Pair every use with [`store_test_lock`]: `STORE` is
+/// process-wide and `cargo test` runs test functions in parallel threads.
 #[cfg(test)]
 pub(crate) fn set_test_store(ms: MessageStore) {
     let store = get_store();
@@ -70,14 +69,12 @@ fn derive_db_key() -> Result<String, String> {
         .keypair
         .to_protobuf_encoding()
         .map_err(|e| format!("Failed to encode keypair: {e}"))?;
-    // Use the first 32 bytes of the protobuf-encoded keypair as key material.
-    // This is deterministic for the same identity.
+    // The first 32 bytes of the protobuf-encoded keypair, deterministic per identity.
     let key_bytes = &proto[..32.min(proto.len())];
     Ok(hex::encode(key_bytes))
 }
 
-/// Open the encrypted message database. Must be called after identity is loaded.
-/// Typically called once at app start (after `load_or_create_identity`).
+/// Open the encrypted message database, once at app start after the identity loads.
 #[frb]
 pub fn open_message_store() -> Result<(), String> {
     let store = get_store();
@@ -102,18 +99,12 @@ pub fn open_message_store() -> Result<(), String> {
     Ok(())
 }
 
-// REMOVED in 0.8.5: `save_message` / `save_channel_message`.
-//
-// Both were Dart-callable inserts that took an OPTIONAL signature and no
-// message_id — i.e. they could write a row that no peer will ever accept
-// through sync (`REQUIRE_SIGNED_BACKFILL`) and that the mid-based dedup cannot
-// reconcile. Neither had a call site outside a `storage_service.dart` wrapper
-// that nothing called. Message rows are written by the node's own send/receive
-// paths, which sign; leaving an unsigned-insert entry point exported was a
-// loaded gun with no user.
+// `save_message` / `save_channel_message` are deliberately absent: both were
+// Dart-callable inserts taking an OPTIONAL signature and no message_id, so they
+// could write a row no peer will accept through sync and the mid-based dedup
+// cannot reconcile. Message rows are written by the node's own signing paths.
 
-/// Load recent messages for a peer from the local database.
-/// Returns messages ordered oldest-first, up to `limit`.
+/// Load recent messages for a peer, oldest-first, up to `limit`.
 #[frb]
 pub fn load_messages(peer_id: String, limit: i32) -> Result<Vec<StoredMessage>, String> {
     let store = get_store();
@@ -141,8 +132,8 @@ pub fn load_messages(peer_id: String, limit: i32) -> Result<Vec<StoredMessage>, 
         .collect())
 }
 
-/// Load ALL DM messages for a peer, including soft-deleted (hidden_at set).
-/// No limit, ordered oldest-first. Used by the archive "My Data" viewer.
+/// Load ALL DM messages for a peer including hidden ones, oldest-first and unlimited,
+/// for the archive viewer.
 #[frb]
 pub fn load_all_dm_messages(peer_id: String) -> Result<Vec<StoredMessage>, String> {
     let store = get_store();
@@ -170,8 +161,8 @@ pub fn load_all_dm_messages(peer_id: String) -> Result<Vec<StoredMessage>, Strin
         .collect())
 }
 
-/// Load ALL channel messages, including soft-deleted (hidden_at set).
-/// No limit, ordered oldest-first. Used by the archive "My Data" viewer.
+/// Load ALL channel messages including hidden ones, oldest-first and unlimited, for
+/// the archive viewer.
 #[frb]
 pub fn load_all_channel_messages(server_id: String, channel_id: String) -> Result<Vec<StoredChannelMessage>, String> {
     let store = get_store();
@@ -201,8 +192,7 @@ pub fn load_all_channel_messages(server_id: String, channel_id: String) -> Resul
         .collect())
 }
 
-/// Load edit history for a batch of message IDs.
-/// Returns a flat list of edits sorted by edited_at ASC.
+/// Load edit history for a batch of message IDs, flat and sorted by edited_at.
 #[frb]
 pub fn load_message_edits(message_ids: Vec<String>) -> Result<Vec<StoredMessageEdit>, String> {
     let store = get_store();
@@ -252,10 +242,9 @@ pub fn count_dm_messages(peer_id: String) -> Result<u32, String> {
     Ok(ms.count_dm_messages(&peer_id))
 }
 
-/// Count all visible DM messages across every conversation. Drives the Home
-/// stats card — an honest multi-device sync-comparison number (DMs fully
-/// converge across a person's devices; channel messages are lazy-paged and
-/// would diverge, so they are deliberately not counted there).
+/// Count all visible DM messages across every conversation, the Home card's honest
+/// multi-device comparison number: DMs fully converge across a person's devices,
+/// while lazy-paged channel messages would diverge.
 #[frb]
 pub fn count_all_dm_messages() -> Result<u32, String> {
     let store = get_store();
@@ -285,19 +274,16 @@ pub struct UserProfile {
     pub twitch_username: String,
     /// Showcase board JSON (profile blocks; empty = no board).
     pub showcase_board: String,
-    /// Avatar frame ID (issue #54). `""` = none, `"b:<hue>"` = a built-in
-    /// procedural frame, 64-hex = an asset-rail blob hash whose bytes are
-    /// pulled on demand via `request_assets(kind: "frame")`.
+    /// Avatar frame ID (issue #54): `""` = none, `"b:<hue>"` = built-in, 64-hex = an
+    /// asset-rail blob hash pulled on demand.
     pub avatar_frame: String,
-    /// Asset-rail hash of this person's ANIMATED avatar; `""` = still only.
-    /// `avatar_bytes` above is the STILL companion — the animation is pulled
-    /// via `request_assets(kind: "profile")` and painted over it when held.
+    /// Asset-rail hash of this person's ANIMATED avatar, `""` = still only.
+    /// `avatar_bytes` above is the STILL companion the animation is painted over.
     pub avatar_anim: String,
     /// Asset-rail hash of this person's ANIMATED banner; `""` = still only.
     pub banner_anim: String,
-    /// Support credentials (artist shop): the verified JSON array as stored,
-    /// `""` for none. Entries are `{t, item, parts, badge, ...}`; a renderer
-    /// lights a mark next to art whose hash is in `parts` and worn.
+    /// Support credentials: the verified JSON array as stored, `""` for none. A renderer
+    /// lights a mark next to art whose hash is in an entry's `parts` and is worn.
     pub support_creds: String,
 }
 
@@ -455,9 +441,8 @@ pub struct SettingEntry {
     pub value: String,
 }
 
-/// Load ALL settings whose key starts with `prefix` in ONE call — replaces
-/// the per-key startup scans (`notif:*`, `seen:*`) that cost one FFI
-/// round-trip per server/channel/DM.
+/// Load ALL settings whose key starts with `prefix` in ONE call, replacing the
+/// per-key startup scans that cost one FFI round-trip per server, channel and DM.
 #[frb]
 pub fn load_settings_with_prefix(prefix: String) -> Result<Vec<SettingEntry>, String> {
     let store = get_store();
@@ -470,12 +455,11 @@ pub fn load_settings_with_prefix(prefix: String) -> Result<Vec<SettingEntry>, St
         .collect())
 }
 
-// Verified peers moved to `api::verification` (Issue 1-D) so every entry point
-// resolves device → master in one auditable place. A verified flag stored under
-// a device id stops applying the moment that contact links a device.
+// Verified peers live in `api::verification` so every entry point resolves device to
+// master in one auditable place: a verified flag stored under a device id stops
+// applying the moment that contact links a device.
 
-/// Count unread DM messages newer than the given last-seen message ID.
-/// Only counts non-hidden messages from the other peer (is_mine = 0).
+/// Count unread, non-hidden DM messages newer than the last-seen message ID.
 #[frb]
 pub fn count_unread_dm(peer_id: String, last_seen_message_id: String) -> Result<u32, String> {
     let store = get_store();
@@ -484,8 +468,7 @@ pub fn count_unread_dm(peer_id: String, last_seen_message_id: String) -> Result<
     Ok(ms.count_unread_dm(&peer_id, &last_seen_message_id))
 }
 
-/// Count unread channel messages newer than the given last-seen message ID.
-/// Only counts non-hidden messages from other members (is_mine = 0).
+/// Count unread, non-hidden channel messages newer than the last-seen message ID.
 #[frb]
 pub fn count_unread_channel(
     server_id: String,
@@ -581,10 +564,9 @@ pub fn load_friends(status: Option<String>) -> Result<Vec<FriendFfi>, String> {
         .collect())
 }
 
-/// Block an identity (MASTER-keyed). Persists the row and warms the in-memory
-/// set the Rust ingest guards read, so it takes effect immediately. Purely
-/// local — the blocked peer learns nothing. Pass any of the peer's ids; it is
-/// collapsed to the master via the resolver.
+/// Block an identity (MASTER-keyed): persists the row and warms the in-memory set the
+/// Rust ingest guards read, so it takes effect immediately. Purely local, so the
+/// blocked peer learns nothing. Any of their ids works; it is collapsed to the master.
 #[frb]
 pub fn block_peer(peer_id: String) -> Result<(), String> {
     let master = crate::node::resolver::resolve(&peer_id);
@@ -797,19 +779,16 @@ pub struct StoredFileInfo {
     pub completed_at: Option<i64>,
     pub disk_path: Option<String>,
     pub expired_at: Option<i64>,
-    /// Video thumbnail back-reference (Phase 6.75 video preview).
-    /// When non-null, this file is a thumbnail image for a vault-stored video.
-    /// The Dart UI uses this to render a play button overlay and trigger the
-    /// vault download on tap.
+    /// Back-reference to the vault-stored video this file is a thumbnail for, which the
+    /// UI uses to draw the play overlay and start the vault download on tap.
     pub video_thumb: Option<crate::api::network::VideoThumbRef>,
     /// Persisted share swarm root hash for share-backed (>34 MB) files —
     /// lets a manual download rejoin the share after a restart (issue #41).
     pub share_root_hash: Option<String>,
     /// Persisted share AES key (hex) paired with `share_root_hash`.
     pub share_key_hex: Option<String>,
-    /// Tiny base64 WebP placeholder thumbnail — rendered blurred under the
-    /// Download button while the real bytes are gated/undownloaded (issue #41
-    /// carry-over).
+    /// Tiny base64 WebP placeholder, rendered blurred under the Download button while
+    /// the real bytes are gated or undownloaded.
     pub thumb_b64: Option<String>,
 }
 
@@ -894,8 +873,7 @@ pub fn mark_file_complete(file_id: String, disk_path: String) -> Result<(), Stri
     Ok(())
 }
 
-/// Get file_ids from messages that have no completed file on disk.
-/// Used to find files that need downloading after message sync.
+/// file_ids from messages with no completed file on disk, for post-sync downloads.
 #[frb]
 pub fn get_missing_file_ids() -> Result<Vec<String>, String> {
     let store = get_store();
@@ -963,10 +941,9 @@ pub struct StorageBreakdown {
     pub contexts: Vec<StorageContextUsage>,
 }
 
-/// Sum the byte sizes of regular files directly inside `dir` (non-recursive,
-/// matching how files/ and vault_cache/ are laid out — flat directories).
-/// Skips transient sender-side stream temps (`.stream_send_*`, `.stream_shard_*`)
-/// so an in-flight send doesn't inflate the reported usage.
+/// Sum the byte sizes of regular files directly inside `dir`; files/ and vault_cache/
+/// are flat. Skips transient sender-side stream temps so an in-flight send does not
+/// inflate the reported usage.
 fn dir_size_bytes(dir: &std::path::Path) -> u64 {
     let mut total = 0u64;
     if let Ok(entries) = std::fs::read_dir(dir) {
@@ -1025,10 +1002,10 @@ pub fn get_storage_breakdown() -> Result<StorageBreakdown, String> {
     })
 }
 
-/// Every asset hash still referenced by a personal set or replicated CRDT
-/// state — eviction and "clear" must never drop these (a personal emote or
-/// a server's active emote/banner would go blank until re-pulled; worse, WE
-/// may be the only online holder for a server we own).
+/// Every asset hash still referenced by a personal set or replicated CRDT state.
+/// Eviction and "clear" must never drop these: a personal emote or a server's active
+/// emote would go blank until re-pulled, and WE may be the only online holder for a
+/// server we own.
 fn referenced_asset_hashes(ms: &crate::storage::MessageStore) -> std::collections::HashSet<String> {
     let mut keep = std::collections::HashSet::new();
     if let Ok(personal) = ms.list_personal_emotes() {
@@ -1054,8 +1031,7 @@ fn referenced_asset_hashes(ms: &crate::storage::MessageStore) -> std::collection
             for sticker in state.stickers.values() {
                 keep.insert(sticker.hash.clone());
             }
-            // Server banner + animated server icon: these settings carry a
-            // blob hash; absent/cleared values are not hex and are skipped.
+            // These settings carry a blob hash; cleared values are not hex and are skipped.
             for key in ["server_banner", "server_avatar_anim"] {
                 if let Some(reg) = state.settings.get(key) {
                     let v = reg.read().clone();
@@ -1066,16 +1042,10 @@ fn referenced_asset_hashes(ms: &crate::storage::MessageStore) -> std::collection
             }
         }
     }
-    // OUR OWN avatar frame (issue #54). Only ours: other people's frames are
-    // decoration and are meant to be the first thing evicted, then re-pulled
-    // from their owner. Ours has no other holder to pull it back from until
-    // somebody who has seen it comes online, so it stays pinned. Mirrored
-    // into a setting by `set_my_avatar_frame` because this function has no
-    // identity to look the profile row up by. A sibling device that inherited
-    // the frame over the wire re-pulls it like anyone else.
-    // OUR OWN avatar frame and animated avatar/banner. Same rule, same
-    // reason: other people's are re-pullable from their owner, ours has no
-    // other holder until somebody who has seen it comes online.
+    // OUR OWN avatar frame and animated avatar/banner, pinned because other people's
+    // are re-pullable from their owner while ours has no other holder until somebody
+    // who has seen them comes online. Mirrored into settings because this function
+    // has no identity to look the profile row up by.
     for key in [
         MY_AVATAR_FRAME_SETTING,
         MY_AVATAR_ANIM_SETTING,
@@ -1087,12 +1057,10 @@ fn referenced_asset_hashes(ms: &crate::storage::MessageStore) -> std::collection
             keep.insert(hash);
         }
     }
-    // Art bought from the artist shop, worn or not. A `.hollowpack` import is
-    // the one thing on the rail with no peer to re-pull it from and a receipt
-    // behind it: evicting it would silently destroy something somebody paid
-    // for, and re-importing means finding the file again. Every owned hash is
-    // pinned, including the stills and the halves of a pair the wearer is not
-    // currently using.
+    // Art bought from the artist shop, worn or not: a `.hollowpack` import is the one
+    // thing on the rail with no peer to re-pull it from and a receipt behind it, so
+    // evicting it would destroy something somebody paid for. Every owned hash is
+    // pinned, stills and unused halves included.
     if let Ok(owned) = ms.owned_art_hashes() {
         keep.extend(owned);
     }
@@ -1103,9 +1071,8 @@ fn referenced_asset_hashes(ms: &crate::storage::MessageStore) -> std::collection
 /// asset evictor can pin it without resolving our identity.
 pub(crate) const MY_AVATAR_FRAME_SETTING: &str = "my_avatar_frame";
 
-/// `app_settings` keys mirroring our own animated avatar/banner hashes, so
-/// the asset evictor can pin them without resolving our identity — same
-/// reason as [`MY_AVATAR_FRAME_SETTING`].
+/// `app_settings` keys mirroring our own animated avatar/banner hashes, so the asset
+/// evictor can pin them without resolving our identity.
 pub(crate) const MY_AVATAR_ANIM_SETTING: &str = "my_avatar_anim";
 pub(crate) const MY_BANNER_ANIM_SETTING: &str = "my_banner_anim";
 
@@ -1218,9 +1185,9 @@ pub fn clear_vault_cache() -> Result<u64, String> {
     Ok(freed)
 }
 
-/// Enforce the cache caps (files/ + vault_cache/ + the asset blob cache).
-/// Called after a download completes so the user-set caps are actually
-/// honored (the sliders were no-ops before this). Returns total bytes freed.
+/// Enforce the cache caps (files/, vault_cache/ and the asset blob cache) after a
+/// download completes, so the user-set sliders are actually honoured. Returns bytes
+/// freed.
 #[frb]
 pub fn enforce_storage_caps(
     files_cap_mb: u64,
@@ -1306,11 +1273,10 @@ pub fn has_identity() -> Result<bool, String> {
     Ok(dir.join("identity.key").exists())
 }
 
-/// Delete the on-disk identity + local DB so the next launch shows the Welcome
-/// screen fresh. Used to discard a THROWAWAY identity created for the "Link a
-/// device" first-run flow when the user cancels it. Best-effort — missing files
-/// are ignored. The caller must restart the app afterward (the live DB handle
-/// is still open). DESTRUCTIVE: only call on a throwaway with no real data.
+/// Delete the on-disk identity and local DB so the next launch shows a fresh Welcome.
+/// Used to discard the THROWAWAY identity of a cancelled "Link a device" flow.
+/// DESTRUCTIVE: only call on a throwaway with no real data, and restart afterwards,
+/// because the live DB handle is still open.
 #[frb]
 pub fn delete_identity() -> Result<(), String> {
     let dir = crate::identity::data_dir()?;
@@ -1329,17 +1295,11 @@ pub fn delete_identity() -> Result<(), String> {
     Ok(())
 }
 
-/// Export account backup as a passphrase-encrypted blob (.hollow file).
-/// Includes identity.key + messages.db. Optionally includes vault/ shard data
-/// and/or downloaded files from files/.
-/// The backup is: [16-byte salt][12-byte nonce][AES-256-GCM ciphertext of zip bytes]
-/// Key derived from passphrase via Argon2id (memory=64MB, iterations=3, parallelism=1).
-/// Build the plaintext snapshot ZIP in memory (no encryption layer).
+/// Build the plaintext snapshot ZIP in memory: `identity.key` plus a WAL-checkpointed
+/// `messages.db`, optionally `vault/` shards and `files/` downloads.
 ///
-/// Contents: `identity.key` (plaintext keypair) + `messages.db` (WAL-checkpointed)
-/// + optionally `vault/` shards and `files/` downloads. This is the shared core of
-/// both the on-disk backup (`export_backup`, wrapped in Argon2id+AES) and the
-/// multi-device link snapshot (`api/network` link transfer, wrapped in a one-time
+/// The shared core of both the on-disk backup (wrapped in Argon2id+AES) and the
+/// multi-device link snapshot (wrapped in a one-time random AES key).
 /// random AES key). Returns the raw zip bytes.
 pub(crate) fn build_snapshot_bytes(include_vault: bool, include_files: bool) -> Result<Vec<u8>, String> {
     use std::io::Write;
@@ -1354,9 +1314,8 @@ pub(crate) fn build_snapshot_bytes(include_vault: bool, include_files: bool) -> 
 
         let key_path = data_dir.join("identity.key");
         if key_path.exists() {
-            // Always export the PLAINTEXT keypair — the wrapping layer (backup
-            // passphrase or link transfer key) provides encryption. Reading via
-            // load_or_create_identity() transparently decrypts if protected.
+            // Always export the PLAINTEXT keypair: the wrapping layer provides the
+            // encryption, and loading transparently decrypts a protected file.
             let id = crate::identity::load_or_create_identity()?;
             let data = id.keypair.to_protobuf_encoding()
                 .map_err(|e| format!("Failed to encode keypair: {e}"))?;
@@ -1434,13 +1393,10 @@ pub(crate) fn import_snapshot_bytes(zip_bytes: &[u8]) -> Result<(), String> {
         return Err("Snapshot does not contain identity.key".into());
     }
 
-    // CRITICAL: the multi-device link import runs while the node is LIVE on a
-    // throwaway identity, so the global STORE holds an open SQLCipher connection
-    // (with its own WAL). If we just overwrite messages.db, the throwaway's WAL/SHM
-    // would later checkpoint back OVER the imported DB, and the live handle reads
-    // the stale (empty) DB. So: drop the live connection and delete its WAL/SHM
-    // BEFORE writing the imported files. The caller restarts the app afterward,
-    // which reopens the real DB with the real (imported-identity) passphrase.
+    // CRITICAL: the link import runs while the node is LIVE on a throwaway identity, so
+    // the global STORE holds an open SQLCipher connection with its own WAL. Overwriting
+    // messages.db would let that WAL checkpoint back OVER the imported DB, so the live
+    // connection is dropped and its WAL/SHM deleted BEFORE the imported files land.
     if let Ok(mut guard) = get_store().lock() {
         let _ = guard.take(); // drops MessageStore → closes the connection
     }
@@ -1452,16 +1408,10 @@ pub(crate) fn import_snapshot_bytes(zip_bytes: &[u8]) -> Result<(), String> {
     }
 
     // CRITICAL: delete the THROWAWAY identity.device. The snapshot carries only a
-    // PLAINTEXT identity.key (no identity.device), so if we keep the throwaway's
-    // device file there are two failure modes:
-    //   (1) protection mismatch — a keychain/password-protected throwaway device
-    //       file (HKEYV1) can't be decrypted after the plaintext master replaces
-    //       identity.key (no session key is established), so load_or_create_identity
-    //       throws "Device key is encrypted" and the identity never loads ("Loading…"
-    //       forever — the exact symptom seen on the VM).
-    //   (2) the throwaway device id was minted under the throwaway identity and is
-    //       meaningless under the real master.
-    // Deleting it makes the next launch generate a FRESH, distinct, plaintext device
+    // plaintext identity.key, so keeping the throwaway's device file either cannot be
+    // decrypted once the plaintext master replaces identity.key (the identity then
+    // never loads) or leaves a device id minted under an identity that is gone.
+    // Deleting it makes the next launch mint a fresh, distinct device key.
     // key under the real master — the correct multi-device shape.
     let dev_path = data_dir.join("identity.device");
     if dev_path.exists() {
@@ -1487,9 +1437,8 @@ pub(crate) fn import_snapshot_bytes(zip_bytes: &[u8]) -> Result<(), String> {
         }
     }
 
-    // Sanity-log what the imported identity resolves to, so a post-restart failure
-    // is diagnosable: the master peer_id below MUST match the source device's, and
-    // the next launch derives the DB passphrase from this same key.
+    // Log what the imported identity resolves to: the master peer_id MUST match the
+    // source device's, and the next launch derives the DB passphrase from this key.
     match crate::identity::load_or_create_identity() {
         Ok(id) => hollow_log!(
             "[HOLLOW-LINK] Import OK — imported identity peer_id={} device_peer_id={}",
@@ -1501,9 +1450,8 @@ pub(crate) fn import_snapshot_bytes(zip_bytes: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
-/// A compact summary of local DB state, used by multi-device linking to decide
-/// data-flow direction (which device is populated vs empty) and for the post-import
-/// summary. NOT a user-facing feature on its own.
+/// A compact summary of local DB state, used by multi-device linking to decide which
+/// device is populated and which is empty. Not a user-facing feature on its own.
 pub(crate) fn snapshot_state_summary() -> (u32, u32, u32, bool) {
     let store = get_store();
     let Ok(guard) = store.lock() else { return (0, 0, 0, false); };
@@ -1535,18 +1483,16 @@ pub(crate) fn snapshot_state_summary() -> (u32, u32, u32, bool) {
     (msg_count, friend_count, server_count, has_profile)
 }
 
-/// Build a passphrase-encrypted `.hollow` backup blob IN MEMORY — the exact same
-/// format `export_backup` writes to disk: `[magic:6][salt:16][nonce:12][ciphertext]`,
-/// Argon2id-derived AES-256-GCM. Shared by the on-disk export AND the multi-device
-/// link transfer (which uses the link CODE as the passphrase and streams the blob,
-/// so the receiver imports via the identical `import_backup` pipeline).
+/// Build a passphrase-encrypted `.hollow` backup blob IN MEMORY, the same format
+/// `export_backup` writes: `[magic:6][salt:16][nonce:12][ciphertext]`, Argon2id-derived
+/// AES-256-GCM. The multi-device link transfer uses the link CODE as the passphrase,
+/// so the receiver imports through the identical pipeline.
 pub(crate) fn export_backup_bytes(passphrase: &str, include_vault: bool, include_files: bool) -> Result<Vec<u8>, String> {
     use aes_gcm::{Aes256Gcm, KeyInit, aead::Aead};
     use aes_gcm::Nonce;
 
     let zip_bytes = build_snapshot_bytes(include_vault, include_files)?;
 
-    // Derive encryption key from passphrase via Argon2id.
     let mut salt = [0u8; 16];
     getrandom::fill(&mut salt).map_err(|e| format!("RNG error: {e}"))?;
     let params = argon2::Params::new(65536, 3, 1, Some(32))
@@ -1556,7 +1502,6 @@ pub(crate) fn export_backup_bytes(passphrase: &str, include_vault: bool, include
     argon.hash_password_into(passphrase.as_bytes(), &salt, &mut key)
         .map_err(|e| format!("Argon2 hash error: {e}"))?;
 
-    // Encrypt zip with AES-256-GCM.
     let mut nonce_bytes = [0u8; 12];
     getrandom::fill(&mut nonce_bytes).map_err(|e| format!("RNG error: {e}"))?;
     let cipher = Aes256Gcm::new_from_slice(&key)
@@ -1590,7 +1535,6 @@ pub(crate) fn import_backup_bytes(blob: &[u8], passphrase: &str) -> Result<(), S
     use aes_gcm::{Aes256Gcm, KeyInit, aead::Aead};
     use aes_gcm::Nonce;
 
-    // Validate magic header.
     if blob.len() < 6 + 16 + 12 + 16 || &blob[..6] != b"HOLLOW" {
         return Err("Invalid backup file (not a Hollow backup)".into());
     }
@@ -1599,7 +1543,6 @@ pub(crate) fn import_backup_bytes(blob: &[u8], passphrase: &str) -> Result<(), S
     let nonce_bytes = &blob[22..34];
     let ciphertext = &blob[34..];
 
-    // Derive decryption key.
     let params = argon2::Params::new(65536, 3, 1, Some(32))
         .map_err(|e| format!("Argon2 params error: {e}"))?;
     let argon = argon2::Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
@@ -1607,14 +1550,12 @@ pub(crate) fn import_backup_bytes(blob: &[u8], passphrase: &str) -> Result<(), S
     argon.hash_password_into(passphrase.as_bytes(), salt, &mut key)
         .map_err(|e| format!("Argon2 hash error: {e}"))?;
 
-    // Decrypt.
     let cipher = Aes256Gcm::new_from_slice(&key)
         .map_err(|e| format!("Cipher init error: {e}"))?;
     let nonce = Nonce::from_slice(nonce_bytes);
     let zip_bytes = cipher.decrypt(nonce, ciphertext)
         .map_err(|_| "Wrong passphrase or corrupted backup".to_string())?;
 
-    // Extract zip to data directory (shared core).
     import_snapshot_bytes(&zip_bytes)
 }
 
@@ -1636,10 +1577,9 @@ fn pending_link_code_path() -> Result<std::path::PathBuf, String> {
     Ok(crate::identity::data_dir()?.join("pending_link.code"))
 }
 
-/// (Receiver) Stash an encrypted `.hollow` link blob + the code that decrypts it,
-/// to be imported on the NEXT launch (pre-node-start, the known-good window — the
-/// exact same path as a manual "Restore from backup"). Called from the link
-/// completion handler. Does NOT import in-place (that was the fragile path).
+/// (Receiver) Stash an encrypted `.hollow` link blob and the code that decrypts it, to
+/// be imported on the NEXT launch before the node starts, the same window a manual
+/// "Restore from backup" uses. Importing in place was the fragile path.
 pub(crate) fn stash_pending_link(blob: &[u8], code: &str) -> Result<(), String> {
     std::fs::write(pending_link_blob_path()?, blob)
         .map_err(|e| format!("Failed to stash link blob: {e}"))?;
@@ -1654,10 +1594,9 @@ pub fn has_pending_link() -> Result<bool, String> {
     Ok(pending_link_blob_path()?.exists() && pending_link_code_path()?.exists())
 }
 
-/// (Receiver, at launch BEFORE start_node) Import a stashed link blob via the exact
-/// same pipeline as a manual `.hollow` restore: delete the throwaway identity,
-/// decrypt with the stashed code, extract into the data dir, then clean up the
-/// stash. After this the bootstrap proceeds as a normal restored-backup launch.
+/// (Receiver, at launch BEFORE start_node) Import a stashed link blob through the same
+/// pipeline as a manual `.hollow` restore, then clean up the stash. After this the
+/// bootstrap proceeds as a normal restored-backup launch.
 #[frb]
 pub fn import_pending_link() -> Result<(), String> {
     let blob_path = pending_link_blob_path()?;
@@ -1681,16 +1620,11 @@ pub fn import_pending_link() -> Result<(), String> {
     let _ = std::fs::remove_file(&blob_path);
     let _ = std::fs::remove_file(&code_path);
 
-    // Multi-device (Step 6): the imported DB contains the SOURCE device's MLS
-    // identity (signer + credential + group leaves). A linked sibling MUST NOT
-    // reuse them — two devices sharing one MLS signature key can't both be group
-    // leaves (`DuplicateSignatureKey` on add, `CannotDecryptOwnMessage` on
-    // receive). Wipe the inherited MLS identity here so the node mints a FRESH,
-    // distinct one on first start and re-joins each server's group as its own
-    // leaf. (The master-key comparison at startup can't catch this case: a
-    // sibling's master EQUALS the source's, so the inherited credential looks
-    // legitimate there.) Best-effort: open the just-imported DB with its
-    // master-derived passphrase and clear the table.
+    // The imported DB contains the SOURCE device's MLS identity, and a linked sibling
+    // MUST NOT reuse it: two devices sharing one MLS signature key cannot both be
+    // group leaves. Wiping it makes the node mint a fresh one and re-join each
+    // server's group as its own leaf. The startup master-key comparison cannot catch
+    // this, because a sibling's master EQUALS the source's.
     if result.is_ok() {
         if let Ok(passphrase) = derive_db_key() {
             let db_path = data_dir.join("messages.db");
@@ -1716,15 +1650,11 @@ pub fn import_pending_link() -> Result<(), String> {
 
 // ── Pending data-dir wipe: next-boot clean slate ─────────────────────────────
 //
-// Used by the "Link a device" → Back/Cancel flow. That flow creates a THROWAWAY
-// identity to connect, so backing out must leave a truly clean data dir for the
-// next launch's Welcome (create new / import / link). We CAN'T reliably delete the
-// DB files in-process: the running node holds open SQLCipher handles (CrdtStore /
-// CryptoStore actor threads + WAL/-shm), and on Windows `remove_file` on an open
-// file fails — leaving `messages.db` behind, encrypted with the throwaway
-// passphrase, so the next identity can't open it → "infinite loading". So we mark a
-// pending wipe, relaunch, and nuke the dir on the NEXT launch BEFORE the node starts
-// (no open handles) — the exact same pre-node-start window as the link import above.
+// Used by the "Link a device" cancel flow, which created a THROWAWAY identity to
+// connect. The DB files cannot be deleted in-process: the running node holds open
+// SQLCipher handles and Windows refuses to remove an open file, which would leave
+// messages.db encrypted with the throwaway passphrase and unopenable. So the wipe is
+// marked, the app relaunches, and the dir is nuked BEFORE the node starts.
 
 fn pending_wipe_marker_path() -> Result<std::path::PathBuf, String> {
     Ok(crate::identity::data_dir()?.join("pending_wipe.marker"))
@@ -1745,11 +1675,9 @@ pub fn has_pending_wipe() -> Result<bool, String> {
     Ok(pending_wipe_marker_path()?.exists())
 }
 
-/// (At launch, BEFORE start_node) Delete every file/dir in the data dir so the next
-/// Welcome starts from a truly clean slate. Preserves nothing identity-bearing:
-/// removes `identity.key`/`identity.device`, `messages.db*`, `device_lists`, any
-/// stashed `pending_link.*`, `vault/`, `files/`, etc. Keeps only the wipe marker
-/// itself (removed last) and any `*.lock` single-instance guard. Idempotent.
+/// (At launch, BEFORE start_node) Delete every file and directory in the data dir so
+/// the next Welcome starts from a clean slate, keeping only the wipe marker (removed
+/// last) and any single-instance lock. Idempotent.
 #[frb]
 pub fn perform_pending_wipe() -> Result<(), String> {
     let marker = pending_wipe_marker_path()?;
@@ -1765,9 +1693,8 @@ pub fn perform_pending_wipe() -> Result<(), String> {
         // Keep the marker (removed last) + any single-instance lock file.
         if Some(&name) == marker_name.as_ref() { continue; }
         if name.to_string_lossy().ends_with(".lock") { continue; }
-        // Keep the profile registry (Settings > Profile switcher): it's
-        // app-level config anchored in the default data root, not identity
-        // data — erasing the default profile must not forget the others.
+        // Keep the profile registry: it is app-level config anchored in the default data
+        // root, not identity data, so erasing this profile must not forget the others.
         if name.to_string_lossy() == "profiles.json" { continue; }
         let res = if path.is_dir() {
             std::fs::remove_dir_all(&path)
@@ -1805,10 +1732,9 @@ mod tests {
         body(guard.as_ref().expect("store installed"))
     }
 
-    /// Art bought from the artist shop is PINNED against the asset evictor.
-    /// Everything else on the rail is a cache entry with a peer behind it; a
-    /// `.hollowpack` import has a receipt behind it and nobody to re-pull it
-    /// from, so eviction must walk past it and take the ordinary blob instead.
+    /// Art bought from the artist shop is PINNED against the asset evictor: everything
+    /// else on the rail has a peer behind it, while a `.hollowpack` import has a receipt
+    /// and nobody to re-pull it from.
     #[test]
     fn owned_art_is_pinned_against_asset_eviction() {
         let _lock = fresh_store();

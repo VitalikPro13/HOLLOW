@@ -11,18 +11,14 @@ void _log(String msg) {
   network_api.logFromDart(message: msg);
 }
 
-/// macOS 13.0–14.1 screen-share-audio SEND path.
+/// macOS 13.0 to 14.1 screen-share-audio SEND path.
 ///
-/// On these versions the CoreAudio Process Tap (14.2+) isn't available, so we
-/// capture system audio with ScreenCaptureKit (audio-only) in the native
-/// plugin, stream raw PCM to Dart over an EventChannel, Opus-encode it with the
-/// bundled `screen_audio_capturer --mode encode` helper, and hand the resulting
-/// Opus packets to [onPacket] — identical to the Windows WASAPI sender, so the
-/// receiver path ([ScreenAudioRenderer] / `--mode render`) is unchanged.
-///
-/// Pipeline:
-///   SCK audio (native) --PCM--> EventChannel --> this --stdin--> encode exe
-///     --stdout [len][seq][opus]--> this --> onPacket([seq][opus]) --> 0x03 DC
+/// The CoreAudio Process Tap is not available on these versions, so system
+/// audio is captured with ScreenCaptureKit in the native plugin, streamed to
+/// Dart as raw PCM over an EventChannel, Opus-encoded by the bundled
+/// `screen_audio_capturer --mode encode` helper, and handed to [onPacket] as
+/// `[seq][opus]`. Identical to the Windows WASAPI sender, so the receiver path
+/// is unchanged.
 class MacSckScreenAudioCapturer {
   static const MethodChannel _method = MethodChannel('FlutterWebRTC.Method');
   static const EventChannel _pcmChannel =
@@ -58,11 +54,10 @@ class MacSckScreenAudioCapturer {
     return null;
   }
 
-  /// Start SCK capture + the encode helper. Opus packets `[seq][opus]` are
-  /// delivered via [onPacket], ready to prefix with 0x03 for the data channel.
-  /// [bitrate] (bps) overrides the encoder default (128k); pass higher for more
-  /// fidelity. Returns false if not on macOS, the binary is missing, or the
-  /// native capture fails to start (e.g. macOS < 13.0).
+  /// Starts SCK capture and the encode helper; Opus packets `[seq][opus]`
+  /// reach [onPacket], ready for the 0x03 data-channel prefix. [bitrate] in
+  /// bps overrides the 128k default. False when not on macOS, the binary is
+  /// missing, or native capture fails to start.
   Future<bool> start({
     int bitrate = 0,
     required void Function(Uint8List packet) onPacket,
@@ -76,7 +71,7 @@ class MacSckScreenAudioCapturer {
       return false;
     }
 
-    // Spawn the Opus encoder helper first so it's ready for PCM.
+    // Spawn the Opus encoder helper first so it is ready for PCM.
     final args = ['--mode', 'encode'];
     if (bitrate > 0) args.addAll(['--bitrate', bitrate.toString()]);
     try {
@@ -98,14 +93,12 @@ class MacSckScreenAudioCapturer {
       _active = false;
     });
 
-    // Read framed Opus packets from the encoder's stdout.
     _packetCount = 0;
     _stdoutSub = _encoder!.stdout.listen((chunk) {
       _buffer.add(chunk is Uint8List ? chunk : Uint8List.fromList(chunk));
       _drainFrames(onPacket);
     }, onError: (e) => _log('[SCK-AUDIO] stdout error: $e'));
 
-    // Start native SCK capture; PCM arrives on the event channel.
     try {
       final ok = await PerfSentinel.timedChannelCall<bool>(
           _method, 'startScreenShareAudioCapture');
@@ -119,9 +112,8 @@ class MacSckScreenAudioCapturer {
       await _teardown();
       return false;
     } catch (e) {
-      // Any other throw (MissingPluginException, TimeoutException, …) must also
-      // tear down the already-spawned encoder process + its stdout subscription,
-      // or they leak (the encoder OS process keeps running).
+      // Any other throw must also tear down the already-spawned encoder
+      // process and its stdout subscription, or the OS process leaks.
       _log('[SCK-AUDIO] Native capture failed (non-platform): $e');
       await _teardown();
       return false;
@@ -139,8 +131,8 @@ class MacSckScreenAudioCapturer {
     return true;
   }
 
-  /// Write a PCM chunk to the encoder, length-prefixed in <=32000-byte frames
-  /// (the encode mode reads a uint16 length header, so chunks must fit u16).
+  /// Writes a PCM chunk to the encoder, length-prefixed in <=32000-byte
+  /// frames: the encode mode reads a uint16 length header.
   void _feedPcm(Uint8List pcm) {
     final stdin = _encoder?.stdin;
     if (stdin == null) return;
@@ -167,8 +159,8 @@ class MacSckScreenAudioCapturer {
     }
   }
 
-  /// Parse `[uint16 payload_len][payload]` frames from the encoder stdout and
-  /// deliver each payload (`[seq][opus]`).
+  /// Parses `[uint16 payload_len][payload]` frames from the encoder stdout and
+  /// delivers each payload (`[seq][opus]`).
   void _drainFrames(void Function(Uint8List) onPacket) {
     final bytes = _buffer.takeBytes();
     int offset = 0;

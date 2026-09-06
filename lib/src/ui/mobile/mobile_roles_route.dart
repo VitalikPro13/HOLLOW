@@ -20,9 +20,9 @@ class MobileRolesRoute extends ConsumerStatefulWidget {
 
 class _MobileRolesRouteState extends ConsumerState<MobileRolesRoute> {
   final Map<String, int> _perms = {};
-  // Rust MemberRole::default_permissions via FFI — never a hand-written
-  // mirror: a stale copy here (missing manageServer AND manageEmotes) made
-  // Reset persist a stripped Admin mask into the server's CRDT overrides.
+  // Read from Rust over FFI, never a hand-written mirror: a stale copy here
+  // makes Reset persist a stripped permission mask into the server's CRDT
+  // overrides.
   final Map<String, int> _defaults = {};
   bool _loading = true;
 
@@ -102,7 +102,6 @@ class _MobileRolesRouteState extends ConsumerState<MobileRolesRoute> {
       body: SafeArea(
         child: Column(
           children: [
-            // Header
             Container(
               padding: const EdgeInsets.symmetric(
                 horizontal: HollowSpacing.sm, vertical: HollowSpacing.sm,
@@ -128,7 +127,6 @@ class _MobileRolesRouteState extends ConsumerState<MobileRolesRoute> {
               ),
             ),
 
-            // Content
             Expanded(
               child: _loading
                   ? const Center(child: CircularProgressIndicator())
@@ -206,7 +204,6 @@ class _RoleSection extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // Role header
           Container(
             padding: const EdgeInsets.all(HollowSpacing.md),
             decoration: BoxDecoration(
@@ -237,7 +234,6 @@ class _RoleSection extends StatelessWidget {
             ),
           ),
 
-          // Permission toggles
           for (final entry in _MobileRolesRouteState._permEntries)
             _PermissionRow(
               bit: entry.$1,

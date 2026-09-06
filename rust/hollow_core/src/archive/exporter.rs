@@ -29,7 +29,6 @@ pub(crate) fn export_archive(
         .unwrap_or_default()
         .as_millis() as i64;
 
-    // ── 1. Load all messages (including hidden/deleted) ─────────
     let TargetData {
         archive_type,
         peer_id: peer_id_opt,
@@ -53,38 +52,28 @@ pub(crate) fn export_archive(
         } => server_target_data(store, server_id, server_name, channels)?,
     };
 
-    // ── 2. Collect message IDs for batch queries ────────────────
     let message_ids: Vec<String> = messages.iter().map(|m| m.message_id.clone()).collect();
 
-    // ── 3. Batch-load related data ──────────────────────────────
     let reactions_map = store.load_reactions_for_sync(&message_ids)?;
     let edits_map = store.load_edits_for_messages(&message_ids)?;
     let deletions_map = store.load_deletions_for_messages(&message_ids)?;
     let removals_map = store.load_reaction_removals_for_messages(&message_ids)?;
 
-    // ── 4. Attach reactions inline ──────────────────────────────
     let mut messages = messages;
     attach_reactions(&mut messages, &reactions_map);
 
-    // ── 5. Build edits list ─────────────────────────────────────
     let (all_edits, edits_by_mid) = build_edits(&edits_map);
 
-    // ── 6. Build deletions list ─────────────────────────────────
     let (all_deletions, deletions_by_mid) = build_deletions(&deletions_map);
 
-    // ── 7. Build reaction removals list ─────────────────────────
     let (all_removals, removals_by_mid) = build_removals(&removals_map);
 
-    // ── 8. Collect unique public keys ───────────────────────────
     let pubkeys = collect_pubkeys(&messages, &all_edits, &all_deletions, &all_removals);
 
-    // ── 9. Handle files ─────────────────────────────────────────
     let (file_metadata, file_bytes_map) = collect_files(store, data_dir, &messages, file_mode);
 
-    // ── 10. Build participants list ─────────────────────────────
     let participants = collect_participants(&messages);
 
-    // ── 11. Build manifest ──────────────────────────────────────
     let manifest = ArchiveManifest {
         format_version: ARCHIVE_FORMAT_VERSION,
         archive_type: archive_type.clone(),
@@ -101,7 +90,6 @@ pub(crate) fn export_archive(
         participants,
     };
 
-    // ── 12. Serialize everything to JSON ────────────────────────
     let manifest_json = serde_json::to_vec_pretty(&manifest)
         .map_err(|e| format!("Failed to serialize manifest: {e}"))?;
 
@@ -126,7 +114,6 @@ pub(crate) fn export_archive(
         file_meta_jsons.insert(fm.file_id.clone(), json);
     }
 
-    // ── 13. Compute archive-level hash ──────────────────────────
     let file_hashes = build_file_hashes(&file_metadata);
 
     let content_hash = compute_archive_hash(
@@ -139,7 +126,6 @@ pub(crate) fn export_archive(
     );
     let content_hash_hex = hex::encode(content_hash);
 
-    // ── 14. Sign the hash ───────────────────────────────────────
     let sig = keypair.sign(&content_hash);
     let sig_b64 = base64::engine::general_purpose::STANDARD.encode(&sig);
     let pk_b64 = base64::engine::general_purpose::STANDARD.encode(keypair.public_key_protobuf());
@@ -154,50 +140,40 @@ pub(crate) fn export_archive(
     let archive_sig_json = serde_json::to_vec_pretty(&archive_sig)
         .map_err(|e| format!("Failed to serialize archive signature: {e}"))?;
 
-    // ── 15. Write zip ───────────────────────────────────────────
     let mut zip_buf = std::io::Cursor::new(Vec::new());
     {
         let mut zip = zip::ZipWriter::new(&mut zip_buf);
         let options = zip::write::SimpleFileOptions::default()
             .compression_method(zip::CompressionMethod::Deflated);
 
-        // manifest.json
         zip_entry(&mut zip, "manifest.json", &manifest_json, options)?;
 
-        // messages/{message_id}.json
         for (mid, json) in &message_jsons {
             zip_entry(&mut zip, &format!("messages/{mid}.json"), json, options)?;
         }
 
-        // edits/{message_id}.json
         for (mid, json) in &edit_jsons {
             zip_entry(&mut zip, &format!("edits/{mid}.json"), json, options)?;
         }
 
-        // deletions/{message_id}.json
         for (mid, json) in &deletion_jsons {
             zip_entry(&mut zip, &format!("deletions/{mid}.json"), json, options)?;
         }
 
-        // reaction_removals/{message_id}.json
         for (mid, json) in &removal_jsons {
             zip_entry(&mut zip, &format!("reaction_removals/{mid}.json"), json, options)?;
         }
 
-        // pubkeys.json
         zip_entry(&mut zip, "pubkeys.json", &pubkeys_json, options)?;
 
-        // files/{file_id}.meta.json
         for (fid, json) in &file_meta_jsons {
             zip_entry(&mut zip, &format!("files/{fid}.meta.json"), json, options)?;
         }
 
-        // files/{file_id}.{ext} (actual bytes)
         for (key, bytes) in &file_bytes_map {
             zip_entry(&mut zip, &format!("files/{key}"), bytes, options)?;
         }
 
-        // archive_signature.json
         zip_entry(&mut zip, "archive_signature.json", &archive_sig_json, options)?;
 
         zip.finish().map_err(|e| format!("Failed to finalize zip: {e}"))?;
@@ -364,7 +340,7 @@ fn server_target_data(
     })
 }
 
-/// Attach each message's reactions inline (step 4).
+/// Attach each message's reactions inline.
 fn attach_reactions(messages: &mut [ArchiveMessage], reactions_map: &ReactionRows) {
     for msg in messages.iter_mut() {
         if let Some(rxns) = reactions_map.get(&msg.message_id) {
@@ -382,7 +358,7 @@ fn attach_reactions(messages: &mut [ArchiveMessage], reactions_map: &ReactionRow
     }
 }
 
-/// Build the flat + per-message edit lists (step 5).
+/// Build the flat + per-message edit lists.
 fn build_edits(edits_map: &EditRows) -> (Vec<ArchiveEdit>, BTreeMap<String, Vec<ArchiveEdit>>) {
     let mut all_edits: Vec<ArchiveEdit> = Vec::new();
     let mut edits_by_mid: BTreeMap<String, Vec<ArchiveEdit>> = BTreeMap::new();
@@ -407,7 +383,7 @@ fn build_edits(edits_map: &EditRows) -> (Vec<ArchiveEdit>, BTreeMap<String, Vec<
     (all_edits, edits_by_mid)
 }
 
-/// Build the flat + per-message deletion lists (step 6).
+/// Build the flat + per-message deletion lists.
 fn build_deletions(
     deletions_map: &DeletionRows,
 ) -> (Vec<ArchiveDeletion>, BTreeMap<String, Vec<ArchiveDeletion>>) {
@@ -430,7 +406,7 @@ fn build_deletions(
     (all_deletions, deletions_by_mid)
 }
 
-/// Build the flat + per-message reaction-removal lists (step 7).
+/// Build the flat + per-message reaction-removal lists.
 fn build_removals(
     removals_map: &RemovalRows,
 ) -> (Vec<ArchiveReactionRemoval>, BTreeMap<String, Vec<ArchiveReactionRemoval>>) {
@@ -454,7 +430,7 @@ fn build_removals(
     (all_removals, removals_by_mid)
 }
 
-/// Collect unique public keys from messages and their reactions (step 8).
+/// Collect unique public keys from messages and their reactions.
 fn collect_message_pubkeys(messages: &[ArchiveMessage], pubkey_map: &mut HashMap<String, String>) {
     for msg in messages {
         if let Some(pk) = &msg.public_key {
@@ -469,7 +445,7 @@ fn collect_message_pubkeys(messages: &[ArchiveMessage], pubkey_map: &mut HashMap
     }
 }
 
-/// Collect unique public keys across all archive entry kinds (step 8).
+/// Collect unique public keys across all archive entry kinds.
 fn collect_pubkeys(
     messages: &[ArchiveMessage],
     all_edits: &[ArchiveEdit],
@@ -509,7 +485,7 @@ fn collect_pubkeys(
         .collect()
 }
 
-/// Gather file metadata and (mode permitting) file bytes for the zip (step 9).
+/// Gather file metadata and (mode permitting) file bytes for the zip.
 fn collect_files(
     store: &MessageStore,
     data_dir: &Path,
@@ -578,7 +554,7 @@ fn read_file_for_archive(
     }
 }
 
-/// Build the sorted participant list (step 10).
+/// Build the sorted participant list.
 fn collect_participants(messages: &[ArchiveMessage]) -> Vec<String> {
     let mut set: HashSet<String> = HashSet::new();
     for msg in messages {
@@ -589,7 +565,7 @@ fn collect_participants(messages: &[ArchiveMessage]) -> Vec<String> {
     v
 }
 
-/// Serialize per-message entry lists to pretty JSON, keyed by message id (step 12).
+/// Serialize per-message entry lists to pretty JSON, keyed by message id.
 fn serialize_entries_by_mid<T: serde::Serialize>(
     by_mid: &BTreeMap<String, Vec<T>>,
     kind: &str,
@@ -603,7 +579,7 @@ fn serialize_entries_by_mid<T: serde::Serialize>(
     Ok(jsons)
 }
 
-/// Map file_id → sha256 (or "placeholder") for the archive hash (step 13).
+/// Map file_id → sha256 (or "placeholder") for the archive hash.
 fn build_file_hashes(file_metadata: &[ArchiveFileMetadata]) -> BTreeMap<String, String> {
     let mut file_hashes: BTreeMap<String, String> = BTreeMap::new();
     for fm in file_metadata {
@@ -617,7 +593,7 @@ fn build_file_hashes(file_metadata: &[ArchiveFileMetadata]) -> BTreeMap<String, 
     file_hashes
 }
 
-/// Write one file entry into the zip (step 15).
+/// Write one file entry into the zip.
 fn zip_entry<W: Write + std::io::Seek>(
     zip: &mut zip::ZipWriter<W>,
     name: &str,

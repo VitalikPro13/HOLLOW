@@ -21,13 +21,12 @@ import 'package:hollow/src/ui/settings/channel_grants_dialog.dart'
 import 'package:hollow/src/ui/settings/settings_shared.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-/// Member management from the profile card (issue #48): role change, label
-/// assignment, and temporary channel access for ONE member, permission-gated
-/// per section. The inverse of the channel-centric grants dialog — same FFI,
-/// same LWW grant model, member-first flow.
+/// Member management from the profile card (issue #48): role, labels and
+/// temporary channel access for ONE member, permission-gated per section. The
+/// member-first inverse of the channel-centric grants dialog, on the same FFI.
 ///
-/// [peerId] must be the MASTER identity (roles, labels, and grants are all
-/// master-keyed CRDT state).
+/// [peerId] must be the MASTER identity: roles, labels and grants are all
+/// master-keyed CRDT state.
 Future<void> showManageMemberDialog(
   BuildContext context, {
   required String serverId,
@@ -57,9 +56,9 @@ class _ManageMemberDialogState extends ConsumerState<_ManageMemberDialog> {
   ChannelInfo? _pendingChannel;
   bool _busy = false;
 
-  /// Optimistic label selection, seeded ONCE from the member row. A refetch
-  /// right after a queued CrdtStore write returns the previous value, so the
-  /// chips must never re-seed from the provider (labels-tab `_seeded` rule).
+  /// Optimistic label selection, seeded ONCE from the member row: a refetch
+  /// right after a queued CrdtStore write returns the PREVIOUS value, so the
+  /// chips must never re-seed from the provider.
   Set<String>? _labelIds;
 
   String _memberName(crdt_api.MemberFfi? member) {
@@ -160,12 +159,9 @@ class _ManageMemberDialogState extends ConsumerState<_ManageMemberDialog> {
     );
   }
 
-  // ── Role ────────────────────────────────────────────────────────────────
-
   Widget _buildRoleSection(HollowTheme hollow, crdt_api.MemberFfi member,
       String name, String myRole) {
-    // Current role first so the selected chip is always present, then the
-    // assignable ones in rank order.
+    // Current role first, so the selected chip is always present.
     final roles = <String>[
       member.role,
       ...assignableRoles(myRole).where((r) => r != member.role),
@@ -232,8 +228,8 @@ class _ManageMemberDialogState extends ConsumerState<_ManageMemberDialog> {
         peerId: widget.peerId,
         newRole: newRole,
       );
-      // set_* only queues into the CrdtStore actor — give the write a beat
-      // before re-reading (same 150ms convention as the grants dialog).
+      // set_* only queues into the CrdtStore actor, so the write needs a beat
+      // before any re-read.
       await Future.delayed(const Duration(milliseconds: 150));
       ref.invalidate(serverMembersProvider(widget.serverId));
       if (mounted) {
@@ -249,8 +245,6 @@ class _ManageMemberDialogState extends ConsumerState<_ManageMemberDialog> {
       if (mounted) setState(() => _busy = false);
     }
   }
-
-  // ── Labels ──────────────────────────────────────────────────────────────
 
   Widget _buildLabelsSection(HollowTheme hollow) {
     final labels =
@@ -286,8 +280,8 @@ class _ManageMemberDialogState extends ConsumerState<_ManageMemberDialog> {
     final ids = _labelIds;
     if (ids == null) return;
     final assigned = ids.contains(label.labelId);
-    // Optimistic — the chip flips immediately and never re-seeds from a
-    // refetch (which could still return the pre-write value).
+    // The chip flips immediately and never re-seeds from a refetch, which could
+    // still return the pre-write value.
     setState(() {
       assigned ? ids.remove(label.labelId) : ids.add(label.labelId);
     });
@@ -317,16 +311,13 @@ class _ManageMemberDialogState extends ConsumerState<_ManageMemberDialog> {
     }
   }
 
-  // ── Temporary channel access ────────────────────────────────────────────
-
   Widget _buildGrantsSection(HollowTheme hollow) {
     final channels =
         ref.watch(serverChannelsProvider(widget.serverId)).valueOrNull ??
             const <String, ChannelInfo>{};
-    // Only label-gated channels can need a grant — everything else already
-    // follows the tier ladder. (A redundant grant on a labelled channel the
-    // member can see is harmless; computing per-member visibility here would
-    // re-implement the Rust predicate.)
+    // Only label-gated channels can need a grant; everything else follows the
+    // tier ladder. A redundant grant is harmless, and computing per-member
+    // visibility here would re-implement the Rust predicate.
     final gated = channels.values
         .where((c) => c.visibilityLabels.isNotEmpty)
         .toList()

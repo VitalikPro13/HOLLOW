@@ -11,10 +11,8 @@ import 'package:hollow/src/ui/dialogs/recovery_pool_dialog.dart';
 import 'package:hollow/src/ui/dialogs/shard_bundle_dialog.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-/// Right panel for the Vault Files tab in the Archive.
-///
-/// Shows all servers the user is a member of, with per-server expandable
-/// sections listing vault files and their shard status.
+/// Right panel for the Vault Files tab: every server the user belongs to, with
+/// expandable sections listing its vault files and their shard status.
 class VaultFilesView extends ConsumerWidget {
   const VaultFilesView({super.key});
 
@@ -43,7 +41,6 @@ class VaultFilesView extends ConsumerWidget {
 
     return Column(
       children: [
-        // Join Recovery Pool button.
         Padding(
           padding: const EdgeInsets.fromLTRB(
             HollowSpacing.lg, HollowSpacing.lg, HollowSpacing.lg, HollowSpacing.xs,
@@ -59,7 +56,6 @@ class VaultFilesView extends ConsumerWidget {
             ],
           ),
         ),
-        // Server list.
         Expanded(
           child: ListView.builder(
             padding: const EdgeInsets.symmetric(
@@ -104,8 +100,7 @@ class _ServerVaultSectionState extends ConsumerState<_ServerVaultSection> {
     final hollow = HollowTheme.of(context);
     final statusAsync = ref.watch(vaultFileStatusProvider(widget.serverId));
 
-    // Default to collapsed if the server has no vault files, expanded otherwise.
-    // Only set once — after that, user toggle takes over.
+    // Set once, then the user's toggle takes over.
     if (_expanded == null && statusAsync.hasValue) {
       _expanded = statusAsync.value!.isNotEmpty;
     }
@@ -114,7 +109,6 @@ class _ServerVaultSectionState extends ConsumerState<_ServerVaultSection> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        // Server header.
         HollowPressable(
           onTap: () => setState(() => _expanded = !expanded),
           borderRadius: BorderRadius.circular(hollow.radiusSm),
@@ -144,7 +138,6 @@ class _ServerVaultSectionState extends ConsumerState<_ServerVaultSection> {
                   overflow: TextOverflow.ellipsis,
                 ),
               ),
-              // Summary badge.
               statusAsync.when(
                 data: (files) {
                   if (files.isEmpty) {
@@ -185,7 +178,6 @@ class _ServerVaultSectionState extends ConsumerState<_ServerVaultSection> {
           ),
         ),
 
-        // File list grouped by type, sorted by date descending.
         if (expanded)
           statusAsync.when(
             data: (files) {
@@ -207,7 +199,6 @@ class _ServerVaultSectionState extends ConsumerState<_ServerVaultSection> {
               return Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  // Action buttons row.
                   Padding(
                     padding: const EdgeInsets.symmetric(
                       horizontal: HollowSpacing.lg,
@@ -283,26 +274,22 @@ class _ServerVaultSectionState extends ConsumerState<_ServerVaultSection> {
   }
 
   Widget _buildGroupedFileList(List<VaultFileStatus> files, HollowTheme hollow) {
-    // Group files by type category.
     final groups = <_FileCategory, List<VaultFileStatus>>{};
     for (final file in files) {
       final cat = _categorize(file.fileName);
       (groups[cat] ??= []).add(file);
     }
 
-    // Sort each group by date descending (newest first).
     for (final list in groups.values) {
       list.sort((a, b) => b.createdAt.compareTo(a.createdAt));
     }
 
-    // Render in a fixed category order.
     const order = _FileCategory.values;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         for (final cat in order)
           if (groups.containsKey(cat)) ...[
-            // Category header.
             Padding(
               padding: const EdgeInsets.fromLTRB(
                 HollowSpacing.lg, HollowSpacing.sm, HollowSpacing.lg, HollowSpacing.xxs,
@@ -402,14 +389,12 @@ class _VaultFileRow extends StatelessWidget {
         ),
         child: Row(
           children: [
-            // File icon.
             Icon(
               _iconForFile(file.fileName),
               size: 20,
               color: hollow.accent,
             ),
             const SizedBox(width: HollowSpacing.md),
-            // File name + size.
             Expanded(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -436,7 +421,6 @@ class _VaultFileRow extends StatelessWidget {
                         ),
                       ),
                       const SizedBox(width: HollowSpacing.sm),
-                      // Shard progress bar.
                       Expanded(
                         child: SizedBox(
                           height: 3,
@@ -457,7 +441,6 @@ class _VaultFileRow extends StatelessWidget {
               ),
             ),
             const SizedBox(width: HollowSpacing.md),
-            // Shard count badge.
             Container(
               padding: const EdgeInsets.symmetric(
                 horizontal: HollowSpacing.sm,

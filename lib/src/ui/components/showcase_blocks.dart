@@ -15,10 +15,9 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// One side of a showcase board: the composed blocks stacked vertically.
 ///
-/// Pure display — everything rendered here is replicated, self-curated
-/// profile data. Covers/artwork come from the replicated asset bundle
-/// ([showcaseAssetsProvider]); NOTHING is fetched at display time. No
-/// relational blocks (feedback_no_relational_profile_blocks — vetoed).
+/// Everything here is replicated, self-curated profile data, and NOTHING is
+/// fetched at display time. No relational blocks
+/// (feedback_no_relational_profile_blocks, vetoed).
 class ShowcaseBoardColumn extends ConsumerWidget {
   final String peerId;
   final List<ShowcaseBlock> blocks;
@@ -50,8 +49,8 @@ class ShowcaseBoardColumn extends ConsumerWidget {
   }
 }
 
-/// Builds the display card for one block; null for blocks this client
-/// can't render (unknown types from newer clients render as nothing).
+/// Builds the display card for one block, null for a type this client does not
+/// know, so a newer client's block renders as nothing.
 Widget? buildShowcaseBlockCard(
     ShowcaseBlock block, Map<String, Uint8List> assets) {
   return switch (block.type) {
@@ -118,7 +117,7 @@ class _BlockCard extends StatelessWidget {
   }
 }
 
-/// Text body via the chat parser — links only open on explicit tap;
+/// Text body via the chat parser: links open only on an explicit tap, and
 /// nothing is fetched while rendering.
 class _TextBody extends StatelessWidget {
   final String body;
@@ -141,8 +140,8 @@ class _TextBody extends StatelessWidget {
   }
 }
 
-/// A game cover from the replicated asset bundle, gamepad placeholder when
-/// the bytes haven't arrived (or the game has no cover).
+/// A game cover from the replicated asset bundle, with a placeholder until the
+/// bytes arrive.
 class _Cover extends StatelessWidget {
   final Uint8List? bytes;
   final double width;
@@ -182,9 +181,8 @@ class _Cover extends StatelessWidget {
   }
 }
 
-/// Opens the game-card detail dialog for a game block. Details resolve from
-/// the replicated asset bundle (or a legacy inline map); blocks without any
-/// still open — the card renders what it has and omits the details panel.
+/// Opens the game-card detail dialog. A block with no resolvable details still
+/// opens: the card renders what it has and omits the details panel.
 void _openGameCard(
     BuildContext context, ShowcaseBlock block, Map<String, Uint8List> assets) {
   showGameCardDialog(

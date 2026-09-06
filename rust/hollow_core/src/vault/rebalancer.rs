@@ -40,11 +40,8 @@ pub struct ShardMigration {
 
 /// Scan manifests for under-replicated content.
 ///
-/// For each manifest with erasure coding (k > 0), check how many placements
-/// are confirmed AND the target peer is online. If available < k, the content
-/// is at risk.
-///
-/// For full-replication manifests (k=0), check if at least 2 peers have the file.
+/// Erasure-coded content is at risk when fewer than k placements are both confirmed
+/// and online; a full-replication manifest needs at least 2 peers holding the file.
 pub fn scan_under_replicated(
     manifests: &[VaultManifest],
     placements: &HashMap<String, Vec<PlacementRecord>>,
@@ -127,7 +124,6 @@ pub fn compute_repair_plan(
     let k = manifest.k as usize;
     let m = manifest.m as usize;
 
-    // Find which shards are available (confirmed + target online)
     let available: Vec<(u16, String)> = placements
         .iter()
         .filter(|r| r.confirmed && online_peers.contains(&r.target_peer))
@@ -139,7 +135,6 @@ pub fn compute_repair_plan(
         return None;
     }
 
-    // Find missing shard indices
     let n = if manifest.k > 0 { k + m } else { placements.len() };
     let available_indices: HashSet<u16> = available.iter().map(|(i, _)| *i).collect();
     let missing: Vec<u16> = (0..n as u16)
@@ -150,8 +145,7 @@ pub fn compute_repair_plan(
         return None; // Nothing to repair
     }
 
-    // Compute new targets for missing shards
-    // Use the placement algorithm to find new peers (exclude peers already holding shards)
+    // New targets come from the placement algorithm, excluding peers already holding one.
     let new_placements = compute_shard_placements(
         &manifest.content_id,
         n,
@@ -193,7 +187,6 @@ pub fn compute_migration_plan(
     let mut migrations = Vec::new();
 
     for new_p in new_placements {
-        // Find old placement for this shard index
         if let Some(old_p) = old_placements
             .iter()
             .find(|o| o.shard_index == new_p.shard_index)

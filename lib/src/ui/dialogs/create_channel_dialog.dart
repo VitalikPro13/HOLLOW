@@ -13,8 +13,7 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 /// Shows a dialog to create a new channel in a server.
 ///
 /// [onCreated] receives the NEW channel's id, so a caller can place it in the
-/// layout (the category right-click menu drops it into that category rather
-/// than letting it land unsorted at the bottom).
+/// layout rather than letting it land unsorted at the bottom.
 void showCreateChannelDialog(
   BuildContext context,
   String serverId, {
@@ -56,7 +55,6 @@ void showCreateChannelDialog(
                   ),
                 ),
                 const SizedBox(height: HollowSpacing.lg),
-                // Channel type selector
                 Row(
                   children: [
                     Expanded(

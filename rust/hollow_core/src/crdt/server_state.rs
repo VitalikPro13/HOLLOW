@@ -7,12 +7,9 @@ use super::hlc::{Hlc, HlcTimestamp};
 use super::operations::{CrdtOp, CrdtPayload, MemberRole, OpReject, Permission};
 use crate::identity::native_identity::NativeKeypair;
 
-/// The MASTER keypair this replica authors ops with, plus its base64 protobuf
-/// public key. Held on the state next to the HLC because `create_op` needs
-/// both to produce an op any peer will accept.
-///
-/// Debug is hand-written: the derive would print the keypair, and a secret key
-/// has no business in a log line.
+/// The MASTER keypair this replica authors ops with, plus its base64 protobuf public
+/// key: `create_op` needs both to produce an op any peer will accept. Debug is
+/// hand-written because a secret key has no business in a log line.
 #[derive(Clone)]
 pub(crate) struct OpSigner {
     keypair: NativeKeypair,
@@ -80,12 +77,10 @@ pub struct EmoteInfo {
 /// replicas converge on the same refusal).
 pub const MAX_SERVER_EMOTES: usize = 50;
 
-/// A sticker of a server's set. METADATA ONLY, same as [EmoteInfo] — the
-/// bytes are content-addressed by `hash` and replicate on demand over the
-/// asset rail at `AssetKind::Sticker`.
-///
-/// `w`/`h` are carried so the picker (and the `[a:s:hash:w:h]` token the
-/// composer writes) can reserve the exact cell before any bytes land.
+/// A sticker of a server's set. METADATA ONLY, like [EmoteInfo]: the bytes are
+/// content-addressed by `hash` and replicate on demand over the asset rail. `w`/`h`
+/// ride along so the picker and the `[a:s:hash:w:h]` token can reserve the exact cell
+/// before any bytes land.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct StickerInfo {
     pub hash: String,
@@ -102,16 +97,14 @@ pub struct StickerInfo {
     pub h: u32,
 }
 
-/// Hard cap on stickers per server (authoring AND apply, like emotes).
-/// Deliberately the same number as emotes even though the blobs are ~20x
-/// bigger: a member opening the sticker picker pulls the bytes of whatever
-/// scrolls into view, so the ceiling is a bandwidth decision as much as a
-/// storage one.
+/// Hard cap on stickers per server (authoring AND apply, like emotes). Deliberately
+/// the same number even though the blobs are ~20x bigger: a member opening the picker
+/// pulls whatever scrolls into view, so the ceiling is a bandwidth decision too.
 pub const MAX_SERVER_STICKERS: usize = 50;
 
-/// Max characters in a sticker's label or pack name. Stickers are picked
-/// visually and never typed, so unlike emote names these are free-form —
-/// bounded, and rejected outright if they carry control characters.
+/// Max characters in a sticker's label or pack name. Stickers are picked visually and
+/// never typed, so unlike emote names these are free-form, bounded, and rejected
+/// outright if they carry control characters.
 pub const MAX_STICKER_LABEL: usize = 32;
 
 /// Grammar for a sticker label / pack name: short, no control characters.
@@ -176,10 +169,9 @@ pub struct ChannelInfo {
     /// may be posted; standalone text and other file types are rejected.
     #[serde(default)]
     pub media_only: bool,
-    /// Label gate for visibility (issue #32). Non-empty REPLACES the tier
-    /// ladder: holders of ANY listed label (plus Admin+/Owner) see the
-    /// channel. Always authored alongside a `visibility: AdminPlus` stamp so
-    /// clients that predate this field fail closed.
+    /// Label gate for visibility. Non-empty REPLACES the tier ladder: holders of ANY
+    /// listed label (plus Admin+/Owner) see the channel. Always authored alongside an
+    /// `AdminPlus` stamp so clients that predate this field fail closed.
     #[serde(default)]
     pub visibility_labels: Vec<String>,
     /// Label gate for posting; same semantics as `visibility_labels`.
@@ -188,13 +180,11 @@ pub struct ChannelInfo {
 }
 
 impl ChannelInfo {
-    /// Whether this channel is EFFECTIVELY public. Voice channels can never be
-    /// public (#44): only their text chat would be browsable, the browser's
-    /// list responders already filter them out (appear-then-vanish), and a
-    /// public voice channel silently changes the SFrame key domain
-    /// (`channel_uses_subgroup`). A stale/malicious `is_public` on a voice
-    /// channel is neutralized HERE rather than by a migration op — every read
-    /// must go through this, never the raw flag.
+    /// Whether this channel is EFFECTIVELY public. Voice channels can never be public:
+    /// only their text chat would be browsable, and a public voice channel silently
+    /// changes the SFrame key domain. A stale or malicious `is_public` on a voice
+    /// channel is neutralized HERE, so every read must go through this, never the raw
+    /// flag.
     pub fn effective_public(&self) -> bool {
         self.is_public && self.channel_type == ChannelType::Text
     }
@@ -207,10 +197,8 @@ pub struct MemberInfo {
     pub display_name: String,
 }
 
-/// The full CRDT state of a Hollow server.
-///
-/// Uses operation-based CRDTs: all mutations go through `apply_op()`,
-/// which is commutative and idempotent.
+/// The full CRDT state of a Hollow server: operation-based, so every mutation goes
+/// through `apply_op()`, which is commutative and idempotent.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerState {
     pub server_id: String,
@@ -237,9 +225,8 @@ pub struct ServerState {
     /// epoch ms. `u64::MAX` = permanent, `0` = unmuted (pruned on unmute).
     #[serde(default)]
     pub muted_members: HashMap<String, AdminLwwReg<u64>>,
-    /// Temporary channel access grants: channel_id -> master peer_id -> expiry
-    /// epoch ms. `u64::MAX` = until revoked, `0` = revoked (pruned only in the
-    /// ChannelGrantRevoked arm). Modeled exactly on `muted_members`: LWW per
+    /// Temporary channel access grants: channel_id -> master peer_id -> expiry epoch ms.
+    /// `u64::MAX` = until revoked, `0` = revoked. Modeled on `muted_members`: LWW per
     /// entry, lazy expiry at read time, no background pruning.
     #[serde(default)]
     pub channel_grants: HashMap<String, HashMap<String, AdminLwwReg<u64>>>,
@@ -256,11 +243,9 @@ pub struct ServerState {
     /// pre-existing persisted ServerState loads with an empty set.
     #[serde(default)]
     pub stickers: HashMap<String, StickerInfo>,
-    /// Tombstone latch (Step "server sync hardening"): set true by a `ServerDeleted`
-    /// op. The state shell + op_log are RETAINED (not removed) so this node keeps
-    /// serving the deletion op to reconnecting peers via normal grow-only sync.
-    /// Monotonic delete-wins (there is no un-delete op). UI hides tombstoned servers.
-    /// `#[serde(default)]` so every pre-existing persisted ServerState loads as false.
+    /// Tombstone latch, set by a `ServerDeleted` op. The state shell and op_log are
+    /// RETAINED so this node keeps serving the deletion op to reconnecting peers.
+    /// Monotonic delete-wins: there is no un-delete op.
     #[serde(default)]
     pub deleted: bool,
     #[serde(default, skip_serializing)]
@@ -276,16 +261,12 @@ pub struct ServerState {
 }
 
 impl ServerState {
-    /// A serialization-only clone: everything the persisted JSON contains,
-    /// with the heavy in-memory-only fields (`op_log`, dedup set, hlc) left
-    /// empty. `op_log` is `skip_serializing` and `hlc`/`op_log_dedup` are
-    /// `skip`, so JSON produced from this snapshot is identical to
-    /// serializing `self` — but cloning skips up to 1000 op-log entries.
-    /// Used by CrdtStore::save_state_snapshot to move the JSON serialization
-    /// off the event loop (a burst of N ops then serializes ONCE per drain).
-    /// Exhaustive destructuring on purpose: adding a ServerState field breaks
-    /// this method at compile time, forcing a decision on whether it persists
-    /// (guards the "field silently missing from saved state" trap).
+    /// A serialization-only clone: everything the persisted JSON contains, with the
+    /// heavy in-memory-only fields left empty, so JSON from this snapshot is identical
+    /// to serializing `self` while skipping up to 1000 op-log entries. It moves the
+    /// serialization off the event loop, so a burst of N ops serializes ONCE per drain.
+    /// Exhaustive destructuring on purpose: adding a ServerState field breaks this at
+    /// compile time, forcing a decision on whether it persists.
     pub fn lean_snapshot(&self) -> ServerState {
         let ServerState {
             server_id, name, channels, members, roles, nicknames,
@@ -395,25 +376,20 @@ impl ServerState {
         self.hlc = Some(hlc);
     }
 
-    /// Install the MASTER keypair this replica signs its own ops with. Goes
-    /// hand in hand with `set_hlc`: a state that can author an op must be able
-    /// to sign it, or every peer will reject what it produces.
+    /// Install the MASTER keypair this replica signs its own ops with. Goes hand in hand
+    /// with `set_hlc`: a state that can author an op must be able to sign it, or every
+    /// peer rejects what it produces.
     pub(crate) fn set_signer(&mut self, keypair: NativeKeypair, pk_b64: String) {
         self.signer = Some(OpSigner { keypair, pk_b64 });
     }
 
-    /// Multi-device (Step 6): fold any per-member entry that is keyed by a DEVICE
-    /// id into its MASTER identity, so one human appears once. `resolve` maps a
-    /// peer_id to its master (identity-passthrough for unknowns — single-device
-    /// is a no-op). This is a LOCAL cleanup (emits no CRDT op): legacy servers
-    /// recorded joiners under their device id before membership was canonicalized
-    /// to master; this drains those without a re-key. Future ops are already
-    /// master-keyed at the source. Returns true if anything was re-keyed.
+    /// Fold any per-member entry keyed by a DEVICE id into its MASTER identity, so one
+    /// human appears once. A LOCAL cleanup that emits no CRDT op: legacy servers recorded
+    /// joiners under their device id before membership was canonicalized, and future ops
+    /// are already master-keyed at the source. Returns true if anything was re-keyed.
     ///
-    /// Conflict resolution: LWW registers fold via `AdminLwwReg::merge` (pure
-    /// HLC — the latest write survives). Plain entries keep the existing
-    /// master entry if present, else adopt the device entry's value under the
-    /// master key.
+    /// LWW registers fold via `AdminLwwReg::merge` (pure HLC), while plain entries keep
+    /// an existing master entry and otherwise adopt the device entry's value.
     pub fn canonicalize_members(&mut self, resolve: impl Fn(&str) -> String) -> bool {
         let mut changed = false;
 
@@ -492,8 +468,7 @@ impl ServerState {
         changed
     }
 
-    /// Restore op_log from DB-persisted ops (called at startup when op_log
-    /// is no longer serialized in the state JSON).
+    /// Restore op_log from DB-persisted ops, at startup.
     pub fn restore_op_log(&mut self, ops: Vec<CrdtOp>) {
         self.op_log = ops;
         self.op_log_dedup.clear();
@@ -502,13 +477,12 @@ impl ServerState {
         }
     }
 
-    /// Generate a new CrdtOp with our HLC, signed with our master key, but do
-    /// NOT apply it yet. Caller should apply via `apply_op()` after
-    /// broadcasting.
+    /// Generate a new CrdtOp with our HLC, signed with our master key, but do NOT apply
+    /// it: the caller applies after broadcasting.
     ///
-    /// The signer is `expect`ed exactly the way the HLC is: an unsigned op is
-    /// refused by every peer, so a missing signer must fail loudly here rather
-    /// than emit ops that silently vanish on the network.
+    /// The signer is `expect`ed exactly the way the HLC is: an unsigned op is refused by
+    /// every peer, so a missing signer must fail loudly rather than emit ops that
+    /// silently vanish on the network.
     pub fn create_op(&mut self, payload: CrdtPayload) -> CrdtOp {
         let hlc = self
             .hlc
@@ -540,14 +514,11 @@ impl ServerState {
             .map(|(pid, _)| pid.clone())
     }
 
-    /// The ONE admission gate for a remotely-authored op. Runs, in order:
-    /// the author signature, the clock bound, then the permission matrix.
-    /// Every remote ingest path calls this BEFORE `apply_op`, so a forged
-    /// author, a stripped signature or a far-future timestamp never reaches
-    /// the state.
-    ///
-    /// Ops we author ourselves do not pass through here: `create_op` signs
-    /// them and the local send handlers already gate them.
+    /// The ONE admission gate for a remotely-authored op: author signature, then the
+    /// clock bound, then the permission matrix. Every remote ingest path calls this
+    /// BEFORE `apply_op`, so a forged author, a stripped signature or a far-future
+    /// timestamp never reaches the state. Ops we author ourselves skip it: `create_op`
+    /// signs them and the local send handlers gate them.
     pub fn admit_remote_op(&self, op: &CrdtOp) -> Result<(), OpReject> {
         if op.server_id != self.server_id {
             return Err(OpReject::WrongServer);
@@ -564,16 +535,12 @@ impl ServerState {
 
     /// Pull every LWW register in this state back inside the clock bound.
     ///
-    /// A `ServerStateSnapshot` is adopted wholesale from one responder during
-    /// a join, so its registers are only as honest as that peer. A register
-    /// stamped in the far future would outrank every later honest write
-    /// forever; clamping on adoption bounds the damage to "the value is
-    /// wrong" instead of "the field is locked". Returns how many registers
-    /// were pulled back.
-    ///
-    /// Exhaustive destructuring on purpose, like `lean_snapshot`: adding a
-    /// field to `ServerState` breaks this at compile time, forcing a decision
-    /// on whether it carries a clampable timestamp.
+    /// A `ServerStateSnapshot` is adopted wholesale from one responder during a join, so
+    /// its registers are only as honest as that peer, and a register stamped in the far
+    /// future would outrank every later honest write forever. Clamping bounds the damage
+    /// to "the value is wrong" instead of "the field is locked". Returns how many were
+    /// pulled back. Exhaustive destructuring, like `lean_snapshot`, so a new field breaks
+    /// this at compile time.
     pub fn clamp_future_hlcs(&mut self, now_ms: u64) -> usize {
         let max_ms = now_ms.saturating_add(super::hlc::MAX_DRIFT_MS);
         let mut clamped = 0usize;
@@ -645,14 +612,11 @@ impl ServerState {
 
         match &op.payload {
             CrdtPayload::ServerCreated { name, owner_peer_id } => {
-                // A server has exactly one founding moment. Once an Owner
-                // exists, a second ServerCreated naming somebody ELSE is a
-                // takeover attempt, not a replication event: log the op (so
-                // sync stays convergent) and mutate nothing.
-                //
-                // `op_allowed` refuses it at ingest; this is the twin guard
-                // for the local replay paths that never pass a gate, and it
-                // makes the real owner's own re-send idempotent.
+                // A server has exactly one founding moment. Once an Owner exists, a
+                // second ServerCreated naming somebody ELSE is a takeover attempt, not
+                // replication: log the op so sync stays convergent, and mutate nothing.
+                // `op_allowed` refuses it at ingest; this is the twin guard for local
+                // replay paths, and it makes the real owner's own re-send idempotent.
                 let hostile_refound = self
                     .current_owner()
                     .is_some_and(|existing| existing != *owner_peer_id);
@@ -699,12 +663,11 @@ impl ServerState {
             }
 
             CrdtPayload::ServerDeleted { .. } => {
-                // Tombstone: latch `deleted` and drain membership/roles/etc. so the
-                // server can no longer be acted upon, but KEEP `server_id` + `op_log`
-                // (handled by the apply_op tail) so this node keeps serving the
-                // deletion op to reconnecting peers. Idempotent via op_log_dedup.
-                // Owner-authorship is validated at the INGEST sites (CrdtOpBroadcast
-                // + sync-merge), not here — the CRDT layer has no transport context.
+                // Tombstone: latch `deleted` and drain membership so the server can no
+                // longer be acted upon, but KEEP `server_id` and `op_log` so this node
+                // keeps serving the deletion op to reconnecting peers. Owner-authorship
+                // is validated at the INGEST sites: the CRDT layer has no transport
+                // context.
                 self.deleted = true;
                 self.members.clear();
                 self.roles.clear();
@@ -868,10 +831,9 @@ impl ServerState {
                 role,
                 priority,
             } => {
-                // The payload's `priority` (the author's role priority) is
-                // inert wire-compat metadata: merge is pure HLC LWW, so a
-                // demotion lands because the demotion op is HLC-later, and
-                // authority is enforced by can_change_role at author + ingest.
+                // The payload's `priority` is inert wire-compat metadata: merge is pure
+                // HLC LWW and authority is enforced by can_change_role at author and
+                // ingest. Old clients still merge priority-first, so keep sending it.
                 // Old clients still merge priority-first, so keep sending it.
                 let entry = self.roles.entry(peer_id.clone()).or_insert_with(|| {
                     AdminLwwReg::new(role.clone(), op.hlc.clone(), *priority)
@@ -1093,8 +1055,7 @@ impl ServerState {
         self.op_log.insert(insert_pos, op.clone());
         self.op_log_dedup.insert(dedup_key);
 
-        // SECURITY: Compact op log to prevent unbounded growth.
-        // Keep last 1000 ops — older ops are already applied to state.
+        // Compact the op log to bound growth; older ops are already applied to state.
         const MAX_OP_LOG: usize = 1000;
         if self.op_log.len() > MAX_OP_LOG {
             let drain_count = self.op_log.len() - MAX_OP_LOG;
@@ -1183,14 +1144,11 @@ impl ServerState {
             .unwrap_or(512)
     }
 
-    /// Relay offline catch-up retention in seconds. DEFAULT ON at 3 days when
-    /// the setting is absent (2026-07-04: users won't find the toggle and will
-    /// assume offline delivery is broken); an explicit "0" = owner turned it
-    /// OFF. Stored in `settings["relay_catchup_secs"]` (Owner/Admin-gated like
-    /// every server setting). When >0, member clients register the server's
-    /// text channels with the relay's per-channel ring buffer and request
-    /// catch-up on connect + channel open — the relay stays an availability
-    /// helper (same E2EE signed bytes, receiver verifies + dedups), never a
+    /// Relay offline catch-up retention in seconds, DEFAULT ON at 3 days when the setting
+    /// is absent (users will not find the toggle and would assume offline delivery is
+    /// broken); an explicit "0" means the owner turned it OFF. When >0, member clients
+    /// register the server's text channels with the relay's ring buffer, which stays an
+    /// availability helper (same signed bytes, receiver verifies and dedups), never a
     /// source of truth.
     pub fn relay_catchup_secs(&self) -> i64 {
         self.settings
@@ -1228,11 +1186,10 @@ impl ServerState {
             .filter(|&n| n > 0)
     }
 
-    /// Look up author's priority from their role in this server. Resolves a
-    /// DEVICE-id author to its master first (roles are master-keyed) so LWW
-    /// priority works for replayed legacy device-authored ops. Unknown authors
-    /// stay at 0 (deliberately BELOW plain members — do not route via `get_role`,
-    /// which defaults unknowns to `Member`).
+    /// Look up an author's priority from their role, resolving a DEVICE-id author to its
+    /// master first so LWW priority works for replayed legacy ops. Unknown authors stay
+    /// at 0, deliberately BELOW plain members, so do not route this via `get_role`, which
+    /// defaults unknowns to `Member`.
     fn author_priority(&self, author: &str) -> u8 {
         let key = super::resolve_identity(author);
         self.roles
@@ -1241,9 +1198,8 @@ impl ServerState {
             .unwrap_or(0)
     }
 
-    /// Get the effective permissions bitmask for a peer.
-    /// Owner gets ALL permissions regardless.
-    /// Checks custom role_permissions first, falls back to defaults.
+    /// Effective permissions bitmask for a peer: Owner gets all, otherwise custom
+    /// `role_permissions` first and the role defaults after.
     pub fn get_permissions(&self, peer_id: &str) -> u32 {
         let role = self.get_role(peer_id);
         if role == MemberRole::Owner {
@@ -1271,9 +1227,8 @@ impl ServerState {
         self.get_permissions(peer_id) & permission != 0
     }
 
-    /// Check if `actor` can change `target`'s role to `new_role`.
-    /// Rules: Owner can do anything. Others can only change roles below
-    /// their own rank, and can only assign roles below their own rank.
+    /// Check if `actor` can change `target`'s role to `new_role`. Owner can do anything;
+    /// anyone else only below their own rank, in both target and assigned role.
     pub fn can_change_role(&self, actor: &str, target: &str, new_role: &MemberRole) -> bool {
         let actor_role = self.get_role(actor);
         if actor_role == MemberRole::Owner {
@@ -1341,19 +1296,14 @@ impl ServerState {
         self.can_kick(actor, target)
     }
 
-    /// The ingest permission matrix: may `op.author` apply this op to this
-    /// server? Shared by BOTH remote-op ingest paths (plaintext
-    /// `CrdtOpBroadcast` in swarm.rs and the MLS `CrdtOp` envelope in
-    /// sync_handler.rs) so the matrices can never drift apart again.
+    /// The ingest permission matrix: may `op.author` apply this op to this server? Shared
+    /// by BOTH remote-op ingest paths so the matrices can never drift apart.
     ///
-    /// Validates the AUTHOR (the op's original creator), never the transport
-    /// sender — ops are legitimately relayed by other peers during join/sync
-    /// fan-out. Override-aware (`get_permissions`, honoring
-    /// `RolePermissionsChanged`), NOT `default_permissions()`: local send
-    /// handlers gate on `has_permission`, so ingest must apply the SAME matrix
-    /// — otherwise an override-granted permission authors ops the whole
-    /// network rejects (the actor's devices fork), and an override-REVOKED
-    /// permission still passes ingest (unenforced remotely).
+    /// Validates the AUTHOR, never the transport sender: ops are legitimately relayed by
+    /// other peers during join and sync fan-out. Override-aware (`get_permissions`, not
+    /// `default_permissions()`), because local send handlers gate on `has_permission`, so
+    /// an override-granted permission would author ops the whole network rejects while an
+    /// override-REVOKED one would still pass ingest.
     pub fn op_allowed(&self, op: &CrdtOp) -> bool {
         let sender_role = self.get_role(&op.author);
         let sender_perms = self.get_permissions(&op.author);
@@ -1367,10 +1317,9 @@ impl ServerState {
             CrdtPayload::RoleChanged { peer_id, role, .. } => {
                 self.can_change_role(&op.author, peer_id, role)
             }
-            // Permission-based (override-aware), NOT role-based — the local
-            // send handlers gate on MANAGE_SERVER, so ingest must match or an
-            // override-granted author forks from the network (see doc above).
-            // Admin holds MANAGE_SERVER by default.
+            // Permission-based (override-aware), NOT role-based: the local send handlers
+            // gate on MANAGE_SERVER, so ingest must match or an override-granted author
+            // forks from the network.
             CrdtPayload::ServerRenamed { .. }
             | CrdtPayload::ServerSettingChanged { .. } => {
                 (sender_perms & Permission::MANAGE_SERVER) != 0
@@ -1445,10 +1394,9 @@ impl ServerState {
             }
             CrdtPayload::LabelAssigned { label_id, peer_id }
             | CrdtPayload::LabelUnassigned { label_id, peer_id } => {
-                // Self-toggle only for existing COSMETIC labels; access
-                // labels and unknown label ids require MANAGE_ROLES. Same
-                // rule as the authoring gate via can_self_toggle_label —
-                // ingest weaker than send is a fork generator.
+                // Self-toggle only for existing COSMETIC labels; access labels and
+                // unknown ids require MANAGE_ROLES, the same rule as the authoring
+                // gate. Ingest weaker than send is a fork generator.
                 self.can_self_toggle_label(&op.author, peer_id, label_id)
                     || (sender_perms & Permission::MANAGE_ROLES) != 0
             }
@@ -1460,16 +1408,15 @@ impl ServerState {
             CrdtPayload::EmojiRemoved { .. } => {
                 (sender_perms & Permission::MANAGE_EMOTES) != 0
             }
-            // Stickers reuse MANAGE_EMOTES rather than adding a permission
-            // bit — same authoring surface, same audience.
+            // Stickers reuse MANAGE_EMOTES rather than adding a permission bit.
             CrdtPayload::StickerAdded { hash, name, pack, w, h, .. } => {
                 (sender_perms & Permission::MANAGE_EMOTES) != 0
                     && super::valid_emote_hash(hash)
                     && valid_sticker_label(name)
                     && valid_sticker_label(pack)
-                    // Dimensions ride the `[a:s:hash:w:h]` token, whose
-                    // grammar tops out at 4 digits — a row we could not
-                    // render a token for has no business replicating.
+                    // Dimensions ride the `[a:s:hash:w:h]` token, whose grammar tops
+                    // out at 4 digits, so a row we could not render has no business
+                    // replicating.
                     && (1..=4096).contains(w)
                     && (1..=4096).contains(h)
             }
@@ -1478,12 +1425,10 @@ impl ServerState {
             }
             // Only the Owner can delete a server (tombstone).
             CrdtPayload::ServerDeleted { .. } => sender_role == MemberRole::Owner,
-            // Founding op. Legal only while the server has NO Owner yet (a
-            // fresh join skeleton replaying the op log), and only from the
-            // peer it names as owner — the signature binds `author` to a key,
-            // so this is the one place ownership can enter a state. Once an
-            // Owner exists, only that same peer's own re-send is admitted, and
-            // `apply_op` makes it a no-op.
+            // Founding op. Legal only while the server has NO Owner yet (a fresh
+            // join skeleton replaying the op log) and only from the peer it names as
+            // owner: the signature binds `author` to a key, so this is the one place
+            // ownership can enter a state.
             CrdtPayload::ServerCreated { owner_peer_id, .. } => {
                 &op.author == owner_peer_id
                     && self
@@ -1542,9 +1487,8 @@ impl ServerState {
         list
     }
 
-    /// Get all stickers, pack-major then by name, then by hash so the order
-    /// is total and identical on every replica (two stickers can share a
-    /// name, so name alone would not be a stable sort key).
+    /// All stickers, pack-major then name then hash, so the order is total and identical
+    /// on every replica: two stickers can share a name.
     pub fn stickers_list(&self) -> Vec<&StickerInfo> {
         let mut list: Vec<_> = self.stickers.values().collect();
         list.sort_by(|a, b| {
@@ -1594,23 +1538,20 @@ impl ServerState {
             .unwrap_or_default()
     }
 
-    /// Does the member (already master-collapsed) hold ANY of the listed
-    /// label ids? Raw `label_assignments` lookup — callers must resolve
-    /// device→master first (`get_member_labels` does not, so don't reuse it
-    /// in predicates). `LabelDeleted` strips assignments, so a deleted label
-    /// can never satisfy a gate (fail-closed).
+    /// Does the member (already master-collapsed) hold ANY of the listed label ids? A raw
+    /// lookup, so callers must resolve device to master first. `LabelDeleted` strips
+    /// assignments, so a deleted label can never satisfy a gate.
     fn holds_any_label(&self, master: &str, wanted: &[String]) -> bool {
         self.label_assignments
             .get(master)
             .is_some_and(|held| wanted.iter().any(|w| held.contains(w)))
     }
 
-    /// Shared self-toggle rule for LabelAssigned/Unassigned — used by BOTH
-    /// the authoring gate (handle_label_op) and `op_allowed`, so the two can
-    /// never drift. Self-toggle is allowed only for an EXISTING label that is
-    /// NOT access-bearing; unknown label ids are refused (fail-closed — an
-    /// assignment racing ahead of its LabelCreated cannot be classified, and
-    /// letting it through would let anyone pre-claim a future access label).
+    /// Shared self-toggle rule for LabelAssigned/Unassigned, used by BOTH the authoring
+    /// gate and `op_allowed` so the two can never drift. Only an EXISTING, non-access
+    /// label may be self-toggled; unknown ids are refused, since an assignment racing
+    /// ahead of its LabelCreated cannot be classified and would let anyone pre-claim a
+    /// future access label.
     pub fn can_self_toggle_label(&self, actor: &str, target_peer: &str, label_id: &str) -> bool {
         super::resolve_identity(actor) == super::resolve_identity(target_peer)
             && self.labels.get(label_id).is_some_and(|l| !l.access)
@@ -1652,10 +1593,9 @@ impl ServerState {
         self.can_post_in_channel_at(peer_id, channel_id, epoch_ms_now())
     }
 
-    /// Posting predicate at an explicit `now_ms`. Same shape as visibility;
-    /// the Everyone tier keeps the SEND_MESSAGES permission check, and a
-    /// grant confers posting too (mute stays a SEPARATE check at the send
-    /// and ingest sites — never folded in here).
+    /// Posting predicate at an explicit `now_ms`. Same shape as visibility; the Everyone
+    /// tier keeps the SEND_MESSAGES check and a grant confers posting too. Mute stays a
+    /// SEPARATE check at the send and ingest sites, never folded in here.
     pub fn can_post_in_channel_at(&self, peer_id: &str, channel_id: &str, now_ms: u64) -> bool {
         let master = super::resolve_identity(peer_id);
         let role = self.get_role(&master);
@@ -1688,12 +1628,10 @@ impl ServerState {
         self.get_role(peer_id).priority() >= MemberRole::Moderator.priority()
     }
 
-    /// Whether a channel is cryptographically isolated in its own MLS subgroup
-    /// (per-channel MLS subgroups / "Option B"). True iff the channel has a
-    /// restricted visibility tier AND is not a plaintext public channel. Such a
-    /// channel is encrypted under `subgroup_id(server_id, channel_id)` instead of
-    /// the server-wide MLS group, so only members whose role satisfies the tier
-    /// hold the key. `Everyone` channels and public channels do NOT use a subgroup.
+    /// Whether a channel is cryptographically isolated in its own MLS subgroup: true iff
+    /// it has a restricted visibility tier and is not a plaintext public channel. Such a
+    /// channel is encrypted under `subgroup_id(server_id, channel_id)`, so only members
+    /// whose role satisfies the tier hold the key.
     pub fn channel_uses_subgroup(&self, channel_id: &str) -> bool {
         self.channels.get(channel_id).is_some_and(|ch| {
             !ch.effective_public()
@@ -1740,12 +1678,10 @@ mod tests {
     use super::*;
     use crate::crdt::testkeys::{keys, owned_state};
 
-    /// A state with a signer installed, so `create_op` works. The owner id
-    /// stays the caller's readable string ("owner", "peer_a", …): these tests
-    /// drive `op_allowed` and `apply_op`, neither of which verifies a
-    /// signature. Anything that goes through `admit_remote_op` builds its
-    /// state with `owned_state` instead, where the owner id is DERIVED from
-    /// the key and the signature therefore binds.
+    /// A state with a signer installed, so `create_op` works. The owner id stays the
+    /// caller's readable string: these tests drive `op_allowed` and `apply_op`, neither
+    /// of which verifies a signature. Anything going through `admit_remote_op` uses
+    /// `owned_state`, where the owner id is DERIVED from the key.
     fn test_state(server_id: String, name: String, owner: String) -> ServerState {
         let mut s = ServerState::new(server_id, name, owner);
         let (kp, _, pk) = keys(9);
@@ -1762,11 +1698,9 @@ mod tests {
         op
     }
 
-    /// The shared ingest permission matrix (`op_allowed`) — one allowed and
-    /// one denied probe per payload arm, driven as a pure function. This is
-    /// the regression guard for BOTH remote-op ingest paths (plaintext
-    /// CrdtOpBroadcast in swarm.rs and the MLS CrdtOp envelope in
-    /// sync_handler.rs), which call this exact method.
+    /// The shared ingest permission matrix (`op_allowed`), one allowed and one denied
+    /// probe per payload arm, driven as a pure function. The regression guard for BOTH
+    /// remote-op ingest paths, which call this exact method.
     #[test]
     fn op_allowed_ingest_matrix() {
         let mut s = test_state("s1".into(), "S".into(), "owner".into());
@@ -1850,9 +1784,8 @@ mod tests {
             ("alice", CrdtPayload::ChannelSlowModeChanged { channel_id: "c".into(), seconds: 5 }, false),
             ("admin", CrdtPayload::ChannelMediaOnlyChanged { channel_id: "c".into(), media_only: true }, true),
             // Labels: create/delete/update need MANAGE_ROLES; assign is
-            // self-or-MANAGE_ROLES — but self ONLY for existing cosmetic
-            // labels (access labels gate channels; self-assign would be
-            // privilege escalation, and unknown ids fail closed).
+            // self-or-MANAGE_ROLES, and self ONLY for existing cosmetic labels, since
+            // access labels gate channels and unknown ids fail closed.
             ("admin", CrdtPayload::LabelCreated { label_id: "l9".into(), name: "L".into(), color: "#fff".into(), access: false }, true),
             ("alice", CrdtPayload::LabelUpdated { label_id: "l1".into(), name: "L".into(), color: "#fff".into(), access: None }, false),
             ("alice", CrdtPayload::LabelDeleted { label_id: "l1".into() }, false),
@@ -1882,15 +1815,14 @@ mod tests {
             // Tombstone: Owner only.
             ("owner", CrdtPayload::ServerDeleted { deleted_at: 1 }, true),
             ("admin", CrdtPayload::ServerDeleted { deleted_at: 1 }, false),
-            // ServerCreated on a server that ALREADY has an Owner: refused
-            // for everyone but that same Owner (whose re-send is a no-op).
-            // This row used to read `true`, which is the whole of CRDT-1:
-            // any member could mint itself Owner of somebody else's server.
+            // ServerCreated on a server that ALREADY has an Owner is refused for
+            // everyone but that same Owner, whose re-send is a no-op. CRDT-1: this row
+            // used to read `true`, so any member could mint itself Owner of somebody
+            // else's server. Naming the REAL owner does not help, because the author
+            // is not them.
             ("stranger", CrdtPayload::ServerCreated { name: "S".into(), owner_peer_id: "stranger".into() }, false),
             ("admin", CrdtPayload::ServerCreated { name: "S".into(), owner_peer_id: "admin".into() }, false),
-            // Naming the REAL owner does not help: the author is not them.
             ("stranger", CrdtPayload::ServerCreated { name: "S".into(), owner_peer_id: "owner".into() }, false),
-            // The real owner re-sending its own founding op is idempotent.
             ("owner", CrdtPayload::ServerCreated { name: "S".into(), owner_peer_id: "owner".into() }, true),
         ];
         for (author, payload, expect) in cases {
@@ -2026,10 +1958,9 @@ mod tests {
 
     #[test]
     fn accessors_resolve_device_to_master_via_hook() {
-        // The chokepoint: ServerState accessors must collapse a DEVICE id to its
-        // master before the keyed lookup, via the installed resolver hook.
-        // Drive it through the real process-global node::resolver (under the
-        // shared test lock — parallel tests clear/mutate the same map).
+        // The chokepoint: ServerState accessors must collapse a DEVICE id to its master
+        // before the keyed lookup. Driven through the real process-global resolver under
+        // the shared test lock, since parallel tests mutate the same map.
         let _lock = crate::node::resolver::test_lock();
         crate::node::resolver::clear_all();
         crate::node::resolver::update("dev_owner", "owner_master");

@@ -5,8 +5,7 @@ import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/rust/api/showcase.dart' as showcase_api;
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 
-/// In-memory profile cache: peer_id → UserProfile.
-/// Loaded from DB on startup, updated on ProfileUpdated events.
+/// In-memory profile cache (peer_id -> UserProfile), updated on ProfileUpdated.
 class ProfileNotifier extends Notifier<Map<String, storage_api.UserProfile>> {
   @override
   Map<String, storage_api.UserProfile> build() => {};
@@ -37,19 +36,15 @@ class ProfileNotifier extends Notifier<Map<String, storage_api.UserProfile>> {
     }
   }
 
-  /// Update our own profile — sends command to Rust which saves + broadcasts.
-  /// Pass avatarBytes/bannerBytes to update images. null = no change. Empty Uint8List = clear.
-  /// showcaseBoard: null = no change, '' = clear, else the board JSON.
-  /// showcaseAssets: null = no change, [] = clear, else the full asset set.
-  /// avatarFrame: null = no change, '' = clear, else the frame ID (issue #54)
-  /// — a built-in `b:<hue>` or the hash of an already-stored frame blob.
-  /// avatarAnim/bannerAnim: the same three states for the ANIMATED variants,
-  /// whose bytes ride the asset rail. Pass the hash from
-  /// `processAndStoreAvatarAnim`/`processAndStoreBannerAnim` together with its
-  /// `still` as avatarBytes/bannerBytes — and pass `''` for a STILL pick, or
-  /// the previous animation keeps playing over the new still.
-  /// supportCreds: null = no change (the normal case: Rust rebuilds the
-  /// field from its own table when a code is redeemed), '' = clear.
+  /// Update our own profile: sends a command to Rust, which saves + broadcasts.
+  ///
+  /// Image and field arguments share one convention: null = no change, empty =
+  /// clear, else the new value. avatarFrame takes a built-in `b:<hue>` or the
+  /// hash of a stored frame blob (issue #54). avatarAnim/bannerAnim take the
+  /// hash from `processAndStoreAvatarAnim`/`processAndStoreBannerAnim` with its
+  /// `still` as avatarBytes/bannerBytes; pass `''` for a STILL pick or the
+  /// previous animation keeps playing over the new still. supportCreds is
+  /// normally null: Rust rebuilds the field from its own table on redeem.
   Future<void> updateMyProfile({
     required String displayName,
     String status = '',
@@ -64,10 +59,9 @@ class ProfileNotifier extends Notifier<Map<String, storage_api.UserProfile>> {
     String? bannerAnim,
     String? supportCreds,
   }) async {
-    // NOTE: `updateProfile` resolves once the command is QUEUED on the node's
-    // channel — the surfaced failures are "Node is not running", oversized
-    // showcase assets, and channel-send failure. There is no end-to-end
-    // broadcast ack; callers must not claim one in their toast copy.
+    // `updateProfile` resolves once the command is QUEUED on the node's channel:
+    // the surfaced failures are a dead node, oversized showcase assets and a
+    // channel-send failure. There is no end-to-end broadcast ack to claim.
     try {
       await network_api.updateProfile(
         displayName: displayName,
@@ -84,17 +78,15 @@ class ProfileNotifier extends Notifier<Map<String, storage_api.UserProfile>> {
         supportCreds: supportCreds,
       );
     } catch (e) {
-      // Rethrow so save UIs can show a REAL failure instead of a false
-      // success toast (mobile showed "Profile updated" on a dead node).
+      // Rethrow so save UIs show a REAL failure instead of a false success toast.
       debugPrint('[HOLLOW] Failed to update profile: $e');
       rethrow;
     }
   }
 
-  /// Save ONLY the showcase board, carrying the current profile fields through
-  /// unchanged. Optimistically patches the cache — the Rust save is
-  /// fire-and-forget via the node command channel, so the DB may be stale when
-  /// the dialog re-reads (the ProfileUpdated event converges it afterwards).
+  /// Save ONLY the showcase board, carrying the other profile fields through
+  /// unchanged. Optimistically patches the cache: the Rust save is
+  /// fire-and-forget, so the DB may be stale when the dialog re-reads.
   Future<void> updateShowcaseBoard(
     String peerId,
     String encoded, {
@@ -132,14 +124,10 @@ class ProfileNotifier extends Notifier<Map<String, storage_api.UserProfile>> {
   }
 
   /// Optimistically patch MY profile's media fields after a save, so every
-  /// surface reading [profileProvider] paints the new art immediately instead
-  /// of waiting for the `ProfileUpdated` event to come back round.
+  /// surface paints the new art without waiting for `ProfileUpdated`.
   ///
-  /// Same idiom as [updateShowcaseBoard]: `null` leaves a field alone, a value
-  /// replaces it. The bytes arguments carry the still that went out with the
-  /// save; the DB is deliberately NOT read back (the Rust save is
-  /// fire-and-forget through the node command channel, so a read right after
-  /// the write returns the PREVIOUS value).
+  /// `null` leaves a field alone, a value replaces it. The DB is deliberately NOT
+  /// read back: the Rust save is fire-and-forget, so a read returns the old value.
   void patchMyMedia({
     String? avatarFrame,
     String? avatarAnim,
@@ -178,7 +166,6 @@ final profileProvider =
 );
 
 /// Static reference to local nicknames, kept in sync by LocalNicknameNotifier.
-/// Allows displayNameFor() to check local nicknames without passing them explicitly.
 Map<String, String> _localNicknames = const {};
 
 /// Called from _bootstrap to set the static reference.

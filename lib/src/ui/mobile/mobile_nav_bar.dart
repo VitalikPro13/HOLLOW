@@ -19,8 +19,8 @@ class MobileNavBar extends ConsumerWidget {
     final hollow = HollowTheme.of(context);
     final currentTab = ref.watch(mobileTabProvider);
     final pendingFriends = ref.watch(pendingFriendCountProvider);
-    // Select the derived SUM — the always-mounted nav bar then only rebuilds
-    // when the total actually changes, not on every unread-state mutation.
+    // The derived SUM, so this always-mounted bar rebuilds only when the total
+    // changes rather than on every unread mutation.
     final totalUnread = ref.watch(unreadProvider.select((u) {
       int total = 0;
       for (final count in u.dmUnreadCounts.values) {
@@ -45,14 +45,13 @@ class MobileNavBar extends ConsumerWidget {
             builder: (context, constraints) {
               final totalWidth = constraints.maxWidth;
               final slotWidth = totalWidth / 5;
-              // Map tab index (0-3) to slot index (0,1 skip center 3,4)
+              // The centre slot is not a tab, so indexes past it shift by one.
               final slotIndex = currentTab < 2 ? currentTab : currentTab + 1;
               final glowLeft = slotIndex * slotWidth + slotWidth / 2 - 28;
 
               return ClipRect(
                 child: Stack(
                 children: [
-                  // Animated glow behind active tab
                   AnimatedPositioned(
                     duration: ReduceMotionController.instance.isReduced
                         ? Duration.zero
@@ -78,7 +77,6 @@ class MobileNavBar extends ConsumerWidget {
                       ),
                     ),
                   ),
-                  // Tab row
                   Row(
                     children: [
                       _NavTab(
@@ -179,9 +177,8 @@ class _NavTab extends StatelessWidget {
   final bool isActive;
   final int badge;
 
-  /// What the [badge] count means, for the screen-reader label (e.g. "unread"
-  /// → "3 unread"; "friend request" → "3 friend requests"). The visible badge
-  /// is just a number, so a screen reader needs this to convey what it counts.
+  /// What the [badge] count means, for the screen-reader label: the visible
+  /// badge is only a number.
   final String badgeNoun;
   final VoidCallback onTap;
 
@@ -194,8 +191,8 @@ class _NavTab extends StatelessWidget {
     required this.onTap,
   });
 
-  /// Composes the full screen-reader announcement: `tab, N noun` plus the
-  /// active state. e.g. "Chats, 3 unread" / "Settings".
+  /// Composes the screen-reader announcement: the tab, its count and noun, and
+  /// the active state.
   String _semanticLabel() {
     final buf = StringBuffer(label);
     if (badge > 0) {
@@ -215,9 +212,8 @@ class _NavTab extends StatelessWidget {
         button: true,
         selected: isActive,
         label: _semanticLabel(),
-        // The inner Text nodes are just the glyph badge ("5") + visible label;
-        // exclude them so the composed label above is what's announced, not a
-        // meaningless "5, Chats".
+        // Excluded so the composed label above is announced, not a meaningless
+        // "5, Chats" from the badge and label nodes.
         child: ExcludeSemantics(
           child: GestureDetector(
             behavior: HitTestBehavior.opaque,
@@ -258,10 +254,8 @@ class _NavTab extends StatelessWidget {
               ],
             ),
             const SizedBox(height: 2),
-            // a11y Phase 3: the bottom nav is a fixed-height control (a stacked
-            // icon + tiny label in a 5-slot grid); like iOS/Android tab bars it
-            // caps label scaling so the label stays legible without bursting the
-            // bar. The content areas still honor the full 2.0× OS scale.
+            // A fixed-height control, so like the iOS and Android tab bars it
+            // caps label scaling; content areas still honour the full OS scale.
             MediaQuery.withClampedTextScaling(
               maxScaleFactor: 1.3,
               child: Text(

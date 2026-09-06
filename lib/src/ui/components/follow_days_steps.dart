@@ -9,13 +9,12 @@ import 'hollow_pressable.dart';
 /// The follow ages a Twitch follow credential can carry, in days.
 ///
 /// The shop signs each threshold under its own key, and blind signing binds a
-/// value only through the key that signs it, so a join gate can only ever ask
-/// for one of these. A server setting between two steps used to round up to
-/// the next one silently; the picker offers the steps and nothing else.
+/// value only through the key that signs it, so a join gate can only ask for
+/// one of these. The picker offers the steps and nothing between them.
 const List<int> kFollowDaySteps = [0, 1, 3, 7, 14, 30, 60, 90, 180, 365];
 
-/// The step a stored setting actually enforces: the smallest step at or above
-/// it. A legacy value of 10 was enforced as 14, and the picker shows 14.
+/// The step a stored setting actually enforces: the smallest one at or above
+/// it, so a legacy value of 10 enforces and displays as 14.
 int effectiveFollowStep(int value) {
   for (final step in kFollowDaySteps) {
     if (step >= value) return step;

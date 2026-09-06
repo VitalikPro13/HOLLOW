@@ -15,9 +15,9 @@ class MobileScreenShareChoice {
   const MobileScreenShareChoice({required this.shareAudio});
 }
 
-/// Mobile pre-share options sheet (there's no source picking on a phone —
-/// MediaProjection / ReplayKit capture THE screen; the OS consent dialog /
-/// broadcast picker handles permission). Returns null when dismissed.
+/// Mobile pre-share options sheet, returning null when dismissed. There is no
+/// source picking on a phone: MediaProjection and ReplayKit capture THE screen
+/// and the OS handles permission.
 Future<MobileScreenShareChoice?> showMobileScreenShareSheet(
     BuildContext context) {
   final hollow = HollowTheme.of(context);
@@ -46,9 +46,9 @@ class _ScreenShareSheetState extends State<_ScreenShareSheet> {
   @override
   void initState() {
     super.initState();
-    // Android exposes SDK_INT only over the platform channel, so prime it and
-    // rebuild once known. Below Android 10 the audio toggle locks (matching the
-    // macOS-below-13 pattern) since AudioPlaybackCapture is unavailable there.
+    // Android exposes SDK_INT only over the platform channel, so it is primed
+    // here. Below Android 10 the audio toggle locks, AudioPlaybackCapture being
+    // unavailable there.
     if (Platform.isAndroid && AndroidScreenAudioSupport.sdkInt == null) {
       AndroidScreenAudioSupport.prime().then((_) {
         if (mounted) setState(() {});

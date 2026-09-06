@@ -35,7 +35,8 @@ class _StorageDashboardContent extends ConsumerStatefulWidget {
 
 class _StorageDashboardContentState
     extends ConsumerState<_StorageDashboardContent> {
-  // Static cache — persists across dialog open/close so it shows instantly on reopen.
+  // Static, so it survives dialog open and close and shows instantly on
+  // reopen.
   static final Map<String, crdt_api.StorageStatsFfi> _statsCache = {};
   static final Map<String, String> _retentionFilesCache = {};
   static final Map<String, String> _retentionMessagesCache = {};
@@ -49,12 +50,10 @@ class _StorageDashboardContentState
   @override
   void initState() {
     super.initState();
-    // Load cached values immediately so UI appears instantly.
     _stats = _statsCache[widget.serverId];
     _retentionFiles = _retentionFilesCache[widget.serverId] ?? '365d';
     _retentionMessages = _retentionMessagesCache[widget.serverId] ?? 'permanent';
     _diskFreeBytes = _diskFreeBytesCache;
-    // Refresh in background — setState triggers smooth animation.
     _loadData();
   }
 
@@ -72,7 +71,6 @@ class _StorageDashboardContentState
       final retMessages = results[2] as String;
       final diskFree = results[3] as int;
 
-      // Update static cache for next open.
       _statsCache[widget.serverId] = stats;
       _retentionFilesCache[widget.serverId] = retFiles.isNotEmpty ? retFiles : '365d';
       _retentionMessagesCache[widget.serverId] = retMessages.isNotEmpty ? retMessages : 'permanent';
@@ -137,8 +135,8 @@ class _StorageDashboardContentState
     return 'Erasure Coding (k=20/m=10)';
   }
 
-  /// Returns (k, m) for the current member count.
-  /// Used to compute the redundancy overhead factor: (k+m)/k.
+  /// Returns the (k, m) erasure parameters for the current member count, from
+  /// which the redundancy overhead is (k+m)/k.
   (int, int) _vaultParams(int memberCount) {
     if (memberCount <= 8) return (3, 2);
     if (memberCount <= 15) return (5, 3);
@@ -165,7 +163,6 @@ class _StorageDashboardContentState
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            // Header with title + close button
             Row(
               children: [
                 Icon(LucideIcons.hardDrive, size: 18, color: hollow.accent),
@@ -193,7 +190,8 @@ class _StorageDashboardContentState
             const SizedBox(height: HollowSpacing.lg),
 
             ...[
-              // Server Storage — full width when <6 members, side-by-side when 6+
+              // Full width below the erasure-coding threshold, side by side
+              // above it.
               if (memberCount < 6)
                 _buildSection(
                   hollow,
@@ -228,7 +226,6 @@ class _StorageDashboardContentState
                 ),
               const SizedBox(height: HollowSpacing.md),
 
-              // Bottom row: Retention Policy | Vault Health — equal height
               IntrinsicHeight(
                 child: Row(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -254,7 +251,6 @@ class _StorageDashboardContentState
                 ),
               ),
 
-              // Member Pledges (6+ only) — full width below
               if (memberCount >= 6) ...[
                 const SizedBox(height: HollowSpacing.md),
                 _buildSection(
@@ -307,8 +303,7 @@ class _StorageDashboardContentState
     final totalUsed = stats?.totalUsedBytes.toDouble() ?? 0;
 
     if (memberCount < 6) {
-      // Full replication — bar shows server data vs disk capacity.
-      // Total disk = used + free. Bar fill = server data / total disk.
+      // Full replication: the bar is server data against total disk.
       final diskTotal = totalUsed + _diskFreeBytes.toDouble();
       final fraction = diskTotal > 0 ? totalUsed / diskTotal : 0.0;
       final diskFreeColor = _diskFreeBytes < 1024 * 1024 * 1024
@@ -360,8 +355,8 @@ class _StorageDashboardContentState
       );
     }
 
-    // Erasure coding (6+) — bar shows server data vs effective usable capacity.
-    // Effective capacity = total pledged × k / (k + m) to account for redundancy overhead.
+    // Erasure coding: the bar is server data against effective usable capacity,
+    // which is the pledged total scaled by k / (k + m) for redundancy.
     final totalPledged = stats?.totalPledgedBytes.toDouble() ?? 0;
     final (k, m) = _vaultParams(memberCount);
     final redundancyFactor = k > 0 ? (k + m) / k : 1.0;
@@ -450,7 +445,7 @@ class _StorageDashboardContentState
           serverId: widget.serverId,
           pledgeBytes: BigInt.from(result) * BigInt.from(1024 * 1024),
         );
-        _loadData(); // Refresh stats.
+        _loadData();
       } catch (e) {
         debugPrint('[HOLLOW] Failed to set pledge: $e');
       }
@@ -589,8 +584,8 @@ class _StorageDashboardContentState
           key: key,
           value: result,
         );
-        // Forward-only: record when the policy was changed so only
-        // messages/files created after this point are subject to pruning.
+        // Forward-only: the stamp is what keeps pruning off anything created
+        // before the policy changed.
         final sinceKey = '${key}_since';
         final nowSecs = (DateTime.now().millisecondsSinceEpoch ~/ 1000).toString();
         await crdt_api.updateServerSetting(
@@ -664,7 +659,7 @@ class _StorageDashboardContentState
     int memberCount,
   ) {
     if (memberCount < 6) {
-      // Full replication mode — simple summary.
+      // Full replication mode.
       return Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -690,7 +685,7 @@ class _StorageDashboardContentState
       );
     }
 
-    // Erasure coding mode — show shard health summary.
+    // Erasure coding mode.
     final shardCount = status?.shardsStoredLocally ?? 0;
     final activeUploads = status?.activeUploads.values
         .where((u) => u.phase != 'complete' && u.phase != 'failed')

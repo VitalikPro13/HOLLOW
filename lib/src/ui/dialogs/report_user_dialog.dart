@@ -11,8 +11,8 @@ import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-/// Report categories the relay accepts. The wire strings are exact — the
-/// relay silently ignores anything else.
+/// Report categories the relay accepts. The wire strings are exact: the relay
+/// silently ignores anything else.
 const _reportCategories = <(String, String)>[
   ('spam', 'Spam'),
   ('harassment', 'Harassment'),
@@ -20,12 +20,11 @@ const _reportCategories = <(String, String)>[
   ('impersonation', 'Impersonation'),
 ];
 
-/// Show the "Report user" dialog for [masterId], then file the report.
+/// Shows the "Report user" dialog for [masterId], then files the report.
 ///
-/// The dialog only picks a category (pops with the wire string); the FFI call
-/// + toast run here against [context], which outlives the dialog. Reports are
-/// deduped server-side (one per reporter per target per category), so repeat
-/// submissions are safe.
+/// The dialog only picks a category; the FFI call and toast run against
+/// [context], which outlives it. Reports are deduped server-side, so a repeat
+/// submission is safe.
 Future<void> showReportUserDialog(
   BuildContext context, {
   required String masterId,
@@ -50,10 +49,9 @@ Future<void> showReportUserDialog(
   }
 }
 
-/// Confirm-then-block flow for [masterId] (pass the MASTER id — resolve
-/// device ids at the call site). Reads providers through the container of
-/// [context] so it stays safe even when the launching widget (hover popup /
-/// profile dialog) was dismissed first.
+/// Confirm-then-block flow for [masterId]; resolve a device id at the call
+/// site. Reads providers through [context]'s container, so it stays safe when
+/// the launching widget was dismissed first.
 Future<void> confirmAndBlockUser(
   BuildContext context, {
   required String masterId,
@@ -96,7 +94,7 @@ Future<void> confirmAndBlockUser(
   }
 }
 
-/// Unblock [masterId] — no confirmation needed.
+/// Unblocks [masterId], with no confirmation.
 Future<void> unblockUser(BuildContext context, {required String masterId}) async {
   final container = ProviderScope.containerOf(context, listen: false);
   try {
@@ -173,8 +171,8 @@ class _ReportUserDialogState extends State<_ReportUserDialog> {
   }
 }
 
-/// A selectable reason row — selection state is a tinted chip-style border,
-/// never a filled button.
+/// A selectable reason row. Selection is a tinted chip border, never a filled
+/// button.
 class _ReasonRow extends StatelessWidget {
   final String label;
   final bool selected;

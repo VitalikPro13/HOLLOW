@@ -8,9 +8,8 @@ import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/settings/settings_shared.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-/// Accessibility category of the desktop Settings dialog: display size
-/// (interface scale + chat text size), reduce motion (tri-state Auto/On/Off)
-/// and reduce transparency. Auto-saves on change.
+/// Accessibility category of the desktop Settings dialog: display size, reduce
+/// motion and reduce transparency. Auto-saves on change.
 class AccessibilitySettingsView extends ConsumerWidget {
   const AccessibilitySettingsView({super.key});
 
@@ -94,8 +93,8 @@ class AccessibilitySettingsView extends ConsumerWidget {
   }
 }
 
-/// The panel WIDTHS are dragged, not set here — but a seam between two panes
-/// is invisible until you know it is there, so this says so.
+/// The panel WIDTHS are dragged rather than set here, and a seam between two
+/// panes is invisible until you know it is there.
 class _PanelWidthFootnote extends StatelessWidget {
   const _PanelWidthFootnote();
 

@@ -2,14 +2,12 @@ import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 
-/// Shell chrome the user can size and shape (GitHub issue #54).
+/// Shell chrome the user can size and shape (issue #54).
 ///
 /// Everything here is watched by the very first frame, so each one is a plain
-/// synchronous [Notifier] with an explicit `load()` called from
-/// `HollowShell._bootstrap` — never an `AsyncNotifier` awaiting `loadSetting`
-/// in `build()`, which throws until the SQLCipher store is open and silently
-/// loses the saved value on every launch
-/// (feedback_load_persisted_setting_from_bootstrap_not_build).
+/// synchronous [Notifier] with an explicit `load()` from
+/// `HollowShell._bootstrap`, never an `AsyncNotifier` awaiting `loadSetting` in
+/// `build()` (feedback_load_persisted_setting_from_bootstrap_not_build).
 ///
 /// [loadLayoutPrefs] is the one call the bootstrap makes.
 
@@ -49,10 +47,6 @@ Future<void> loadLayoutPrefs(WidgetRef ref) async {
   await ref.read(collapsedMemberGroupsProvider.notifier).load();
 }
 
-// ---------------------------------------------------------------------------
-// Profile card style
-// ---------------------------------------------------------------------------
-
 /// Whether clicking a user opens the compact card or the full profile.
 final profileCardStyleProvider =
     NotifierProvider<ProfileCardStyleNotifier, ProfileCardStyle>(
@@ -83,10 +77,6 @@ class ProfileCardStyleNotifier extends Notifier<ProfileCardStyle> {
     }
   }
 }
-
-// ---------------------------------------------------------------------------
-// Panel widths
-// ---------------------------------------------------------------------------
 
 /// Shared body of the two width preferences: same clamp, same write-through,
 /// different key and bounds.
@@ -160,15 +150,9 @@ class MemberPanelWidthNotifier extends _PanelWidthNotifier {
   double get maxWidth => kMemberPanelWidthMax;
 }
 
-// ---------------------------------------------------------------------------
-// Panel content scale
-// ---------------------------------------------------------------------------
-
-/// Zoom for the side panels ONLY — server strip, channel sidebar, member
-/// panel. Avatars, icons, names and counts grow together, exactly the way the
-/// interface scale grows the whole app, because icon sizes live in hundreds of
-/// hardcoded `size:` literals and no text scaler can reach them (issue #54,
-/// "adjust left server panel and user member panel icon size and text size").
+/// Zoom for the side panels ONLY: server strip, channel sidebar, member panel.
+/// Avatars, icons, names and counts grow together, because icon sizes live in
+/// hundreds of hardcoded `size:` literals no text scaler can reach (issue #54).
 final panelScaleProvider =
     NotifierProvider<PanelScaleNotifier, double>(PanelScaleNotifier.new);
 
@@ -203,14 +187,9 @@ class PanelScaleNotifier extends Notifier<double> {
   double _clamp(double v) => v.clamp(kPanelScaleMin, kPanelScaleMax).toDouble();
 }
 
-// ---------------------------------------------------------------------------
-// Collapsed member-list groups
-// ---------------------------------------------------------------------------
-
 /// Member-list sections the user has folded away, keyed `serverId:label`
-/// (issue #54, "ability to collapse groups in the member list, mostly to hide
-/// offline members"). Per server, because "hide Offline" on a 200-member
-/// server says nothing about a 4-member one.
+/// (issue #54). Per server, because "hide Offline" on a 200-member server says
+/// nothing about a 4-member one.
 final collapsedMemberGroupsProvider =
     NotifierProvider<CollapsedMemberGroupsNotifier, Set<String>>(
         CollapsedMemberGroupsNotifier.new);

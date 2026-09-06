@@ -7,24 +7,22 @@ use super::native_identity::NativeKeypair;
 
 /// The result of identity generation/loading.
 pub(crate) struct IdentityData {
-    /// Master keypair (from the mnemonic). The cross-device IDENTITY: drives
-    /// display, friendships, message-content signing, and the DB passphrase.
+    /// Master keypair from the mnemonic: the cross-device IDENTITY behind display,
+    /// friendships, message signing and the DB passphrase.
     pub keypair: NativeKeypair,
     /// Master peer_id — the identity-level id shared across all devices.
     pub peer_id: String,
     /// Per-device keypair (random, NOT from the mnemonic). Drives this device's
     /// transport-level peer_id (relay/rooms/Olm). See `device_key.rs`.
     pub device_keypair: NativeKeypair,
-    /// This device's peer_id = `compute_peer_id(device_keypair)`. On an existing
-    /// (pre-multi-device) install this equals `peer_id` (migration keystone).
+    /// This device's peer_id. On a pre-multi-device install it equals `peer_id`.
     pub device_peer_id: String,
     pub mnemonic: Option<String>,
 }
 
 static DATA_DIR_OVERRIDE: OnceLock<String> = OnceLock::new();
 
-/// Set the data directory path from Dart (Android/iOS pass their app data dir).
-/// Must be called before any identity or storage operations.
+/// Set the data directory from Dart, before any identity or storage operation.
 pub fn set_data_dir(path: String) -> Result<(), String> {
     let _ = DATA_DIR_OVERRIDE.set(path);
     Ok(())
@@ -58,9 +56,8 @@ pub(crate) fn device_keypair_path() -> Result<PathBuf, String> {
 
 /// Generate a brand new identity from a fresh BIP-39 mnemonic.
 pub(crate) fn generate_new_identity() -> Result<IdentityData, String> {
-    // Generate 24-word mnemonic (256 bits of entropy). The entropy IS the
-    // identity, so the buffer is wiped when this returns rather than left in
-    // freed stack memory.
+    // The entropy IS the identity, so the buffer is wiped on return rather than left
+    // in freed stack memory.
     let mut entropy = zeroize::Zeroizing::new([0u8; 32]);
     getrandom::fill(&mut entropy[..]).map_err(|e| format!("RNG failed: {e}"))?;
     let mnemonic = Mnemonic::from_entropy(&entropy[..])
@@ -70,17 +67,12 @@ pub(crate) fn generate_new_identity() -> Result<IdentityData, String> {
     let keypair = NativeKeypair::from_mnemonic(&mnemonic)?;
     let peer_id = keypair.peer_id();
 
-    // Save the keypair to disk.
     save_keypair(&keypair)?;
 
-    // Brand-new identity → fresh random device key, ALWAYS distinct from the master
-    // AND overwriting any stale `identity.device` left from a PREVIOUS identity on
-    // this install. (The old `load_or_create_device_keypair(None)` REUSED a leftover
-    // device file without rotation — if that file was a legacy keystone where
-    // device == old master, the new identity inherited a device id equal to some
-    // unrelated master, which then got published as a master-as-device entry in the
-    // device list and broke friend/DM keying for peers. Mirror
-    // `restore_identity_from_mnemonic`, which already mints fresh + overwrites.)
+    // A brand-new identity gets a fresh random device key that also OVERWRITES any
+    // stale `identity.device` from a previous identity: reusing a leftover keystone
+    // file would give this identity a device id equal to some unrelated master, which
+    // then publishes as a master-as-device entry and breaks friend and DM keying.
     let mut device_secret = zeroize::Zeroizing::new([0u8; 32]);
     getrandom::fill(&mut device_secret[..]).map_err(|e| format!("RNG failed: {e}"))?;
     let device_keypair = NativeKeypair::from_secret_bytes(&device_secret);
@@ -105,14 +97,11 @@ pub(crate) fn restore_identity_from_mnemonic(phrase: &str) -> Result<IdentityDat
     let keypair = NativeKeypair::from_mnemonic(&mnemonic)?;
     let peer_id = keypair.peer_id();
 
-    // Save the restored keypair to disk.
     save_keypair(&keypair)?;
 
-    // Restoring the mnemonic onto a device IS the multi-device case ("import my
-    // identity here"). This device MUST get a FRESH random device key so its
-    // peer_id is distinct from the originating device — seeding from master
-    // would recreate the same-peer_id collision we are fixing. We overwrite any
-    // stale identity.device left over from a previous identity on this install.
+    // Restoring a mnemonic onto a device IS the multi-device case, so this device MUST
+    // mint a FRESH random device key (seeding from master recreates the same-peer_id
+    // collision) and overwrite any stale identity.device left by a previous identity.
     let mut device_secret = zeroize::Zeroizing::new([0u8; 32]);
     getrandom::fill(&mut device_secret[..]).map_err(|e| format!("RNG failed: {e}"))?;
     let device_keypair = NativeKeypair::from_secret_bytes(&device_secret);
@@ -128,9 +117,8 @@ pub(crate) fn restore_identity_from_mnemonic(phrase: &str) -> Result<IdentityDat
     })
 }
 
-/// Load existing identity from disk, or create a new one if none exists.
-/// If the identity file is encrypted, requires a session wrapping key
-/// (set via `unlock_identity()` FFI call) to decrypt.
+/// Load the identity from disk, creating one if none exists. An encrypted file needs
+/// the session wrapping key from `unlock_identity()`.
 pub(crate) fn load_or_create_identity() -> Result<IdentityData, String> {
     let path = keypair_path()?;
 
@@ -150,9 +138,8 @@ pub(crate) fn load_or_create_identity() -> Result<IdentityData, String> {
             .map_err(|e| format!("Failed to decode identity: {e}"))?;
         let peer_id = keypair.peer_id();
 
-        // Existing install → device key seeds from the master on first run
-        // (migration keystone: device_peer_id == legacy peer_id), or loads the
-        // already-persisted device key on subsequent runs.
+        // An existing install seeds the device key from the master on first run, then
+        // loads the persisted one.
         let device_keypair = super::device_key::load_or_create_device_keypair(Some(&keypair))?;
         let device_peer_id = device_keypair.peer_id();
 
@@ -171,10 +158,9 @@ pub(crate) fn load_or_create_identity() -> Result<IdentityData, String> {
 /// Load an existing identity from disk WITHOUT falling back to generating a
 /// new one. Returns Ok(None) if no identity file exists yet.
 ///
-/// Used by background push handlers (FCM fetch): generating a fresh identity
-/// there would yield a different peer_id and a different DB passphrase, which
-/// silently opens an empty database (no cached profiles, wrong decrypt keys).
-/// The background isolate must use the REAL identity or do nothing.
+/// Used by background push handlers: generating a fresh identity there would yield a
+/// different peer_id and DB passphrase, silently opening an empty database. The
+/// background isolate must use the REAL identity or do nothing.
 pub(crate) fn load_existing_identity() -> Result<Option<IdentityData>, String> {
     let path = keypair_path()?;
     if !path.exists() {
@@ -196,8 +182,7 @@ pub(crate) fn load_existing_identity() -> Result<Option<IdentityData>, String> {
         .map_err(|e| format!("Failed to decode identity: {e}"))?;
     let peer_id = keypair.peer_id();
 
-    // Background isolates (FCM fetch) need the real device key too. Seed from
-    // master if absent (consistent with the foreground load path).
+    // Background isolates need the real device key too, seeded from master if absent.
     let device_keypair = super::device_key::load_or_create_device_keypair(Some(&keypair))?;
     let device_peer_id = device_keypair.peer_id();
 
@@ -210,22 +195,20 @@ pub(crate) fn load_existing_identity() -> Result<Option<IdentityData>, String> {
     }))
 }
 
-/// Save a keypair to disk. If encryption is active (session key set),
-/// the file is written as an encrypted HKEYV1 envelope. Otherwise plaintext protobuf.
+/// Save a keypair to disk: an encrypted HKEYV1 envelope when a session key is set,
+/// otherwise plaintext protobuf.
 fn save_keypair(keypair: &NativeKeypair) -> Result<(), String> {
     save_keypair_to(&keypair_path()?, keypair)
 }
 
-/// Save a keypair to an arbitrary path, mirroring the protection mode of the
-/// file already at that path (so the device key file matches the master file's
-/// password/keychain state independently). Used for both `identity.key` and
-/// `identity.device`.
+/// Save a keypair to an arbitrary path, mirroring the protection mode of whatever is
+/// already there, so the device file matches the master file's password or keychain
+/// state independently.
 pub(crate) fn save_keypair_to(path: &PathBuf, keypair: &NativeKeypair) -> Result<(), String> {
     let plaintext = keypair.to_protobuf_encoding()
         .map_err(|e| format!("Failed to encode keypair: {e}"))?;
 
     let bytes_to_write = if let Some(key) = super::encryption::get_session_key() {
-        // Determine current protection flags by reading existing file (if any).
         let (password_used, os_keychain_used) = if path.exists() {
             let existing = fs::read(path).unwrap_or_default();
             match super::encryption::detect_format(&existing) {

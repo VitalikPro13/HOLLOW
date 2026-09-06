@@ -19,15 +19,14 @@ class HotkeyBinding {
     required this.trigger,
   });
 
-  /// A binding with no modifiers (e.g. plain Space). Bare bindings are
-  /// suppressed while a Hollow text field has focus — they're what you type
-  /// with.
+  /// A binding with no modifiers. Bare bindings are suppressed while a Hollow
+  /// text field has focus, since they are what you type with.
   bool get isBare => !ctrl && !shift && !alt;
 
-  /// Whether the trigger key produces a character when typed (letters,
-  /// digits, space, punctuation). A BARE binding on a typable trigger is a
-  /// foot-gun for always-on app shortcuts (typing "b" would trigger Bold) —
-  /// the Shortcuts page refuses those; F-keys/Insert/Home/… stay allowed.
+  /// Whether the trigger key produces a character when typed. A BARE binding
+  /// on a typable trigger is a foot-gun for always-on app shortcuts (typing
+  /// "b" would trigger Bold), so the Shortcuts page refuses those; F-keys,
+  /// Insert and Home stay allowed.
   bool get isTypableTrigger {
     final name = _nameOfKey(trigger);
     if (name == null) return false;
@@ -92,9 +91,9 @@ class HotkeyBinding {
       event.logicalKey == trigger && modifiersMatch(hk);
 
   /// Whether the current modifier state of [hk] matches. AltGr guard
-  /// (CLAUDE.md): a Ctrl-binding without Alt additionally requires Alt NOT
-  /// pressed — AltGr reports as Ctrl+Alt on Windows, and swallowing it
-  /// breaks @/€ on AZERTY layouts app-wide.
+  /// (CLAUDE.md): a Ctrl binding without Alt additionally requires Alt NOT
+  /// pressed, since AltGr reports as Ctrl+Alt on Windows and swallowing it
+  /// breaks @ and € on AZERTY layouts app-wide.
   bool modifiersMatch(HardwareKeyboard hk) {
     if (hk.isControlPressed != ctrl) return false;
     if (hk.isShiftPressed != shift) return false;
@@ -110,10 +109,9 @@ class HotkeyBinding {
   /// X11 keysym for the trigger, or null if unmapped.
   int? get x11Keysym => _x11Keysym[trigger];
 
-  /// xkbcommon keysym NAME for the trigger (freedesktop shortcuts spec,
-  /// used as the GlobalShortcuts portal `preferred_trigger` hint), or null
-  /// if unmapped — the hint is optional; the portal dialog lets the user
-  /// pick a trigger either way.
+  /// xkbcommon keysym NAME for the trigger, used as the GlobalShortcuts
+  /// portal `preferred_trigger` hint, or null if unmapped. The hint is
+  /// optional: the portal dialog lets the user pick a trigger either way.
   String? get xkbName => _xkbNames[trigger];
 
   @override
@@ -128,9 +126,7 @@ class HotkeyBinding {
   int get hashCode => Object.hash(ctrl, shift, alt, trigger);
 }
 
-// ---------------------------------------------------------------------------
-// Key name/code tables (letters, digits, space, F1-F24, common punctuation)
-// ---------------------------------------------------------------------------
+// Key name/code tables: letters, digits, space, F1-F24, common punctuation.
 
 const Map<String, LogicalKeyboardKey> _nameToKey = {
   'space': LogicalKeyboardKey.space,
@@ -251,8 +247,8 @@ final Map<LogicalKeyboardKey, int> _x11Keysym = {
   LogicalKeyboardKey.pageDown: 0xFF56,
 };
 
-/// LogicalKeyboardKey → xkbcommon keysym name (xkbcommon-keysyms.h without
-/// the XKB_KEY_ prefix — the freedesktop shortcuts-spec key identifiers).
+/// LogicalKeyboardKey to xkbcommon keysym name, the freedesktop
+/// shortcuts-spec key identifiers.
 final Map<LogicalKeyboardKey, String> _xkbNames = {
   LogicalKeyboardKey.space: 'space',
   // a-z / 0-9: names are the characters themselves.
@@ -280,11 +276,11 @@ final Map<LogicalKeyboardKey, String> _xkbNames = {
   LogicalKeyboardKey.pageDown: 'Next',
 };
 
-/// Build a binding from a captured key-down: the pressed non-modifier key +
-/// the live modifier state. Returns null for modifier-only or unmapped keys.
+/// Builds a binding from a captured key-down: the pressed non-modifier key
+/// plus the live modifier state. Null for modifier-only or unmapped keys.
 HotkeyBinding? bindingFromCapture(KeyEvent event, HardwareKeyboard hk) {
   final key = event.logicalKey;
-  // Not const: LogicalKeyboardKey overrides == (const sets forbid that).
+  // Not const: LogicalKeyboardKey overrides ==, which const sets forbid.
   final modifiers = {
     LogicalKeyboardKey.controlLeft, LogicalKeyboardKey.controlRight,
     LogicalKeyboardKey.control,
@@ -299,8 +295,8 @@ HotkeyBinding? bindingFromCapture(KeyEvent event, HardwareKeyboard hk) {
   if (!_keyToName.containsKey(key)) return null;
   final alt = hk.isAltPressed;
   final ctrl = hk.isControlPressed;
-  // AltGr (Ctrl+Alt together) is not capturable as a modifier combo — it's
-  // how AZERTY layouts type. Treat it as a bare-Alt binding attempt: reject.
+  // AltGr (Ctrl+Alt together) is not capturable as a modifier combo, since
+  // it is how AZERTY layouts type. Treat it as a bare-Alt attempt and reject.
   if (ctrl && alt) return null;
   return HotkeyBinding(
     ctrl: ctrl,

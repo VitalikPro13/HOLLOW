@@ -3,34 +3,22 @@ import 'package:flutter/services.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
 
-/// The draggable seam between two shell panes (issue #54: "being able to
-/// resize the left panel").
+/// The draggable seam between two shell panes (issue #54).
 ///
-/// It occupies its own narrow strip in the row rather than floating over the
-/// panel's edge, because that edge already belongs to the panel's scrollbar
-/// gutter — a handle on top of it would swallow the last few pixels of the
-/// thumb and make the list undraggable.
+/// It occupies its own strip in the row rather than floating over the panel's
+/// edge, which already belongs to the scrollbar gutter: a handle on top of it
+/// would swallow the thumb and make the list undraggable.
 ///
-/// **It paints as an EXTENSION OF THE PANEL, and it owns the divider.** Its
-/// first version painted nothing at rest, which left a 6px hole between the
-/// panel and the chat. Across the message area that was invisible (both sides
-/// are `hollow.background`), but the chat's header bar and composer bar are
-/// opaque `hollow.surface` and stopped 6px short of the divider at both ends
-/// — measured on a real build: at the header's y the seam read 13,15,20 and
-/// the chat read 20,22,28. Four dark notches at the corners of the chat, and
-/// exactly the "gaps on the sides" the resizable panels were blamed for.
-/// Filling the strip with the panel's own surface makes the panel simply 6px
-/// wider and puts the divider back against the chat where it was.
+/// It paints as an EXTENSION OF THE PANEL and owns the divider, because
+/// painting nothing at rest left a 6px hole that the chat's opaque header and
+/// composer bars stopped short of, reading as dark notches at the chat's
+/// corners. The panel beside a seam must therefore NOT draw its own edge border
+/// (`ChannelSidebar.edgeBorder`, `MemberPanel.edgeBorder`); a panel with no
+/// seam keeps drawing one.
 ///
-/// Because the seam owns the divider now, the panel beside it must NOT draw
-/// its own edge border — that is what `ChannelSidebar.edgeBorder` /
-/// `MemberPanel.edgeBorder` are for. A panel with no seam (the split view's
-/// right sidebar) keeps drawing its own.
-///
-/// Mouse: drag to resize, double-click to go back to the default width.
-/// Keyboard: focusable, left/right arrows move it in [_kKeyStep] steps and
-/// Home resets — a splitter that only answers to a drag is a control blind and
-/// motor-impaired users simply do not have.
+/// Arrow keys move it in [_kKeyStep] steps and Home resets, because a splitter
+/// that only answers to a drag is a control blind and motor-impaired users do
+/// not have.
 class PanelResizeHandle extends StatefulWidget {
   /// Current width of the panel this seam sizes.
   final double width;
@@ -71,12 +59,10 @@ class _PanelResizeHandleState extends State<PanelResizeHandle> {
   bool _dragging = false;
   double _startWidth = 0;
 
-  /// Movement since the drag started, in LOCAL logical pixels. Accumulated
-  /// from `delta` rather than measured from `localPosition`: the seam moves
-  /// with the panel it is sizing, so a position measured against the seam
-  /// itself would fight the resize it just caused. `delta` arrives already
-  /// converted out of window space, which also keeps this honest under the
-  /// interface zoom.
+  /// Movement since the drag started, in LOCAL logical pixels. Accumulated from
+  /// `delta` rather than `localPosition` because the seam moves with the panel
+  /// it sizes, and `delta` already arrives out of window space (so the interface
+  /// zoom stays honest).
   double _dragged = 0;
 
   void _nudge(double delta) =>
@@ -133,12 +119,11 @@ class _PanelResizeHandleState extends State<PanelResizeHandle> {
                     setState(() => _dragging = false),
                 child: DecoratedBox(
                   decoration: BoxDecoration(
-                    // The panel's own fill, so the strip reads as 6px more
-                    // panel instead of a hole punched between the two.
+                    // The panel's own fill, so the strip reads as more panel
+                    // instead of a hole punched between the two.
                     color: hollow.surface,
                     // ...and the divider, on the CHAT side of the strip. A
-                    // DecoratedBox does not inset its child the way Container
-                    // does, so this paints over the edge and the drag target
+                    // DecoratedBox does not inset its child, so the drag target
                     // keeps its full width.
                     border: Border(
                       left: widget.panelOnRight
@@ -152,10 +137,8 @@ class _PanelResizeHandleState extends State<PanelResizeHandle> {
                   child: SizedBox(
                     width: kPanelSeamWidth,
                     height: double.infinity,
-                    // The accent sits ON the divider it replaces. Centred in
-                    // the strip it lit up 2.5px away from the panel's border
-                    // and the two read as a double rule — the same bug the
-                    // own-message accent bar had against the chat scrollbar.
+                    // The accent sits ON the divider it replaces; centred in
+                    // the strip the two read as a double rule.
                     child: Align(
                       alignment: widget.panelOnRight
                           ? Alignment.centerLeft

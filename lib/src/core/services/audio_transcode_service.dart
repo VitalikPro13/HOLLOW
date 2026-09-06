@@ -5,10 +5,9 @@ import 'package:hollow/src/core/hollow_data_dir.dart';
 import 'package:hollow/src/core/services/audio_probe_service.dart';
 import 'package:hollow/src/core/services/video_thumbnail_service.dart';
 
-/// Windows' Media Foundation (which `audioplayers_windows` wraps) cannot
-/// decode Opus-in-Ogg. We transcode those files to a local PCM WAV cache
-/// via the bundled ffmpeg before handing them to the player. The wire
-/// format stays Opus; only local playback uses the cached WAV.
+/// Windows' Media Foundation, which `audioplayers_windows` wraps, cannot decode
+/// Opus-in-Ogg, so those files are transcoded to a local PCM WAV cache via the
+/// bundled ffmpeg before playback. The wire format stays Opus.
 class AudioTranscodeService {
   static const _cacheSubdir = 'audio_cache';
 
@@ -21,19 +20,17 @@ class AudioTranscodeService {
   @visibleForTesting
   static AudioProcessRunner? debugRunner;
 
-  /// Returns a file path that `audioplayers` can open. Transcodes to a
-  /// cached WAV if the input is an Ogg/Opus file on Windows. On non-Windows
-  /// platforms or for already-supported formats, returns the input path.
-  ///
-  /// Returns null only if transcoding fails (original path is still on
-  /// disk — callers can surface an error toast).
+  /// Returns a path `audioplayers` can open, transcoding to a cached WAV for
+  /// an Ogg/Opus file on Windows and returning the input path otherwise.
+  /// Null only when transcoding fails; the original is still on disk, so the
+  /// caller can surface an error.
   static Future<String?> ensurePlayable(String inputPath) async {
     final lower = inputPath.toLowerCase();
     final dot = lower.lastIndexOf('.');
     final ext = dot >= 0 ? lower.substring(dot + 1) : '';
 
-    // Only Windows' audioplayers backend has trouble with Opus. On Linux
-    // (GStreamer) and macOS (AVFoundation) Ogg/Opus plays natively.
+    // Only the Windows audioplayers backend struggles with Opus; GStreamer
+    // on Linux and AVFoundation on macOS play Ogg/Opus natively.
     if (!Platform.isWindows || !_needsTranscode.contains(ext)) {
       return inputPath;
     }
@@ -49,7 +46,6 @@ class AudioTranscodeService {
     final stat = await inputFile.stat();
     final cachePath = await _cachePathFor(inputPath, stat.modified);
 
-    // Cache hit — reuse.
     final cachedFile = File(cachePath);
     if (await cachedFile.exists() && await cachedFile.length() > 0) {
       return cachePath;
@@ -87,8 +83,8 @@ class AudioTranscodeService {
     if (!await dir.exists()) {
       await dir.create(recursive: true);
     }
-    // Key by input path + mtime so re-downloads invalidate the cache.
-    // Fast non-crypto hash — we only need path-safe uniqueness, not security.
+    // Key by input path plus mtime so a re-download invalidates the cache.
+    // A fast non-crypto hash: this needs path-safe uniqueness, not security.
     final key = '$inputPath|${mtime.millisecondsSinceEpoch}';
     var hash = 0;
     for (final code in key.codeUnits) {

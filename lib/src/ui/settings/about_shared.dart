@@ -9,11 +9,10 @@ import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 /// About-section pieces shared by the desktop About category and the mobile
-/// Settings tab: legal-document markdown rendering, the contact/legal link
-/// buttons, and the open-source licenses page.
+/// Settings tab.
 
-/// Load a legal markdown asset and strip the top-level heading (# Title) —
-/// the surfaces show the title in their own header chrome.
+/// Loads a legal markdown asset without its top-level heading, which the
+/// surfaces show in their own header chrome.
 Future<String> loadLegalMarkdownBody(String assetPath) async {
   final text = await rootBundle.loadString(assetPath);
   final lines = text.split('\n');
@@ -23,8 +22,8 @@ Future<String> loadLegalMarkdownBody(String assetPath) async {
       .trim();
 }
 
-/// Rendered legal markdown with the Hollow stylesheet. The desktop dialog and
-/// mobile bottom sheet differ only in their shell — this is the shared body.
+/// Rendered legal markdown with the Hollow stylesheet: the shared body under
+/// the desktop dialog's and the mobile sheet's own shells.
 Widget legalMarkdownView(
   HollowTheme hollow,
   String body, {
@@ -78,7 +77,7 @@ Widget legalMarkdownView(
   );
 }
 
-/// Left-aligned ghost link button — the About sections' one link shape.
+/// The About sections' one link shape.
 Widget aboutLinkButton({
   required VoidCallback onPressed,
   required IconData icon,
@@ -94,19 +93,19 @@ Widget aboutLinkButton({
   );
 }
 
-/// Open a brand/social URL in the external browser.
+/// Opens a brand or social URL in the external browser.
 void launchBrandUrl(String url) {
   launchUrl(Uri.parse(url), mode: LaunchMode.externalApplication);
 }
 
-/// Copy the feedback email to the clipboard (Contact section).
+/// Copies the feedback email to the clipboard.
 void copySupportEmail(BuildContext context) {
   Clipboard.setData(const ClipboardData(text: 'feedback@anonlisten.com'));
   HollowToast.show(context, 'Email copied to clipboard',
       type: HollowToastType.success);
 }
 
-/// Open the AnonListen website externally (Contact section).
+/// Opens the AnonListen website externally.
 void openAnonListenSite() {
   launchUrl(
     Uri.parse('https://anonlisten.com'),
@@ -114,7 +113,7 @@ void openAnonListenSite() {
   );
 }
 
-/// Flutter's license page with the Hollow branding (Legal section).
+/// Flutter's license page with the Hollow branding.
 void showHollowLicensesPage(BuildContext context) {
   showLicensePage(
     context: context,

@@ -50,9 +50,8 @@ class WebRtcNotifier extends Notifier<WebRtcState> {
 
   void _wireCallbacks() {
     _service!.onProgress = (transferId, bytesDone, totalBytes) {
-      // Pass raw byte counts as "chunks" — the widget uses the ratio
-      // (chunksReceived / totalChunks) for the progress bar, so raw bytes work.
-      // Clamp to prevent overshoot (ciphertext is slightly larger than plaintext).
+      // Raw byte counts ride as "chunks": the widget uses the ratio. Clamped,
+      // because ciphertext is slightly larger than plaintext.
       final clamped = bytesDone.clamp(0, totalBytes);
       ref.read(fileTransferProvider.notifier).onFileProgress(
             transferId,
@@ -69,13 +68,10 @@ class WebRtcNotifier extends Notifier<WebRtcState> {
         (transferId, tempPath, senderPeerId, kind, shardIndex) {
       debugPrint(
           '[HOLLOW-WEBRTC] Provider: receive complete $transferId at $tempPath');
-      // Rust handles the rest via webrtcTransferComplete FFI call
-      // (called by WebRtcService already).
     };
 
     _service!.onReconnectNeeded = (peerId) {
-      // Re-establish WebRTC connection after unexpected close (e.g., buffer crash).
-      // Delay slightly to let the old connection fully clean up.
+      // Re-establish after an unexpected close, delayed so the old one cleans up.
       Future.delayed(const Duration(seconds: 2), () {
         ensureConnection(peerId);
       });
@@ -132,17 +128,14 @@ class WebRtcNotifier extends Notifier<WebRtcState> {
 
   /// Proactively establish the dedicated STUN-only SHARE connection to a peer.
   ///
-  /// Deliberately separate from [ensureConnection]: Hollow Share gets its own
-  /// peer connection even when a general one is already open, because that one
-  /// carries TURN and Share must never touch the relay (HOLLOW_PLAN §7A).
-  /// [WebRtcState.peers] tracks the general lane only — the Share lane's
-  /// liveness lives in Rust's share-peer set.
+  /// Separate from [ensureConnection]: Share gets its own peer connection even
+  /// when a general one is open, because that one carries TURN and Share must
+  /// never touch the relay (HOLLOW_PLAN §7A).
   Future<void> ensureShareConnection(
       String peerId, Map<String, dynamic> shareIceConfig) async {
     final s = service;
-    // Register the Share config even when we don't dial — a Share SEEDER
-    // usually ends up answering the downloader's offer, and the answer path
-    // needs the STUN-only config.
+    // Register the Share config even when we don't dial: a Share SEEDER usually
+    // answers the downloader's offer, and the answer path needs the STUN-only config.
     s.noteShareIceConfig(peerId, shareIceConfig);
     if (s.hasShareChannel(peerId)) return;
     await s.connectShareToPeer(peerId, shareIceConfig);
@@ -175,8 +168,7 @@ class WebRtcNotifier extends Notifier<WebRtcState> {
     required String excludePeerId,
   }) async {
     final s = service;
-    // Send the broadcast to all connected gossip neighbors (Rust already
-    // filtered to the right set and excluded the sender).
+    // Rust already filtered to the right set and excluded the sender.
     for (final entry in state.peers.entries) {
       if (entry.value == WebRtcPeerStatus.connected &&
           entry.key != excludePeerId) {

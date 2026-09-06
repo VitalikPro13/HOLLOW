@@ -112,10 +112,9 @@ class AnnotationOverlay {
     }
   }
 
-  /// Set the annotation-mode flag via the long-lived [ProviderContainer]
-  /// reachable from the global navigator key. We can't rely on a
-  /// [WidgetRef] passed in from the title bar because the title bar widget
-  /// is removed from the tree while annotation mode is active.
+  /// Sets the annotation-mode flag through the long-lived [ProviderContainer]
+  /// behind the global navigator key: a [WidgetRef] from the title bar is no
+  /// use, because that widget leaves the tree while annotation mode is on.
   static void _setAnnotationMode(bool active) {
     final ctx = hollowNavigatorKey.currentContext;
     if (ctx == null) {
@@ -196,10 +195,9 @@ class _AnnotationOverlayLayerState extends State<_AnnotationOverlayLayer> {
         child: Stack(
           fit: StackFit.expand,
           children: [
-            // Drawing surface. Opaque hit-test so input doesn't leak through
-            // to whatever's behind, but visually transparent.
+            // Opaque to hit-testing so input cannot leak through to what is
+            // behind, while staying visually transparent.
             AnnotationCanvas(controller: widget.controller),
-            // Toolbar pinned to top-center.
             Positioned(
               top: 16,
               left: 0,

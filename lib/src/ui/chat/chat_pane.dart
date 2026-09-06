@@ -93,10 +93,8 @@ import 'package:url_launcher/url_launcher.dart';
 
 import 'package:hollow/src/ui/chat/chat_pane_shared.dart';
 
-// The twins' shared building blocks (grouping/date helpers, DateSeparator,
-// typing bar, unread pill, reply/staged bars, reversed-list shell) live in
-// chat_pane_shared.dart; re-exported here for the existing consumers
-// (mobile routes, archive viewers).
+// The twins' shared building blocks live in chat_pane_shared.dart, re-exported
+// here for the existing consumers (mobile routes, archive viewers).
 export 'package:hollow/src/ui/chat/chat_pane_shared.dart'
     show
         shouldGroup,
@@ -110,17 +108,13 @@ export 'package:hollow/src/ui/chat/chat_pane_shared.dart'
         chatListWithRail,
         unreadDividerIndex;
 
-/// Whether the DM profile panel is visible.
 final dmProfilePanelProvider = StateProvider<bool>((ref) => true);
 
-// ---------------------------------------------------------------------------
-// Shared DM call helpers — used by the pane, the inline call panel, and the
-// screen-share overlays. Kept top-level so the former per-class twins can't
-// drift apart again.
-// ---------------------------------------------------------------------------
+// Shared DM call helpers, kept top-level so the pane, the inline call panel and
+// the screen-share overlays cannot drift apart again.
 
-/// Count active video sources (cameras + screens, both sides) in a DM call.
-/// Used to decide whether to show the source-switcher pill (2+ sources).
+/// Active video sources (cameras and screens, both sides) in a DM call; the
+/// switcher pill appears from two.
 int _countActiveDmSources(CallState call) {
   int count = 0;
   if (call.isVideoEnabled) count++;
@@ -130,8 +124,8 @@ int _countActiveDmSources(CallState call) {
   return count;
 }
 
-/// Ordered source list for the switcher pills: screens first, then cameras —
-/// matches voice_channel_pane's _buildSharerSwitcher order.
+/// Ordered source list for the switcher pills: screens first, then cameras,
+/// matching voice_channel_pane.
 List<({String peerId, String type})> _dmActiveSources(
     CallState call, String localPeerId, String remotePeerId) {
   return [
@@ -142,10 +136,8 @@ List<({String peerId, String type})> _dmActiveSources(
   ];
 }
 
-/// The source-switcher pill shell: one tab per active source (icon + avatar +
-/// name) with focus highlighting. Shared by the full-bleed screen-share pill
-/// and the inline call panel pill — only focus derivation and tap handling
-/// differ between the two.
+/// The source-switcher pill shell, shared by the full-bleed screen-share pill
+/// and the inline call panel; only focus derivation and tap handling differ.
 Widget _dmSourcePill({
   required HollowTheme hollow,
   required Map<String, storage_api.UserProfile> profiles,
@@ -251,8 +243,8 @@ Widget _shareLabelChip(HollowTheme hollow, String label) {
   );
 }
 
-/// Toggle screen share: stop if sharing, else pick a source and start.
-/// Shared by the inline call panel and the screen-share controls overlay.
+/// Toggles screen share, shared by the inline call panel and the controls
+/// overlay.
 Future<void> _toggleScreenShare(
     BuildContext context, WidgetRef ref, CallState call) async {
   if (call.isScreenSharing) {
@@ -274,8 +266,8 @@ Future<void> _toggleScreenShare(
   }
 }
 
-// Call-control buttons shared by the inline call panel (20px icons, sm
-// padding) and the screen-share controls overlay (smaller icons, xs padding).
+// Call-control buttons shared by the inline call panel and the screen-share
+// controls overlay, which differ only in icon size and padding.
 
 Widget _muteCallButton(WidgetRef ref, HollowTheme hollow, CallState call,
     {required double iconSize, required EdgeInsetsGeometry padding}) {
@@ -418,21 +410,18 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
   DateTime? _lastTypingSent;
   int? _highlightIndex;
   bool _showScrollPill = false;
-  /// In-conversation message search (issue #54). The FFI has always been
-  /// there (`searchDmMessages`); only the DM header never called it, so the
-  /// global quick-search shortcut flipped a flag nothing in a DM read.
+  /// In-conversation message search (issue #54).
   final TextEditingController _searchController = TextEditingController();
   final FocusNode _searchFocusNode = FocusNode();
   List<storage_api.StoredMessage> _searchResults = const [];
-  /// Staged file attachment (user picked but hasn't sent yet).
+  /// Picked but not yet sent.
   String? _stagedFilePath;
   String? _stagedFileName;
   bool _stagedFileIsImage = false;
-  /// True while the user is recording a voice message — swaps the text
-  /// input row for the [VoiceRecorderBar].
+  /// True while recording, which swaps the input row for the
+  /// [VoiceRecorderBar].
   bool _isRecordingVoice = false;
-  /// Staged link preview (Phase 6.75). Set while the user is typing a URL
-  /// and Hollow is fetching its OG metadata in the background.
+  /// Set while a typed URL's OG metadata is being fetched in the background.
   String? _stagedPreviewUrl;
   network_api.LinkPreviewRef? _stagedPreview;
   bool _stagedPreviewLoading = false;
@@ -443,14 +432,13 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
   static final RegExp _urlRegex = RegExp(r'(?:https?|hollow)://[^\s<>"' "'" r')\]}]+');
   Timer? _overlayHideTimer;
   bool _overlaysVisible = true;
-  bool _chatOverlayPinned = false; // User explicitly toggled chat open
+  bool _chatOverlayPinned = false;
 
   @override
   void initState() {
     super.initState();
-    // Close search when (re-)entering a conversation — cannot reset in
-    // dispose, where Riverpod forbids all ref usage. Same rule as the
-    // channel pane, and it is what lets both panes share one flag.
+    // Close search on entering a conversation; it cannot be reset in dispose,
+    // where Riverpod forbids all ref usage.
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) ref.read(chatSearchOpenProvider.notifier).state = false;
     });
@@ -466,13 +454,12 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
       setState(() => _showScrollPill = !nearBottom);
     }
     ref.read(chatAtBottomProvider.notifier).state = nearBottom;
-    // Auto-mark as read when the user ARRIVES at the bottom. Edge-triggered
-    // (mobile-style) — this used to run per scroll frame while at the bottom,
-    // i.e. a map-clone + FFI settings write on every scroll tick.
+    // Edge-triggered: per scroll frame this is a map clone and an FFI settings
+    // write on every tick.
     if (nearBottom && !_wasNearBottom) {
       final msgs = ref.read(chatProvider)[widget.peerId];
-      // Reached the bottom: release the freeze. If messages were held back
-      // while reading, snap to the true newest row.
+      // Reached the bottom: release the freeze, and snap to the true newest row
+      // if anything was held back.
       if (_frozenLen != null && msgs != null && msgs.length > _frozenLen!) {
         _jumpToBottom();
       } else {
@@ -483,9 +470,9 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
               widget.peerId, msgs.last.messageId);
       }
     } else if (!nearBottom && _wasNearBottom) {
-      // Left the bottom: freeze the display so arrivals can't shift the
-      // reading position. (No setState — the display is unchanged until a
-      // message actually arrives, and that arrival rebuilds via the watch.)
+      // Left the bottom: freeze the display so arrivals cannot shift the
+      // reading position. No setState, because nothing changes until a message
+      // arrives and that arrival rebuilds via the watch.
       _frozenLen ??= (ref.read(chatProvider)[widget.peerId] ?? const []).length;
     }
     _wasNearBottom = nearBottom;
@@ -497,19 +484,16 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
     await ref.read(chatProvider.notifier).loadHistory(widget.peerId);
     if (!mounted) return;
     setState(() {});
-    // Pin to the latest message. ScrollablePositionedList only honors
-    // `initialScrollIndex` at first build; when loadHistory grows the list
-    // from its initial (possibly 1-message) state, we need an explicit jump.
+    // ScrollablePositionedList honours `initialScrollIndex` only at first
+    // build, so a list grown by loadHistory needs an explicit jump.
     _jumpToBottom();
-    // Mark DM as read now that messages are loaded.
     final msgs = ref.read(chatProvider)[widget.peerId];
     final latestId = msgs != null && msgs.isNotEmpty
         ? msgs.last.messageId
         : null;
     ref.read(unreadProvider.notifier).markDmSeen(widget.peerId, latestId);
-    // Re-request any file whose bytes never arrived (live WebRTC transfer failed)
-    // from the friend or an online sibling that has them — so an image stuck as a
-    // metadata-only bubble fills in when you open the thread.
+    // Re-request files whose bytes never arrived, so an image stuck as a
+    // metadata-only bubble fills in when the thread is opened.
     ref.read(eventStreamProvider.notifier)
         .requestMissingDmFilesOnOpen(widget.peerId);
   }
@@ -519,7 +503,6 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
     if (!_overlaysVisible) {
       setState(() => _overlaysVisible = true);
     }
-    // Don't start hide timer while user is typing or chat is pinned open.
     if (_focusNode.hasFocus || _chatOverlayPinned) return;
     _overlayHideTimer = Timer(const Duration(seconds: 1), () {
       if (mounted) setState(() => _overlaysVisible = false);
@@ -533,11 +516,8 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
     }
   }
 
-  /// Source switcher pill for the full-bleed screen share view. Shows one
-  /// tab per active source (camera or screen, local or remote). ALL tabs
-  /// are clickable — tapping a tab sets [focusedDmSourceProvider] to that
-  /// (peerId, type) pair, and the screen-share view's big tile updates to
-  /// show that source.
+  /// Source switcher pill for the full-bleed screen share view: every tab is
+  /// clickable and sets [focusedDmSourceProvider] to that source.
   Widget _buildScreenShareSourcePill(
     HollowTheme hollow,
     CallState call,
@@ -547,8 +527,8 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
     final profiles = ref.watch(profileProvider);
     final focused = ref.watch(focusedDmSourceProvider);
     final gridOn = ref.watch(dmShareGridViewProvider);
-    // Opt-in watching (issue #38): the remote share tab shows an eye until
-    // we opted in — tapping it starts watching instead of focusing.
+    // Opt-in watching (issue #38): until we opt in, the remote share tab shows
+    // an eye and tapping it starts watching instead of focusing.
     final unwatched = {
       if (call.remoteScreenSharing && !call.watchingRemoteShare) remotePeerId,
     };
@@ -619,16 +599,11 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
     super.dispose();
   }
 
-  // ── Reversed-list scroll model ────────────────────────────────────────
-  // The list renders `reverse: true` with the NEWEST message at index 0
-  // pinned to the bottom, so "at bottom" is simply "index 0 visible" —
-  // length-independent and immune to burst growth (the old sentinel model
-  // compared stale positions against a moving length and disengaged under
-  // fast flow). While the user reads history the display list is FROZEN
-  // (_frozenLen): arrivals are held out of the list so the view can never
-  // shift under them — the unread pill takes over. Reaching the bottom,
-  // tapping the pill, or sending releases the freeze and snaps (jumpTo,
-  // never animated) to the newest message.
+  // Reversed list: the NEWEST message is index 0 pinned to the bottom, so "at
+  // bottom" is simply "index 0 visible", length-independent and immune to burst
+  // growth. While the user reads history the display list is FROZEN
+  // (_frozenLen) so arrivals cannot shift the view; reaching the bottom,
+  // tapping the pill or sending releases it and jumps, never animates.
 
   /// Non-null while the user is scrolled up: display list capped here.
   int? _frozenLen;
@@ -650,10 +625,9 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
     if (_frozenLen != null) setState(() => _frozenLen = null);
   }
 
-  /// Snap to the newest message — INSTANT. The old animated 150ms scroll on
-  /// receive rendered the new row first and then glided to it (a visible
-  /// jump-then-move); sends always used the instant jump and felt right.
-  /// One motion, no animation, everywhere.
+  /// Snaps to the newest message, INSTANT everywhere: an animated scroll on
+  /// receive renders the new row and then glides to it, which reads as a jump
+  /// followed by a move.
   void _jumpToBottom() {
     _releaseFreeze();
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -664,8 +638,8 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
 
   void _scrollToBottom() => _jumpToBottom();
 
-  /// [index] is CHRONOLOGICAL (0 = oldest) — converted to the reversed
-  /// builder index here, in one place.
+  /// [index] is CHRONOLOGICAL (0 = oldest); the conversion to the reversed
+  /// builder index happens here, in one place.
   void _scrollToMessage(int index) {
     if (!_itemScrollController.isAttached) return;
     final messages =
@@ -676,8 +650,8 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
       index: messages.length - 1 - index,
       duration: const Duration(milliseconds: 300),
       curve: Curves.easeOutCubic,
-      // Reversed alignment measures from the BOTTOM edge — 0.6 lands the
-      // target in the upper-middle area like the old 0.3-from-top did.
+      // Reversed alignment measures from the BOTTOM edge, so this lands the
+      // target in the upper-middle area.
       alignment: 0.6,
     );
     Future.delayed(const Duration(milliseconds: 1500), () {
@@ -686,14 +660,12 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
   }
 
   void _onTextChanged(String text) {
-    // Debounced URL detection for link previews (Phase 6.75).
     _urlDebounce?.cancel();
     _urlDebounce = Timer(const Duration(milliseconds: 600), _detectUrl);
 
     _emoteAutocomplete.update(context, text);
 
     if (text.isEmpty) return;
-    // Don't send typing indicators when invisible.
     final amInvisible =
         ref.read(invisibleModeProvider);
     if (amInvisible) return;
@@ -709,13 +681,13 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
     ).catchError((_) {});
   }
 
-  /// Extract the first URL from the current compose text and, if it
-  /// differs from what's staged, kick off a background OG fetch. If the
-  /// URL was removed, clear the staged preview.
+  /// Kicks off a background OG fetch for the first URL in the compose text when
+  /// it differs from the staged one, and clears the staged preview when the URL
+  /// is removed.
   void _detectUrl() {
     if (!mounted) return;
-    // Previews off: never touch the pasted URL at all (issue #45). Hollow
-    // deep links still resolve — those are parsed locally, no request.
+    // Previews off: never touch the pasted URL at all (issue #45). Hollow deep
+    // links still resolve, because those are parsed locally.
     if (!ref.read(linkPreviewsEnabledProvider)) return;
     final text = _controller.text;
     final match = _urlRegex.firstMatch(text);
@@ -755,12 +727,11 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
     try {
       final preview = await network_api.fetchLinkPreview(url: url);
       if (!mounted) return;
-      // The send raced this fetch. Land the card on the message that already
-      // went out instead of discarding the result (issue #45).
+      // The send raced this fetch, so the card lands on the message that
+      // already went out (issue #45).
       final lateMid = _latePreview.claim(url);
       if (lateMid != null) _attachPreview(lateMid, preview);
-      // Bail out if the user changed the URL (or dismissed it) while we
-      // were fetching.
+      // The user changed or dismissed the URL while the fetch ran.
       if (_stagedPreviewUrl != url) return;
       setState(() {
         _stagedPreview = preview;
@@ -768,11 +739,11 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
       });
     } catch (_) {
       if (!mounted) return;
-      // A failed fetch has nothing to attach — drop the pending record so a
-      // later unrelated fetch can't inherit it.
+      // A failed fetch has nothing to attach, and leaving the record would let
+      // a later unrelated fetch inherit it.
       _latePreview.claim(url);
       if (_stagedPreviewUrl != url) return;
-      // Failed silently — keep the URL but drop the staged card entirely.
+      // Failed silently: the URL stays, the staged card does not.
       setState(() {
         _stagedPreviewUrl = null;
         _stagedPreview = null;
@@ -781,10 +752,9 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
     }
   }
 
-  /// Land a card on an already-sent message. Deliberately quiet on failure:
-  /// the user's action (the send) already succeeded and is on screen, and a
-  /// card that never arrives is cosmetic — a toast here would be noise about
-  /// something they never asked for.
+  /// Lands a card on an already-sent message. Deliberately quiet on failure:
+  /// the send already succeeded and is on screen, so a missing card is cosmetic
+  /// and a toast would be noise about something nobody asked for.
   void _attachPreview(String messageId, network_api.LinkPreviewRef? preview) {
     ref
         .read(chatProvider.notifier)
@@ -797,9 +767,9 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
   Future<void> _handleSend({bool refocus = true}) async {
     _emoteAutocomplete.dismiss();
     if (_stagedFilePath != null) {
-      // A file send has nowhere to put a preview — FileHeaderPayload has no
-      // link_preview slot — so the staged card is dropped. Clear it here or
-      // it stays on screen attached to a message that never carried it.
+      // FileHeaderPayload has no link_preview slot, so the staged card must be
+      // cleared here or it stays on screen attached to a message that never
+      // carried it.
       _urlDebounce?.cancel();
       setState(() {
         _stagedPreviewUrl = null;
@@ -822,9 +792,9 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
     _lastTypingSent = null;
     if (refocus) _focusNode.requestFocus();
     final replyMid = _replyToMessageId;
-    // Capture staged preview BEFORE clearing state. When the fetch is still
-    // in flight there is nothing to capture — remember the URL instead, and
-    // attach the card when it lands (issue #45).
+    // Capture the staged preview BEFORE clearing state; with the fetch still in
+    // flight there is nothing to capture, so the URL is remembered and the card
+    // attaches when it lands (issue #45).
     final preview = _stagedPreview;
     final wasLoading = _stagedPreviewLoading;
     final pendingUrl = pendingPreviewUrl(
@@ -853,13 +823,12 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
               replyToMid: replyMid, linkPreview: preview);
       if (pendingUrl != null) {
         _latePreview.arm(pendingUrl, sentMid);
-        // Nothing is in flight when the debounce never fired — start it now.
+        // Nothing is in flight when the debounce never fired.
         if (!wasLoading) _fetchPreview(pendingUrl);
       }
     } catch (_) {
-      // The provider only adds the bubble AFTER the network send, so a
-      // failure here would otherwise vanish silently (composer already
-      // cleared, no bubble).
+      // The provider adds the bubble only AFTER the network send, so a failure
+      // here would vanish silently: composer cleared, no bubble.
       if (!mounted) return;
       HollowToast.show(context, 'Failed to send message',
           type: HollowToastType.error);
@@ -878,8 +847,8 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
     _focusNode.requestFocus();
   }
 
-  /// Stages a file dropped from the OS via desktop_drop.
-  /// Files over 34 MB prompt to host as a Hollow Share (see [_pickAndStageFile]).
+  /// Stages a file dropped from the OS. Over 34 MB it prompts to host the file
+  /// as a Hollow Share instead.
   Future<void> _handleDroppedFile(String path, String name, int sizeBytes) async {
     if (!mounted) return;
 
@@ -928,20 +897,17 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
         _stagedFileName = file.name;
         _stagedFileIsImage = ['png', 'jpg', 'jpeg', 'gif', 'bmp', 'webp'].contains(ext);
       });
-      // Defer the re-focus to after the OS returns window focus from the native
-      // file dialog. A synchronous requestFocus() here races that restoration —
-      // Flutter marks the node focused but keystrokes don't land, so the user has
-      // to click the field a few times. A post-frame callback runs after the
-      // window-focus event settles.
+      // Defer the re-focus until the OS has returned window focus from the
+      // native file dialog: a synchronous requestFocus() marks the node focused
+      // while keystrokes still go nowhere.
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) _focusNode.requestFocus();
       });
     } finally { _isPicking = false; }
   }
 
-  /// Called by [VoiceRecorderBar] when the user taps send. Stages the
-  /// `.ogg` file produced by the recorder and kicks off send immediately —
-  /// voice messages shouldn't need a confirmation click.
+  /// Stages the recorder's `.ogg` and sends it immediately, because a voice
+  /// message should not need a confirmation click.
   Future<void> _stageVoiceMessage(VoiceRecordingResult result) async {
     if (!mounted) return;
     final file = File(result.filePath);
@@ -969,13 +935,11 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
     await _sendStagedFile();
   }
 
-  /// Send an already-written file straight into this conversation, with no
-  /// save dialog — the "Share pack to this chat" path (issue #36). Stages and
-  /// sends in one go, exactly like a finished voice recording.
+  /// Sends an already-written file straight into this conversation with no save
+  /// dialog, the "Share pack to this chat" path (issue #36).
   ///
-  /// The file is NOT deleted afterwards: our own bubble keeps pointing at it
-  /// (the pack card reads its manifest from disk), so it lives out its life in
-  /// the temp directory the OS already sweeps.
+  /// The file is NOT deleted afterwards: our own bubble keeps pointing at it,
+  /// so it lives out its life in the temp directory the OS sweeps.
   Future<void> _shareFileToChat(String path, String fileName) async {
     if (!mounted) return;
     setState(() {
@@ -1023,11 +987,10 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
           messageId: messageId,
           messageText: messageText,
           // The display name is the voice-recorder signal; the wire carries a
-          // dedicated flag (auto-download-gate exemption, issue #41).
+          // dedicated flag (auto-download gate exemption, issue #41).
           isVoice: fileName == 'Voice message.ogg',
         );
 
-    // Clean up voice recording temp files after successful send.
     if (fileName.endsWith('.ogg') && filePath.contains('temp')) {
       try { await File(filePath).delete(); } catch (_) {}
     }
@@ -1067,11 +1030,10 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
     }
   }
 
-  /// Default filename for the save dialog: images normalize to .png
-  /// (gifs stay .gif); everything else keeps its original name.
+  /// Default filename for the save dialog: images normalise to .png, gifs stay
+  /// .gif, everything else keeps its original name.
   String _saveDialogFileName(FileAttachment attachment) {
     if (!attachment.isImage) return attachment.fileName;
-    // Strip extension from filename for the dialog.
     final baseName = attachment.fileName.contains('.')
         ? attachment.fileName.substring(0, attachment.fileName.lastIndexOf('.'))
         : attachment.fileName;
@@ -1080,23 +1042,20 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
         : '$baseName.png';
   }
 
-  /// Write the attachment to [savePath], converting stored WebP images when
-  /// the user chose a different format.
+  /// Writes the attachment to [savePath], converting a stored WebP image when
+  /// the chosen extension asks for another format.
   Future<void> _writeSavedFile(String savePath, FileAttachment attachment) async {
-    // Determine target format from chosen extension.
     final targetExt = savePath.contains('.')
         ? savePath.split('.').last.toLowerCase()
         : attachment.fileExt;
 
     if (attachment.isImage && targetExt != 'webp' && attachment.fileExt == 'webp') {
-      // Convert WebP to target format via Rust.
       final converted = await network_api.convertImageFormat(
         sourcePath: attachment.diskPath!,
         targetFormat: targetExt,
       );
       await File(savePath).writeAsBytes(converted);
     } else {
-      // Direct copy.
       await File(attachment.diskPath!).copy(savePath);
     }
   }
@@ -1111,8 +1070,8 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
     // Manual pull: lift the auto-download-gate pin so real progress renders.
     ref.read(fileTransferProvider.notifier).clearDeclined(attachment.fileId);
     try {
-      // No toast: the card itself answers the tap now, saying "Requesting..."
-      // and then what came back (tmp.txt item 1). Failures still toast.
+      // No toast: the card itself answers the tap, saying "Requesting..." and
+      // then what came back. Failures still toast.
       await network_api.requestFileFromPeer(
         fileId: attachment.fileId,
         peerId: senderId,
@@ -1128,10 +1087,8 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
-    // Per-conversation select: a message/reaction/edit in ANY other
-    // conversation used to rebuild this whole pane (the map is replaced
-    // wholesale on every insert; this conversation's list identity only
-    // changes when IT changes).
+    // Per-conversation select: the map is replaced wholesale on every insert,
+    // so watching it rebuilds this pane for activity in any conversation.
     final messages =
         ref.watch(chatProvider.select((m) => m[widget.peerId])) ?? [];
 
@@ -1143,9 +1100,8 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
     final profiles = ref.watch(profileProvider);
     final localPeerId = ref.watch(identityProvider).peerId ?? '';
 
-    // Screen share layout only shows in the DM with the call peer.
-    // Named-record select: this build only reads these four call fields, so
-    // video toggles / labels / renderer seq bumps no longer rebuild the pane.
+    // Named-record select: this build reads only these four call fields, so
+    // video toggles, labels and renderer seq bumps do not rebuild the pane.
     final call = ref.watch(callProvider.select((c) => (
           peerId: c.peerId,
           status: c.status,
@@ -1154,33 +1110,28 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
           watchingRemoteShare: c.watchingRemoteShare,
         )));
     final isCallWithThisPeer = call.peerId == widget.peerId;
-    // Any share (ours or theirs) engages the share surface. Opt-in watching
-    // (issue #38) gates the MEDIA, not the surface: an unwatched remote
-    // share renders as an avatar + Watch placeholder tile in there.
+    // Any share engages the surface; opt-in watching (issue #38) gates the
+    // MEDIA, so an unwatched remote share renders as a Watch placeholder tile.
     final isScreenShareActive = isCallWithThisPeer &&
         (call.isScreenSharing || call.remoteScreenSharing);
 
-    // Saved messages: this DM is with our OWN master identity. The header shows
-    // "Saved messages" + a bookmark instead of the peer avatar/name/presence,
-    // and the call buttons are hidden (can't call yourself). Everything below
-    // the header (messages, search, files) works like any other DM.
+    // Saved messages is a DM with our OWN master identity: only the header and
+    // the call buttons differ, everything below works like any other DM.
     final savedId = ref.watch(savedMessagesPeerIdProvider);
     final isSavedMessages = savedId != null &&
         ref.watch(deviceLinkProvider).identityOf(widget.peerId) == savedId;
 
-    // Custom-emote pull source for every token/reaction in this DM: ask the
-    // conversation counterpart's devices.
+    // Custom-emote pull source for every token and reaction in this DM: the
+    // counterpart's devices.
     return EmoteScope(
       peerHint: widget.peerId,
       child: Row(
       children: [
-        // DM Profile Panel (left side) with slide animation
         _DmProfilePanelSlider(
           visible: showProfilePanel && !isScreenShareActive,
           peerId: widget.peerId,
         ),
 
-        // Chat area
         Expanded(
           child: ChatDropZone(
             onFileDropped: _handleDroppedFile,
@@ -1193,12 +1144,10 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
         if (ref.watch(chatSearchOpenProvider))
           _buildSearchBar(hollow, isSavedMessages),
 
-        // Issue 1-C: pinned above the message list, not a toast — the warning
-        // has to survive scrollback and restarts. Renders nothing when clear.
+        // Pinned above the message list rather than a toast, because the
+        // warning has to survive scrollback and restarts.
         if (!isSavedMessages) SecurityAlertBanner(peerId: widget.peerId),
 
-        // Screen share: full-bleed layout with overlay chat + controls.
-        // Normal call / no call: standard column layout.
         if (isScreenShareActive)
           _buildScreenShareLayout(
               hollow, messages, typingPeers, profiles, localPeerId,
@@ -1209,31 +1158,28 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
           ..._buildMessageArea(hollow, messages, typingPeers, profiles, localPeerId),
         ],
       ],
-          ), // Column
-          ), // ChatDropZone
-        ), // Expanded (chat area)
+          ),
+          ),
+        ),
       ],
-      ), // Row
-    ); // EmoteScope
+      ),
+    );
   }
 
-  /// All build-time ref.listen registrations. Must be invoked from build()
-  /// every frame — Riverpod re-registers listeners per build and silently
-  /// no-ops registrations made anywhere else (e.g. initState).
+  /// All build-time ref.listen registrations. MUST be invoked from build():
+  /// Riverpod re-registers listeners per build and silently no-ops a
+  /// registration made anywhere else.
   void _registerBuildListeners() {
-    // New-message handling under the reversed list: following (at bottom) →
-    // instant re-pin to the newest row; reading history → freeze the display
-    // (the unread pill takes over) so the view never shifts mid-read.
+    // Following re-pins to the newest row; reading history freezes the display
+    // so the view never shifts mid-read.
     ref.listen<Map<String, List<ChatMessage>>>(
         chatProvider, _onMessageListGrowth);
-    // Focus-return mark-seen: a message arriving while the window is
-    // unfocused counts as unread (the isViewingDm gate requires focus), and
-    // if this chat was ALREADY open at the bottom nothing else clears it —
-    // the scroll handler only marks seen on a bottom re-ENTRY transition.
-    // The user is now looking straight at the message; retire the unread.
+    // A message arriving while the window is unfocused counts as unread, and if
+    // this chat was already open at the bottom nothing else clears it: the
+    // scroll handler only marks seen on a bottom re-ENTRY.
     ref.listen<bool>(windowFocusedProvider, _onWindowFocusChanged);
-    // Opened by the global quick-search shortcut: focus the field, which the
-    // header button does for itself.
+    // Opened by the global quick-search shortcut, which unlike the header
+    // button cannot focus the field itself.
     ref.listen<bool>(chatSearchOpenProvider, _onSearchOpenChanged);
   }
 
@@ -1262,13 +1208,13 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
       );
       if (mounted) setState(() => _searchResults = results);
     } catch (_) {
-      // Store closed or a transient FFI error — leave the last results up
-      // rather than blanking the list under the user's cursor.
+      // Store closed or a transient FFI error: leave the last results up rather
+      // than blanking the list under the cursor.
     }
   }
 
   /// Closes search and scrolls to the tapped result. The index is against the
-  /// DISPLAY (possibly frozen) list, which is what [_scrollToMessage] takes.
+  /// DISPLAY list, possibly frozen, which is what [_scrollToMessage] takes.
   void _jumpToSearchResult(storage_api.StoredMessage msg) {
     final messages =
         _displayMessages(ref.read(chatProvider)[widget.peerId] ?? []);
@@ -1284,10 +1230,10 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
     final prevLen = (prev?[widget.peerId] ?? const []).length;
     final nextLen = (next[widget.peerId] ?? const []).length;
     if (nextLen <= prevLen) return;
-    if (_frozenLen != null) return; // already frozen — held back + pill
+    if (_frozenLen != null) return;
     if (!_isNearBottom) {
-      // Scroll-away raced the freeze transition — freeze at the pre-growth
-      // length so this arrival is held back too.
+      // Scroll-away raced the freeze, so freeze at the pre-growth length and
+      // hold this arrival back too.
       _frozenLen = prevLen;
       return;
     }
@@ -1328,8 +1274,7 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
           Expanded(child: _buildHeaderTitle(hollow, isSavedMessages)),
           if (!isSavedMessages) _buildConnectionStatus(),
           const SizedBox(width: HollowSpacing.sm),
-          // Voice + video call buttons (hidden for Saved messages — you
-          // can't call yourself).
+          // Hidden for Saved messages: you cannot call yourself.
           if (!isSavedMessages) ...[
             _buildVoiceCallButton(hollow),
             const SizedBox(width: HollowSpacing.xs),
@@ -1339,13 +1284,11 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
           _buildSearchToggleButton(hollow),
           const SizedBox(width: HollowSpacing.xs),
           _buildProfileToggleButton(hollow, showProfilePanel),
-          // Notification mute toggle — hidden for Saved Messages (you
-          // never get notified about your own self-DM).
+          // Hidden for Saved messages: a self-DM never notifies.
           if (!isSavedMessages) ...[
             const SizedBox(width: HollowSpacing.xs),
             _buildMuteToggleButton(hollow),
           ],
-          // Split view button (dock mode only)
           if (ref.watch(layoutModeProvider) == LayoutMode.dock) ...[
             const SizedBox(width: HollowSpacing.xs),
             _buildSplitToggleButton(hollow),
@@ -1489,13 +1432,10 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
     );
   }
 
-  /// Header names (status dot dropped — the ConnectionProgress on the right
-  /// already conveys online/offline):
-  ///  • local nickname set  → local nickname on top, the friend's own profile
-  ///    name (their "real nickname") below — falling back to the short peer
-  ///    ID if they set no profile name.
-  ///  • no local nickname   → just the profile name (or short peer ID), no
-  ///    subline.
+  /// Header names. A local nickname takes the top line and the friend's own
+  /// profile name (or their short peer id) drops to a subline; with no local
+  /// nickname there is no subline. No status dot, because the ConnectionProgress
+  /// on the right already carries online and offline.
   Widget _buildHeaderTitle(HollowTheme hollow, bool isSavedMessages) {
     if (isSavedMessages) {
       return Text(
@@ -1547,14 +1487,11 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
     );
   }
 
-  /// Multi-device: `widget.peerId` is the friend's MASTER id, but
-  /// `peersProvider` is keyed by the DEVICE peer_ids the relay reports. A
-  /// direct `peers[master]` lookup is always null for a multi-device /
-  /// keystone-rotated friend, so the header showed Offline while the
-  /// dots/call-buttons (which collapse by master) showed online. Scan for ANY
-  /// device of this master with an encrypted session (same pattern as the
-  /// Home network column). Single-device: the device id IS the master →
-  /// direct lookup.
+  /// `widget.peerId` is the friend's MASTER id while `peersProvider` is keyed by
+  /// the DEVICE ids the relay reports, so a direct `peers[master]` lookup is
+  /// always null for a multi-device friend and the header would read Offline
+  /// while the dots and call buttons read online. Scan for ANY device of this
+  /// master with an encrypted session.
   Widget _buildConnectionStatus() {
     final links = ref.watch(deviceLinkProvider);
     final peers = ref.watch(peersProvider);
@@ -1576,15 +1513,15 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
       key: ValueKey('dm-conn-${widget.peerId}-${stage.index}'),
       stage: stage,
       // In a DM header the stage describes THE OTHER PERSON, not our own relay
-      // link — say so, so it can't be read as "you are offline".
+      // link, so it must not read as "you are offline".
       tooltip: stage == ConnectionStage.offline
           ? "This person isn't reachable right now"
           : null,
     );
   }
 
-  /// Starting a DM call while in a server voice channel disconnects the
-  /// channel (issue #49) — confirm before doing so. Returns true to proceed.
+  /// Confirms leaving a server voice channel, which starting a DM call
+  /// disconnects (issue #49). Returns true to proceed.
   Future<bool> _confirmLeaveVoiceForCall() async {
     final vc = ref.read(voiceChannelProvider);
     if (!vc.isInVoiceChannel) return true;
@@ -1743,9 +1680,8 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
     );
   }
 
-  /// Full-bleed screen-share layout: the share view fills the pane, with the
-  /// source pill (top), chat overlay (right), and controls pill (bottom)
-  /// floating above it — all auto-hiding via [_overlaysVisible].
+  /// Full-bleed screen-share layout: the share fills the pane and the source
+  /// pill, chat overlay and controls pill float above it, auto-hiding together.
   Widget _buildScreenShareLayout(
     HollowTheme hollow,
     List<ChatMessage> messages,
@@ -1760,18 +1696,14 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
         onEnter: (_) => _resetOverlayTimer(),
         child: Stack(
           children: [
-            // Layer 0: full-bleed screen share
             Positioned.fill(
               child: _ScreenShareFullView(peerId: widget.peerId),
             ),
-            // Layer 0.5: source switcher pill (top-center) — only when at
-            // least one screen share is active AND there are 2+ sources to
-            // switch between. Camera-only DMs don't need a switcher.
+            // Only with a share active and two or more sources to switch
+            // between; a camera-only DM needs no switcher.
             if (anyScreenSharing) _buildSourcePillOverlay(hollow),
-            // Layer 1: chat overlay (right side) + toggle button
             _buildChatOverlay(
                 hollow, messages, typingPeers, profiles, localPeerId),
-            // Layer 2: floating controls pill (bottom center)
             _buildControlsPillOverlay(),
           ],
         ),
@@ -1779,15 +1711,14 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
     );
   }
 
-  /// Scoped Consumer: the pill needs the FULL call state (video-enabled
-  /// fields) — watch it here, not pane-wide.
+  /// Scoped Consumer: the pill needs the FULL call state, so it is watched here
+  /// rather than pane-wide.
   Widget _buildSourcePillOverlay(HollowTheme hollow) {
     return Consumer(builder: (context, ref, _) {
       final fullCall = ref.watch(callProvider);
       if (_countActiveDmSources(fullCall) < 2) {
-        // MUST stay Positioned: a bare (non-positioned) child
-        // makes the Stack size to IT (0x0) instead of
-        // expanding — which blanked the whole share view.
+        // MUST stay Positioned: a non-positioned child makes the Stack size to
+        // it (0x0) and blanks the whole share view.
         return const Positioned(left: 0, top: 0, child: SizedBox.shrink());
       }
       return Positioned(
@@ -1828,7 +1759,6 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.center,
         children: [
-          // Pin toggle — always visible while overlays are.
           ChatOverlayToggleButton(
             overlaysVisible: _overlaysVisible,
             pinned: _chatOverlayPinned,
@@ -1837,7 +1767,6 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
             onHoverEnter: _pinOverlays,
             onHoverExit: _resetOverlayTimer,
           ),
-          // Chat panel — slides in/out
           _ChatOverlaySlider(
             visible: _chatOverlayPinned,
             onHoverEnter: _pinOverlays,
@@ -1883,8 +1812,8 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
     );
   }
 
-  /// Open the unified emoji/emote picker anchored to the composer button and
-  /// insert the selection (Unicode emoji or emote token) at the cursor.
+  /// Opens the emoji and emote picker anchored to the composer button, and
+  /// inserts the selection at the cursor.
   void _openComposerEmojiPicker(BuildContext btnCtx) {
     final box = btnCtx.findRenderObject() as RenderBox?;
     final anchor = box == null
@@ -1897,8 +1826,8 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
     );
   }
 
-  /// Open the GIF picker anchored to the composer button; the picked GIF
-  /// arrives as an `[a:g:hash:w:h]` token and stages like an emote.
+  /// Opens the GIF picker anchored to the composer button. The pick arrives as
+  /// an `[a:g:hash:w:h]` token and stages like an emote.
   void _openComposerGifPicker(BuildContext btnCtx) {
     final box = btnCtx.findRenderObject() as RenderBox?;
     final anchor = box == null
@@ -1911,8 +1840,8 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
     );
   }
 
-  /// Open the sticker picker anchored to the composer button. A pick SENDS
-  /// immediately (see [_sendAsset]) and the panel stays open.
+  /// Opens the sticker picker anchored to the composer button. A pick SENDS
+  /// immediately and the panel stays open.
   void _openComposerStickerPicker(BuildContext btnCtx) {
     final box = btnCtx.findRenderObject() as RenderBox?;
     final anchor = box == null
@@ -1926,24 +1855,20 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
     );
   }
 
-  /// Send-on-click (issue #36): a sticker or GIF leaves its picker as a
-  /// MESSAGE, not as composer content, the way Telegram and Discord do it.
-  /// Text already in the composer rides along in the same message as a
-  /// caption (the Discord half), so the caption path survives without costing
-  /// a click, and both panels stay open so sending several is just repeated
-  /// clicks.
+  /// Send-on-click (issue #36): a sticker or GIF leaves its picker as a MESSAGE
+  /// rather than as composer content, with any text already typed riding along
+  /// as a caption.
   ///
   /// Focus deliberately stays where it is: pulling it back to the composer
-  /// summons the software keyboard over the picker sheet on mobile, on every
-  /// single pick.
+  /// summons the software keyboard over the picker sheet on every pick.
   Future<void> _sendAsset(String token) async {
     _insertEmojiAtCursor(token, refocus: false);
     await _handleSend(refocus: false);
   }
 
   void _insertEmojiAtCursor(String text, {bool refocus = true}) {
-    // Custom-emote/asset tokens become a 1-char placeholder rendered inline
-    // as the actual image; Unicode emoji pass through unchanged.
+    // Asset tokens become a 1-char placeholder rendered inline as the image;
+    // Unicode emoji pass through unchanged.
     text = _controller.displayTextFor(text);
     final sel = _controller.selection;
     final base = sel.isValid ? sel.baseOffset : _controller.text.length;
@@ -1957,8 +1882,8 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
     if (refocus) _focusNode.requestFocus();
   }
 
-  /// Builds the message list + typing + reply bar + input bar.
-  /// Used by both the normal column layout and the screen-share overlay.
+  /// The message area, shared by the normal column layout and the screen-share
+  /// overlay.
   List<Widget> _buildMessageArea(
     HollowTheme hollow,
     List<ChatMessage> allMessages,
@@ -1966,11 +1891,10 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
     Map<String, storage_api.UserProfile> profiles,
     String localPeerId,
   ) {
-    // While the user reads history the display is frozen — arrivals are held
-    // back (see _frozenLen). `allMessages` keeps the true list for mark-seen.
+    // Frozen while reading history, so `allMessages` keeps the true list for
+    // mark-seen.
     final messages = _displayMessages(allMessages);
     return [
-      // Messages list + unread pill overlay
       Expanded(
         child: Stack(
           children: [
@@ -1980,10 +1904,8 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
         ),
       ),
 
-      // Typing indicator
       if (typingPeers.isNotEmpty) _buildTypingBar(typingPeers),
 
-      // Reply preview bar
       if (_replyToMessageId != null)
         ChatReplyPreviewBar(
           senderName: _replyToSenderName,
@@ -1992,7 +1914,6 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
           onCancel: _cancelReply,
         ),
 
-      // Staged file preview
       if (_stagedFilePath != null)
         StagedFilePreviewBar(
           filePath: _stagedFilePath!,
@@ -2001,7 +1922,6 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
           onRemove: _removeStagedFile,
         ),
 
-      // Staged link card (hollow invite or OG preview)
       StagedLinkArea(
         hollowLink: _stagedHollowLink,
         previewUrl: _stagedPreviewUrl,
@@ -2011,7 +1931,6 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
         onDismissPreview: _dismissStagedPreview,
       ),
 
-      // Input bar
       _buildInputBar(hollow),
     ];
   }
@@ -2100,23 +2019,21 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
     );
   }
 
-  /// The reversed message list (see the scroll-model comment above
-  /// [_frozenLen]) plus the per-build row precomputes.
+  /// The reversed message list plus the per-build row precomputes.
   Widget _buildMessageList(
     HollowTheme hollow,
     List<ChatMessage> messages,
     Map<String, storage_api.UserProfile> profiles,
     String localPeerId,
   ) {
-    // Reply-target lookup: one pass per build instead of an O(n) indexWhere
-    // scan per reply row per rebuild.
+    // One pass per build instead of an O(n) scan per reply row per rebuild.
     final replyIndexById = <String, int>{
       for (var i = 0; i < messages.length; i++)
         if (messages[i].messageId != null) messages[i].messageId!: i,
     };
-    // Where reading left off (issue #54). Computed once per build against the
-    // list actually on screen, so the reversed index handed to the rail and
-    // the chronological one handed to the rows cannot disagree.
+    // Computed once per build against the list actually on screen, so the
+    // reversed index handed to the rail and the chronological one handed to the
+    // rows cannot disagree (issue #54).
     final unreadIndex = unreadDividerIndex(
       count: messages.length,
       entrySeenId:
@@ -2132,9 +2049,9 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
       scrollOffsetController: _scrollOffsetController,
       itemCount: messages.length,
       indexByMessageId: replyIndexById,
-      // The rail's "jump to present" has to go through the pane: the display
-      // list is frozen while reading, so index 0 is not the newest message
-      // until the freeze is released (issue #54).
+      // "Jump to present" goes through the pane because the display list is
+      // frozen while reading, so index 0 is not the newest message until the
+      // freeze is released (issue #54).
       onJumpToNewest: _scrollToBottom,
       unreadRevIndex:
           unreadIndex == null ? null : messages.length - 1 - unreadIndex,
@@ -2150,8 +2067,7 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
     );
   }
 
-  /// One chat row: grouping-header decision, hover-action wrapper, bubble,
-  /// and date separator — [revIndex] is the reversed builder index.
+  /// One chat row. [revIndex] is the reversed builder index.
   Widget _buildMessageRow(
     BuildContext context,
     int revIndex,
@@ -2161,12 +2077,10 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
     String localPeerId,
     int? unreadIndex,
   ) {
-    // Map the reversed builder index back to chronological order — all row
-    // logic below (grouping, separators, highlight, reply) stays in
-    // chronological terms.
+    // Map the reversed builder index back to chronological order; all row logic
+    // below stays in chronological terms.
     final index = messages.length - 1 - revIndex;
     final msg = messages[index];
-    // Grouping: compare with the previous message in chronological order.
     final showHeader = index == 0 ||
         !shouldGroup(
           currentIsMe: msg.isMe,
@@ -2192,8 +2106,8 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
           ? (emoji) => _toggleReaction(msg, emoji)
           : null,
       onDownload: _downloadFor(context, msg),
-      // The hover bar and the message menu mirror the card: no Download
-      // while nobody can serve the file (tmp.txt item 1).
+      // The hover bar and the message menu mirror the card: no Download while
+      // nobody can serve the file.
       fileAttachment: msg.fileAttachment,
       onCopy: _copyFor(context, msg),
       onCopyImage: _copyImageFor(context, msg),
@@ -2207,17 +2121,17 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
       timestamp: msg.timestamp,
       prevTimestamp: index > 0 ? messages[index - 1].timestamp : null,
       showHeader: showHeader,
-      // This list carries the scroll rail, so the date rule keeps its right
-      // end level with its left instead of ending 34px from the pane edge.
+      // This list carries the scroll rail, so the date rule gives that width
+      // back and keeps its two ends level.
       railGutter: true,
       unreadDivider: index == unreadIndex,
       child: wrapper,
     );
   }
 
-  /// Sticker tiling for the row at [index]: it and its neighbour are both
-  /// nothing-but-stickers and already grouped, so the seam between them is
-  /// drawn continuous. `showHeader` IS "not grouped with the previous".
+  /// Sticker tiling for the row at [index]: a continuous seam where it and its
+  /// neighbour are both bare stickers and already grouped. `showHeader` IS "not
+  /// grouped with the previous".
   ({bool prev, bool next}) _tilingAt(
       List<ChatMessage> messages, int index, bool showHeader) {
     bool candidate(ChatMessage m) => stickerTileCandidate(
@@ -2288,16 +2202,15 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
     );
   }
 
-  // ── Row action callbacks ──────────────────────────────────────────────
-  // Null hides the affordance for this message. Tap-time reads use ref.read
-  // (equal or fresher than the build-captured watch values at tap time).
+  // Row action callbacks. Null hides the affordance for this message, and
+  // tap-time reads use ref.read, which is never staler than the build's watch.
 
   VoidCallback? _editStartFor(ChatMessage msg, int revIndex) {
     final canEdit =
         msg.messageId != null && msg.isMe && msg.fileAttachment == null;
     if (!canEdit) return null;
     return () {
-      // Positions + jumpTo live in the REVERSED index space.
+      // Positions and jumpTo live in the REVERSED index space.
       final positions = _itemPositionsListener.itemPositions.value;
       final current = positions.where((p) => p.index == revIndex).firstOrNull;
       final alignment = current?.itemLeadingEdge ?? 0.3;
@@ -2344,8 +2257,8 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
     _resyncPreviewAfterEdit(messageId, newText);
   }
 
-  /// Keep the card honest after an edit (issue #45): editing the URL out of a
-  /// message used to leave its old card sitting under the new text.
+  /// Keeps the card honest after an edit (issue #45): editing the URL out of a
+  /// message must not leave its old card under the new text.
   Future<void> _resyncPreviewAfterEdit(String messageId, String newText) async {
     if (!ref.read(linkPreviewsEnabledProvider)) return;
     final msgs = ref.read(chatProvider)[widget.peerId] ?? const <ChatMessage>[];
@@ -2353,9 +2266,9 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
     final oldUrl = idx == -1 ? null : msgs[idx].linkPreview?.url;
     final newUrl = _urlRegex.firstMatch(newText)?.group(0);
 
-    if (newUrl == oldUrl) return; // Same link, same card.
+    if (newUrl == oldUrl) return;
     if (newUrl == null) {
-      _attachPreview(messageId, null); // URL gone — clear the card.
+      _attachPreview(messageId, null);
       return;
     }
     // Hollow deep links render from a locally parsed card, never a fetch.
@@ -2368,8 +2281,8 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
       if (!mounted) return;
       _attachPreview(messageId, preview);
     } catch (_) {
-      // Nothing fetched: leave whatever card the row already had rather than
-      // blanking it on a transient network failure.
+      // Leave whatever card the row had rather than blanking it on a transient
+      // network failure.
     }
   }
 
@@ -2412,7 +2325,6 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
     final attachment = msg.fileAttachment;
     if (attachment == null) return null;
     return () {
-      // Guard against duplicate downloads.
       final transfer = ref.read(fileTransferProvider)[attachment.fileId];
       if (transfer != null && transfer.isDownloading) {
         HollowToast.show(context, 'File is already downloading...',
@@ -2423,9 +2335,9 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
         _saveFile(attachment);
       } else if (attachment.shareRootHash != null &&
           attachment.shareKeyHex != null) {
-        // Share-backed (>34 MB): rejoin the share swarm via the persisted
-        // ref — a direct FileRequest response carries no share_ref and our
-        // own size cap rejects it (issue #41).
+        // Share-backed (>34 MB): rejoin the swarm through the persisted ref,
+        // because a direct FileRequest response carries no share_ref and our own
+        // size cap rejects it (issue #41).
         ref.read(eventStreamProvider.notifier).startManualShareDownload(
               fileId: attachment.fileId,
               rootHash: attachment.shareRootHash!,
@@ -2439,7 +2351,6 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
           }
         });
       } else {
-        // DM: request from the peer we're chatting with.
         _requestFileFromPeer(attachment, widget.peerId);
       }
     };
@@ -2463,8 +2374,8 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
     }
     return () async {
       final ok = await copyImageToClipboard(attachment.diskPath!);
-      // itemBuilder shadows the State's context — list items
-      // dispose when scrolled away, so check THIS element.
+      // itemBuilder shadows the State's context, and a list item disposes when
+      // scrolled away, so check THIS element.
       if (context.mounted) {
         HollowToast.show(
           context,
@@ -2486,9 +2397,8 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
           senderDisplayName:
               displayNameFor(ref.read(profileProvider), senderPeerId),
           text: msg.text,
-          // If the message has been edited, the signature was computed over
-          // the edit timestamp + new text — use editedAt to reconstruct the
-          // canonical payload.
+          // An edited message's signature covers the edit timestamp and the new
+          // text, so the canonical payload must be rebuilt from editedAt.
           timestampMs: (msg.editedAt ?? msg.timestamp).millisecondsSinceEpoch,
           signature: msg.signature,
           publicKey: msg.publicKey,
@@ -2508,7 +2418,7 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
     return att.isImage ? '📷 Image' : '📎 ${att.fileName}';
   }
 
-  /// Unread pill — only when new messages arrived while scrolled up.
+  /// Unread pill, only for messages that arrived while scrolled up.
   Widget _buildUnreadPillOverlay(List<ChatMessage> allMessages) {
     final unreadCount = ref.watch(
         unreadProvider.select((s) => s.dmUnreadCounts[widget.peerId] ?? 0));
@@ -2522,8 +2432,8 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
           count: unreadCount,
           onTap: () {
             _scrollToBottom();
-            // The display list may be frozen — mark seen against
-            // the TRUE newest message.
+            // The display list may be frozen, so mark seen against the TRUE
+            // newest message.
             ref.read(unreadProvider.notifier).markDmSeen(
                   widget.peerId,
                   allMessages.last.messageId,
@@ -2638,11 +2548,9 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
 }
 
 /// Slide animation wrapper for the DM profile panel.
-// ---------------------------------------------------------------------------
-// Inline call panel — shown under the DM header during a call with this peer.
-// ---------------------------------------------------------------------------
 
-/// Animated slider for the inline call panel (slides down from header).
+/// Animated slider for the inline call panel, shown under the DM header during
+/// a call with this peer.
 class _InlineCallPanelSlider extends ConsumerStatefulWidget {
   final String peerId;
   const _InlineCallPanelSlider({required this.peerId});
@@ -2686,7 +2594,7 @@ class _InlineCallPanelSliderState extends ConsumerState<_InlineCallPanelSlider>
         (call.status == CallStatus.active ||
          call.status == CallStatus.connecting);
 
-    // Drive animation (duration re-evaluated for disable toggle).
+    // Re-evaluated so the reduce-motion toggle takes effect.
     _controller.duration = HollowDurations.normal;
     if (isCallWithThisPeer) {
       _controller.forward();
@@ -2714,7 +2622,7 @@ class _InlineCallPanelSliderState extends ConsumerState<_InlineCallPanelSlider>
   }
 }
 
-/// The actual call panel content — audio bar or video view + controls.
+/// The call panel content: an audio bar, or a video view with controls.
 class _InlineCallPanel extends ConsumerStatefulWidget {
   final String peerId;
   const _InlineCallPanel({required this.peerId});
@@ -2725,16 +2633,14 @@ class _InlineCallPanel extends ConsumerStatefulWidget {
 
 class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
   double _remoteVolume = 1.0;
-  double _videoHeight = 200; // Height of the video area (only when video active).
+  double _videoHeight = 200;
   static const _minVideoHeight = 80.0;
   static const _maxVideoHeight = 2000.0;
   String? _expandedRenderer; // null = side-by-side, 'local' or 'remote' = fullscreen
 
-  /// Handle a tap on a source switcher tab. For cameras, this sets
-  /// _expandedRenderer to show the camera fullscreen with the other
-  /// side as PiP. For screens, this is a no-op in the inline panel
-  /// (the full-bleed screen share view takes over automatically via
-  /// isScreenShareActive).
+  /// Handles a tap on a source switcher tab. A camera goes fullscreen with the
+  /// other side as PiP; a screen is a no-op here, because the full-bleed share
+  /// view takes over on its own.
   void _onDmSourceTapped(String peerId, String type, String localPeerId) {
     if (type != 'camera') return;
     setState(() {
@@ -2742,10 +2648,8 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
     });
   }
 
-  /// Source switcher pill for DM calls. Shows one tab per active video
-  /// source (camera or screen) with highlighting on the currently focused
-  /// one. Focus highlight: cameras via [_expandedRenderer]; screens are not
-  /// interactive in the inline panel, so nothing is highlighted for them.
+  /// Source switcher pill for DM calls, one tab per active video source. Only
+  /// cameras highlight, since screens are not interactive in the inline panel.
   Widget _buildDmSourceSwitcher(
     HollowTheme hollow,
     CallState call,
@@ -2759,8 +2663,8 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
     } else if (_expandedRenderer == 'remote') {
       focusedPeerId = remotePeerId;
     }
-    // Opt-in watching (issue #38): the remote screen tab shows an eye until
-    // opted in — tapping it starts watching (which activates the layout).
+    // Opt-in watching (issue #38): until we opt in the remote screen tab shows
+    // an eye, and tapping it starts watching.
     final unwatched = {
       if (call.remoteScreenSharing && !call.watchingRemoteShare) remotePeerId,
     };
@@ -2782,9 +2686,8 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
     );
   }
 
-  // Call duration is rendered by CallDurationText (self-ticking leaf) — the
-  // old per-second setState rebuilt the ENTIRE inline call panel (video
-  // views, drag-resize, tabs, controls) every second of every call.
+  // Call duration is a self-ticking leaf: a per-second setState here rebuilds
+  // the ENTIRE inline call panel every second of every call.
 
   @override
   Widget build(BuildContext context) {
@@ -2803,14 +2706,12 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
     final remoteRenderer = voiceService?.remoteRenderer;
     final localRenderer = voiceService?.localRenderer;
 
-    // Reset expanded view when video turns off.
     if (!hasAnyVideo && _expandedRenderer != null) {
       _expandedRenderer = null;
     }
 
-    // Max video height: leave just enough room for controls + input bar
-    // (~140 px). The user wants to be able to drag the video panel up to
-    // nearly the full window height when focusing on one participant.
+    // Leave just enough room for the controls and input bar, so the video can
+    // be dragged to nearly the full window height.
     final screenHeight = MediaQuery.of(context).size.height;
     final maxH = (screenHeight * 0.8).clamp(_minVideoHeight, _maxVideoHeight);
 
@@ -2830,12 +2731,11 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
         child: Column(
           mainAxisSize: isScreenShare ? MainAxisSize.max : MainAxisSize.min,
           children: [
-            // Held-open status, as a header for the whole call panel. Above
-            // the video rather than beside it: this is about the call, not
-            // about one participant's tile.
+            // Above the video rather than beside it: this is about the call,
+            // not about one participant's tile.
             _buildLinkHealthBanner(),
-            // Video / screen share area — screen share fills available
-            // space; camera uses fixed (drag-resizable) height.
+            // A screen share fills the available space; a camera keeps a fixed,
+            // drag-resizable height.
             if (hasVideoArea) ...[
               if (isScreenShare)
                 Expanded(
@@ -2844,8 +2744,6 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
               else
                 _buildCameraArea(call, hollow, displayName, remoteRenderer,
                     localRenderer, hasRemoteVideo, hasLocalVideo, localPeerId),
-              // Resize handle (not needed during screen share — it fills
-              // Expanded).
               if (!isScreenShare) _buildResizeHandle(hollow, maxH),
             ],
             _buildControlBar(call, hollow, hasAnyVideo, localPeerId),
@@ -2879,9 +2777,8 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
                 : _buildSideBySideVideo(hollow, displayName, remoteRenderer,
                     localRenderer, hasRemoteVideo, hasLocalVideo),
           ),
-          // Source switcher pill (top-center) — only when at least one
-          // screen share is active AND there are 2+ sources. Camera-only
-          // DMs don't need a switcher.
+          // Only with a share active and two or more sources to switch
+          // between; a camera-only DM needs no switcher.
           if ((call.isScreenSharing || call.remoteScreenSharing) &&
               _countActiveDmSources(call) >= 2)
             Positioned(
@@ -2926,8 +2823,7 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
     );
   }
 
-  /// Control bar: timer (left), avatars (center, audio-only), controls
-  /// (right).
+  /// Control bar: timer, avatars while audio-only, then the controls.
   Widget _buildControlBar(
       CallState call, HollowTheme hollow, bool hasAnyVideo, String localPeerId) {
     return Padding(
@@ -2937,7 +2833,6 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
       ),
       child: Row(
         children: [
-          // Left: timer + status
           StatusDot(color: hollow.success, size: 8),
           const SizedBox(width: HollowSpacing.sm),
           if (call.status == CallStatus.connecting || call.startedAt == null)
@@ -2957,23 +2852,20 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
                 fontFeatures: [const FontFeature.tabularFigures()],
               ),
             ),
-          // Center: avatars (audio-only — when video is on, they're in the
-          // rectangles).
+          // With video on, the avatars are in the rectangles instead.
           if (!hasAnyVideo) ...[
             const Spacer(),
             _buildAudioAvatars(call, hollow, localPeerId),
           ],
           const Spacer(),
-          // Right: controls
           _buildControls(call, hollow),
         ],
       ),
     );
   }
 
-  /// Speaking state comes from callSpeakingProvider via a scoped Consumer so
-  /// VAD flips rebuild ONLY these two avatars, not the whole inline call
-  /// panel.
+  /// Speaking state arrives through a scoped Consumer so a VAD flip rebuilds
+  /// only these two avatars, not the whole inline call panel.
   Widget _buildAudioAvatars(
       CallState call, HollowTheme hollow, String localPeerId) {
     return Consumer(builder: (context, ref, _) {
@@ -3097,10 +2989,8 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
   }
 
   /// Puts the speaking ring on a call video tile (issue #37). The ring is an
-  /// overlay INSIDE the tile's clip, so it lights the rectangle the camera
-  /// occupies without changing the layout — the video texture is never
-  /// resized by a VAD flip. The scoped [Consumer] + `.select` keeps a flip to
-  /// this one layer instead of rebuilding the whole call panel 1-4x/second.
+  /// overlay INSIDE the tile's clip, so a VAD flip never resizes the video
+  /// texture, and the scoped [Consumer] keeps the flip to this one layer.
   Widget _speakingWrapped({
     required bool local,
     required BorderRadius radius,
@@ -3124,7 +3014,7 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
     );
   }
 
-  /// Default: two equal video rectangles side by side. Click to expand.
+  /// Two equal video rectangles side by side; a click expands one.
   Widget _buildSideBySideVideo(
     HollowTheme hollow,
     String displayName,
@@ -3135,7 +3025,6 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
   ) {
     return Row(
       children: [
-        // Local camera
         Expanded(
           child: GestureDetector(
             onTap: hasLocalVideo
@@ -3183,7 +3072,6 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
             ),
           ),
         ),
-        // Remote camera
         Expanded(
           child: GestureDetector(
             onTap: hasRemoteVideo
@@ -3234,7 +3122,7 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
     );
   }
 
-  /// Fullscreen: one video fills the area, the other is PiP. Click to exit.
+  /// One video fills the area with the other as PiP; a click exits.
   Widget _buildFullscreenVideo(
     HollowTheme hollow,
     String displayName,
@@ -3255,9 +3143,8 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
       child: Stack(
         clipBehavior: Clip.hardEdge,
         children: [
-          // Main video (full area) — Contain so the entire frame is visible
-          // when the user expands; letterbox bars are preferable to cropping
-          // someone's face/body out of the recording.
+          // Contain, because letterbox bars beat cropping someone out of the
+          // frame they just expanded.
           Positioned.fill(
             child: _speakingWrapped(
               local: isLocalExpanded,
@@ -3274,7 +3161,6 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
             ),
           ),
 
-          // PiP (bottom right)
           if (hasPip && pipRenderer != null)
             Positioned(
               right: 8,
@@ -3310,7 +3196,6 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
               ),
             ),
 
-          // "Click to exit fullscreen" hint (top left)
           Positioned(
             left: 8,
             top: 8,
@@ -3341,7 +3226,7 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
     );
   }
 
-  /// Screen share view: handles local sharing, remote sharing, and both sharing.
+  /// Screen share view: local sharing, remote sharing, or both.
   Widget _buildScreenShareView(
       CallState call, HollowTheme hollow, RTCVideoRenderer? remoteRenderer) {
     if (call.isScreenSharing && call.remoteScreenSharing) {
@@ -3353,12 +3238,11 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
     return _buildRemoteShareView(call, hollow, remoteRenderer);
   }
 
-  /// Both sharing — stacked: remote top, local banner bottom.
+  /// Both sharing: their screen on top, our banner below.
   Widget _buildBothSharingView(
       CallState call, HollowTheme hollow, RTCVideoRenderer? remoteRenderer) {
     return Column(
       children: [
-        // Remote screen (top, takes most space)
         Expanded(
           flex: 3,
           child: Stack(
@@ -3390,7 +3274,6 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
             ],
           ),
         ),
-        // Local banner (bottom, compact)
         Container(
           padding: const EdgeInsets.symmetric(vertical: HollowSpacing.sm),
           color: hollow.elevated,
@@ -3425,7 +3308,7 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
     );
   }
 
-  /// Only local sharing — show banner.
+  /// Only we are sharing, so a banner is enough.
   Widget _buildLocalShareBanner(CallState call, HollowTheme hollow) {
     return Container(
       color: hollow.elevated,
@@ -3463,7 +3346,7 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
     );
   }
 
-  /// Only remote sharing — show their screen (Contain, never mirror).
+  /// Only they are sharing: their screen, contained and never mirrored.
   Widget _buildRemoteShareView(
       CallState call, HollowTheme hollow, RTCVideoRenderer? remoteRenderer) {
     return Stack(
@@ -3503,8 +3386,8 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
     );
   }
 
-  /// Call avatar with muted (bottom-left) / deafened (bottom-right) badges —
-  /// same convention as the mobile voice avatars.
+  /// Call avatar with muted and deafened badges, in the same corners as the
+  /// mobile voice avatars.
   Widget _badgedCallAvatar({
     required HollowTheme hollow,
     required String peerId,
@@ -3523,13 +3406,10 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
 
     return Stack(
       children: [
-        // A speaking ring is drawn AROUND this avatar, and a built-in frame
-        // is a coloured ring in the same accent family - side by side they
-        // are the same picture, so a quiet person with a teal frame reads as
-        // talking. The functional cue wins: no frame on an avatar that
-        // carries a speaking ring of its own. Tile-rim cues (the VC grid,
-        // video PiPs) are a different shape in a different place and keep
-        // theirs. See avatar_frame.dart.
+        // No frame on an avatar that carries a speaking ring of its own: a
+        // built-in frame is a coloured ring in the same accent family, so a
+        // quiet person with a teal frame would read as talking. Tile-rim cues
+        // are a different shape in a different place and keep theirs.
         HollowAvatar(peerId: peerId, size: 60, frameId: ''),
         if (muted)
           Positioned(left: 0, bottom: 0, child: badge(LucideIcons.micOff)),
@@ -3540,8 +3420,7 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
     );
   }
 
-  /// Shared row of call controls: mute, deafen, camera, screen share,
-  /// record, end call.
+  /// Shared row of call controls.
   Widget _buildControls(CallState call, HollowTheme hollow) {
     final rec = ref.watch(recordingProvider);
     const iconSize = 20.0;
@@ -3563,15 +3442,13 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
         const SizedBox(width: HollowSpacing.xs),
         _cameraCallButton(ref, hollow, call,
             iconSize: iconSize, padding: buttonPadding),
-        // Screen share (desktop only)
         if (Platform.isWindows || Platform.isLinux || Platform.isMacOS) ...[
           const SizedBox(width: HollowSpacing.xs),
           _screenShareCallButton(context, ref, hollow, call,
               iconSize: iconSize, padding: buttonPadding),
         ],
-        // Record (Windows + macOS only). On macOS < 13.0 the native recorder
-        // doesn't exist, so the button is disabled with an explanatory tooltip.
-        // Hidden on Linux — no working native recorder there yet.
+        // Windows and macOS only: macOS before 13.0 has no native recorder (the
+        // button explains itself) and Linux has none at all.
         if (Platform.isWindows || Platform.isMacOS) ...[
           const SizedBox(width: HollowSpacing.xs),
           _buildRecordButton(rec, hollow, iconSize, buttonPadding),
@@ -3639,9 +3516,7 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Chat overlay slider — slides the chat panel in/out during screen share.
-// ---------------------------------------------------------------------------
+// Chat overlay slider: slides the chat panel in and out during a screen share.
 
 class _ChatOverlaySlider extends StatefulWidget {
   final bool visible;
@@ -3726,16 +3601,13 @@ class _ChatOverlaySliderState extends State<_ChatOverlaySlider>
   }
 }
 
-// ---------------------------------------------------------------------------
-// Screen share full-bleed view — fills entire chat area as background.
-// ---------------------------------------------------------------------------
+// Screen share full-bleed view, filling the chat area as its background.
 
 class _ScreenShareFullView extends ConsumerWidget {
   final String peerId;
   const _ScreenShareFullView({required this.peerId});
 
-  /// Mirror semantics for a renderer: cameras are mirrored when local,
-  /// screens are never mirrored.
+  /// Mirrors a local camera; a screen is never mirrored.
   Widget _renderTile(RTCVideoRenderer? renderer,
       {required bool isCamera, required bool isLocal}) {
     if (renderer == null) return const SizedBox.shrink();
@@ -3759,13 +3631,13 @@ class _ScreenShareFullView extends ConsumerWidget {
     final localScreen = notifier.localScreenShareRenderer;
     final remoteCamera = voice?.remoteRenderer;
     final localCamera = voice?.localRenderer;
-    // Opt-in watching (issue #38): the remote share only counts once we
-    // pressed Watch — unwatched it stays a pill tab / grid placeholder.
+    // Opt-in watching (issue #38): the remote share counts only once Watch was
+    // pressed; unwatched it stays a pill tab or grid placeholder.
     final bothSharing = call.isScreenSharing &&
         call.remoteScreenSharing &&
         call.watchingRemoteShare;
 
-    // Zoom-style grid of all sources (issue #38 follow-up).
+    // Zoom-style grid of all sources (issue #38).
     if (ref.watch(dmShareGridViewProvider)) {
       return _buildDmGridView(
         ref, call, hollow, localPeerId,
@@ -3776,16 +3648,14 @@ class _ScreenShareFullView extends ConsumerWidget {
       );
     }
 
-    // Opt-in watching (issue #38): their share exists but isn't watched —
-    // the share surface shows a clean avatar + Watch placeholder (side by
-    // side with our own share when we're sharing too). Media stays gated.
+    // Their share exists but is unwatched, so the surface shows an avatar and a
+    // Watch placeholder while the media stays gated (issue #38).
     if (call.remoteScreenSharing && !call.watchingRemoteShare) {
       return _buildUnwatchedShareStack(
           ref, call, hollow, localScreen: localScreen);
     }
 
-    // Resolve the focused source. Falls back to a sensible default if the
-    // focused source isn't currently active.
+    // Falls back to a default when the focused source is not currently active.
     final focused = ref.watch(focusedDmSourceProvider);
     final ({RTCVideoRenderer? renderer, bool isCamera, bool isLocal})
         bigChoice = _resolveBig(
@@ -3799,10 +3669,8 @@ class _ScreenShareFullView extends ConsumerWidget {
       localCamera: localCamera,
     );
 
-    // (Auto-focus-on-build was reverted — caused issues during the
-    // screen-share toggling dance. The pill simply won't highlight any tab
-    // until the user explicitly taps one. The big tile still uses
-    // _resolveBig's fallback so it shows the right thing.)
+    // No auto-focus on build: it fought the screen-share toggling dance, so no
+    // tab highlights until one is tapped and the big tile uses the fallback.
 
     if (bothSharing) {
       return _buildBothSharingStack(
@@ -3811,9 +3679,8 @@ class _ScreenShareFullView extends ConsumerWidget {
     return _buildSingleSourceStack(call, hollow, notifier, bigChoice);
   }
 
-  /// The peer shares but we haven't opted in: a clean placeholder surface
-  /// (avatar + name + Watch), split with our own share when both share —
-  /// the same look as the VC grid's unwatched tile.
+  /// The placeholder surface for a share we have not opted into, split with our
+  /// own share when both are sharing.
   Widget _buildUnwatchedShareStack(
     WidgetRef ref,
     CallState call,
@@ -3872,8 +3739,8 @@ class _ScreenShareFullView extends ConsumerWidget {
       return Container(color: Colors.black, child: placeholder);
     }
 
-    // Both sharing, theirs unwatched: our share left, their placeholder
-    // right — the same side-by-side the VC grid shows.
+    // Both sharing with theirs unwatched: our share left, their placeholder
+    // right, the same side-by-side the VC grid shows.
     final ownTile = Container(
       margin: const EdgeInsets.all(2),
       decoration: BoxDecoration(
@@ -3945,9 +3812,8 @@ class _ScreenShareFullView extends ConsumerWidget {
     );
   }
 
-  /// Zoom-style grid (issue #38): every active source as a tile — own share,
-  /// remote share (Watch placeholder until opted in), both cameras. Tap a
-  /// live tile to focus it full-bleed.
+  /// Zoom-style grid (issue #38): every active source as a tile, a remote share
+  /// staying a Watch placeholder until opted in. Tapping a live tile focuses it.
   Widget _buildDmGridView(
     WidgetRef ref,
     CallState call,
@@ -4039,7 +3905,7 @@ class _ScreenShareFullView extends ConsumerWidget {
           onTap: () => focusSource(peerId, 'screen'),
         ),
       if (call.remoteScreenSharing && !call.watchingRemoteShare)
-        // Unwatched share — placeholder; only the Watch button acts.
+        // Unwatched: only the Watch button acts.
         Container(
           margin: const EdgeInsets.all(2),
           decoration: BoxDecoration(
@@ -4091,7 +3957,8 @@ class _ScreenShareFullView extends ConsumerWidget {
         ),
     ];
 
-    // 1-2 tiles side by side; 3-4 in a 2x2 (underfull row centered).
+    // One or two tiles side by side, three or four in a 2x2 with an underfull
+    // row centred.
     Widget grid;
     if (tiles.isEmpty) {
       grid = const SizedBox.shrink();
@@ -4123,7 +3990,7 @@ class _ScreenShareFullView extends ConsumerWidget {
         Positioned.fill(
           child: Container(color: Colors.black, child: grid),
         ),
-        // Stop sharing stays reachable from the grid.
+        // Stop sharing has to stay reachable from the grid.
         if (call.isScreenSharing)
           Positioned(
             top: HollowSpacing.md,
@@ -4140,7 +4007,7 @@ class _ScreenShareFullView extends ConsumerWidget {
     );
   }
 
-  /// Both sharing: big tile = focused source, PiP = the OTHER screen.
+  /// Both sharing: the focused source in the big tile, the other screen as PiP.
   Widget _buildBothSharingStack(
     WidgetRef ref,
     CallState call,
@@ -4150,7 +4017,6 @@ class _ScreenShareFullView extends ConsumerWidget {
     RTCVideoRenderer? localScreen,
     String localPeerId,
   ) {
-    // PiP shows the OTHER screen (the one that isn't the big tile).
     final isLocalBig = bigChoice.isLocal && !bigChoice.isCamera;
     final pipRenderer = isLocalBig ? remoteScreen : localScreen;
     final bigLabel = bigChoice.isLocal
@@ -4159,7 +4025,6 @@ class _ScreenShareFullView extends ConsumerWidget {
 
     return Stack(
       children: [
-        // Big tile — focused source (could be a camera or a screen).
         Positioned.fill(
           child: Container(
             color: Colors.black,
@@ -4170,15 +4035,15 @@ class _ScreenShareFullView extends ConsumerWidget {
             ),
           ),
         ),
-        // PiP tile — the other screen. Tap to swap focus.
+        // Tap swaps the focus.
         Positioned(
           right: HollowSpacing.md,
           bottom: HollowSpacing.md,
           child: _buildPipTile(ref, hollow, pipRenderer,
               pipIsLocal: !isLocalBig, localPeerId: localPeerId),
         ),
-        // Quality label for the big tile (top-left). A remote big tile shows
-        // the RECEIVED resolution live; our own share keeps its source label.
+        // A remote big tile shows the RECEIVED resolution live; our own share
+        // keeps its source label.
         if (!bigChoice.isCamera && bigLabel != null)
           Positioned(
             top: HollowSpacing.md,
@@ -4188,7 +4053,6 @@ class _ScreenShareFullView extends ConsumerWidget {
               sourceLabel: bigLabel,
             ),
           ),
-        // Small "Stop sharing" affordance, top-right.
         Positioned(
           top: HollowSpacing.md,
           right: HollowSpacing.md,
@@ -4238,7 +4102,6 @@ class _ScreenShareFullView extends ConsumerWidget {
                   isLocal: pipIsLocal,
                 ),
               ),
-              // Small label so the user knows which screen this is.
               Positioned(
                 left: HollowSpacing.xs,
                 bottom: HollowSpacing.xs,
@@ -4268,9 +4131,8 @@ class _ScreenShareFullView extends ConsumerWidget {
     );
   }
 
-  /// Only one peer is sharing a screen (or only cameras are present because
-  /// we got opened in this view from a camera focus tap). Show whatever the
-  /// focus resolved to in the big tile.
+  /// One sharer, or only cameras when a camera focus tap opened this view: the
+  /// big tile shows whatever the focus resolved to.
   Widget _buildSingleSourceStack(
     CallState call,
     HollowTheme hollow,
@@ -4311,8 +4173,6 @@ class _ScreenShareFullView extends ConsumerWidget {
                   ),
           ),
         ),
-        // Quality label + stop button (local sharing) or just quality label
-        // (remote sharing).
         if (call.isScreenSharing)
           Positioned(
             top: HollowSpacing.md,
@@ -4341,9 +4201,8 @@ class _ScreenShareFullView extends ConsumerWidget {
               mainAxisSize: MainAxisSize.min,
               children: [
                 if (call.remoteScreenShareLabel != null) ...[
-                  // Received resolution once frames flow (falls back to the
-                  // sharer's source label; only when the big tile IS the
-                  // remote share — a focused camera has no share renderer).
+                  // Only when the big tile IS the remote share: a focused
+                  // camera has no share renderer to measure.
                   ShareQualityChip(
                     renderer: !bigChoice.isCamera && !bigChoice.isLocal
                         ? bigChoice.renderer
@@ -4352,7 +4211,7 @@ class _ScreenShareFullView extends ConsumerWidget {
                   ),
                   const SizedBox(width: HollowSpacing.sm),
                 ],
-                // Opt-in watching (issue #38): leaving the stream is one tap.
+                // Leaving the stream stays one tap (issue #38).
                 if (call.watchingRemoteShare)
                   HollowButton.ghost(
                     onPressed: () =>
@@ -4368,9 +4227,8 @@ class _ScreenShareFullView extends ConsumerWidget {
     );
   }
 
-  /// Resolve which renderer to show in the big tile based on the focus state
-  /// and what's actually active. Falls back to a sensible default if the
-  /// focused source isn't currently sharing.
+  /// The renderer for the big tile, from the focus state and what is actually
+  /// active, falling back when the focused source is not currently sharing.
   ({RTCVideoRenderer? renderer, bool isCamera, bool isLocal}) _resolveBig({
     required DmFocusedSource focused,
     required CallState call,
@@ -4392,7 +4250,8 @@ class _ScreenShareFullView extends ConsumerWidget {
     );
     if (fromFocus != null) return fromFocus;
 
-    // Fallback priority: remote screen → local screen → remote camera → local camera.
+    // Fallback priority: remote screen, local screen, remote camera, local
+    // camera.
     if (call.remoteScreenSharing && remoteScreen != null) {
       return (renderer: remoteScreen, isCamera: false, isLocal: false);
     }
@@ -4408,8 +4267,7 @@ class _ScreenShareFullView extends ConsumerWidget {
     return (renderer: null, isCamera: false, isLocal: false);
   }
 
-  /// The focused source, or null when nothing is focused / the focused
-  /// source isn't currently active.
+  /// The focused source, or null when nothing is focused or it is not active.
   ({RTCVideoRenderer? renderer, bool isCamera, bool isLocal})?
       _resolveFocusedSource({
     required DmFocusedSource focused,
@@ -4452,9 +4310,7 @@ class _ScreenShareFullView extends ConsumerWidget {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Screen share controls overlay — floating pill with call controls.
-// ---------------------------------------------------------------------------
+// Screen share controls overlay: a floating pill of call controls.
 
 class _ScreenShareControlsOverlay extends ConsumerStatefulWidget {
   final String peerId;
@@ -4467,8 +4323,8 @@ class _ScreenShareControlsOverlay extends ConsumerStatefulWidget {
 
 class _ScreenShareControlsOverlayState
     extends ConsumerState<_ScreenShareControlsOverlay> {
-  // Duration rendered by CallDurationText — the old per-second setState
-  // rebuilt the whole controls overlay (over a live screen-share video).
+  // Duration is a self-ticking leaf: a per-second setState here rebuilds the
+  // whole overlay over a live screen-share video.
 
   @override
   Widget build(BuildContext context) {
@@ -4530,26 +4386,22 @@ class _ScreenShareControlsOverlayState
             ),
           ],
           const SizedBox(width: HollowSpacing.lg),
-          // Mute
           _muteCallButton(ref, hollow, call,
               iconSize: 16, padding: const EdgeInsets.all(HollowSpacing.xs)),
           const SizedBox(width: HollowSpacing.xs),
-          // Camera toggle (independent of screen share — separate PCs)
+          // Independent of the screen share: separate peer connections.
           _cameraCallButton(ref, hollow, call,
               iconSize: 16, padding: const EdgeInsets.all(HollowSpacing.xs)),
-          // Screen share toggle (desktop only)
           if (Platform.isWindows || Platform.isLinux || Platform.isMacOS) ...[
             const SizedBox(width: HollowSpacing.xs),
             _screenShareCallButton(context, ref, hollow, call,
                 iconSize: 16, padding: const EdgeInsets.all(HollowSpacing.xs)),
           ],
-          // Received share audio: volume + duck controls.
           if (call.remoteScreenSharing) ...[
             const SizedBox(width: HollowSpacing.xs),
             const ShareVolumeButton(),
           ],
           const SizedBox(width: HollowSpacing.sm),
-          // End call
           _endCallButton(ref, hollow,
               iconSize: 14,
               innerPadding: const EdgeInsets.symmetric(
@@ -4645,12 +4497,12 @@ class _DmProfilePanel extends ConsumerWidget {
     final friends = ref.watch(friendsProvider);
     final friendInfo = friends[peerId];
 
-    // Block/Report key on the MASTER identity (device→master collapse).
+    // Block and report key on the MASTER identity.
     final master = ref.watch(deviceLinkProvider).identityOf(peerId);
     final isBlocked = ref.watch(blockedUsersProvider).contains(master);
 
-    // Saved Messages (self-DM): no nickname/block/report actions — you can't
-    // block or report yourself.
+    // Saved messages is a self-DM: there is nobody here to nickname, block or
+    // report.
     final savedId = ref.watch(savedMessagesPeerIdProvider);
     final isSavedMessages = savedId != null && master == savedId;
 
@@ -4676,8 +4528,8 @@ class _DmProfilePanel extends ConsumerWidget {
       ),
       child: Column(
         children: [
-          // Banner — 96 is this panel's 240 width / 2.5, the one ratio every
-          // user banner surface and Rust's 1200x480 storage share.
+          // The 2.5:1 ratio every user banner surface shares with Rust's
+          // 1200x480 storage.
           SizedBox(
             height: 96,
             width: double.infinity,
@@ -4687,7 +4539,6 @@ class _DmProfilePanel extends ConsumerWidget {
                 : _bannerGradient(bannerColor),
           ),
 
-          // Avatar overlapping banner + content
           Transform.translate(
             offset: const Offset(0, -32),
             child: Padding(
@@ -4697,7 +4548,6 @@ class _DmProfilePanel extends ConsumerWidget {
                   _buildAvatarWithStatus(hollow, isOnline),
                   const SizedBox(height: HollowSpacing.sm),
                   ..._buildNameLines(hollow, localNick, shownName),
-                  // Status
                   if (status.isNotEmpty) ...[
                     const SizedBox(height: HollowSpacing.xxs),
                     Text(
@@ -4712,9 +4562,8 @@ class _DmProfilePanel extends ConsumerWidget {
                       textAlign: TextAlign.center,
                     ),
                   ],
-                  // Twitch badge — a VERIFIED account only. The profile's
-                  // own `twitch_username` is a self-declaration, so a new
-                  // client draws nothing for it (`twitchLoginProvider`).
+                  // VERIFIED accounts only: the profile's own
+                  // `twitch_username` is a self-declaration and draws nothing.
                   if (verifiedTwitch != null) ...[
                     const SizedBox(height: HollowSpacing.xs),
                     _buildTwitchBadge(hollow, verifiedTwitch),
@@ -4724,7 +4573,6 @@ class _DmProfilePanel extends ConsumerWidget {
             ),
           ),
 
-          // Scrollable content
           Expanded(
             child: Transform.translate(
               offset: const Offset(0, -16),
@@ -4733,7 +4581,6 @@ class _DmProfilePanel extends ConsumerWidget {
                 child: ListView(
                   padding: EdgeInsets.zero,
                   children: [
-                    // About Me (in quotes, italic)
                     if (aboutMe.isNotEmpty) ...[
                       Container(height: 1, color: hollow.border),
                       const SizedBox(height: HollowSpacing.sm),
@@ -4752,11 +4599,8 @@ class _DmProfilePanel extends ConsumerWidget {
 
                     const SizedBox(height: HollowSpacing.sm),
 
-                    // Action buttons — hidden for Saved Messages (self-DM: no
-                    // nickname/block/report on yourself). All outline styled
-                    // (like Edit Profile); Block/Report use the red outline
-                    // (danger tint). Blocking and reporting key on the MASTER
-                    // identity, not the device.
+                    // Hidden for Saved messages: there is nobody to nickname,
+                    // block or report on a self-DM.
                     if (!isSavedMessages)
                       ..._buildDmActions(context, ref, hollow,
                           master: master,
@@ -4764,7 +4608,6 @@ class _DmProfilePanel extends ConsumerWidget {
                           shownName: shownName,
                           localNick: localNick),
 
-                    // Friend status — shown at the end.
                     if (friendInfo != null && friendInfo.status == 'accepted') ...[
                       Row(
                         mainAxisAlignment: MainAxisAlignment.center,
@@ -4832,8 +4675,8 @@ class _DmProfilePanel extends ConsumerWidget {
     );
   }
 
-  /// Local nickname on top with the profile name below, or just the profile
-  /// name when no local nickname is set.
+  /// A local nickname takes the top line and pushes the profile name to a
+  /// subline; without one there is no subline.
   List<Widget> _buildNameLines(
       HollowTheme hollow, String? localNick, String shownName) {
     final nameStyle = HollowTypography.subheading.copyWith(
@@ -4873,8 +4716,8 @@ class _DmProfilePanel extends ConsumerWidget {
     ];
   }
 
-  /// [login] is a VERIFIED Twitch account (`twitchLoginProvider`); there is
-  /// no other source for this badge.
+  /// [login] is a VERIFIED Twitch account; there is no other source for this
+  /// badge.
   Widget _buildTwitchBadge(HollowTheme hollow, String login) {
     return GestureDetector(
       onTap: () => launchUrl(
@@ -4909,7 +4752,7 @@ class _DmProfilePanel extends ConsumerWidget {
     );
   }
 
-  /// Nickname button + Block/Report row (each half, red outline).
+  /// The nickname button and the Block and Report row.
   List<Widget> _buildDmActions(
     BuildContext context,
     WidgetRef ref,
@@ -4937,8 +4780,8 @@ class _DmProfilePanel extends ConsumerWidget {
         ),
       ),
       const SizedBox(height: HollowSpacing.xs),
-      // Verify — same action and ordering as the profile card, so the DM panel
-      // is not a place where verification is quietly unavailable.
+      // Same action and ordering as the profile card, so verification is never
+      // quietly unavailable here.
       SizedBox(
         width: double.infinity,
         child: HollowButton.outline(
@@ -4988,7 +4831,7 @@ class _DmProfilePanel extends ConsumerWidget {
     ];
   }
 
-  /// Peer ID (copy on tap).
+  /// Peer id, copied on tap.
   Widget _buildPeerIdChip(BuildContext context, HollowTheme hollow) {
     return HollowPressable(
       onTap: () {
@@ -5041,7 +4884,7 @@ class _DmProfilePanel extends ConsumerWidget {
   }
 }
 
-/// Banner color from peer ID.
+/// Banner colour derived from a peer id.
 Color _bannerColorFromId(String id) {
   final hash = id.hashCode;
   final hue = ((hash % 360).abs() + 40) % 360;

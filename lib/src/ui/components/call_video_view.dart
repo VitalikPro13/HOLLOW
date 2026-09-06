@@ -11,8 +11,8 @@ import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/recording_indicator.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-/// Floating draggable video panel shown during a call when video is active.
-/// Displays remote video (large) and local preview (small PiP corner).
+/// Floating draggable video panel: the remote video large, the local preview in
+/// a PiP corner.
 class CallVideoView extends ConsumerStatefulWidget {
   const CallVideoView({super.key});
 

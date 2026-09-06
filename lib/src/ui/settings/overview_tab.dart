@@ -54,9 +54,9 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
   bool _saving = false;
   bool _savingNickname = false;
 
-  // Optimistic server-icon staging: the cropped bytes render instantly while
-  // the Rust WebP encode + CRDT write run behind a small spinner. Any newer
-  // pick/clear bumps the generation so a stale completion can't clobber it.
+  // Optimistic icon staging: the cropped bytes render while the Rust encode and
+  // CRDT write run. A newer pick or clear bumps the generation, so a stale
+  // completion cannot clobber it.
   Uint8List? _stagedIcon;
   bool _iconBusy = false;
   int _iconPickGen = 0;
@@ -153,9 +153,9 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
       final raw = _maxMembersController.text.trim();
       final parsed = int.tryParse(raw) ?? 0;
 
-      // A finite cap can't be set below the current member count (you can't
-      // retroactively evict people). Check the live count, not the possibly
-      // stale memberCount on the passed-in ServerInfo.
+      // A finite cap cannot go below the current member count, and the live
+      // count is authoritative: memberCount on the passed-in ServerInfo may be
+      // stale.
       if (parsed > 0) {
         final members = await crdt_api.getServerMembers(serverId: sid);
         final current = members.length;
@@ -180,7 +180,6 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
       await crdt_api.updateServerSetting(
           serverId: sid, key: 'max_members', value: maxValue);
       if (mounted) {
-        // Normalize the field to the saved value.
         _maxMembersController.text = maxValue == '0' ? '' : maxValue;
         HollowToast.show(context, 'Access settings saved',
             type: HollowToastType.success);
@@ -346,8 +345,8 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
       if (cropped == null || !mounted || gen != _iconPickGen) return;
       toSend = cropped;
     }
-    // Instant feedback: show the picked bytes NOW; the Rust WebP encode +
-    // CRDT write (a real wall-clock wait) runs behind the spinner.
+    // Show the picked bytes NOW: the Rust encode and CRDT write are a real
+    // wall-clock wait.
     setState(() {
       _stagedIcon = toSend;
       _iconBusy = true;
@@ -358,11 +357,9 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
         rawBytes: toSend,
       );
       if (!mounted || gen != _iconPickGen) return;
-      // Seed the providers with the bytes we just sent — reading the DB here
-      // races the fire-and-forget CRDT persist and returns the PREVIOUS icon
-      // ("second upload applies the first" bug). applyLocalWrite reconciles
-      // to the processed bytes once the write lands. A still pick clears any
-      // previous animated icon.
+      // Seed the providers with the bytes we just sent: reading the DB here
+      // races the fire-and-forget CRDT persist and returns the PREVIOUS icon.
+      // applyLocalWrite reconciles to the processed bytes once the write lands.
       ref
           .read(serverAvatarProvider.notifier)
           .applyLocalWrite(widget.server.serverId, toSend);
@@ -377,7 +374,6 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
           type: HollowToastType.success);
     } catch (e) {
       if (!mounted || gen != _iconPickGen) return;
-      // Revert the optimistic staging — the pick failed.
       setState(() {
         _stagedIcon = null;
         _iconBusy = false;
@@ -387,9 +383,8 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
     }
   }
 
-  /// GIF / animated-WebP magic — animated picks skip the crop dialog (the
-  /// cropper flattens to a still PNG); Rust center-crops per frame
-  /// (3:1 for banners, square for icons).
+  /// GIF or animated-WebP magic bytes. An animated pick skips the crop dialog,
+  /// which would flatten it to a still PNG; Rust center-crops per frame.
   static bool _isAnimatedPick(Uint8List bytes) {
     if (bytes.length > 4 && bytes[0] == 0x47 && bytes[1] == 0x49 && bytes[2] == 0x46 && bytes[3] == 0x38) {
       return true; // GIF8
@@ -428,8 +423,8 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
       if (cropped == null || !mounted || gen != _bannerPickGen) return;
       toSend = cropped;
     }
-    // Instant feedback: show the picked bytes NOW; the Rust WebP encode +
-    // CRDT write (a real wall-clock wait) runs behind the spinner.
+    // Show the picked bytes NOW: the Rust encode and CRDT write are a real
+    // wall-clock wait.
     setState(() {
       _stagedBanner = toSend;
       _bannerBusy = true;
@@ -440,9 +435,8 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
         rawBytes: toSend,
       );
       if (!mounted || gen != _bannerPickGen) return;
-      // Seed the provider with the bytes we just sent — reading the DB here
-      // races the fire-and-forget CRDT persist ("second upload applies the
-      // first" bug). applyLocalWrite reconciles once the write lands.
+      // Seed the provider with the bytes we just sent: reading the DB here
+      // races the fire-and-forget CRDT persist and returns the previous banner.
       ref
           .read(serverBannerProvider.notifier)
           .applyLocalWrite(widget.server.serverId, toSend);
@@ -553,8 +547,8 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
   }
 
   Future<void> _clearServerAvatar() async {
-    // Invalidate any in-flight pick — its late completion must not resurrect
-    // the staged icon after the clear.
+    // Invalidate any in-flight pick: a late completion must not resurrect the
+    // staged icon after the clear.
     _iconPickGen++;
     setState(() {
       _stagedIcon = null;
@@ -563,8 +557,8 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
     try {
       await crdt_api.clearServerAvatar(serverId: widget.server.serverId);
       if (!mounted) return;
-      // Drop the cached bytes NOW — a DB read here races the queued write
-      // and would resurrect the just-removed icon.
+      // Drop the cached bytes NOW: a DB read here races the queued write and
+      // would resurrect the just-removed icon.
       ref
           .read(serverAvatarProvider.notifier)
           .applyLocalWrite(widget.server.serverId, null);
@@ -588,7 +582,6 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
     return ListView(
       padding: const EdgeInsets.all(HollowSpacing.xl),
       children: [
-        // ── Server Settings (admin+ only) ──
         if (widget.canManageServer) ...[
           Text(
             'SERVER SETTINGS',
@@ -600,7 +593,6 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
           ),
           const SizedBox(height: HollowSpacing.md),
 
-          // Server Avatar
           Text(
             'Server icon',
             style:
@@ -622,9 +614,8 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
                 );
                 final Widget icon;
                 if (_stagedIcon != null) {
-                  // Staged bytes (optimistic pick) win over the provider
-                  // cache; AnimatedGifImage previews an animated pick live
-                  // and renders a still pick as-is.
+                  // Staged bytes win over the provider cache, and an animated
+                  // pick previews live.
                   icon = ClipRRect(
                     borderRadius: BorderRadius.circular(hollow.radiusMd),
                     child: AnimatedGifImage(
@@ -632,8 +623,7 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
                         width: 48, height: 48, fit: BoxFit.cover),
                   );
                 } else {
-                  // The authoring tile counts as watched while the tab is
-                  // open — animate whenever an animated icon exists.
+                  // The authoring tile counts as watched while the tab is open.
                   icon = ServerIconImage(
                     serverId: widget.server.serverId,
                     size: 48,
@@ -643,8 +633,7 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
                   );
                 }
                 if (!_iconBusy) return icon;
-                // Small non-blocking spinner while the WebP encode + CRDT
-                // write run (the tile already shows the cropped bytes).
+                // Non-blocking: the tile already shows the cropped bytes.
                 return Stack(
                   children: [
                     icon,
@@ -685,8 +674,8 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
           ),
           const SizedBox(height: HollowSpacing.lg),
 
-          // Server Banner (issue #25) — shown at the top of the channel
-          // sidebar. Same optimistic-staging pattern as the icon above.
+          // Server banner (issue #25), shown at the top of the channel sidebar.
+          // Same optimistic-staging pattern as the icon above.
           Text(
             'Server banner',
             style:
@@ -767,7 +756,6 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
           ),
           const SizedBox(height: HollowSpacing.lg),
 
-          // Server Name
           Text(
             'Server name',
             style:
@@ -793,7 +781,6 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
           ),
           const SizedBox(height: HollowSpacing.xl),
 
-          // Description
           Text(
             'Description',
             style:
@@ -820,7 +807,6 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
           Divider(color: hollow.border),
           const SizedBox(height: HollowSpacing.xl),
 
-          // ── Access (private + member cap) ──
           Text(
             'ACCESS',
             style: HollowTypography.caption.copyWith(
@@ -933,7 +919,6 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
           Divider(color: hollow.border),
           const SizedBox(height: HollowSpacing.xl),
 
-          // ── Offline catch-up (relay message-availability cache) ──
           Text(
             'OFFLINE CATCH-UP',
             style: HollowTypography.caption.copyWith(
@@ -986,8 +971,8 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
                   HollowTypography.label.copyWith(color: hollow.textSecondary),
             ),
             const SizedBox(height: HollowSpacing.sm),
-            // Selection chips, not buttons: a filled HollowButton here read
-            // as another primary CTA competing with the section Save buttons.
+            // Selection chips, not buttons: a filled HollowButton reads as
+            // another primary CTA competing with the section Save buttons.
             Row(
               children: [
                 for (final days in const [1, 3, 7]) ...[
@@ -1022,7 +1007,6 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
           Divider(color: hollow.border),
           const SizedBox(height: HollowSpacing.xl),
 
-          // Server Template
           Text(
             'SERVER TEMPLATE',
             style: HollowTypography.caption.copyWith(
@@ -1060,7 +1044,6 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
           ),
           const SizedBox(height: HollowSpacing.xl),
 
-          // Server ID
           Text(
             'Server ID',
             style:
@@ -1107,7 +1090,6 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
           Divider(color: hollow.border),
           const SizedBox(height: HollowSpacing.xl),
 
-          // ── Twitch Verification ──
           Text(
             'TWITCH VERIFICATION',
             style: HollowTypography.caption.copyWith(
@@ -1125,7 +1107,6 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
           ),
           const SizedBox(height: HollowSpacing.md),
 
-          // Enable toggle
           Row(
             children: [
               const Icon(BrandIcons.twitch, size: 16, color: Color(0xFF9146FF)),
@@ -1221,7 +1202,6 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
 
             const SizedBox(height: HollowSpacing.lg),
 
-            // Require sub toggle
             Row(
               children: [
                 Icon(LucideIcons.crown, size: 16, color: hollow.textSecondary),
@@ -1253,7 +1233,6 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
 
             const SizedBox(height: HollowSpacing.lg),
 
-            // Owner-online verification toggle
             Row(
               children: [
                 Icon(LucideIcons.shield, size: 16, color: hollow.textSecondary),
@@ -1310,7 +1289,6 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
           const SizedBox(height: HollowSpacing.xl),
         ],
 
-        // ── Your Identity (all members) ──
         Text(
           'YOUR IDENTITY',
           style: HollowTypography.caption.copyWith(

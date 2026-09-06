@@ -10,20 +10,14 @@ import 'video_quality_ladder.dart';
 /// Drives one media link's resilience: the hold-open ladder, the stats
 /// sampler, the outbound video ladder, and the health the UI shows.
 ///
-/// One of these per link (per call for a DM, per peer for the voice mesh, per
-/// leg for a screen share). It owns the timer; the policy lives in the pure
-/// modules it composes, and the lane supplies the four things only it can
-/// know: how to restart ICE, how to apply a video rung, what to do when the
-/// budget is finally spent, and where to publish health.
+/// One per link (per call for a DM, per peer for the voice mesh, per leg for a
+/// screen share). It owns the timer; the policy lives in the pure modules it
+/// composes, and the lane supplies what only it can know.
 ///
-/// ## Why this is one class and not three copies
-///
-/// The lanes disagreed before. DM calls hung up on `disconnected`, the voice
-/// mesh closed the peer on `failed` with no restart, and the screen share leg
-/// had its own consent watchdog. Three behaviours meant three sets of bugs and
-/// no single place to fix "the call dies when the network wobbles". The lanes
-/// differ in their timings (see [LinkResilienceConfig.share]) and in whether
-/// they govern video at all, and in nothing else.
+/// One class rather than three copies: the lanes disagreed before and "the
+/// call dies when the network wobbles" had nowhere single to be fixed. They
+/// differ only in timings ([LinkResilienceConfig.share]) and in whether they
+/// govern video at all.
 class LinkWatchdog {
   LinkWatchdog({
     required this.peerConnection,
@@ -39,13 +33,12 @@ class LinkWatchdog {
     this.log,
   });
 
-  /// The live peer connection, read lazily: the lanes rebuild it under us
-  /// (a renegotiation, an ICE restart, a reconnect) and a captured reference
-  /// would go on sampling a corpse.
+  /// The live peer connection, read lazily: the lanes rebuild it under us and
+  /// a captured reference would go on sampling a corpse.
   final RTCPeerConnection? Function() peerConnection;
 
-  /// Whether this side initiates recovery first. Same lexicographic peer-id
-  /// convention the rest of the codebase arbitrates glare with.
+  /// Whether this side initiates recovery first, by the peer-id convention
+  /// the rest of the codebase arbitrates glare with.
   final bool isPolite;
 
   final LinkResilienceConfig config;
@@ -55,37 +48,29 @@ class LinkWatchdog {
 
   /// Recover the link. The lane decides what that means.
   ///
-  /// Deliberately NOT "restart ICE". An in-place ICE restart recovers the
-  /// transport and destroys SFrame with it: repairing the cryptors afterwards
-  /// was attempted four separate ways in the field and never once produced
-  /// working audio. Rebuilding the media session from scratch does both, and
-  /// it is the path every successful call start already takes.
+  /// Deliberately NOT "restart ICE": an in-place restart recovers the
+  /// transport and destroys SFrame with it, and repairing the cryptors
+  /// afterwards was tried four ways in the field without once producing audio.
   final Future<void> Function() onRecoverLink;
 
   /// The hold-open budget is spent. Tear this link down for real.
   final void Function() onGiveUp;
 
-  /// The link came back after we had attempted at least one ICE restart, so
-  /// the transport underneath may have been rebuilt.
+  /// The link came back after at least one ICE restart, so the transport
+  /// underneath may have been rebuilt.
   ///
-  /// Belt for the SFrame re-assert. The lane's own detector keys on the remote
+  /// Belt for the SFrame re-assert: the lane's own detector keys on the remote
   /// ICE credentials changing, which needs an offer/answer to COMPLETE, and a
-  /// recovery does not always involve one: field-caught 2026-08-27, a peer
-  /// restarted ICE four times into a relay that was down and then recovered
-  /// anyway, because libwebrtc restored consent on the original candidate
-  /// pair. No SDP was exchanged, so nothing announced the change.
+  /// recovery does not always involve one.
   final void Function()? onTransportRebuilt;
 
   /// Hold the outbound video sender to a rung. Null for a lane with no video
-  /// of its own to govern (or one, like screen share, that already has its
-  /// own resolution governor).
+  /// of its own, or one that already has its own resolution governor.
   final Future<bool> Function(VideoRung rung)? onApplyRung;
 
   /// Whether this node's relay connection can carry a renegotiation offer
-  /// right now. An ICE restart fired while the relay is down is not a recovery
-  /// attempt: `restartIce()` arms credentials, and the offer that carries them
-  /// is dropped before it leaves the machine. Null means "assume it can",
-  /// which is the right default for a lane with no relay of its own.
+  /// right now. A restart fired while the relay is down is not an attempt: the
+  /// offer is dropped before it leaves the machine. Null means "assume it can".
   final bool Function()? canSignal;
 
   final String label;
@@ -101,9 +86,8 @@ class LinkWatchdog {
   bool _rungApplied = true;
   bool _stopped = false;
 
-  /// Counted here rather than read back off the tracker: a recovery RESETS the
-  /// tracker's counter as part of the same transition that reports it, so the
-  /// log line always said "after 0 restart(s)" no matter what had happened.
+  /// Counted here rather than read back off the tracker: a recovery RESETS
+  /// the tracker's counter in the same transition that reports it.
   int _restartsThisLapse = 0;
 
   LinkHealthSnapshot _published = const LinkHealthSnapshot();
@@ -116,11 +100,10 @@ class LinkWatchdog {
   void start() {
     if (_timer != null) return;
     _stopped = false;
-    // One second, because the ladder's decisions are all measured in seconds
-    // and a lapse has to be noticed promptly. Stats are read on every OTHER
-    // tick: `getStats()` is a round trip into the native layer, and sampling
-    // it once a second on every peer of a full voice mesh is real work for a
-    // machine that is, by hypothesis, already struggling.
+    // One second, because the ladder's decisions are all measured in seconds.
+    // Stats are read on every OTHER tick: `getStats()` is a round trip into
+    // the native layer, and once a second per peer of a full mesh is real
+    // work for a machine that is, by hypothesis, already struggling.
     _timer = Timer.periodic(const Duration(seconds: 1), (_) => _tick());
   }
 
@@ -140,17 +123,16 @@ class LinkWatchdog {
   /// Feed a raw transport state from the lane's `onConnectionState`.
   ///
   /// CRITICAL: never call this with `closed` from the lane's own teardown.
-  /// `closed` is reported both when the remote end goes away and when we close
-  /// the peer connection ourselves, and it is read here as terminal.
+  /// `closed` also means the remote end went away, and is read here as
+  /// terminal.
   void noteTransportState(RTCPeerConnectionState state) {
     if (_stopped) return;
     final wasLapsing = _resilience.isLapsing;
     final action = _resilience.onTransportState(state, DateTime.now());
 
     if (!wasLapsing && _resilience.isLapsing) {
-      // The transport just lost consent. Whatever the uplink is doing, feeding
-      // it video while its own connectivity checks are going unanswered is the
-      // one certain way to keep them unanswered.
+      // Whatever the uplink is doing, feeding it video while its own
+      // connectivity checks go unanswered keeps them unanswered.
       _log('lapse opened, collapsing video while the link recovers');
       _probe.reset();
       if (_video.collapse()) _applyRung();
@@ -183,15 +165,11 @@ class LinkWatchdog {
     _video.restore();
     _rungApplied = false;
     // A rebuilt connection has FRESH cryptors, so the transport-rebuilt belt
-    // must not fire on the recovery that follows: it would drop and re-create
-    // cryptors that are already correct.
+    // must not fire on the recovery that follows: it would re-create cryptors
+    // that are already correct.
     _restartsThisLapse = 0;
     _publishCurrent();
   }
-
-  // ---------------------------------------------------------------------------
-  // Private
-  // ---------------------------------------------------------------------------
 
   void _tick() {
     if (_stopped) return;
@@ -219,10 +197,9 @@ class LinkWatchdog {
 
     _resilience.setQualityDegraded(sample.isDegraded);
 
-    // The video ladder only has an opinion while a camera is actually sending,
-    // and only while the transport is up: during a lapse the sender is already
-    // collapsed on purpose, and measuring a link with no consent would read
-    // every sample as catastrophic and walk the ladder down for no reason.
+    // The video ladder only has an opinion while a camera is sending and the
+    // transport is up: during a lapse the sender is collapsed on purpose, and
+    // a link with no consent reads every sample as catastrophic.
     if (onApplyRung != null &&
         sample.isSendingVideo &&
         !_resilience.isLapsing) {
@@ -230,9 +207,8 @@ class LinkWatchdog {
         _log('video ladder to "${_video.rung.label}" (${sample.toString()})');
         _rungApplied = false;
       }
-      // Retry until the sender accepts it. A pre-negotiation `setParameters`
-      // is dropped on the native path, so the rung applied at camera-enable
-      // time routinely does not take; this is what makes the cap real.
+      // Retry until the sender accepts it: a pre-negotiation `setParameters`
+      // is dropped on the native path, which is what makes the cap real.
       if (!_rungApplied) _applyRung();
     }
 
@@ -282,9 +258,8 @@ class LinkWatchdog {
     if (_stopped) return;
     _publish(LinkHealthSnapshot(
       health: _resilience.health,
-      // A collapse is the transport's doing, not a bandwidth verdict, and the
-      // "Reconnecting" line already explains it. Reporting it as a video
-      // decision too would put two competing explanations on screen.
+      // A collapse is the transport's doing, not a bandwidth verdict, and
+      // the "Reconnecting" line already explains it.
       videoDegraded: _video.isDegraded && !_video.isCollapsed,
       videoPaused: _video.isPaused && !_video.isCollapsed,
     ));

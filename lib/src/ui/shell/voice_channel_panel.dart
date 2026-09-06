@@ -15,8 +15,8 @@ import 'package:hollow/src/ui/components/ptt_mic_visual.dart';
 import 'package:hollow/src/ui/dialogs/screen_share_dialog.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-/// Voice channel controls panel.
-/// Sits at the bottom of the channel sidebar when the user is in a voice channel.
+/// Voice channel controls, at the bottom of the channel sidebar while the user
+/// is in a voice channel.
 class VoiceChannelPanel extends ConsumerWidget {
   const VoiceChannelPanel({super.key});
 
@@ -54,10 +54,9 @@ class VoiceChannelPanel extends ConsumerWidget {
     final channelName =
         channels[vcState.currentChannelId]?.name ?? 'Voice';
 
-    // OUR OWN link, not the mesh's. A per-peer leg in trouble is labelled on
-    // that member's row; this line is the one case that affects everyone, and
-    // a hardcoded green "Voice Connected" said the opposite of the truth while
-    // the relay was down. Same source and same helper as the user bars.
+    // OUR OWN link, not the mesh's: a per-peer leg in trouble is labelled on
+    // that member's row, and this line is the one case affecting everyone. A
+    // hardcoded green here contradicts the truth while the relay is down.
     final connection = ref.watch(overallConnectionProvider);
     final visual = connectionVisual(hollow, connection);
     final connected = connection.isOnline;
@@ -76,11 +75,10 @@ class VoiceChannelPanel extends ConsumerWidget {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          // Header: connection status + channel name
           Row(
             children: [
-              // Shape carries the state as well as colour (a11y): only a
-              // settled connection is a filled disc.
+              // Shape carries the state as well as colour: only a settled
+              // connection is a filled disc.
               Container(
                 width: 8,
                 height: 8,
@@ -117,11 +115,10 @@ class VoiceChannelPanel extends ConsumerWidget {
             ],
           ),
           const SizedBox(height: HollowSpacing.sm),
-          // Controls row
           Row(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              // Mute toggle (PTT-aware: gated mic while idle, live on hold)
+              // PTT-aware: a gated mic while idle, live on hold.
               Builder(builder: (context) {
                 final mic = micButtonVisual(ref,
                     isMuted: vcState.isMuted,
@@ -140,7 +137,6 @@ class VoiceChannelPanel extends ConsumerWidget {
                 );
               }),
               const SizedBox(width: HollowSpacing.sm),
-              // Deafen toggle
               HollowTooltip(
                 message: vcState.isDeafened ? 'Undeafen' : 'Deafen',
                 child: HollowPressable(
@@ -159,7 +155,6 @@ class VoiceChannelPanel extends ConsumerWidget {
                 ),
               ),
               const SizedBox(width: HollowSpacing.sm),
-              // Camera toggle
               HollowTooltip(
                 message: vcState.isCameraOn ? 'Turn off camera' : 'Turn on camera',
                 child: HollowPressable(
@@ -179,7 +174,6 @@ class VoiceChannelPanel extends ConsumerWidget {
                   ),
                 ),
               ),
-              // Screen share (desktop only)
               if (Platform.isWindows || Platform.isMacOS || Platform.isLinux) ...[
                 const SizedBox(width: HollowSpacing.sm),
                 HollowTooltip(
@@ -204,7 +198,6 @@ class VoiceChannelPanel extends ConsumerWidget {
                 ),
               ],
               const SizedBox(width: HollowSpacing.sm),
-              // Disconnect
               HollowTooltip(
                 message: 'Disconnect',
                 child: HollowPressable(

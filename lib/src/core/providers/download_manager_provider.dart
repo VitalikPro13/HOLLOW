@@ -1,8 +1,6 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/share_tab_provider.dart';
 
-// ── Data model ───────────────────────────────────────────────
-
 enum DownloadEntryType { savedFile, rebalance }
 
 enum DownloadEntryStatus { active, complete }
@@ -30,8 +28,6 @@ class DownloadManagerEntry {
   });
 }
 
-// ── Saved file record ────────────────────────────────────────
-
 class SavedFileRecord {
   /// User-chosen filename (basename of savedPath).
   final String fileName;
@@ -54,8 +50,6 @@ class SavedFileRecord {
   });
 }
 
-// ── Rebalance tracker ────────────────────────────────────────
-
 class RebalanceTracker {
   final String serverId;
   final int moved;
@@ -69,8 +63,6 @@ class RebalanceTracker {
     this.completed = false,
   });
 }
-
-// ── Owned state ──────────────────────────────────────────────
 
 class DownloadManagerOwnedState {
   /// Saved files keyed by savedPath (dedupes re-saves to the same destination).
@@ -108,7 +100,6 @@ class DownloadManagerNotifier extends Notifier<DownloadManagerOwnedState> {
     bool isImage = false,
     bool isVideo = false,
   }) {
-    // Derive filename from path (handle both \ and / separators).
     final normalized = savedPath.replaceAll('\\', '/');
     final fileName = normalized.contains('/')
         ? normalized.substring(normalized.lastIndexOf('/') + 1)
@@ -146,8 +137,6 @@ class DownloadManagerNotifier extends Notifier<DownloadManagerOwnedState> {
     final updated = Map.of(state.savedFiles)..remove(savedPath);
     state = state.copyWith(savedFiles: updated);
   }
-
-  // ── Rebalance events ────────────────────────────────────────
 
   void onRebalanceStarted(String serverId, int shardsToMove) {
     state = state.copyWith(
@@ -197,14 +186,11 @@ final downloadManagerStateProvider =
   DownloadManagerNotifier.new,
 );
 
-// ── Computed entries ─────────────────────────────────────────
-
 final downloadManagerEntriesProvider =
     Provider<List<DownloadManagerEntry>>((ref) {
   final owned = ref.watch(downloadManagerStateProvider);
   final entries = <DownloadManagerEntry>[];
 
-  // 1. Active rebalances first.
   for (final rebal in owned.rebalances.values.where((r) => !r.completed)) {
     entries.add(DownloadManagerEntry(
       id: 'rebal:${rebal.serverId}',
@@ -217,7 +203,6 @@ final downloadManagerEntriesProvider =
     ));
   }
 
-  // 2. Saved files, most recent first.
   final savedList = owned.savedFiles.values.toList()
     ..sort((a, b) => b.sequence.compareTo(a.sequence));
   for (final saved in savedList) {
@@ -232,7 +217,6 @@ final downloadManagerEntriesProvider =
     ));
   }
 
-  // 3. Completed rebalances at the bottom.
   for (final rebal in owned.rebalances.values.where((r) => r.completed)) {
     entries.add(DownloadManagerEntry(
       id: 'rebal:${rebal.serverId}',

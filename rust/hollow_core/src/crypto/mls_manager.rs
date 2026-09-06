@@ -13,23 +13,18 @@ use crate::hollow_log;
 const CIPHERSUITE: Ciphersuite =
     Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519;
 
-/// Late-delivery windows (relay message-availability cache, 2026-07-04).
-/// The relay's per-channel rings replay OLD ciphertext — after the receiver
-/// may have processed newer traffic from the same sender or even crossed an
-/// epoch bump. OpenMLS defaults (out_of_order_tolerance=5, max_past_epochs=0)
-/// made such frames PERMANENTLY undecryptable (SecretTreeError / WrongEpoch).
-/// Keep a bounded window instead: up to 512 skipped message keys per sender
-/// ratchet and receive secrets for the last 3 epochs. This is a deliberate,
-/// bounded relaxation of forward secrecy — the same plaintext would be
-/// re-served by any peer via channel sync anyway; ring capacity is 200
-/// frames/channel so 512 generations covers every replayable frame.
+/// Late-delivery windows. The relay's per-channel rings replay OLD ciphertext, after
+/// the receiver may have processed newer traffic or crossed an epoch bump, and the
+/// OpenMLS defaults made such frames PERMANENTLY undecryptable. A bounded window is
+/// kept instead: 512 skipped message keys per sender ratchet and receive secrets for
+/// the last 3 epochs. A deliberate, bounded relaxation of forward secrecy, since any
+/// peer would re-serve the same plaintext through channel sync anyway.
 const SENDER_RATCHET_TOLERANCE: u32 = 512;
 const SENDER_RATCHET_MAX_FORWARD: u32 = 2000;
 const MAX_PAST_EPOCHS: usize = 3;
 
-/// The shared join-config carrying the late-delivery windows. Applied at
-/// create, at join, AND (via `set_configuration`) to groups loaded from disk,
-/// so pre-existing groups upgrade on the next app start.
+/// The shared join-config carrying the late-delivery windows. Applied at create, at
+/// join, AND to groups loaded from disk, so pre-existing groups upgrade on next start.
 fn hollow_join_config() -> MlsGroupJoinConfig {
     MlsGroupJoinConfig::builder()
         .use_ratchet_tree_extension(true)
@@ -41,22 +36,18 @@ fn hollow_join_config() -> MlsGroupJoinConfig {
         .build()
 }
 
-/// Group-key for a per-channel MLS subgroup ("Option B"). A restricted channel
-/// (visibility != Everyone, non-public) is encrypted under its own MLS group
-/// keyed by this string instead of the server-wide group keyed by bare
-/// `server_id`. The `#` separator never appears in a `server_id`
-/// (`12D3KooW...` peer id) nor a `channel_id` (`{server_prefix}-{hex4}`), so it
-/// round-trips unambiguously and never collides with a server group key.
+/// Group-key for a per-channel MLS subgroup: a restricted channel is encrypted under
+/// its own group keyed by this string instead of the server-wide one. The `#`
+/// separator never appears in a `server_id` or a `channel_id`, so it round-trips
+/// unambiguously and never collides with a server group key.
 pub(crate) fn subgroup_id(server_id: &str, channel_id: &str) -> String {
     format!("{server_id}#{channel_id}")
 }
 
-/// Inverse of [`subgroup_id`]. Splits an MLS group key into
-/// `(server_id, Option<channel_id>)`. A bare server group key has no `#` and
-/// yields `(server_id, None)`; a subgroup key `"{server}#{channel}"` yields
-/// `(server, Some(channel))`. Used by the batch timer and bootstrap handlers to
-/// recover the server room / CRDT state and the wire `channel_id` from a group
-/// key uniformly across server groups and channel subgroups.
+/// Inverse of [`subgroup_id`]: a bare server key yields `(server_id, None)`, a
+/// subgroup key `"{server}#{channel}"` yields `(server, Some(channel))`. Used by the
+/// batch timer and bootstrap handlers to recover the room, CRDT state and wire
+/// channel_id uniformly.
 pub(crate) fn split_group_key(group_key: &str) -> (String, Option<String>) {
     match group_key.split_once('#') {
         Some((server, channel)) => (server.to_string(), Some(channel.to_string())),
@@ -64,20 +55,18 @@ pub(crate) fn split_group_key(group_key: &str) -> (String, Option<String>) {
     }
 }
 
-/// Wraps OpenMLS for Hollow.s channel group encryption.
-/// One MLS group per server. DMs stay on Olm.
+/// Wraps OpenMLS for Hollow's channel group encryption: one MLS group per server,
+/// while DMs stay on Olm.
 pub(crate) struct MlsManager {
     provider: OpenMlsRustCrypto,
     signer: SignatureKeyPair,
     credential_with_key: CredentialWithKey,
     /// server_id → MlsGroup
     groups: HashMap<String, MlsGroup>,
-    /// RAM-only ring of recently authored/applied commit frames per group —
-    /// `(post_merge_epoch, base64_commit)`, ascending, capped. Serves the
-    /// `MlsCommitCatchup` replay to members that missed the unbuffered 0x03
-    /// room broadcast (join-order SFrame race). Deliberately NOT persisted:
-    /// after a restart the catch-up responder simply can't bridge and falls
-    /// back to the remove+re-add repair.
+    /// RAM-only ring of recent commit frames per group, `(post_merge_epoch, base64)`,
+    /// ascending and capped. Serves `MlsCommitCatchup` to members that missed the
+    /// unbuffered room broadcast. Deliberately NOT persisted: after a restart the
+    /// responder simply cannot bridge and falls back to remove+re-add.
     commit_cache: HashMap<String, VecDeque<(u64, String)>>,
 }
 
@@ -88,25 +77,20 @@ const COMMIT_CACHE_CAP: usize = 8;
 impl MlsManager {
     /// Create a new MlsManager with a fresh MLS identity.
     ///
-    /// `identity_id` becomes the leaf credential. Multi-device (Step 6): this is
-    /// THIS device's transport peer_id (`device_peer_id`), NOT the master — so
-    /// each of a human's devices holds a distinct leaf credential and can be a
-    /// separate MLS group member. (Pre-Step-6 this was seeded with the master;
-    /// existing groups keep those master credentials via `from_persisted`.)
+    /// `identity_id` becomes the leaf credential and is THIS device's transport peer_id,
+    /// NOT the master, so each of a human's devices holds a distinct leaf credential and
+    /// can be a separate group member. Legacy groups keep their master credentials.
     pub fn new(identity_id: &str) -> Result<Self, String> {
         let peer_id = identity_id;
         let provider = OpenMlsRustCrypto::default();
 
-        // Generate MLS signing keypair (Ed25519).
         let signer = SignatureKeyPair::new(CIPHERSUITE.signature_algorithm())
             .map_err(|e| format!("Failed to generate MLS signer: {e:?}"))?;
 
-        // Store the signer in the provider so OpenMLS can find it.
         signer
             .store(provider.storage())
             .map_err(|e| format!("Failed to store MLS signer: {e:?}"))?;
 
-        // Create credential: BasicCredential with identity = peer_id bytes.
         let credential = BasicCredential::new(peer_id.as_bytes().to_vec());
         let credential_with_key = CredentialWithKey {
             credential: credential.into(),
@@ -122,9 +106,8 @@ impl MlsManager {
         })
     }
 
-    /// Restore MlsManager from persisted state.
-    /// `signer_bytes` and `credential_bytes` are serde JSON blobs.
-    /// `storage_blob` is the serialized MemoryStorage HashMap (if any).
+    /// Restore MlsManager from persisted state: serde JSON blobs for the signer and
+    /// credential, and the serialized MemoryStorage map for `storage_blob`.
     pub fn from_persisted(
         signer_bytes: &[u8],
         credential_bytes: &[u8],
@@ -133,7 +116,6 @@ impl MlsManager {
     ) -> Result<Self, String> {
         let provider = OpenMlsRustCrypto::default();
 
-        // Restore the storage state from blob.
         if let Some(blob) = storage_blob {
             let mut cursor = std::io::Cursor::new(blob);
             let count = read_u64(&mut cursor)?;
@@ -149,27 +131,22 @@ impl MlsManager {
             drop(values);
         }
 
-        // Restore signer and credential from serde JSON.
         let signer: SignatureKeyPair = serde_json::from_slice(signer_bytes)
             .map_err(|e| format!("Failed to deserialize MLS signer: {e}"))?;
         let credential_with_key: CredentialWithKey = serde_json::from_slice(credential_bytes)
             .map_err(|e| format!("Failed to deserialize MLS credential: {e}"))?;
 
-        // Store signer in the provider so OpenMLS can find it.
         signer
             .store(provider.storage())
             .map_err(|e| format!("Failed to store restored MLS signer: {e:?}"))?;
 
-        // Load MLS groups from the storage provider.
         let mut groups = HashMap::new();
         for server_id in server_ids {
             let group_id = GroupId::from_slice(server_id.as_bytes());
             match MlsGroup::load(provider.storage(), &group_id) {
                 Ok(Some(mut group)) => {
-                    // Upgrade pre-existing groups to the late-delivery config
-                    // (bigger sender-ratchet tolerance + past-epoch secrets) —
-                    // idempotent; without this only NEW groups would tolerate
-                    // relay ring replay.
+                    // Upgrade pre-existing groups to the late-delivery config; idempotent, and
+                    // without it only NEW groups would tolerate relay ring replay.
                     if let Err(e) = group.set_configuration(provider.storage(), &hollow_join_config()) {
                         hollow_log!("[HOLLOW-MLS] set_configuration failed for {server_id}: {e:?}");
                     }
@@ -194,13 +171,11 @@ impl MlsManager {
         })
     }
 
-    /// The identity string baked into this manager's leaf credential (the id
-    /// passed to `new()`). Multi-device: a device's MLS leaf is credentialed by
-    /// its own `device_peer_id`; a legacy/single-device install's is the master.
-    /// Used at startup to detect a leaf credential inherited from ANOTHER device
-    /// (e.g. a linked sibling that imported the source device's DB) — that must be
-    /// regenerated, or two devices share one MLS signature key
-    /// (`DuplicateSignatureKey` on add, `CannotDecryptOwnMessage` on receive).
+    /// The identity string baked into this manager's leaf credential. A device's leaf is
+    /// credentialed by its own `device_peer_id`, a legacy install's by the master. Used
+    /// at startup to detect a leaf inherited from ANOTHER device (a sibling that imported
+    /// the source DB), which must be regenerated or two devices share one MLS signature
+    /// key (`DuplicateSignatureKey` on add, `CannotDecryptOwnMessage` on receive).
     pub fn credential_identity(&self) -> String {
         String::from_utf8_lossy(
             self.credential_with_key.credential.serialized_content()
@@ -252,17 +227,12 @@ impl MlsManager {
 
     /// Drop a KeyPackage we minted but will never be Welcomed for.
     ///
-    /// `KeyPackage::builder().build()` writes the whole bundle — the public
-    /// package plus the private init key AND the private leaf encryption key —
-    /// into the provider store under the package's hash reference, and
-    /// `join_from_welcome` is what normally consumes and deletes it. A mint
-    /// that never becomes a Welcome (a pending join the user discards, a join a
-    /// member refuses) would otherwise leave that private material in the
-    /// persisted storage blob for the life of the install. One delete is the
-    /// whole delete: both private halves live in that one bundle, which is why
-    /// OpenMLS's own Welcome path calls exactly this and nothing else.
-    ///
-    /// The caller persists afterwards.
+    /// `KeyPackage::builder().build()` writes the whole bundle, public package plus both
+    /// private halves, into the provider store, and `join_from_welcome` normally consumes
+    /// it. A mint that never becomes a Welcome would otherwise leave that private
+    /// material in the persisted blob for the life of the install. One delete is the whole
+    /// delete, which is why OpenMLS's own Welcome path calls exactly this. The caller
+    /// persists afterwards.
     pub fn discard_key_package(&self, kp_bytes: &[u8]) -> Result<(), String> {
         use openmls_traits::storage::StorageProvider;
         let kp_in: KeyPackageIn = TlsDeserialize::tls_deserialize_exact(kp_bytes)
@@ -279,14 +249,11 @@ impl MlsManager {
             .map_err(|e| format!("Failed to delete KeyPackage: {e:?}"))
     }
 
-    /// The credential identity carried in a serialised KeyPackage's leaf.
-    ///
-    /// Hollow leaf credentials are bare `device_peer_id`s, so this is "which
-    /// device is this KeyPackage asking to be added as". Read from the payload
-    /// rather than from a validated package on purpose: the value is a CLAIM,
-    /// and the caller's job is to refuse it unless it equals the identity the
-    /// transport already attributed the frame to. The package itself is fully
-    /// validated later, by `add_members_batch`, before any leaf is created.
+    /// The credential identity carried in a serialised KeyPackage's leaf, i.e. which
+    /// device it asks to be added as. Read from the payload on purpose: the value is a
+    /// CLAIM, and the caller must refuse it unless it equals the identity the transport
+    /// attributed the frame to. The package itself is fully validated later, by
+    /// `add_members_batch`, before any leaf is created.
     pub fn key_package_identity(kp_bytes: &[u8]) -> Result<String, String> {
         let kp_in: KeyPackageIn = TlsDeserialize::tls_deserialize_exact(kp_bytes)
             .map_err(|e| format!("Failed to deserialize KeyPackage: {e:?}"))?;
@@ -425,15 +392,11 @@ impl MlsManager {
 
     /// Remove a member from the MLS group. Returns serialized commit.
     /// Caller must call `merge_pending_commit()` after broadcasting.
-    ///
-    /// Multi-device (Step 6): a human can hold MULTIPLE leaves (one per device,
-    /// each credentialed by its own device peer_id), plus possibly a legacy
-    /// master-credentialed leaf. To remove that human entirely, the CALLER must
-    /// expand `peer_id` into the full set of credential ids
-    /// (`{master} ∪ devices_for(master)`) and use
-    /// [`remove_identity_leaves`]. This single-id helper removes only the ONE leaf
-    /// whose credential equals `peer_id` and is kept for callers that genuinely
-    /// target one specific leaf (e.g. removing a single stale device).
+    /// A human can hold MULTIPLE leaves (one per device, plus possibly a legacy
+    /// master-credentialed one), so removing that human entirely means expanding
+    /// `peer_id` into `{master} + devices_for(master)` and calling
+    /// [`remove_identity_leaves`]. This helper removes only the ONE leaf whose credential
+    /// equals `peer_id`, for callers that genuinely target a single device.
     pub fn remove_member(
         &mut self,
         server_id: &str,
@@ -452,17 +415,14 @@ impl MlsManager {
         self.remove_identity_leaves(server_id, peer_ids)
     }
 
-    /// Remove EVERY leaf whose credential matches any of `credential_ids`, in a
-    /// single commit. This is the canonical multi-device removal primitive: the
-    /// caller passes the full set of credential ids belonging to the identity
-    /// (or identities) to remove — typically `{master} ∪ devices_for(master)` —
-    /// and all matching leaves are dropped at once (one epoch advance).
+    /// Remove EVERY leaf whose credential matches any of `credential_ids`, in a single
+    /// commit: the canonical multi-device removal primitive, taking the full credential
+    /// set of the identity to remove, typically `{master} + devices_for(master)`.
     ///
-    /// Credentials are matched by exact bytes; with per-device credentials each
-    /// id matches at most one leaf, and a legacy master-credentialed leaf is
-    /// matched when the master id is included. Ids with no matching leaf are
-    /// skipped (idempotent — a re-issued kick is harmless). Returns an error only
-    /// if the id set is empty or NO leaf matched any id.
+    /// Credentials match by exact bytes, so each id matches at most one leaf and a legacy
+    /// master-credentialed leaf is matched when the master id is included. Ids with no
+    /// leaf are skipped, so a re-issued kick is harmless; an error comes back only if the
+    /// set is empty or NO leaf matched.
     pub fn remove_identity_leaves(
         &mut self,
         server_id: &str,
@@ -572,7 +532,6 @@ impl MlsManager {
             .process_message(&self.provider, protocol_msg)
             .map_err(|e| format!("MLS process_message failed: {e:?}"))?;
 
-        // Extract sender identity from the credential.
         let sender_credential = processed.credential();
         let sender_peer_id = String::from_utf8_lossy(
             sender_credential.serialized_content()
@@ -631,16 +590,16 @@ impl MlsManager {
         self.groups.contains_key(server_id)
     }
 
-    /// Whether a held group is still ACTIVE. A commit that removes our own
-    /// leaf merges cleanly but leaves the group inactive (use-after-eviction):
-    /// `has_group` stays true while export/encrypt fail forever. Callers use
-    /// this to detect eviction and drop + re-bootstrap instead of wedging.
+    /// Whether a held group is still ACTIVE. A commit that removes our own leaf merges
+    /// cleanly but leaves the group inactive: `has_group` stays true while export and
+    /// encrypt fail forever, so callers use this to drop and re-bootstrap instead of
+    /// wedging.
     pub fn is_active(&self, server_id: &str) -> bool {
         self.groups.get(server_id).map(|g| g.is_active()).unwrap_or(false)
     }
 
-    /// All server_ids we currently hold an MLS group for (Step 7 revocation sweeps
-    /// every shared server to remove a revoked device's leaf where we coordinate).
+    /// All server_ids we hold an MLS group for, so revocation can sweep every shared
+    /// server for a revoked device's leaf where we coordinate.
     pub fn group_ids(&self) -> Vec<String> {
         self.groups.keys().cloned().collect()
     }
@@ -682,9 +641,8 @@ impl MlsManager {
             // Delete from OpenMLS provider storage so join_from_welcome doesn't hit GroupAlreadyExists.
             let _ = group.delete(self.provider.storage());
         }
-        // Cached commits belong to the dropped incarnation — a fresh Welcome
-        // lands us past them, and serving them to anyone would only produce
-        // partial catch-ups that end behind the group anyway.
+        // Cached commits belong to the dropped incarnation: a fresh Welcome lands us past
+        // them, and serving them would produce partial catch-ups that end behind the group.
         self.commit_cache.remove(server_id);
     }
 
@@ -702,10 +660,9 @@ impl MlsManager {
         }
     }
 
-    /// Commit frames bridging `(after_epoch, up_to]` for catch-up replay,
-    /// ascending. Returns `Some` ONLY when the cache holds EVERY epoch in that
-    /// range — a partial replay would leave the receiver still stale while
-    /// looking served. `None` = can't bridge; caller falls back to the
+    /// Commit frames bridging `(after_epoch, up_to]`, ascending. `Some` ONLY when the
+    /// cache holds EVERY epoch in that range, because a partial replay would leave the
+    /// receiver stale while looking served; `None` means the caller falls back to the
     /// remove+re-add repair.
     pub fn cached_commits_after(
         &self,
@@ -774,8 +731,8 @@ mod commit_cache_tests {
         // Contiguous (4, 6] bridges.
         let bridged = mgr.cached_commits_after("g", 4, 6).expect("bridge 5..=6");
         assert_eq!(bridged, vec![(5, "c5".to_string()), (6, "c6".to_string())]);
-        // (4, 8] crosses the missing epoch 7 — must refuse (a partial replay
-        // would leave the receiver stale while looking served).
+        // (4, 8] crosses the missing epoch 7 and must refuse: a partial replay would leave
+        // the receiver stale while looking served.
         assert!(mgr.cached_commits_after("g", 4, 8).is_none());
         // (6, 8] also needs 7 — refuse.
         assert!(mgr.cached_commits_after("g", 6, 8).is_none());
@@ -825,30 +782,24 @@ mod tests {
 
     #[test]
     fn test_two_members_encrypt_decrypt() {
-        // Alice creates a group.
         let mut alice = MlsManager::new("12D3KooWAlice").unwrap();
         alice.create_group("server1").unwrap();
 
-        // Bob generates a KeyPackage.
         let bob = MlsManager::new("12D3KooWBob").unwrap();
         let bob_kp = bob.generate_key_package().unwrap();
 
-        // Alice adds Bob.
         let (commit_bytes, welcome_bytes) = alice.add_member("server1", &bob_kp).unwrap();
         alice.merge_pending_commit("server1").unwrap();
         assert_eq!(alice.member_count("server1"), 2);
 
-        // Bob joins from Welcome.
         let mut bob = bob; // make mutable
         bob.join_from_welcome("server1", &welcome_bytes).unwrap();
         assert_eq!(bob.member_count("server1"), 2);
 
-        // Alice encrypts a message.
         let plaintext = b"Hello from Alice!";
         let ciphertext = alice.encrypt("server1", plaintext).unwrap();
         assert_ne!(ciphertext, plaintext.to_vec());
 
-        // Bob decrypts.
         let (decrypted, sender) = bob.decrypt("server1", &ciphertext).unwrap();
         assert_eq!(decrypted, plaintext.to_vec());
         assert_eq!(sender, "12D3KooWAlice");
@@ -863,7 +814,6 @@ mod tests {
 
     #[test]
     fn test_remove_member_forward_secrecy() {
-        // Alice (owner), Bob, Charlie.
         let mut alice = MlsManager::new("12D3KooWAlice").unwrap();
         alice.create_group("server1").unwrap();
 
@@ -878,26 +828,21 @@ mod tests {
         let charlie_kp = charlie.generate_key_package().unwrap();
         let (commit_charlie, welcome_charlie) = alice.add_member("server1", &charlie_kp).unwrap();
         alice.merge_pending_commit("server1").unwrap();
-        // Bob processes the commit so he knows about Charlie.
         bob.process_commit("server1", &commit_charlie).unwrap();
         let mut charlie = charlie;
         charlie.join_from_welcome("server1", &welcome_charlie).unwrap();
 
         assert_eq!(alice.member_count("server1"), 3);
 
-        // Alice removes Bob.
         let remove_commit = alice.remove_member("server1", "12D3KooWBob").unwrap();
         alice.merge_pending_commit("server1").unwrap();
-        // Charlie processes the remove commit.
         charlie.process_commit("server1", &remove_commit).unwrap();
 
         assert_eq!(alice.member_count("server1"), 2);
 
-        // Alice sends a message post-removal.
         let post_removal_msg = b"Secret after Bob left";
         let ct = alice.encrypt("server1", post_removal_msg).unwrap();
 
-        // Charlie can decrypt.
         let (decrypted, _) = charlie.decrypt("server1", &ct).unwrap();
         assert_eq!(decrypted, post_removal_msg.to_vec());
 
@@ -908,20 +853,17 @@ mod tests {
 
     #[test]
     fn test_credential_identity_reports_seed() {
-        // The credential identity must equal the id passed to new() — this is what
-        // startup uses to detect a sibling that inherited another device's MLS
-        // identity (credential != our device id → must regenerate to avoid a
-        // duplicate signature key across two leaves).
+        // The credential identity must equal the id passed to new(): this is what startup
+        // uses to detect a sibling that inherited another device's MLS identity.
         let mgr = MlsManager::new("12D3KooWMyDeviceId").unwrap();
         assert_eq!(mgr.credential_identity(), "12D3KooWMyDeviceId");
     }
 
     #[test]
     fn test_distinct_devices_have_distinct_signature_keys() {
-        // Two independently-created managers (distinct device ids) must have
-        // DISTINCT MLS signature keys, so both can be added as separate leaves.
-        // (A linked sibling that imported the source's signer would FAIL this —
-        // hence the startup regeneration.)
+        // Two independently-created managers must have DISTINCT MLS signature keys, so both
+        // can be separate leaves. A sibling that imported the source's signer fails this,
+        // which is why startup regenerates.
         let a = MlsManager::new("12D3KooWDeviceA").unwrap();
         let b = MlsManager::new("12D3KooWDeviceB").unwrap();
         assert_ne!(a.signer_bytes().unwrap(), b.signer_bytes().unwrap(),
@@ -930,9 +872,8 @@ mod tests {
 
     #[test]
     fn test_remove_identity_leaves_multiple() {
-        // Step 6: one human holds TWO leaves (two device credentials). A single
-        // remove_identity_leaves call passing both device ids must drop BOTH in
-        // one commit, and survivors keep decrypting.
+        // One human holding TWO leaves: a single remove_identity_leaves call passing both
+        // device ids must drop BOTH in one commit, and survivors keep decrypting.
         let mut owner = MlsManager::new("12D3KooWOwner").unwrap();
         owner.create_group("server1").unwrap();
 
@@ -943,13 +884,11 @@ mod tests {
         let mut survivor = survivor;
         survivor.join_from_welcome("server1", &w_surv).unwrap();
 
-        // "Human X" device A.
         let dev_a = MlsManager::new("12D3KooWHumanXDeviceA").unwrap();
         let (c_a, _) = owner.add_member("server1", &dev_a.generate_key_package().unwrap()).unwrap();
         owner.merge_pending_commit("server1").unwrap();
         survivor.process_commit("server1", &c_a).unwrap();
 
-        // "Human X" device B (distinct credential — the multi-device case).
         let dev_b = MlsManager::new("12D3KooWHumanXDeviceB").unwrap();
         let (c_b, _) = owner.add_member("server1", &dev_b.generate_key_package().unwrap()).unwrap();
         owner.merge_pending_commit("server1").unwrap();
@@ -957,7 +896,6 @@ mod tests {
 
         assert_eq!(owner.member_count("server1"), 4); // owner + survivor + A + B
 
-        // Remove BOTH of Human X's leaves in one commit (caller expanded the set).
         let commit = owner.remove_identity_leaves(
             "server1",
             &["12D3KooWHumanXDeviceA", "12D3KooWHumanXDeviceB"],
@@ -967,7 +905,6 @@ mod tests {
 
         assert_eq!(owner.member_count("server1"), 2); // owner + survivor
 
-        // Survivor still decrypts post-removal.
         let ct = owner.encrypt("server1", b"after X removed").unwrap();
         let (dec, _) = survivor.decrypt("server1", &ct).unwrap();
         assert_eq!(dec, b"after X removed".to_vec());
@@ -975,8 +912,8 @@ mod tests {
 
     #[test]
     fn test_remove_identity_leaves_skips_unknown_ids() {
-        // Removing by a set that includes ids with no matching leaf removes the
-        // matching one and silently skips the rest (idempotent kicks).
+        // A set including ids with no matching leaf removes the matching one and skips the
+        // rest, so kicks stay idempotent.
         let mut owner = MlsManager::new("12D3KooWOwner").unwrap();
         owner.create_group("server1").unwrap();
         let bob = MlsManager::new("12D3KooWBob").unwrap();
@@ -984,7 +921,6 @@ mod tests {
         owner.merge_pending_commit("server1").unwrap();
         assert_eq!(owner.member_count("server1"), 2);
 
-        // Pass Bob's master id + a never-present device id of his (no leaf).
         owner.remove_identity_leaves(
             "server1",
             &["12D3KooWBob", "12D3KooWBobGhostDevice"],
@@ -998,7 +934,6 @@ mod tests {
 
     #[test]
     fn test_storage_serialization_roundtrip() {
-        // Create a group and verify state survives serialization.
         let mut alice = MlsManager::new("12D3KooWAlice").unwrap();
         alice.create_group("server1").unwrap();
 
@@ -1007,12 +942,10 @@ mod tests {
         let (_, welcome) = alice.add_member("server1", &bob_kp).unwrap();
         alice.merge_pending_commit("server1").unwrap();
 
-        // Serialize Alice's state.
         let signer_bytes = alice.signer_bytes().unwrap();
         let credential_bytes = alice.credential_bytes().unwrap();
         let storage_blob = alice.serialize_storage().unwrap();
 
-        // Restore from serialized state.
         let mut alice2 = MlsManager::from_persisted(
             &signer_bytes,
             &credential_bytes,
@@ -1023,7 +956,6 @@ mod tests {
         assert!(alice2.has_group("server1"));
         assert_eq!(alice2.member_count("server1"), 2);
 
-        // Restored Alice can still encrypt.
         let mut bob = bob;
         bob.join_from_welcome("server1", &welcome).unwrap();
         let ct = alice2.encrypt("server1", b"After restore").unwrap();
@@ -1047,14 +979,12 @@ mod tests {
         let mgr = MlsManager::new("12D3KooWTestPeer").unwrap();
         let kp = mgr.generate_key_package().unwrap();
         assert!(!kp.is_empty());
-        // Verify it can be deserialized back.
         let kp_in: KeyPackageIn = TlsDeserialize::tls_deserialize_exact(&kp).unwrap();
         assert!(kp_in.validate(mgr.provider.crypto(), ProtocolVersion::Mls10).is_ok());
     }
 
     #[test]
     fn test_batch_add_six_members() {
-        // Owner creates group, 6 peers generate KeyPackages.
         let mut owner = MlsManager::new("12D3KooWOwner").unwrap();
         owner.create_group("server1").unwrap();
 
@@ -1066,7 +996,7 @@ mod tests {
             .map(|(p, id)| (id.clone(), p.generate_key_package().unwrap()))
             .collect();
 
-        // Batch add all 6 at once — single epoch advance.
+        // One batch add of all 6, a single epoch advance.
         let (commit_bytes, welcome_bytes, added) = owner
             .add_members_batch("server1", &key_packages)
             .unwrap();
@@ -1075,18 +1005,15 @@ mod tests {
         assert_eq!(added.len(), 6);
         assert_eq!(owner.member_count("server1"), 7); // owner + 6
 
-        // All peers join from the same Welcome.
         let mut joined_peers: Vec<MlsManager> = peers.into_iter().map(|mut p| {
             p.join_from_welcome("server1", &welcome_bytes).unwrap();
             p
         }).collect();
 
-        // Verify all peers see 7 members.
         for p in &joined_peers {
             assert_eq!(p.member_count("server1"), 7);
         }
 
-        // Owner encrypts, all peers can decrypt.
         let msg = b"Hello from owner to all 6 peers!";
         let ct = owner.encrypt("server1", msg).unwrap();
         for p in &mut joined_peers {
@@ -1101,14 +1028,12 @@ mod tests {
         let mut owner = MlsManager::new("12D3KooWOwner").unwrap();
         owner.create_group("server1").unwrap();
 
-        // Add Bob normally first.
         let bob = MlsManager::new("12D3KooWBob").unwrap();
         let bob_kp = bob.generate_key_package().unwrap();
         let (_, _) = owner.add_member("server1", &bob_kp).unwrap();
         owner.merge_pending_commit("server1").unwrap();
         assert_eq!(owner.member_count("server1"), 2);
 
-        // Try batch-adding Bob again + a new peer Charlie.
         let charlie = MlsManager::new("12D3KooWCharlie").unwrap();
         let charlie_kp = charlie.generate_key_package().unwrap();
         let bob2 = MlsManager::new("12D3KooWBob").unwrap();
@@ -1122,7 +1047,6 @@ mod tests {
         let (_, _, added) = owner.add_members_batch("server1", &batch).unwrap();
         owner.merge_pending_commit("server1").unwrap();
 
-        // Only Charlie should be added, Bob skipped.
         assert_eq!(added.len(), 1);
         assert_eq!(added[0], "12D3KooWCharlie");
         assert_eq!(owner.member_count("server1"), 3); // owner + bob + charlie
@@ -1159,7 +1083,6 @@ mod tests {
 
     #[test]
     fn test_six_members_all_communicate() {
-        // Setup: owner + 6 peers, batch-added.
         let mut owner = MlsManager::new("12D3KooWOwner").unwrap();
         owner.create_group("server1").unwrap();
 
@@ -1184,12 +1107,10 @@ mod tests {
             let msg = format!("Message from peer {}", sender_idx + 1);
             let ct = all_peers[sender_idx].encrypt("server1", msg.as_bytes()).unwrap();
 
-            // Owner decrypts.
             let (dec, sender) = owner.decrypt("server1", &ct).unwrap();
             assert_eq!(dec, msg.as_bytes());
             assert_eq!(sender, peer_ids[sender_idx]);
 
-            // All other peers decrypt.
             for recv_idx in 0..all_peers.len() {
                 if recv_idx == sender_idx { continue; }
                 let (dec, sender) = all_peers[recv_idx].decrypt("server1", &ct).unwrap();
@@ -1198,7 +1119,6 @@ mod tests {
             }
         }
 
-        // Owner sends, all peers decrypt.
         let owner_msg = b"Owner broadcast";
         let owner_ct = owner.encrypt("server1", owner_msg).unwrap();
         for p in &mut all_peers {
@@ -1215,13 +1135,11 @@ mod tests {
 
         owner.create_group("server1").unwrap();
 
-        // Add peer to group.
         let kp = peer.generate_key_package().unwrap();
         let (commit, welcome) = owner.add_member("server1", &kp).unwrap();
         owner.merge_pending_commit("server1").unwrap();
         peer.join_from_welcome("server1", &welcome).unwrap();
 
-        // Both export the same SFrame key.
         let owner_key = owner.export_secret("server1", "sframe", b"", 32).unwrap();
         let peer_key = peer.export_secret("server1", "sframe", b"", 32).unwrap();
 
@@ -1229,7 +1147,6 @@ mod tests {
         assert_eq!(peer_key.len(), 32);
         assert_eq!(owner_key, peer_key, "Both members should derive the same SFrame key");
 
-        // Epoch should be consistent.
         let owner_epoch = owner.epoch("server1").unwrap();
         let peer_epoch = peer.epoch("server1").unwrap();
         assert_eq!(owner_epoch, peer_epoch);
@@ -1238,28 +1155,24 @@ mod tests {
 
     #[test]
     fn test_two_same_human_leaves_share_sframe_key() {
-        // Step 6: a human's TWO devices each hold a leaf (distinct device-id
-        // credentials) in the same group. At the same epoch both leaves MUST
-        // export the same SFrame key as every other member — MLS derives the
-        // epoch secret from group state, not per-leaf identity.
+        // A human's TWO devices each hold a leaf in the same group, and at the same epoch
+        // both MUST export the same SFrame key as every other member: MLS derives the epoch
+        // secret from group state, not per-leaf identity.
         let mut owner = MlsManager::new("12D3KooWOwner").unwrap();
         owner.create_group("server1").unwrap();
 
-        // Human X device A.
         let mut dev_a = MlsManager::new("12D3KooWHumanXDeviceA").unwrap();
         let (c_a, w_a) = owner.add_member("server1", &dev_a.generate_key_package().unwrap()).unwrap();
         owner.merge_pending_commit("server1").unwrap();
         dev_a.join_from_welcome("server1", &w_a).unwrap();
         let _ = c_a;
 
-        // Human X device B (distinct credential, same human).
         let mut dev_b = MlsManager::new("12D3KooWHumanXDeviceB").unwrap();
         let (c_b, w_b) = owner.add_member("server1", &dev_b.generate_key_package().unwrap()).unwrap();
         owner.merge_pending_commit("server1").unwrap();
         dev_a.process_commit("server1", &c_b).unwrap();
         dev_b.join_from_welcome("server1", &w_b).unwrap();
 
-        // All three at the same epoch derive the identical SFrame key.
         let k_owner = owner.export_secret("server1", "sframe", b"", 32).unwrap();
         let k_a = dev_a.export_secret("server1", "sframe", b"", 32).unwrap();
         let k_b = dev_b.export_secret("server1", "sframe", b"", 32).unwrap();
@@ -1267,10 +1180,10 @@ mod tests {
         assert_eq!(k_owner, k_b, "both of one human's leaves must derive the same SFrame key");
         assert_eq!(owner.epoch("server1").unwrap(), dev_b.epoch("server1").unwrap());
 
-        // And both devices can decrypt an owner broadcast (two leaves, one human).
+        // Both devices decrypt an owner broadcast: two leaves, one human.
         let ct = owner.encrypt("server1", b"hello both devices").unwrap();
         assert_eq!(dev_a.decrypt("server1", &ct).unwrap().0, b"hello both devices".to_vec());
-        // dev_b decrypts a SECOND copy (each leaf decrypts independently).
+        // Each leaf decrypts its own copy independently.
         let ct2 = owner.encrypt("server1", b"hello both devices").unwrap();
         assert_eq!(dev_b.decrypt("server1", &ct2).unwrap().0, b"hello both devices".to_vec());
     }
@@ -1283,7 +1196,6 @@ mod tests {
 
         owner.create_group("server1").unwrap();
 
-        // Add peer1.
         let kp1 = peer1.generate_key_package().unwrap();
         let (_, welcome1) = owner.add_member("server1", &kp1).unwrap();
         owner.merge_pending_commit("server1").unwrap();
@@ -1292,7 +1204,7 @@ mod tests {
         let key_epoch1 = owner.export_secret("server1", "sframe", b"", 32).unwrap();
         let epoch1 = owner.epoch("server1").unwrap();
 
-        // Add peer2 — epoch changes, key should rotate.
+        // A second add advances the epoch, so the key must rotate.
         let kp2 = peer2.generate_key_package().unwrap();
         let (commit2, welcome2) = owner.add_member("server1", &kp2).unwrap();
         owner.merge_pending_commit("server1").unwrap();
@@ -1305,18 +1217,16 @@ mod tests {
         assert_ne!(key_epoch1, key_epoch2, "SFrame key must change when membership changes");
         assert!(epoch2 > epoch1, "Epoch must increase");
 
-        // All three members should have the same new key.
         let peer1_key = peer1.export_secret("server1", "sframe", b"", 32).unwrap();
         let peer2_key = peer2.export_secret("server1", "sframe", b"", 32).unwrap();
         assert_eq!(key_epoch2, peer1_key);
         assert_eq!(key_epoch2, peer2_key);
     }
 
-    /// Fix 1 (keystone regen): an OLD owned group (keystone owner + sibling + friend).
-    /// The keystone REGENERATES a fresh device-credentialed leaf; the SIBLING re-adds it
-    /// to the SAME group (one epoch advance — Welcome to the keystone, Commit to the
-    /// friend). The friend must then DECRYPT a message from the regenerated keystone,
-    /// and the group must NOT fork (sibling still decrypts at the same epoch).
+    /// Keystone regeneration: in an OLD owned group the keystone regenerates a fresh
+    /// device-credentialed leaf and the SIBLING re-adds it to the SAME group. The friend
+    /// must then decrypt a message from the regenerated keystone, and the group must NOT
+    /// fork.
     #[test]
     fn keystone_regen_rejoins_owned_group_via_sibling_no_fork() {
         // OLD owned server: keystone "M" (master-credentialed legacy leaf is just
@@ -1340,11 +1250,9 @@ mod tests {
         let mut keystone_new = MlsManager::new("M").unwrap();
         assert!(!keystone_new.has_group("oldsrv"), "regenerated keystone has no group yet");
 
-        // The OLD keystone leaf (credential "M") is STILL in the group, colliding with
-        // the new one's credential id. Production handles this in the batch processor:
-        // Phase 1 REMOVES the stale "M" leaf (commit 1), Phase 2 ADDS the new "M" leaf
-        // (commit 2). Model both, with the friend applying each commit.
-        // Phase 1: sibling removes the stale "M" leaf.
+        // The OLD keystone leaf is STILL in the group, colliding with the new one's
+        // credential id. Production handles this in two commits, remove then add, which
+        // this models with the friend applying each.
         let c_rm = sibling.remove_member("oldsrv", "M").unwrap();
         sibling.merge_pending_commit("oldsrv").unwrap();
         friend.process_commit("oldsrv", &c_rm).unwrap();
@@ -1358,17 +1266,15 @@ mod tests {
         friend.process_commit("oldsrv", &c3).unwrap();
         keystone_new.join_from_welcome("oldsrv", &w3).unwrap();
 
-        // THE ASSERT: friend decrypts a channel message from the REGENERATED keystone.
+        // THE ASSERT: the friend decrypts from the REGENERATED keystone.
         let ct = keystone_new.encrypt("oldsrv", b"hello from regenerated keystone").unwrap();
         let (pt, sender) = friend.decrypt("oldsrv", &ct).unwrap();
         assert_eq!(pt, b"hello from regenerated keystone".to_vec());
         assert_eq!(sender, "M", "decrypted message attributed to the keystone leaf id");
 
-        // No fork: the sibling also decrypts at the same epoch.
         let ct2 = keystone_new.encrypt("oldsrv", b"again").unwrap();
         assert_eq!(sibling.decrypt("oldsrv", &ct2).unwrap().0, b"again".to_vec());
 
-        // And the friend's SFrame key matches the keystone's (same epoch, no fork).
         assert_eq!(
             friend.export_secret("oldsrv", "sframe", b"", 32).unwrap(),
             keystone_new.export_secret("oldsrv", "sframe", b"", 32).unwrap(),
@@ -1377,16 +1283,14 @@ mod tests {
     }
 }
 
-/// Persistence-format guard for the OpenMLS upgrade (0.8.1 -> 0.9.0).
+/// Persistence-format guard for the OpenMLS upgrade.
 ///
-/// `serialize_storage()`/`from_persisted()` hand-roll a length-prefixed dump of
-/// the `openmls_memory_storage::MemoryStorage` map into the `mls_identity`
-/// blob. Nothing in the type system pins that map's key/value encoding, so an
-/// upstream change would make every persisted group silently unreadable with no
-/// compile error. These fixtures were minted by `generate_mls_0_8_1_fixtures`
-/// while the crate was still on openmls 0.8.1 / openmls_memory_storage 0.5.0;
-/// `persisted_0_8_1_storage_still_loads` reloads them on every run, so a future
-/// bump that changes the blob format fails here instead of in the field.
+/// `serialize_storage()`/`from_persisted()` hand-roll a length-prefixed dump of the
+/// `MemoryStorage` map into the `mls_identity` blob, and nothing in the type system
+/// pins that map's encoding, so an upstream change would make every persisted group
+/// silently unreadable with no compile error. The fixtures were minted while the
+/// crate was on openmls 0.8.1 and are reloaded on every run, so a future bump that
+/// changes the blob format fails here instead of in the field.
 #[cfg(test)]
 mod persisted_storage_fixture {
     use super::*;
@@ -1405,18 +1309,17 @@ mod persisted_storage_fixture {
             .join("mls_persisted_0_8_1")
     }
 
-    /// Mints the fixtures. Ignored by default: it OVERWRITES the committed
-    /// blobs, which must stay exactly as openmls 0.8.1 wrote them. Run with
-    /// `cargo test --lib generate_mls_0_8_1_fixtures -- --ignored` only when
-    /// deliberately re-baselining against a new persisted format.
+    /// Mints the fixtures. Ignored by default because it OVERWRITES the committed blobs,
+    /// which must stay exactly as openmls 0.8.1 wrote them. Run it only when deliberately
+    /// re-baselining against a new persisted format.
     #[test]
     #[ignore = "overwrites the committed 0.8.1 fixtures; run only to re-baseline"]
     fn generate_mls_0_8_1_fixtures() {
         let mut alice = MlsManager::new("12D3KooWFixtureAlice").unwrap();
         alice.create_group(FIXTURE_SERVER).unwrap();
 
-        // Two members so the persisted blob carries a real ratchet tree, an
-        // epoch bump and another leaf's key material, not just a solo group.
+        // Two members, so the persisted blob carries a real ratchet tree, an epoch bump and
+        // another leaf's key material.
         let bob = MlsManager::new("12D3KooWFixtureBob").unwrap();
         let bob_kp = bob.generate_key_package().unwrap();
         alice.add_member(FIXTURE_SERVER, &bob_kp).unwrap();
@@ -1508,8 +1411,8 @@ mod persisted_storage_fixture {
         want_members.sort();
         assert_eq!(got_members, want_members, "persisted member list changed");
 
-        // The load is only genuine if the epoch secrets survived: same label,
-        // same context, same bytes. This is what SFrame media keys ride on.
+        // The load is only genuine if the epoch secrets survived: same label, same context,
+        // same bytes, which is what SFrame media keys ride on.
         let secret = restored
             .export_secret(
                 &server_id,

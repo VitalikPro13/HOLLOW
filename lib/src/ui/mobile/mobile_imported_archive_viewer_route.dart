@@ -185,7 +185,6 @@ class _MobileImportedArchiveViewerRouteState
 
     return Column(
       children: [
-        // Back + title header
         ArchiveMobileToolbar(
           leading: headerLeading,
           title: prep.headerTitle,
@@ -215,7 +214,6 @@ class _MobileImportedArchiveViewerRouteState
           searchOpen: searchOpen,
         ),
 
-        // Verification banner
         ArchiveVerificationBanner(
           archiveSigValid: prep.archiveSigValid,
           archiveSigText: prep.archiveSigText,
@@ -224,7 +222,6 @@ class _MobileImportedArchiveViewerRouteState
           dense: true,
         ),
 
-        // Channel selector for server archives
         if (prep.isServer && data.channels.length > 1)
           ArchiveChannelSelector(
             channels: data.channels,
@@ -240,7 +237,6 @@ class _MobileImportedArchiveViewerRouteState
             },
           ),
 
-        // Search bar
         if (searchOpen)
           ArchiveListSearchBar(
             texts: [
@@ -250,7 +246,6 @@ class _MobileImportedArchiveViewerRouteState
             controller: _listController,
           ),
 
-        // Message list
         Expanded(
           child: visibleMessages.isEmpty
               ? Center(
@@ -283,7 +278,7 @@ class _MobileImportedArchiveViewerRouteState
     String proofMsgType,
     String exporterPeerId,
   ) {
-    // Exporter-relative proof context (imported archives).
+    // The proof context is relative to the exporter, not to us.
     String dmProofCtxFor(ChatMessage msg) {
       final senderPeerId = msg.isMe ? localPeerId : (data.peerId ?? '');
       return proofMsgType == 'dm'
@@ -360,8 +355,6 @@ class _MobileImportedArchiveViewerRouteState
       ),
     );
   }
-
-  // ── Shared helpers ─────────────────────────────────────────────
 
   void _showActions(
     String text,

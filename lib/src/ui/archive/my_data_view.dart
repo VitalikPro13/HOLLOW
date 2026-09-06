@@ -8,8 +8,8 @@ import 'package:hollow/src/ui/archive/archive_message_viewer.dart';
 import 'package:hollow/src/ui/archive/recovery_pool_dashboard.dart';
 import 'package:hollow/src/ui/archive/vault_files_view.dart';
 
-/// Two-panel layout for the "My Data" sub-tab.
-/// Left: conversation list (~280px). Right: read-only message viewer (or vault files view).
+/// Two-panel layout for the "My Data" sub-tab: conversation list on the left,
+/// read-only viewer or vault files on the right.
 class MyDataView extends ConsumerWidget {
   const MyDataView({super.key});
 
@@ -19,8 +19,6 @@ class MyDataView extends ConsumerWidget {
     final innerTab = ref.watch(myDataInnerTabProvider);
     final recoveryPool = ref.watch(recoveryPoolProvider);
 
-    // Right panel: recovery pool dashboard when active,
-    // otherwise vault files or message viewer.
     final Widget rightPanel;
     if (innerTab == MyDataInnerTab.vaultFiles && recoveryPool != null && recoveryPool.isActive && !recoveryPool.isPending) {
       rightPanel = const RecoveryPoolDashboard();
@@ -36,8 +34,8 @@ class MyDataView extends ConsumerWidget {
           width: 280,
           child: Container(
             decoration: BoxDecoration(
-              // Transparency-aware (same fix as the guest sidebar, #44) —
-              // opaqueBackground is for fixed chrome bars only.
+              // Transparency-aware (#44): opaqueBackground is for fixed chrome
+              // bars only.
               color: hollow.surface,
               border: Border(right: BorderSide(color: hollow.border)),
             ),

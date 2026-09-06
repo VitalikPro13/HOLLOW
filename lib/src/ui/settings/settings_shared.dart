@@ -14,12 +14,11 @@ import 'package:hollow/src/ui/components/rainbow_slider_track.dart';
 import 'package:hollow/src/ui/components/ui_scale.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-/// Shared scaffolding for the Settings surfaces (desktop dialog categories +
-/// mobile Settings tab). One implementation of the card/toggle/segment/slider
-/// building blocks so the two surfaces can't drift apart — extend this module
-/// instead of copying widgets between them.
+/// Shared scaffolding for the Settings surfaces, desktop and mobile. One
+/// implementation of the card, toggle, segment and slider blocks so the two
+/// cannot drift: extend this module instead of copying widgets between them.
 
-/// Helper: shorten a peer_id for display (`12D3…JQcW`).
+/// Shortens a peer_id for display (`12D3…JQcW`).
 String shortenPeerId(String id) =>
     id.length <= 12 ? id : '${id.substring(0, 6)}…${id.substring(id.length - 4)}';
 
@@ -39,8 +38,6 @@ Widget settingsCardList(List<Widget> cards) {
 }
 
 /// A titled, bordered card grouping related settings in the content area.
-/// This is the visual unit Vitalik asked for — each category is a short stack
-/// of these instead of one undifferentiated scroll.
 class SettingsCard extends StatelessWidget {
   final String title;
   final List<Widget> children;
@@ -155,9 +152,9 @@ class SettingsToggleRow extends StatelessWidget {
   }
 }
 
-/// Horizontal segmented control for a small set of mutually-exclusive
-/// options (e.g. Reduce Motion's Auto/On/Off). Each segment is a
-/// [HollowPressable] so it is keyboard- and screen-reader-actionable.
+/// Horizontal segmented control for a small set of mutually-exclusive options.
+/// Each segment is a [HollowPressable], so it is keyboard- and
+/// screen-reader-actionable.
 class TriStateSegment<T> extends StatelessWidget {
   final T value;
   final List<(T, String)> options;
@@ -215,10 +212,8 @@ class TriStateSegment<T> extends StatelessWidget {
   }
 }
 
-/// Labeled slider block: icon + title + subtitle header, themed slider, and a
-/// min/max caption row underneath. The scaffold shared by the cache-limit and
-/// auto-download sliders (Storage category) — callers supply the computed
-/// value, range, and display labels.
+/// Labeled slider block: header, themed slider and a min/max caption row.
+/// Callers supply the computed value, range and display labels.
 class SettingsLabeledSlider extends StatelessWidget {
   final IconData icon;
   final String title;
@@ -312,18 +307,14 @@ class SettingsLabeledSlider extends StatelessWidget {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Display size (issue #20) — shared by the desktop Accessibility category and
-// the mobile Accessibility tab, so the two surfaces can't drift apart.
-// ---------------------------------------------------------------------------
+// Display size (issue #20), shared by the desktop Accessibility category and
+// the mobile Accessibility tab so the two cannot drift apart.
 
-/// Interface scale ("zoom") slider — scales text, icons and spacing together.
+/// Interface scale ("zoom") slider: text, icons and spacing together.
 ///
-/// The value is committed on RELEASE, not on every drag tick. That is not
-/// laziness: this control lives inside the very UI it resizes, so a live
-/// commit would move the slider track out from under the pointer on each
-/// frame and the value would oscillate. Keyboard adjustment (arrow keys,
-/// which fire `onChanged` without a drag) still commits immediately.
+/// Committed on RELEASE, not on every drag tick, because this control lives
+/// inside the UI it resizes and a live commit moves the track out from under
+/// the pointer. Keyboard adjustment fires without a drag and commits at once.
 class InterfaceScaleControl extends ConsumerStatefulWidget {
   const InterfaceScaleControl({super.key});
 
@@ -343,9 +334,9 @@ class _InterfaceScaleControlState extends ConsumerState<InterfaceScaleControl> {
     final shown = _dragValue ?? saved;
     final min = uiScaleMin;
     final max = uiScaleMax;
-    // A window too small to show the app at the chosen scale gets a reduced
-    // one (so the controls that undo it stay reachable). Say so — a slider
-    // that visibly stops mattering past a point otherwise reads as broken.
+    // A window too small for the chosen scale gets a reduced one, so the
+    // controls that undo it stay reachable. Saying so keeps a slider that stops
+    // mattering past a point from reading as broken.
     final info = UiScaleInfo.maybeOf(context);
     final clampedTo = info != null && info.isClamped ? info.effective : null;
 
@@ -367,7 +358,7 @@ class _InterfaceScaleControlState extends ConsumerState<InterfaceScaleControl> {
         if (_dragValue != null) {
           setState(() => _dragValue = v);
         } else {
-          // Keyboard / assistive adjustment — no drag, so commit right away.
+          // Keyboard or assistive adjustment: no drag, so commit right away.
           ref.read(uiScaleProvider.notifier).setScale(v);
         }
       },
@@ -379,9 +370,9 @@ class _InterfaceScaleControlState extends ConsumerState<InterfaceScaleControl> {
   }
 }
 
-/// Chat text size slider — message text and the composer only, on top of the
-/// interface scale. Live, with a worked example underneath: nothing it
-/// resizes is on screen while the Settings surface is open.
+/// Chat text size slider: message text and the composer only, on top of the
+/// interface scale. Live, with a worked example underneath, because nothing it
+/// resizes is on screen while Settings is open.
 class ChatTextScaleControl extends ConsumerStatefulWidget {
   const ChatTextScaleControl({super.key});
 
@@ -478,9 +469,9 @@ class _ChatTextPreview extends StatelessWidget {
   }
 }
 
-/// Side-panel zoom (issue #54): the server strip, channel list and member
-/// list, without touching the chat. Live, because all three are visible
-/// behind the Settings dialog while it moves.
+/// Side-panel zoom (issue #54): the server strip, channel list and member list,
+/// without touching the chat. Live, because all three are visible behind the
+/// Settings dialog.
 class PanelScaleControl extends ConsumerWidget {
   const PanelScaleControl({super.key});
 
@@ -503,8 +494,8 @@ class PanelScaleControl extends ConsumerWidget {
   }
 }
 
-/// Shared skeleton for both scale sliders: header row with a live percentage
-/// badge and a Reset action, the themed slider, and min/max captions.
+/// Shared skeleton for both scale sliders: header with a live percentage badge
+/// and a Reset action, the slider, and min/max captions.
 class _ScaleSliderBlock extends StatelessWidget {
   final HollowTheme hollow;
   final IconData icon;
@@ -620,9 +611,8 @@ class _ScaleSliderBlock extends StatelessWidget {
   }
 }
 
-/// 1px divider with a looping accent shimmer sweep (ASOT style). Uses
-/// [SharedTickers.shimmer] instead of its own AnimationController. Shared by
-/// the About sections (desktop + mobile) and the home dashboard.
+/// 1px divider with a looping accent shimmer sweep, on [SharedTickers.shimmer]
+/// rather than an AnimationController of its own.
 class ShimmerDividerLine extends StatelessWidget {
   final HollowTheme hollow;
   const ShimmerDividerLine({super.key, required this.hollow});
@@ -652,8 +642,8 @@ class ShimmerDividerLine extends StatelessWidget {
   }
 }
 
-/// Square accent color preview box (current hue swatch next to the label).
-/// Size/radius differ between desktop and mobile — passed in.
+/// Square accent colour preview box. Size and radius differ between desktop and
+/// mobile, so they are passed in.
 class AccentHuePreviewBox extends StatelessWidget {
   final double hue;
   final double size;
@@ -682,8 +672,8 @@ class AccentHuePreviewBox extends StatelessWidget {
   }
 }
 
-/// Rainbow hue slider used by the accent color pickers (desktop + mobile).
-/// Track/thumb sizing differs between the two surfaces — passed in.
+/// Rainbow hue slider for the accent colour pickers. Track and thumb sizing
+/// differ between the two surfaces, so they are passed in.
 class AccentHueSliderRow extends StatelessWidget {
   final double hue;
   final double height;

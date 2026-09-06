@@ -11,7 +11,7 @@ import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-/// Verify a Proof — paste or import a proof JSON and verify it using the same
+/// Verify a proof: paste or import a proof JSON and check it with the same
 /// Ed25519 verification as the Message Proof dialog. One implementation shared
 /// by the desktop Security category and the mobile Settings tab.
 class VerifyProofSection extends StatefulWidget {
@@ -88,7 +88,6 @@ class _VerifyProofSectionState extends State<VerifyProofSection> {
     try {
       final map = json.decode(jsonStr) as Map<String, dynamic>;
 
-      // Extract fields from the proof JSON.
       final message = map['message'] as Map<String, dynamic>?;
       final sender = map['sender'] as Map<String, dynamic>?;
       final ctx = map['context'] as Map<String, dynamic>?;
@@ -118,17 +117,14 @@ class _VerifyProofSectionState extends State<VerifyProofSection> {
         return;
       }
 
-      // Reconstruct the canonical payload from the individual JSON fields
-      // and verify it matches the embedded one. This catches field tampering
-      // (e.g. changing message text while keeping the old canonical_payload).
-      // The grammar mirrors Rust's `message_signing_payload_v2` (absent fields
-      // serialize as empty strings) — the one place it is dual-defined.
+      // Reconstruct the canonical payload from the individual fields and check
+      // it against the embedded one, which catches field tampering such as new
+      // text kept against an old canonical_payload. The grammar mirrors Rust's
+      // `message_signing_payload_v2`, the one place it is dual-defined.
       //
-      // v1 proofs are refused outright in `_envelopeError`: their canonical
-      // payload covers the text ONLY, so a v1 proof whose reply_to / file_id /
-      // order_us / link preview were rewritten would reconstruct cleanly and
-      // verify. Accepting one here would reintroduce finding 2.3 through the
-      // manual verifier.
+      // v1 proofs are refused in `_envelopeError`: their payload covers the
+      // text ONLY, so a v1 proof with a rewritten reply_to, file_id, order_us
+      // or link preview would reconstruct cleanly and verify.
       final replyTo = message['reply_to'] as String? ?? '';
       final fileId = message['file_id'] as String? ?? '';
       final orderUs = message['order_us']?.toString() ?? '';
@@ -174,8 +170,8 @@ class _VerifyProofSectionState extends State<VerifyProofSection> {
     }
   }
 
-  /// Validate the proof envelope fields that must have exact expected values.
-  /// Returns the error message to show, or null when the envelope is valid.
+  /// Returns the error to show for an invalid proof envelope, or null when its
+  /// fields all hold their expected values.
   static String? _envelopeError(
     Map<String, dynamic> map,
     Map<String, dynamic>? message,
@@ -188,11 +184,10 @@ class _VerifyProofSectionState extends State<VerifyProofSection> {
     final version = map['version'];
     final protocol = map['protocol'] as String?;
     final algorithm = sig['algorithm'] as String?;
-    // v1 (hollow-proof-v1) is refused since 0.8.5. Its canonical payload
-    // covered the message TEXT only, so the reply target, attachment, ordering
-    // stamp and link preview sat outside the signature and could be rewritten
-    // while the proof still verified. Accepting one would let a doctored proof
-    // display as authentic.
+    // v1 is refused since 0.8.5: its canonical payload covered the message TEXT
+    // only, so the reply target, attachment, ordering stamp and link preview
+    // sat outside the signature and could be rewritten while the proof still
+    // verified.
     if (version == 1) {
       return 'This is a legacy v1 proof. The v1 signature covered only the '
           'message text. The attachment, reply target, ordering and link '
@@ -211,8 +206,8 @@ class _VerifyProofSectionState extends State<VerifyProofSection> {
     return null;
   }
 
-  /// Map the human-readable context type back to the canonical short form
-  /// used in the signing payload ('dm'/'ch'/'dm-delete'/'ch-delete').
+  /// Maps a human-readable context type back to the short form the signing
+  /// payload uses ('dm', 'ch', 'dm-delete', 'ch-delete').
   static String _canonicalMsgType(String contextType) {
     if (contextType == 'direct_message') return 'dm';
     if (contextType == 'channel') return 'ch';
@@ -246,7 +241,6 @@ class _VerifyProofSectionState extends State<VerifyProofSection> {
         ),
         const SizedBox(height: HollowSpacing.md),
 
-        // Input area
         Container(
           width: double.infinity,
           height: 120,
@@ -276,7 +270,6 @@ class _VerifyProofSectionState extends State<VerifyProofSection> {
         ),
         const SizedBox(height: HollowSpacing.md),
 
-        // Buttons
         Row(
           children: [
             HollowButton.ghost(
@@ -293,7 +286,6 @@ class _VerifyProofSectionState extends State<VerifyProofSection> {
           ],
         ),
 
-        // Result
         if (_result != null) ...[
           const SizedBox(height: HollowSpacing.lg),
           KeyedSubtree(key: _resultKey, child: _buildResult(hollow)),
@@ -370,7 +362,6 @@ class _VerifyProofSectionState extends State<VerifyProofSection> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // Status badge
           Row(
             children: [
               Icon(statusIcon, size: 16, color: statusColor),
@@ -387,13 +378,10 @@ class _VerifyProofSectionState extends State<VerifyProofSection> {
           ),
           const SizedBox(height: HollowSpacing.md),
 
-          // Message text
           if (r.text != null && r.text!.isNotEmpty) ..._messageBlock(hollow, r),
 
-          // Sender
           if (r.senderPeerId != null) ..._senderBlock(hollow, r),
 
-          // Context + Timestamp
           Row(
             children: [
               if (contextLabel.isNotEmpty) ...[

@@ -2,12 +2,9 @@ import 'dart:async';
 
 import 'package:flutter/widgets.dart';
 
-/// A self-ticking mm:ss call-duration label.
-///
-/// The 1-second tick lives INSIDE this leaf widget, so only this Text
-/// rebuilds each second — the call screens used to run the timer in their
-/// own State and `setState` the entire Scaffold (video tiles, controls,
-/// renderer probing) once per second for the life of the call.
+/// A self-ticking mm:ss call-duration label. The tick lives INSIDE this leaf
+/// widget, so a call screen does not rebuild its whole Scaffold once a second
+/// for the life of the call.
 class CallDurationText extends StatefulWidget {
   final DateTime startedAt;
   final TextStyle? style;

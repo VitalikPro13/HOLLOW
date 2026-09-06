@@ -8,15 +8,15 @@ import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-/// Icon for an audio route, shared by the sheet and the in-call control row
-/// so the button always shows where the audio is actually going.
+/// Icon for an audio route, shared by the sheet and the in-call control row so
+/// the button always shows where audio is actually going.
 IconData audioRouteIcon(AudioRouteKind? kind) {
   switch (kind) {
     case AudioRouteKind.earpiece:
       return LucideIcons.phone;
     case AudioRouteKind.wired:
-      // headSET (with boom), not headPHONES — the deafen button next to this
-      // one in every call control row already owns the plain headphones glyph.
+      // A headSET, not headPHONES: the deafen button beside this one in every
+      // control row already owns the plain headphones glyph.
       return LucideIcons.headset;
     case AudioRouteKind.bluetooth:
       return LucideIcons.bluetooth;
@@ -32,12 +32,12 @@ IconData audioRouteIcon(AudioRouteKind? kind) {
   }
 }
 
-/// Output/input picker for a live mobile call (HOLLOW_PLAN "change input/
-/// output on mobile"). Picking a route sets BOTH ends on iOS — a headset's
-/// mic travels with its speakers in an AVAudioSession route.
+/// Output and input picker for a live mobile call. Picking a route sets BOTH
+/// ends on iOS, where a headset's mic travels with its speakers in one
+/// AVAudioSession route.
 ///
-/// [onSelect] performs the switch through whichever call surface is live
-/// (1:1 call or voice channel), so `isSpeakerOn` stays in step with the route.
+/// [onSelect] switches through whichever call surface is live, so `isSpeakerOn`
+/// stays in step with the route.
 Future<void> showMobileAudioRouteSheet(
   BuildContext context, {
   required Future<void> Function(AudioRoute route) onSelect,
@@ -68,8 +68,7 @@ class _AudioRouteSheetState extends ConsumerState<_AudioRouteSheet> {
   @override
   void initState() {
     super.initState();
-    // Re-read on open: a headset may have been plugged in while the sheet was
-    // closed, and the list must show what is attached RIGHT NOW.
+    // A headset may have been plugged in while the sheet was closed.
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       ref.read(audioRouteProvider.notifier).refresh();
@@ -172,9 +171,8 @@ class _RouteRow extends StatelessWidget {
       semanticButton: false,
       semanticLabel: selected ? '${route.label}, in use' : route.label,
       borderRadius: BorderRadius.circular(hollow.radiusMd),
-      // Selection reads as a tinted row, never a filled button — and the
-      // background is a real colour, never Colors.transparent (lerping from
-      // transparent goes via black).
+      // Selection is a tinted row, never a filled button, and the background is
+      // a real colour: lerping from `Colors.transparent` goes via black.
       backgroundColor: selected
           ? hollow.accent.withValues(alpha: 0.12)
           : hollow.surface,

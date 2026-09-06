@@ -1,21 +1,11 @@
-//! The RSA half of a support credential, pinned to ONE variant of RFC 9474.
-//!
-//! Every blind signature in the artist shop is RSABSSA-SHA384-PSS-Deterministic
-//! over an RSA-3072 key, and this file is the one place that says so. The app
-//! (blind, finalize, verify) compiles it as `crate::node::support_rsa`; the
-//! `hollowpack` binary the shop runs (keygen, blind-sign) `#[path]`-includes
-//! the same file. A second definition of the variant anywhere else would be a
-//! second protocol, and the interop test in `support_creds.rs` (blind here,
-//! sign through the built binary, finalize here) is what keeps them one.
-//!
-//! Keys travel as PKCS#1 DER (`to_der` / `from_der`): 422 bytes for the
-//! public half, which is what rides inside every credential entry, base64.
-//!
-//! Deliberately dependency-light: this file needs only the RFC 9474 crate,
-//! so the binary does not drag the app's Ed25519, serde or storage crates.
+//! The RSA half of a support credential, pinned to ONE variant of RFC 9474:
+//! RSABSSA-SHA384-PSS-Deterministic over RSA-3072. The app compiles this file and
+//! the shop's `hollowpack` binary `#[path]`-includes it, because a second
+//! definition of the variant anywhere else would be a second protocol. Keys
+//! travel as PKCS#1 DER; the only dependency is the RFC 9474 crate.
 
-// The issuing half (keygen, secret keys, blind_sign) is the CLI's: the app
-// compiles it too, because this is one file, and never calls it.
+// The issuing half (keygen, secret keys, blind_sign) belongs to the CLI; the app
+// compiles it, because this is one file, and never calls it.
 #![allow(dead_code)]
 
 use blind_rsa_signatures::{
@@ -49,8 +39,7 @@ pub fn generate_issuing_key() -> Result<(Vec<u8>, Vec<u8>), String> {
 /// protocol issued.
 pub fn public_key_from_der(der: &[u8]) -> Result<SupportPublicKey, String> {
     let pk = SupportPublicKey::from_der(der).map_err(|e| format!("bad issuing key: {e}"))?;
-    // The modulus as big-endian bytes has its top bit set, so its length IS
-    // the key size; this avoids naming the rsa crate's traits here.
+    // The modulus's top bit is set, so its big-endian length IS the key size.
     if pk.components().n().len() != MODULUS_BYTES {
         return Err("bad issuing key: not RSA-3072".into());
     }

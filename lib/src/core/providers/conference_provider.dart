@@ -118,9 +118,8 @@ class ConferenceState {
 
   /// Host side: knocks awaiting admit/deny.
   ///
-  /// Meeting CHAT does not live here — it rides `channelChatProvider` under
-  /// the RAM-only `'conf:<id>:main'` key so the screen-share chat drawer is
-  /// the one and only conference chat surface (cleared on start/leave/end).
+  /// Meeting CHAT is not here: it rides `channelChatProvider` under the RAM-only
+  /// `'conf:<id>:main'` key, so the drawer is the one conference chat surface.
   final List<WaitingEntry> waiting;
 
   const ConferenceState({
@@ -183,11 +182,8 @@ class ConferenceNotifier extends Notifier<ConferenceState> {
   @override
   ConferenceState build() => const ConferenceState();
 
-  // ── Desktop tab ─────────────────────────────────────────────────────────
-
-  /// Open the desktop Conferences center tab: set our flag, clear every
-  /// sibling tab + selection provider in one synchronous block (the
-  /// bottom-bar `_openShare` pattern), then refresh the room list.
+  /// Open the desktop Conferences center tab: set our flag, clear every sibling
+  /// tab and selection provider in one synchronous block, then refresh the rooms.
   void openTab() {
     final split = ref.read(splitViewProvider);
     if (split.isSplit) {
@@ -201,8 +197,6 @@ class ConferenceNotifier extends Notifier<ConferenceState> {
     ref.read(serverSettingsOpenProvider.notifier).state = false;
     unawaited(loadRooms());
   }
-
-  // ── Room management (host side) ─────────────────────────────────────────
 
   Future<void> loadRooms() async {
     try {
@@ -296,8 +290,6 @@ class ConferenceNotifier extends Notifier<ConferenceState> {
     );
   }
 
-  // ── Meeting lifecycle ───────────────────────────────────────────────────
-
   /// (Host) start a meeting for [room] and join its call.
   Future<void> startMeeting(ConferenceRoom room) async {
     if (ref.read(callProvider).status != CallStatus.idle) {
@@ -365,9 +357,8 @@ class ConferenceNotifier extends Notifier<ConferenceState> {
       return;
     }
 
-    // Self-check: our OWN room's link means "start the meeting", not "knock
-    // on our own door" (the host handler ignores self-knocks, so the lobby
-    // would wait forever).
+    // Self-check: our OWN room's link means "start the meeting", not "knock on
+    // our own door" (the host handler ignores self-knocks, so it would wait forever).
     if (!state.roomsLoaded) await loadRooms();
     final ownRoom = state.roomById(confId);
     if (ownRoom != null) {
@@ -463,18 +454,14 @@ class ConferenceNotifier extends Notifier<ConferenceState> {
     state = state.copyWith(clearActive: true);
   }
 
-  /// Wipe a meeting's RAM state — chat (channelChatProvider 'conf:...' keys)
-  /// AND the tracked remote participants — on start/leave/end. A previous
-  /// meeting's members otherwise linger as stale tiles: their leave broadcast
-  /// races the host's room-leave/group-drop and never lands, and restarting
-  /// the room reuses the same virtual server id.
+  /// Wipe a meeting's RAM state, chat and tracked remote participants, on
+  /// start/leave/end: a previous meeting's members otherwise linger as stale
+  /// tiles, and restarting the room reuses the same virtual server id.
   void _clearConfChat(String confId) {
     final sid = conferenceServerId(confId);
     ref.read(channelChatProvider.notifier).clearServerCache(sid);
     ref.read(voiceChannelProvider.notifier).clearServerParticipants(sid);
   }
-
-  // ── Event handlers (called from event_provider) ─────────────────────────
 
   void onJoinRequest(
       String confId, String peerId, String displayName, String avatarHash) {
@@ -559,9 +546,8 @@ class ConferenceNotifier extends Notifier<ConferenceState> {
     }
   }
 
-  /// We were removed by the host — same host validation as [onEnded]
-  /// (a random member can't fake-kick us out of the UI; the cryptographic
-  /// removal already happened either way).
+  /// We were removed by the host, with the same host validation as [onEnded]:
+  /// a random member can't fake-kick us out of the UI.
   Future<void> onKicked(String confId, String byPeerId) async {
     if (state.activeConfId != confId || state.isHost) return;
     final links = ref.read(deviceLinkProvider);
@@ -582,8 +568,6 @@ class ConferenceNotifier extends Notifier<ConferenceState> {
     _toast('You were removed from the meeting', HollowToastType.info);
   }
 
-  // ── Internals ───────────────────────────────────────────────────────────
-
   Future<void> _leaveVoiceIfInConference(String confId) async {
     final vc = ref.read(voiceChannelProvider);
     if (vc.currentServerId == conferenceServerId(confId)) {
@@ -591,9 +575,8 @@ class ConferenceNotifier extends Notifier<ConferenceState> {
     }
   }
 
-  /// Own display name + avatar hash for handshakes. Light-announce rule:
-  /// hashes only, never blobs — the local profile cache doesn't expose the
-  /// avatar hash, so v1 sends an empty hash (receivers fall back to initials).
+  /// Own display name + avatar hash for handshakes. Light-announce rule: hashes
+  /// only, never blobs; v1 sends an empty hash and receivers fall back to initials.
   (String, String) _ownProfileLight() {
     final myId = ref.read(identityProvider).peerId ?? '';
     final profile = ref.read(profileProvider)[myId];

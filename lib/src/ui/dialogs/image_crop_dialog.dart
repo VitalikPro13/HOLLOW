@@ -9,14 +9,11 @@ import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 
-/// Shows a crop dialog for an image. Returns the cropped region as raw PNG bytes,
-/// or null if cancelled.
+/// Shows a crop dialog, returning the cropped region as raw PNG bytes or null.
 ///
-/// [aspectRatio] is width/height: 1.0 for a square avatar or server icon,
-/// 2.5 for a USER profile banner (every profile banner surface and Rust's
-/// 1200x480 storage share that ratio), 3.0 for a SERVER banner, 16/9 for the
-/// chat background.
-/// [title] is the dialog title (e.g. "Crop Avatar").
+/// [aspectRatio] is width over height: 1.0 for an avatar or server icon, 2.5 for
+/// a USER profile banner (the ratio every banner surface and Rust's storage
+/// share), 3.0 for a SERVER banner, 16/9 for the chat background.
 Future<Uint8List?> showImageCropDialog({
   required BuildContext context,
   required Uint8List imageBytes,
@@ -52,23 +49,18 @@ class _ImageCropDialogState extends State<_ImageCropDialog> {
   ui.Image? _decodedImage;
   bool _imageLoaded = false;
 
-  // Display area (image scaled to fit the dialog)
   static const double _maxDisplayWidth = 420.0;
   static const double _maxDisplayHeight = 380.0;
 
-  // The image display size (scaled to fit within max bounds)
   double _displayW = 0;
   double _displayH = 0;
 
-  // Crop rect in display coordinates
   late Rect _cropRect;
 
-  // Drag state
   _DragMode _dragMode = _DragMode.none;
   Offset _dragStart = Offset.zero;
   late Rect _cropAtDragStart;
 
-  // Minimum crop size in display px
   static const double _minCropSide = 40;
 
   @override
@@ -86,25 +78,21 @@ class _ImageCropDialogState extends State<_ImageCropDialog> {
     final imgW = img.width.toDouble();
     final imgH = img.height.toDouble();
 
-    // Scale image to fit within display bounds
     final scaleX = _maxDisplayWidth / imgW;
     final scaleY = _maxDisplayHeight / imgH;
     final scale = min(scaleX, scaleY).clamp(0.0, 1.0); // never upscale
-    // But if image is small, allow some upscaling so it's usable
+    // A small image is allowed to upscale, or the crop is unusable.
     final finalScale = min(scaleX, scaleY);
 
     _displayW = imgW * finalScale;
     _displayH = imgH * finalScale;
 
-    // Initial crop: largest rect with target aspect that fits the display image
     final ar = widget.aspectRatio;
     double cropW, cropH;
     if (_displayW / _displayH > ar) {
-      // Image is wider than aspect — constrain by height
       cropH = _displayH;
       cropW = cropH * ar;
     } else {
-      // Image is taller than aspect — constrain by width
       cropW = _displayW;
       cropH = cropW / ar;
     }
@@ -123,7 +111,6 @@ class _ImageCropDialogState extends State<_ImageCropDialog> {
     double t = _cropRect.top;
     double w = _cropRect.width;
     double h = _cropRect.height;
-    // Clamp position
     l = l.clamp(0.0, _displayW - w);
     t = t.clamp(0.0, _displayH - h);
     _cropRect = Rect.fromLTWH(l, t, w, h);
@@ -150,7 +137,6 @@ class _ImageCropDialogState extends State<_ImageCropDialog> {
           _cropRect.height,
         );
       } else {
-        // Resize from a corner/edge — compute new size with fixed aspect ratio
         double newW = _cropAtDragStart.width;
         double newH = _cropAtDragStart.height;
         double newL = _cropAtDragStart.left;
@@ -177,13 +163,11 @@ class _ImageCropDialogState extends State<_ImageCropDialog> {
             break;
         }
 
-        // Ensure minimum height
         if (newH < _minCropSide) {
           newH = _minCropSide;
           newW = newH * ar;
         }
 
-        // Clamp to image bounds
         if (newL < 0) { newL = 0; newW = _cropAtDragStart.right; newH = newW / ar; }
         if (newT < 0) { newT = 0; newH = _cropAtDragStart.bottom; newW = newH * ar; }
         if (newL + newW > _displayW) { newW = _displayW - newL; newH = newW / ar; }
@@ -204,7 +188,6 @@ class _ImageCropDialogState extends State<_ImageCropDialog> {
     final imgW = _decodedImage!.width.toDouble();
     final imgH = _decodedImage!.height.toDouble();
 
-    // Convert crop rect from display coords to image coords
     final scaleX = imgW / _displayW;
     final scaleY = imgH / _displayH;
     final srcRect = Rect.fromLTWH(
@@ -214,7 +197,6 @@ class _ImageCropDialogState extends State<_ImageCropDialog> {
       _cropRect.height * scaleY,
     );
 
-    // Render cropped region
     final outW = srcRect.width.round();
     final outH = srcRect.height.round();
 
@@ -260,7 +242,6 @@ class _ImageCropDialogState extends State<_ImageCropDialog> {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              // Header
               Padding(
                 padding: const EdgeInsets.fromLTRB(
                   HollowSpacing.xl,
@@ -289,7 +270,6 @@ class _ImageCropDialogState extends State<_ImageCropDialog> {
                 ),
               ),
 
-              // Image + crop overlay
               Padding(
                 padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.xl),
                 child: _imageLoaded && _decodedImage != null
@@ -298,7 +278,6 @@ class _ImageCropDialogState extends State<_ImageCropDialog> {
                         height: _displayH,
                         child: Stack(
                           children: [
-                            // Full image
                             Positioned.fill(
                               child: Image.memory(
                                 widget.imageBytes,
@@ -308,7 +287,6 @@ class _ImageCropDialogState extends State<_ImageCropDialog> {
                               ),
                             ),
 
-                            // Dark overlay outside crop
                             Positioned.fill(
                               child: RepaintBoundary(
                                 child: CustomPaint(
@@ -321,7 +299,6 @@ class _ImageCropDialogState extends State<_ImageCropDialog> {
                               ),
                             ),
 
-                            // Drag: move the crop rect
                             Positioned.fromRect(
                               rect: _cropRect,
                               child: GestureDetector(
@@ -335,7 +312,6 @@ class _ImageCropDialogState extends State<_ImageCropDialog> {
                               ),
                             ),
 
-                            // Corner handles
                             _buildHandle(hollow, _cropRect.topLeft, _DragMode.topLeft, SystemMouseCursors.resizeUpLeft),
                             _buildHandle(hollow, _cropRect.topRight, _DragMode.topRight, SystemMouseCursors.resizeUpRight),
                             _buildHandle(hollow, _cropRect.bottomLeft, _DragMode.bottomLeft, SystemMouseCursors.resizeDownLeft),
@@ -359,7 +335,6 @@ class _ImageCropDialogState extends State<_ImageCropDialog> {
                       ),
               ),
 
-              // Actions
               Padding(
                 padding: const EdgeInsets.all(HollowSpacing.lg),
                 child: Row(
@@ -433,21 +408,18 @@ class _CropOverlayPainter extends CustomPainter {
   void paint(Canvas canvas, Size size) {
     final fullRect = Rect.fromLTWH(0, 0, size.width, size.height);
 
-    // Dark overlay outside crop
     final overlayPaint = Paint()..color = overlayColor;
     canvas.save();
     canvas.clipRect(cropRect, clipOp: ui.ClipOp.difference);
     canvas.drawRect(fullRect, overlayPaint);
     canvas.restore();
 
-    // Border around crop
     final borderPaint = Paint()
       ..color = borderColor
       ..style = PaintingStyle.stroke
       ..strokeWidth = 2;
     canvas.drawRect(cropRect, borderPaint);
 
-    // Rule-of-thirds grid lines (subtle)
     final gridPaint = Paint()
       ..color = borderColor.withValues(alpha: 0.3)
       ..style = PaintingStyle.stroke

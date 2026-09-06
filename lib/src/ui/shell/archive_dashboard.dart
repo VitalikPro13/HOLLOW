@@ -8,7 +8,7 @@ import 'package:hollow/src/ui/archive/imported_archives_view.dart';
 import 'package:hollow/src/ui/archive/my_data_view.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 
-/// Archive dashboard — top-level tab with "My Data" and "Imported Archives" sub-tabs.
+/// Archive dashboard, with the My Data and Imported Archives sub-tabs.
 class ArchiveDashboard extends ConsumerWidget {
   const ArchiveDashboard({super.key});
 
@@ -21,7 +21,6 @@ class ArchiveDashboard extends ConsumerWidget {
       color: hollow.background,
       child: Column(
         children: [
-          // ── Top tab bar ──
           Container(
             padding: const EdgeInsets.symmetric(
               horizontal: HollowSpacing.lg,
@@ -52,7 +51,6 @@ class ArchiveDashboard extends ConsumerWidget {
             ),
           ),
 
-          // ── Body ──
           Expanded(
             child: subTab == ArchiveSubTab.myData
                 ? const MyDataView()

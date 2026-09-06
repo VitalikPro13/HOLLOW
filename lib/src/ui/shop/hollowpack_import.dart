@@ -19,11 +19,11 @@ import 'package:hollow/src/ui/components/hollow_toast.dart';
 /// the "here is what you got, want to wear it" dialog.
 ///
 /// The pack is what makes a support mark light up later: its bytes are the
-/// shop-PROCESSED bytes, and the credential names the hash of exactly those.
-/// Rust verifies caps, hashes, dimensions and centre on the way in and never
-/// re-encodes, so nothing here touches the art itself.
+/// shop-PROCESSED bytes and the credential names the hash of exactly those, so
+/// Rust verifies on the way in and never re-encodes. Nothing here touches the
+/// art itself.
 
-/// Whether [path] names a pack. Case-insensitive: Windows hands back whatever
+/// Whether [path] names a pack, case-insensitively: Windows hands back whatever
 /// case the file was saved with.
 bool looksLikeHollowpack(String path) =>
     path.toLowerCase().endsWith('.hollowpack');
@@ -33,9 +33,8 @@ Future<void> pickAndImportHollowpack(
     BuildContext context, WidgetRef ref) async {
   final mobile = Platform.isAndroid || Platform.isIOS;
   final result = await FilePicker.platform.pickFiles(
-    // Custom extensions are unreliable on Android and iOS (the system picker
-    // maps them through MIME types it does not know), so mobile asks for any
-    // file and the name check below is the gate.
+    // Custom extensions are unreliable on mobile, where the system picker maps
+    // them through MIME types it does not know, so the name check is the gate.
     type: mobile ? FileType.any : FileType.custom,
     allowedExtensions: mobile ? null : ['hollowpack'],
     dialogTitle: 'Import a .hollowpack',
@@ -64,8 +63,8 @@ Future<void> importHollowpackAt(
     imported = await network_api.importHollowpack(path: path);
   } catch (e) {
     if (!context.mounted) return;
-    // The Rust errors are the user's business: a bad signature, a file over
-    // the cap, a hash that does not match its bytes.
+    // The Rust errors are the user's business: a bad signature, an oversized
+    // file, a hash that does not match its bytes.
     final message = e.toString().replaceFirst(RegExp(r'^[A-Za-z]+: '), '');
     await showHollowDialog<void>(
       context: context,
@@ -238,8 +237,7 @@ class _ImportedPackDialogState extends ConsumerState<_ImportedPackDialog> {
             key: kind,
             label: wearKindLabel(kind),
             kinds: {kind},
-            // With more than one kind, "Wear all" is the primary action and
-            // the per-kind buttons step back to outline.
+            // With more than one kind, "Wear all" becomes the primary action.
             filled: kinds.length == 1,
             hollow: hollow,
           ),
@@ -256,10 +254,9 @@ class _ImportedPackDialogState extends ConsumerState<_ImportedPackDialog> {
   }
 }
 
-/// What one imported file looks like, read back off the rail it just landed
-/// on: a frame in front of your own face, an avatar as your face, a banner
-/// as its strip. Animated files play here; this is the one place the buyer
-/// is looking at exactly what they bought.
+/// What one imported file looks like, read back off the rail it just landed on.
+/// Animated files play here: it is the one place the buyer sees exactly what
+/// they bought.
 class _ImportedFilePreview extends ConsumerWidget {
   final network_api.HollowpackFile file;
 
@@ -285,8 +282,8 @@ class _ImportedFilePreview extends ConsumerWidget {
         );
 
     if (file.role == 'frame') {
-      // The frame provider reads the rail itself; the bytes are already
-      // there because the import just stored them.
+      // The frame provider reads the rail, where the import just stored the
+      // bytes.
       return box(HollowAvatar(
         peerId: me,
         size: height * 0.72,

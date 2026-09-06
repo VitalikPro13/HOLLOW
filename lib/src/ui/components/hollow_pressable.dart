@@ -4,22 +4,14 @@ import 'package:hollow/src/ui/components/hover_scope.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/ui/components/hollow_focus_ring.dart';
 
-/// Universal interactive widget for Hollow — replaces InkWell everywhere.
+/// Universal interactive widget for Hollow, replacing InkWell everywhere. No
+/// Material ripple, ever. [subtle] is for list items: hover colour only, no
+/// press dim or scale.
 ///
-/// On press: dims opacity to 0.85 + scales to 0.98 with spring physics.
-/// On hover: smoothly transitions to [hoverColor].
-/// No Material ripple, ever.
-///
-/// Set [subtle] to true for list items — hover color change only, no
-/// press dim/scale animation.
-///
-/// Accessibility: when [onTap] is set the whole widget is exposed to screen
-/// readers / Voice Control as a button. Pass [semanticLabel] for icon-only
-/// controls (where the [child] carries no readable text). When the child is
-/// already meaningful text, leave it null. Set [semanticButton] to false for
-/// rows/cards that are tappable but shouldn't be announced as a "button"
-/// (e.g. list tiles, conversation rows) — they stay tappable via the semantic
-/// [onTap] action without the button role.
+/// With [onTap] set the widget is exposed to screen readers and Voice Control
+/// as a button. Pass [semanticLabel] for an icon-only control, and set
+/// [semanticButton] false for a tappable row or card, which stays actionable
+/// without claiming the button role.
 class HollowPressable extends StatefulWidget {
   final Widget child;
   final VoidCallback? onTap;
@@ -35,9 +27,8 @@ class HollowPressable extends StatefulWidget {
   /// (icon-only buttons). Null = let the child supply the name.
   final String? semanticLabel;
 
-  /// Whether to announce the "button" role. True for actual buttons; set
-  /// false for tappable list rows/cards (still actionable, just not labeled
-  /// as a button).
+  /// Whether to announce the "button" role; false for a tappable row or card,
+  /// which stays actionable without it.
   final bool semanticButton;
 
   const HollowPressable({
@@ -68,10 +59,9 @@ class _HollowPressableState extends State<HollowPressable>
   bool _hovering = false;
   bool _pressing = false;
 
-  /// Row-hover for descendants (see [HoverScope]). Deliberately a notifier
-  /// rather than another setState: a pointer crossing a member list must
-  /// rebuild the avatars that listen, not every row it passes over. Set even
-  /// when the row is NOT interactive — a plain row still hovers.
+  /// Row-hover for descendants ([HoverScope]). A notifier rather than another
+  /// setState, so a pointer crossing a member list rebuilds only the avatars
+  /// that listen. Set even when the row is NOT interactive.
   final ValueNotifier<bool> _rowHovered = ValueNotifier<bool>(false);
 
   @override
@@ -129,9 +119,8 @@ class _HollowPressableState extends State<HollowPressable>
     _controller?.reverse();
   }
 
-  /// Hover "lift" for controls with an explicit background: nudge toward
-  /// white on dark fills, toward black on light fills — a fixed lerp toward
-  /// white was invisible on light-theme fills.
+  /// Hover lift for a control with an explicit background: toward white on a
+  /// dark fill, toward black on a light one, where white would be invisible.
   static Color _hoverLift(Color base) {
     final toward =
         base.computeLuminance() > 0.5 ? Colors.black : Colors.white;
@@ -148,12 +137,10 @@ class _HollowPressableState extends State<HollowPressable>
       duration: HollowDurations.fast,
       curve: HollowCurves.subtle,
       decoration: BoxDecoration(
-        // Resting color is the hover color at ZERO ALPHA, never
-        // Colors.transparent: transparent is 0x00000000 (transparent BLACK),
-        // and AnimatedContainer lerps RGB+alpha together — the transition
-        // passed through semi-opaque DARK colors, reading as a dark flash on
-        // hover AND unhover (worst in light mode). Same-RGB endpoints make
-        // the animation pure fade.
+        // Resting colour is the hover colour at ZERO ALPHA, never
+        // Colors.transparent: that is transparent BLACK, and lerping RGB and
+        // alpha together flashes dark on hover and unhover. Same-RGB endpoints
+        // make it a pure fade.
         color: _hovering && isInteractive
             ? (widget.backgroundColor != null
                   ? _hoverLift(widget.backgroundColor!)
@@ -161,8 +148,8 @@ class _HollowPressableState extends State<HollowPressable>
             : (widget.backgroundColor ??
                   effectiveHoverColor.withValues(alpha: 0.0)),
         borderRadius: widget.borderRadius,
-        // No hover glow: the 8px blurred halo painted OUTSIDE the control's
-        // bounds — hover must never read bigger than the control's outline.
+        // No hover glow: a blurred halo paints OUTSIDE the control's bounds,
+        // and hover must never read bigger than the outline.
       ),
       padding: widget.padding,
       child: HoverScope(hovered: _rowHovered, child: widget.child),
@@ -207,11 +194,9 @@ class _HollowPressableState extends State<HollowPressable>
         onPointerUp: _onPointerUp,
         onPointerCancel: _onPointerCancel,
         child: Semantics(
-          // Announce as a button (or a plain tappable node) so VoiceOver and
-          // Voice Control can find and invoke it. The semantic onTap mirrors
-          // the gesture handler — physical taps go through the GestureDetector;
-          // assistive-tech activation goes through this action. They don't
-          // double-fire (one is a pointer event, the other an a11y action).
+          // The semantic onTap mirrors the gesture handler and cannot
+          // double-fire with it: one is a pointer event, the other an
+          // assistive-tech action.
           button: isInteractive && widget.semanticButton,
           label: widget.semanticLabel,
           enabled: isInteractive,
@@ -229,10 +214,8 @@ class _HollowPressableState extends State<HollowPressable>
 
     if (!isInteractive) return result;
 
-    // Make the control keyboard-focusable + draw the focus ring (a11y 2.6).
-    // The ring hugs the control's own corner radius; Enter/Space activate it.
-    // Then merge the role/label with the child content into one screen-reader
-    // node (icon-only button = one stop; conversation row = one swipe).
+    // Keyboard focus and the focus ring (a11y 2.6), then one merged
+    // screen-reader node so a row is a single stop rather than several.
     return MergeSemantics(
       child: HollowFocusRing(
         borderRadius: widget.borderRadius ?? BorderRadius.zero,

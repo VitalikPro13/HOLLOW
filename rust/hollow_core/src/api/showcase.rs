@@ -1,11 +1,10 @@
 //! Profile Showcase Board — IGDB game search + asset processing.
 //!
-//! PRIVACY MODEL: the website endpoint (which holds the single Twitch/IGDB
-//! app credential and write-through-caches covers onto our CDN) is touched
-//! ONLY at authoring time, by the profile OWNER. Everything a viewer sees is
-//! replicated profile data — receivers never contact IGDB, the website, or
-//! any third party. `showcase_fetch_cover` therefore refuses any URL that is
-//! not on our own CDN, so it can never be abused as a generic fetcher.
+//! PRIVACY MODEL: the website endpoint, which holds the single IGDB credential and
+//! caches covers onto our CDN, is touched ONLY at authoring time by the profile
+//! OWNER. Everything a viewer sees is replicated profile data, so receivers never
+//! contact IGDB or any third party, and `showcase_fetch_cover` refuses any URL that
+//! is not on our own CDN so it can never become a generic fetcher.
 
 use base64::Engine;
 use flutter_rust_bridge::frb;
@@ -18,11 +17,9 @@ use super::storage::get_store;
 const ENDPOINT_BASE: &str = "https://hollow.anonlisten.com/igdb";
 /// Covers must come from here and nowhere else.
 const COVER_BASE: &str = "https://hollow.anonlisten.com/igdb/covers/";
-/// Endpoint response-schema version (keep in sync with SEARCH_VER in
-/// search.php). Params ride the POST body so the search text never appears
-/// in the request URL (and therefore never in web-server access logs); POST
-/// also bypasses the hCDN edge cache, so `v` is no longer needed for cache
-/// busting — it's still sent so the endpoint could branch on it someday.
+/// Endpoint response-schema version. Params ride the POST body so the search text
+/// never appears in a request URL or a web-server access log; POST also bypasses the
+/// edge cache, so `v` is now only there for the endpoint to branch on someday.
 const ENDPOINT_SCHEMA_VER: &str = "11";
 
 /// One processed showcase image, content-addressed by its hash. The board
@@ -33,9 +30,8 @@ pub struct ShowcaseAsset {
     pub bytes: Vec<u8>,
 }
 
-/// One row of the FAST search response (?q=) — basics only. Card details
-/// are fetched separately via [showcase_game_details] when the user actually
-/// picks a game (one pick = one enrichment request; searching stays instant).
+/// One row of the FAST search response, basics only. Card details are fetched
+/// separately when the user picks a game, so searching stays instant.
 pub struct GameSearchResult {
     pub id: i64,
     pub name: String,
@@ -45,13 +41,10 @@ pub struct GameSearchResult {
     pub cover_url: Option<String>,
 }
 
-/// Card details for ONE picked game (?id= mode). [details_json] is the
-/// endpoint's `details` object verbatim (description, requirements,
-/// platforms, metacritic, release date, achievements, deduped dev/publisher
-/// credits with logo URLs + social links, copyright, store links, key-art
-/// URL) — baked into the block at authoring so a viewer fetches NOTHING.
-/// [logo_urls]/[artwork_url] are surfaced (CDN-filtered) so the composer can
-/// fetch + bundle the images and rewrite the baked JSON to asset hashes.
+/// Card details for ONE picked game. [details_json] is the endpoint's `details` object
+/// verbatim, baked into the block at authoring so a viewer fetches NOTHING.
+/// [logo_urls]/[artwork_url] are surfaced (CDN-filtered) so the composer can bundle
+/// the images and rewrite the baked JSON to asset hashes.
 pub struct GameCardDetails {
     pub details_json: String,
     pub logo_urls: Vec<String>,
@@ -195,9 +188,8 @@ fn fetch_cdn_image(url: String) -> Result<Vec<u8>, String> {
     })
 }
 
-/// Download a game cover / company logo FROM OUR CDN (authoring-time only)
-/// and process it into a content-addressed showcase asset (≤400px lossy
-/// WebP — alpha survives, so transparent logos stay transparent).
+/// Download a game cover or company logo FROM OUR CDN (authoring-time only) and
+/// process it into a content-addressed showcase asset (400px lossy WebP, alpha kept).
 #[frb]
 pub fn showcase_fetch_cover(url: String) -> Result<ShowcaseAsset, String> {
     let raw = fetch_cdn_image(url)?;
@@ -205,9 +197,8 @@ pub fn showcase_fetch_cover(url: String) -> Result<ShowcaseAsset, String> {
     Ok(make_asset(processed))
 }
 
-/// Download landscape key art FROM OUR CDN (authoring-time only). Processed
-/// at the artwork budget (≤800px lossy WebP) — it's the card's hero image,
-/// so the cover's 400px thumbnail cap would visibly blur it.
+/// Download landscape key art FROM OUR CDN (authoring-time only), at the artwork
+/// budget of 800px: it is the card's hero image, so the cover's cap would blur it.
 #[frb]
 pub fn showcase_fetch_key_art(url: String) -> Result<ShowcaseAsset, String> {
     let raw = fetch_cdn_image(url)?;

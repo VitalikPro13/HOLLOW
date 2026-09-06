@@ -21,7 +21,8 @@ import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-/// Members tab — view members with their roles. Admins+ can change roles & kick.
+/// Members tab: view members with their roles. Admins and above can change
+/// roles and kick.
 class MembersTab extends ConsumerWidget {
   final String serverId;
 
@@ -45,7 +46,6 @@ class MembersTab extends ConsumerWidget {
           );
         }
 
-        // Sort: owner first, then admin, then moderator, then member
         final sorted = [...members]..sort((a, b) {
             const order = {
               'owner': 0,
@@ -89,7 +89,7 @@ class MembersTab extends ConsumerWidget {
   }
 }
 
-/// Returns role display info: color, icon.
+/// The colour and icon a role is drawn with.
 ({Color color, IconData icon}) _roleInfo(String role, HollowTheme hollow) {
   return switch (role) {
     'owner' => (color: hollow.warning, icon: LucideIcons.crown),
@@ -102,9 +102,8 @@ class MembersTab extends ConsumerWidget {
   };
 }
 
-// Role hierarchy helpers (canManageRole / assignableRoles) moved to the
-// shared core/role_hierarchy.dart so the profile-card Manage Member dialog
-// can't drift from this tab.
+// The role hierarchy helpers live in core/role_hierarchy.dart so the
+// profile-card Manage Member dialog cannot drift from this tab.
 
 class _MemberRow extends ConsumerWidget {
   final String serverId;
@@ -186,7 +185,6 @@ class _MemberRow extends ConsumerWidget {
               ),
             ),
             const SizedBox(width: HollowSpacing.sm),
-            // Role badge
             Container(
               padding: const EdgeInsets.symmetric(
                 horizontal: HollowSpacing.sm,
@@ -211,16 +209,13 @@ class _MemberRow extends ConsumerWidget {
                 ],
               ),
             ),
-            // Action menu (only visible if we can manage this member).
-            //
             // The same `showHollowMenu` surface as every other context menu
-            // in the app (issue #61) rather than a Material PopupMenuButton,
-            // and the same shared confirms the mobile members route and the
-            // desktop user menu use.
+            // (issue #61) rather than a Material PopupMenuButton, on the same
+            // shared confirms the mobile route and the desktop user menu use.
             if (canManage) ...[
               const SizedBox(width: HollowSpacing.xs),
               // Builder so the menu anchors off the BUTTON rather than the
-              // whole row, which is 600px wide.
+              // 600px row.
               Builder(
                 builder: (buttonContext) => HollowTooltip(
                   message: 'Member actions',
@@ -330,12 +325,12 @@ class _MutedMembersSectionState extends ConsumerState<_MutedMembersSection> {
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
-    // Provider-backed (not a one-shot load) so the section appears the moment
-    // a mute lands — ServerUpdated invalidates it on the CrdtStore ramp.
+    // Provider-backed rather than a one-shot load, so the section appears the
+    // moment a mute lands.
     final muted =
         ref.watch(mutedMembersProvider(widget.serverId)).valueOrNull ?? const [];
     if (muted.isEmpty) return const SizedBox.shrink();
-    // Muted members are still members — resolve their display names.
+    // Muted members are still members, so their display names resolve.
     final members =
         ref.watch(serverMembersProvider(widget.serverId)).valueOrNull ?? const [];
     String nameFor(String peerId) {

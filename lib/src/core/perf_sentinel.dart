@@ -8,11 +8,8 @@ import '../rust/api/network.dart' as network_api;
 ///
 /// Quiet by default: sentinels emit ONLY anomalies, rate-limited or latched,
 /// each line carrying the grep-able "[SENTINEL]" prefix and landing in
-/// hollow_debug.log via logFromDart. A UI freeze or a slow platform-channel
-/// call leaves a named, timestamped line instead of requiring a log dig.
-///
-/// Never log content or ids that fingerprint — sentinel lines carry only
-/// durations, counters, and method names.
+/// hollow_debug.log. Never log content or ids that fingerprint: only durations,
+/// counters and method names.
 class PerfSentinel {
   PerfSentinel._();
 
@@ -26,10 +23,8 @@ class PerfSentinel {
 
   /// Emit a steady-state frame census line every [FrameCensus.intervalMs].
   ///
-  /// The stall aggregator answers "did a frame take too long". This answers
-  /// the different and, for idle cost, more important question: "how many
-  /// frames are we producing at all, and is the time going to build or to
-  /// raster". An app doing nothing should be producing almost none.
+  /// The stall aggregator answers "did a frame take too long"; this answers how
+  /// many frames we produce at all, and whether the time goes to build or raster.
   static bool frameCensus = true;
 
   /// Public so one-shot diagnostics can share the same log sink.
@@ -90,10 +85,9 @@ class PerfSentinel {
   }
 }
 
-/// Frame-stall aggregation: a frame whose build+raster exceeds the threshold
-/// logs at most one line per [lineIntervalMs]; stalls in between are counted
-/// and flushed as a single summary line at most once per [flushIntervalMs].
-/// Pure logic (injected clock + sink) so the rate limit is unit-testable.
+/// Frame-stall aggregation: a frame over the threshold logs at most one line
+/// per [lineIntervalMs]; stalls in between are counted and flushed once per
+/// [flushIntervalMs]. Pure logic (injected clock + sink) so it is testable.
 class FrameStallAggregator {
   FrameStallAggregator({
     required this.sink,
@@ -161,14 +155,10 @@ class FrameStallAggregator {
 /// Steady-state frame census: one line per [intervalMs] carrying how many
 /// frames were produced and where their time went.
 ///
-/// This exists because an idle Hollow was burning most of a core, and every
-/// theory about WHY was argued from source rather than from frame counts.
-/// Build against raster is the split that matters: build time is Dart
-/// rebuilding widgets, raster time is the engine turning the scene into
-/// pixels (on Windows, through ANGLE onto D3D11, which is CPU work).
-///
-/// Silent when no frames were produced, so a genuinely idle app stays quiet.
-/// Pure logic (injected clock + sink) so it is unit-testable.
+/// Build against raster is the split that matters: build time is Dart rebuilding
+/// widgets, raster time is the engine turning the scene into pixels (on Windows
+/// through ANGLE onto D3D11, which is CPU work). Silent when no frames were
+/// produced, so a genuinely idle app stays quiet.
 class FrameCensus {
   FrameCensus({required this.sink, this.intervalMs = 10000});
 

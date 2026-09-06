@@ -7,21 +7,13 @@ import '../components/hollow_pressable.dart';
 import 'emoji_data.dart';
 import 'emote_image.dart';
 
-/// Composer support for custom emotes:
+/// Composer support for custom emotes and assets.
 ///
-/// - [EmoteComposerController] renders emotes INLINE in the input bar. Each
-///   inserted emote occupies exactly ONE private-use character in the text,
-///   drawn as the actual emote image via [buildTextSpan] — the 1-char ↔
-///   1-WidgetSpan match is what keeps caret/selection math correct (a widget
-///   standing in for the full 70-char wire token would desync them).
-///   [expandedText] produces the real `[e:name:hash]` / `[a:kind:hash:w:h]`
-///   tokens at send time (assets — GIFs/stickers — use the same mechanism).
-/// - [EmoteAutocomplete] is the `:` shortcode overlay (mention-overlay
-///   pattern): typing `:na` suggests custom emotes and Unicode emoji.
-
-// ---------------------------------------------------------------------------
-// Inline-emote controller
-// ---------------------------------------------------------------------------
+/// An inserted emote occupies exactly ONE private-use character in the text,
+/// drawn as its image: the 1-char to 1-WidgetSpan match is what keeps caret and
+/// selection maths correct, where a widget standing in for the full wire token
+/// would desync them. [EmoteComposerController.expandedText] produces the real
+/// `[e:name:hash]` and `[a:kind:hash:w:h]` tokens at send time.
 
 class ComposerEmote {
   final String name;
@@ -29,8 +21,8 @@ class ComposerEmote {
   const ComposerEmote(this.name, this.hash);
 }
 
-/// A generic asset (GIF/sticker) staged in the composer — same 1-char
-/// placeholder mechanism as emotes, expanding to `[a:kind:hash:w:h]`.
+/// A GIF or sticker staged in the composer, on the same 1-char placeholder
+/// mechanism as emotes.
 class ComposerAsset {
   final String kind; // 'g' GIF | 's' sticker
   final String hash;
@@ -39,7 +31,7 @@ class ComposerAsset {
   const ComposerAsset(this.kind, this.hash, this.w, this.h);
 }
 
-/// First Unicode private-use codepoint; placeholders are allocated upward.
+/// First private-use codepoint; placeholders are allocated upward.
 const int _puaBase = 0xE000;
 const int _puaLast = 0xF8FF;
 
@@ -50,23 +42,22 @@ class EmoteComposerController extends TextEditingController {
   final Map<String, ComposerAsset> _assets = {};
   int _nextPua = _puaBase;
 
-  /// Register an emote and return its 1-char placeholder for insertion.
+  /// Registers an emote and returns its 1-char placeholder.
   String placeholderFor(String name, String hash) {
     final char = String.fromCharCode(_nextPua++);
     _emotes[char] = ComposerEmote(name, hash);
     return char;
   }
 
-  /// Register a GIF/sticker asset and return its 1-char placeholder.
+  /// Registers a GIF or sticker and returns its 1-char placeholder.
   String placeholderForAsset(String kind, String hash, int w, int h) {
     final char = String.fromCharCode(_nextPua++);
     _assets[char] = ComposerAsset(kind, hash, w, h);
     return char;
   }
 
-  /// Convert a picker/autocomplete result into composer display text:
-  /// custom-emote and asset wire tokens become a registered placeholder
-  /// char, anything else (Unicode emoji) passes through unchanged.
+  /// Turns a picker result into composer display text: a wire token becomes a
+  /// registered placeholder char, a Unicode emoji passes through.
   String displayTextFor(String emoji) {
     final emote = parseEmoteToken(emoji);
     if (emote != null) return placeholderFor(emote.name, emote.hash);
@@ -77,9 +68,8 @@ class EmoteComposerController extends TextEditingController {
     return emoji;
   }
 
-  /// The outgoing message text: placeholders expanded to `[e:name:hash]` /
-  /// `[a:kind:hash:w:h]` wire tokens. Unmapped private-use characters
-  /// (pasted from elsewhere) are stripped.
+  /// The outgoing message text, with placeholders expanded to wire tokens.
+  /// Unmapped private-use characters, pasted from elsewhere, are stripped.
   String expandedText() {
     final buf = StringBuffer();
     for (final code in text.codeUnits) {
@@ -121,8 +111,8 @@ class EmoteComposerController extends TextEditingController {
       return super.buildTextSpan(
           context: context, style: style, withComposing: withComposing);
     }
-    // WidgetSpans are opaque to the text scaler, so the inline emote has to
-    // follow the chat text size by hand (same rule as message_text_parser).
+    // WidgetSpans are opaque to the text scaler, so an inline emote follows the
+    // chat text size by hand.
     final emoteSize = MediaQuery.textScalerOf(context).scale(22);
     final assetHeight = MediaQuery.textScalerOf(context).scale(36);
     final children = <InlineSpan>[];
@@ -165,17 +155,13 @@ class EmoteComposerController extends TextEditingController {
   }
 }
 
-// ---------------------------------------------------------------------------
-// `:` shortcode autocomplete (mention-overlay pattern)
-// ---------------------------------------------------------------------------
-
 class EmoteSuggestion {
   final String name;
 
-  /// Custom emote hash, or null for a Unicode emoji.
+  /// Null for a Unicode emoji.
   final String? hash;
 
-  /// The Unicode emoji character (null for custom emotes).
+  /// Null for a custom emote.
   final String? char;
 
   const EmoteSuggestion.custom(this.name, String this.hash) : char = null;
@@ -191,10 +177,8 @@ class EmoteShortcodeScan {
 
 final _shortcodeQueryRegex = RegExp(r'^[a-zA-Z0-9_]+$');
 
-/// Scan backward from [cursor] for a `:query` shortcode trigger (colon
-/// preceded by whitespace/start, 2+ query chars) and collect matching
-/// suggestions: custom [emotes] first, then Unicode emoji by name.
-/// Returns null when there is no active trigger or nothing matches.
+/// Scans back from [cursor] for a `:query` trigger and collects suggestions,
+/// custom [emotes] first. Null when there is no trigger or no match.
 EmoteShortcodeScan? scanEmoteShortcode({
   required String text,
   required int cursor,
@@ -243,9 +227,8 @@ EmoteShortcodeScan? scanEmoteShortcode({
   return EmoteShortcodeScan(colonPos, suggestions);
 }
 
-/// Replace the active `:query` (from [colonPos] to the cursor) with the
-/// picked suggestion — a registered placeholder char for custom emotes, the
-/// raw character for Unicode — plus a trailing space.
+/// Replaces the active `:query` with the picked suggestion and a trailing
+/// space: a registered placeholder char, or the raw Unicode character.
 void acceptEmoteSuggestion({
   required EmoteComposerController controller,
   required int colonPos,
@@ -265,17 +248,16 @@ void acceptEmoteSuggestion({
   );
 }
 
-/// Self-contained `:` autocomplete for one composer. The host pane calls
-/// [update] from its onChanged, routes key events through [handleKey], and
-/// wraps its composer in a `CompositedTransformTarget` using [link] (an
-/// existing mention LayerLink can be shared — only one overlay shows at a
-/// time since the triggers differ).
+/// Self-contained `:` autocomplete for one composer. The host calls [update]
+/// from onChanged, routes keys through [handleKey], and wraps its composer in a
+/// `CompositedTransformTarget` on [link], which an existing mention LayerLink
+/// may share because the triggers differ and only one overlay shows.
 class EmoteAutocomplete {
   final LayerLink link;
   final EmoteComposerController controller;
 
-  /// Merged custom emotes available in this composer (server + personal),
-  /// refreshed by the host before each [update] call.
+  /// Custom emotes available in this composer, refreshed by the host before
+  /// each [update].
   List<ComposerEmote> Function() emotesSource;
 
   EmoteAutocomplete({
@@ -291,8 +273,7 @@ class EmoteAutocomplete {
 
   bool get isActive => _entry != null;
 
-  /// Scan the text around the cursor for a `:query` trigger and show/update
-  /// or dismiss the overlay accordingly.
+  /// Shows, updates or dismisses the overlay from the text around the cursor.
   void update(BuildContext context, String text) {
     final scan = scanEmoteShortcode(
       text: text,
@@ -310,7 +291,7 @@ class EmoteAutocomplete {
   }
 
   /// Key handling while the overlay is up. Call BEFORE the pane's own send
-  /// key handling; returns [KeyEventResult.ignored] when inactive.
+  /// handling; ignored when inactive.
   KeyEventResult handleKey(KeyEvent event) {
     if (_entry == null) return KeyEventResult.ignored;
     if (event is! KeyDownEvent && event is! KeyRepeatEvent) {

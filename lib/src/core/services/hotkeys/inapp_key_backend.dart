@@ -3,10 +3,10 @@ import 'package:flutter/services.dart';
 import 'hotkey_backend.dart';
 import 'hotkey_binding.dart';
 
-/// Window-focused hotkeys via HardwareKeyboard — the only backend on macOS
-/// and Wayland (no sanctioned global observation there yet), and the
-/// fallback when a poller can't map a binding or failed to initialize.
-/// Handles KeyUp too (PTT needs the release edge); KeyRepeat is ignored.
+/// Window-focused hotkeys via HardwareKeyboard: the only backend on macOS and
+/// Wayland, where no sanctioned global observation exists yet, and the
+/// fallback when a poller cannot map a binding or failed to initialize.
+/// KeyUp is handled too, since PTT needs the release edge; KeyRepeat is not.
 class InAppKeyBackend implements HotkeyBackend {
   Map<HotkeyAction, HotkeyBinding> _bindings = const {};
   HotkeyEdgeCallback? _onEdge;
@@ -45,7 +45,7 @@ class InAppKeyBackend implements HotkeyBackend {
 
       if (event is KeyDownEvent) {
         if (!binding.matchesEvent(event, hk)) continue;
-        // Bare keys are what you type with — let the composer have them.
+        // Bare keys are what you type with: let the composer have them.
         if (binding.isBare && _isTextEditing()) continue;
         if (_pressed[action] != true) {
           _pressed[action] = true;
@@ -53,8 +53,8 @@ class InAppKeyBackend implements HotkeyBackend {
         }
         consumed = true;
       } else if (event is KeyUpEvent) {
-        // Release matches on the TRIGGER key alone — modifiers may have
-        // been released first and must not orphan a held action.
+        // Release matches on the TRIGGER key alone: modifiers may have been
+        // released first and must not orphan a held action.
         if (event.logicalKey != binding.trigger) continue;
         if (_pressed[action] == true) {
           _pressed[action] = false;
@@ -66,9 +66,8 @@ class InAppKeyBackend implements HotkeyBackend {
     return consumed;
   }
 
-  /// The window lost focus — KeyUp will never arrive for held keys, so
-  /// force-release every pressed action (the controller wires this to the
-  /// window-focus provider).
+  /// The window lost focus, so KeyUp will never arrive for held keys: this
+  /// force-releases every pressed action, wired to the window-focus provider.
   void releaseAll() {
     for (final entry in _pressed.entries) {
       if (entry.value) _onEdge?.call(entry.key, false);

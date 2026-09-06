@@ -21,8 +21,7 @@ class ChatNotifier extends Notifier<Map<String, List<ChatMessage>>> {
   @override
   Map<String, List<ChatMessage>> build() => {};
 
-  /// Send a message to a peer (FFI + update state).
-  /// DB persistence happens in Rust (SendMessage handler) with Rust-generated timestamp.
+  /// Send a message to a peer; Rust persists it with its own timestamp.
   ///
   /// Returns the generated message id so a caller that sent before its link
   /// preview finished fetching can attach the card afterwards (issue #45).
@@ -51,26 +50,22 @@ class ChatNotifier extends Notifier<Map<String, List<ChatMessage>>> {
 
     _addMessage(peerId, msg);
 
-    // Being the last to speak clears our own unread state for this DM.
-    // Without this, `seen:dm:{peer}` stays pinned before our latest activity,
-    // so after a restart `recomputeDmUnread` could light the unread pill on a
-    // conversation where OUR message is the newest (the self-message pill bug).
+    // Being the last to speak clears our own unread state for this DM: otherwise
+    // `seen:dm:{peer}` stays pinned before our latest activity and the pill lights.
     ref.read(unreadProvider.notifier).markDmSeen(peerId, messageId);
     return messageId;
   }
 
-  /// Receive a message from a peer (from network events).
-  /// DB persistence happens in Rust (DirectMessage handler) with sender's timestamp.
+  /// Receive a message from a peer; Rust persists it with the sender's timestamp.
   void receiveMessage(String fromPeer, String text, int timestamp,
       String messageId, String replyToMid,
       {network_api.LinkPreviewRef? linkPreview,
       String? signature,
       String? publicKey,
       bool isOwn = false}) {
-    // Multi-device self fan-out: `isOwn` means this DM is an echo of a message
-    // WE sent from a sibling device — `fromPeer` is the conversation's other
-    // party (the recipient), and it must render as an OUTGOING bubble. Without
-    // this a sibling shows our own sent message as if the friend sent it to us.
+    // Multi-device self fan-out: `isOwn` means this is an echo of a message WE
+    // sent from a sibling, so `fromPeer` is the recipient and it must render as
+    // OUTGOING. Without this a sibling shows our own message as the friend's.
     final ts = DateTime.fromMillisecondsSinceEpoch(timestamp);
     final msg = ChatMessage(
       text: text,
@@ -82,12 +77,9 @@ class ChatNotifier extends Notifier<Map<String, List<ChatMessage>>> {
       signature: signature,
       publicKey: publicKey,
     );
-    // Dedup by message_id: the same message can arrive both from loadHistory
-    // (DB — possibly already written by the background push-fetch node) and as a
-    // live network event when the full node connects. Without this guard, a
-    // message the FCM fetch persisted shows TWICE when the app opens. If it's
-    // already present, the loaded copy is authoritative (it reflects any edit
-    // already applied in the DB), so skip the duplicate.
+    // Dedup by message_id: the same message arrives from loadHistory (the DB, as
+    // written by the background push-fetch node) AND as a live event. The loaded
+    // copy is authoritative, since it reflects any edit already applied.
     if (msg.messageId != null) {
       final current = state[fromPeer];
       if (current != null &&
@@ -98,14 +90,10 @@ class ChatNotifier extends Notifier<Map<String, List<ChatMessage>>> {
     _addMessage(fromPeer, msg);
   }
 
-  /// Hydrate signature, public key, and (critically) timestamp on an existing
-  /// in-memory message. Called from the MessageSent event handler after Rust
-  /// has signed+persisted the message — we overwrite the optimistic Dart-side
-  /// `DateTime.now()` timestamp with Rust's exact `SystemTime::now()` value
-  /// that the signature was actually computed over. Without the timestamp
-  /// replacement, the Dart verifier reconstructs the canonical payload with a
-  /// slightly different millisecond, which breaks signature verification on
-  /// machines with coarse OS timer resolution (e.g. VMs).
+  /// Hydrate signature, public key and (critically) timestamp on an existing
+  /// in-memory message: the optimistic Dart `DateTime.now()` is replaced with
+  /// Rust's exact value that the signature was computed over, or the verifier
+  /// rebuilds a different canonical payload on coarse-timer machines.
   void hydrateSignature(String peerId, String messageId, int timestampMs,
       String? signature, String? publicKey) {
     final current = state[peerId];
@@ -131,7 +119,6 @@ class ChatNotifier extends Notifier<Map<String, List<ChatMessage>>> {
       messageId: messageId,
       newText: newText,
     );
-    // UI update happens via the DmMessageEdited event.
   }
 
   /// Apply an edit to an in-memory message (from network event or own edit).
@@ -169,7 +156,6 @@ class ChatNotifier extends Notifier<Map<String, List<ChatMessage>>> {
       messageId: messageId,
       preview: preview,
     );
-    // UI update happens via the DmLinkPreviewUpdated event.
   }
 
   /// Apply a late link preview to an in-memory message. Never touches
@@ -182,9 +168,8 @@ class ChatNotifier extends Notifier<Map<String, List<ChatMessage>>> {
 
     final idx = current.indexWhere((m) => m.messageId == messageId);
     if (idx == -1) return;
-    // Re-applying the same card (duplicate frame, sibling echo) is a no-op
-    // rather than a pointless rebuild of the whole list. LinkPreviewRef has
-    // generated value equality, and null == null covers the clear case.
+    // Re-applying the same card (duplicate frame, sibling echo) is a no-op rather
+    // than a pointless rebuild; LinkPreviewRef has generated value equality.
     if (current[idx].linkPreview == preview) return;
 
     final updatedList = List<ChatMessage>.from(current);
@@ -203,7 +188,6 @@ class ChatNotifier extends Notifier<Map<String, List<ChatMessage>>> {
       peerId: peerId,
       messageId: messageId,
     );
-    // UI update happens via the DmMessageDeleted event.
   }
 
   /// Remove a message from in-memory state (from network event or own deletion).
@@ -224,7 +208,6 @@ class ChatNotifier extends Notifier<Map<String, List<ChatMessage>>> {
   /// Enforces 3 distinct emoji limit per user per message.
   Future<void> addReaction(
       String peerId, String messageId, String emoji) async {
-    // Check limit client-side before sending.
     final current = state[peerId];
     if (current != null) {
       final localPeerId = ref.read(identityProvider).peerId ?? '';
@@ -322,13 +305,11 @@ class ChatNotifier extends Notifier<Map<String, List<ChatMessage>>> {
         limit: 200,
       );
 
-      // Collect message IDs for bulk reaction loading.
       final messageIds = stored
           .where((m) => m.messageId != null)
           .map((m) => m.messageId!)
           .toList();
 
-      // Load reactions in one batch.
       Map<String, Map<String, List<String>>> reactionsMap = {};
       if (messageIds.isNotEmpty) {
         try {
@@ -343,7 +324,6 @@ class ChatNotifier extends Notifier<Map<String, List<ChatMessage>>> {
         } catch (_) {}
       }
 
-      // Load file attachments for messages that have file_id.
       final fileIds = stored
           .where((m) => m.fileId != null)
           .map((m) => m.fileId!)
@@ -399,10 +379,8 @@ class ChatNotifier extends Notifier<Map<String, List<ChatMessage>>> {
               ))
           .toList();
 
-      // DB is the source of truth, but preserve any in-memory messages
-      // (by messageId) that aren't in the DB snapshot yet — covers the
-      // tiny race where a message arrives mid-load, and keeps optimistic
-      // in-flight sends that haven't round-tripped through Rust.
+      // DB is the source of truth, but preserve in-memory messages not yet in the
+      // snapshot: a message arriving mid-load, and optimistic in-flight sends.
       final existing = state[peerId] ?? const <ChatMessage>[];
       final loadedIds = messages
           .where((m) => m.messageId != null)
@@ -412,18 +390,15 @@ class ChatNotifier extends Notifier<Map<String, List<ChatMessage>>> {
           .where((m) => m.messageId != null && !loadedIds.contains(m.messageId))
           .toList();
       // STABLE sort: List.sort is unstable and timestamps are millisecond
-      // wall-clock — rapid messages share a millisecond, and an unstable
-      // resort shuffles them randomly (the DB already delivered them in
-      // correct order_us order). Tie-break by pre-sort index instead.
+      // wall-clock, so rapid messages share a millisecond and an unstable resort
+      // shuffles them. Tie-break by pre-sort index instead.
       final merged = _stableSortByTimestamp([...messages, ...carryOver]);
       final updated = Map.of(state);
       updated[peerId] = merged;
       state = updated;
 
-      // Self-heal the unread pill: if the newest message in this DM is our own,
-      // there's nothing for US to read — advance the seen-pointer to it. This
-      // also repairs stale `seen:dm:{peer}` state left by older builds that
-      // didn't mark-seen on send (the self-message pill bug).
+      // Self-heal the unread pill: if the newest message here is our own there is
+      // nothing for US to read, so advance the seen-pointer to it.
       if (merged.isNotEmpty) {
         final newest = merged.last;
         if (newest.isMe && newest.messageId != null) {
@@ -524,24 +499,17 @@ class ChatNotifier extends Notifier<Map<String, List<ChatMessage>>> {
 
   void _addMessage(String peerId, ChatMessage message) {
     final current = state[peerId] ?? <ChatMessage>[];
-    // Guard against duplicate inserts of the same identified message (e.g. a
-    // message persisted by the background push-fetch then re-delivered live).
-    // Messages without a messageId (system/failure notices) always append.
+    // Guard against duplicate inserts of the same identified message. Messages
+    // without a messageId (system/failure notices) always append.
     if (message.messageId != null &&
         current.any((m) => m.messageId == message.messageId)) {
       return;
     }
-    // Plain append in ARRIVAL order. We deliberately do NOT sort by timestamp
-    // here: timestamps are wall-clock values from the SENDER, and across machines
-    // with even slightly skewed clocks a sort reorders the live conversation
-    // (e.g. our own just-sent message, stamped with our local now(), jumping
-    // BEFORE a friend's image that carries the friend's slightly-later clock).
-    // Correct ordering for out-of-order arrivals (multi-device sibling backfill,
-    // Step 5) is handled by the `DmSyncCompleted` → `loadHistory()` resort, which
-    // reloads from the DB sorted by timestamp — so the per-message live event
-    // only needs to append.
+    // Plain append in ARRIVAL order. Deliberately NOT sorted by timestamp here:
+    // timestamps are the SENDER's wall clock, and across skewed machines a sort
+    // reorders the live conversation. Out-of-order arrivals are fixed by the
+    // `DmSyncCompleted` -> `loadHistory()` resort, which reads the DB in order.
     var list = <ChatMessage>[...current, message];
-    // Trim oldest messages to prevent unbounded memory growth.
     if (list.length > _maxMessages) {
       list = list.sublist(list.length - _maxMessages);
     }
@@ -567,15 +535,11 @@ final chatProvider =
     NotifierProvider<ChatNotifier, Map<String, List<ChatMessage>>>(
         ChatNotifier.new);
 
-/// Lightweight derived provider: only the last message per peer.
-/// Changes far less frequently than the full chatProvider (only when a new
-/// message arrives or the latest message is edited/deleted, not on every
-/// message in any conversation). Use this in the shell/sidebar instead of
-/// watching the full chatProvider to avoid root-widget rebuilds.
+/// Lightweight derived provider: only the last message per peer, so the shell
+/// and sidebar don't rebuild on every message in any conversation.
 ///
-/// Notifier (not a plain Provider) purely for [updateShouldNotify]: the
-/// recompute mints a fresh Map on EVERY chatProvider mutation, and identity
-/// `==` made this "dampener" notify the root shell per mutation anyway.
+/// A Notifier purely for [updateShouldNotify]: the recompute mints a fresh Map
+/// on EVERY chatProvider mutation, so identity `==` notified the root anyway.
 final lastDmMessageProvider =
     NotifierProvider<LastDmMessageNotifier, Map<String, ChatMessage>>(
         LastDmMessageNotifier.new);

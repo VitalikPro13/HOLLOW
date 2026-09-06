@@ -4,12 +4,9 @@ use std::time::Instant;
 use serde::{Deserialize, Serialize};
 
 // -- Shared handler-parameter shorthands --
-//
-// The node modules pass event-loop state as individual parameters (no
-// SwarmContext struct — the borrow checker needs disjoint borrows), which makes
-// every handler signature repeat the same long generic types. These aliases
-// keep those signatures short; call sites are unaffected (aliases are
-// transparent).
+// No SwarmContext struct: the borrow checker needs disjoint borrows, so the
+// node modules pass state as individual parameters, and these aliases keep the
+// resulting handler signatures short.
 
 pub(crate) type ServerStates = HashMap<String, crate::crdt::server_state::ServerState>;
 pub(crate) type WsCmdTx = tokio::sync::mpsc::UnboundedSender<crate::node::ws_client::WsCommand>;
@@ -17,7 +14,7 @@ pub(crate) type WsRoomPeers = HashMap<String, HashSet<String>>;
 pub(crate) type GossipOverlays = HashMap<String, crate::node::gossip::GossipOverlay>;
 pub(crate) type EventTx = tokio::sync::mpsc::Sender<NetworkEvent>;
 
-// -- Security constants (Phase 6.25) --
+// -- Security constants --
 
 /// Maximum SDP payload size (64 KB). Realistic SDP is ~2-10 KB.
 pub(crate) const MAX_SDP_SIZE: usize = 64 * 1024;
@@ -36,29 +33,13 @@ pub(crate) const VC_SIGNAL_RATE_BURST: u32 = 30;
 /// VC signaling sub-rate-limiter: refill rate (tokens per second per peer).
 pub(crate) const VC_SIGNAL_RATE_REFILL: u32 = 10;
 
-/// Compute a deterministic DM room code for two peers.
-/// Both peers compute the same code so signaling can match them.
-/// Uses SHA-256 truncated to 32 hex chars for collision resistance.
+/// Deterministic DM room code for a pair of peers (SHA-256, 32 hex chars).
 ///
-/// PURE function of the two ids passed in — NO resolver lookup. This is the
-/// load-bearing invariant: two friends MUST always derive the same DM room, and
-/// the only way to guarantee that is to key the room on ids both sides agreed on
-/// at friend-request time (the identity each authenticates/signs as), never on
-/// per-peer mutable resolver state (which can diverge — one side ingested a
-/// device list the other didn't, or has a stale/polluted link — and would then
-/// compute a DIFFERENT room, so the two never meet and key exchange never lands).
-///
-/// Multi-device (Phase 6): a person's DM room is `f(my_master, friend_identity)`.
-/// The event loop passes the MASTER id for the local end (a device always knows
-/// its own master for certain), and the friend's identity id for the remote end.
-/// All of a master's devices therefore land in the same room because they each
-/// pass the SAME master as the local end. A fan-out send to a SPECIFIC device
-/// must compute the room from the recipient's MASTER (resolve at the call site)
-/// and use the device id only as the direct `target_peer` — NOT pass the device
-/// id here (that would key the room on the device, not the identity).
-///
-/// Pre-multi-device installs pass `device_peer_id == master`, so this is
-/// byte-for-byte the old behavior — known-good room codes are preserved.
+/// PURE in its arguments, never a resolver lookup: both sides must derive the
+/// same room, and per-peer resolver state can diverge (one side ingested a
+/// device list the other did not) and would then compute a different room.
+/// Callers pass MASTER ids, so all of a master's devices share one room; a
+/// fan-out to a single device names that device only as `target_peer`.
 pub(crate) fn dm_room_code(peer_a: &str, peer_b: &str) -> String {
     use sha2::{Sha256, Digest};
     let mut sorted = [peer_a, peer_b];
@@ -74,22 +55,15 @@ pub(crate) struct DiscoveredPeer {
     pub addresses: Vec<String>,
 }
 
-/// A master-signed list of the device peer_ids belonging to one identity
-/// (multi-device, Phase 6). Rides on profile sync so friends learn which device
-/// peer_ids resolve to one person, in a tamper-proof way.
+/// A master-signed list of the device peer_ids belonging to one identity.
 ///
-/// - `master_pubkey_b64`: the master Ed25519 public key (36-byte protobuf,
-///   base64). `peer_id_from_pubkey_protobuf(master_pubkey)` MUST equal
-///   `master_peer_id` (binds pubkey → identity).
-/// - `devices`: sorted device peer_ids (sorted so the signed payload is canonical).
-/// - `revoked`: sorted device peer_ids that have been REVOKED (Step 7). Tombstones:
-///   a revoked id is removed from `devices` and can never re-enter the union (see
-///   `ingest_device_list`). One `version` + one `sig_b64` governs adds AND removes;
-///   a revoked id is un-revoked ONLY by a future higher-version master-signed list
-///   that drops it from `revoked`. A replayed lower-version list cannot un-revoke.
-/// - `version`: monotonic; clients reject a list whose version is not greater
-///   than the highest already seen for that master (replay protection).
-/// - `sig_b64`: master's Ed25519 signature over `device_list_signing_payload`.
+/// `peer_id_from_pubkey_protobuf(master_pubkey_b64)` MUST equal `master_peer_id`:
+/// that is what binds the key to the identity. `revoked` is a tombstone set, and
+/// a revoked id can never re-enter `devices` (`ingest_device_list`); only a
+/// higher-`version` signed list may drop it again. `version` is monotonic per
+/// master, so a replayed older list can neither un-revoke nor re-add. `devices`
+/// and `revoked` are sorted so the signed payload is canonical, and `sig_b64` is
+/// the master's signature over `device_list_signing_payload`.
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub(crate) struct SignedDeviceList {
     #[serde(default)]
@@ -98,8 +72,6 @@ pub(crate) struct SignedDeviceList {
     pub master_peer_id: String,
     #[serde(default)]
     pub devices: Vec<String>,
-    /// Revoked device peer_ids (sorted). Step 7 tombstones — empty on every
-    /// pre-Step-7 / single-device list (`#[serde(default)]` keeps old data valid).
     #[serde(default)]
     pub revoked: Vec<String>,
     #[serde(default)]
@@ -108,24 +80,19 @@ pub(crate) struct SignedDeviceList {
     pub sig_b64: String,
 }
 
-/// An Olm prekey bundle CARRIED inside a friend request, so the handshake needs
-/// no co-presence at all (async friending).
+/// An Olm prekey bundle carried inside a friend request, so the handshake needs
+/// no co-presence at all.
 ///
-/// Why this is not a [`HavenMessage::KeyBundle`]: the live bundle is addressed to
-/// a recipient DEVICE and is only valid for `KEY_EXCHANGE_SKEW_SECS` (5 minutes),
-/// because a live bundle that outlives a rotation is a replay. A carried bundle
-/// is addressed to a recipient MASTER (a stranger has no device of ours to name)
-/// and has to survive sitting in a relay mailbox until the recipient next boots,
-/// so it gets its OWN freshness rule (`MAX_CARRIED_BUNDLE_AGE_SECS`) and its OWN
-/// domain-separated signing payload. Replay protection here is the one-time key
-/// being single-use, not the clock.
+/// Not a [`HavenMessage::KeyBundle`]: that one is addressed to a recipient DEVICE
+/// and expires in `KEY_EXCHANGE_SKEW_SECS`, while a carried bundle is addressed
+/// to a MASTER (a stranger has no device of ours to name) and must survive a
+/// relay mailbox, so it gets its own age bound and its own domain-separated
+/// signing payload. Replay protection is the one-time key being single-use.
 ///
-/// SECURITY: `sig_b64` is made by the sender's DEVICE key over
-/// `carried_bundle_signing_payload`, and `device_pk_b64` derives the sender
-/// device id. Verification (`crypto_handler::verify_carried_bundle`) additionally
-/// requires that device to appear in the sender's master-SIGNED device list, so
-/// the chain master -> signed device list -> device key -> signed bundle -> Olm
-/// keys is unbroken, exactly like the live path.
+/// SECURITY: `verify_carried_bundle` requires the DEVICE signature over
+/// `carried_bundle_signing_payload` AND that device to appear in the sender's
+/// master-signed device list, so master -> device list -> device key -> bundle
+/// -> Olm keys is unbroken, exactly like the live path.
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub(crate) struct CarriedBundle {
     /// Sender device's Olm Curve25519 identity key (base64).
@@ -148,27 +115,20 @@ pub(crate) struct CarriedBundle {
     pub device_pk_b64: String,
 }
 
-/// The sender's own master-SIGNED profile, carried inside a `FriendRequest` so
-/// the receiver can render the incoming card with a real name (and eventually an
-/// avatar) even when the sender is long offline — a stranger has never sent us a
+/// The sender's own master-signed profile, carried inside a `FriendRequest` so
+/// the incoming card renders with a real name: a stranger has never sent us a
 /// `ProfileUpdate`, so without this the card falls back to a raw peer id.
 ///
-/// LIGHT, exactly like every other profile announce: the avatar HASH only, never
-/// the bytes. The still/animation follow via the asset rail / `ProfileRequest`
-/// once the two are online. This mirrors the signed subset a [`crate::node::types::HavenMessage::ProfileRelay`]
-/// carries and is ingested the same way — verified with
-/// `crypto_handler::verify_profile_signature`, stored with `save_profile` — so a
-/// forwarded/relayed profile and a request-carried one obey one identical rule:
-/// only the subject's own signature can assert the subject's name and avatar.
+/// LIGHT like every profile announce: the avatar HASH only, never the bytes.
 ///
 /// SECURITY: `profile_sig` is REQUIRED on ingest and made by `source_peer_id`'s
-/// MASTER key. An absent or invalid signature drops the PROFILE, never the
-/// request (`if sig.is_some()` is the bypass — we verify, we do not log-and-store).
+/// MASTER key; an absent or invalid signature drops the PROFILE, never the
+/// request. Only the subject's own signature may assert the subject's name and
+/// avatar, which is why this is verified exactly like a relayed profile.
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub(crate) struct CarriedProfile {
-    /// The subject's MASTER peer_id — profiles are one per identity, master-keyed.
-    /// The receiver binds this to the request sender's resolved master and drops
-    /// the profile on a mismatch (a sender must not assert a third party's).
+    /// The subject's MASTER peer_id. Bound to the request sender's resolved master
+    /// on ingest and dropped on a mismatch: nobody may assert a third party's profile.
     #[serde(default)]
     pub source_peer_id: String,
     #[serde(default)]
@@ -181,12 +141,11 @@ pub(crate) struct CarriedProfile {
     pub updated_at: i64,
     #[serde(default)]
     pub twitch_username: String,
-    /// Hex SHA-256 of the avatar blob the OWNER signed; empty = no avatar. NEVER
-    /// the bytes — the still is pulled on demand, same as every light announce.
+    /// Hex SHA-256 of the avatar blob; empty = no avatar. Never the bytes.
     #[serde(default)]
     pub avatar_hash: String,
-    /// The subject's signature over the signed subset (`profile_signing_payload`).
-    /// REQUIRED — an unsigned carried profile is dropped, the request kept.
+    /// Subject's signature over `profile_signing_payload`. REQUIRED: an unsigned
+    /// carried profile is dropped and the request kept.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile_sig: Option<String>,
     /// Subject MASTER public key (base64 protobuf) paired with `profile_sig`.
@@ -194,9 +153,8 @@ pub(crate) struct CarriedProfile {
     pub profile_pk: Option<String>,
 }
 
-/// One accepted-friend entry shared between a master identity's own devices
-/// (multi-device, Phase 6). Carries identity + relationship metadata only — no
-/// message history. See `HavenMessage::FriendListSync`.
+/// One friend entry shared between an identity's own devices: relationship
+/// metadata only, never message history. See `HavenMessage::FriendListSync`.
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub(crate) struct FriendListEntry {
     #[serde(default)]
@@ -217,24 +175,16 @@ pub(crate) enum NetworkEvent {
     RoomCleared,
     Listening { address: String },
     MessageReceived { from_peer: String, text: String, timestamp: i64, message_id: String, reply_to_mid: String, link_preview: Option<LinkPreviewRef>, signature: Option<String>, public_key: Option<String>,
-        /// Multi-device self fan-out: true when this DM is a copy echoed from one
-        /// of OUR OWN sibling devices (we are the SENDER, `from_peer` is the
-        /// conversation's OTHER party = the recipient master). Dart must render it
-        /// as an OUTGOING bubble (isMe=true), not incoming — otherwise a sibling
-        /// shows our own sent message as if the friend sent it to us. False for a
-        /// normal DM from a friend (the overwhelmingly common case).
+        /// True when this DM is our OWN message echoed from a sibling device: then
+        /// `from_peer` is the recipient master and Dart must render it as outgoing.
         is_own: bool,
-        /// True when the message row ALREADY existed in the DB (a sync batch,
-        /// pending-drain or fetch-node insert beat this live delivery). The
-        /// event is still emitted so an OPEN chat renders it (the in-memory
-        /// list dedups by message_id) — suppressing it entirely left the pane
-        /// stale until re-entry. Dart must SKIP unread increments and
-        /// notifications when true (replays would double-count/re-notify).
+        /// The row already existed (a sync batch, pending drain or fetch-node insert
+        /// beat this delivery). Still emitted so an open chat renders it; Dart must
+        /// skip unread increments and notifications.
         duplicate: bool },
     ChannelMessageReceived { server_id: String, channel_id: String, from_peer: String, text: String, timestamp: i64, message_id: String, reply_to_mid: String, link_preview: Option<LinkPreviewRef>, signature: Option<String>, public_key: Option<String>,
-        /// True when `reply_to_mid` points at a message WE authored (parent row's
-        /// `is_mine`, resolved at ingest). Dart's mentions-only notification gate
-        /// reads this — `reply_to_mid` alone means "a reply to anyone".
+        /// True when `reply_to_mid` points at a message WE authored; Dart's
+        /// mentions-only notification gate reads this.
         reply_to_own: bool,
         /// Same contract as [`NetworkEvent::MessageReceived::duplicate`].
         duplicate: bool },
@@ -243,11 +193,10 @@ pub(crate) enum NetworkEvent {
     MessageSendFailed { to_peer: String, error: String },
     SessionEstablished { peer_id: String },
     Error { message: String },
-    // -- CRDT events (Phase 3) --
+    // -- CRDT events --
     ServerCreated { server_id: String, name: String },
     ServerUpdated { server_id: String },
-    /// Custom emote bytes arrived (EmoteAssets verified + cached). Dart
-    /// invalidates the hash-keyed emote image cache so pending tokens render.
+    /// Emote bytes arrived and were cached; Dart invalidates its hash-keyed cache.
     EmoteAssetsReceived { hashes: Vec<String> },
     ChannelAdded { server_id: String, channel_id: String, name: String, channel_type: String },
     ChannelRemoved { server_id: String, channel_id: String },
@@ -258,13 +207,11 @@ pub(crate) enum NetworkEvent {
     SyncCompleted { server_id: String, ops_applied: u32 },
     ServerJoined { server_id: String, name: String },
     ServerJoinFailed { server_id: String, reason: String },
-    /// The 15s live window elapsed with nobody there to answer, so the request
-    /// was parked: persisted locally and deposited into the server room's join
-    /// ring. NOT a failure. The UI shows a pending tile.
+    /// The live window elapsed with nobody there to answer, so the request was
+    /// parked in the server room's join ring. Not a failure; the UI shows a tile.
     ServerJoinParked { server_id: String },
-    /// A parked join changed state. `state` is one of `rejected`, `admitted`,
-    /// `ready`, `discarded`; `reason` carries the reject reason and is empty
-    /// otherwise.
+    /// `state` is one of `rejected`, `admitted`, `ready`, `discarded`; `reason`
+    /// carries the reject reason and is empty otherwise.
     PendingJoinUpdated { server_id: String, state: String, reason: String },
     MessageSyncStarted { server_id: String, peer_id: String },
     MessageSyncCompleted { server_id: String, new_message_count: u32 },
@@ -272,52 +219,46 @@ pub(crate) enum NetworkEvent {
     MessageSyncProgress { server_id: String, channel_id: String, received_count: u32, total_count: u32 },
     RoleChanged { server_id: String, peer_id: String, new_role: String },
     DmSyncCompleted { peer_id: String, new_message_count: u32 },
-    // -- Profile events (Phase 3.5) --
+    // -- Profile events --
     ProfileUpdated { peer_id: String },
-    /// A device list was ingested for `master_peer_id` (multi-device, Phase 6).
-    /// Dart invalidates its device→identity map so attribution updates.
+    /// A device list was ingested for `master_peer_id`; Dart invalidates its
+    /// device-to-identity map so attribution updates.
     DeviceListUpdated { master_peer_id: String },
-    /// A contact's identity changed in a way worth showing the user (Issue 1-C):
-    /// a NEW DEVICE joined their identity, or one of their devices re-keyed.
-    /// `peer_id` is the MASTER (an alert is about a person), `kind` is a
-    /// `security_alerts::KIND_*` constant, `detail` is the device id or key that
-    /// changed. Emitted ONLY the first time each distinct fact is recorded, so a
+    /// A contact's identity changed: a new device joined it, or one of their
+    /// devices re-keyed. `peer_id` is the MASTER, `kind` a
+    /// `security_alerts::KIND_*` constant. Emitted once per distinct fact, so a
     /// dismissed warning stays dismissed across reconnects.
     SecurityAlert { peer_id: String, kind: String, detail: String, created_at: i64 },
-    /// THIS device has been revoked by the identity (Step 7) — it appears in the
-    /// signed `revoked` tombstone set. Dart self-nukes: `stash_pending_wipe()` +
-    /// relaunch → clean Welcome. The cryptographic cutoff already happened on
-    /// everyone else; this is the revoked device honestly tearing itself down.
+    /// THIS device appears in the identity's signed `revoked` set. Dart self-nukes
+    /// (`stash_pending_wipe()` + relaunch); the cryptographic cutoff already
+    /// happened everywhere else.
     SelfRevoked,
-    // -- Message editing events (Phase 3.5) --
+    // -- Message editing events --
     ChannelMessageEdited { server_id: String, channel_id: String, message_id: String, new_text: String, edited_at: i64, signature: Option<String>, public_key: Option<String> },
     DmMessageEdited { peer_id: String, message_id: String, new_text: String, edited_at: i64, signature: Option<String>, public_key: Option<String> },
     // -- Late link-preview events (issue #45) --
-    //
-    // A card landed on a message that is already on screen. Deliberately NOT
-    // an edit event: `edited_at` is untouched, so the bubble must not grow an
-    // "(edited)" badge just because its preview arrived late.
+    // Deliberately NOT an edit event: `edited_at` is untouched, so the bubble must
+    // not grow an "(edited)" badge because its preview arrived late.
     ChannelLinkPreviewUpdated { server_id: String, channel_id: String, message_id: String, preview: Option<LinkPreviewRef> },
     DmLinkPreviewUpdated { peer_id: String, message_id: String, preview: Option<LinkPreviewRef> },
-    // -- Message deletion events (Phase 3.5) --
+    // -- Message deletion events --
     ChannelMessageDeleted { server_id: String, channel_id: String, message_id: String, deleted_at: i64 },
     DmMessageDeleted { peer_id: String, message_id: String, deleted_at: i64 },
-    // -- Emoji reaction events (Phase 3.5) --
+    // -- Emoji reaction events --
     ChannelReactionAdded { server_id: String, channel_id: String, message_id: String, emoji: String, reactor: String, added_at: i64 },
     DmReactionAdded { peer_id: String, message_id: String, emoji: String, reactor: String, added_at: i64 },
     ChannelReactionRemoved { server_id: String, channel_id: String, message_id: String, emoji: String, reactor: String, removed_at: i64 },
     DmReactionRemoved { peer_id: String, message_id: String, emoji: String, reactor: String, removed_at: i64 },
-    // -- Friend events (Phase 3.5) --
+    // -- Friend events --
     FriendRequestReceived { peer_id: String },
     FriendRequestAccepted { peer_id: String },
     FriendRequestRejected { peer_id: String },
     FriendRemoved { peer_id: String },
-    /// Multi-device (Phase 6): a sibling device sent us our identity's friend
-    /// list and we inserted `count` new friend rows. Dart reloads `friendsProvider`.
+    /// A sibling sent our identity's friend list and we inserted `count` new rows.
     FriendsBackfilled { count: u32 },
     // -- Conference events (see node/conference.rs + reports/CONFERENCES_PLAN.md) --
-    /// (Host) a stranger is at the door — waiting-room panel entry. Blocklist
-    /// already applied at ingest; `avatar_hash` is a hash, never blob bytes.
+    /// (Host) a stranger is at the door. Blocklist already applied at ingest;
+    /// `avatar_hash` is a hash, never blob bytes.
     ConferenceJoinRequestReceived { conf_id: String, peer_id: String, display_name: String, avatar_hash: String },
     /// (Joiner) the host declined us / wrong access code / meeting gone.
     ConferenceJoinDenied { conf_id: String, reason: String },
@@ -348,19 +289,18 @@ pub(crate) enum NetworkEvent {
         server_id: String, channel_id: String, from_peer: String,
         message_id: String,
         has_everyone: bool, mentioned_names: Vec<String>,
-        /// True only when the message replies to one of OUR messages (compared
-        /// against the wire hint's `reply_to_sender`). Hints from pre-0.9.1
-        /// senders can't tell us the reply author, so this stays false there.
+        /// True only when the message replies to one of OUR messages. Pre-0.9.1
+        /// senders cannot tell us the reply author, so this stays false for them.
         is_reply_to_own: bool,
     },
-    // -- Typing indicator events (Phase 3.5) --
+    // -- Typing indicator events --
     TypingStarted { peer_id: String, server_id: String, channel_id: String },
-    // -- Presence events (Phase 6.75) --
+    // -- Presence events --
     PeerStatusChanged { peer_id: String, status: String },
-    // -- Pinned message events (Phase 3.5) --
+    // -- Pinned message events --
     MessagePinned { server_id: String, channel_id: String, message_id: String },
     MessageUnpinned { server_id: String, channel_id: String, message_id: String },
-    // -- File transfer events (Phase 3.5) --
+    // -- File transfer events --
     FileHeaderReceived {
         file_id: String,
         file_name: String,
@@ -372,14 +312,12 @@ pub(crate) enum NetworkEvent {
         sender_id: String,
         server_id: String,    // empty for DMs
         channel_id: String,   // peer_id for DMs
-        /// Video thumbnail back-reference (Phase 6.75 video preview).
-        /// Present when the received FileHeader is a thumbnail for a vault video.
+        /// Present when this FileHeader is the thumbnail for a vault video.
         video_thumb: Option<VideoThumbRef>,
         /// Hidden Share back-reference for large files / progressive video streaming.
         share_ref: Option<ShareRef>,
-        /// Tiny base64 WebP placeholder thumbnail (blurred under the Download
-        /// button for gated/undownloaded images). None for non-images and
-        /// pre-0.9.4 senders.
+        /// Tiny base64 WebP placeholder shown blurred under the Download button.
+        /// None for non-images and pre-0.9.4 senders.
         thumb_b64: Option<String>,
     },
     FileProgress {
@@ -395,34 +333,30 @@ pub(crate) enum NetworkEvent {
         file_id: String,
         error: String,
     },
-    /// Honest file-card state for a file whose bytes are not on disk (tmp.txt
-    /// item 1). `state` is one of "requesting" | "waiting" | "gone" |
-    /// "expired"; `peer_id` is the MASTER the state is about ("" when none):
-    /// the holder being asked, the DM counterparty who is offline, or the peer
-    /// that answered "I don't have it".
+    /// Honest file-card state for a file whose bytes are not on disk. `state` is
+    /// one of "requesting" | "waiting" | "gone" | "expired"; `peer_id` is the
+    /// MASTER it is about ("" when none): the holder being asked, the offline DM
+    /// counterparty, or the peer that answered that it does not have the file.
     FileAvailability {
         file_id: String,
         state: String,
         peer_id: String,
     },
-    /// Time-limited TURN credentials from the relay (over the authed WS).
-    /// Dart's iceConfigProvider consumes these; Rust owns the refresh cadence
-    /// (on connect + 50-min interval).
+    /// Time-limited TURN credentials from the relay over the authed WS. Rust owns
+    /// the refresh cadence (on connect, then every 50 minutes).
     TurnCredentials { username: String, password: String, ttl: u64, uris: Vec<String> },
-    /// The relay's advertised media forwarder (media forwarding step 3).
-    /// Static config on the relay — refreshed on every (re)connect only.
-    /// Dart's forwarderInfoProvider caches it.
+    /// The relay's advertised media forwarder. Static relay config, refreshed only
+    /// on each (re)connect.
     MediaForwarderInfo { peer_id: String, online: bool },
-    // -- Multi-device link snapshot events (Step 4) --
-    /// (Populated device) Our link code was successfully claimed on the relay —
-    /// show it (with countdown) for the empty device to enter.
+    // -- Multi-device link snapshot events --
+    /// (Populated device) our link code was claimed on the relay; show it with a
+    /// countdown for the empty device to enter.
     LinkCodeClaimed { code: String },
     /// (Populated/empty) A link-code claim or resolve failed (taken / invalid /
     /// not_found / expired).
     LinkCodeError { error: String, code: String },
-    /// A populated sibling is offering / an empty sibling is requesting a full DB
-    /// snapshot. Carries the sender's state summary so the UI can auto-detect
-    /// data-flow direction. `peer_id` is the sibling DEVICE id.
+    /// A populated sibling is offering, or an empty one requesting, a full DB
+    /// snapshot. `peer_id` is the sibling DEVICE id; the counts drive direction.
     SiblingLinkAvailable {
         peer_id: String,
         their_msg_count: u32,
@@ -435,8 +369,7 @@ pub(crate) enum NetworkEvent {
         bytes_received: u64,
         total_bytes: u64,
     },
-    /// The inbound snapshot was decrypted and imported. Counts are from the freshly
-    /// imported DB (post-import summary).
+    /// The inbound snapshot was decrypted and imported; the counts are post-import.
     LinkComplete {
         link_id: String,
         msg_count: u32,
@@ -448,27 +381,27 @@ pub(crate) enum NetworkEvent {
         link_id: String,
         error: String,
     },
-    /// (Sender/populated device) The snapshot was fully queued to the target — lets
-    /// the sender close its dialog. The sender does NOT restart (its DB is intact).
+    /// (Sender) the snapshot is fully queued to the target, so the sender can close
+    /// its dialog. It does NOT restart; its own DB is intact.
     LinkPushComplete {
         bytes: u64,
     },
-    // -- Vault shard events (Phase 4) --
+    // -- Vault shard events --
     ShardStored { server_id: String, content_id: String, shard_index: u16, from_peer: String },
     ShardStoreAckReceived { server_id: String, content_id: String, shard_index: u16, success: bool, error: String },
     ShardStoreFailed { server_id: String, content_id: String, shard_index: u16, target_peer: String, error: String },
     ShardDeleted { server_id: String, content_id: String },
     ShardReceived { server_id: String, content_id: String, shard_index: u16, from_peer: String },
     ShardRequestFailed { server_id: String, content_id: String, shard_index: u16, error: String },
-    // -- Vault upload pipeline events (Phase 4) --
+    // -- Vault upload pipeline events --
     VaultUploadProgress { server_id: String, content_id: String, phase: String, progress: f32 },
     VaultUploadComplete { server_id: String, content_id: String, channel_id: String },
     VaultUploadFailed { server_id: String, content_id: String, error: String },
-    // -- Vault download pipeline events (Phase 4) --
+    // -- Vault download pipeline events --
     VaultDownloadProgress { server_id: String, content_id: String, phase: String, progress: f32 },
     VaultDownloadComplete { server_id: String, content_id: String, disk_path: String },
     VaultDownloadFailed { server_id: String, content_id: String, error: String },
-    // -- Vault rebalancing events (Phase 4) --
+    // -- Vault rebalancing events --
     RebalanceStarted { server_id: String, shards_to_move: u32 },
     RebalanceProgress { server_id: String, moved: u32, total: u32 },
     RebalanceCompleted { server_id: String },
@@ -477,36 +410,28 @@ pub(crate) enum NetworkEvent {
     // -- Connection status events --
     KeyExchangeStarted { peer_id: String },
     KeyExchangeProgress { peer_id: String, stage: String },
-    // -- WebRTC events (Phase 5A) --
-    /// Forward incoming WebRTC signaling message to Dart.
+    // -- WebRTC events --
     WebRtcSignal { peer_id: String, signal_type: String, payload: String, conn_id: String },
     /// Tell Dart to send a file over WebRTC data channel.
     /// `chunk_index` is only meaningful when kind == "share_chunk"; otherwise 0.
     WebRtcSendFile { peer_id: String, transfer_id: String, file_path: String, total_size: u64, kind: String, shard_index: u16, chunk_index: u32 },
-    // -- Voice call events (Phase 5B) --
-    /// Forward incoming voice call signaling message to Dart.
+    // -- Voice call events --
     CallSignal { peer_id: String, signal_type: String, payload: String },
-    // -- Voice channel events (Phase 5C) --
-    /// `is_self` = this is OUR OWN join/leave (set by the emitting handler,
-    /// which knows for certain). Dart must branch on it — never on comparing
-    /// `peer_id` against a local id: the participant set is keyed by ROUTABLE
-    /// DEVICE ids and every id-form guess here has produced a self-dial bug
-    /// (the 2026-08 self-ghost dialed our own master as a remote participant).
+    // -- Voice channel events --
+    /// `is_self` = this is OUR OWN join or leave, set by the emitting handler. Dart
+    /// must branch on it and never compare `peer_id` against a local id: the
+    /// participant set is keyed by ROUTABLE DEVICE ids.
     VoiceChannelJoined { server_id: String, channel_id: String, peer_id: String, is_self: bool },
     VoiceChannelLeft { server_id: String, channel_id: String, peer_id: String, is_self: bool },
     VoiceChannelSignal { server_id: String, channel_id: String, peer_id: String, signal_type: String, payload: String },
     // -- Media forwarder events (media forwarding step 3) --
-    /// A client-bound `fwd_*` signal from a media forwarder
-    /// (`fwd_ingest_answer` / `fwd_egress_offer` / `fwd_error`). Dart gates on
-    /// "from_peer == the discovered forwarder AND origin is watched+assigned"
-    /// before acting — Rust only enforces the SDP size cap here.
+    /// A client-bound `fwd_*` signal from a media forwarder. Dart gates on
+    /// "from_peer is the discovered forwarder AND origin is watched+assigned";
+    /// Rust only enforces the SDP size cap here.
     ForwarderSignal { from_peer: String, signal_type: String, payload: String },
-    // -- Gossip relay tree events (Phase 5D) --
-    /// Tell Dart to establish a WebRTC data channel to this peer (gossip neighbor).
+    // -- Gossip relay tree events --
     GossipConnect { peer_id: String },
-    /// Tell Dart to close the WebRTC data channel to this peer.
     GossipDisconnect { peer_id: String },
-    /// Tell Dart to relay a file broadcast to gossip neighbors.
     GossipRelayFile {
         broadcast_id: String,
         ttl: u8,
@@ -519,10 +444,9 @@ pub(crate) enum NetworkEvent {
         server_id: String,
         channel_id: String,
     },
-    /// Tell Dart to send a small gossip frame (`GossipCrdtOp` JSON, framed as
-    /// type byte 0x04 on 'hollow-data') to each target's open data channel.
-    /// Tier 2 large-server scaling: CRDT ops flood peer-to-peer instead of
-    /// paying the relay's O(N) egress (`reports/LARGE_SERVER_SCALING_2026.md`).
+    /// Tell Dart to send a small gossip frame (`GossipCrdtOp` JSON, type byte 0x04
+    /// on 'hollow-data') to each target's open data channel, so CRDT ops flood
+    /// peer-to-peer instead of paying the relay's O(N) egress.
     GossipRelayOp {
         targets: Vec<String>,
         payload: Vec<u8>,
@@ -534,10 +458,9 @@ pub(crate) enum NetworkEvent {
         mode: String,
         gossip_neighbors: Vec<String>,
     },
-    /// MLS epoch changed — SFrame key needs rotation.
-    /// `channel_id` is `Some(cid)` when the key belongs to a restricted channel's
-    /// MLS SUBGROUP (per-channel subgroups / "Option B" voice) — Dart applies it
-    /// only to that voice channel's cryptor. `None` = the server-wide group key.
+    /// MLS epoch changed, so the SFrame key needs rotation. `channel_id` is
+    /// `Some(cid)` when the key belongs to a restricted channel's MLS SUBGROUP and
+    /// Dart applies it only to that channel's cryptor; `None` = the server group.
     MlsEpochChanged {
         server_id: String,
         epoch: u64,
@@ -554,21 +477,16 @@ pub(crate) enum NetworkEvent {
     RecoveryPoolShardTransferred { server_id: String, content_id: String, shard_index: u16 },
     RecoveryPoolFileRecovered { server_id: String, content_id: String, disk_path: String },
     RecoveryPoolStopped { server_id: String },
-    // -- Hollow Share (Phase 7A) --
-    /// Manifest for a share has been fetched and verified; download can be started.
+    // -- Hollow Share --
     ShareManifestReady { root_hash: String, file_name: String, total_size: u64, chunk_count: u32 },
-    /// Periodic progress update for an active share download or seed.
     ShareProgress { root_hash: String, chunks_have: u32, chunks_total: u32, seeders: u8, leechers: u8, bytes_per_sec: u64 },
-    /// Download finished, file written to disk_path.
     ShareCompleted { root_hash: String, disk_path: String },
     /// Download/seed encountered a fatal error; swarm state has been dropped.
     ShareFailed { root_hash: String, error: String },
-    /// Seeding flag toggled (manually or by completion auto-seed).
     ShareSeedingChanged { root_hash: String, seeding: bool, seeders: u8, leechers: u8, bytes_uploaded: u64 },
-    /// share_create_from_file finished; link is ready to share.
     ShareCreated { root_hash: String, link: String, file_name: String, total_size: u64 },
-    /// Hidden share created for large file / video streaming. Contains root_hash + key
-    /// needed to build a ShareRef for the FileHeader.
+    /// Hidden share created for a large file or video streaming; carries the
+    /// root_hash and key a `ShareRef` on the FileHeader needs.
     ShareCreatedHidden { root_hash: String, key_hex: String, file_name: String, total_size: u64 },
     /// Result of share_list (returned via stream so it stays uniform with other queries).
     ShareList { entries: Vec<ShareEntryRef> },
@@ -588,8 +506,8 @@ pub(crate) enum NetworkEvent {
     PublicChannelConfigChanged { server_id: String, channel_id: String, is_public: bool, channel_name: String, category: Option<String> },
 }
 
-/// Lightweight ShareEntry for streaming lists to Dart. The persisted row is wider
-/// (manifest_json, encryption_key blob, etc.) — Dart only needs what it renders.
+/// Lightweight ShareEntry for streaming lists to Dart; the persisted row is
+/// wider (manifest JSON, encryption key) and Dart only needs what it renders.
 #[derive(Clone)]
 pub(crate) struct ShareEntryRef {
     pub root_hash: String,
@@ -607,7 +525,6 @@ pub(crate) struct ShareEntryRef {
     pub context_type: Option<String>,
 }
 
-/// Public channel entry for guest sync.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct PublicChannelEntry {
     pub channel_id: String,
@@ -616,7 +533,6 @@ pub(crate) struct PublicChannelEntry {
     pub category: Option<String>,
 }
 
-/// FFI-visible public channel entry for guest viewer.
 #[derive(Clone)]
 pub(crate) struct PublicChannelEntryFfi {
     pub channel_id: String,
@@ -624,7 +540,6 @@ pub(crate) struct PublicChannelEntryFfi {
     pub category: Option<String>,
 }
 
-/// FFI-visible guest sync message.
 #[derive(Clone)]
 pub(crate) struct GuestSyncMessageFfi {
     pub sender_id: String,
@@ -637,14 +552,11 @@ pub(crate) struct GuestSyncMessageFfi {
     pub reply_to: Option<String>,
     pub hidden_at: Option<i64>,
     pub reactions: Vec<GuestReactionFfi>,
-    /// Attachment metadata (name/size/type only — never bytes). The wire's
-    /// `SyncFileMetaItem` already carried this; it used to be dropped here,
-    /// leaving guests a raw `[file:<id>]` token instead of a file card.
+    /// Attachment metadata: name, size and type only, never bytes.
     pub file_meta: Option<GuestFileMetaFfi>,
-    /// The message's link preview. Guests hold no rows, so the card comes
-    /// straight off the wire — and reaches here only because
-    /// `guest_item_accepted` folded it into the signature check, which is what
-    /// stops a relay pasting its own card onto a plaintext public batch.
+    /// The message's link preview. Guests hold no rows, so the card comes straight
+    /// off the wire; `guest_item_accepted` folds it into the signature check, which
+    /// is what stops a relay pasting its own card onto a plaintext public batch.
     pub link_preview: Option<LinkPreviewRef>,
 }
 
@@ -660,14 +572,12 @@ pub(crate) struct GuestFileMetaFfi {
     pub is_image: bool,
     pub width: Option<u32>,
     pub height: Option<u32>,
-    /// LOCAL branch only (owner/member previewing their own server): the
-    /// completed file's path on OUR disk, so the card renders instantly with
-    /// no peer fetch. Never populated from the wire — a responder's path is
-    /// meaningless (and none rides `SyncFileMetaItem` anyway).
+    /// LOCAL branch only (previewing our own server): the completed file's path on
+    /// OUR disk, so the card renders with no peer fetch. Never populated from the
+    /// wire, where a responder's path is meaningless.
     pub disk_path: Option<String>,
 }
 
-/// FFI-visible guest reaction.
 #[derive(Clone)]
 pub(crate) struct GuestReactionFfi {
     pub emoji: String,
@@ -675,7 +585,6 @@ pub(crate) struct GuestReactionFfi {
     pub added_at: i64,
 }
 
-/// FFI-visible sender profile for guest sync.
 #[derive(Clone)]
 pub(crate) struct SyncSenderProfileFfi {
     pub peer_id: String,
@@ -694,21 +603,18 @@ pub(crate) struct SendFilePayload {
     pub override_width: Option<u32>,
     pub override_height: Option<u32>,
     pub share_ref: Option<ShareRef>,
-    /// True for recorded voice messages (auto-download-gate exemption rides
-    /// the FileHeader as `voice`; the wire name is the recorder's temp
-    /// basename, so the flag must come from Dart).
+    /// True for recorded voice messages. The wire name is the recorder's temp
+    /// basename, so the auto-download-gate exemption has to come from Dart.
     pub voice: bool,
-    /// Video poster frame extracted by Dart (ffmpeg first-frame WebP).
-    /// Rust re-encodes it small+lossy into `FileHeaderPayload::thumb` and
-    /// falls back to its dimensions when the ffmpeg stderr probe produced
-    /// none — so receivers always render the right aspect + a real poster.
+    /// Video poster frame extracted by Dart. Rust re-encodes it small and lossy
+    /// into `FileHeaderPayload::thumb` and falls back to its dimensions when the
+    /// ffmpeg probe found none, so receivers always get the right aspect.
     pub poster: Option<Vec<u8>>,
 }
 
 /// Internal re-entry payload: an image SendFile whose WebP/GIF conversion ran
-/// off the event loop (spawn_blocking). Carries the converted bytes plus the
-/// original request context so `finish_send_file` can resume at the store/send
-/// steps. Never constructed from FFI.
+/// off the event loop. Carries the converted bytes plus the original request
+/// context so `finish_send_file` can resume. Never constructed from FFI.
 pub(crate) struct SendFileConvertedPayload {
     pub peer_id: Option<String>,
     pub server_id: Option<String>,
@@ -723,16 +629,13 @@ pub(crate) struct SendFileConvertedPayload {
     pub final_ext: String,
     pub width: Option<u32>,
     pub height: Option<u32>,
-    /// Tiny base64 WebP placeholder thumbnail generated on the blocking pool
-    /// alongside the conversion (see FileHeaderPayload::thumb).
+    /// Tiny base64 WebP placeholder built alongside the conversion.
     pub thumb: Option<String>,
-    /// Voice-message flag carried through from SendFilePayload.
     pub voice: bool,
 }
 
-/// Internal re-entry payload: erasure coding + local shard writes for a vault
-/// upload ran off the event loop; resume at shard distribution / manifest
-/// broadcast. Never constructed from FFI.
+/// Internal re-entry payload: erasure coding and the local shard writes ran off
+/// the event loop; resume at shard distribution. Never constructed from FFI.
 pub(crate) struct VaultUploadPreparedPayload {
     pub server_id: String,
     pub channel_id: String,
@@ -760,59 +663,49 @@ pub(crate) struct VaultUploadFilePayload {
 /// Carries the gate-bypass tokens needed when (re-)sending a ServerJoinRequest.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct PendingJoin {
-    /// Twitch verification proof (if the server requires it).
     pub(crate) twitch_proof_json: Option<String>,
     /// True once the user accepted the NSFW "proceed at your own risk" prompt.
     pub(crate) nsfw_confirmed: bool,
-    /// Unix MILLISECONDS when the user asked. This is the request NONCE: every
-    /// answer (a reject, a `join_resolved` ring frame) names it, so a stale copy
-    /// replayed out of a three-day ring can never resolve a NEWER request.
+    /// Unix MILLISECONDS when the user asked, and the request NONCE: every answer
+    /// names it, so a stale copy replayed out of the three-day ring can never
+    /// resolve a NEWER request.
     pub(crate) requested_at: i64,
-    /// True once the 15s live window elapsed with no answer and we deposited a
-    /// copy into the server room's `~join` ring. A parked join has no timer and
-    /// no live expectation: it waits for a member to return.
+    /// True once the live window elapsed with no answer and we deposited a copy in
+    /// the server room's `~join` ring. A parked join has no timer: it waits for a
+    /// member to return.
     pub(crate) parked: bool,
     /// Unix MILLISECONDS of the last ring deposit, so a flapping joiner cannot
     /// refill a 200-frame ring on every reconnect (see `REDEPOSIT_INTERVAL_MS`).
     pub(crate) last_deposited_at: i64,
-    /// Our OWN master-signed device list, carried on every copy of the request.
-    /// A member that has never been online with us holds no device -> master
-    /// link for us, so `resolve()` alone would attribute the join to our raw
-    /// DEVICE id and add the wrong member key. Same lesson as `FriendReject`.
-    /// Built once at request time and cached for re-sends.
+    /// Our OWN master-signed device list, carried on every copy of the request. A
+    /// member that has never been online with us holds no device-to-master link, so
+    /// `resolve()` alone would add our raw DEVICE id as the member key.
     pub(crate) device_list: Option<SignedDeviceList>,
-    /// Base64 of our serialised MLS KeyPackage, minted ONCE when the row is
-    /// created and reused for the life of the row (a repeat ask keeps it and
-    /// only refreshes the nonce; OpenMLS accepts a re-add of the same package
-    /// once an old leaf is gone, and we hold its private half until a Welcome
-    /// consumes it). It rides the PARKED ring copy only, so a member reading
-    /// the ring with the joiner nowhere near can queue the LEAF in the same
-    /// batch that admits the membership — which is the difference between
-    /// coming back to a server you can read and one you can only see.
+    /// Base64 of our serialised MLS KeyPackage, minted ONCE per row and reused for
+    /// every re-send: we hold its private half until a Welcome consumes it, and
+    /// OpenMLS accepts a re-add of the same package once the old leaf is gone. It
+    /// rides the PARKED ring copy so an admitter can seat the LEAF in the same
+    /// batch that admits the membership, with the joiner nowhere near.
     pub(crate) key_package: Option<String>,
 }
 
 /// How often a still-parked join re-deposits its copy into the `~join` ring.
 ///
-/// The ring is 200 frames / 1 MB per (room, topic), shared by every joiner of
-/// that server. A joiner that flaps once a minute would own the whole ring
-/// inside four hours and push out everybody else's request. Twelve hours is
-/// far inside the default three-day retention, so a parked join is always
-/// represented, and the relay's fair-share eviction stays the backstop rather
-/// than the design.
+/// The ring is 200 frames / 1 MB per (room, topic) and shared by every joiner
+/// of that server, so a joiner that flapped once a minute would own the whole
+/// ring within hours. Twelve hours is far inside the three-day retention, which
+/// keeps the relay's fair-share eviction a backstop rather than the design.
 pub(crate) const REDEPOSIT_INTERVAL_MS: i64 = 12 * 3600 * 1000;
 
 /// The pseudo-channel the server room's join ring is keyed under.
 ///
-/// Never a channel id: channel ids are `{server8}-{hex}` or a uuid, and `~` is
-/// not in that alphabet, so this can never collide with a real channel's ring.
-/// The relay validates topic strings for LENGTH only, so no registration is
-/// needed beyond the ordinary `set_topic_buffer` the client already sends.
+/// Never a channel id: `~` is not in the channel-id alphabet, so this cannot
+/// collide with a real channel's ring. The relay validates topic strings for
+/// LENGTH only, so no registration beyond the ordinary `set_topic_buffer`.
 pub(crate) const JOIN_TOPIC: &str = "~join";
 
-/// Wall-clock unix MILLISECONDS. The nonce clock for parked joins: it has to be
-/// wall clock, not a monotonic instant, because the value crosses the wire and
-/// outlives the process that minted it.
+/// Wall-clock unix MILLISECONDS. Wall clock rather than a monotonic instant
+/// because the value crosses the wire and outlives the process that minted it.
 pub(crate) fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -822,9 +715,8 @@ pub(crate) fn now_ms() -> i64 {
 
 /// A fresh channel id: the server's first 8 characters, then 4 random bytes.
 ///
-/// ONE definition, called by whoever sends [NodeCommand::CreateChannel], so
-/// the id exists before the command does and can be handed straight back to
-/// the caller.
+/// ONE definition, called by whoever sends [NodeCommand::CreateChannel], so the
+/// id exists before the command does and can be handed back to the caller.
 pub(crate) fn new_channel_id(server_id: &str) -> String {
     let mut buf = [0u8; 4];
     getrandom::fill(&mut buf)
@@ -837,13 +729,11 @@ pub(crate) enum NodeCommand {
     SendMessage { peer_id: String, text: String, message_id: String, reply_to_mid: Option<String>, link_preview: Option<LinkPreviewRef> },
     SendChannelMessage { server_id: String, channel_id: String, text: String, message_id: String, reply_to_mid: Option<String>, link_preview: Option<LinkPreviewRef> },
     JoinRoom { room_code: String },
-    // -- CRDT commands (Phase 3) --
+    // -- CRDT commands --
     CreateServer { name: String },
-    /// [channel_id] is minted by the CALLER (`new_channel_id`), not here, so
-    /// the FFI can return the real id to Dart instead of a placeholder. The UI
-    /// needs it synchronously: "create channel in this category" has to put
-    /// the new channel into the layout, and a placeholder id writes a dangling
-    /// layout entry that no channel will ever match.
+    /// `channel_id` is minted by the CALLER (`new_channel_id`) so the FFI can hand
+    /// Dart the real id synchronously: "create channel in this category" writes a
+    /// layout entry, and a placeholder id leaves one no channel will ever match.
     CreateChannel { server_id: String, channel_id: String, name: String, category: Option<String>, channel_type: String },
     RemoveChannel { server_id: String, channel_id: String },
     RenameServer { server_id: String, new_name: String },
@@ -861,12 +751,10 @@ pub(crate) enum NodeCommand {
     SetChannelVisibility { server_id: String, channel_id: String, visibility: String },
     SetChannelPosting { server_id: String, channel_id: String, posting: String },
     SetChannelPublic { server_id: String, channel_id: String, is_public: bool },
-    /// Request/reply: a LIVE clone of one server's in-memory CRDT state.
-    /// `get_server_channels` prefers this over the persisted snapshot —
-    /// enforcement reads the in-memory copy while the CrdtStore flush is
-    /// async fire-and-forget, so a DB read racing a fresh toggle write
-    /// returned the PREVIOUS value and reverted optimistic UI (#44
-    /// "toggle twice to make it stick"). `None` = server unknown.
+    /// Request/reply: a LIVE clone of one server's in-memory CRDT state. Preferred
+    /// over the persisted snapshot because the CrdtStore flush is fire-and-forget,
+    /// so a DB read racing a fresh toggle returns the PREVIOUS value and reverts
+    /// the optimistic UI (#44). `None` = server unknown.
     GetServerStateSnapshot {
         server_id: String,
         reply: tokio::sync::oneshot::Sender<Option<crate::crdt::server_state::ServerState>>,
@@ -884,11 +772,10 @@ pub(crate) enum NodeCommand {
     // -- Guest sync commands (Public Channels Phase 3) --
     RequestPublicChannels { server_id: String },
     RequestPublicChannelSync { server_id: String, channel_id: String, before_timestamp: Option<i64> },
-    /// Guest download of a PUBLIC-channel file: sends a FileRequest to ONE
-    /// room peer (peer_hint preferred when live — usually the sender) and
-    /// arms the `pending_public_file_requests` receipt cap. ONE target only —
-    /// each holder re-encrypts with its own AES key, so a fan-out poisons the
-    /// single header key (see handle_request_file).
+    /// Guest download of a PUBLIC-channel file: one FileRequest to a single room
+    /// peer (`peer_hint` preferred when live), arming the receipt cap. ONE target
+    /// only, because each holder re-encrypts with its own AES key and a fan-out
+    /// would poison the single header key.
     RequestPublicFile { server_id: String, file_id: String, peer_hint: Option<String> },
     LeaveGuestRoom { server_id: String },
     CreateLabel { server_id: String, name: String, color: String, access: bool },
@@ -923,41 +810,37 @@ pub(crate) enum NodeCommand {
     SetNickname { server_id: String, peer_id: String, nickname: String },
     SetTwitchUsername { server_id: String, peer_id: String, twitch_username: String },
     NotifyShutdown,
-    // -- Profile commands (Phase 3.5) --
+    // -- Profile commands --
     UpdateProfile { display_name: String, status: String, about_me: String, avatar_bytes: Option<Vec<u8>>, banner_bytes: Option<Vec<u8>>, twitch_username: String, showcase_board: Option<String>, showcase_assets: Option<Vec<u8>>, avatar_frame: Option<String>, avatar_anim: Option<String>, banner_anim: Option<String>, support_creds: Option<String> },
-    // -- Message editing (Phase 3.5) --
+    // -- Message editing --
     EditChannelMessage { server_id: String, channel_id: String, message_id: String, new_text: String },
     EditDmMessage { peer_id: String, message_id: String, new_text: String },
     // -- Late link previews (issue #45) --
-    //
     // Attach a card to a message ALREADY sent, re-signing the row rather than
-    // editing it. `preview: None` clears an existing card. Emitted when a
-    // background OG fetch outlives the send that raced it, and when an edit
-    // changes or removes the message's URL.
+    // editing it. `preview: None` clears an existing card.
     AttachChannelLinkPreview { server_id: String, channel_id: String, message_id: String, preview: Option<Box<LinkPreviewRef>> },
     AttachDmLinkPreview { peer_id: String, message_id: String, preview: Option<Box<LinkPreviewRef>> },
-    // -- Message deletion/hiding (Phase 3.5) --
+    // -- Message deletion/hiding --
     DeleteChannelMessage { server_id: String, channel_id: String, message_id: String },
     DeleteDmMessage { peer_id: String, message_id: String },
-    // -- Emoji reactions (Phase 3.5) --
+    // -- Emoji reactions --
     AddChannelReaction { server_id: String, channel_id: String, message_id: String, emoji: String },
     AddDmReaction { peer_id: String, message_id: String, emoji: String },
     RemoveChannelReaction { server_id: String, channel_id: String, message_id: String, emoji: String },
     RemoveDmReaction { peer_id: String, message_id: String, emoji: String },
-    // -- Friends (Phase 3.5) --
+    // -- Friends --
     SendFriendRequest { peer_id: String },
     SendFriendRequestByNickname { nickname: String },
     AcceptFriendRequest { peer_id: String },
     RejectFriendRequest { peer_id: String },
     RemoveFriend { peer_id: String },
-    /// File a report against a peer with the relay (one per reporter per
-    /// target per category, deduped relay-side via hashed keys). Blocking
-    /// itself is FFI-direct (api/network.rs) — purely local, no node command.
+    /// File a report against a peer with the relay (deduped relay-side, one per
+    /// reporter per target per category). Blocking itself is FFI-direct and local.
     ReportUser { target: String, category: String },
     // -- Temporary nicknames --
     ClaimNickname { nickname: String },
     ReleaseNickname,
-    // -- Multi-device linking (Step 4) --
+    // -- Multi-device linking --
     /// (Populated device) Claim a 6-char link code on the relay so an empty
     /// sibling can find this device by code. Reply arrives as `LinkCodeClaimed`.
     ClaimLinkCode { code: String },
@@ -973,42 +856,39 @@ pub(crate) enum NodeCommand {
     AcceptLinkPush { target_peer: String, include_vault: bool, include_files: bool },
     /// (Populated device) Decline an inbound link request.
     DeclineLinkPush { target_peer: String },
-    /// (Step 7) Revoke one of OUR OWN devices (lost/stolen). Bumps our master-signed
-    /// device list with the device tombstoned, drops our Olm session to it, and (where
-    /// we coordinate) removes its MLS leaf from shared servers. Manual-only.
+    /// Revoke one of OUR OWN devices: bumps our master-signed list with the device
+    /// tombstoned, drops our Olm session to it, and removes its MLS leaf from
+    /// shared servers where we coordinate. Manual-only.
     RevokeDevice { device_peer_id: String },
-    /// Full sibling teardown ("Reset Device List"): tombstone EVERY device except
-    /// the one we're running on, in one version bump, propagate to friends, and
-    /// nuke each revoked sibling. The propagating, permanent counterpart to the old
-    /// blunt local-wipe reset (which the grow-only merge just regrew).
+    /// Full sibling teardown: tombstone EVERY device but the one we run on in a
+    /// single version bump, propagate to friends, and nuke each revoked sibling. A
+    /// local wipe alone regrows, because the device-list merge is grow-only.
     ResetDeviceLists,
-    /// Multi-device MANUAL state sync (Security → Your Devices "Sync from this
-    /// device"). Ask the chosen SOURCE sibling to re-announce all its servers +
-    /// re-share its friends to US. `source_device_id` is that device's peer_id.
+    /// Ask the chosen SOURCE sibling to re-announce all its servers and re-share
+    /// its friends to us. `source_device_id` is that device's peer_id.
     RequestStateSync { source_device_id: String },
     // -- Push notifications --
     RegisterPushToken { token: String, platform: String },
     /// Register per-server/channel push notification prefs with the relay
     /// (RAM only, re-sent on reconnect). See `WsCommand::SetPushPrefs`.
     SetPushPrefs { prefs_json: String },
-    /// Opt in/out of the relay's extended offline DM buffer ("offline inbox").
-    /// RAM-only on the relay, re-registered on every reconnect by ws_client.
-    /// See `WsCommand::SetOfflineBuffer`.
+    /// Opt in/out of the relay's extended offline DM buffer. RAM-only on the relay
+    /// and re-registered on every reconnect. See `WsCommand::SetOfflineBuffer`.
     SetOfflineInbox { enabled: bool, retention_secs: i64 },
-    // -- Typing indicators (Phase 3.5) --
+    // -- Typing indicators --
     SendTypingIndicator { server_id: String, channel_id: String },
-    // -- Presence (Phase 6.75) --
+    // -- Presence --
     SetInvisible { invisible: bool },
-    // -- Channel subscriptions (Phase 6.75) --
+    // -- Channel subscriptions --
     SubscribeChannels { server_id: String, channel_ids: Vec<String> },
-    // -- Channel layout (Phase 3.5) --
+    // -- Channel layout --
     UpdateChannelLayout { server_id: String, layout_json: String },
-    // -- Pinned messages (Phase 3.5) --
+    // -- Pinned messages --
     PinMessage { server_id: String, channel_id: String, message_id: String },
     UnpinMessage { server_id: String, channel_id: String, message_id: String },
-    // -- Storage pledge (Phase 4) --
+    // -- Storage pledge --
     SetStoragePledge { server_id: String, pledge_bytes: u64 },
-    // -- File sharing (Phase 3.5) --
+    // -- File sharing --
     SendFile(Box<SendFilePayload>),
     /// Internal: image conversion finished off-loop; resume the send.
     SendFileConverted(Box<SendFileConvertedPayload>),
@@ -1017,19 +897,17 @@ pub(crate) enum NodeCommand {
         peer_id: String,
         chunks: Vec<u32>,
     },
-    /// Stop waiting for a file (the hover bar's "Stop waiting for this file").
-    /// Drops the pending ask AND the explicit-pull receipt, so an answer that
-    /// is already on its way is treated as an unsolicited push: the size cap
-    /// and the auto-download gate decide it exactly as they would for any
-    /// push. Emits nothing; the card clears its own state on the tap.
+    /// Stop waiting for a file. Drops the pending ask AND the explicit-pull
+    /// receipt, so an answer already on its way is treated as an unsolicited push
+    /// and faces the size cap and the auto-download gate exactly as one. Emits
+    /// nothing; the card clears its own state on the tap.
     CancelFileRequest {
         file_id: String,
     },
-    /// The auto-download config changed (set_auto_download_config FFI) —
-    /// re-advertise `auto_dl_pref` to every connected DM peer / sibling so
-    /// senders stop (or resume) pushing file bytes to us accordingly.
+    /// The auto-download config changed; re-advertise `auto_dl_pref` to every
+    /// connected DM peer and sibling so senders stop or resume pushing us bytes.
     ReadvertiseAutoDlPref,
-    // -- Vault shard distribution (Phase 4) --
+    // -- Vault shard distribution --
     VaultDownloadFile { server_id: String, content_id: String },
     VaultUploadFile(Box<VaultUploadFilePayload>),
     /// Internal: erasure coding finished off-loop; resume the upload.
@@ -1042,27 +920,26 @@ pub(crate) enum NodeCommand {
         shard_key: String,
         target_peer: String,
     },
-    // -- WebRTC commands (Phase 5A) --
+    // -- WebRTC commands --
     WebRtcPeerConnected { peer_id: String },
     WebRtcPeerDisconnected { peer_id: String },
-    /// Hollow Share's DEDICATED STUN-only data channel opened/closed. Tracked
-    /// in its own set (`webrtc_share_peers`), never mixed with the general one:
-    /// the general channel carries TURN, and a Share riding it would push
-    /// multi-GB payloads onto the relay (HOLLOW_PLAN §7A).
+    /// Hollow Share's DEDICATED STUN-only data channel. Tracked in its own set
+    /// (`webrtc_share_peers`), never mixed with the general one: that channel
+    /// carries TURN, and multi-GB Share payloads must not land on the relay.
     WebRtcSharePeerConnected { peer_id: String },
     WebRtcSharePeerDisconnected { peer_id: String },
     /// A Share chunk transfer failed on the Share channel. Separate from
-    /// `WebRtcTransferFailed` so a Share hiccup can't evict the peer from the
-    /// general set (which would knock DM/channel files onto the WS relay).
+    /// `WebRtcTransferFailed` so a Share hiccup cannot evict the peer from the
+    /// general set and knock DM/channel files onto the WS relay.
     WebRtcShareTransferFailed { transfer_id: String, peer_id: String, error: String },
     WebRtcSendSignal { peer_id: String, signal_type: String, payload: String, conn_id: String },
     /// `chunk_index` is only meaningful when kind == "share_chunk"; for "file" / "shard" it's ignored.
     WebRtcTransferComplete { transfer_id: String, temp_path: String, sender_peer_id: String, kind: String, shard_index: u16, chunk_index: u32 },
     WebRtcSendComplete { transfer_id: String },
     WebRtcTransferFailed { transfer_id: String, peer_id: String, error: String },
-    // -- Voice call commands (Phase 5B) --
+    // -- Voice call commands --
     CallSendSignal { peer_id: String, signal_type: String, payload: String },
-    // -- Voice channel commands (Phase 5C) --
+    // -- Voice channel commands --
     VoiceChannelJoin { server_id: String, channel_id: String },
     VoiceChannelLeave { server_id: String, channel_id: String },
     VoiceChannelSendSignal { server_id: String, channel_id: String, peer_id: String, signal_type: String, payload: String },
@@ -1072,13 +949,12 @@ pub(crate) enum NodeCommand {
     VoiceSframeHeal { server_id: String, channel_id: String, peer_id: String, escalate: bool },
     // -- Media forwarder control plane (media forwarding step 3) --
     /// Send an Olm-encrypted `fwd_*` envelope to a media forwarder inside its
-    /// `fwd:{peer_id}` room. Queues + fires a signed KeyRequest when no Olm
-    /// session exists yet (message_ops pattern).
+    /// `fwd:{peer_id}` room. Queues and fires a signed KeyRequest when there is
+    /// no Olm session yet.
     ForwarderSendSignal { forwarder_peer_id: String, signal_type: String, payload: String },
     /// Join/leave the forwarder's dedicated relay room. Deliberately NOT
-    /// `NodeCommand::JoinRoom` — that arm mutates `active_room` and fires
-    /// `RoomCleared` (DM-conversation-pane semantics that would wipe the open
-    /// chat).
+    /// `NodeCommand::JoinRoom`: that arm mutates `active_room` and fires
+    /// `RoomCleared`, which would wipe the open DM chat.
     JoinForwarderRoom { forwarder_peer_id: String },
     LeaveForwarderRoom { forwarder_peer_id: String },
     // -- Embedded peer forwarder (media forwarding step 3 phase 2) --
@@ -1086,17 +962,15 @@ pub(crate) enum NodeCommand {
     /// No-op on mobile / non-forwarder builds.
     SetPeerForwardingEnabled { enabled: bool },
     /// The viewer advertised `fwd_capable` on a `vc_screen_watch` for this
-    /// originator — the embedded engine may accept a `fwd_stream_register`
-    /// whose origin matches `(origin_peer, kind)` while active. Cleared when
-    /// the watch ends. This is the abuse gate: a peer forwarder only ever
-    /// forwards a stream its user explicitly watches.
+    /// originator, so the embedded engine may accept a matching
+    /// `fwd_stream_register` while the watch lasts. This is the abuse gate: a peer
+    /// forwarder only ever forwards a stream its user explicitly watches.
     SetForwarderExpectation { origin_peer: String, kind: String, active: bool },
-    /// INTERNAL (embedded engine → swarm): a plaintext engine reply envelope
-    /// to Olm-encrypt and send through our own `fwd:{device_id}` room — or,
-    /// when `to_peer` is ourselves (the forwarder's own display leg), to
-    /// short-circuit straight back as a `ForwarderSignal` event.
+    /// INTERNAL (embedded engine to swarm): a plaintext engine reply to Olm-encrypt
+    /// and send through our own `fwd:{device_id}` room, or, when `to_peer` is
+    /// ourselves, to short-circuit back as a `ForwarderSignal` event.
     EmbeddedForwarderOut { to_peer: String, envelope_json: String, via_target_room: bool },
-    /// Feeder election: start/stop feeding another forwarder with a stream our
+    /// Feeder election: start or stop feeding another forwarder with a stream our
     /// embedded engine already forwards. Driven by the stream OWNER over
     /// `vc_screen_assign{feed_target}`.
     SetForwarderFeed {
@@ -1127,30 +1001,25 @@ pub(crate) enum NodeCommand {
         data: Vec<u8>,
         target_peer: String,
     },
-    // -- Gossip relay tree commands (Phase 5D) --
+    // -- Gossip relay tree commands --
     /// Internal: a pending join's window elapsed, so consider PARKING it.
     ///
-    /// `only_if_empty` marks the SHORT window (see `JOIN_EMPTY_ROOM_WINDOW`):
-    /// it parks only when the relay has already told us the server room holds
-    /// nobody else. The long window sends `false` and is the authority for
-    /// every other case.
+    /// `only_if_empty` marks the SHORT window (`JOIN_EMPTY_ROOM_WINDOW`): it parks
+    /// only when the relay has already told us the server room holds nobody else.
+    /// The long window sends `false` and is the authority for every other case.
     CheckPendingJoinTimeout { server_id: String, only_if_empty: bool },
-    /// Internal: a pending join has gone unanswered past the coordinator's
-    /// window — re-send the request so EVERY online member serves it, not just
-    /// the elected one. The fast path is one responder; this is the safety net
-    /// for the case where the members' election named a coordinator that is
-    /// already gone (presence skew), which would otherwise be a 15s failure.
+    /// Internal: a pending join went unanswered past the coordinator's window, so
+    /// re-send it and let EVERY online member serve it. The safety net for a
+    /// members' election that named a coordinator already gone (presence skew).
     RetryPendingJoin { server_id: String },
-    /// User action: drop a persisted pending/rejected join row. Deletes the
-    /// row, forgets the RAM entry and leaves the server room, so a late
-    /// admission's buffered answer never replays (we never rejoin that room
-    /// without a row). Nothing is sent to the relay: the ring copy just ages out.
+    /// User action: drop a persisted pending or rejected join row. Also leaves the
+    /// server room, so a late admission's buffered answer never replays. Nothing is
+    /// sent to the relay; the ring copy ages out.
     DiscardPendingJoin { server_id: String },
-    /// User action ("Request again") on a pending or rejected tile: re-run the
-    /// join with the row's stored NSFW/Twitch values under a FRESH nonce.
-    ///
-    /// Deliberately NOT `RetryPendingJoin`, which is the internal 4s
-    /// coordinator-window re-ask and must keep its nonce.
+    /// User action ("Request again") on a pending or rejected tile: re-run the join
+    /// with the row's stored NSFW/Twitch values under a FRESH nonce. Deliberately
+    /// NOT `RetryPendingJoin`, the internal coordinator-window re-ask, which must
+    /// keep its nonce.
     RequestPendingJoinAgain { server_id: String },
     /// Dart reports data channel keepalive RTT for peer scoring.
     WebRtcPingReport { peer_id: String, rtt_ms: u32 },
@@ -1169,16 +1038,15 @@ pub(crate) enum NodeCommand {
         kind: String,
         shard_index: u16,
     },
-    /// Dart hands back a gossip CRDT-op frame (type 0x04) received on a data
-    /// channel. Ingested through the same validated path as a relay
-    /// `CrdtOpBroadcast`; re-flooded to our own mesh neighbors only if the op
-    /// is NEW to our op_log (op-newness bounds propagation).
+    /// Dart hands back a gossip CRDT-op frame (type 0x04) from a data channel.
+    /// Ingested through the same validated path as a relay `CrdtOpBroadcast`, and
+    /// re-flooded to our own neighbors only when the op is NEW to our op_log.
     WebRtcGossipOpReceived { sender_peer_id: String, payload: Vec<u8> },
     // -- Recovery pool commands (Evidence Recovery) --
     InitiateRecoveryPool { server_id: String, token: String },
     JoinRecoveryPool { server_id: String, token: String },
     StopRecoveryPool { server_id: String },
-    // -- Hollow Share (Phase 7A) --
+    // -- Hollow Share --
     /// Build a ShareManifest from a local file, persist it, generate the link, start auto-seeding.
     /// Emits ShareCreated on success.
     ShareCreate { source_path: String },
@@ -1200,11 +1068,9 @@ pub(crate) enum NodeCommand {
     /// Enumerate persisted shares; result returned via NetworkEvent::ShareList.
     ShareList,
 
-    /// TEST-ONLY: read a live snapshot of the event loop's in-memory MLS/Olm
-    /// state (which the running loop owns and is otherwise unreadable from
-    /// outside) and reply on the oneshot. Never sent in production — the variant
-    /// does not exist in release builds. Used by the multi-node test harness to
-    /// inspect MLS group membership / epoch and Olm session status.
+    /// TEST-ONLY: read a live snapshot of the event loop's in-memory MLS/Olm state,
+    /// which the running loop owns and nothing outside can otherwise read, and
+    /// reply on the oneshot. The variant does not exist in release builds.
     #[cfg(test)]
     DebugSnapshot {
         reply: tokio::sync::oneshot::Sender<DebugSnapshotReply>,
@@ -1371,8 +1237,8 @@ impl NodeCommand {
 #[cfg(test)]
 #[derive(Debug, Clone, Default)]
 pub(crate) struct DebugSnapshotReply {
-    /// server_id -> the MLS group's leaf DEVICE ids (device-keyed, the raw truth
-    /// under the master-keyed CRDT member panel).
+    /// server_id -> the MLS group's leaf DEVICE ids: the raw device-keyed truth
+    /// under the master-keyed CRDT member panel.
     pub mls_members: std::collections::HashMap<String, Vec<String>>,
     /// server_id -> current MLS epoch.
     pub mls_epoch: std::collections::HashMap<String, u64>,
@@ -1389,9 +1255,9 @@ pub(crate) enum HavenMessage {
     /// Ask a peer for an Olm prekey bundle.
     ///
     /// SECURITY: receiving this makes us TEAR DOWN a working session, so it is
-    /// DEVICE-signed (see `crypto_handler::signed_key_request`). All four fields
-    /// are `Option` + `#[serde(default)]` so a pre-rollout client's bare
-    /// `{"type":"key_request"}` still deserializes during phase 1.
+    /// DEVICE-signed (`crypto_handler::signed_key_request`). All four fields are
+    /// `Option` + `#[serde(default)]` so a pre-rollout client's bare
+    /// `{"type":"key_request"}` still deserializes.
     #[serde(rename = "key_request")]
     KeyRequest {
         /// Recipient device peer_id — blocks reflection at a third party.
@@ -1410,10 +1276,9 @@ pub(crate) enum HavenMessage {
     /// An Olm prekey bundle: the Curve25519 keys a peer will ratchet with.
     ///
     /// SECURITY: these keys travel through the relay, so they are DEVICE-signed
-    /// (see `crypto_handler::signed_key_bundle`). Without the signature a
-    /// hostile relay could substitute its own keys and sit in the middle of the
-    /// conversation — the reported MITM. Same `Option` + `#[serde(default)]`
-    /// rollout treatment as `KeyRequest`.
+    /// (`crypto_handler::signed_key_bundle`). Unsigned, a hostile relay could
+    /// substitute its own keys and sit in the middle of the conversation. Same
+    /// `Option` + `#[serde(default)]` rollout treatment as `KeyRequest`.
     #[serde(rename = "key_bundle")]
     KeyBundle {
         identity_key: String,
@@ -1439,18 +1304,16 @@ pub(crate) enum HavenMessage {
     #[serde(rename = "ack")]
     Ack,
 
-    // -- CRDT sync messages (Phase 3) --
+    // -- CRDT sync messages --
 
     #[serde(rename = "sync_request")]
     SyncRequest {
         server_id: String,
         state_vector_json: String,
-        /// Sender's SERVER-GROUP MLS epoch (join-order SFrame race fix). Rides
-        /// the plaintext first-contact sync so a stale member is detected the
-        /// moment it (re-)enters the room — the responder serves an
-        /// `MlsCommitCatchup` replay (or the remove+re-add repair) when the
-        /// sender is behind, and probes the authority itself when AHEAD of us.
-        /// Absent = old client = no detection (today's behavior).
+        /// Sender's SERVER-GROUP MLS epoch, riding the plaintext first-contact sync so
+        /// a stale member is detected the moment it re-enters the room: the responder
+        /// serves an `MlsCommitCatchup` replay when the sender is behind, and probes
+        /// the authority itself when it is AHEAD of us. Absent = old client.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         mls_epoch: Option<u64>,
     },
@@ -1461,12 +1324,10 @@ pub(crate) enum HavenMessage {
         ops_json: String,
     },
 
-    /// Full server state snapshot, sent alongside the op log when serving a
-    /// ServerJoinRequest. Op logs can be incomplete (pre-persistence history
-    /// loss, 1000-op compaction), so a joiner reconstructing purely from op
-    /// replay can miss channels/layout/name. The responder's STATE is
-    /// authoritative — the joiner adopts it as the base, then merges ops on
-    /// top. Only honored while a join for this server is pending.
+    /// Full server state snapshot, sent alongside the op log when serving a join.
+    /// Op logs can be incomplete (history loss, 1000-op compaction), so a joiner
+    /// replaying ops alone can miss channels, layout or name. The responder's STATE
+    /// is the base and ops merge on top. Honored only while a join is pending.
     #[serde(rename = "srv_snapshot")]
     ServerStateSnapshot {
         server_id: String,
@@ -1488,36 +1349,28 @@ pub(crate) enum HavenMessage {
         /// risk" prompt, so the receiver's NSFW gate lets them through.
         #[serde(default)]
         nsfw_confirmed: bool,
-        /// Unix MILLISECONDS the user asked at: the request NONCE. Binds every
-        /// answer to the ask it resolves, so a copy replayed out of the `~join`
-        /// ring can never satisfy or reject a newer request. 0 = a client from
-        /// before parked joins existed (the live path treats it as today).
+        /// Unix MILLISECONDS the user asked at: the request NONCE. Binds every answer
+        /// to the ask it resolves, so a copy replayed out of the `~join` ring can never
+        /// satisfy or reject a newer request. 0 = a client from before parked joins.
         #[serde(default)]
         requested_at: i64,
-        /// The joiner's OWN master-signed device list. A member serving a
-        /// PARKED join has, by definition, never been online with the joiner,
-        /// so `resolve(sender_device)` hands the device straight back and the
-        /// member entry would be keyed by a device id. The list makes the
-        /// device -> master attribution cryptographic. Absent = a pre-parked
-        /// client; the receiver falls back to the resolver.
+        /// The joiner's OWN master-signed device list. A member serving a PARKED join
+        /// has by definition never been online with the joiner, so `resolve()` hands
+        /// the device id straight back and the member entry would be device-keyed.
+        /// Absent = a pre-parked client; the receiver falls back to the resolver.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         device_list: Option<SignedDeviceList>,
-        /// True ONLY on the copy deposited into the room's `~join` ring. It is
-        /// read out of a TTL buffer, possibly days later, by a member that was
-        /// not there when it was written, so it is held to stricter rules than
-        /// the live unicast copy (no coordinator-gate bypass, no interactive
-        /// rejections written into the ring).
+        /// True ONLY on the copy deposited into the room's `~join` ring. It is read out
+        /// of a TTL buffer, possibly days later, by a member that was not there when it
+        /// was written, so it is held to stricter rules than the live unicast copy: no
+        /// coordinator-gate bypass, no interactive rejections written into the ring.
         #[serde(default)]
         parked: bool,
-        /// The joiner's MLS KeyPackage, base64 of the serialised package. Set
-        /// ONLY on the parked ring copy (`deposit_parked_join`); a live request
-        /// carries `None` and bootstraps on its SyncResponse instead.
-        ///
-        /// A KeyPackage is public material by construction — it is the thing
-        /// you hand out so that somebody can add you — so it rides a frame any
-        /// invite-holder can pull without widening what the ring exposes: peer
-        /// ids, a signed device list, a follow credential, and now a public key
-        /// package. Absent = a client from before rung 2.
+        /// The joiner's MLS KeyPackage, base64 of the serialised package. Set ONLY on
+        /// the parked ring copy (`deposit_parked_join`); a live request carries `None`
+        /// and bootstraps on its SyncResponse instead. A KeyPackage is public material
+        /// by construction, so it rides a frame any invite-holder can pull without
+        /// widening what the ring exposes. Absent = a client from before rung 2.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         key_package: Option<String>,
     },
@@ -1528,25 +1381,21 @@ pub(crate) enum HavenMessage {
         reason: String,
         /// The `requested_at` of the request being refused.
         ///
-        /// Load-bearing since parked joins: a refusal now rides
-        /// `send_message_to_peer_in_room`, so the relay BUFFERS it for an absent
-        /// joiner and replays it on that device's next join of the server room.
-        /// The next join of that room is usually the user asking again, and
-        /// without a nonce that stale copy would kill the fresh request the
-        /// moment it arrived. 0 = a pre-2026-08-29 client: "refuse whatever is
-        /// pending", which is what the old presence-gated send meant anyway.
+        /// Load-bearing since parked joins: a refusal rides
+        /// `send_message_to_peer_in_room`, so the relay BUFFERS it for an absent joiner
+        /// and replays it on that device's next join of the server room, which is
+        /// usually the user asking again. Without the nonce that stale copy would kill
+        /// the fresh request. 0 = a pre-nonce client: "refuse whatever is pending".
         #[serde(default)]
         requested_at: i64,
     },
 
     /// A member's answer to a join, published on the server room's `~join`
-    /// pseudo-topic so it survives the joiner being offline AND tells the other
-    /// members the join is already resolved.
-    ///
-    /// This is not a second CRDT ingest path: `op_json` carries the very
-    /// `MemberAdded` op the admitting member authored, and receivers route it
-    /// through the same author-validated apply the plaintext `CrdtOpBroadcast`
-    /// arm uses.
+    /// pseudo-topic so it survives the joiner being offline and tells the other
+    /// members the join is already resolved. Not a second CRDT ingest path:
+    /// `op_json` carries the very `MemberAdded` op the admitting member authored,
+    /// and receivers route it through the same author-validated apply the
+    /// plaintext `CrdtOpBroadcast` arm uses.
     #[serde(rename = "join_resolved")]
     ServerJoinResolved {
         #[serde(default)]
@@ -1591,27 +1440,24 @@ pub(crate) enum HavenMessage {
         sender_timestamps: HashMap<String, i64>,
     },
 
-    /// DM sync: request missed DMs from a peer.
     #[serde(rename = "dm_sync_req")]
     DmSyncRequest {
         /// Latest DM timestamp the requester has from this peer.
         since_timestamp: i64,
-        /// Multi-device peer-fallback: when set, the responder serves BOTH
-        /// directions of the conversation (not just `is_mine = 1`). A
-        /// multi-device requester sets this so a friend re-serves the
-        /// requester's OWN messages sent from another device — which would
-        /// otherwise be stranded if that other device is offline. Single-device
-        /// requesters omit it (default false → unchanged one-directional path).
+        /// Multi-device peer-fallback: the responder serves BOTH directions of the
+        /// conversation, not just `is_mine = 1`, so a friend re-serves the requester's
+        /// OWN messages sent from another device that is now offline. Omitted by
+        /// single-device requesters (false = the unchanged one-directional path).
         #[serde(default)]
         both_directions: bool,
     },
 
-    /// Multi-device sibling DM backfill (Phase 6 / Step 5): a sibling device asks
-    /// for the FULL DM history across ALL conversations, both directions. Only
-    /// honored from a `same_identity` sender (a friend must never pull our DB).
-    /// `per_convo_since` carries the requester's per-conversation high-water mark
-    /// `(friend_master, latest_ts)`; conversations the requester omits are served
-    /// from `0`. The responder replies with one `DmSiblingSyncBatch` per convo.
+    /// Multi-device sibling DM backfill: a sibling device asks for the FULL DM
+    /// history across ALL conversations, both directions. Honored ONLY from a
+    /// `same_identity` sender, because a friend must never pull our DB.
+    /// `per_convo_since` carries `(friend_master, latest_ts)` high-water marks and
+    /// omitted conversations are served from 0; the responder replies with one
+    /// `DmSiblingSyncBatch` per conversation.
     #[serde(rename = "dm_sib_sync_req")]
     DmSiblingSyncRequest {
         #[serde(default)]
@@ -1622,11 +1468,10 @@ pub(crate) enum HavenMessage {
     #[serde(rename = "disconnecting")]
     PeerDisconnecting,
 
-    /// Multi-device: the creator of a NEW server tells its OWN sibling devices the
-    /// server exists so they auto-onboard (the server room is brand-new, siblings
-    /// aren't in it, and a sibling has no other way to learn). The receiving sibling
-    /// runs its normal join flow for `server_id`; the creator's ServerJoinRequest
-    /// handler same-identity fast-paths it (no Twitch/ban gates for a co-owner).
+    /// Multi-device: the creator of a NEW server tells its OWN siblings that the
+    /// server exists, because the room is brand-new and a sibling has no other way
+    /// to learn. The sibling runs its normal join flow; the creator's request
+    /// handler same-identity fast-paths it, with no Twitch or ban gate for a co-owner.
     #[serde(rename = "sib_server_announce")]
     SiblingServerAnnounce {
         server_id: String,
@@ -1634,10 +1479,9 @@ pub(crate) enum HavenMessage {
 
     // -- MLS group encryption messages --
 
-    /// MLS-encrypted channel message (replaces Olm fan-out for channels).
-    /// `channel_id`: `None` = server-wide MLS group (default, backward compatible);
-    /// `Some(cid)` = the restricted channel's per-channel MLS subgroup ("Option B"),
-    /// keyed by `subgroup_id(server_id, cid)`.
+    /// MLS-encrypted channel message. `channel_id` `None` = the server-wide group;
+    /// `Some(cid)` = that restricted channel's per-channel subgroup, keyed by
+    /// `subgroup_id(server_id, cid)`.
     #[serde(rename = "mls_msg")]
     MlsChannelMessage {
         server_id: String,
@@ -1674,11 +1518,10 @@ pub(crate) enum HavenMessage {
         commit: String, // base64 serialized Commit
         #[serde(default, skip_serializing_if = "Option::is_none")]
         channel_id: Option<String>,
-        /// POST-merge epoch of this commit (large-server Tier 1 broadcast guard).
-        /// Commits ride a single room broadcast, so they also reach fresh joiners
-        /// (already at this epoch via their Welcome) and duplicate deliveries —
-        /// receivers at/past this epoch skip processing instead of erroring into
-        /// the drop-group + re-bootstrap path. Absent from legacy senders.
+        /// POST-merge epoch of this commit. Commits ride a single room broadcast, so
+        /// they also reach fresh joiners already at this epoch and duplicate
+        /// deliveries; receivers at or past it skip processing instead of erroring into
+        /// the drop-group and re-bootstrap path. Absent from legacy senders.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         epoch: Option<u64>,
     },
@@ -1692,15 +1535,12 @@ pub(crate) enum HavenMessage {
         channel_id: Option<String>,
     },
 
-    /// Plaintext epoch probe (join-order SFrame race fix): "my MLS group for
-    /// this key sits at `epoch` — am I behind?" Sent to the group authority at
-    /// VC join and from SFrame heal step 2. A present-but-stale group is
-    /// otherwise INVISIBLE: commits ride an unbuffered 0x03 room broadcast, and
-    /// every recovery trigger keys on `has_group`/leaf-missing, so a member
-    /// that missed join-churn commits sits on a stale SFrame key (black screen)
-    /// until the escalated heal. The authority answers with `MlsCommitCatchup`
-    /// or falls back to the remove+re-add repair. Plaintext by the sync rule —
-    /// the prober's MLS is stale by definition.
+    /// Plaintext epoch probe: "my MLS group for this key sits at `epoch`, am I
+    /// behind?" Sent to the group authority at VC join and from SFrame heal step 2.
+    /// A present-but-stale group is otherwise INVISIBLE: commits ride an unbuffered
+    /// 0x03 room broadcast and every recovery trigger keys on `has_group`, so a
+    /// member that missed join-churn commits sits on a stale SFrame key until the
+    /// escalated heal. Plaintext by the sync rule: the prober's MLS is stale.
     #[serde(rename = "mls_epoch_probe")]
     MlsEpochProbe {
         server_id: String,
@@ -1709,15 +1549,12 @@ pub(crate) enum HavenMessage {
         epoch: u64,
     },
 
-    /// Replay of missed MLS commit frames to ONE stale member, ascending epoch
-    /// order. Entries are `(post_merge_epoch, base64_commit)` — the SAME bytes
-    /// that already rode the server-room `MlsCommit` broadcast, so replaying
-    /// them to a verified member leaks nothing; the receiver revalidates every
-    /// frame through the normal OpenMLS commit-apply path (epoch guard,
-    /// signature checks, eviction check). This is the non-churning repair: the
-    /// stale member marches to the current epoch WITHOUT new commits — repair
-    /// by remove+re-add bumps the epoch for everyone and feeds exactly the
-    /// churn spiral that thrashed the long-lived test server.
+    /// Replay of missed MLS commit frames to ONE stale member, in ascending epoch
+    /// order, as `(post_merge_epoch, base64_commit)`. The SAME bytes that already
+    /// rode the server-room `MlsCommit` broadcast, so replaying them to a verified
+    /// member leaks nothing and the receiver revalidates every frame through the
+    /// normal OpenMLS commit-apply path. The non-churning repair: remove+re-add
+    /// bumps the epoch for everyone and feeds a churn spiral.
     #[serde(rename = "mls_commit_catchup")]
     MlsCommitCatchup {
         server_id: String,
@@ -1728,10 +1565,10 @@ pub(crate) enum HavenMessage {
 
     // -- Conferences (node/conference.rs; reports/CONFERENCES_PLAN.md) --
 
-    /// Joiner → conf room broadcast: knock on the door. Carries a fresh MLS
-    /// KeyPackage so admission is a single host-side commit. `avatar_hash` is
-    /// a HASH (stranger surface = light announce, never blobs); `access_hash`
-    /// is `derive_access_hash(conf_id, code)` or empty.
+    /// Joiner to the conf room: knock on the door, carrying a fresh MLS KeyPackage
+    /// so admission is a single host-side commit. `avatar_hash` is a HASH (a
+    /// stranger surface is a light announce, never blobs); `access_hash` is
+    /// `derive_access_hash(conf_id, code)` or empty.
     #[serde(rename = "conf_join_req")]
     ConferenceJoinRequest {
         conf_id: String,
@@ -1767,7 +1604,6 @@ pub(crate) enum HavenMessage {
         body: String,
     },
 
-    /// Host → conf room: the meeting is over.
     #[serde(rename = "conf_ended")]
     ConferenceEnded {
         conf_id: String,
@@ -1780,7 +1616,7 @@ pub(crate) enum HavenMessage {
         conf_id: String,
     },
 
-    // -- Profile sync (Phase 3.5) --
+    // -- Profile sync --
 
     /// Broadcast profile update to connected peers. Plaintext (not sensitive).
     #[serde(rename = "profile_update")]
@@ -1802,9 +1638,8 @@ pub(crate) enum HavenMessage {
         #[serde(default)]
         device_list: Option<SignedDeviceList>,
         /// Hex SHA-256 of the sender's current avatar/banner blob; empty = no blob.
-        /// Re-announces send LIGHT updates (empty b64 fields = "no change") plus these
-        /// hashes so a receiver with a stale cache pulls once via ProfileRequest —
-        /// instead of every reconnect re-shipping megabytes of unchanged blobs.
+        /// Re-announces are LIGHT (empty b64 = "no change") and carry only the hashes,
+        /// so a stale receiver pulls once instead of every reconnect re-shipping blobs.
         #[serde(default)]
         avatar_hash: String,
         #[serde(default)]
@@ -1821,52 +1656,44 @@ pub(crate) enum HavenMessage {
         showcase_assets_b64: String,
         #[serde(default)]
         showcase_assets_hash: String,
-        /// Avatar frame ID (issue #54): `""` = none, `"b:<hue>"` = a
-        /// built-in procedural frame, 64-hex = an asset-rail blob hash. Never
-        /// the bytes — the art is PULLED on demand so it can be evicted,
-        /// unlike this push. `None` from clients that predate frames, which
-        /// receivers PRESERVE (a status edit from an old client must not wipe
-        /// somebody's frame); `Some("")` = explicit clear.
+        /// Avatar frame ID (issue #54): `""` = none, `"b:<hue>"` = a built-in
+        /// procedural frame, 64-hex = an asset-rail blob hash. Never the bytes; the art
+        /// is PULLED on demand so it can be evicted, unlike this push. `None` from
+        /// clients that predate frames and receivers PRESERVE it (a status edit must
+        /// not wipe somebody's frame); `Some("")` = explicit clear.
         #[serde(default)]
         avatar_frame: Option<String>,
-        /// Asset-rail hash of the sender's ANIMATED avatar (issue #54's
-        /// follow-up): `""` = none, 64-hex = a blob to pull under
-        /// `AssetKind::Profile`. NEVER the bytes — only the still companion
-        /// rides `avatar_b64`, so a profile push stays kilobytes while the
-        /// animation is PULLED on demand and LRU-evicted. `None` from clients
-        /// that predate this, which receivers PRESERVE (a status edit from an
-        /// old client must not wipe somebody's animated avatar); `Some("")` =
-        /// explicit clear.
+        /// Asset-rail hash of the sender's ANIMATED avatar (issue #54's follow-up):
+        /// `""` = none, 64-hex = a blob to pull under `AssetKind::Profile`. NEVER the
+        /// bytes, so a profile push stays kilobytes while the animation is pulled on
+        /// demand and LRU-evicted. `None` from clients that predate it and receivers
+        /// PRESERVE it; `Some("")` = explicit clear.
         #[serde(default)]
         avatar_anim: Option<String>,
         /// Asset-rail hash of the sender's ANIMATED banner. See `avatar_anim`.
         #[serde(default)]
         banner_anim: Option<String>,
-        /// Support credentials (artist shop, design section 5): a JSON array
-        /// of self-contained blind-signature entries, each binding this
-        /// profile's MASTER peer id to an item. Small capped text, so it
-        /// rides the light announce like the showcase board. `None` from
-        /// clients that predate it, which receivers PRESERVE; `Some("")` =
-        /// explicit clear, and it only clears when `support_creds_sig`
-        /// verifies over it. Verified entry by entry on ingest
-        /// (`support_creds::sanitize_incoming_support_creds`), never signed
-        /// by the profile signature: an entry already binds the identity.
+        /// Support credentials: a JSON array of self-contained blind-signature entries,
+        /// each binding this profile's MASTER peer id to an item. Capped text, so it
+        /// rides the light announce like the showcase board. `None` from clients that
+        /// predate it and receivers PRESERVE it; `Some("")` clears, but only when
+        /// `support_creds_sig` verifies over it. Verified entry by entry on ingest
+        /// (`support_creds::sanitize_incoming_support_creds`) and deliberately outside
+        /// the profile signature: an entry already binds the identity.
         #[serde(default)]
         support_creds: Option<String>,
-        /// The MASTER's signature over `(peer_id, updated_at,
-        /// support_creds)` (`support_creds::support_creds_sig_message`),
-        /// base64 Ed25519. Sent whenever `support_creds` is `Some`, including
-        /// `Some("")`. REQUIRED on ingest: a receiver applies `support_creds`
-        /// only under a valid signature, and otherwise PRESERVES what it
-        /// stored, so stripping it in flight changes nothing. The credentials
-        /// themselves are unforgeable without it; this is what stops a relay
-        /// DENYING them.
+        /// The MASTER's Ed25519 signature (base64) over `(peer_id, updated_at,
+        /// support_creds)`, sent whenever `support_creds` is `Some`, including
+        /// `Some("")`. REQUIRED on ingest: a receiver applies `support_creds` only
+        /// under a valid signature and otherwise PRESERVES what it stored, so
+        /// stripping it in flight changes nothing. The credentials are unforgeable
+        /// without it; this is what stops a relay DENYING them.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         support_creds_sig: Option<String>,
         /// Owner's signature over the relayable subset of this profile
-        /// (`crypto_handler::profile_signing_payload`). REQUIRED on ingest —
-        /// receivers store it so they can forward it in a `ProfileRelay`, which
-        /// is what stops a forwarder asserting a third party's profile.
+        /// (`crypto_handler::profile_signing_payload`). REQUIRED on ingest; receivers
+        /// store it so they can forward it in a `ProfileRelay`, which is what stops a
+        /// forwarder asserting a third party's profile.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         profile_sig: Option<String>,
         /// Owner MASTER public key (base64 protobuf) paired with `profile_sig`.
@@ -1874,7 +1701,7 @@ pub(crate) enum HavenMessage {
         profile_pk: Option<String>,
     },
 
-    // -- Multi-peer fan-out sync (Phase 3.5) --
+    // -- Multi-peer fan-out sync --
 
     /// Lightweight probe: "what's your latest timestamp for this channel?"
     /// Used to skip channels that have no new messages before sending a full sync request.
@@ -1889,27 +1716,24 @@ pub(crate) enum HavenMessage {
         msg_count: u32,
     },
 
-    // -- Friends (Phase 3.5) --
+    // -- Friends --
 
     #[serde(rename = "friend_request")]
     FriendRequest {
         requested_at: i64,
-        /// Async friending: the sender's Olm prekey bundle, so the accepter can
-        /// build a session without ever being online at the same moment.
-        /// Absent = a pre-async-friending client; the receiver falls back to
-        /// today's lazy co-presence key exchange.
+        /// Async friending: the sender's Olm prekey bundle, so the accepter can build a
+        /// session without ever being online at the same moment. Absent = a
+        /// pre-async-friending client, which falls back to lazy co-presence exchange.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         carried_bundle: Option<CarriedBundle>,
-        /// The sender's own master-signed device list, so the accepter can check
-        /// the carried bundle's device really speaks for that master WITHOUT
-        /// having ingested a ProfileUpdate first (a stranger, by definition, has
-        /// not).
+        /// The sender's own master-signed device list, so the accepter can check the
+        /// carried bundle's device really speaks for that master WITHOUT having
+        /// ingested a ProfileUpdate first (a stranger, by definition, has not).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         device_list: Option<SignedDeviceList>,
-        /// The sender's own master-signed profile, so the receiver can fill the
-        /// incoming card (name + avatar hash) for a stranger it holds no profile
-        /// for — verified + stored exactly like a `ProfileRelay`. Absent from
-        /// pre-carried-profile clients; the card then falls back to the peer id.
+        /// The sender's own master-signed profile, so the receiver can fill the incoming
+        /// card for a stranger it holds no profile for; verified and stored exactly like
+        /// a `ProfileRelay`. Absent from older clients: the card falls back to the id.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         carried_profile: Option<CarriedProfile>,
     },
@@ -1931,14 +1755,12 @@ pub(crate) enum HavenMessage {
         /// 0 = a pre-2026-08-29 client: "decline whatever is pending".
         #[serde(default)]
         requested_at: i64,
-        /// The decliner's OWN master-signed device list, exactly what a
-        /// `FriendRequest` carries and for exactly the same reason: the requester
-        /// has never been online with us, so its resolver has no device -> master
-        /// link for the device this reject arrives from, and attribution by
-        /// `resolve()` alone returns the raw device id and misses the friend row
-        /// (which is master-keyed). The list makes attribution cryptographic
-        /// instead of dependent on a prior meeting. Absent = a pre-carried-list
-        /// client; the receiver falls back to the resolver.
+        /// The decliner's OWN master-signed device list, exactly what a `FriendRequest`
+        /// carries and for exactly the same reason: the requester has never been online
+        /// with us, so `resolve()` alone returns the raw device id and misses the
+        /// master-keyed friend row. The list makes attribution cryptographic instead of
+        /// dependent on a prior meeting. Absent = a pre-carried-list client, and the
+        /// receiver falls back to the resolver.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         device_list: Option<SignedDeviceList>,
     },
@@ -1946,48 +1768,40 @@ pub(crate) enum HavenMessage {
     #[serde(rename = "friend_remove")]
     FriendRemove,
 
-    /// Multi-device (Phase 6): one device shares its accepted-friend list with a
-    /// SIBLING device of the same master identity, so a freshly-linked device
-    /// learns who its identity's friends are and can join their DM rooms (and
-    /// thus appear/observe presence). Sent DIRECTLY to the sibling, only after
+    /// Multi-device: one device shares its accepted-friend list with a SIBLING of
+    /// the same master, so a freshly-linked device learns its identity's friends
+    /// and can join their DM rooms. Sent DIRECTLY, only after
     /// `resolver::same_identity` confirms the recipient is our own other device.
-    /// Carries no message history — that is Step 4/5 backfill. Idempotent on the
-    /// receiver (skips friends it already has).
+    /// Carries no message history, and is idempotent on the receiver.
     #[serde(rename = "friend_list_sync")]
     FriendListSync {
         #[serde(default)]
         friends: Vec<FriendListEntry>,
     },
 
-    /// Multi-device (Phase 6): ask a SIBLING device to send us its friend list.
-    /// Pull-based companion to `FriendListSync` — fixes the join-timing race where
-    /// a freshly-linked device's profile reached the established device before it
-    /// was listening, so the established device never push-shared its friends. On
-    /// detecting a sibling (ingesting its device list), we both push our friends
-    /// AND request theirs. Verified-self only; the responder replies with a
-    /// `FriendListSync`.
+    /// Multi-device: ask a SIBLING device to send us its friend list. The pull
+    /// companion to `FriendListSync`, for the join-timing race where a freshly
+    /// linked device's profile reached the established device before it was
+    /// listening, so nothing was ever pushed. On detecting a sibling we both push
+    /// and request. Verified-self only; the responder replies with `FriendListSync`.
     #[serde(rename = "friend_list_request")]
     FriendListRequest,
 
-    /// Multi-device MANUAL state sync (user-triggered "Sync from this device"
-    /// button in Security → Your Devices). The DESTINATION device (where the user
-    /// tapped) sends this to a chosen SOURCE sibling. The source responds by
-    /// (re)announcing EVERY server it holds (`SiblingServerAnnounce` per server,
-    /// which drives the destination's proven join flow → `ServerJoined` → UI) and
-    /// re-sharing its friend list (`FriendListSync`). Deterministic, on-demand
-    /// equivalent of the reconnect re-announce — the escape hatch for when the
-    /// automatic sibling sync didn't converge. Verified-self only.
+    /// Multi-device MANUAL state sync ("Sync from this device"). The DESTINATION
+    /// device sends this to a chosen SOURCE sibling, which re-announces EVERY
+    /// server it holds (`SiblingServerAnnounce` each) and re-shares its friend list.
+    /// The on-demand equivalent of the reconnect re-announce, and the escape hatch
+    /// for when automatic sibling sync did not converge. Verified-self only.
     #[serde(rename = "sibling_state_sync_request")]
     SiblingStateSyncRequest,
 
     // -- Multi-device sibling proof handshake (anti-mis-link) --
 
     /// Sent to an UNPROVEN peer that appeared in our own `inbox:{master}` room,
-    /// challenging it to prove it holds our master private key (i.e. is genuinely
-    /// our own sibling device). A friend-request sender lands in our inbox too but
-    /// does NOT hold our master key, so it can never produce a valid response — this
-    /// is what stops a stranger being mis-merged as our device. `nonce` is a fresh
-    /// per-attempt random value the challenger remembers in `pending_sibling_challenges`.
+    /// challenging it to prove it holds our master private key. A friend-request
+    /// sender lands in our inbox too but holds no master key and can never answer,
+    /// which is what stops a stranger being mis-merged as our device. `nonce` is a
+    /// fresh per-attempt value remembered in `pending_sibling_challenges`.
     #[serde(rename = "sib_prove_req")]
     SiblingProveRequest {
         #[serde(default)]
@@ -1995,10 +1809,10 @@ pub(crate) enum HavenMessage {
     },
 
     /// Response to a [`HavenMessage::SiblingProveRequest`]: the responder signs
-    /// `hollow-sibling:{challenger_master}:{responder_device}:{nonce}` with the SHARED
-    /// master key. The challenger verifies the signature binds to ITS OWN master and to
-    /// the device id it challenged; only then does it run the sibling merge/snapshot
-    /// machinery. `master_pubkey_b64` is the protobuf-encoded master pubkey (base64).
+    /// `hollow-sibling:{challenger_master}:{responder_device}:{nonce}` with the
+    /// SHARED master key. The challenger verifies the signature binds to ITS OWN
+    /// master and to the device id it challenged before it runs any sibling merge.
+    /// `master_pubkey_b64` is the protobuf-encoded master pubkey (base64).
     #[serde(rename = "sib_prove_resp")]
     SiblingProveResponse {
         #[serde(default)]
@@ -2009,12 +1823,11 @@ pub(crate) enum HavenMessage {
         master_pubkey_b64: String,
     },
 
-    // -- Multi-device link snapshot (Step 4) --
+    // -- Multi-device link snapshot --
 
-    /// (Empty → populated sibling) "Send me your full DB snapshot." Carries the
-    /// requester's tiny state summary so the populated device can show direction.
-    /// The populated device responds by emitting `SiblingLinkAvailable` (UI confirm)
-    /// then, on accept, `LinkSnapshotKey` + the streamed bytes.
+    /// (Empty to populated sibling) "Send me your full DB snapshot", carrying the
+    /// requester's state summary so the populated device can show direction. It
+    /// answers with `SiblingLinkAvailable`, then `LinkSnapshotKey` plus the bytes.
     #[serde(rename = "link_snapshot_request")]
     LinkSnapshotRequest {
         #[serde(default)]
@@ -2045,11 +1858,9 @@ pub(crate) enum HavenMessage {
     #[serde(rename = "link_declined")]
     LinkDeclined,
 
-    /// (Empty → populated) The empty device received + stashed the full snapshot
-    /// successfully. The sender stays on its "sending" spinner until this lands, so
-    /// "Data sent" only shows once the OTHER device truly has everything (the queued
-    /// bytes leaving our WS channel is NOT proof of receipt). `link_id` matches the
-    /// stream id.
+    /// (Empty to populated) the empty device received and stashed the full snapshot.
+    /// The sender holds its "sending" spinner until this lands: bytes leaving our
+    /// WS channel are NOT proof of receipt. `link_id` matches the stream id.
     #[serde(rename = "link_snapshot_ack")]
     LinkSnapshotAck {
         #[serde(default)]
@@ -2079,7 +1890,7 @@ pub(crate) enum HavenMessage {
         reply_to_sender: Option<String>,
     },
 
-    // -- Public channels (Phase 7B) --
+    // -- Public channels --
 
     /// Plaintext channel message for public channels. Ed25519-signed but NOT
     /// MLS-encrypted. Broadcast via SendToRoom so guests (non-members) receive it.
@@ -2100,17 +1911,15 @@ pub(crate) enum HavenMessage {
         file_id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         link_preview: Option<LinkPreviewRef>,
-        /// Microsecond send stamp (Lamport). Carried since 0.8.3 — the v2
-        /// message signature binds it, so the receive path must persist the
-        /// SENDER's value, not a local `ts*1000` default. `None` from a
-        /// pre-0.8.3 sender (their signatures are v1 and don't cover it).
+        /// Microsecond send stamp (Lamport). The v2 message signature binds it, so the
+        /// receive path must persist the SENDER's value, never a local `ts*1000`
+        /// default. `None` from a pre-0.8.3 sender, whose v1 signature omits it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         order_us: Option<i64>,
-        /// Attachment metadata for GUESTS (0.9.1+): guests can't decrypt the
-        /// MLS FileHeader, so a public-channel FILE post carries its metadata
-        /// here (never bytes). The v2 signature binds `file_id`, not this
-        /// blob — receivers require `file_meta.fid == file_id` and members
-        /// ignore it entirely (their metadata comes from the MLS header).
+        /// Attachment metadata for GUESTS, who cannot decrypt the MLS FileHeader
+        /// (never bytes). The v2 signature binds `file_id`, not this blob, so receivers
+        /// require `file_meta.fid == file_id`; members ignore it entirely and take
+        /// their metadata from the MLS header.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         file_meta: Option<SyncFileMetaItem>,
     },
@@ -2238,7 +2047,7 @@ pub(crate) enum HavenMessage {
         category: Option<String>,
     },
 
-    // -- Typing indicators (Phase 3.5) --
+    // -- Typing indicators --
 
     /// Ephemeral typing indicator. Not stored, not signed. Fire-and-forget.
     #[serde(rename = "typing")]
@@ -2257,14 +2066,12 @@ pub(crate) enum HavenMessage {
         status: String,
     },
 
-    /// Per-device auto-download preference advert (issue #41 pre-negotiation).
-    /// Sent to DM-room peers on join and on settings change so the SENDER can
-    /// skip pushing file bytes a gated receiver would only discard. `mb` is the
-    /// advertiser's effective threshold for the conversation with the TARGET
-    /// device's identity (0 = auto-download off there); to own siblings it is
-    /// the global threshold. Plaintext by the same precedent as `typing` /
-    /// `status_update` — a single small number, no content. Best-effort: the
-    /// receive-side gate remains the enforcement; unknown pref = push as before.
+    /// Per-device auto-download preference advert (issue #41 pre-negotiation),
+    /// sent to DM-room peers on join and on settings change so the SENDER can skip
+    /// pushing file bytes a gated receiver would only discard. `mb` is the
+    /// advertiser's threshold for the TARGET device's identity (0 = off there); to
+    /// own siblings it is the global threshold. Best-effort: the receive-side gate
+    /// remains the enforcement, and an unknown pref pushes as before.
     #[serde(rename = "auto_dl_pref")]
     AutoDownloadPref {
         #[serde(default)]
@@ -2282,7 +2089,7 @@ pub(crate) enum HavenMessage {
         msg_count: u32,
     },
 
-    // -- File sharing (Phase 3.5) --
+    // -- File sharing --
 
     /// Request file chunks from a peer.
     #[serde(rename = "file_req")]
@@ -2296,35 +2103,32 @@ pub(crate) enum HavenMessage {
         offset: u64,
     },
 
-    /// Negative answer to `FileRequest`: we know this file_id, you are entitled
-    /// to its bytes, and we do not hold them. Same shape and purpose as the
-    /// `missing` field on `EmoteAssets` (2026-09-05): the asker rotates to
-    /// another holder instead of waiting out a timer, and the card can say WHY.
+    /// Negative answer to `FileRequest`: we know this file_id, you are entitled to
+    /// its bytes, and we do not hold them, so the asker rotates to another holder
+    /// instead of waiting out a timer and the card can say WHY.
     ///
-    /// Sent ONLY after the same entitlement gate the positive answer passes, and
+    /// Sent ONLY behind the same entitlement gate the positive answer passes, and
     /// only when a row exists. A blocked requester, an unknown file_id and a
-    /// non-entitled requester all keep getting silence: answering "unknown" to
-    /// strangers would let anyone tell "this device holds a row for X" (silence)
-    /// from "it does not" (an answer), which is a membership leak.
+    /// non-entitled requester all keep getting silence: answering "unknown" would
+    /// let anyone tell "this device holds a row for X" from "it does not", which
+    /// is a membership leak.
     #[serde(rename = "file_unavail")]
     FileUnavailable {
         file_id: String,
-        /// "gone" (evicted by the storage cap / downloads cleared / never
-        /// landed) or "expired" (the sender's retention sweep marked it). Old
-        /// clients ignore unknown variants, so this whole message is invisible
-        /// to them.
+        /// "gone" (evicted by the storage cap, downloads cleared, never landed) or
+        /// "expired" (the sender's retention sweep marked it). Old clients ignore
+        /// unknown variants, so this whole message is invisible to them.
         #[serde(default)]
         reason: String,
     },
 
-    /// Plaintext FileHeader answering a FileRequest from a NON-member for a
-    /// file in a PUBLIC channel (guest browser downloads). Members get the
-    /// Olm-wrapped `MessageEnvelope::FileHeader` instead; this variant exists
-    /// because a guest may hold no Olm session with the responder. Carrying
-    /// the per-request AES key in plaintext is consistent with the public
-    /// trust model — the relay already sees public-channel content itself.
-    /// Receivers accept it ONLY for a file they explicitly requested
-    /// (`pending_public_file_requests` receipt cap) from a guest room.
+    /// Plaintext FileHeader answering a FileRequest from a NON-member for a file in
+    /// a PUBLIC channel. Members get the Olm-wrapped `MessageEnvelope::FileHeader`
+    /// instead; this exists because a guest may hold no Olm session with the
+    /// responder. The plaintext per-request AES key is consistent with the public
+    /// trust model, since the relay already sees public-channel content. Receivers
+    /// accept it ONLY for a file they explicitly requested, against the
+    /// `pending_public_file_requests` receipt cap.
     #[serde(rename = "pub_file_hdr")]
     PublicFileHeader {
         file_id: String,
@@ -2361,7 +2165,7 @@ pub(crate) enum HavenMessage {
         available_chunks: Vec<u32>,
     },
 
-    // -- WebRTC signaling (Phase 5A) --
+    // -- WebRTC signaling --
 
     /// SDP offer for WebRTC data channel connection.
     #[serde(rename = "rtc_offer")]
@@ -2388,15 +2192,13 @@ pub(crate) enum HavenMessage {
 
     // -- Hollow Share data-channel signaling --
     //
-    // Share negotiates a SECOND, dedicated peer connection per peer, built from
-    // the STUN-only Share ICE config so its bytes never touch the relay
-    // (HOLLOW_PLAN §7A). It gets its own variants rather than a flag on
-    // RtcOffer/RtcAnswer/RtcIceCandidate on purpose: a client that predates the
-    // Share lane can't parse these, so it DROPS them here at the envelope layer.
-    // Had they reused `rtc_offer`, that client would have handed a Share offer
-    // to its single-connection data-channel layer, where the glare tiebreaker
-    // would tear down (or flap) the live hollow-data connection its DMs, file
-    // transfers and screen audio depend on.
+    // Share negotiates a SECOND, dedicated peer connection per peer from the
+    // STUN-only Share ICE config so its bytes never touch the relay (HOLLOW_PLAN
+    // §7A). It gets its own variants rather than a flag on RtcOffer/RtcAnswer on
+    // purpose: a client that predates the Share lane cannot parse these and DROPS
+    // them at the envelope layer, instead of handing a Share offer to its single
+    // data-channel layer, where the glare tiebreaker would tear down the live
+    // hollow-data connection its DMs and file transfers depend on.
 
     /// SDP offer for the dedicated Hollow Share data channel.
     #[serde(rename = "rtc_share_offer")]
@@ -2421,7 +2223,7 @@ pub(crate) enum HavenMessage {
         conn_id: String,
     },
 
-    // -- Voice call signaling (Phase 5B) --
+    // -- Voice call signaling --
 
     /// Invite a peer to a voice/video call.
     #[serde(rename = "call_invite")]
@@ -2446,13 +2248,11 @@ pub(crate) enum HavenMessage {
     /// Rebuild the call's media session from scratch, keeping the call alive.
     ///
     /// Sent when a link has been recovered but its transport was torn down
-    /// underneath SFrame. Repairing cryptors in place on a rebuilt transport
-    /// was tried four times in the field and never once produced working
-    /// audio; a FRESH peer connection is the one path that has never failed,
-    /// because it is exactly what a call start does. The receiver tears its
-    /// peer connection down and treats the offer that follows as an initial
-    /// one. The call id, the SFrame key and the UI state all survive, so the
-    /// user sees a "Reconnecting" flair rather than a hangup and a new ring.
+    /// underneath SFrame. Repairing cryptors in place on a rebuilt transport never
+    /// once produced working audio in the field; a FRESH peer connection is exactly
+    /// what a call start does. The receiver tears its peer connection down and
+    /// treats the offer that follows as an initial one, so the call id, the SFrame
+    /// key and the UI state survive and the user sees "Reconnecting", not a new ring.
     #[serde(rename = "call_media_restart")]
     CallMediaRestart { call_id: String },
 
@@ -2517,18 +2317,15 @@ pub(crate) enum HavenMessage {
         role: String,
     },
 
-    /// Viewer -> sharer: request or cancel receiving the call screen share
-    /// (opt-in watching, issue #38 follow-up). The sharer only sends a
-    /// screen offer after want=true.
+    /// Viewer to sharer: request or cancel receiving the call screen share (opt-in
+    /// watching, issue #38 follow-up). The sharer only sends a screen offer after
+    /// want=true.
     ///
-    /// viewer_width/viewer_height = the viewer's largest display in physical
-    /// pixels (media forwarding step 1: the sharer clamps THIS viewer's
-    /// encoder to what they can actually show). 0x0 = unknown (old client)
-    /// = no clamp. The per-viewer "Source quality" opt-out was REMOVED
-    /// 2026-08-15: the clamp is keyed to the viewer's MONITOR, so it already
-    /// delivers everything they can display, and on a shared forwarder branch
-    /// there is no longer a per-viewer encoder for an opt-out to apply to. A
-    /// `source_quality` key from an older client is simply ignored.
+    /// `viewer_width`/`viewer_height` are the viewer's largest display in physical
+    /// pixels, so the sharer clamps THIS viewer's encoder to what they can show;
+    /// 0x0 = unknown (old client) = no clamp. There is deliberately no per-viewer
+    /// quality opt-out: the clamp already tracks the viewer's monitor, and a shared
+    /// forwarder branch has no per-viewer encoder for one to apply to.
     #[serde(rename = "call_screen_watch")]
     CallScreenWatch {
         #[serde(default)]
@@ -2552,7 +2349,7 @@ pub(crate) enum HavenMessage {
         recording: bool,
     },
 
-    // -- Gossip relay tree (Phase 5D) --
+    // -- Gossip relay tree --
 
     /// Gossip peer exchange: share neighbor list for topology discovery.
     #[serde(rename = "peer_exchange")]
@@ -2580,11 +2377,9 @@ pub(crate) enum HavenMessage {
     EmoteAssets {
         #[serde(default)]
         bundle_json: String,
-        /// Hashes from the request this answers that we do NOT hold, so the
-        /// asker can rotate to another holder instead of waiting out its
-        /// retry timer. The bundle may be empty when every asked hash lands
-        /// here. Clients that predate this field send nothing and stay
-        /// silent on a total miss, which the asker's timer still covers.
+        /// Hashes from the request we do NOT hold, so the asker rotates to another
+        /// holder instead of waiting out its retry timer. The bundle may be empty when
+        /// every asked hash lands here; older clients simply stay silent on a miss.
         #[serde(default)]
         missing: Vec<String>,
     },
@@ -2613,11 +2408,10 @@ pub(crate) enum HavenMessage {
         avatar_b64: String,
         #[serde(default)]
         twitch_username: String,
-        /// The avatar hash the OWNER signed — carried explicitly rather than
-        /// derived from `avatar_b64`, because a relayer's cached blob can lag
-        /// the owner's current one (announces are light: hash, no bytes).
-        /// Receivers verify the signature over THIS, then separately check the
-        /// bytes against it and drop just the avatar on a mismatch.
+        /// The avatar hash the OWNER signed, carried explicitly rather than derived
+        /// from `avatar_b64` because a relayer's cached blob can lag the owner's
+        /// current one. Receivers verify the signature over THIS, then separately
+        /// check the bytes against it and drop just the avatar on a mismatch.
         #[serde(default)]
         avatar_hash: String,
         /// The SUBJECT's own signature, forwarded verbatim by the relayer.
@@ -2633,9 +2427,9 @@ pub(crate) enum HavenMessage {
     },
 
     // -- Voice channel coordination (plaintext for MLS epoch resilience) --
-    // These use plaintext HavenMessage instead of MLS MessageEnvelope so they
-    // survive epoch staleness after reconnection. SDP/ICE (which contain IPs)
-    // stay MLS-encrypted with Olm fallback — only state broadcasts are plaintext.
+    // Plaintext rather than an MLS `MessageEnvelope`, so they survive epoch
+    // staleness after a reconnect. SDP and ICE carry IPs and stay MLS-encrypted
+    // with Olm fallback; only these state broadcasts are plaintext.
 
     /// Broadcast: user joined a voice channel.
     #[serde(rename = "vc_join")]
@@ -2750,11 +2544,10 @@ pub(crate) enum HavenMessage {
     #[serde(rename = "recovery_stop")]
     RecoveryStop,
 
-    // -- Hollow Share (Phase 7A) --
-    // Share control lives in HavenMessage (the wire-level enum), NOT MessageEnvelope.
-    // MessageEnvelope assumes a stable MLS group membership; share swarms have none —
-    // anyone with the link joins/leaves freely. HavenMessage is the same layer 1:1
-    // call signaling uses (RtcOffer, CallInvite, etc.).
+    // -- Hollow Share --
+    // Share control lives in HavenMessage, not MessageEnvelope: MessageEnvelope
+    // assumes a stable MLS group membership and a share swarm has none, since
+    // anyone with the link joins and leaves freely.
 
     /// Sent by a peer that just joined a share swarm and needs the manifest.
     /// Any seeder in the room responds with ShareManifestResponse.
@@ -2798,12 +2591,11 @@ pub(crate) enum HavenMessage {
     },
 }
 
-// -- Hollow Share manifest (Phase 7A) --
+// -- Hollow Share manifest --
 
-/// Manifest describing a shared file. Transmitted in the clear over the swarm room
-/// (the manifest's SHA-256 IS the root_hash from the share link, so encrypting it
-/// would make discovery impossible). The decryption key is in the link only — never
-/// in the manifest.
+/// Manifest describing a shared file, transmitted in the clear over the swarm
+/// room: its SHA-256 IS the root_hash from the share link, so encrypting it
+/// would make discovery impossible. The decryption key is in the link only.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct ShareManifest {
     /// Format version; bump if the chunk hash domain or nonce derivation changes.
@@ -2840,12 +2632,11 @@ pub(crate) struct DirectMessagePayload {
     pub file_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub link_preview: Option<LinkPreviewRef>,
-    /// Multi-device self fan-out (Phase 6, Step 3): the OTHER party's MASTER id,
-    /// set ONLY on the copy we echo to our OWN sibling device so it files the
-    /// message under the correct conversation. Without it the sibling would
-    /// resolve the convo from the SENDER (us) and misfile our outgoing DM as a
-    /// conversation with ourselves. `None` on every normal send (recipient uses
-    /// `resolve(sender)` as before) → backward-compatible.
+    /// Multi-device self fan-out: the OTHER party's MASTER id, set ONLY on the copy
+    /// we echo to our OWN sibling device so it files the message under the correct
+    /// conversation. Without it the sibling resolves the convo from the SENDER (us)
+    /// and misfiles our outgoing DM as a conversation with ourselves. `None` on
+    /// every normal send, which stays backward-compatible.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub convo: Option<String>,
     /// Microsecond send timestamp for stable cross-device ordering (Step 9C/C4).
@@ -2913,32 +2704,28 @@ pub(crate) struct FileHeaderPayload {
     pub vthumb: Option<VideoThumbRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub share_ref: Option<ShareRef>,
-    /// Microsecond send stamp of the companion message (Lamport). Since 0.8.3:
-    /// the captionless-offline-image path creates the MESSAGE row from this
-    /// header ("[file:...]" sentinel), and the v2 message signature binds
-    /// `order_us` — inserting with a local `ts*1000` default would store a row
-    /// whose signature no longer verifies when re-served through sync.
+    /// Microsecond send stamp of the companion message (Lamport). The
+    /// captionless-offline-image path creates the MESSAGE row from this header, and
+    /// the v2 message signature binds `order_us`, so inserting with a local
+    /// `ts*1000` default stores a row whose signature fails when re-served.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub order_us: Option<i64>,
-    /// Base64 of the AES-encrypted file bytes, INLINED into the header.
-    /// Only set when delivering a small image to an OFFLINE peer: the bytes ride
-    /// inside the Olm-encrypted FileHeader (via SendDirectImage / 0x08) so the
-    /// relay buffers them alongside the message, and the FCM fetch node can write
-    /// the file to disk without a live stream. None for the normal online path
-    /// (bytes stream separately) and for non-image / large files.
+    /// Base64 of the AES-encrypted file bytes, INLINED into the header. Only set
+    /// when delivering a small image to an OFFLINE peer, so the relay buffers them
+    /// alongside the message and the FCM fetch node can write the file to disk with
+    /// no live stream. None on the normal online path, and for non-image or large
+    /// files.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inline_bytes: Option<String>,
-    /// Tiny blurred-placeholder thumbnail for images: base64 lossy WebP,
-    /// max dimension ~32 px (a few hundred bytes). Rendered blurred under the
-    /// manual Download button when the auto-download gate keeps the real bytes
-    /// off disk (issue #41 carry-over). Same envelope-borne-thumbnail pattern
-    /// as LinkPreviewRef. Receivers cap its size and only honor it for images.
+    /// Tiny blurred-placeholder thumbnail for images: base64 lossy WebP, max
+    /// dimension ~32 px. Rendered blurred under the manual Download button when the
+    /// auto-download gate keeps the real bytes off disk (issue #41). Receivers cap
+    /// its size and only honor it for images.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thumb: Option<String>,
-    /// True for recorded voice messages. Voice notes are tiny and
-    /// conversational — they are exempt from the auto-download gate on every
-    /// receive path. Pre-0.9.4 senders don't set this; receivers ALSO match
-    /// the recorder's filename pattern (`voice_{stamp}_{rand}.ogg`) as a
+    /// True for recorded voice messages, which are exempt from the auto-download
+    /// gate on every receive path. Pre-0.9.4 senders do not set it, so receivers
+    /// ALSO match the recorder's filename pattern (`voice_{stamp}_{rand}.ogg`) as a
     /// legacy fallback (see `is_voice_message_name`).
     #[serde(default)]
     pub voice: bool,
@@ -2998,14 +2785,12 @@ pub(crate) enum MessageEnvelope {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         has_more: Option<bool>,
     },
-    /// Multi-device sibling DM backfill batch (Phase 6 / Step 5): one
-    /// conversation's missed DMs, BOTH directions (each item carries `mine`).
-    /// `convo` is the OTHER party's master id — the receiving sibling files these
-    /// under that thread (NOT under the sender, who is its own other device).
-    /// Only honored from a `same_identity` sender.
+    /// Multi-device sibling DM backfill batch: one conversation's missed DMs, BOTH
+    /// directions (each item carries `mine`). `convo` is the OTHER party's master
+    /// id, so the receiving sibling files these under that thread and not under the
+    /// sender, which is its own other device. Only honored from `same_identity`.
     #[serde(rename = "dm_sib_sync")]
     DmSiblingSyncBatch {
-        /// The conversation peer (the friend's master id).
         convo: String,
         messages: Vec<DmSyncItem>,
         /// If true, this convo has more messages — re-request it from `convo`'s high-water mark.
@@ -3015,16 +2800,13 @@ pub(crate) enum MessageEnvelope {
     /// Edit an existing message (channel or DM).
     #[serde(rename = "edit")]
     EditMessage {
-        /// The message_id of the original message.
         mid: String,
-        /// New text content.
         text: String,
         /// Edit timestamp (millis since epoch).
         ts: i64,
         /// Ed25519 signature over the edit payload.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         sig: Option<String>,
-        /// Sender's Ed25519 public key.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pk: Option<String>,
         /// Server ID (present for channel edits, absent for DM edits).
@@ -3034,22 +2816,16 @@ pub(crate) enum MessageEnvelope {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cid: Option<String>,
     },
-    /// Attach (or clear) a link preview on an existing message, WITHOUT
-    /// touching its text and WITHOUT stamping it edited (issue #45).
+    /// Attach (or clear) a link preview on an existing message, WITHOUT touching
+    /// its text and WITHOUT stamping it edited (issue #45).
     ///
-    /// The compose box fetches OG metadata in the background while the user
-    /// types; sending before that lands used to throw the result away. Now
-    /// the fetch finishes and the author emits this, re-signed over the SAME
-    /// text / ts / reply_to / file_id / order_us with the new `lp_digest`, so
-    /// the row keeps verifying — including through signed sync backfill,
-    /// which carries the digest.
-    ///
-    /// `ts` is the ORIGINAL message timestamp, never "now": this is not an
-    /// edit, `edited_at` stays untouched, and no "(edited)" badge appears
+    /// Re-signed over the SAME text / ts / reply_to / file_id / order_us with the
+    /// new `lp_digest`, so the row keeps verifying, including through signed sync
+    /// backfill, which carries the digest. `ts` is the ORIGINAL message timestamp,
+    /// never "now": `edited_at` stays untouched, and no "(edited)" badge appears
     /// just because a preview arrived a second late.
     #[serde(rename = "lp_set")]
     LinkPreviewSet {
-        /// The message_id of the message the card belongs to.
         mid: String,
         /// The card. `None` CLEARS it (used when an edit removes the URL).
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3059,7 +2835,6 @@ pub(crate) enum MessageEnvelope {
         /// Ed25519 signature over the re-signed message payload.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         sig: Option<String>,
-        /// Author's Ed25519 public key.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pk: Option<String>,
         /// Server ID (present for channel messages, absent for DMs).
@@ -3072,14 +2847,12 @@ pub(crate) enum MessageEnvelope {
     /// Delete (hide) an existing message (channel or DM).
     #[serde(rename = "delete")]
     DeleteMessage {
-        /// The message_id of the message to delete.
         mid: String,
         /// Deletion timestamp (millis since epoch).
         ts: i64,
         /// Ed25519 signature over the deletion payload.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         sig: Option<String>,
-        /// Sender's Ed25519 public key.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pk: Option<String>,
         /// Server ID (present for channel deletions, absent for DM).
@@ -3092,9 +2865,7 @@ pub(crate) enum MessageEnvelope {
     /// Add an emoji reaction to a message.
     #[serde(rename = "reaction")]
     AddReaction {
-        /// The message_id being reacted to.
         mid: String,
-        /// Unicode emoji string.
         emoji: String,
         /// Timestamp (millis since epoch).
         ts: i64,
@@ -3125,7 +2896,7 @@ pub(crate) enum MessageEnvelope {
         cid: Option<String>,
     },
 
-    // -- File sharing (Phase 3.5) --
+    // -- File sharing --
 
     #[serde(rename = "file_hdr")]
     FileHeader {
@@ -3136,7 +2907,6 @@ pub(crate) enum MessageEnvelope {
     /// A single file chunk (base64-encoded data).
     #[serde(rename = "file_chunk")]
     FileChunk {
-        /// File ID this chunk belongs to.
         fid: String,
         /// 0-based chunk index.
         idx: u32,
@@ -3144,7 +2914,7 @@ pub(crate) enum MessageEnvelope {
         data: String,
     },
 
-    // -- Vault shard store (Phase 4) --
+    // -- Vault shard store --
 
     #[serde(rename = "shard_store")]
     ShardStore {
@@ -3182,7 +2952,7 @@ pub(crate) enum MessageEnvelope {
         cid: String,
     },
 
-    // -- Vault shard retrieve (Phase 4) --
+    // -- Vault shard retrieve --
 
     /// Request a specific shard from a peer.
     #[serde(rename = "shard_req")]
@@ -3329,25 +3099,11 @@ pub(crate) enum MessageEnvelope {
         avatar_anim: Option<String>,
         #[serde(default)]
         banner_anim: Option<String>,
-        /// Support credentials (artist shop, design section 5): a JSON array
-        /// of self-contained blind-signature entries, each binding this
-        /// profile's MASTER peer id to an item. Small capped text, so it
-        /// rides the light announce like the showcase board. `None` from
-        /// clients that predate it, which receivers PRESERVE; `Some("")` =
-        /// explicit clear, and it only clears when `support_creds_sig`
-        /// verifies over it. Verified entry by entry on ingest
-        /// (`support_creds::sanitize_incoming_support_creds`), never signed
-        /// by the profile signature: an entry already binds the identity.
+        /// Support credentials; see `HavenMessage::ProfileUpdate`.
         #[serde(default)]
         support_creds: Option<String>,
-        /// The MASTER's signature over `(peer_id, updated_at,
-        /// support_creds)` (`support_creds::support_creds_sig_message`),
-        /// base64 Ed25519. Sent whenever `support_creds` is `Some`, including
-        /// `Some("")`. REQUIRED on ingest: a receiver applies `support_creds`
-        /// only under a valid signature, and otherwise PRESERVES what it
-        /// stored, so stripping it in flight changes nothing. The credentials
-        /// themselves are unforgeable without it; this is what stops a relay
-        /// DENYING them.
+        /// The MASTER's signature over the credentials, REQUIRED on ingest; see
+        /// `HavenMessage::ProfileUpdate`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         support_creds_sig: Option<String>,
         /// Owner's profile signature — see HavenMessage::ProfileUpdate.
@@ -3417,30 +3173,28 @@ pub(crate) enum MessageEnvelope {
     #[serde(rename = "session_ack")]
     SessionAck,
 
-    // -- 1:1 call signaling (Phase 5B, encrypted since 2026-09) --
+    // -- 1:1 call signaling --
 
     /// One 1:1 call signal, carried INSIDE the Olm ciphertext.
     ///
-    /// SECURITY: the `HavenMessage::Call*` variants used to ride the wire as
-    /// bare plaintext frames, so the relay read every call's AES-128-GCM
-    /// SFrame media key (CallInvite / CallAccept), every SDP and every ICE
-    /// candidate, and could forge a CallAccept carrying a key of its own. The
-    /// signal now travels as this envelope, decrypted only by the recipient
-    /// device; the plaintext receive arms REJECT instead of handling, so a
-    /// relay-injected Call* frame is inert.
+    /// SECURITY: the `HavenMessage::Call*` variants used to ride the wire as bare
+    /// plaintext frames, so the relay read every call's AES-128-GCM SFrame media
+    /// key, every SDP and every ICE candidate, and could forge a CallAccept
+    /// carrying a key of its own. The signal now travels as this envelope,
+    /// decrypted only by the recipient device, and the plaintext receive arms
+    /// REJECT instead of handling, so a relay-injected Call* frame is inert.
     ///
-    /// Boxed: `HavenMessage` is a large enum and this envelope is reachable
-    /// from the swarm event loop, whose tokio worker stack has already been
-    /// blown once by an inline payload.
+    /// Boxed because `HavenMessage` is a large enum and this envelope is reachable
+    /// from the swarm event loop, whose tokio worker stack it has already blown.
     ///
-    /// Only ever built for the 17 `Call*` variants; the receiver whitelists
-    /// them again on the way out (`voice_handler::handle_call_signal_message`).
+    /// Only ever built for the `Call*` variants; the receiver whitelists them again
+    /// on the way out (`voice_handler::handle_call_signal_message`).
     #[serde(rename = "call_sig")]
     CallSignal {
         signal: Box<HavenMessage>,
     },
 
-    // -- Voice channel signaling (Phase 5C) --
+    // -- Voice channel signaling --
 
     /// Broadcast: user joined a voice channel.
     #[serde(rename = "vc_join")]
@@ -3501,13 +3255,11 @@ pub(crate) enum MessageEnvelope {
         target: Option<String>,
     },
 
-    // -- Voice channel screen sharing (Phase 5B) --
+    // -- Voice channel screen sharing --
 
-    /// Targeted: SDP offer for voice channel screen share (separate PC per direction).
-    ///
-    /// `origin` = media forwarding step 2: the stream's ORIGINATOR. Absent ⇒
-    /// the sender is the originator (old clients / direct legs — today's
-    /// behavior, byte-identical on the wire via skip_serializing_if).
+    /// Targeted: SDP offer for a voice channel screen share (separate PC per
+    /// direction). `origin` is the stream's ORIGINATOR; absent means the sender is
+    /// the originator (old clients and direct legs).
     #[serde(rename = "vc_screen_offer")]
     VoiceChannelScreenOffer {
         sid: String,
@@ -3563,18 +3315,15 @@ pub(crate) enum MessageEnvelope {
         quality: Option<String>,
     },
 
-    /// Targeted: viewer -> sharer, request or cancel receiving their screen
-    /// share (opt-in watching, issue #38). The sharer only sends a screen
-    /// offer to peers that asked with want=true.
+    /// Targeted: viewer to sharer, request or cancel receiving their screen share
+    /// (opt-in watching, issue #38). The sharer only sends a screen offer to peers
+    /// that asked with want=true.
     ///
-    /// viewer_width/viewer_height = the viewer's largest display in physical
-    /// pixels (media forwarding step 1: the sharer clamps THIS viewer's
-    /// encoder to what they can actually show). 0x0 = unknown (old client)
-    /// = no clamp. The per-viewer "Source quality" opt-out was REMOVED
-    /// 2026-08-15: the clamp is keyed to the viewer's MONITOR, so it already
-    /// delivers everything they can display, and on a shared forwarder branch
-    /// there is no longer a per-viewer encoder for an opt-out to apply to. A
-    /// `source_quality` key from an older client is simply ignored.
+    /// `viewer_width`/`viewer_height` are the viewer's largest display in physical
+    /// pixels, so the sharer clamps THIS viewer's encoder to what they can show;
+    /// 0x0 = unknown (old client) = no clamp. There is deliberately no per-viewer
+    /// quality opt-out: the clamp already tracks the viewer's monitor, and a shared
+    /// forwarder branch has no per-viewer encoder for one to apply to.
     #[serde(rename = "vc_screen_watch")]
     VoiceChannelScreenWatch {
         sid: String,
@@ -3585,57 +3334,46 @@ pub(crate) enum MessageEnvelope {
         viewer_width: u32,
         #[serde(default)]
         viewer_height: u32,
-        /// Viewer's self-reported route class to the sharer (media forwarding
-        /// step 3): "" = old/unknown client, "direct", "relay",
-        /// "direct_failed" (fallback-ladder re-watch after a forwarder
-        /// failure). ADVISORY — the sharer uses it to decide forwarder
-        /// assignment; a wrong hint is corrected by the fallback ladder.
-        /// Non-empty also marks a step-3-capable client (old viewers must
-        /// never receive `vc_screen_assign`).
+        /// Viewer's self-reported route class to the sharer: "" = old/unknown client,
+        /// "direct", "relay", or "direct_failed" (a re-watch after a forwarder
+        /// failure). ADVISORY, and a wrong hint is corrected by the fallback ladder.
+        /// Non-empty also marks a step-3-capable client: old viewers must never
+        /// receive `vc_screen_assign`.
         #[serde(default)]
         route: String,
-        /// Phase 2 (viewer-peer forwarders): this watcher offers to serve as
-        /// a forwarder for THIS share (desktop, peer-forwarding toggle ON).
-        /// The sharer may pick it for relay-routed viewers and self-assign it
-        /// (`vc_screen_assign{forwarder: <this watcher>}` sent to the watcher
-        /// itself switches its display to its embedded engine's egress leg).
-        /// Old clients: absent = false = never a candidate.
+        /// This watcher offers to serve as a forwarder for THIS share (desktop with
+        /// peer forwarding on). The sharer may pick it for relay-routed viewers and
+        /// even self-assign it, which switches its display to its own embedded
+        /// engine's egress leg. Absent (old client) = false = never a candidate.
         #[serde(default)]
         fwd_capable: bool,
-        /// Phase 2 privacy: this viewer runs "Always relay calls" — its media
-        /// must only touch OPERATOR infrastructure (TURN or the infra
-        /// forwarder, the same trust domain), never another member's machine.
-        /// The sharer must skip the peer-forwarder rungs for it. Advisory
-        /// like `route` — the viewer additionally hard-refuses peer-forwarder
-        /// assignments locally. Absent (old client) = false.
+        /// This viewer runs "Always relay calls": its media may only touch OPERATOR
+        /// infrastructure (TURN or the infra forwarder), never another member's
+        /// machine, so the sharer must skip the peer-forwarder rungs for it. Advisory
+        /// like `route`; the viewer also hard-refuses peer-forwarder assignments
+        /// locally. Absent (old client) = false.
         #[serde(default)]
         relay_private: bool,
-        /// Phase 3 (simulcast): this watcher's embedded forwarder engine can
-        /// ingest a 2-layer rid simulcast stream and select layers per
-        /// viewer. The sharer offers a simulcast ingest ONLY to peer
-        /// forwarders that advertised this — an old engine would blindly fan
-        /// BOTH layers' interleaved packets down one egress stream (garbage
-        /// on every viewer). Absent (old client) = false = single-layer
-        /// ingest, today's behavior.
+        /// This watcher's embedded forwarder engine can ingest a 2-layer rid simulcast
+        /// and select layers per viewer. Offered ONLY to forwarders that advertised
+        /// it: an old engine would blindly fan BOTH layers' interleaved packets down
+        /// one egress stream. Absent (old client) = false = single-layer ingest.
         #[serde(default)]
         fwd_simulcast: bool,
-        /// Feeder election: this watcher's embedded engine can also FEED
-        /// another forwarder — re-emit the stream it already receives into a
-        /// second forwarder's ingest, so the sharer uploads one copy instead
-        /// of two when a peer branch and the VPS forwarder both serve viewers.
-        /// The sharer only ever sends `feed_target` to a branch head that
-        /// advertised this. Absent (old client) = false = never asked.
+        /// This watcher's embedded engine can also FEED another forwarder, re-emitting
+        /// the stream it already receives into a second forwarder's ingest so the
+        /// sharer uploads one copy instead of two. The sharer only sends `feed_target`
+        /// to a branch head that advertised this. Absent (old client) = false.
         #[serde(default)]
         fwd_feed: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         target: Option<String>,
     },
 
-    /// Targeted: sharer -> viewer, assignment to a media forwarder (media
-    /// forwarding step 3). The viewer joins `fwd:{forwarder}` and attaches to
-    /// the stream identified by `origin` instead of receiving a direct
-    /// per-viewer PC. `forwarder` empty = revert-to-direct (re-watch).
-    /// Origin is spoof-guarded like the screen offer (must name the sender).
+    /// Targeted: sharer to viewer, assignment to a media forwarder. The viewer
+    /// joins `fwd:{forwarder}` and attaches to the stream named by `origin`
+    /// instead of a direct per-viewer PC; `forwarder` empty = revert to direct.
+    /// Origin is spoof-guarded like the screen offer and must name the sender.
     #[serde(rename = "vc_screen_assign")]
     VoiceChannelScreenAssign {
         sid: String,
@@ -3644,11 +3382,11 @@ pub(crate) enum MessageEnvelope {
         origin: Box<StreamOrigin>,
         #[serde(default)]
         forwarder: String,
-        /// Feeder election (owner → branch head): "also feed your copy of my
-        /// stream into forwarder `feed_target`". Empty/absent = stop feeding /
-        /// never asked. Carried on the assign because it rides the same
-        /// originator-authenticated trust (`inbound_origin_ok`) — only the
-        /// stream's originator may direct where its own stream goes.
+        /// Feeder election (owner to branch head): "also feed your copy of my stream
+        /// into forwarder `feed_target`". Empty or absent = stop feeding, or never
+        /// asked. It rides the assign because that carries the same
+        /// originator-authenticated trust (`inbound_origin_ok`): only the stream's
+        /// originator may direct where its own stream goes.
         #[serde(default, skip_serializing_if = "String::is_empty")]
         feed_target: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3658,9 +3396,8 @@ pub(crate) enum MessageEnvelope {
     /// Targeted: feeder → sharer, the state of a delegated feed leg.
     ///
     /// The sharer keeps supplying the far forwarder's ingest itself until
-    /// `up: true` arrives, so the handover is MAKE-BEFORE-BREAK; `up: false`
-    /// (leg died, or the far forwarder refused — e.g. an older binary that
-    /// ignores the `feeder` field) makes it resume immediately.
+    /// `up: true` arrives, so the handover is MAKE-BEFORE-BREAK; `up: false` (the
+    /// leg died, or the far forwarder refused) makes it resume immediately.
     #[serde(rename = "vc_screen_feed_state")]
     VoiceChannelScreenFeedState {
         sid: String,
@@ -3676,7 +3413,7 @@ pub(crate) enum MessageEnvelope {
         target: Option<String>,
     },
 
-    // -- Voice channel camera (Phase 5B) --
+    // -- Voice channel camera --
 
     /// Targeted: renegotiation SDP offer (adding/removing video track).
     #[serde(rename = "vc_reneg_offer")]
@@ -3684,16 +3421,13 @@ pub(crate) enum MessageEnvelope {
         sid: String,
         cid: String,
         sdp: String,
-        /// This renegotiation exists ONLY to apply an ICE restart
-        /// ("direct whenever direct is possible") — the m-lines are unchanged.
-        ///
-        /// The receiver must therefore NOT run its camera-track safety net for
-        /// it: that net exists because `onTrack` can stay silent when a
-        /// transceiver is REUSED for a camera turning on, and it materialises a
-        /// renderer for any video receiver it finds. On an ICE-restart re-offer
-        /// the (inactive) video transceiver is still there, so the net invents
-        /// a camera tile for a peer whose camera is off — field-observed
-        /// 2026-08-15. Absent (old client) = false = today's behaviour.
+        /// This renegotiation exists ONLY to apply an ICE restart, so the m-lines are
+        /// unchanged and the receiver must NOT run its camera-track safety net for it.
+        /// That net materialises a renderer for any video receiver it finds (because
+        /// `onTrack` can stay silent when a transceiver is REUSED for a camera turning
+        /// on), and on an ICE-restart re-offer the inactive video transceiver is still
+        /// there, so the net invents a camera tile for a peer whose camera is off.
+        /// Absent (old client) = false.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         ice_restart: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3712,12 +3446,11 @@ pub(crate) enum MessageEnvelope {
 
     /// Targeted: "our leg is broken, please re-offer it".
     ///
-    /// The mesh gives the offer to the lexicographically LOWER peer id, so a
-    /// leg that only the OTHER side can see as broken had no way to be
-    /// rebuilt: the higher id would close its side and then wait forever for
-    /// an offer nobody was going to send (field-caught 2026-08-27). This is
-    /// the request that lets it ask. Payload-free: the sid/cid already ride
-    /// the envelope, and the sender is the leg.
+    /// The mesh gives the offer to the lexicographically LOWER peer id, so a leg
+    /// that only the OTHER side can see as broken had no way to be rebuilt: the
+    /// higher id would close its side and then wait forever for an offer nobody
+    /// was going to send. This is the request that lets it ask. Payload-free: the
+    /// sid/cid already ride the envelope, and the sender is the leg.
     #[serde(rename = "vc_leg_restart")]
     VoiceChannelLegRestart {
         sid: String,
@@ -3751,15 +3484,14 @@ pub(crate) enum MessageEnvelope {
 
     // -- Media forwarder control plane (media forwarding step 3) --
     //
-    // Client ↔ forwarder ONLY, Olm-direct inside the dedicated
-    // `fwd:{forwarder_peer_id}` relay room — never room-broadcast, never MLS,
-    // never the vc_* lane (the forwarder can't satisfy is_vc_participant and
-    // must never hold group keys). The forwarder requires `origin.peer` to be
-    // the Olm-authenticated sender on registration; viewers must be on the
-    // stream's allowlist to attach. Both legs exchange COMPLETE SDPs (the
-    // forwarder has a fixed public host candidate — the D2 spike proved a
-    // NAT'd client reaches it without trickle). Tag `fwd_ice` is RESERVED for
-    // a future trickle path; do not reuse it for anything else.
+    // Client to forwarder ONLY, Olm-direct inside the dedicated
+    // `fwd:{forwarder_peer_id}` relay room: never room-broadcast, never MLS, never
+    // the vc_* lane, because the forwarder cannot satisfy is_vc_participant and
+    // must never hold group keys. Registration requires `origin.peer` to be the
+    // Olm-authenticated sender, and a viewer must be on the stream's allowlist to
+    // attach. Both legs exchange COMPLETE SDPs (the forwarder has a fixed public
+    // host candidate, so a NAT'd client reaches it without trickle). Tag `fwd_ice`
+    // is RESERVED for a future trickle path; do not reuse it.
 
     /// Sharer → forwarder: register a stream and its viewer allowlist.
     /// Idempotent — re-registering replaces the allowlist.
@@ -3769,24 +3501,21 @@ pub(crate) enum MessageEnvelope {
         origin: Box<StreamOrigin>,
         #[serde(default)]
         allowed_viewers: Vec<String>,
-        /// Simulcast (phase 3): viewers that should be served the LOW layer
-        /// (rid "q") when the ingest carries one; everyone else rides the
-        /// full layer (rid "f"). Absent/empty = full for all (old sharer /
-        /// no simulcast). Layer choice is applied when a viewer's egress leg
-        /// is created — a re-register updates the set for FUTURE attaches,
-        /// it never rewires a live leg (v1).
+        /// Simulcast: viewers that should be served the LOW layer (rid "q") when the
+        /// ingest carries one; everyone else rides the full layer (rid "f").
+        /// Absent/empty = full for all. The choice is applied when a viewer's egress
+        /// leg is created, so a re-register updates FUTURE attaches and never rewires
+        /// a live leg.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         low_viewers: Vec<String>,
-        /// Feeder election: the ONE peer the owner delegates to supply this
-        /// stream's ingest in its place (a peer branch head that already
-        /// receives the stream re-emits it here, so the originator uploads one
-        /// copy instead of two). Empty/absent = nobody, which is exactly the
-        /// pre-feeder owner-only rule.
+        /// Feeder election: the ONE peer the owner delegates to supply this stream's
+        /// ingest in its place, so the originator uploads one copy instead of two.
+        /// Empty or absent = nobody, exactly the pre-feeder owner-only rule.
         ///
         /// SECURITY: only the owner can name a feeder (this register is
-        /// Olm-authenticated and `admit_register` pins origin == sender), and
-        /// the grant is SUPPLY ONLY — `admit_owner_op` still gates auth and
-        /// unregister. See `forwarder::dispatch::admit_ingest_offer`.
+        /// Olm-authenticated and `admit_register` pins origin == sender), and the grant
+        /// is SUPPLY ONLY: `admit_owner_op` still gates auth and unregister. See
+        /// `forwarder::dispatch::admit_ingest_offer`.
         #[serde(default, skip_serializing_if = "String::is_empty")]
         feeder: String,
     },
@@ -3863,11 +3592,10 @@ pub(crate) enum MessageEnvelope {
         sdp: String,
     },
 
-    /// Forwarder → client: explicit refusal/failure. `code` is one of
+    /// Forwarder to client: explicit refusal or failure. `code` is one of
     /// `full | over_budget | not_authorized | unknown_stream | shutting_down`
-    /// (see `forwarder::budget::FwdErrorCode`). Receivers fall back to the
-    /// direct+TURN path — the forwarder is an availability helper, never
-    /// authority.
+    /// (`forwarder::budget::FwdErrorCode`). Receivers fall back to direct+TURN:
+    /// the forwarder is an availability helper, never authority.
     #[serde(rename = "fwd_error")]
     FwdError {
         #[serde(default)]
@@ -3878,7 +3606,7 @@ pub(crate) enum MessageEnvelope {
         detail: String,
     },
 
-    // -- Gossip relay tree (Phase 5D) --
+    // -- Gossip relay tree --
 
     /// Broadcast metadata: notifies server members that a gossip file broadcast is in flight.
     #[serde(rename = "broadcast_meta")]
@@ -3888,7 +3616,7 @@ pub(crate) enum MessageEnvelope {
         sid: String,
         cid: String,
         file_id: String,
-        /// TTL (time-to-live) — decremented on each relay hop. Added Phase 6.25.
+        /// TTL, decremented on each relay hop.
         #[serde(default = "default_broadcast_ttl")]
         ttl: u8,
     },
@@ -3993,9 +3721,7 @@ pub(crate) struct SyncSenderProfile {
 /// A single message in a sync batch.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct SyncMessageItem {
-    /// sender peer ID
     pub s: String,
-    /// message text
     pub t: String,
     /// timestamp (millis since epoch)
     pub ts: i64,
@@ -4011,10 +3737,8 @@ pub(crate) struct SyncMessageItem {
     /// Edit timestamp (if message was edited).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub edited_at: Option<i64>,
-    /// Message ID this is replying to (optional).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reply_to: Option<String>,
-    /// File attachment ID (optional).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file_id: Option<String>,
     /// File metadata for late joiners (so they can create file cards).
@@ -4023,48 +3747,37 @@ pub(crate) struct SyncMessageItem {
     /// Deletion timestamp (if message was deleted).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hidden_at: Option<i64>,
-    /// Author's own deletion signature for `hidden_at` (0.8.4) — the
-    /// "ch-delete" proof stored in `message_deletions` at deletion time.
-    /// Receivers REJECT-ABSENT: a hidden flag with no verifying proof is
-    /// dropped (a bare `hidden_at` in a sync batch is a censorship primitive
-    /// — any responder, or a relay tampering with a plaintext public-channel
-    /// batch, could hide arbitrary messages on the victim).
+    /// Author's own deletion signature for `hidden_at`: the "ch-delete" proof
+    /// stored in `message_deletions` at deletion time. Receivers REJECT-ABSENT,
+    /// because a bare `hidden_at` in a sync batch is a censorship primitive: any
+    /// responder, or a relay tampering with a plaintext public-channel batch,
+    /// could hide arbitrary messages on the victim.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hidden_sig: Option<String>,
     /// Author public key (base64 protobuf) paired with `hidden_sig`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hidden_pk: Option<String>,
-    /// Microsecond send timestamp for stable cross-device ordering (Step 9C/C4).
-    /// Carried verbatim through backfill so a sender's same-millisecond burst sorts
-    /// in true send order on every device. `None` from a pre-9C peer → the receiver
-    /// falls back to `ts * 1000` (legacy-equivalent).
+    /// Microsecond send timestamp, carried verbatim through backfill so a sender's
+    /// same-millisecond burst sorts in true send order on every device. `None` from
+    /// a pre-9C peer, which falls back to `ts * 1000`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub order_us: Option<i64>,
-    /// Hex `link_preview_digest` of the message's link preview (0.8.3, v2
-    /// signatures). Backfill verification needs the digest the sender signed;
-    /// this field carries it on its own for the cases where [`Self::lp`] is
-    /// absent but the row still has one. `None` = no preview (or a pre-0.8.3
-    /// responder; their rows are v1-signed and don't cover it).
+    /// Hex `link_preview_digest` of the message's link preview. Backfill
+    /// verification needs the digest the sender signed, and this carries it on its
+    /// own for rows where [`Self::lp`] is absent but a preview exists. `None` = no
+    /// preview, or a pre-0.8.3 responder whose rows are v1-signed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lp_digest: Option<String>,
-    /// The message's link preview, carried IN FULL.
+    /// The message's link preview, carried IN FULL, so a peer catching up through
+    /// backfill can render the card its row's signature already binds.
     ///
-    /// This used to be digest-only, on the reasoning that "verification only
-    /// ever needs the digest" — true, and precisely why the card never reached
-    /// anyone who was offline when it was sent. A peer that catches up through
-    /// backfill got a row whose signature bound a preview it had no copy of,
-    /// so it rendered a bare link, and re-serving that row computed
-    /// `lp_digest = None` from its own empty column and every downstream peer
-    /// REJECTED the message as forged. Previews now ride the batch.
+    /// When both this and `lp_digest` are present the digest is RECOMPUTED from
+    /// this preview and the wire's `lp_digest` is ignored: that is what makes the
+    /// card signature-covered end to end, so a responder swapping in a phishing
+    /// card fails the backfill check instead of having it stored.
     ///
-    /// When both this and `lp_digest` are present the digest is RECOMPUTED
-    /// from this preview and the wire's `lp_digest` is ignored — that is what
-    /// makes the card signature-covered end to end, so a responder swapping in
-    /// a phishing card fails the backfill check instead of having it stored.
-    ///
-    /// Boxed deliberately, like [`LinkPreviewRef::rich`]: a preview is ~200
-    /// bytes by value and these items are built, cloned and matched inside the
-    /// swarm's async state machines.
+    /// Boxed deliberately, like [`LinkPreviewRef::rich`]: these items are built,
+    /// cloned and matched inside the swarm's async state machines.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lp: Option<Box<LinkPreviewRef>>,
     /// Reactions on this message (synced alongside the message).
@@ -4101,25 +3814,18 @@ pub(crate) struct SyncFileMetaItem {
     pub mid: Option<String>,
     pub ts: i64,
     pub sender: String,
-    /// Video thumbnail back-reference (Phase 6.75 video preview).
-    /// Present when this file is a thumbnail for a vault-stored video.
+    /// Present when this file is the thumbnail for a vault-stored video.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vthumb: Option<VideoThumbRef>,
-    /// Tiny base64 WebP placeholder thumbnail (see FileHeaderPayload::thumb) —
-    /// lets sync-backfilled cards render the blurred placeholder too.
+    /// Tiny base64 WebP placeholder (see `FileHeaderPayload::thumb`), so
+    /// sync-backfilled cards render it too.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thumb: Option<String>,
 }
 
-/// Back-reference from a thumbnail image (sent via the image P2P path) to the
-/// underlying video bytes (stored in the vault). Carried in `MessageEnvelope::FileHeader`
-/// and persisted alongside file metadata.
-///
-/// All fields are needed by the receiver to: (a) display the thumbnail with
-/// duration/size badges, (b) trigger a `vault_download_file` on play, (c) Save
-/// the underlying video with its original name.
-///
-/// Phase 6.75 video preview in chats. See HOLLOW_PLAN.md.
+/// Back-reference from a thumbnail image (sent over the image P2P path) to the
+/// underlying video bytes in the vault. Carried in
+/// `MessageEnvelope::FileHeader` and persisted alongside file metadata.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VideoThumbRef {
     /// Vault content_id (sha256 of ciphertext) of the underlying video.
@@ -4139,11 +3845,9 @@ pub struct VideoThumbRef {
     pub dur_ms: u32,
 }
 
-/// Back-reference to a hidden Share that provides chunked P2P delivery for
-/// large files (>34 MB) or progressive video streaming. Embedded in
-/// `MessageEnvelope::FileHeader` so the receiver can join the share swarm
-/// and download via the Share infrastructure instead of waiting for a
-/// direct P2P binary stream.
+/// Back-reference to a hidden Share providing chunked P2P delivery for large
+/// files (>34 MB) or progressive video streaming, so the receiver joins the
+/// share swarm instead of waiting for a direct P2P binary stream.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ShareRef {
     /// Root hash of the share manifest (hex, 64 chars).
@@ -4154,27 +3858,26 @@ pub struct ShareRef {
     pub key: String,
 }
 
-/// Identifies the ORIGINATOR of a (potentially forwarded) media stream —
-/// media forwarding step 2 (see reports/MEDIA_FORWARDING_PLAN.md).
+/// Identifies the ORIGINATOR of a (potentially forwarded) media stream
+/// (reports/MEDIA_FORWARDING_PLAN.md).
 ///
 /// Rides `vc_screen_offer` / `vc_screen_answer` / `vc_screen_ice` as
-/// `Option<Box<StreamOrigin>>`. Absent ⇒ the delivering sender IS the
-/// originator (old clients, and every direct leg today). Receivers key
-/// attribution, dedup, watch-consent and SFrame cryptor registration on
-/// `peer`; transport stays keyed on the delivering neighbor.
+/// `Option<Box<StreamOrigin>>`; absent means the delivering sender IS the
+/// originator. Receivers key attribution, dedup, watch-consent and SFrame
+/// cryptor registration on `peer`, while transport stays keyed on the
+/// delivering neighbor.
 ///
-/// SECURITY: inbound origins are only accepted when `peer` equals the
-/// Olm/MLS-authenticated sender (offer direction) or ourselves (answer/ICE
-/// echo of our own share) — see `voice_handler::inbound_origin_ok`. Forwarder
-/// legs (step 3) ride the separate `fwd_*` namespace, never this lane.
+/// SECURITY: an inbound origin is accepted only when `peer` equals the
+/// Olm/MLS-authenticated sender (offer direction) or ourselves (answer/ICE echo
+/// of our own share); see `voice_handler::inbound_origin_ok`. Forwarder legs
+/// ride the separate `fwd_*` namespace, never this lane.
 ///
-/// BOXED at every use site per the `LinkPreviewRef::rich` rule below: inline
-/// envelope fields grow every event-loop future frame and have overflowed the
-/// 2 MB tokio worker stacks before. Behind one pointer it costs 8 bytes.
+/// BOXED per the `LinkPreviewRef::rich` rule below: inline envelope fields grow
+/// every event-loop future frame and have overflowed the 2 MB tokio worker
+/// stacks before.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub(crate) struct StreamOrigin {
-    /// Originator DEVICE peer_id (routable — VC signals key on the WS sender;
-    /// UI collapses device→master at display time only).
+    /// Originator DEVICE peer_id: routable, since VC signals key on the WS sender.
     #[serde(default)]
     pub peer: String,
     /// Stream kind: "screen" (cameras may join in a later phase).
@@ -4188,16 +3891,12 @@ pub(crate) struct StreamOrigin {
 
 /// A link preview for a URL embedded in a message.
 ///
-/// Generated by the sender (fetch OG tags, download + compress thumbnail to
-/// lossy WebP Q=50) and embedded in the outgoing `DirectMessage` /
-/// `ChannelMessage` envelope. Receivers render the card directly from these
-/// fields and NEVER make an HTTP request to the previewed URL — this is a
-/// privacy requirement, not a cache optimization.
-///
-/// Phase 6.75 link previews. See HOLLOW_PLAN.md.
+/// Generated by the SENDER (OG tags plus a thumbnail compressed to lossy WebP)
+/// and embedded in the outgoing envelope. Receivers render the card from these
+/// fields and NEVER make an HTTP request to the previewed URL: that is a
+/// privacy requirement, not a cache optimisation.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LinkPreviewRef {
-    /// The URL that was previewed.
     #[serde(default)]
     pub url: String,
     /// og:title or <title> fallback. Truncated to 200 chars on the sender side.
@@ -4224,15 +3923,13 @@ pub struct LinkPreviewRef {
     pub thumb_h: Option<u32>,
     /// Social-post extras (issue #45), absent for a plain OpenGraph card.
     ///
-    /// BOXED ON PURPOSE, and this is not a micro-optimization. A
-    /// `LinkPreviewRef` sits BY VALUE inside `ChannelMessagePayload`,
-    /// `DirectMessagePayload` and `HavenMessage::PublicChannelMessage`, all of
-    /// which live in the swarm event loop's async state machines. Adding the
-    /// five fields inline grew every one of those frames by ~80 bytes and
-    /// overflowed the 2 MB tokio worker stack in debug builds — 44 of the 74
-    /// multi-node harness tests died with STATUS_STACK_OVERFLOW. Behind one
-    /// pointer the same data costs 8 bytes. Anything added here in future
-    /// belongs in [`RichCard`], never as another inline field.
+    /// BOXED ON PURPOSE. A `LinkPreviewRef` sits BY VALUE inside
+    /// `ChannelMessagePayload`, `DirectMessagePayload` and
+    /// `HavenMessage::PublicChannelMessage`, all of which live in the swarm event
+    /// loop's async state machines; five inline fields grew every one of those
+    /// frames by ~80 bytes and overflowed the 2 MB tokio worker stack in debug
+    /// builds. Behind one pointer the same data costs 8 bytes, so anything added
+    /// here later belongs in [`RichCard`], never as another inline field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rich: Option<Box<RichCard>>,
 }
@@ -4251,16 +3948,11 @@ pub struct RichCard {
     pub author: Option<String>,
     /// Where this post's video lives. NEVER an iframe or a JS embed.
     ///
-    /// Two cases, and the receiver tells them apart by looking at the URL
-    /// (`isDirectPlayableVideo` on the Dart side):
-    ///  * a DIRECT `.mp4`/`.webm` file, which an adapter found — the card can
-    ///    play it inline on an explicit tap;
-    ///  * the media PAGE itself (a YouTube watch URL, an Instagram reel),
-    ///    which has no direct file to play — the card shows the same
-    ///    affordance but opens the page instead.
-    ///
-    /// Either way nothing is fetched to RENDER the card, and nothing ever
-    /// autoplays.
+    /// Either a DIRECT `.mp4`/`.webm` the card can play inline on an explicit tap,
+    /// or the media PAGE itself (a YouTube watch URL, an Instagram reel), which the
+    /// card opens instead; the receiver tells them apart from the URL
+    /// (`isDirectPlayableVideo` on the Dart side). Nothing is fetched to RENDER
+    /// the card, and nothing ever autoplays.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub video_url: Option<String>,
     /// Video width, for the card's aspect ratio.
@@ -4291,7 +3983,6 @@ impl RichCard {
 /// A single DM in a DM sync batch.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct DmSyncItem {
-    /// message text
     pub t: String,
     /// timestamp (millis since epoch)
     pub ts: i64,
@@ -4309,10 +4000,8 @@ pub(crate) struct DmSyncItem {
     /// Edit timestamp (if message was edited).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub edited_at: Option<i64>,
-    /// Message ID this is replying to (optional).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reply_to: Option<String>,
-    /// File attachment ID (optional).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file_id: Option<String>,
     /// File metadata for late joiners (so they can create file cards).
@@ -4328,12 +4017,10 @@ pub(crate) struct DmSyncItem {
     /// Author public key (base64 protobuf) paired with `hidden_sig`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hidden_pk: Option<String>,
-    /// Microsecond send timestamp for stable cross-device ordering (Step 9C/C4).
-    /// See [`SyncMessageItem::order_us`].
+    /// Microsecond send timestamp; see [`SyncMessageItem::order_us`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub order_us: Option<i64>,
-    /// Hex link-preview digest for v2 signature verification.
-    /// See [`SyncMessageItem::lp_digest`].
+    /// Hex link-preview digest; see [`SyncMessageItem::lp_digest`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lp_digest: Option<String>,
     /// The DM's link preview, carried in full. See [`SyncMessageItem::lp`] —
@@ -4346,19 +4033,11 @@ pub(crate) struct DmSyncItem {
 }
 
 // ---------------------------------------------------------------------------
-// Multi-Peer Fan-Out Sync Coordinator (Phase 3.5)
+// Multi-Peer Fan-Out Sync Coordinator
 // ---------------------------------------------------------------------------
 //
-// Instead of syncing every channel from one peer (ConnectionEstablished),
-// the coordinator spreads channel sync across ALL available peers evenly.
-//
-// Flow:
-// 1. ConnectionEstablished → register peer with coordinator
-// 2. After 500ms collection window → assign channels to peers round-robin
-// 3. Send lightweight ChannelSyncProbe to each assigned peer
-// 4. Probe response: if timestamps differ → fire full ChannelSyncRequest
-//    If timestamps match → skip (no new messages)
-// 5. Result: parallel sync, spread evenly, zero wasted bandwidth
+// Channel sync is spread across ALL available peers rather than pulled from
+// the one peer whose connection happened to be established first.
 
 /// Tracks a server that needs sync after reconnection.
 pub(crate) struct PendingServerSync {
@@ -4376,8 +4055,7 @@ pub(crate) struct PendingServerSync {
 pub(crate) struct SyncCoordinator {
     /// Servers waiting for sync: server_id → PendingServerSync.
     pub pending: HashMap<String, PendingServerSync>,
-    /// How long to wait after first peer connects before dispatching probes.
-    /// Allows more peers to connect, giving us better spread.
+    /// How long to wait after the first peer connects, so more can join the spread.
     collection_window: std::time::Duration,
 }
 
@@ -4389,8 +4067,7 @@ impl SyncCoordinator {
         }
     }
 
-    /// Register a newly connected peer for a server's sync.
-    /// Called from PeerJoined instead of directly sending sync requests.
+    /// Registers a newly connected peer for a server's sync.
     pub(crate) fn register_peer(
         &mut self,
         server_id: &str,
@@ -4409,8 +4086,6 @@ impl SyncCoordinator {
         if !entry.available_peers.contains(&peer_string) {
             entry.available_peers.push(peer_string);
         }
-        // Update channels if this registration provides more channels
-        // (e.g., server state updated between connections).
         if entry.channels.len() < channels_with_timestamps.len() {
             entry.channels = channels_with_timestamps;
         }
@@ -4432,9 +4107,8 @@ impl SyncCoordinator {
             {
                 sync.dispatched = true;
 
-                // Assign channels to peers using round-robin.
-                // Each channel gets assigned to up to 2 peers (primary + backup)
-                // for redundancy, unless we have very few peers.
+                // Each channel goes to a primary peer and, where there are enough peers, a
+                // backup as well, so one silent peer cannot stall a channel's sync.
                 let peers = &sync.available_peers;
                 let peer_count = peers.len();
                 let use_backup = peer_count >= 3;
@@ -4442,14 +4116,13 @@ impl SyncCoordinator {
                 let mut assignments: HashMap<String, Vec<(String, i64)>> = HashMap::new();
 
                 for (i, (cid, ts)) in sync.channels.iter().enumerate() {
-                    // Primary peer: round-robin by channel index
                     let primary_idx = i % peer_count;
                     assignments
                         .entry(peers[primary_idx].clone())
                         .or_default()
                         .push((cid.clone(), *ts));
 
-                    // Backup peer: offset by half the peer count for maximum spread
+                    // Offset by half the peer count so primary and backup rarely coincide.
                     if use_backup {
                         let backup_idx = (i + peer_count / 2 + 1) % peer_count;
                         if backup_idx != primary_idx {
@@ -4497,9 +4170,8 @@ impl SyncCoordinator {
 mod stream_origin_tests {
     use super::*;
 
-    /// Old-client wire WITHOUT `origin` must parse to `origin: None` — the
-    /// harness can't simulate a pre-rollout client (both nodes run this
-    /// build), so the old wire shape is pinned here byte-for-byte.
+    /// Old-client wire WITHOUT `origin` must parse to `origin: None`; pinned
+    /// byte-for-byte because the harness cannot simulate a pre-rollout client.
     #[test]
     fn vc_screen_offer_without_origin_parses_to_none() {
         let json = r#"{"t":"vc_screen_offer","sid":"srv1","cid":"vc1","sdp":"v=0"}"#;
@@ -4540,9 +4212,8 @@ mod stream_origin_tests {
         }
     }
 
-    /// `origin: None` must serialize to EXACTLY today's wire bytes — no
-    /// `origin` key at all (skip_serializing_if), so pre-step-2 clients see an
-    /// unchanged protocol.
+    /// `origin: None` must serialize to EXACTLY today's wire bytes, with no
+    /// `origin` key at all, so pre-step-2 clients see an unchanged protocol.
     #[test]
     fn vc_screen_signals_without_origin_keep_wire_bytes() {
         let offer = MessageEnvelope::VoiceChannelScreenOffer {
@@ -4581,9 +4252,8 @@ mod stream_origin_tests {
 mod epoch_catchup_wire_tests {
     use super::*;
 
-    /// Old-client `sync_request` (no `mls_epoch`) must parse to `None` —
-    /// pinned byte-for-byte because the harness can't simulate a pre-rollout
-    /// client (both nodes run this build).
+    /// Old-client `sync_request` (no `mls_epoch`) must parse to `None`; pinned
+    /// byte-for-byte because the harness cannot simulate a pre-rollout client.
     #[test]
     fn sync_request_without_epoch_parses_to_none() {
         let json = r#"{"type":"sync_request","server_id":"srv1","state_vector_json":"{}"}"#;
@@ -4597,9 +4267,8 @@ mod epoch_catchup_wire_tests {
         }
     }
 
-    /// `mls_epoch: None` must serialize to EXACTLY today's wire bytes — no
-    /// `mls_epoch` key at all (skip_serializing_if), so old clients see an
-    /// unchanged protocol.
+    /// `mls_epoch: None` must serialize to EXACTLY today's wire bytes, with no
+    /// `mls_epoch` key at all, so old clients see an unchanged protocol.
     #[test]
     fn sync_request_without_epoch_keeps_wire_bytes() {
         let msg = HavenMessage::SyncRequest {
@@ -4671,9 +4340,8 @@ mod epoch_catchup_wire_tests {
 mod screen_assign_route_tests {
     use super::*;
 
-    /// Old-client `vc_screen_watch` (no `route`) parses with route = "" —
-    /// the "unknown client" marker that keeps `vc_screen_assign` away from
-    /// pre-step-3 viewers.
+    /// Old-client `vc_screen_watch` (no `route`) parses with route = "", the
+    /// "unknown client" marker that keeps `vc_screen_assign` away from it.
     #[test]
     fn screen_watch_without_route_defaults_empty() {
         let json = r#"{"t":"vc_screen_watch","sid":"s","cid":"c","want":true,"viewer_width":1920,"viewer_height":1080,"source_quality":false}"#;
@@ -4706,9 +4374,8 @@ mod screen_assign_route_tests {
     }
 
     /// Phase 2: `fwd_capable` + `relay_private` round-trip, and their absence
-    /// (old client OR phase-1 client) parses as false — an old watcher is
-    /// never picked as a peer forwarder, and only an explicit flag steers a
-    /// viewer off the peer rungs.
+    /// parses as false, so an old watcher is never picked as a peer forwarder and
+    /// only an explicit flag steers a viewer off the peer rungs.
     #[test]
     fn screen_watch_fwd_capable_round_trips_and_defaults_false() {
         let env = MessageEnvelope::VoiceChannelScreenWatch {

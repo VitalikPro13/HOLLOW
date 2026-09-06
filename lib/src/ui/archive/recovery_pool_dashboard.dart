@@ -31,7 +31,7 @@ class RecoveryPoolDashboard extends ConsumerWidget {
       );
     }
 
-    // Use local vault file data as fallback when pool status hasn't arrived yet.
+    // Local vault file data stands in until the pool status arrives.
     final localStatus = ref.watch(vaultFileStatusProvider(pool.serverId));
     int totalFiles = pool.totalFiles;
     int reconstructable = pool.reconstructable;
@@ -52,7 +52,6 @@ class RecoveryPoolDashboard extends ConsumerWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // Header.
           Row(
             children: [
               StatusDot(
@@ -94,7 +93,6 @@ class RecoveryPoolDashboard extends ConsumerWidget {
             ),
           ),
 
-          // Invite link (if initiator and link available).
           if (pool.inviteLink.isNotEmpty) ...[
             const SizedBox(height: HollowSpacing.md),
             Container(
@@ -136,11 +134,9 @@ class RecoveryPoolDashboard extends ConsumerWidget {
           ],
           const SizedBox(height: HollowSpacing.lg),
 
-          // Progress section.
           _buildProgressRing(hollow, totalFiles, reconstructable),
           const SizedBox(height: HollowSpacing.lg),
 
-          // Stats row.
           Row(
             children: [
               _StatCard(
@@ -167,7 +163,6 @@ class RecoveryPoolDashboard extends ConsumerWidget {
           ),
           const SizedBox(height: HollowSpacing.lg),
 
-          // Members section.
           Text(
             'MEMBERS (${pool.memberPeerIds.length})',
             style: HollowTypography.caption.copyWith(
@@ -225,7 +220,6 @@ class RecoveryPoolDashboard extends ConsumerWidget {
               ),
           const SizedBox(height: HollowSpacing.lg),
 
-          // Recovered files section.
           if (pool.recoveredFiles.isNotEmpty) ...[
             Text(
               'RECOVERED FILES (${pool.recoveredFiles.length})',

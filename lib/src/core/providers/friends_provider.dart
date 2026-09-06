@@ -29,7 +29,6 @@ class FriendsNotifier extends Notifier<Map<String, FriendInfo>> {
   @override
   Map<String, FriendInfo> build() => {};
 
-  /// Load all friends from DB.
   Future<void> loadAll() async {
     try {
       final rows = await storage_api.loadFriends();
@@ -44,10 +43,8 @@ class FriendsNotifier extends Notifier<Map<String, FriendInfo>> {
         );
       }
       state = map;
-      // Refresh the iOS push-hints cache (friend name + avatar for the
-      // Notification Service Extension). Debounced + iOS-gated internally, so
-      // this is a cheap no-op on other platforms. Covers startup + every friend
-      // mutation since they all funnel through loadAll().
+      // Refresh the iOS push-hints cache. Debounced + iOS-gated internally, and
+      // covers every friend mutation since they all funnel through loadAll().
       PushHintsCache.scheduleWrite(map.keys);
     } catch (e) {
       debugPrint('[HOLLOW] Failed to load friends: $e');
@@ -108,35 +105,26 @@ final friendsProvider =
         FriendsNotifier.new);
 
 /// ALL accepted friends, master-collapsed + deduped, sorted by online status
-/// (online first) then alphabetical display name.
+/// then display name.
 ///
-/// This is the canonical accepted-friends list used by every "show me my
-/// friends/conversations" surface (Friends dialog, home dashboard, mobile chats,
-/// network column). It does NOT apply the favourites filter — that belongs ONLY
-/// to the horizontal FriendsBar dock (see [friendsBarDisplayProvider]). Mixing
-/// the two was the bug where favouriting one friend (or a stale favourite id)
-/// made every other friend vanish from the dialog/home/chats.
-///
-/// Memoized — only recomputes when the upstream providers change.
+/// The canonical accepted-friends list for every "show me my friends" surface.
+/// It does NOT apply the favourites filter, which belongs ONLY to the
+/// horizontal FriendsBar dock: mixing the two made favouriting one friend hide
+/// every other friend from the dialog, home and chats.
 final sortedFriendsProvider = Provider<List<FriendInfo>>((ref) {
   final friends = ref.watch(friendsProvider);
-  // Multi-device: collapse a friend's several device peer_ids into their one
-  // master identity for online status. Single-device installs resolve each peer
-  // to itself, so this is identical to the old `peers - invisible` check.
+  // Multi-device: collapse a friend's device peer_ids into one master identity
+  // for online status. Single-device installs resolve each peer to itself.
   final online = ref.watch(onlineIdentitiesProvider);
   final profiles = ref.watch(profileProvider);
   // A friend row added by TEMPORARY NICKNAME is keyed under the friend's DEVICE
-  // id (the relay claims nicknames under the WS-auth device socket), while
-  // presence/profile key on the MASTER. Resolve device→master here so the row's
-  // online dot + name resolve correctly even before the backend re-key lands.
+  // id (the relay claims nicknames under the device socket) while presence keys
+  // on the MASTER, so resolve device->master before the backend re-key lands.
   final links = ref.watch(deviceLinkProvider);
 
   // Collapse each accepted friend's stored id to its MASTER and dedupe, so every
-  // downstream render site (which reads `friend.peerId` from this list) gets the
-  // master id — its online dot, name, and avatar then key correctly. A friend
-  // stranded under a device id (nickname add, pre-re-key) heals here immediately
-  // once `deviceLinkProvider` knows the mapping; after the backend re-key the
-  // stored id is already the master so this is a no-op.
+  // render site keys its online dot, name and avatar correctly. A friend stranded
+  // under a device id heals here as soon as `deviceLinkProvider` knows the map.
   final byMaster = <String, FriendInfo>{};
   for (final f in friends.values.where((f) => f.status == 'accepted')) {
     final master = links.identityOf(f.peerId);
@@ -170,17 +158,12 @@ final sortedFriendsProvider = Provider<List<FriendInfo>>((ref) {
 
 /// The friend list to render in the horizontal FriendsBar DOCK only.
 ///
-/// When the user has set favourites, the dock shows ONLY those (in their custom
-/// drag order); otherwise it shows all accepted friends (from
-/// [sortedFriendsProvider]). Favourite ids are resolved device→master before
-/// matching, so a favourite saved under a device id (or one that has since been
-/// re-keyed) still matches its collapsed friend — never silently dropping the
-/// whole list.
+/// With favourites set the dock shows ONLY those, in their drag order;
+/// otherwise all accepted friends. Favourite ids are resolved device->master
+/// before matching, so a favourite saved under a device id still matches.
 ///
-/// IMPORTANT: only the FriendsBar dock should read this. The Friends management
-/// dialog, home dashboard, and conversation lists must read
-/// [sortedFriendsProvider] (the unfiltered list) so favouriting can never hide a
-/// non-favourite friend from them.
+/// IMPORTANT: only the dock reads this. Every other surface reads
+/// [sortedFriendsProvider], so favouriting can never hide a friend from them.
 final friendsBarDisplayProvider = Provider<List<FriendInfo>>((ref) {
   final accepted = ref.watch(sortedFriendsProvider);
   final favourites = ref.watch(favouriteFriendsProvider);

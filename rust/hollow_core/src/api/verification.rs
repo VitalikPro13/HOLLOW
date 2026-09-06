@@ -1,18 +1,8 @@
-//! Contact verification FFI — safety numbers, the verified flag, and the
-//! key/device change alerts (Issue 1-C + 1-D).
-//!
-//! Everything the "is this really them?" UI needs lives here rather than being
-//! spread across the storage API, so the rules below can be audited in one
-//! place:
-//!
-//! 1. **Everything is MASTER-keyed.** Verification is about a PERSON. A peer_id
-//!    arriving from Dart may be a per-device id, so every entry point resolves
-//!    device → master before touching the DB. A verified flag stored under a
-//!    device id would silently stop applying the moment that contact linked or
-//!    dropped a device — a badge that quietly stops reflecting reality is worse
-//!    than no badge at all.
-//! 2. **Never invent a number.** A malformed peer_id returns `Err`, not a
-//!    plausible-looking string.
+//! Contact verification FFI: safety numbers, the verified flag and the key/device
+//! change alerts. Everything is MASTER-keyed because verification is about a
+//! PERSON: a flag stored under a device id would silently stop applying the moment
+//! that contact linked or dropped a device. A malformed peer_id returns `Err`
+//! rather than a plausible-looking number.
 
 use flutter_rust_bridge::frb;
 
@@ -22,12 +12,9 @@ use super::storage::{get_peer_id, get_store};
 
 /// Collapse a possibly-per-device peer_id to the MASTER identity it belongs to.
 ///
-/// Delegates to [`super::network::identity_for_persisted`], which falls back to
-/// the persisted `device_links` when the in-memory resolver is still cold. That
-/// fallback matters here: the Verify screen is reachable from a push tap or
-/// straight after launch, before the first device-list ingest of the session —
-/// and resolving to a DEVICE id there would compute a safety number for "one of
-/// their machines" instead of for the person.
+/// Falls back to persisted `device_links` while the in-memory resolver is cold:
+/// the Verify screen is reachable from a push tap before the first device-list
+/// ingest, and a DEVICE id there would number one machine instead of the person.
 fn to_master(peer_id: &str) -> String {
     super::network::identity_for_persisted(peer_id.to_string())
 }
@@ -36,12 +23,9 @@ fn to_master(peer_id: &str) -> String {
 
 /// The 60-digit safety number shared by this identity and `peer_id`.
 ///
-/// Both people see the IDENTICAL number, so verification is a single "do these
-/// match?" — there is no yours/theirs ordering to get wrong.
-///
-/// Derived purely from the two MASTER Ed25519 keys, so it is stable across
-/// reinstalls and across the contact adding or removing devices. It changes only
-/// when the master identity does — i.e. when it is genuinely a different person.
+/// Both people see the IDENTICAL number, and it is derived from the two MASTER
+/// keys only, so it survives reinstalls and device changes and moves only when
+/// the person does.
 #[frb]
 pub fn safety_number_with(peer_id: String) -> Result<String, String> {
     let local = get_peer_id()?;
@@ -51,10 +35,8 @@ pub fn safety_number_with(peer_id: String) -> Result<String, String> {
 
 /// Group a 60-digit safety number into 12 blocks of 5 for display.
 ///
-/// Lives in Rust so desktop and mobile cannot drift into showing the same
-/// number two different ways — two people comparing differently-grouped digits
-/// is exactly the confusion this screen exists to remove. Input that is not the
-/// expected length is returned untouched rather than mangled.
+/// In Rust so desktop and mobile cannot show the same number two different ways.
+/// Input that is not 60 digits is returned untouched.
 #[frb(sync)]
 pub fn format_safety_number(number: String) -> String {
     let digits = sn::normalize_safety_number(&number);
@@ -69,11 +51,7 @@ pub fn format_safety_number(number: String) -> String {
         .join(" ")
 }
 
-/// Compare a number the contact read out (or pasted) against `expected`.
-///
-/// Both sides are normalized to digits first, so spacing, line breaks or a
-/// trailing newline never produce a false mismatch. A false alarm on a security
-/// screen teaches users to ignore it.
+/// Compare a number the contact read out against `expected`, ignoring spacing.
 #[frb(sync)]
 pub fn safety_numbers_match(expected: String, provided: String) -> bool {
     sn::safety_numbers_match(&expected, &provided)
@@ -81,9 +59,8 @@ pub fn safety_numbers_match(expected: String, provided: String) -> bool {
 
 // ── The verified flag ───────────────────────────────────────────────
 
-/// Mark a contact as identity-verified (their safety number was confirmed out
-/// of band). Stored against the MASTER identity, so it survives their device
-/// changes — which is the whole point of a master-derived safety number.
+/// Mark a contact as identity-verified, stored against the MASTER identity so it
+/// survives their device changes.
 #[frb]
 pub fn set_peer_verified(peer_id: String) -> Result<(), String> {
     let master = to_master(&peer_id);
@@ -130,9 +107,8 @@ pub struct SecurityAlertFfi {
     pub alert_id: String,
     /// MASTER peer_id of the contact the alert is about.
     pub peer_id: String,
-    /// `new_device` (a device joined their identity — the one that carries an
-    /// attack signal) or `identity_key_changed` (a device re-keyed, i.e. they
-    /// reinstalled).
+    /// `new_device` (a device joined their identity, the signal an attack shows
+    /// up in) or `identity_key_changed` (a device re-keyed, i.e. a reinstall).
     pub kind: String,
     /// The device id that appeared, or the device whose key changed.
     pub detail: String,
@@ -141,8 +117,7 @@ pub struct SecurityAlertFfi {
     pub acknowledged_at: Option<i64>,
 }
 
-/// All recorded alerts, newest first — read AND dismissed alike, so the history
-/// survives scrollback rather than vanishing on dismiss.
+/// All recorded alerts, newest first, read and dismissed alike.
 #[frb]
 pub fn get_security_alerts() -> Result<Vec<SecurityAlertFfi>, String> {
     let store = get_store();
@@ -171,8 +146,7 @@ pub fn acknowledge_security_alert(alert_id: String) -> Result<(), String> {
     ms.acknowledge_security_alert(&alert_id)
 }
 
-/// Mark every outstanding alert for one contact as read (the conversation
-/// banner's Dismiss, which speaks for all of them at once).
+/// Mark every outstanding alert for one contact as read.
 #[frb]
 pub fn acknowledge_security_alerts_for_peer(peer_id: String) -> Result<(), String> {
     let master = to_master(&peer_id);

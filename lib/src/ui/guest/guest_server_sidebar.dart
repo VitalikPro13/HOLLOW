@@ -72,7 +72,6 @@ class _GuestServerSidebarState extends ConsumerState<GuestServerSidebar> {
             context, 'Added as manual: 7 real-time servers reached',
             type: HollowToastType.info);
       }
-      // Expand the newly added server and request its channels.
       ref.read(guestExpandedServerProvider.notifier).state = serverId;
       ref.read(guestSelectedServerProvider.notifier).state = serverId;
       final loading = Set<String>.from(ref.read(guestLoadingProvider));
@@ -96,15 +95,13 @@ class _GuestServerSidebarState extends ConsumerState<GuestServerSidebar> {
 
     return Container(
       decoration: BoxDecoration(
-        // Transparency-aware like every content sidebar (#44) —
-        // `opaqueBackground` is reserved for fixed chrome bars and made this
-        // pane a solid slab next to see-through neighbours.
+        // Transparency-aware like every content sidebar (#44):
+        // `opaqueBackground` is reserved for fixed chrome bars.
         color: hollow.surface,
         border: Border(right: BorderSide(color: hollow.border)),
       ),
       child: Column(
         children: [
-          // Header
           Container(
             height: 48,
             padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.lg),
@@ -143,7 +140,6 @@ class _GuestServerSidebarState extends ConsumerState<GuestServerSidebar> {
             ),
           ),
 
-          // Add server field (slide down)
           AnimatedSize(
             duration: HollowDurations.normal,
             curve: HollowCurves.enter,
@@ -161,7 +157,6 @@ class _GuestServerSidebarState extends ConsumerState<GuestServerSidebar> {
                 : const SizedBox.shrink(),
           ),
 
-          // Server list or empty state
           Expanded(
             child: servers.isEmpty
                 ? Center(
@@ -254,7 +249,6 @@ class _GuestServerSidebarState extends ConsumerState<GuestServerSidebar> {
     ref.read(guestExpandedServerProvider.notifier).state = serverId;
     ref.read(guestSelectedServerProvider.notifier).state = serverId;
 
-    // Fetch channels if not cached.
     final channels = ref.read(guestChannelMapProvider)[serverId];
     if (channels == null || channels.isEmpty) {
       final loading = Set<String>.from(ref.read(guestLoadingProvider));
@@ -267,7 +261,6 @@ class _GuestServerSidebarState extends ConsumerState<GuestServerSidebar> {
   void _selectChannel(String serverId, String channelId) {
     ref.read(guestSelectedServerProvider.notifier).state = serverId;
     ref.read(guestSelectedChannelProvider.notifier).state = channelId;
-    // Only fetch if messages aren't already loaded for this channel.
     final key = '$serverId:$channelId';
     final existing = ref.read(channelChatProvider)[key];
     if (existing == null || existing.isEmpty) {
@@ -292,8 +285,6 @@ class _GuestServerSidebarState extends ConsumerState<GuestServerSidebar> {
     });
   }
 }
-
-// ── Server section (header + expandable channels) ──
 
 class _GuestServerSection extends ConsumerWidget {
   final SavedGuestServer server;
@@ -336,13 +327,14 @@ class _GuestServerSection extends ConsumerWidget {
         ? server.serverName
         : server.serverId.substring(0, 8);
     final avatarColor = colorFromId(server.serverId);
-    // Try guest avatar first (from PublicChannelListResponse), then member avatar.
+    // The guest avatar comes off the public channel list; the member cache is
+    // the fallback.
     final guestAvatar = ref.watch(
         guestServerAvatarProvider.select((m) => m[server.serverId]));
     final memberAvatar = ref.watch(
         serverAvatarProvider.select((m) => m[server.serverId]));
     final avatarBytes = guestAvatar ?? memberAvatar;
-    // Banner: guest thumb (wire) first, then the member-cached full banner.
+    // The guest thumb rides the wire; the member cache holds the full banner.
     final guestBanner = ref.watch(
         guestServerBannerProvider.select((m) => m[server.serverId]));
     final memberBanner = ref.watch(
@@ -355,7 +347,6 @@ class _GuestServerSection extends ConsumerWidget {
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
-        // Server header
         Padding(
           padding: const EdgeInsets.symmetric(
             horizontal: HollowSpacing.sm,
@@ -378,7 +369,6 @@ class _GuestServerSection extends ConsumerWidget {
               ),
               child: Row(
                 children: [
-                  // Server avatar
                   ClipRRect(
                     borderRadius: BorderRadius.circular(6),
                     child: avatarBytes != null
@@ -406,7 +396,6 @@ class _GuestServerSection extends ConsumerWidget {
                           ),
                   ),
                   const SizedBox(width: HollowSpacing.sm),
-                  // Server name
                   Expanded(
                     child: Text(
                       name,
@@ -421,7 +410,6 @@ class _GuestServerSection extends ConsumerWidget {
                       ),
                     ),
                   ),
-                  // Fetch mode icon
                   Icon(
                     _fetchModeIcon(server.fetchMode),
                     size: 12,
@@ -442,7 +430,6 @@ class _GuestServerSection extends ConsumerWidget {
                     ),
                   ],
                   const SizedBox(width: 4),
-                  // Chevron
                   AnimatedRotation(
                     turns: isExpanded ? 0.25 : 0.0,
                     duration: HollowDurations.fast,
@@ -458,9 +445,8 @@ class _GuestServerSection extends ConsumerWidget {
           ),
         ),
 
-        // Channel list (animated expand/collapse), headed by the banner
-        // when the server has one. The strip stays STILL here (animate:
-        // false) — only the selected server's sidebar header animates.
+        // The strip stays STILL here (animate: false); only the selected
+        // server's sidebar header animates.
         AnimatedSize(
           duration: HollowDurations.normal,
           curve: HollowCurves.enter,
@@ -545,14 +531,9 @@ class _GuestServerSection extends ConsumerWidget {
     );
   }
 
-  /// The guest server's context menu.
-  ///
-  /// This used to hand-roll its own `showDialog` + `Stack` + two private row
-  /// widgets, which is a second context-menu surface with its own positioning,
-  /// its own dismissal and its own idea of what a menu row looks like. It goes
-  /// through [showHollowMenu] like every other menu in the app now (issue
-  /// #61), so the fetch modes get real check marks and the whole thing gets
-  /// the keyboard and screen-reader routes for free.
+  /// The guest server's context menu, through [showHollowMenu] like every other
+  /// menu in the app (issue #61) so it inherits the keyboard and screen-reader
+  /// routes.
   void _showContextMenu(BuildContext context, Offset anchor) {
     showHollowMenu(
       context: context,
@@ -581,8 +562,6 @@ class _GuestServerSection extends ConsumerWidget {
     );
   }
 }
-
-// ── Channel tile (matches _ChannelTile from channel_sidebar.dart) ──
 
 class _GuestChannelTile extends StatelessWidget {
   final String name;
@@ -665,5 +644,3 @@ class _GuestChannelTile extends StatelessWidget {
     );
   }
 }
-
-// ── Context menu helpers ──

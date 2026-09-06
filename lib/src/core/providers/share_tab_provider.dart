@@ -259,8 +259,6 @@ List<ShareItemState> downloadingShares(List<ShareItemState> shares) =>
 List<ShareItemState> seedingShares(List<ShareItemState> shares) =>
     shares.where((s) => s.state == 'completed').toList();
 
-// ── Download path preference ────────────────────────────────────────────
-
 const _shareDownloadPathKey = 'share_download_path';
 
 final shareDownloadPathProvider =

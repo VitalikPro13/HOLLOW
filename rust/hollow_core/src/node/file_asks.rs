@@ -1,29 +1,20 @@
-//! Honest file card states: the asker side of `FileRequest` (tmp.txt item 1).
+//! Honest file card states: the asker side of `FileRequest`.
 //!
 //! A file whose bytes are not on disk used to show a Download button that could
-//! silently do nothing. The request went to ONE holder, and a holder that no
+//! silently do nothing: the request went to ONE holder, and a holder that no
 //! longer had the bytes said NOTHING, so the asker could not tell "they are
 //! offline" from "they deleted it" and the card could not say either.
 //!
-//! This is the asset rail's [`super::emotes::PendingAsk`] with the same shapes
-//! and the same rules, applied to file bytes:
-//!
-//!   1. every explicit pull becomes a [`PendingFileAsk`] that OUTLIVES the
-//!      socket, so a holder who was offline when the user tapped Download still
-//!      gets asked the moment it turns up;
-//!   2. a holder that cannot serve answers `HavenMessage::FileUnavailable`
-//!      instead of staying silent, and the walk rotates to the next holder;
-//!   3. a `FileUnavailable` from a device THIS ask never asked changes nothing
-//!      (the asked-set rule: an unasked peer can neither steer the walk nor
-//!      delete the ask);
-//!   4. every state change the walk goes through is reported to the UI as
-//!      `NetworkEvent::FileAvailability`, so the card says what is happening
-//!      rather than showing a button that does nothing.
+//! This is the asset rail's [`super::emotes::PendingAsk`] applied to file bytes.
+//! Every explicit pull becomes a [`PendingFileAsk`] that OUTLIVES the socket; a
+//! holder that cannot serve answers `HavenMessage::FileUnavailable` instead of
+//! staying silent and the walk rotates; a `FileUnavailable` from a device THIS ask
+//! never asked changes nothing; and every state change is reported as
+//! `NetworkEvent::FileAvailability`, so the card says what is happening.
 //!
 //! ONE holder is asked at a time. Every holder re-encrypts its stream under its
-//! own AES key and the receiver kept exactly one `FileHeader` key, so two
-//! parallel streams can only fail to decrypt (the loop this rule exists to
-//! prevent is documented in `file_handler::handle_request_file`).
+//! own AES key and the receiver kept exactly one `FileHeader` key, so two parallel
+//! streams can only fail to decrypt.
 
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
@@ -46,11 +37,9 @@ const MAX_FILE_ASK_CANDIDATES: usize = 4;
 /// can produce and the work the sweep does ON THE EVENT LOOP.
 const MAX_FILE_ASKS_PER_SWEEP: usize = 8;
 
-/// How long an ask sits unanswered before the retry sweep rotates it to the
-/// next holder. The answering `FileHeader` arrives in seconds even for a large
-/// file (the bytes stream after it), so this only has to outlast a round trip.
-/// Shortened under `cfg(test)` so the harness can observe rotation without a
-/// fifteen-second wait, the same trick the asset rail uses.
+/// How long an ask sits unanswered before the retry sweep rotates it to the next
+/// holder; the answering `FileHeader` arrives in seconds even for a large file, so
+/// this only has to outlast a round trip. Shortened under `cfg(test)`.
 pub(crate) const FILE_ASK_TIMEOUT_SECS: u64 = if cfg!(test) { 1 } else { 15 };
 
 /// Where an ask may look for holders. Read off the file row once, at upsert.
@@ -111,8 +100,7 @@ impl PendingFileAsk {
 
 /// Every holder this ask could still try, best first and otherwise in ascending
 /// device-id order so the walk is reproducible. Each entry carries the room the
-/// send must go out through: a targeted send routes to its DETERMINISTIC room,
-/// never to whichever room happens to list the peer first.
+/// send must go out through: a targeted send routes to its DETERMINISTIC room.
 fn ask_candidates(
     ask: &PendingFileAsk,
     ws_room_peers: &HashMap<String, HashSet<String>>,
@@ -163,9 +151,8 @@ fn ask_candidates(
                     out.push((dev, room));
                 }
             }
-            // Then every other member that may LEGITIMATELY hold the bytes.
-            // Full replication put a copy on everyone who was online, and the
-            // channel ladder is what decides who that could be.
+            // Then every other member that may LEGITIMATELY hold the bytes: full
+            // replication put a copy on everyone the channel ladder allows.
             if let Some(state) = server_states.get(server_id) {
                 for dev in super::file_handler::channel_holder_candidates(
                     state,
@@ -228,12 +215,10 @@ async fn dispatch_one(
         .map(|s| s.bytes_received)
         .unwrap_or(0);
 
-    // CRITICAL, and the load-bearing line of this module: the explicit-pull
-    // receipt is CLEARED on `WsEvent::Disconnected` and CONSUMED at header
-    // time, so a retry that does not re-stamp it has its own answer refused by
-    // the auto-download gate — which is precisely the silent failure this
-    // module exists to end. Same for the decline pin: a file the gate declined
-    // on the push is exactly the file a manual pull is for.
+    // CRITICAL, and the load-bearing line of this module: the explicit-pull receipt
+    // is CLEARED on `WsEvent::Disconnected` and CONSUMED at header time, so a retry
+    // that does not re-stamp it has its own answer refused by the auto-download
+    // gate. Same for the decline pin: a declined push is what a manual pull is for.
     requested_file_receipts.insert(file_id.to_string(), Instant::now());
     declined_file_ids.remove(file_id);
 
@@ -329,10 +314,9 @@ async fn advance(
     }
 }
 
-/// `NodeCommand::RequestFile` for a file we hold a ROW for: upsert the pending
-/// ask and dispatch it. A young in-flight request is left alone (Dart's sweeps
-/// re-issue liberally, and this is the dedup); a SETTLED ask is the user asking
-/// again, so its walk starts over.
+/// `NodeCommand::RequestFile` for a file we hold a ROW for: upsert the pending ask
+/// and dispatch it. A young in-flight request is left alone (this is the dedup for
+/// Dart's liberal sweeps); a SETTLED ask is the user asking again, so it restarts.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn upsert_and_advance(
     ws_cmd_tx: &mpsc::UnboundedSender<super::ws_client::WsCommand>,
@@ -405,10 +389,9 @@ pub(crate) async fn upsert_and_advance(
     .await;
 }
 
-/// `files.created_at` is written in MILLISECONDS by every send and receive path
-/// (`order_us / 1000`). Normalise anyway: a value below the year-2001
-/// millisecond mark can only be a seconds stamp from an older row, and a
-/// retention comparison against the wrong unit silently never fires.
+/// `files.created_at` is written in MILLISECONDS by every send and receive path.
+/// Normalise anyway: a value below the year-2001 millisecond mark can only be a
+/// seconds stamp from an older row, and a comparison in the wrong unit never fires.
 fn created_at_ms(created_at: i64) -> i64 {
     if created_at < 100_000_000_000 {
         created_at.saturating_mul(1000)
@@ -418,9 +401,8 @@ fn created_at_ms(created_at: i64) -> i64 {
 }
 
 /// Whether OUR OWN row for `file_id` is genuinely past the server's retention
-/// window. This is the gate on the one store write a remote answer can cause: a
-/// member cannot expire someone else's file by claiming it expired, because our
-/// own CRDT settings and our own row's age have to agree first.
+/// window. The gate on the one store write a remote answer can cause: a member
+/// cannot expire someone else's file, because our own settings and row must agree.
 fn retention_expired_locally(
     file_id: &str,
     server_states: &HashMap<String, ServerState>,
@@ -457,12 +439,10 @@ fn retention_expired_locally(
     created_at_ms(meta.created_at) < now_ms - (days as i64) * 86_400_000
 }
 
-/// Inbound `HavenMessage::FileUnavailable`: a holder we asked says it cannot
-/// serve the bytes.
+/// Inbound `HavenMessage::FileUnavailable`: a holder we asked cannot serve.
 ///
 /// The asked-set check is a HARD DROP, not a log line: a device this ask never
-/// asked can neither steer the walk nor delete the ask, exactly as an unasked
-/// peer's `missing` list cannot move an asset-rail ask.
+/// asked can neither steer the walk nor delete the ask.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_file_unavailable(
     ws_cmd_tx: &mpsc::UnboundedSender<super::ws_client::WsCommand>,
@@ -655,12 +635,10 @@ pub(crate) async fn retry_asks_in_room(
     }
 }
 
-/// Retry sweep: an ask that has gone quiet is a silent miss (a client that
-/// predates `FileUnavailable`, a row the holder never had, a dropped frame).
-/// Rotate it, and when there is nobody left say so.
-///
-/// Opens the store at most ONCE, and only when something is actually stale: an
-/// idle node ticks through here without touching SQLCipher at all.
+/// Retry sweep: an ask that has gone quiet is a silent miss (a client predating
+/// `FileUnavailable`, a row the holder never had, a dropped frame). Rotate it, and
+/// when there is nobody left say so. Opens the store at most ONCE, and only when
+/// something is actually stale.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn retry_stale_asks(
     ws_cmd_tx: &mpsc::UnboundedSender<super::ws_client::WsCommand>,
@@ -735,10 +713,9 @@ pub(crate) async fn retry_stale_asks(
     }
 }
 
-/// A new socket means a fresh set of holders: keep every ask, drop only what
-/// the dead connection told us. `last_asked_at` is stamped stale so the next
-/// roster snapshot dispatches at once instead of waiting out a window measured
-/// against a socket that no longer exists.
+/// A new socket means a fresh set of holders: keep every ask, drop only what the
+/// dead connection told us. `last_asked_at` is stamped stale so the next roster
+/// snapshot dispatches at once rather than waiting out a dead socket's window.
 pub(crate) fn reset_on_disconnect(pending: &mut HashMap<String, PendingFileAsk>) {
     let stale_now = Instant::now()
         .checked_sub(Duration::from_secs(FILE_ASK_TIMEOUT_SECS))
@@ -760,15 +737,10 @@ pub(crate) fn retire(pending: &mut HashMap<String, PendingFileAsk>, file_id: &st
 /// "Stop waiting for this file": drop the queued ask so nothing retries it, and
 /// drop its explicit-pull receipt with it.
 ///
-/// The receipt goes on purpose. It is the thing that makes an answering header
-/// bypass the size cap and the auto-download gate, and a request the user has
-/// withdrawn has no business bypassing either: an answer already in flight
-/// arrives as an ordinary unsolicited push and is judged exactly like one.
-/// `declined_file_ids` is deliberately untouched — it records what the
-/// auto-download SETTING did to a push, not what the user did to a request.
-///
-/// Emits nothing. Dart clears the card on the tap, and an event from here would
-/// race it.
+/// The receipt goes on purpose. It is what makes an answering header bypass the
+/// size cap and the auto-download gate, and a withdrawn request has no business
+/// bypassing either. `declined_file_ids` is deliberately untouched: it records
+/// what the auto-download SETTING did to a push, not what the user did to a request.
 pub(crate) fn cancel(
     pending: &mut HashMap<String, PendingFileAsk>,
     requested_file_receipts: &mut HashMap<String, Instant>,

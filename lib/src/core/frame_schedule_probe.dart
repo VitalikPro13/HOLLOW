@@ -4,21 +4,13 @@ import 'package:flutter/widgets.dart';
 
 /// Diagnostic binding that answers "who is asking for all these frames".
 ///
-/// A Flutter app only renders when something calls `scheduleFrame()`. When an
-/// idle window is producing frames at the display's refresh rate, the useful
-/// question is not how expensive a frame is — it is which line of code keeps
-/// requesting them. Nothing in the normal toolkit answers that: the frame is
-/// not slow, so no stall fires; Dart's CPU cost is near zero, so a profiler
-/// points at the engine; and reading the source only produces candidates.
-///
-/// So this overrides [scheduleFrame] and captures a stack for a short burst,
-/// folds identical stacks together, and logs the busiest few. It runs in
-/// RELEASE, which matters: debug mode's own machinery schedules frames that a
-/// release build never would, and `debugPrintScheduleFrameStacks` is
-/// assert-guarded and therefore unavailable in the build people actually run.
-///
-/// Off unless [startBurst] is called. One burst, then it disarms itself and
-/// costs a single boolean check per frame forever after.
+/// A Flutter app only renders when something calls `scheduleFrame()`. Nothing
+/// in the normal toolkit names the caller: the frame is not slow, so no stall
+/// fires, and Dart's cost is near zero, so a profiler points at the engine.
+/// So this overrides [scheduleFrame], folds identical stacks and logs the
+/// busiest few. It runs in RELEASE, which matters: debug mode schedules frames
+/// a release build never would, and `debugPrintScheduleFrameStacks` is
+/// assert-guarded. Off unless [startBurst] is called; one burst, then it disarms.
 class FrameScheduleProbe extends WidgetsFlutterBinding {
   static FrameScheduleProbe? _instance;
 
@@ -36,10 +28,8 @@ class FrameScheduleProbe extends WidgetsFlutterBinding {
   final Map<String, int> _folded = {};
   void Function(String line)? _sink;
 
-  /// Capture the next [samples] `scheduleFrame()` stacks, then report.
-  ///
-  /// [delay] exists so startup — which legitimately schedules a great many
-  /// frames — is not what gets measured.
+  /// Capture the next [samples] `scheduleFrame()` stacks, then report. [delay]
+  /// exists so startup, which legitimately schedules many frames, is not measured.
   void startBurst({
     required void Function(String line) sink,
     Duration delay = const Duration(seconds: 20),

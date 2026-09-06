@@ -5,16 +5,11 @@ import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/ui/components/hollow_focus_ring.dart';
 
-/// Button variant for Hollow-branded buttons.
 enum HollowButtonVariant { filled, ghost, outline, danger }
 
-/// Custom Hollow button — no Material ripple, spring physics interactions.
-///
-/// Four variants:
-/// - **filled**: solid accent bg, white text (primary action)
-/// - **ghost**: transparent bg, accent text (secondary action, replaces TextButton)
-/// - **outline**: 1px accent border, accent text
-/// - **danger**: error-red bg, white text (destructive actions)
+/// Custom Hollow button: no Material ripple, spring physics. `filled` is the
+/// primary action, `ghost` the secondary, `outline` a bordered variant, and
+/// `danger` is reserved for destructive confirmations.
 class HollowButton extends StatefulWidget {
   final VoidCallback? onPressed;
   final Widget child;
@@ -23,15 +18,13 @@ class HollowButton extends StatefulWidget {
   final bool expand;
   final bool compact;
 
-  /// Tints an [HollowButton.outline] with the error color (red border + red
-  /// text) instead of accent — a non-destructive-looking way to flag a
-  /// cautionary action (e.g. Block/Report) without the solid-red `.danger`
-  /// fill that's reserved for confirm dialogs. No effect on other variants.
+  /// Tints an [HollowButton.outline] with the error colour, to flag a
+  /// cautionary action without the solid `.danger` fill that confirm dialogs
+  /// own. No effect on other variants.
   final bool danger;
 
-  /// Screen-reader label override. Usually null — the [child] text auto-names
-  /// the button. Only set this for icon-only buttons (no text child) or when
-  /// the visible text isn't the right thing to announce.
+  /// Usually null, because the [child] text auto-names the button. Set it for
+  /// an icon-only button, or when the visible text is the wrong announcement.
   final String? semanticLabel;
 
   const HollowButton({
@@ -156,9 +149,8 @@ class _HollowButtonState extends State<HollowButton>
         fg = hollow.textOnAccent;
         hoverBg = hollow.accentHover;
       case HollowButtonVariant.ghost:
-        // Resting bg = hover color at zero alpha, NOT Colors.transparent
-        // (transparent BLACK) — the color lerp passed through semi-opaque
-        // dark colors, flashing dark on hover/unhover in light mode.
+        // The hover colour at zero alpha, NOT Colors.transparent: that is
+        // transparent BLACK, and the lerp flashes dark on hover and unhover.
         bg = hollow.accentMuted.withValues(alpha: 0.0);
         fg = hollow.accent;
         hoverBg = hollow.accentMuted;
@@ -180,12 +172,11 @@ class _HollowButtonState extends State<HollowButton>
     }
 
     final effectiveBg = _hovering && isInteractive ? hoverBg : bg;
-    // No hover glow: the 8px blurred halo painted OUTSIDE the button's
-    // outline — hover must never read bigger than the control itself.
+    // No hover glow: a blurred halo paints OUTSIDE the button's outline, and
+    // hover must never read bigger than the control.
 
-    // Larger Text (a11y P3): scale the icon alongside the label so an
-    // icon+text button stays visually balanced at high OS text scale (the
-    // label scales via textScaler; a fixed icon would look small next to it).
+    // The label scales with the OS text setting, so the icon has to as well or
+    // it looks small beside it.
     final textScaler = MediaQuery.textScalerOf(context);
     final iconBox = textScaler.scale(16);
     final iconGlyph = textScaler.scale(14);
@@ -247,9 +238,7 @@ class _HollowButtonState extends State<HollowButton>
             _controller.reverse();
           },
           child: Semantics(
-            // Button role for assistive tech. semanticLabel is null for normal
-            // text buttons (the child Text auto-names them); set it only for
-            // icon-only buttons. Semantic onTap mirrors the gesture handler.
+            // The semantic onTap mirrors the gesture handler.
             button: true,
             enabled: isInteractive,
             label: widget.semanticLabel,

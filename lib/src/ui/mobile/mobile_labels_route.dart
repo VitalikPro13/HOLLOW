@@ -64,7 +64,6 @@ class _MobileLabelsRouteState extends ConsumerState<MobileLabelsRoute> {
       body: SafeArea(
         child: Column(
           children: [
-            // Header
             Container(
               padding: const EdgeInsets.symmetric(
                 horizontal: HollowSpacing.sm, vertical: HollowSpacing.sm,
@@ -100,7 +99,6 @@ class _MobileLabelsRouteState extends ConsumerState<MobileLabelsRoute> {
               ),
             ),
 
-            // Content
             Expanded(
               child: _loading
                   ? const Center(child: CircularProgressIndicator())
@@ -122,7 +120,6 @@ class _MobileLabelsRouteState extends ConsumerState<MobileLabelsRoute> {
                       : ListView(
                           padding: const EdgeInsets.all(HollowSpacing.lg),
                           children: [
-                            // Self-assign section
                             _SelfAssignSection(
                               labels: _labels,
                               members: _members,
@@ -131,7 +128,6 @@ class _MobileLabelsRouteState extends ConsumerState<MobileLabelsRoute> {
                               onReload: _reload,
                             ),
 
-                            // Management section
                             if (canManage) ...[
                               const SizedBox(height: HollowSpacing.xl),
                               _ManageSection(
@@ -152,8 +148,8 @@ class _MobileLabelsRouteState extends ConsumerState<MobileLabelsRoute> {
     );
   }
 
-  /// Create (existing == null) or edit a label, with the Cosmetic/Access
-  /// choice (access labels gate channels and are staff-assigned only).
+  /// Creates a label, or edits [existing]. Access labels gate channels and are
+  /// staff-assigned only.
   void _showLabelDialog(BuildContext context, {crdt_api.LabelFfi? existing}) {
     final nameController = TextEditingController(text: existing?.name ?? '');
     var selectedColor = existing != null
@@ -258,8 +254,8 @@ class _MobileLabelsRouteState extends ConsumerState<MobileLabelsRoute> {
                       );
                     }
                     await _reload();
-                    // `context` is the helper's parameter, not this State's —
-                    // guard the element actually used for the toast.
+                    // `context` is the helper's parameter, not this State's, so
+                    // the guard has to name the element used for the toast.
                     if (context.mounted) {
                       HollowToast.show(context,
                           existing == null ? 'Label created' : 'Label updated',
@@ -319,8 +315,8 @@ class _SelfAssignSection extends StatelessWidget {
           children: labels.map((label) {
             final color = parseLabelColor(label.color);
             final isAssigned = myLabelIds.contains(label.labelId);
-            // Access labels are staff-assigned; activation announces why
-            // instead of silently no-oping.
+            // Access labels are staff-assigned, so activation says why rather
+            // than silently doing nothing.
             if (label.access) {
               return LabelChip(
                 label: label,
@@ -370,8 +366,8 @@ class _SelfAssignSection extends StatelessWidget {
                       size: 14, color: color,
                     ),
                     const SizedBox(width: HollowSpacing.xs),
-                    // Larger Text (a11y P3): free-form label name — ellipsize
-                    // so it can't overflow the chip Row at high text scale.
+                    // A free-form label name overflows the chip Row at a high
+                    // text scale unless it ellipsizes.
                     Flexible(
                       child: Text(label.name,
                           maxLines: 1,

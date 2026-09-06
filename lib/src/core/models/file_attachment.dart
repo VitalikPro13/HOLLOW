@@ -14,10 +14,8 @@ class FileAttachment {
   final int chunksReceived;
   final bool isComplete;
   final String? diskPath;
-  /// Video thumbnail back-reference (Phase 6.75 video preview).
-  /// When non-null, this file is a thumbnail image for the vault-stored video
-  /// identified by [videoThumb.cid]. The UI renders a play button overlay and
-  /// triggers a vault download on tap.
+  /// Video thumbnail back-reference: non-null means this file is a thumbnail
+  /// for the vault-stored video at [videoThumb.cid], so the UI draws a play button.
   final network_api.VideoThumbRef? videoThumb;
   final int? expiredAt;
   /// Persisted share swarm reference for share-backed (>34 MB) files —

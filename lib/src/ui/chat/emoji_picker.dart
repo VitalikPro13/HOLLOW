@@ -36,12 +36,12 @@ const kQuickReactionEmojis = [
   '\u{1F480}', // skull
 ];
 
-/// The unified emoji/emote picker: full Unicode set (search + recents),
-/// the current server's custom emotes, the user's personal (global) emotes,
-/// and an FFZ browse tab (authoring-time import via OUR website cache).
+/// The unified emoji and emote picker: the Unicode set, the server's custom
+/// emotes, the user's personal ones, and an FFZ browse tab whose import is
+/// authoring-time only, through our own website cache.
 ///
-/// `onSelect` receives either a Unicode emoji or a custom-emote wire token
-/// (`[e:name:hash]`) — callers treat both as an opaque string.
+/// `onSelect` receives a Unicode emoji or a `[e:name:hash]` wire token, and
+/// callers treat both as an opaque string.
 void showEmojiPicker({
   required BuildContext context,
   required Offset anchorPosition,
@@ -52,9 +52,8 @@ void showEmojiPicker({
   late OverlayEntry entry;
   final anim = PopupAnimationController();
 
-  // Removal guard: a rapid double-tap on a cell fires onSelect twice before
-  // the removal frame builds out (the overlay widget stays mounted until the
-  // next frame) — a second remove() on an already-removed entry crashes.
+  // A rapid double-tap fires onSelect twice before the removal frame builds
+  // out, and a second remove() on an already-removed entry crashes.
   var removed = false;
   void teardown() {
     if (removed) return;
@@ -67,9 +66,8 @@ void showEmojiPicker({
   }
 
   entry = OverlayEntry(
-    // wrapEntry: the barrier must stop taking clicks the instant the
-    // exit starts, or a dismiss immediately followed by another click
-    // eats the second one.
+    // The barrier must stop taking clicks the instant the exit starts, or a
+    // dismiss followed straight away by a click eats the second one.
     builder: (ctx) => anim.wrapEntry(_EmojiPickerOverlay(
       anchorPosition: anchorPosition,
       anim: anim,
@@ -86,9 +84,7 @@ void showEmojiPicker({
   overlay.insert(entry);
 }
 
-// ---------------------------------------------------------------------------
-// Recently used (persisted in app_settings as a JSON list; newest first)
-// ---------------------------------------------------------------------------
+// Recently used, persisted in app_settings as a JSON list, newest first.
 
 const _recentsKey = 'recent_emojis';
 const _recentsMax = 24;
@@ -122,8 +118,8 @@ void _removeRecentEmoji(String emoji) {
 }
 
 void _saveRecents(List<String> recents) {
-  // try/catch AND catchError: an uninitialized bridge throws SYNCHRONOUSLY
-  // (before a Future exists), which .catchError alone can't intercept.
+  // try/catch AND catchError: an uninitialized bridge throws SYNCHRONOUSLY,
+  // before a Future exists, which `.catchError` alone cannot intercept.
   try {
     storage_api
         .saveSetting(key: _recentsKey, value: jsonEncode(recents))
@@ -131,17 +127,13 @@ void _saveRecents(List<String> recents) {
   } catch (_) {}
 }
 
-// ---------------------------------------------------------------------------
-// Emote cell context menu (right-click / long-press)
-// ---------------------------------------------------------------------------
-
 /// Small anchored menu for removing an emote from a personal collection.
-/// Deliberately a menu, not a dialog: the picker stays open behind it and
-/// the single destructive item doubles as the confirmation step.
 ///
-/// Inserted as an OverlayEntry ON TOP of the root overlay — the picker
-/// itself is a raw OverlayEntry above the navigator's routes, so a dialog
-/// route would render BEHIND it.
+/// Deliberately a menu, not a dialog: the picker stays open behind it and the
+/// single destructive item doubles as the confirmation. It goes in as an
+/// OverlayEntry on top of the root overlay, because the picker is itself a raw
+/// OverlayEntry above the navigator's routes and a dialog route renders BEHIND
+/// it.
 void _showEmoteContextMenu(
   BuildContext context,
   Offset globalPosition, {
@@ -158,8 +150,7 @@ void _showEmoteContextMenu(
 
   final overlay = Overlay.of(context);
   late OverlayEntry entry;
-  // Same double-remove guard as the picker itself: a stray second dismiss
-  // before the removal frame builds out must not crash.
+  // Same double-remove guard as the picker itself.
   var removed = false;
   void dismiss() {
     if (removed) return;
@@ -246,10 +237,6 @@ void _showEmoteContextMenu(
   overlay.insert(entry);
 }
 
-// ---------------------------------------------------------------------------
-// Overlay shell
-// ---------------------------------------------------------------------------
-
 enum _PickerTab { emoji, server, mine, ffz }
 
 class _EmojiPickerOverlay extends StatelessWidget {
@@ -283,10 +270,8 @@ class _EmojiPickerOverlay extends StatelessWidget {
     if (left + pickerWidth > screenSize.width - 8) {
       left = screenSize.width - pickerWidth - 8;
     }
-    // Normally the picker opens ABOVE the anchor, so it grows out of its
-    // bottom edge. When there is no room above it flips below, and the growth
-    // origin has to flip with it or the animation reads as sliding away from
-    // the control that opened it.
+    // The growth origin flips with the panel, or the animation reads as sliding
+    // away from the control that opened it.
     var flippedBelow = false;
     if (top < 8) {
       flippedBelow = true;
@@ -342,10 +327,6 @@ class _EmojiPickerOverlay extends StatelessWidget {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Picker body (reusable: overlay on desktop, bottom sheet on mobile)
-// ---------------------------------------------------------------------------
-
 class EmojiPickerBody extends ConsumerStatefulWidget {
   final String? serverId;
   final void Function(String emoji) onSelect;
@@ -366,7 +347,6 @@ class _EmojiPickerBodyState extends ConsumerState<EmojiPickerBody> {
   String _search = '';
   List<String> _recents = const [];
 
-  // FFZ tab state.
   List<emotes_api.FfzEmote>? _ffzResults;
   bool _ffzLoading = false;
   String? _ffzError;
@@ -409,8 +389,8 @@ class _EmojiPickerBodyState extends ConsumerState<EmojiPickerBody> {
       _ffzLoading = true;
       _ffzError = null;
     });
-    // Empty search = the curated popular list; an older proxy without the
-    // curated mode answers [] — fall back to the FFZ global sets.
+    // An empty search asks for the curated list; an older proxy without that
+    // mode answers [], so the FFZ global sets are the fallback.
     final future = q.isEmpty
         ? emotes_api.ffzCurated().then((rows) async =>
             rows.isNotEmpty ? rows : await emotes_api.ffzGlobal())
@@ -446,19 +426,16 @@ class _EmojiPickerBodyState extends ConsumerState<EmojiPickerBody> {
                 : 'Search emoji…',
             isDense: true,
             prefixIcon: const Icon(LucideIcons.search, size: 14),
-            // Desktop only: type-to-search immediately. On mobile the
-            // autofocus summons the software keyboard right over the picker
-            // sheet — search focuses on tap instead.
+            // On mobile the autofocus summons the keyboard over the sheet, so
+            // search focuses on tap instead.
             autofocus: !(Platform.isAndroid || Platform.isIOS),
           ),
         ),
         Padding(
           padding: const EdgeInsets.symmetric(
               horizontal: HollowSpacing.sm, vertical: 6),
-          // EdgeScrollRow, not a bare Row: four chips in a 360px panel
-          // overflow at a larger-text setting, and a bare Row would clip the
-          // FFZ tab out of reach entirely (the GIF and sticker pickers
-          // already scroll their tab rows).
+          // EdgeScrollRow, not a bare Row: four chips overflow a 360px panel at
+          // a larger-text setting, and a Row clips the last tab out of reach.
           child: EdgeScrollRow(
             semanticLabel: 'tabs',
             children: [
@@ -532,8 +509,6 @@ class _EmojiPickerBodyState extends ConsumerState<EmojiPickerBody> {
     }
   }
 
-  // -- Server emotes tab --
-
   Widget _serverTab(HollowTheme hollow) {
     final serverId = widget.serverId!;
     final emotes = ref.watch(serverEmotesProvider(serverId)).valueOrNull ?? [];
@@ -555,8 +530,6 @@ class _EmojiPickerBodyState extends ConsumerState<EmojiPickerBody> {
       ),
     );
   }
-
-  // -- Personal emotes tab --
 
   Widget _mineTab(HollowTheme hollow) {
     final emotes = ref.watch(personalEmotesProvider).valueOrNull ?? [];
@@ -634,8 +607,6 @@ class _EmojiPickerBodyState extends ConsumerState<EmojiPickerBody> {
     }
   }
 
-  // -- FFZ browse tab --
-
   Widget _ffzTab(HollowTheme hollow) {
     if (_ffzLoading) {
       return Center(
@@ -703,8 +674,8 @@ class _EmojiPickerBodyState extends ConsumerState<EmojiPickerBody> {
   Future<void> _importFfz(emotes_api.FfzEmote e) async {
     try {
       final processed = await emotes_api.ffzImportEmote(imageUrl: e.imageUrl);
-      // FFZ names may not fit our grammar (case, symbols) — normalize, and
-      // fall back to a prompt when nothing valid survives.
+      // An FFZ name need not fit our grammar, so it is normalised and prompted
+      // for when nothing valid survives.
       var name = e.name.toLowerCase().replaceAll(RegExp(r'[^a-z0-9_]'), '');
       if (name.length > 24) name = name.substring(0, 24);
       if (name.length < 2) {
@@ -728,8 +699,6 @@ class _EmojiPickerBodyState extends ConsumerState<EmojiPickerBody> {
       }
     }
   }
-
-  // -- Shared cells --
 
   Widget _emoteGrid(int count, Widget Function(int) cell) {
     return GridView.builder(
@@ -789,9 +758,7 @@ class _EmojiPickerBodyState extends ConsumerState<EmojiPickerBody> {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Unicode grid — lazily built by ROW so the 1.9k-emoji list stays cheap
-// ---------------------------------------------------------------------------
+// Lazily built by ROW, so the 1.9k-emoji list stays cheap.
 
 const _gridColumns = 8;
 
@@ -856,7 +823,7 @@ class _UnicodeGrid extends StatelessWidget {
     );
   }
 
-  /// Splits [emojis] into fixed-width rows and appends them to [entries].
+  /// Splits [emojis] into fixed-width rows appended to [entries].
   void _addEmojiRows(
       List<_GridEntry> entries, List<UnicodeEmoji> emojis,
       {bool recents = false}) {
@@ -867,13 +834,13 @@ class _UnicodeGrid extends StatelessWidget {
     }
   }
 
-  /// Entries for the no-search browse view: recents (if any) + all groups.
+  /// Entries for the browse view: recents, then all groups.
   List<_GridEntry> _browseEntries() {
     final entries = <_GridEntry>[];
     if (recents.isNotEmpty) {
       entries.add(_HeaderEntry('Recently used'));
-      // Recents may contain custom-emote tokens; keep only Unicode here
-      // (tokens still render fine, but the emoji tab is the Unicode home).
+      // Recents may hold custom-emote tokens, but the emoji tab is the Unicode
+      // home.
       final recentEmojis = recents
           .map((r) {
             final emote = parseEmoteToken(r);
@@ -942,7 +909,7 @@ class _UnicodeGrid extends StatelessWidget {
 class _EmojiCell extends StatelessWidget {
   final UnicodeEmoji emoji;
   final void Function(String emoji) onSelect;
-  /// Recents cells only: remove this entry from the recently-used list.
+  /// Recents cells only: removes this entry from the recently-used list.
   final VoidCallback? onRemove;
 
   const _EmojiCell({
@@ -954,7 +921,7 @@ class _EmojiCell extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
-    // A recents entry may be a custom-emote token; render it as an image.
+    // A recents entry may be a custom-emote token.
     final emote = parseEmoteToken(emoji.char);
     final cell = HollowPressable(
       onTap: () => onSelect(emoji.char),
@@ -983,16 +950,11 @@ class _EmojiCell extends StatelessWidget {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Shared authoring helpers (also used by the server settings emotes tab)
-// ---------------------------------------------------------------------------
-
-/// Pick an image file and prompt for a name while the emote is processed in
-/// the background: the name dialog opens instantly with the raw picked bytes
-/// as preview, the Rust WebP encode runs in a tracked never-throwing future
-/// (the preview swaps to the processed result when it lands), and Save awaits
-/// the in-flight processing. Returns null on cancel; shows a toast on
-/// processing failure.
+/// Picks an image file and prompts for a name while the emote is processed.
+///
+/// The dialog opens instantly on the raw picked bytes, the encode runs in a
+/// tracked never-throwing future, and Save awaits it. Null on cancel, with a
+/// toast on a processing failure.
 Future<({emotes_api.ProcessedEmote processed, String name})?> pickAndNameEmote(
     BuildContext context) async {
   final result = await FilePicker.platform.pickFiles(
@@ -1004,7 +966,7 @@ Future<({emotes_api.ProcessedEmote processed, String name})?> pickAndNameEmote(
   if (bytes == null) return null;
 
   Object? processError;
-  // Listener-less after the dialog closes, so late updates are no-ops.
+  // Listener-less once the dialog closes, so a late update is a no-op.
   final processedHash = ValueNotifier<String?>(null);
   final processing = emotes_api
       .processAndStoreEmote(rawBytes: bytes)
@@ -1037,7 +999,7 @@ Future<({emotes_api.ProcessedEmote processed, String name})?> pickAndNameEmote(
   );
   if (name == null) return null; // cancelled
   if (name.isEmpty) {
-    // Sentinel from the dialog: Save was pressed but processing failed.
+    // The dialog's sentinel for Save pressed after processing failed.
     if (context.mounted) {
       HollowToast.show(
           context, '$processError'.replaceFirst('Exception: ', ''),
@@ -1050,7 +1012,7 @@ Future<({emotes_api.ProcessedEmote processed, String name})?> pickAndNameEmote(
   return (processed: processed, name: name);
 }
 
-/// Prompt for an emote name (grammar-validated). Returns null on cancel.
+/// Prompts for a grammar-validated emote name. Null on cancel.
 Future<String?> promptEmoteName(BuildContext context,
     {required String hash, String initial = ''}) {
   return _promptEmoteNameImpl(
@@ -1062,9 +1024,9 @@ Future<String?> promptEmoteName(BuildContext context,
 
 final _emoteNameRegex = RegExp(r'^[a-z0-9_]{2,24}$');
 
-/// Shared name dialog. When [processing] is set, Save awaits it under a
-/// spinner and pops '' if it resolved null (= failed) — the caller toasts;
-/// pop(null) means the user cancelled.
+/// Shared name dialog. With [processing] set, Save awaits it under a spinner
+/// and pops '' when it resolved null, which the caller toasts; a null pop is a
+/// cancel.
 Future<String?> _promptEmoteNameImpl(
   BuildContext context, {
   required Widget preview,

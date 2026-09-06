@@ -128,9 +128,8 @@ class SystemNotificationNotifier
     final profiles = ref.read(profileProvider);
     final senderName = displayNameFor(profiles, fromPeerId);
 
-    // Mobile: route by lifecycle. Backgrounded-but-connected → real OS banner
-    // (the live node received this over WS; in-app banners can't draw while
-    // backgrounded). Foreground → fall through to the in-app card path below.
+    // Mobile: route by lifecycle. Backgrounded-but-connected gets a real OS
+    // banner, since in-app banners can't draw while backgrounded.
     if (Platform.isAndroid || Platform.isIOS) {
       final lifecycle = ref.read(appLifecycleProvider);
       if (lifecycle.isBackground) {
@@ -144,8 +143,7 @@ class SystemNotificationNotifier
         );
         return;
       }
-      // Foreground on mobile: show the in-app card (MobileNotificationBanner /
-      // MobileInChatBanner watch these).
+      // Foreground on mobile: the in-app card path below.
       _addMessage(
         sourceKey: fromPeerId,
         title: senderName,
@@ -187,10 +185,9 @@ class SystemNotificationNotifier
     }
   }
 
-  /// Show a notification for a new channel message. `isMention` is computed
-  /// ONCE at the event gate (event_provider) and passed in — this method used
-  /// to re-derive it from a drifted copy of the check whose `replyToMid !=
-  /// null` clause was a tautology that neutered "Mentions only" (#42).
+  /// Show a notification for a new channel message. `isMention` is computed ONCE
+  /// at the event gate and passed in: this method used to re-derive it from a
+  /// drifted copy whose `replyToMid != null` tautology neutered "Mentions only" (#42).
   Future<void> notifyChannel({
     required String serverId,
     required String channelId,
@@ -251,9 +248,8 @@ class SystemNotificationNotifier
     }
 
     if (await _useNativeToast()) {
-      // Native OS toast — channel line carries the sender name (multiple people
-      // post in a channel, unlike a DM). Use the SENDER's avatar (a real peer id;
-      // passing the serverId to getPushProfile would never resolve).
+      // Native OS toast: the channel line carries the sender name. Use the SENDER's
+      // avatar, since passing the serverId to getPushProfile would never resolve.
       final avatar = await _avatarFor(fromPeerId);
       DesktopNotificationService.instance.showChannel(
         serverId: serverId,
@@ -285,9 +281,8 @@ class SystemNotificationNotifier
     state = state.where((c) => c.sourceKey != sourceKey).toList();
   }
 
-  /// Dismiss the pending card for a DM the user just opened. Chat-open must
-  /// clear its in-app card the same way it clears the OS notification —
-  /// otherwise the card lingers and replays later (and occupies the card cap).
+  /// Dismiss the pending card for a DM the user just opened: otherwise the card
+  /// lingers, replays later and occupies the card cap.
   void dismissDm(String peerId) => dismissCard(peerId);
 
   /// Dismiss the pending card for a channel the user just opened.
@@ -299,12 +294,9 @@ class SystemNotificationNotifier
     state = [];
   }
 
-  // ── In-app overlay cards ──────────────────────────────────────
-
-  /// In-app cards are the ONE surface that had no sound of its own: the native
-  /// toast path already rings with the OS notification sound, so hooking the
-  /// Hollow sound in here (rather than at the top of notifyDm/notifyChannel)
-  /// keeps the one-surface-one-sound-per-message property (#55).
+  /// In-app cards are the ONE surface with no sound of its own: the native toast
+  /// path rings with the OS sound, so hooking the Hollow sound here keeps
+  /// one-surface-one-sound-per-message (#55).
   void _addMessage({
     required String sourceKey,
     required String title,
@@ -340,8 +332,6 @@ class SystemNotificationNotifier
     state = cards;
   }
 
-  // ── Helpers ───────────────────────────────────────────────────
-
   /// Bring the desktop window to the foreground (used when a native toast is
   /// tapped). Public so the toast open-handler in the shell can call it.
   Future<void> bringWindowToFront() => _bringWindowToFront();
@@ -351,17 +341,13 @@ class SystemNotificationNotifier
     return channels[channelId]?.name ?? 'channel';
   }
 
-  /// Which surface this message gets. `event_provider` already guaranteed we're
-  /// NOT viewing this exact chat (visible + focused + selected + at-bottom), so
-  /// exactly ONE surface fires here:
-  ///  • Native OS toast when the window is hidden (tray) OR unfocused.
-  ///  • In-app card only when the window is visible AND provably focused
-  ///    (focused-but-other-conversation) — a toast there as well was redundant
-  ///    noise.
+  /// Which surface this message gets. `event_provider` already guaranteed we are
+  /// NOT viewing this exact chat, so exactly ONE surface fires: a native OS toast
+  /// when the window is hidden or unfocused, an in-app card only when it is
+  /// visible AND provably focused.
   ///
-  /// Ties go to the toast. The card is invisible whenever the window isn't on
-  /// top, so guessing "focused" loses the message outright, while guessing
-  /// "unfocused" only costs a redundant toast.
+  /// Ties go to the toast: the card is invisible whenever the window isn't on top,
+  /// so guessing "focused" loses the message, guessing "unfocused" costs a toast.
   Future<bool> _useNativeToast() async {
     if (await _isWindowHidden()) return true;
     if (!await _isWindowFocused()) return true;
@@ -384,18 +370,14 @@ class SystemNotificationNotifier
 
   /// Whether the user is *positively established* to be looking at our window.
   ///
-  /// Two independent sources, and both must agree:
-  ///  • `windowFocusedProvider` — event-driven, fed by window_manager's
-  ///    `onWindowFocus`/`onWindowBlur` (WM_NCACTIVATE on Windows). This is the
-  ///    same source the event gate in `event_provider` uses.
-  ///  • `windowManager.isFocused()` — a live `GetForegroundWindow()` compare.
+  /// Two independent sources must agree: `windowFocusedProvider` (event-driven,
+  /// the same source the event gate uses) and `windowManager.isFocused()` (a live
+  /// foreground-window compare).
   ///
-  /// The two branches downstream are NOT symmetric: the native toast is always
-  /// visible, the in-app card is invisible the moment another app is on top.
-  /// So "focused" has to be proven, never assumed — either source saying "not
-  /// focused" wins, and a query that throws counts as not focused. Before this,
-  /// the `catch` returned `true` and a single lying source was enough to route
-  /// a message into a card nobody could see (Flutter 3.47 field report).
+  /// The downstream branches are NOT symmetric: a native toast is always visible,
+  /// an in-app card is invisible the moment another app is on top. So "focused"
+  /// must be proven: either source saying "not focused" wins, and a query that
+  /// throws counts as not focused.
   Future<bool> _isWindowFocused() async {
     final eventFocused = ref.read(windowFocusedProvider);
     bool nativeFocused;
@@ -409,13 +391,10 @@ class SystemNotificationNotifier
       // Whichever source is wrong, the next field report names it.
       notifLog(
           'focus sources disagree: native=$nativeFocused event=$eventFocused');
-      // One-way repair. A missed `onWindowBlur` leaves the provider stuck on
-      // `true`, and the gate in event_provider (which only has the provider)
-      // then reads "user is viewing this chat" and drops the message silently.
-      // Writing the live native `false` back un-sticks it for the next message.
-      // Deliberately never the other direction: `isFocused()` returning a wrong
-      // `true` is the very failure this method exists to survive, so it must
-      // not be allowed to overwrite a correct `false`.
+      // One-way repair. A missed `onWindowBlur` leaves the provider stuck on `true`,
+      // and the gate in event_provider then drops the message silently; writing the
+      // live native `false` back un-sticks it. Never the other direction: a wrong
+      // `true` from `isFocused()` is the failure this method exists to survive.
       if (!nativeFocused) {
         ref.read(windowFocusedProvider.notifier).state = false;
       }

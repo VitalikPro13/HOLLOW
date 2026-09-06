@@ -12,10 +12,6 @@ import 'package:hollow/src/ui/components/link_health_chip.dart';
 import 'package:hollow/src/ui/components/speaking_border.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-// ─────────────────────────────────────────────────
-// Clustered avatar layout with speaking indicators
-// ─────────────────────────────────────────────────
-
 class MobileClusteredAvatars extends StatelessWidget {
   final List<String> participants;
   final Set<String> speakingSet;
@@ -93,10 +89,6 @@ class MobileClusteredAvatars extends StatelessWidget {
   }
 }
 
-// ─────────────────────────────────────────────────
-// Single avatar with animated teal speaking glow (rounded square)
-// ─────────────────────────────────────────────────
-
 class MobileSpeakingAvatar extends ConsumerWidget {
   final String peerId;
   final double size;
@@ -117,9 +109,8 @@ class MobileSpeakingAvatar extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final hollow = HollowTheme.of(context);
     final profiles = ref.watch(profileProvider);
-    // VC participants are keyed by the ROUTABLE WS sender (a DEVICE id for
-    // multi-device peers) — collapse to the MASTER for the avatar/name
-    // lookups (both master-keyed). Single-device → no-op.
+    // VC participants are keyed by the ROUTABLE WS sender, a DEVICE id for
+    // multi-device peers, while avatar and name lookups are master-keyed.
     final displayId = ref.watch(deviceLinkProvider).identityOf(peerId);
     final displayName = displayNameFor(profiles, displayId);
     final localPeerId = ref.read(identityProvider).peerId ?? '';
@@ -140,7 +131,6 @@ class MobileSpeakingAvatar extends ConsumerWidget {
           child: Stack(
             children: [
               // No frame under a speaking ring: the two are the same picture.
-              // See the note in chat_pane's call avatars.
               HollowAvatar(peerId: displayId, size: size, frameId: ''),
               // Muted badge bottom-left, deafened badge bottom-right.
               if (isMuted)
@@ -175,9 +165,9 @@ class MobileSpeakingAvatar extends ConsumerWidget {
           ),
           overflow: TextOverflow.ellipsis,
         ),
-        // Per-peer link flair, under the name. In a mesh a member on bad
-        // Wi-Fi is that member's leg: it belongs on their avatar, never on
-        // the channel. Our own avatar has no leg of its own to report.
+        // In a mesh, a member on bad Wi-Fi is that member's leg, so the flair
+        // belongs on their avatar and never on the channel. Our own avatar has
+        // no leg of its own to report.
         if (!isMe)
           Consumer(builder: (context, ref, _) {
             final health =
@@ -219,10 +209,6 @@ class _AvatarBadge extends StatelessWidget {
   }
 }
 
-// ─────────────────────────────────────────────────
-// Circular control button
-// ─────────────────────────────────────────────────
-
 class MobileControlButton extends StatelessWidget {
   final IconData icon;
   final double iconSize;
@@ -231,11 +217,10 @@ class MobileControlButton extends StatelessWidget {
   final Color backgroundColor;
   final VoidCallback? onTap;
 
-  /// Optional secondary action (e.g. long-pressing the speaker button opens
-  /// the audio-device picker).
+  /// Optional secondary action, such as the speaker button's route picker.
   final VoidCallback? onLongPress;
 
-  /// Screen-reader name for this icon-only control (e.g. "Mute", "Leave call").
+  /// Screen-reader name for this icon-only control.
   final String? semanticLabel;
 
   const MobileControlButton({

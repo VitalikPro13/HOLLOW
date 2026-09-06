@@ -5,20 +5,15 @@
 
 import 'package:flutter/material.dart';
 
-/// Makes a full-screen slide-up sheet (call screen, voice channel screen)
-/// draggable: swipe down anywhere to pull the sheet with the finger and
-/// minimize it, exactly like the iOS back-swipe but vertical.
+/// Makes a full-screen slide-up sheet draggable: swipe down to pull it with the
+/// finger and minimize it, like the iOS back-swipe but vertical.
 ///
-/// Works by driving the enclosing route's transition controller directly
-/// (the Cupertino back-gesture mechanism) instead of a local Transform —
-/// while the controller sits below 1.0 the Navigator paints the previous
-/// route underneath, so the chat shows through as the sheet moves. Release
-/// past the threshold (or a downward fling) pops the route; otherwise the
-/// sheet springs back. Routes stay opaque, so there is zero extra paint
-/// cost when the sheet is at rest.
-///
-/// The drag is an enhancement only — both call screens keep their labeled
-/// "Minimize" button as the accessible path.
+/// It drives the enclosing route's transition controller rather than a local
+/// Transform, so the Navigator paints the previous route underneath while the
+/// controller sits below 1.0 and the chat shows through as the sheet moves.
+/// Routes stay opaque, so a sheet at rest costs no extra paint. The drag is an
+/// enhancement only: both call screens keep a labelled Minimize button as the
+/// accessible path.
 class MobileSheetDragToMinimize extends StatefulWidget {
   final Widget child;
 
@@ -37,7 +32,7 @@ class _MobileSheetDragToMinimizeState extends State<MobileSheetDragToMinimize> {
 
   void _onDragStart(DragStartDetails details) {
     final route = ModalRoute.of(context);
-    // Only grab the route when it is settled on top — never mid-transition.
+    // Only when the route is settled on top, never mid-transition.
     if (route == null ||
         !route.isCurrent ||
         route.controller == null ||
@@ -89,8 +84,8 @@ class _MobileSheetDragToMinimizeState extends State<MobileSheetDragToMinimize> {
 
   @override
   void dispose() {
-    // A drag can die with the widget (e.g. the call ends mid-drag and the
-    // route auto-pops); make sure the navigator's gesture flag is released.
+    // A drag can die with the widget, so the navigator's gesture flag has to be
+    // released here too.
     if (_dragging) {
       _navigator?.didStopUserGesture();
       _route = null;

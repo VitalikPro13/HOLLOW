@@ -6,12 +6,8 @@ import 'package:hollow/src/ui/archive/shared/archive_sender_filter.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-// ── Desktop toolbar ─────────────────────────────────────────────
-
-/// Desktop archive header: leading + title/subtitle, message count,
-/// sender filter, jump-to-date, search, optional export, read-only badge.
-/// Used by both the My Data viewer and the imported-archive viewer
-/// (imported = no export button).
+/// Desktop archive header, shared by the My Data viewer and the imported-archive
+/// viewer, which has no export button.
 class ArchiveToolbar extends StatelessWidget {
   final Widget leading;
   final String title;
@@ -100,9 +96,7 @@ class ArchiveToolbar extends StatelessWidget {
           ),
           if (messageCount != null)
             // NOT Flexible: a second flex child would split the row's free
-            // space with the title's Expanded and leave a dead gap on the
-            // right. The title Expanded owns all slack; the count + trailing
-            // controls hug the right edge. Counts are short/bounded.
+            // space with the title's Expanded and leave a dead gap on the right.
             Text(
               '$countText messages',
               maxLines: 1,
@@ -112,7 +106,6 @@ class ArchiveToolbar extends StatelessWidget {
                 fontSize: 11,
               ),
             ),
-          // Peer filter (channel archives only).
           if (senderIds != null && senderIds!.length > 1) ...[
             const SizedBox(width: HollowSpacing.xs),
             ArchiveFilterButton(
@@ -181,11 +174,8 @@ class ArchiveToolbar extends StatelessWidget {
   }
 }
 
-// ── Mobile toolbar ──────────────────────────────────────────────
-
-/// Mobile archive header: back button, leading + two-line title, filter,
-/// jump-to-date, search, optional export, read-only badge. Used by both
-/// the My Data viewer route and the imported-archive viewer route.
+/// Mobile archive header, shared by the My Data viewer route and the
+/// imported-archive viewer route.
 class ArchiveMobileToolbar extends StatelessWidget {
   final Widget leading;
   final String title;

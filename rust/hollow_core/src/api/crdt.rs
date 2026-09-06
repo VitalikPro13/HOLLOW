@@ -11,12 +11,11 @@ pub struct ServerFfi {
     pub channel_count: u32,
 }
 
-/// A join that has not completed yet, for the pending tile (Dart-visible).
+/// A join that has not completed yet, for the pending tile.
 ///
-/// `state` is `pending` (waiting for a member to come back) or `rejected` (a
-/// member answered no; `reason` says which gate). `last_deposited_at` is when
-/// the request was last written into the server room's join ring, 0 while the
-/// join is still live.
+/// `state` is `pending` or `rejected` (`reason` says which gate refused), and
+/// `last_deposited_at` is when the request was last written into the server room's
+/// join ring, 0 while the join is still live.
 pub struct PendingJoinFfi {
     pub server_id: String,
     pub requested_at: i64,
@@ -27,10 +26,10 @@ pub struct PendingJoinFfi {
 
 /// Channel info for FFI (Dart-visible).
 ///
-/// `me_can_see` / `me_can_post` are computed HERE with the full Rust
-/// predicate (tier ladder + label gates + unexpired grants + SEND_MESSAGES
-/// bit) so Dart never re-implements the access ladder. Mute is NOT folded
-/// into `me_can_post` — it stays a separate signal (`get_muted_members`).
+/// `me_can_see` / `me_can_post` are computed HERE with the full Rust predicate (tier
+/// ladder, label gates, unexpired grants, SEND_MESSAGES bit) so Dart never
+/// re-implements the access ladder. Mute is NOT folded into `me_can_post`: it stays
+/// a separate signal.
 pub struct ChannelFfi {
     pub channel_id: String,
     pub name: String,
@@ -127,17 +126,13 @@ pub fn create_server(name: String) -> Result<String, String> {
 
 /// Create a channel in a server. Returns the NEW channel's id.
 ///
-/// The id is minted here rather than inside the handler, because the caller
-/// needs it in the same breath: "create a channel in this category" puts the
-/// new channel into the layout, and the layout is written before any event
-/// comes back. This used to return the string "pending", so that write left a
-/// dangling layout entry — the category looked right (the unplaced channel is
-/// drawn straight after it) while nothing was actually in it, and collapsing
-/// the category left the channel behind.
+/// The id is minted here rather than inside the handler because the caller needs it
+/// in the same breath: "create a channel in this category" writes the layout before
+/// any event comes back, and a placeholder id left a dangling layout entry.
 ///
-/// The channel itself is still created asynchronously, and a permission
-/// failure still drops the whole thing, so a caller that stores this id must
-/// tolerate an id that never materialises. Layout normalisation does: it drops
+/// The channel itself is still created asynchronously and a permission failure drops
+/// the whole thing, so a caller that stores this id must tolerate one that never
+/// materialises. Layout normalisation does: it drops references to missing channels.
 /// references to channels that do not exist.
 #[frb]
 pub fn create_channel(
@@ -149,8 +144,8 @@ pub fn create_channel(
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
-    // Release the global node mutex BEFORE the (possibly waiting) send —
-    // holding it across block_on(send) serializes all other FFI calls.
+    // Drop the mutex before the send: holding it across block_on(send) serializes
+    // every other FFI call.
     drop(guard);
 
     let channel_id = node::new_channel_id(&server_id);
@@ -175,8 +170,6 @@ pub fn remove_channel(server_id: String, channel_id: String) -> Result<(), Strin
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
-    // Release the global node mutex BEFORE the (possibly waiting) send —
-    // holding it across block_on(send) serializes all other FFI calls.
     drop(guard);
 
     let rt = get_runtime();
@@ -198,9 +191,8 @@ pub fn get_joined_servers() -> Result<Vec<ServerFfi>, String> {
     let store = store_guard.as_ref().ok_or("Message store is not open")?;
     let servers = store.load_all_servers()?;
 
-    // Our MASTER id — memberships are master-keyed. Used to hide shells of
-    // servers we're no longer a member of (see below). If the identity can't
-    // load (locked), skip the membership filter rather than hiding everything.
+    // Our MASTER id, since memberships are master-keyed. If the identity cannot load
+    // (locked), skip the membership filter rather than hiding everything.
     let local_master = crate::identity::load_existing_identity()
         .ok()
         .flatten()
@@ -214,10 +206,8 @@ pub fn get_joined_servers() -> Result<Vec<ServerFfi>, String> {
             // Hide tombstoned servers — the node retains the shell to serve the
             // deletion op to reconnecting peers, but the UI must not list it.
             if state.is_deleted() { continue; }
-            // Hide servers we LEFT / were kicked from whose shell survived (the
-            // pre-teardown bug left these stranded; the eviction paths now delete
-            // them, but a legacy DB may still hold one). Never hide a server with
-            // no members at all (a freshly-created state mid-bootstrap).
+            // Hide servers we LEFT or were kicked from whose shell survived. Never hide a
+            // server with no members at all: that is a fresh state mid-bootstrap.
             if let Some(ref me) = local_master {
                 if !state.members.is_empty() && !state.is_member(me) { continue; }
             }
@@ -234,9 +224,9 @@ pub fn get_joined_servers() -> Result<Vec<ServerFfi>, String> {
 
 /// Every join still waiting for an answer, plus the ones a member rejected.
 ///
-/// Reads the local DB like [get_joined_servers] does: these rows are written
-/// by the node's CrdtStore actor and only ever read here, so a snapshot on the
-/// FRB thread is exactly the tile's data source.
+/// Reads the local DB like [get_joined_servers]: these rows are written by the node's
+/// CrdtStore actor and only ever read here, so a snapshot on the FRB thread is
+/// exactly the tile's data source.
 #[frb]
 pub fn list_pending_joins() -> Result<Vec<PendingJoinFfi>, String> {
     let store_guard = super::storage::get_store().lock().map_err(|e| format!("Lock poisoned: {e}"))?;
@@ -287,13 +277,11 @@ pub fn retry_pending_join(server_id: String) -> Result<(), String> {
 
 /// Get channels for a specific server.
 ///
-/// Prefers a LIVE clone of the event loop's in-memory state (the copy that
-/// ENFORCES — request/reply over `GetServerStateSnapshot`): the CrdtStore
-/// flush is async fire-and-forget and `ServerUpdated` fires BEFORE it lands,
-/// so the old DB-snapshot read racing a fresh toggle write returned the
-/// PREVIOUS value and reverted optimistic UI (#44 "toggle twice to stick").
-/// Falls back to the persisted DB snapshot when the node isn't running (or
-/// the reply times out) so early-startup callers keep working.
+/// Prefers a LIVE clone of the event loop's in-memory state, the copy that ENFORCES:
+/// the CrdtStore flush is async fire-and-forget and `ServerUpdated` fires BEFORE it
+/// lands, so a DB-snapshot read racing a fresh toggle returned the PREVIOUS value and
+/// reverted optimistic UI. Falls back to the persisted snapshot when the node is not
+/// running, so early-startup callers keep working.
 #[frb]
 pub fn get_server_channels(server_id: String) -> Result<Vec<ChannelFfi>, String> {
     if let Some(state) = live_server_state(&server_id) {
@@ -319,8 +307,8 @@ fn live_server_state(server_id: &str) -> Option<crate::crdt::server_state::Serve
     let cmd_tx = {
         let guard = node.lock().ok()?;
         guard.as_ref()?.cmd_tx.clone()
-        // Guard dropped before the blocking send (never hold the global node
-        // mutex across block_on — it serializes all other FFI calls).
+        // The guard is dropped before the blocking send: never hold the global node
+        // mutex across block_on.
     };
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
     let rt = get_runtime();
@@ -342,8 +330,7 @@ fn live_server_state(server_id: &str) -> Option<crate::crdt::server_state::Serve
 /// Shared `ServerState` → `Vec<ChannelFfi>` mapping for the live and
 /// DB-snapshot paths of [`get_server_channels`].
 fn channels_from_state(state: &crate::crdt::server_state::ServerState) -> Vec<ChannelFfi> {
-    // Local master for the me_can_see/me_can_post computation (same load
-    // pattern as get_joined_servers). None (no identity yet) fails closed.
+    // Local master for the me_can_see/me_can_post computation; no identity fails closed.
     let me = crate::identity::load_existing_identity()
         .ok()
         .flatten()
@@ -376,9 +363,8 @@ fn channels_from_state(state: &crate::crdt::server_state::ServerState) -> Vec<Ch
                     ChannelPosting::ModeratorPlus => "moderator".to_string(),
                     ChannelPosting::AdminPlus => "admin".to_string(),
                 },
-                // EFFECTIVE flag — voice channels are never public (#44), so a
-                // stale CRDT `is_public` on one never reaches Dart (the Dart
-                // subgroup mirror + all UI read this field).
+                // EFFECTIVE flag: voice channels are never public (#44), so a stale CRDT
+                // `is_public` on one never reaches Dart.
                 is_public: ch.effective_public(),
                 slow_mode: ch.slow_mode,
                 media_only: ch.media_only,
@@ -458,8 +444,6 @@ pub fn rename_server(server_id: String, new_name: String) -> Result<(), String> 
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
-    // Release the global node mutex BEFORE the (possibly waiting) send —
-    // holding it across block_on(send) serializes all other FFI calls.
     drop(guard);
 
     let rt = get_runtime();
@@ -480,8 +464,6 @@ pub fn rename_channel(server_id: String, channel_id: String, new_name: String) -
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
-    // Release the global node mutex BEFORE the (possibly waiting) send —
-    // holding it across block_on(send) serializes all other FFI calls.
     drop(guard);
 
     let rt = get_runtime();
@@ -503,8 +485,6 @@ pub fn update_server_setting(server_id: String, key: String, value: String) -> R
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
-    // Release the global node mutex BEFORE the (possibly waiting) send —
-    // holding it across block_on(send) serializes all other FFI calls.
     drop(guard);
 
     let rt = get_runtime();
@@ -520,17 +500,14 @@ pub fn update_server_setting(server_id: String, key: String, value: String) -> R
     Ok(())
 }
 
-/// Set a server avatar. Processes the raw image to a still 128x128 WebP
-/// stored base64 in `settings["server_avatar"]` (old clients + the public
-/// sync thumb read only this). An ANIMATED source (GIF / animated WebP)
-/// additionally produces a 128px animated WebP cached content-addressed
-/// with kind='avatar' — `settings["server_avatar_anim"]` carries ONLY its
-/// hash and the bytes ride the asset rail, never the CRDT.
+/// Set a server avatar. Processes the raw image to a still 128x128 WebP stored base64
+/// in `settings["server_avatar"]`, which old clients and the public sync thumb read.
+/// An ANIMATED source additionally produces a 128px animated WebP cached
+/// content-addressed, with only its HASH in `settings["server_avatar_anim"]`.
 #[frb]
 pub fn set_server_avatar(server_id: String, raw_bytes: Vec<u8>) -> Result<(), String> {
-    // SERVER_ICON_DIM, not a person's AVATAR_DIM: this still is base64 INSIDE
-    // the CRDT, so it replicates to every member, and a server renders far
-    // smaller than a profile card.
+    // SERVER_ICON_DIM, not a person's AVATAR_DIM: this still is base64 INSIDE the
+    // CRDT, so it replicates to every member.
     let processed = crate::node::image_convert::process_still_avatar(
         &raw_bytes,
         crate::node::image_convert::SERVER_ICON_DIM,
@@ -552,8 +529,8 @@ pub fn set_server_avatar(server_id: String, raw_bytes: Vec<u8>) -> Result<(), St
         String::new()
     };
 
-    // Anim hash first so the still write (which drives UI reloads via
-    // ServerUpdated) lands with its companion already in place.
+    // Anim hash first, so the still write that drives UI reloads lands with its
+    // companion already in place.
     update_server_setting(server_id.clone(), "server_avatar_anim".into(), anim_hash)?;
     use base64::Engine;
     let b64 = base64::engine::general_purpose::STANDARD.encode(&processed);
@@ -581,10 +558,9 @@ pub fn get_server_avatar(server_id: String) -> Result<Option<Vec<u8>>, String> {
     Ok(Some(bytes))
 }
 
-/// Animated server icon as seen locally. The CRDT carries only the hash;
-/// bytes live in the content-addressed asset store (kind='avatar') and
-/// replicate via the asset rail — never through the CRDT. The still icon
-/// is separate (`get_server_avatar`).
+/// Animated server icon as seen locally. The CRDT carries only the hash; the bytes
+/// live in the content-addressed asset store and replicate via the asset rail, never
+/// through the CRDT. The still icon is separate.
 pub struct ServerAvatarAnimData {
     /// 64-hex SHA-256 of the processed animated WebP bytes.
     pub hash: String,
@@ -612,9 +588,8 @@ pub fn get_server_avatar_anim(server_id: String) -> Result<Option<ServerAvatarAn
     Ok(Some(ServerAvatarAnimData { hash, bytes }))
 }
 
-/// Server banner as seen locally. The CRDT carries only the hash; bytes
-/// live in the content-addressed asset store (kind='banner') and replicate
-/// via the asset rail — never through the CRDT.
+/// Server banner as seen locally. The CRDT carries only the hash; the bytes live in
+/// the content-addressed asset store and replicate via the asset rail.
 pub struct ServerBannerData {
     /// 64-hex SHA-256 of the processed WebP bytes.
     pub hash: String,
@@ -641,8 +616,8 @@ pub fn set_server_banner(server_id: String, raw_bytes: Vec<u8>) -> Result<(), St
         let ms = guard.as_ref().ok_or("Message store is not open")?;
         ms.save_asset_blob(&hash, &processed, animated, "banner")?;
     }
-    // Animated flag first so the hash write (which drives UI reloads via
-    // ServerUpdated) lands with its companion already in place.
+    // Animated flag first, so the hash write that drives UI reloads lands with its
+    // companion already in place.
     update_server_setting(
         server_id.clone(),
         "server_banner_animated".into(),
@@ -743,8 +718,6 @@ pub fn change_member_role(server_id: String, peer_id: String, new_role: String) 
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
-    // Release the global node mutex BEFORE the (possibly waiting) send —
-    // holding it across block_on(send) serializes all other FFI calls.
     drop(guard);
 
     let rt = get_runtime();
@@ -767,8 +740,6 @@ pub fn kick_member(server_id: String, peer_id: String) -> Result<(), String> {
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
-    // Release the global node mutex BEFORE the (possibly waiting) send —
-    // holding it across block_on(send) serializes all other FFI calls.
     drop(guard);
 
     let rt = get_runtime();
@@ -789,8 +760,6 @@ pub fn set_nickname(server_id: String, peer_id: String, nickname: String) -> Res
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
-    // Release the global node mutex BEFORE the (possibly waiting) send —
-    // holding it across block_on(send) serializes all other FFI calls.
     drop(guard);
 
     let rt = get_runtime();
@@ -811,8 +780,6 @@ pub fn set_twitch_username(server_id: String, peer_id: String, twitch_username: 
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
-    // Release the global node mutex BEFORE the (possibly waiting) send —
-    // holding it across block_on(send) serializes all other FFI calls.
     drop(guard);
 
     let rt = get_runtime();
@@ -835,8 +802,6 @@ pub fn update_channel_layout(server_id: String, layout_json: String) -> Result<(
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
-    // Release the global node mutex BEFORE the (possibly waiting) send —
-    // holding it across block_on(send) serializes all other FFI calls.
     drop(guard);
 
     let rt = get_runtime();
@@ -876,8 +841,6 @@ pub fn pin_message(server_id: String, channel_id: String, message_id: String) ->
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
-    // Release the global node mutex BEFORE the (possibly waiting) send —
-    // holding it across block_on(send) serializes all other FFI calls.
     drop(guard);
 
     let rt = get_runtime();
@@ -899,8 +862,6 @@ pub fn unpin_message(server_id: String, channel_id: String, message_id: String) 
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
-    // Release the global node mutex BEFORE the (possibly waiting) send —
-    // holding it across block_on(send) serializes all other FFI calls.
     drop(guard);
 
     let rt = get_runtime();
@@ -938,8 +899,6 @@ pub fn delete_server(server_id: String) -> Result<(), String> {
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
-    // Release the global node mutex BEFORE the (possibly waiting) send —
-    // holding it across block_on(send) serializes all other FFI calls.
     drop(guard);
 
     let rt = get_runtime();
@@ -960,8 +919,6 @@ pub fn create_label(server_id: String, name: String, color: String, access: bool
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
-    // Release the global node mutex BEFORE the (possibly waiting) send —
-    // holding it across block_on(send) serializes all other FFI calls.
     drop(guard);
     let rt = get_runtime();
     rt.block_on(cmd_tx.send(node::NodeCommand::CreateLabel { server_id, name, color, access }))
@@ -975,8 +932,6 @@ pub fn delete_label(server_id: String, label_id: String) -> Result<(), String> {
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
-    // Release the global node mutex BEFORE the (possibly waiting) send —
-    // holding it across block_on(send) serializes all other FFI calls.
     drop(guard);
     let rt = get_runtime();
     rt.block_on(cmd_tx.send(node::NodeCommand::DeleteLabel { server_id, label_id }))
@@ -990,8 +945,6 @@ pub fn update_label(server_id: String, label_id: String, name: String, color: St
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
-    // Release the global node mutex BEFORE the (possibly waiting) send —
-    // holding it across block_on(send) serializes all other FFI calls.
     drop(guard);
     let rt = get_runtime();
     rt.block_on(cmd_tx.send(node::NodeCommand::UpdateLabel { server_id, label_id, name, color, access }))
@@ -1005,8 +958,6 @@ pub fn assign_label(server_id: String, label_id: String, peer_id: String) -> Res
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
-    // Release the global node mutex BEFORE the (possibly waiting) send —
-    // holding it across block_on(send) serializes all other FFI calls.
     drop(guard);
     let rt = get_runtime();
     rt.block_on(cmd_tx.send(node::NodeCommand::AssignLabel { server_id, label_id, peer_id }))
@@ -1020,8 +971,6 @@ pub fn unassign_label(server_id: String, label_id: String, peer_id: String) -> R
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
-    // Release the global node mutex BEFORE the (possibly waiting) send —
-    // holding it across block_on(send) serializes all other FFI calls.
     drop(guard);
     let rt = get_runtime();
     rt.block_on(cmd_tx.send(node::NodeCommand::UnassignLabel { server_id, label_id, peer_id }))
@@ -1054,8 +1003,6 @@ pub fn set_channel_visibility_labels(server_id: String, channel_id: String, labe
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
-    // Release the global node mutex BEFORE the (possibly waiting) send —
-    // holding it across block_on(send) serializes all other FFI calls.
     drop(guard);
     let rt = get_runtime();
     rt.block_on(cmd_tx.send(node::NodeCommand::SetChannelVisibilityLabels { server_id, channel_id, labels }))
@@ -1069,8 +1016,6 @@ pub fn set_channel_posting_labels(server_id: String, channel_id: String, labels:
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
-    // Release the global node mutex BEFORE the (possibly waiting) send —
-    // holding it across block_on(send) serializes all other FFI calls.
     drop(guard);
     let rt = get_runtime();
     rt.block_on(cmd_tx.send(node::NodeCommand::SetChannelPostingLabels { server_id, channel_id, labels }))
@@ -1085,8 +1030,6 @@ pub fn grant_channel_access(server_id: String, channel_id: String, peer_id: Stri
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
-    // Release the global node mutex BEFORE the (possibly waiting) send —
-    // holding it across block_on(send) serializes all other FFI calls.
     drop(guard);
 
     let expires_at: u64 = if duration_secs <= 0 {
@@ -1111,8 +1054,6 @@ pub fn revoke_channel_access(server_id: String, channel_id: String, peer_id: Str
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
-    // Release the global node mutex BEFORE the (possibly waiting) send —
-    // holding it across block_on(send) serializes all other FFI calls.
     drop(guard);
     let rt = get_runtime();
     rt.block_on(cmd_tx.send(node::NodeCommand::RevokeChannelAccess { server_id, channel_id, peer_id }))
@@ -1154,8 +1095,6 @@ pub fn set_channel_visibility(server_id: String, channel_id: String, visibility:
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
-    // Release the global node mutex BEFORE the (possibly waiting) send —
-    // holding it across block_on(send) serializes all other FFI calls.
     drop(guard);
 
     let rt = get_runtime();
@@ -1177,8 +1116,6 @@ pub fn set_channel_posting(server_id: String, channel_id: String, posting: Strin
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
-    // Release the global node mutex BEFORE the (possibly waiting) send —
-    // holding it across block_on(send) serializes all other FFI calls.
     drop(guard);
 
     let rt = get_runtime();
@@ -1200,8 +1137,6 @@ pub fn set_channel_public(server_id: String, channel_id: String, is_public: bool
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
-    // Release the global node mutex BEFORE the (possibly waiting) send —
-    // holding it across block_on(send) serializes all other FFI calls.
     drop(guard);
 
     let rt = get_runtime();
@@ -1224,8 +1159,6 @@ pub fn request_public_channels(server_id: String) -> Result<(), String> {
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
-    // Release the global node mutex BEFORE the (possibly waiting) send —
-    // holding it across block_on(send) serializes all other FFI calls.
     drop(guard);
 
     let rt = get_runtime();
@@ -1247,8 +1180,6 @@ pub fn request_public_channel_sync(
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
-    // Release the global node mutex BEFORE the (possibly waiting) send —
-    // holding it across block_on(send) serializes all other FFI calls.
     drop(guard);
 
     let rt = get_runtime();
@@ -1276,8 +1207,6 @@ pub fn request_public_file(
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
-    // Release the global node mutex BEFORE the (possibly waiting) send —
-    // holding it across block_on(send) serializes all other FFI calls.
     drop(guard);
 
     let rt = get_runtime();
@@ -1299,8 +1228,6 @@ pub fn leave_guest_room(server_id: String) -> Result<(), String> {
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
-    // Release the global node mutex BEFORE the (possibly waiting) send —
-    // holding it across block_on(send) serializes all other FFI calls.
     drop(guard);
 
     let rt = get_runtime();
@@ -1318,8 +1245,6 @@ pub fn ban_member(server_id: String, peer_id: String) -> Result<(), String> {
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
-    // Release the global node mutex BEFORE the (possibly waiting) send —
-    // holding it across block_on(send) serializes all other FFI calls.
     drop(guard);
 
     let rt = get_runtime();
@@ -1340,8 +1265,6 @@ pub fn unban_member(server_id: String, peer_id: String) -> Result<(), String> {
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
-    // Release the global node mutex BEFORE the (possibly waiting) send —
-    // holding it across block_on(send) serializes all other FFI calls.
     drop(guard);
 
     let rt = get_runtime();
@@ -1380,8 +1303,6 @@ pub fn mute_member(server_id: String, peer_id: String, duration_secs: i64) -> Re
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
-    // Release the global node mutex BEFORE the (possibly waiting) send —
-    // holding it across block_on(send) serializes all other FFI calls.
     drop(guard);
 
     let expires_at = if duration_secs <= 0 {
@@ -1413,8 +1334,6 @@ pub fn unmute_member(server_id: String, peer_id: String) -> Result<(), String> {
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
-    // Release the global node mutex BEFORE the (possibly waiting) send —
-    // holding it across block_on(send) serializes all other FFI calls.
     drop(guard);
 
     let rt = get_runtime();
@@ -1464,8 +1383,6 @@ pub fn set_channel_slow_mode(server_id: String, channel_id: String, seconds: u32
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
-    // Release the global node mutex BEFORE the (possibly waiting) send —
-    // holding it across block_on(send) serializes all other FFI calls.
     drop(guard);
 
     let rt = get_runtime();
@@ -1487,8 +1404,6 @@ pub fn set_channel_media_only(server_id: String, channel_id: String, media_only:
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
-    // Release the global node mutex BEFORE the (possibly waiting) send —
-    // holding it across block_on(send) serializes all other FFI calls.
     drop(guard);
 
     let rt = get_runtime();
@@ -1510,8 +1425,6 @@ pub fn change_role_permissions(server_id: String, role: String, permissions: u32
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
-    // Release the global node mutex BEFORE the (possibly waiting) send —
-    // holding it across block_on(send) serializes all other FFI calls.
     drop(guard);
 
     let rt = get_runtime();
@@ -1543,10 +1456,9 @@ pub fn get_role_permissions(server_id: String, role: String) -> Result<u32, Stri
     Ok(state.get_role_permissions(&role))
 }
 
-/// Default permissions bitmask for a role name — the single source of truth
-/// for the Dart Roles UIs (Reset button + pre-load fallback). Pure function,
-/// no store needed. "owner" → ALL; unknown strings fall back to Member
-/// (MemberRole::from_str semantics).
+/// Default permissions bitmask for a role name, the single source of truth for the
+/// Dart Roles UIs. Pure function: "owner" gets ALL, unknown strings fall back to
+/// Member.
 #[frb(sync)]
 pub fn default_role_permissions(role: String) -> u32 {
     crate::crdt::operations::MemberRole::from_str(&role).default_permissions()
@@ -1559,8 +1471,6 @@ pub fn leave_server(server_id: String) -> Result<(), String> {
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
-    // Release the global node mutex BEFORE the (possibly waiting) send —
-    // holding it across block_on(send) serializes all other FFI calls.
     drop(guard);
 
     let rt = get_runtime();
@@ -1580,8 +1490,6 @@ pub fn set_storage_pledge(server_id: String, pledge_bytes: u64) -> Result<(), St
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
-    // Release the global node mutex BEFORE the (possibly waiting) send —
-    // holding it across block_on(send) serializes all other FFI calls.
     drop(guard);
 
     let rt = get_runtime();
@@ -1615,7 +1523,6 @@ pub fn get_storage_stats(server_id: String) -> Result<StorageStatsFfi, String> {
     let member_count = state.members.len() as u32;
     let min_pledge_mb = state.min_pledge_mb();
 
-    // Load storage usage.
     let hollow_dir = crate::identity::data_dir()?;
     let db_path = hollow_dir.join("messages.db").to_str().ok_or("Invalid path")?.to_string();
     let passphrase = super::storage::derive_db_key_public()?;
@@ -1633,9 +1540,8 @@ pub fn get_storage_stats(server_id: String) -> Result<StorageStatsFfi, String> {
     let file_used = store.total_file_storage_for_server(&server_id).unwrap_or(0);
     let msg_used = store.total_message_storage_for_server(&server_id).unwrap_or(0);
 
-    // Server Storage: use manifest total if vault has data, otherwise P2P file total.
-    // Don't double-count (manifests already represent the file sizes).
-    // Message text is always added on top (not part of vault manifests or P2P files).
+    // Manifest total when the vault has data, otherwise the P2P file total, so nothing
+    // is double-counted. Message text is always added on top.
     let total_server = if server_total > 0 { server_total + msg_used } else { file_used + msg_used };
 
     Ok(StorageStatsFfi {
@@ -1701,11 +1607,8 @@ pub fn initiate_recovery_pool(server_id: String) -> Result<String, String> {
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
-    // Release the global node mutex BEFORE the (possibly waiting) send —
-    // holding it across block_on(send) serializes all other FFI calls.
     drop(guard);
 
-    // Generate random 16-char hex token.
     let mut token_bytes = [0u8; 8];
     getrandom::fill(&mut token_bytes)
         .map_err(|e| format!("Failed to generate token: {e}"))?;
@@ -1729,7 +1632,6 @@ pub fn initiate_recovery_pool(server_id: String) -> Result<String, String> {
 /// Link format: `hollow://recovery?server={server_id}&token={token}`
 #[frb]
 pub fn join_recovery_pool(invite_link: String) -> Result<(), String> {
-    // Parse the invite link.
     let server_id = invite_link
         .split("server=")
         .nth(1)
@@ -1746,8 +1648,6 @@ pub fn join_recovery_pool(invite_link: String) -> Result<(), String> {
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
-    // Release the global node mutex BEFORE the (possibly waiting) send —
-    // holding it across block_on(send) serializes all other FFI calls.
     drop(guard);
 
     let rt = get_runtime();
@@ -1768,8 +1668,6 @@ pub fn stop_recovery_pool(server_id: String) -> Result<(), String> {
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
-    // Release the global node mutex BEFORE the (possibly waiting) send —
-    // holding it across block_on(send) serializes all other FFI calls.
     drop(guard);
 
     let rt = get_runtime();
@@ -1790,8 +1688,6 @@ pub fn delete_vault_content(server_id: String, content_id: String) -> Result<(),
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
-    // Release the global node mutex BEFORE the (possibly waiting) send —
-    // holding it across block_on(send) serializes all other FFI calls.
     drop(guard);
 
     let rt = get_runtime();
@@ -1816,12 +1712,10 @@ pub fn vault_upload_file(
     file_path: String,
     message_id: String,
 ) -> Result<String, String> {
-    // Read the file
     let file_data =
         std::fs::read(&file_path).map_err(|e| format!("Failed to read file: {e}"))?;
     let original_size = file_data.len() as u64;
 
-    // Extract filename and mime type
     let path = std::path::Path::new(&file_path);
     let file_name = path
         .file_name()
@@ -1835,14 +1729,11 @@ pub fn vault_upload_file(
         .to_lowercase();
     let mime_type = crate::vault::pipeline::mime_from_ext(&ext);
 
-    // AES-256-GCM encrypt
     let encrypted = crate::vault::pipeline::aes_encrypt(&file_data)
         .map_err(|e| format!("Encryption failed: {e}"))?;
 
-    // Compute content_id
     let content_id = crate::vault::content_store::content_id(&encrypted.ciphertext);
 
-    // Send to swarm handler
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let state = guard.as_ref().ok_or("Node is not running")?;
@@ -1880,7 +1771,6 @@ pub fn vault_download_file(server_id: String, content_id: String) -> Result<Stri
     let passphrase = super::storage::derive_db_key_public()?;
     let vault_dir = hollow_dir.join("vault");
 
-    // Try to load manifest and check cache
     if let Ok(cs) = crate::vault::content_store::ContentStore::open(&db_path, &passphrase, &vault_dir) {
         if let Ok(Some(manifest)) = cs.load_manifest(&content_id) {
             let ext = crate::vault::pipeline::ext_from_filename(&manifest.file_name);
@@ -1890,12 +1780,10 @@ pub fn vault_download_file(server_id: String, content_id: String) -> Result<Stri
         }
     }
 
-    // Not in cache — send command to swarm for reconstruction
+    // Not in cache: the swarm reconstructs it.
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
-    // Release the global node mutex BEFORE the (possibly waiting) send —
-    // holding it across block_on(send) serializes all other FFI calls.
     drop(guard);
 
     let rt = get_runtime();

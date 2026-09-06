@@ -9,16 +9,12 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// The "your connection is having a moment" flair.
 ///
-/// Shown on call surfaces whenever the link is anything other than healthy.
-/// Its entire job is to make a held-open call legible: without it, a call that
-/// keeps running with soft video and a couple of seconds of silence looks like
-/// the app misbehaving, which is worse than the honest "this is the network,
-/// we are holding your call".
+/// Shown on call surfaces whenever the link is anything but healthy, so a
+/// held-open call reads as the network rather than as the app misbehaving.
 ///
-/// Deliberately static. A pulsing or spinning indicator here would mean an
-/// `AnimationController` requesting a frame every vsync on a machine that is
-/// already struggling, which is exactly backwards (see
-/// `feedback_ticker_is_a_frame_request`).
+/// Deliberately static: a pulsing indicator would request a frame every vsync
+/// on a machine that is already struggling
+/// (`feedback_ticker_is_a_frame_request`).
 class LinkHealthChip extends StatelessWidget {
   const LinkHealthChip({
     super.key,
@@ -28,9 +24,8 @@ class LinkHealthChip extends StatelessWidget {
 
   final LinkHealthSnapshot snapshot;
 
-  /// Icon only, for surfaces with no room for a label (the mobile pill, a
-  /// video tile corner). The label still reaches screen readers and the
-  /// tooltip, so nothing is lost.
+  /// Icon only, for surfaces with no room for a label. The label still reaches
+  /// screen readers and the tooltip.
   final bool compact;
 
   @override
@@ -49,8 +44,8 @@ class LinkHealthChip extends StatelessWidget {
     };
 
     final detail = snapshot.detail;
-    // One string for the tooltip and for assistive tech, so a screen reader
-    // gets the explanation and not just the two-word headline.
+    // One string for the tooltip and assistive tech, so a screen reader gets
+    // the explanation and not just the headline.
     final full = detail == null ? label : '$label. $detail';
 
     return HollowTooltip(
@@ -65,8 +60,7 @@ class LinkHealthChip extends StatelessWidget {
             vertical: HollowSpacing.xxs,
           ),
           decoration: BoxDecoration(
-            // withValues, never a lerp from transparent: animating a colour
-            // from Colors.transparent goes via black.
+            // withValues, never a lerp from transparent, which goes via black.
             color: color.withValues(alpha: 0.14),
             borderRadius: BorderRadius.circular(hollow.radiusSm),
           ),
@@ -169,13 +163,9 @@ class LinkHealthBanner extends StatelessWidget {
   }
 }
 
-/// Full-bleed status strip for the top of a call panel.
-///
-/// The floating card this replaced sat left-aligned in the middle of the panel
-/// and read as a stray widget rather than as the call telling you something.
-/// A strip that spans the panel and carries a bottom border attaches itself to
-/// the conversation the way a header does, which is where the eye already goes
-/// when something changes.
+/// Full-bleed status strip for the top of a call panel. Spanning the panel with
+/// a bottom border attaches it to the conversation the way a header does; a
+/// floating card in the middle reads as a stray widget.
 class LinkHealthHeader extends StatelessWidget {
   const LinkHealthHeader({super.key, required this.snapshot});
 
@@ -231,7 +221,7 @@ class LinkHealthHeader extends StatelessWidget {
             if (detail != null) ...[
               const SizedBox(width: HollowSpacing.sm),
               // Flexible, not Expanded: on a narrow panel the detail gives way
-              // to the label rather than forcing the row to overflow.
+              // rather than forcing the row to overflow.
               Flexible(
                 child: Text(
                   detail,

@@ -17,10 +17,9 @@ final gifThumbCacheSizeProvider = FutureProvider.autoDispose<int>((ref) {
   return GifThumbCache.instance.sizeBytes();
 });
 
-/// Actions for the Storage Manager: clear cached file bytes (all / per-context),
-/// enforce the files cache cap, and clear/evict the vault cache. Each refreshes
-/// `storageBreakdownProvider` afterward. The clear/evict FFIs keep the signed
-/// FileHeader rows (messages stay re-downloadable) — only the heavy bytes go.
+/// Actions for the Storage Manager: clear cached file bytes, enforce the files
+/// cap, and clear/evict the vault cache. Each refreshes the breakdown. The
+/// FFIs keep the signed FileHeader rows, so only the heavy bytes go.
 final storageActionsProvider = Provider<StorageActions>((ref) {
   return StorageActions(ref);
 });

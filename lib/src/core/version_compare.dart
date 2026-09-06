@@ -1,15 +1,11 @@
 /// Numeric dotted-version comparison for the updater.
 ///
-/// `hasUpdateProvider` used to fire on `latest != current`, which also fires
-/// when `latest` is OLDER. With signed manifests that matters: a host that
-/// replays an old, genuinely signed manifest must not be able to talk every
-/// install into downgrading to a build with known bugs. Only a strictly
-/// newer `latest` counts as an update; the per-version Install buttons in
-/// Settings stay a deliberate user choice.
+/// Only a strictly newer `latest` counts as an update: a host replaying an old,
+/// genuinely signed manifest must not be able to talk installs into downgrading
+/// to a build with known bugs.
 ///
-/// Returns true when [candidate] is strictly newer than [current]. Versions
-/// are dot-separated integers; a missing part counts as 0, and anything that
-/// does not parse is never "newer".
+/// Returns true when [candidate] is strictly newer than [current]. Versions are
+/// dot-separated integers; a missing part counts as 0, unparseable is never newer.
 bool isNewerVersion(String candidate, String current) {
   final a = _parts(candidate);
   final b = _parts(current);

@@ -1,27 +1,20 @@
 import 'dart:convert';
 import 'dart:io';
 
-/// Profile registry — issue #47 (switch / erase identities).
+/// Profile registry (issue #47): switch and erase identities.
 ///
-/// A "profile" is just a data root: the default OS dir, the portable
-/// `hollow_data` folder next to the exe, or any user-added folder. The registry
-/// records which one is pinned as active plus the user's custom entries. It
-/// lives at a FIXED anchor — `<default OS data root>/profiles.json` — so it is
-/// readable at boot before the data root is resolved, and survives switching
-/// (and erasing: `perform_pending_wipe` keeps it).
+/// A "profile" is just a data root. The registry records which one is pinned
+/// active plus the user's custom entries, and lives at a FIXED anchor,
+/// `<default OS data root>/profiles.json`, so it is readable at boot before the
+/// data root is resolved and survives switching and erasing.
 ///
-/// Precedence at boot (see `initHollowDataDir`):
-///   `HOLLOW_DATA_DIR` env  >  pinned active profile  >  portable marker
-///   detection  >  OS default.
-/// The pin sits ABOVE portable detection on purpose: an installed copy with a
-/// `hollow_data` folder next to the exe (implicit portable) must be able to
-/// switch back to its AppData profile. A pure stick on a foreign machine has no
-/// profiles.json, so portable detection still wins there. No registry / no
-/// active pin = exactly the pre-#47 behavior.
+/// Boot precedence: `HOLLOW_DATA_DIR` > pinned profile > portable marker > OS
+/// default. The pin sits ABOVE portable detection on purpose, so an installed
+/// copy with a `hollow_data` folder can switch back to its AppData profile; a
+/// pure stick has no profiles.json, so portable still wins there.
 ///
-/// Desktop-only: mobile data roots are sandboxed, and the iOS Notification
-/// Service Extension opens ONE fixed App Group DB path — profile switching
-/// there needs its own design.
+/// Desktop-only: mobile data roots are sandboxed and the iOS NSE opens ONE
+/// fixed App Group DB path.
 
 /// One user-added profile entry. The Default and Portable rows are implicit
 /// (derived from the environment) and never stored.
@@ -61,10 +54,9 @@ class ProfileRegistry {
   }
 }
 
-/// The default per-OS data root — mirrors Rust's `dirs::data_dir()/hollow`
-/// (identity/keys.rs::data_dir) resolved through env vars. This is where a
-/// non-portable, non-pinned install keeps its data, and where profiles.json
-/// anchors. Desktop only.
+/// The default per-OS data root, mirroring Rust's `dirs::data_dir()/hollow`
+/// resolved through env vars. Where a non-portable, non-pinned install keeps its
+/// data, and where profiles.json anchors. Desktop only.
 String defaultDesktopDataRoot() {
   final env = Platform.environment;
   if (Platform.isWindows) {

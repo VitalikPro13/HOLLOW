@@ -1,32 +1,14 @@
 //! Process-wide Lamport clock for chat-message send stamps.
 //!
-//! Chat display order is keyed on the sender-stamped pair `(timestamp ms,
-//! order_us)` everywhere (SQL `ORDER BY` in `storage/messages.rs`, Dart's
-//! millisecond stable sort, the unread ms rules). Raw wall-clock stamps break
-//! causality across machines with skewed clocks: a reply typed on a machine
-//! whose clock runs a few seconds behind stamps EARLIER than the message it
-//! answers, so every sorted view (history load, every other device) shows the
-//! reply ABOVE it — while the live view appends in arrival order, so two
-//! machines render the same thread in different orders (2026-07-06 desktop/VM
-//! field report).
-//!
-//! Fix: a classic Lamport clock. Every ingested chat message advances the
-//! clock to at least its stamp (`observe`, called from the two storage insert
-//! choke points so every path — live, sync backfill, push fetch — is covered),
-//! and every send stamps `max(now_us, clock + 1)` (`next_send_stamp_us`). A
-//! reply therefore always stamps strictly after everything its sender had
-//! seen, independent of wall-clock skew — timestamp order == conversational
-//! order on every machine, and both the signed ms `ts` and `order_us` derive
-//! from the ONE stamp (`ts = stamp / 1000`), so no ordering key can disagree.
-//!
-//! Poisoning guard: `observe` clamps to local-now + 5 minutes so one peer with
-//! a wildly-future clock (or a malicious stamp) can't drag every message we
-//! send afterwards into the far future.
-//!
-//! The clock is a process-global (like `node/resolver.rs`): one device = one
-//! clock. Harness tests run many nodes in one process and thus share it —
-//! harmless (stamps stay strictly increasing across the whole process, which
-//! only strengthens the ordering the tests assert).
+//! Display order is keyed on the sender-stamped `(timestamp ms, order_us)`, and
+//! raw wall-clock stamps break causality across skewed machines: a reply typed on
+//! a machine running seconds behind sorts ABOVE the message it answers. Every
+//! ingest calls `observe` and every send stamps `max(now_us, clock + 1)`, so a
+//! reply always stamps after everything its sender had seen, and both ordering
+//! keys derive from the ONE stamp (`ts = stamp / 1000`). `observe` clamps to
+//! local-now plus 5 minutes so a peer with a wildly-future clock cannot drag our
+//! own sends into the far future. The clock is process-global, so harness nodes
+//! share one, which only strengthens the ordering they assert.
 
 use std::sync::atomic::{AtomicI64, Ordering};
 
@@ -42,8 +24,8 @@ fn now_us() -> i64 {
         .as_micros() as i64
 }
 
-/// Advance the clock to at least `seen_us` — the microsecond stamp of any
-/// chat message being persisted (remote or our own; ours are no-ops).
+/// Advance the clock to at least `seen_us`, the stamp of any chat message being
+/// persisted (our own are no-ops).
 pub(crate) fn observe(seen_us: i64) {
     observe_on(&CLOCK_US, seen_us, now_us());
 }
@@ -91,9 +73,9 @@ mod tests {
 
     #[test]
     fn reply_stamps_after_seen_message_despite_clock_behind() {
-        // Our wall clock runs BEHIND the peer's: we see their message stamped
-        // at 5_000_000 while our own clock reads 1_000_000. The reply must
-        // still stamp AFTER the seen message (the reported desktop/VM bug).
+        // Our wall clock runs BEHIND the peer's: their message is stamped at
+        // 5_000_000 while ours reads 1_000_000, and the reply must still stamp
+        // after the seen message.
         let clock = AtomicI64::new(0);
         observe_on(&clock, 5_000_000, 1_000_000);
         let reply = next_on(&clock, 1_000_000);
@@ -102,8 +84,8 @@ mod tests {
 
     #[test]
     fn far_future_stamp_is_clamped_not_chased() {
-        // A peer stamped 1 hour in the future — the clock advances at most
-        // 5 minutes past local now, so we don't poison our own sends.
+        // A peer stamped an hour ahead: the clock advances at most 5 minutes past
+        // local now, so our own sends are not poisoned.
         let clock = AtomicI64::new(0);
         let now = 1_000_000_000;
         let hour_ahead = now + 3_600 * 1_000_000;

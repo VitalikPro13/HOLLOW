@@ -101,11 +101,8 @@ pub fn aes_decrypt(
 
 // ── Upload orchestration ─────────────────────────────────────
 
-/// Prepare a complete upload plan. Pure function — no I/O, no network.
-///
-/// The caller provides pre-encrypted data (ciphertext + key + nonce) and
-/// the pre-computed content_id. This function handles erasure coding,
-/// placement computation, and manifest creation.
+/// Prepare a complete upload plan: erasure coding, placement and manifest, from
+/// pre-encrypted data and a pre-computed content_id. Pure, with no I/O.
 #[allow(clippy::too_many_arguments)]
 pub fn prepare_upload(
     ciphertext: &[u8],
@@ -224,7 +221,6 @@ pub fn reconstruct_file(
     manifest: &VaultManifest,
     packed_shards: &[Option<Vec<u8>>],
 ) -> Result<Vec<u8>, String> {
-    // Decode AES key and nonce from manifest hex strings
     let key_vec =
         hex::decode(&manifest.encryption_key).map_err(|e| format!("Invalid AES key hex: {e}"))?;
     let nonce_vec =
@@ -270,8 +266,8 @@ pub fn vault_cache_dir() -> PathBuf {
     dir
 }
 
-/// Get the downloaded-files directory path (`~/hollow/files`). Mirror of
-/// `vault_cache_dir()` — used by the Storage Manager's files-cache eviction.
+/// The downloaded-files directory, the mirror of `vault_cache_dir()` the Storage
+/// Manager's files-cache eviction uses.
 pub fn files_dir() -> PathBuf {
     let dir = crate::identity::data_dir()
         .unwrap_or_else(|_| PathBuf::from("hollow"))

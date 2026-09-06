@@ -10,26 +10,17 @@ void _log(String msg) {
   network_api.logFromDart(message: msg);
 }
 
-/// Mobile (Android/iOS) screen-share-audio SEND path — the encode mirror of
+/// Mobile (Android/iOS) screen-share-audio SEND path, the encode mirror of
 /// `MobileScreenAudioRenderer`.
 ///
-/// Desktop spawns an out-of-process `screen_audio_capturer` exe to capture +
-/// Opus-encode system audio; a phone can't spawn a child process, so native
-/// capture streams raw PCM to Dart and the encode happens in Rust
-/// (`unsafe-libopus`, no NDK) via `encode_screen_audio`.
-///
-/// Native capture front-ends (both deliver interleaved 48 kHz stereo s16le on
-/// the `FlutterWebRTC/ScreenShareAudio` EventChannel — the same contract the
-/// macOS SCK send path uses):
-///  - Android: `AudioPlaybackCapture` riding the screen share's live
-///    MediaProjection (`startScreenShareAudioCapture`). The mic path is
-///    untouched — the user talks over the shared audio.
-///  - iOS: the ReplayKit broadcast extension's app-audio samples, forwarded
-///    by the plugin from the app-group socket.
-///
-/// Pipeline:
-///   native capture --PCM--> EventChannel --> this --FFI--> Rust Opus encode
-///     --> onPacket([seq:4 LE][opus]) --> sendScreenAudio (0x03 data channel)
+/// A phone cannot spawn the child process the desktop path uses, so native
+/// capture streams raw PCM to Dart and the Opus encode happens in Rust.
+/// Android rides the screen share's live MediaProjection through
+/// `AudioPlaybackCapture`, leaving the mic path untouched so the user can
+/// talk over the shared audio; iOS forwards the ReplayKit broadcast
+/// extension's app-audio samples. Both deliver interleaved 48 kHz stereo
+/// s16le on the `FlutterWebRTC/ScreenShareAudio` EventChannel, the same
+/// contract the macOS SCK send path uses.
 class MobileScreenAudioCapturer {
   static const MethodChannel _method = MethodChannel('FlutterWebRTC.Method');
   static const EventChannel _pcmChannel =
@@ -41,21 +32,21 @@ class MobileScreenAudioCapturer {
   int _packetCount = 0;
   int _dropped = 0;
 
-  // Encode FFI calls are async; a serial chain preserves PCM order (Opus is
-  // stateful — out-of-order frames corrupt the prediction state).
+  // Encode FFI calls are async and a serial chain preserves PCM order: Opus
+  // is stateful, so out-of-order frames corrupt the prediction state.
   Future<void> _encodeChain = Future.value();
   int _pending = 0;
 
-  // If the encode chain backs up (device stall), drop incoming PCM instead of
-  // queueing unbounded — mirrors the receive path's backlog guard.
+  // If the encode chain backs up, drop incoming PCM rather than queue it
+  // unbounded, mirroring the receive path's backlog guard.
   static const int _kMaxPendingEncodes = 32;
 
   bool get isActive => _active;
 
-  /// Start native capture + the Rust encoder. Wire packets `[seq:4 LE][opus]`
-  /// are delivered via [onPacket], ready to prefix with 0x03 for the data
-  /// channel. Returns false when native capture can't start (no live screen
-  /// share projection, Android < 10, permission missing).
+  /// Starts native capture and the Rust encoder. Wire packets
+  /// `[seq:4 LE][opus]` reach [onPacket], ready for the 0x03 prefix. False
+  /// when native capture cannot start: no live projection, Android below 10,
+  /// a missing permission.
   Future<bool> start({
     required void Function(Uint8List packet) onPacket,
   }) async {

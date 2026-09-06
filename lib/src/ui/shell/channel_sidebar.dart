@@ -56,8 +56,7 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 
 /// Full height of the server banner header (issue #25) when the sidebar has
-/// room for it. Below [kBannerHeaderMinHeight] worth of pressure it yields —
-/// see [bannerHeaderHeight].
+/// room for it; under pressure it yields, see [bannerHeaderHeight].
 const double kBannerHeaderHeight = 120;
 
 /// The banner never shrinks past this: the server name + action icons still
@@ -65,24 +64,17 @@ const double kBannerHeaderHeight = 120;
 const double kBannerHeaderMinHeight = 72;
 
 /// Share of the sidebar column the banner may occupy once space is tight.
-/// 120/0.22 ≈ 545, so this is inert at any normal desktop height and only
-/// engages when the column is genuinely short.
+/// Inert at any normal desktop height; it engages only on a short column.
 const double _kBannerHeaderMaxFraction = 0.22;
 
 /// How tall the banner header should be in a sidebar column of [available]
 /// logical pixels.
 ///
-/// **Why this is not a constant.** The interface zoom lays the whole app out
-/// at `viewport / scale` (`ui_scale.dart`), so raising the zoom does not just
-/// magnify the sidebar — it *shortens* it. On 1080p the sidebar column is
-/// ~905 logical px at 100% but only ~401 at 200%, and a flat 120px banner
-/// goes from 13% of the column to 30% of it. Stack the voice panel on top of
-/// that and over half the sidebar is chrome, which is why issue #37's 200%
-/// screenshot fits three channels. A fixed slice of a viewport that shrinks
-/// with zoom is not a fixed slice — it grows.
-///
-/// Returns the full [kBannerHeaderHeight] whenever the column can afford it,
-/// so nothing changes at ordinary window sizes.
+/// Not a constant, because the interface zoom lays the app out at
+/// `viewport / scale` and so SHORTENS the sidebar as it magnifies it: a fixed
+/// height grows as a share of the column until the chrome crowds out the
+/// channel list (issue #37). The full [kBannerHeaderHeight] is returned
+/// whenever the column can afford it.
 double bannerHeaderHeight(double available) {
   if (!available.isFinite || available <= 0) return kBannerHeaderHeight;
   return math.min(
@@ -93,28 +85,19 @@ double bannerHeaderHeight(double available) {
 
 /// Avatar edge for a voice-channel participant row.
 ///
-/// **Why this is not 18.** Issue #37: "the channel list on the left icons and
-/// names are ever so tiny". These rows were the smallest thing in the app —
-/// an 18px avatar under a 28px one everywhere else, and `caption` (11px) text
-/// directly beneath a `body` (14px) channel name. The interface zoom cannot
-/// fix that, because zoom multiplies every size by the same factor: 11-next-
-/// to-14 stays 11-next-to-14 at 200%. It was a RATIO problem inside the
-/// panel, not a scaling one. 22/13 keeps the rows subordinate to the channel
-/// name above them while landing in the same range as every other person row
-/// (member panel and chat both use 28px avatars with 13px names).
+/// A RATIO inside the panel, not a scale (issue #37): the zoom multiplies every
+/// size by the same factor, so a row that reads as too small next to the
+/// channel name above it still does at 200%. This keeps the row subordinate
+/// while landing in the same range as every other person row in the app.
 const double kVoiceParticipantAvatarSize = 22;
 
-/// Status glyphs (screen share / camera / mute / deafen) on a participant
-/// row. Sized with the avatar above, not left at 12 — they carry state a user
-/// scans for at a glance, and they were the first thing to disappear.
+/// Status glyphs (screen share, camera, mute, deafen) on a participant row.
+/// Sized with the avatar: they carry state a user scans for at a glance.
 const double kVoiceParticipantIconSize = 14;
 
-/// Channel / DM sidebar (240px). Supports two modes:
-///
-/// **Home mode** (`selectedServer == null`): room controls + peer list.
-/// **Server mode** (`selectedServer != null`): server name header + channel list.
+/// Channel / DM sidebar. A null `selectedServer` draws home mode (room controls
+/// and the peer list), otherwise server mode (name header and channel list).
 class ChannelSidebar extends StatelessWidget {
-  // -- Home mode props --
   final Map<String, PeerInfo> peers;
   final Map<String, ChatMessage> lastMessages;
   final String? selectedPeerId;
@@ -123,7 +106,6 @@ class ChannelSidebar extends StatelessWidget {
   final ChatMessage? Function(String) lastMessage;
   final String Function(DateTime) formatTime;
 
-  // -- Server mode props --
   final ServerInfo? selectedServer;
   final Map<String, ChannelInfo> channels;
   final String? selectedChannelId;
@@ -133,21 +115,20 @@ class ChannelSidebar extends StatelessWidget {
   final bool canManageChannels;
   final String channelLayoutJson;
 
-  /// Fixed width for desktop/tablet. Pass null on mobile to fill available space.
+  /// Null fills the available space, which is what mobile passes.
   final double? width;
 
-  /// When true, sidebar hides entirely when no server selected (Dock layout).
+  /// Dock layout: the sidebar hides entirely when no server is selected.
   final bool dockMode;
 
-  /// Whether to show the UserBar at the bottom. False in Dock layout.
+  /// False in Dock layout, which carries the user bar elsewhere.
   final bool showUserBar;
 
   /// Whether to draw this panel's own divider on the edge facing the chat.
   ///
   /// False wherever a [PanelResizeHandle] sits against that edge: the seam
-  /// paints the divider itself, and two of them put a second line 6px inside
-  /// the first. True for a panel with no seam beside it (the split view's
-  /// right sidebar).
+  /// paints the divider itself, and two of them put a second line just inside
+  /// the first.
   final bool edgeBorder;
 
   const ChannelSidebar({
@@ -180,7 +161,6 @@ class ChannelSidebar extends StatelessWidget {
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
 
-    // In dock mode, hide sidebar entirely when no server is selected.
     if (dockMode && selectedServer == null) {
       return const SizedBox.shrink();
     }
@@ -211,22 +191,18 @@ class ChannelSidebar extends StatelessWidget {
       width: width,
       decoration: BoxDecoration(
         color: hollow.surface,
-        // When a PanelResizeHandle sits against this edge it paints the
-        // divider itself — drawing one here too would put a second line 6px
-        // inside the first.
+        // A PanelResizeHandle against this edge paints the divider itself, and
+        // a second one lands just inside the first.
         border: Border(
           right: edgeBorder
               ? BorderSide(color: hollow.border)
               : BorderSide.none,
         ),
       ),
-      // The banner header is the only fixed-height slice of this column, and
-      // the column itself SHRINKS with the interface zoom (everything below
-      // `UiScale` lays out at `viewport / scale`). Measure what we actually
-      // got so the header can yield instead of eating the channel list —
-      // see `bannerHeaderHeight`.
-      // Panel zoom (issue #54): the column keeps its slot, the channel
-      // names, icons and avatars inside it grow together.
+      // Measure what the column actually got: it SHRINKS with the interface
+      // zoom, so the banner header has to yield rather than eat the channel
+      // list (see `bannerHeaderHeight`). Panel zoom (issue #54) keeps the slot
+      // and grows the contents.
       child: PanelScale(
         child: LayoutBuilder(
           builder: (context, constraints) {
@@ -234,13 +210,11 @@ class ChannelSidebar extends StatelessWidget {
             return Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                // Header — crossfade between server name and "Direct Messages"
                 AnimatedSwitcher(
                   duration: HollowDurations.fast,
                   child: _buildHeader(context, hollow, bannerHeight),
                 ),
 
-                // Content — crossfade between server channels and home/DM view
                 Expanded(
                   child: AnimatedSwitcher(
                     duration: HollowDurations.normal,
@@ -272,10 +246,8 @@ class ChannelSidebar extends StatelessWidget {
                   ),
                 ),
 
-                // Voice channel controls (visible when in a voice channel)
                 const VoiceChannelPanel(),
 
-                // User bar at bottom (hidden in dock mode)
                 ?userBar,
               ],
             );
@@ -303,13 +275,12 @@ class ChannelSidebar extends StatelessWidget {
             ? null
             : ref.watch(serverBannerProvider.select((m) => m[serverId]));
 
-        // No banner (and always in home/DM mode): the classic 48px header.
         if (banner == null) {
           return Container(
             key: ValueKey('header-$label'),
             height: 48,
-            // Right = sm so the action icons line up with the channel
-            // header's "+" below (its row is LTRB lg/sm).
+            // Right = sm so the action icons line up with the channel header's
+            // "+" below.
             padding: const EdgeInsets.only(
               left: HollowSpacing.lg,
               right: HollowSpacing.sm,
@@ -321,26 +292,21 @@ class ChannelSidebar extends StatelessWidget {
           );
         }
 
-        // Banner header (issue #25): the banner fills a taller header with
-        // the name + actions overlaid on a bottom-up scrim. Animated
-        // banners only play while actually watched: window focused and not
-        // reduce-motion (AnimatedGifImage enforces the latter itself);
-        // selected + mounted are implied — the sidebar renders only the
-        // selected server.
+        // Banner header (issue #25). An animated banner plays only while it is
+        // actually watched: the window is focused and motion is not reduced.
         final focused = ref.watch(windowFocusedProvider);
         return SizedBox(
-          // Hash in the key so a banner re-upload crossfades even though
-          // the server label (the old key) is unchanged. No bottom border
-          // here — the scrim fades fully into the surface, and a border on
-          // top of that fade reads as a stray line.
+          // The hash is in the key so a re-upload crossfades even though the
+          // server label has not changed. No bottom border: the scrim fades
+          // fully into the surface, and a border over that reads as a stray
+          // line.
           key: ValueKey('header-$label-${banner.hash}'),
           height: bannerHeight,
           child: Stack(
-            // The sidebar Container insets its children by its 1px right
-            // border (BoxDecoration.padding), so an in-bounds banner stops
-            // 1px short and the border color shows as a line against the
-            // image. Banner + scrim bleed 1px right over that column;
-            // Clip.none lets them paint there.
+            // The sidebar Container insets its children by its right border,
+            // so an in-bounds banner stops short of it and the border colour
+            // reads as a line against the image; the banner and scrim bleed
+            // over that column instead.
             clipBehavior: Clip.none,
             children: [
               Positioned(
@@ -355,14 +321,12 @@ class ChannelSidebar extends StatelessWidget {
                   errorWidget: const SizedBox.expand(),
                 ),
               ),
-              // Bottom-up scrim toward the sidebar surface so the header
-              // text keeps its normal theme contrast. Eased multi-stop
-              // falloff (a coarse 3-stop ramp BANDS on dark themes) that
-              // reaches FULLY opaque surface at the bottom — anything
-              // less leaves a sliver of banner against the solid sidebar
-              // below, which reads as a line across the edge. Stops use
-              // the surface color at alpha 0 — NEVER Colors.transparent
-              // (it lerps through black in light theme).
+              // Bottom-up scrim toward the sidebar surface, so header text
+              // keeps its normal contrast. Many stops because a coarse ramp
+              // BANDS on dark themes, and it must reach a FULLY opaque surface
+              // or a sliver of banner reads as a line across the edge. Stops
+              // use the surface colour at alpha 0, NEVER Colors.transparent,
+              // which lerps through black in the light theme.
               Positioned(
                 left: 0,
                 top: 0,
@@ -391,8 +355,8 @@ class ChannelSidebar extends StatelessWidget {
                 right: 0,
                 bottom: 0,
                 child: Padding(
-                  // Right = sm so the action icons line up with the
-                  // channel header's "+" below (its row is LTRB lg/sm).
+                  // Right = sm so the action icons line up with the channel
+                  // header's "+" below.
                   padding: const EdgeInsets.fromLTRB(
                     HollowSpacing.lg,
                     HollowSpacing.sm,
@@ -417,8 +381,8 @@ class ChannelSidebar extends StatelessWidget {
     return Row(
         children: [
           Expanded(
-            // a11y Phase 3: fixed-height (48px) sidebar header chrome — cap the
-            // title scale so it stays in the bar at high OS text size.
+            // The header chrome is fixed-height, so the title scale is capped
+            // to keep it in the bar at high OS text size.
             child: MediaQuery.withClampedTextScaling(
               maxScaleFactor: 1.3,
               child: TypewriterText(
@@ -438,8 +402,8 @@ class ChannelSidebar extends StatelessWidget {
               child: HollowPressable(
                 semanticLabel: 'Invite people',
                 onTap: () {
-                  // Web form: clickable anywhere (browser bounces into the
-                  // app); new clients still render it as a Join card.
+                  // Web form: clickable anywhere, since the browser bounces
+                  // into the app, and new clients still render a Join card.
                   final link =
                       webServerInviteLink(selectedServer!.serverId);
                   showInviteDialog(
@@ -489,7 +453,7 @@ class ChannelSidebar extends StatelessWidget {
   }
 }
 
-/// Server mode content — channel list with create button.
+/// Server mode content: the channel list.
 class _ServerContent extends StatefulWidget {
   final HollowTheme hollow;
   final String serverId;
@@ -519,7 +483,7 @@ class _ServerContent extends StatefulWidget {
 }
 
 class _ServerContentState extends State<_ServerContent> {
-  /// Cached parsed layout — only re-parsed when the JSON string changes.
+  /// Re-parsed only when the JSON string changes.
   List<LayoutItem> _parsedLayout = const [];
   String _lastLayoutJson = '';
 
@@ -533,20 +497,12 @@ class _ServerContentState extends State<_ServerContent> {
 
   /// The rows to draw, from the EFFECTIVE layout.
   ///
-  /// Effective, not stored: [effectiveLayoutFrom] is the same normalisation
-  /// the context menus and the Channels settings editor already use, so all
-  /// three agree on what a category contains AND on what index a category has.
-  /// Drawing the stored layout instead cost two bugs:
-  ///
-  /// * Channels missing from the layout were appended AFTER the loop that
-  ///   tracks the current category, so one drawn under a trailing category was
-  ///   never treated as being in it. Collapsing the category left it on
-  ///   screen, which is what "the channels under it are not inside it" looked
-  ///   like from the outside.
-  /// * A stored layout holding a channel id that no longer exists shifted
-  ///   every index after it, because normalisation drops that reference — and
-  ///   the category menu edits by INDEX, so it would have edited its
-  ///   neighbour.
+  /// Effective, never stored: [effectiveLayoutFrom] is the same normalisation
+  /// the context menus and the Channels editor use, so all three agree on what
+  /// a category contains AND on what index it has. Rendering the stored layout
+  /// strands appended channels outside the category they are drawn under, and
+  /// shifts every index past a dropped channel id, which the category menu
+  /// edits by (feedback_one_mutation_path_per_state).
   List<Widget> _buildLayoutItems() {
     final w = widget;
     final widgets = <Widget>[];
@@ -561,8 +517,8 @@ class _ServerContentState extends State<_ServerContent> {
           widgets.add(_CategoryHeader(
             hollow: w.hollow,
             name: name,
-            // Categories are addressed by POSITION in the layout, never by
-            // name: two categories may legally share one.
+            // Categories are addressed by POSITION, never by name: two of them
+            // may legally share one.
             layoutIndex: index,
             serverId: w.serverId,
             layoutJson: w.channelLayoutJson,
@@ -579,8 +535,8 @@ class _ServerContentState extends State<_ServerContent> {
             child: Divider(height: 1, color: w.hollow.border),
           ));
         case ChannelItem(:final channelId):
-          // Normalisation already dropped ids with no channel, so a miss here
-          // means the channel list changed under us this frame.
+          // Normalisation already dropped ids with no channel, so a miss means
+          // the channel list changed under us this frame.
           final channel = w.channels[channelId];
           if (channel == null) break;
           final collapsed = currentCategory != null &&
@@ -654,10 +610,9 @@ class _ServerContentState extends State<_ServerContent> {
         if (!hasCategories) Divider(height: 1, color: w.hollow.border),
         Expanded(
           // Right-click on empty sidebar space opens the server-level menu
-          // (issue #61). Opaque so the bare area below the last channel is a
-          // hit target too; a right-click that lands on a tile or a category
-          // header hits their own handler first, since the inner recognizer
-          // wins the arena.
+          // (issue #61). Opaque so the area below the last channel is a hit
+          // target; a tile or category header wins its own right-click,
+          // because the inner recognizer takes the arena.
           child: Consumer(
             builder: (context, ref, child) => ContextMenuTarget(
               behavior: HitTestBehavior.opaque,
@@ -669,7 +624,7 @@ class _ServerContentState extends State<_ServerContent> {
                 canManage: w.canManageChannels,
                 onOpenSettings: w.onOpenSettings,
                 onInvite: () {
-                  // Same web-form link the header's invite button copies.
+                  // The same web-form link the header's invite button copies.
                   final link = webServerInviteLink(w.serverId);
                   showInviteDialog(context, link, w.serverId);
                 },
@@ -723,17 +678,17 @@ class _AnimatedChannelTile extends StatelessWidget {
   }
 }
 
-/// Tracks collapsed state of categories in the sidebar (persists across rebuilds).
+/// Top-level so a collapsed category survives a sidebar rebuild.
 final Map<String, bool> _categoryCollapsedState = {};
 
-/// Category header in the sidebar — collapsible folder label.
+/// Collapsible category header in the sidebar.
 class _CategoryHeader extends StatefulWidget {
   final HollowTheme hollow;
   final String name;
   final VoidCallback? onToggle;
 
-  /// Position of this category in the parsed layout — the identity the
-  /// context menu edits by. Names are not unique.
+  /// Position in the parsed layout, which is the identity the context menu
+  /// edits by, because names are not unique.
   final int layoutIndex;
   final String serverId;
   final String layoutJson;
@@ -820,7 +775,7 @@ class _CategoryHeaderState extends State<_CategoryHeader> {
   }
 }
 
-/// Home / DM mode content — friends list.
+/// Home mode content: the friends list.
 class _HomeContent extends ConsumerWidget {
   final HollowTheme hollow;
   final Map<String, PeerInfo> peers;
@@ -844,8 +799,8 @@ class _HomeContent extends ConsumerWidget {
   @override
   Widget build(BuildContext innerContext, WidgetRef ref) {
     final friends = ref.watch(friendsProvider);
-    // Multi-device: a friend is online if ANY of their devices is online,
-    // collapsed to the master identity. Single-device resolves to itself.
+    // A friend is online if ANY of their devices is, collapsed to the master
+    // identity.
     final online = ref.watch(onlineIdentitiesProvider);
     final dividerTextStyle = HollowTypography.caption.copyWith(
       color: hollow.textSecondary,
@@ -854,7 +809,6 @@ class _HomeContent extends ConsumerWidget {
       fontSize: 11,
     );
 
-    // Split friends into accepted and pending.
     final accepted = friends.values
         .where((f) => f.status == 'accepted')
         .toList();
@@ -865,7 +819,6 @@ class _HomeContent extends ConsumerWidget {
         .where((f) => f.status == 'pending' && f.direction == 'outgoing')
         .toList();
 
-    // Sort accepted: online first, then by peer ID.
     accepted.sort((a, b) {
       final aOnline = online.contains(a.peerId) ? 0 : 1;
       final bOnline = online.contains(b.peerId) ? 0 : 1;
@@ -875,14 +828,13 @@ class _HomeContent extends ConsumerWidget {
 
     final hasPending = pendingIncoming.isNotEmpty || pendingOutgoing.isNotEmpty;
 
-    // Device→master mirror for the encrypted-lock lookup below (peers is
-    // DEVICE-keyed, friend.peerId is the MASTER).
+    // Device to master mirror for the encrypted-lock lookup below: `peers` is
+    // DEVICE-keyed and `friend.peerId` is the MASTER.
     final links = ref.watch(deviceLinkProvider);
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        // Add friend button
         Padding(
           padding: const EdgeInsets.all(HollowSpacing.sm + 2),
           child: HollowButton.outline(
@@ -895,8 +847,8 @@ class _HomeContent extends ConsumerWidget {
 
         Divider(height: 1, color: hollow.border),
 
-        // Saved messages — pinned above the friend conversations. A DM with
-        // your own master identity; opens through the same flow as a friend.
+        // Saved messages is a DM with your own master identity, opened through
+        // the same flow as a friend.
         Builder(builder: (context) {
           final savedId = ref.watch(savedMessagesPeerIdProvider);
           if (savedId == null) return const SizedBox.shrink();
@@ -908,7 +860,6 @@ class _HomeContent extends ConsumerWidget {
           );
         }),
 
-        // Pending requests section
         if (hasPending) ...[
           Padding(
             padding: const EdgeInsets.symmetric(
@@ -965,7 +916,6 @@ class _HomeContent extends ConsumerWidget {
           Divider(height: 1, color: hollow.border),
         ],
 
-        // Friends section header
         Padding(
           padding: const EdgeInsets.symmetric(
             horizontal: HollowSpacing.sm + 2,
@@ -982,7 +932,6 @@ class _HomeContent extends ConsumerWidget {
           ),
         ),
 
-        // Friends list
         Expanded(
           child: accepted.isEmpty && !hasPending
               ? Center(
@@ -1009,11 +958,9 @@ class _HomeContent extends ConsumerWidget {
                   itemBuilder: (context, index) {
                     final friend = accepted[index];
                     final isOnline = online.contains(friend.peerId);
-                    // `peers` is DEVICE-keyed but `friend.peerId` is the MASTER —
-                    // a direct lookup silently never matches a multi-device
-                    // friend, so the encrypted lock never showed here. Collapse
-                    // each device through the resolver mirror (same pattern as
-                    // home_dashboard's Friends column).
+                    // `peers` is DEVICE-keyed while `friend.peerId` is the
+                    // MASTER, so a direct lookup silently never matches a
+                    // multi-device friend and the encrypted lock never shows.
                     final isEncrypted = peers.entries.any((e) =>
                         links.identityOf(e.key) == friend.peerId &&
                         e.value.isEncrypted);
@@ -1044,8 +991,8 @@ class _HomeContent extends ConsumerWidget {
   }
 }
 
-/// Pinned "Saved messages" row — mirrors [PeerCard] styling but with a
-/// bookmark avatar and no presence dot (it's a conversation with yourself).
+/// Pinned "Saved messages" row: [PeerCard] styling with a bookmark avatar and
+/// no presence dot, since it is a conversation with yourself.
 class _SavedMessagesCard extends StatelessWidget {
   final bool isSelected;
   final ChatMessage? lastMessage;
@@ -1225,7 +1172,7 @@ class _PendingRequestTile extends ConsumerWidget {
   }
 }
 
-/// Sidebar add-friend dialog — unified peer ID / nickname input.
+/// Sidebar add-friend dialog, taking a peer id or a nickname.
 class _SidebarAddFriendDialog extends ConsumerStatefulWidget {
   final BuildContext parentContext;
   const _SidebarAddFriendDialog({required this.parentContext});
@@ -1250,8 +1197,8 @@ class _SidebarAddFriendDialogState
   Future<void> _send() async {
     final input = _controller.text.trim();
     if (input.isEmpty) return;
-    // Await the send so a failure (e.g. node not running) surfaces here —
-    // the dialog stays open for a retry instead of toasting a false success.
+    // Awaited so a failure surfaces here and the dialog stays open for a
+    // retry, instead of toasting a false success.
     try {
       if (_isPeerId(input)) {
         await ref.read(friendsProvider.notifier).sendRequest(input);
@@ -1312,12 +1259,12 @@ class _ChannelTile extends ConsumerWidget {
   final bool isSelected;
   final VoidCallback onTap;
 
-  /// Whether the local user holds MANAGE_CHANNELS here. Advisory only: it
-  /// picks which rows the context menu offers, while Rust re-checks every op.
+  /// Advisory only: it picks which rows the context menu offers, and Rust
+  /// re-checks every op.
   final bool canManage;
 
-  // No `key`: the keyed list element is the _AnimatedChannelTile that wraps
-  // this one (`ach-<channelId>`), and Flutter reparents on that.
+  // No `key`: the keyed list element is the _AnimatedChannelTile wrapping this
+  // one, and Flutter reparents on that.
   const _ChannelTile({
     required this.channel,
     required this.serverId,
@@ -1378,8 +1325,8 @@ class _ChannelTile extends ConsumerWidget {
                 overflow: TextOverflow.ellipsis,
               ),
             ),
-            // Public indicator (#44): members had no way to tell which
-            // channels are readable by anyone via the public browser.
+            // Public indicator (#44): otherwise nothing tells a member which
+            // channels the public browser can read.
             if (channel.isPublic) ...[
               HollowTooltip(
                 message: 'Public: anyone can read this channel without joining',
@@ -1451,9 +1398,8 @@ class _ChannelTile extends ConsumerWidget {
   }
 }
 
-/// Voice channel tile — shows speaker icon, channel name, and participant list.
-/// Clicking joins the voice channel instead of selecting it for text.
-/// Tracks leaving peers to animate them out before removal.
+/// Voice channel tile. A click JOINS the channel rather than selecting it for
+/// text, and leaving peers are held until their exit animation finishes.
 class _VoiceChannelTile extends ConsumerStatefulWidget {
   final ChannelInfo channel;
   final String serverId;
@@ -1475,10 +1421,9 @@ class _VoiceChannelTile extends ConsumerStatefulWidget {
 }
 
 class _VoiceChannelTileState extends ConsumerState<_VoiceChannelTile> {
-  /// Peers currently animating out (kept in tree until animation finishes).
+  /// Held in the tree until their exit animation finishes.
   final Set<String> _leavingPeers = {};
 
-  /// Previous frame's participant set for diffing.
   Set<String> _prevParticipants = {};
 
   @override
@@ -1490,7 +1435,6 @@ class _VoiceChannelTileState extends ConsumerState<_VoiceChannelTile> {
     final participants =
         vcState.getParticipants(widget.serverId, widget.channel.channelId);
 
-    // Detect who just left.
     final departed = _prevParticipants.difference(participants);
     for (final peerId in departed) {
       if (!_leavingPeers.contains(peerId)) {
@@ -1499,7 +1443,6 @@ class _VoiceChannelTileState extends ConsumerState<_VoiceChannelTile> {
     }
     _prevParticipants = Set.of(participants);
 
-    // Visible = current participants + still-animating leavers.
     final visible = [...participants, ..._leavingPeers];
 
     final radius = BorderRadius.circular(hollow.radiusMd);
@@ -1507,7 +1450,6 @@ class _VoiceChannelTileState extends ConsumerState<_VoiceChannelTile> {
     Widget channelRow = HollowPressable(
       onTap: () {
         if (isConnected) {
-          // Already in this channel — select it for the main pane.
           widget.onChannelSelected(widget.channel.channelId);
           return;
         }
@@ -1555,8 +1497,8 @@ class _VoiceChannelTileState extends ConsumerState<_VoiceChannelTile> {
       );
     }
 
-    // Only the channel row itself — the participant rows below keep their own
-    // secondary-tap per-peer volume popup.
+    // The channel row only: participant rows below keep their own secondary-tap
+    // volume popup.
     channelRow = ContextMenuTarget(
       semanticLabel: 'Channel actions',
       onOpen: (anchor) => showChannelTileMenu(
@@ -1686,11 +1628,9 @@ class _VoiceParticipantRow extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    // VC participants are keyed by the ROUTABLE WS sender — a DEVICE peer id
-    // for multi-device peers (including our own row). Collapse to the MASTER
-    // identity for everything display-related (avatar, local nickname,
-    // profile name); audio/speaking/volume state stays keyed by the routable
-    // id. Single-device → identityOf is a no-op.
+    // VC participants are keyed by the ROUTABLE WS sender, a DEVICE peer id.
+    // Display (avatar, nickname, profile name) collapses to the MASTER, while
+    // audio, speaking and volume state stay keyed by the routable id.
     final master = ref.watch(deviceLinkProvider).identityOf(peerId);
     final peerProfile =
         ref.watch(profileProvider.select((p) => p[master]));
@@ -1698,9 +1638,8 @@ class _VoiceParticipantRow extends ConsumerWidget {
     final hollow = HollowTheme.of(context);
     final vcState = ref.watch(voiceChannelProvider);
     final localPeerId = ref.watch(identityProvider).peerId ?? '';
-    // Self = this row is THIS device (or the bare master id) — a sibling
-    // device of ours in the same channel is deliberately NOT self (it has
-    // its own mute/camera state).
+    // Self is THIS device or the bare master id. A sibling of ours in the same
+    // channel is deliberately NOT self: it has its own mute and camera state.
     final myDevice = ref.watch(localDevicePeerIdProvider).valueOrNull;
     final isSelf = peerId == localPeerId || peerId == myDevice;
 
@@ -1715,10 +1654,10 @@ class _VoiceParticipantRow extends ConsumerWidget {
       isDeafened = peerState.isDeafened;
     }
 
-    // Our own row reads the dedicated local flag; remote rows membership-
-    // select so a row only rebuilds when ITS peer's bit flips. Testing the
-    // set for OURSELVES is what silently failed before: the set is keyed by
-    // routable device ids, this row can hold either form.
+    // Our own row reads the dedicated local flag; remote rows
+    // membership-select so a row rebuilds only when ITS peer's bit flips.
+    // Testing the set for OURSELVES fails silently, because the set is keyed
+    // by routable device ids and this row may hold either form.
     final speaking = isSelf
         ? ref.watch(vcLocalSpeakingProvider)
         : ref.watch(vcSpeakingProvider.select((s) => s.contains(peerId)));
@@ -1734,9 +1673,7 @@ class _VoiceParticipantRow extends ConsumerWidget {
         ? recState.isMyRecording
         : recState.remoteRecorders.contains(peerId);
 
-    // Right-click used to open the per-peer volume slider and nothing else.
-    // It opens the user menu now, with that slider as its first row, so the
-    // control survives and the row gains every other user action (#61).
+    // The user menu, with the per-peer volume slider as its first row (#61).
     return ContextMenuTarget(
       enabled: isRemote,
       semanticLabel: 'Participant actions',
@@ -1753,12 +1690,10 @@ class _VoiceParticipantRow extends ConsumerWidget {
         padding: const EdgeInsets.symmetric(vertical: HollowSpacing.xxs),
         child: Row(
           children: [
-            // Speaking cue = an outline hugging the avatar, replacing the
-            // teal dot that used to sit at the far end of the row: the cue
-            // sits on the thing it identifies, and a long name can't push it
-            // out of view. SpeakingAvatarOutline, not SpeakingBorder — this
-            // row is dense, so the outline must not take layout space or
-            // stand a gap off the avatar (see its doc comment).
+            // The speaking cue hugs the avatar so a long name cannot push it
+            // out of view. SpeakingAvatarOutline, not SpeakingBorder: this row
+            // is dense, so the outline must take no layout space and stand no
+            // gap off the avatar.
             SpeakingAvatarOutline(
               isSpeaking: speaking,
               size: kVoiceParticipantAvatarSize,
@@ -1776,9 +1711,8 @@ class _VoiceParticipantRow extends ConsumerWidget {
                 overflow: TextOverflow.ellipsis,
               ),
             ),
-            // Per-peer link flair. In a mesh one member on bad Wi-Fi is that
-            // member's leg, so it is labelled on THEIR row and never as a
-            // channel-wide alarm. Our own row has no leg of its own to report.
+            // In a mesh, one member on bad Wi-Fi is that member's leg, so the
+            // flair sits on THEIR row and never reads as a channel-wide alarm.
             if (isRemote)
               Consumer(builder: (context, ref, _) {
                 final health =
@@ -1789,14 +1723,12 @@ class _VoiceParticipantRow extends ConsumerWidget {
                   child: LinkHealthChip(snapshot: health, compact: true),
                 );
               }),
-            // Screen sharing indicator — green monitor icon.
             if (isScreenSharing)
               const Padding(
                 padding: EdgeInsets.only(left: HollowSpacing.xxs),
                 child: Icon(LucideIcons.monitor,
                     size: kVoiceParticipantIconSize, color: Colors.green),
               ),
-            // Camera indicator — accent video icon.
             if (isCameraOn)
               Padding(
                 padding: const EdgeInsets.only(left: HollowSpacing.xxs),
@@ -1827,6 +1759,3 @@ class _VoiceParticipantRow extends ConsumerWidget {
   }
 
 }
-
-// The speaking cue for a participant row is an outline AROUND the avatar
-// (SpeakingBorder), not a separate dot — see _VoiceParticipantRow.

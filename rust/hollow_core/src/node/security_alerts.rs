@@ -1,41 +1,20 @@
 //! Visible key/device change warnings (Issue 1-C).
 //!
-//! ## Why this is not "warn when the Olm key changes"
-//!
-//! Before 0.8.2, a changed Olm key was genuinely ambiguous — a hostile relay
-//! could substitute one. Since key exchange is authenticated
-//! ([`super::crypto_handler::REQUIRE_SIGNED_KEY_EXCHANGE`]), a changed key must
+//! Not "warn when the Olm key changes": since key exchange is authenticated
+//! ([`super::crypto_handler::REQUIRE_SIGNED_KEY_EXCHANGE`]) a changed key must
 //! have been signed by that device's real Ed25519 key, so it means the contact
-//! REINSTALLED. Useful context, not an attack signal.
+//! REINSTALLED. The signal that still carries information is a NEW DEVICE
+//! appearing for a contact: that is the real-world attack shape, and it is
+//! detectable because the device list is master-signed. So [`KIND_NEW_DEVICE`]
+//! is a WARNING and [`KIND_KEY_CHANGED`] only a notice.
 //!
-//! The signal that still carries information is:
+//! Deliberately NOT alerted: first contact (a baseline, not a change, and
+//! alerting there trains users to dismiss without reading), our own devices
+//! (the linked-devices UI is where the user is the actor), and device REMOVAL
+//! (revocation is the user cutting a device off, a safe act).
 //!
-//! > **A NEW DEVICE appeared for this contact.**
-//!
-//! That is the real-world attack shape — someone links a device to an account
-//! they have compromised — and it is detectable precisely because the device
-//! list is master-signed and we already ingest and verify it.
-//!
-//! So we pin two things, with deliberately different weights:
-//!
-//! | kind                   | means                        | weight  |
-//! |------------------------|------------------------------|---------|
-//! | [`KIND_NEW_DEVICE`]    | a device joined their identity | WARNING |
-//! | [`KIND_KEY_CHANGED`]   | one device re-keyed (reinstall)| notice  |
-//!
-//! ## What is deliberately NOT alerted
-//!
-//! - **First contact.** The first device list we ever see for someone is not a
-//!   change, it is the baseline. Alerting there would fire on every new friend
-//!   and train users to dismiss without reading.
-//! - **Our own devices.** Handled by the linked-devices UI, where the user is
-//!   the actor and already knows.
-//! - **Device REMOVAL.** Revocation is the user cutting a device off — a safe
-//!   act. Warning about it would be pure noise.
-//!
-//! Alerts persist in `security_alerts` and are deduplicated by a deterministic
-//! id, because device lists are re-ingested on every reconnect. A dismissed
-//! warning stays dismissed.
+//! Alerts are deduplicated by a deterministic id, because device lists are
+//! re-ingested on every reconnect: a dismissed warning stays dismissed.
 
 use tokio::sync::mpsc;
 
@@ -96,12 +75,10 @@ async fn record(
 
 /// Warn that devices joined a CONTACT's identity.
 ///
-/// `previously_known` is the device set we held BEFORE this ingest. An empty
-/// set means first contact — we record no alert and simply let the baseline be
-/// established, because "this person has devices" is not news.
-///
-/// `local_master_peer_id` guards the self case: our own siblings are the user's
-/// own doing and surface in linked-devices, not as a warning.
+/// `previously_known` is the device set held BEFORE this ingest; an empty set
+/// means first contact, which records nothing, because "this person has
+/// devices" is not news. `local_master_peer_id` guards the self case: our own
+/// siblings surface in linked-devices, not as a warning.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn note_new_devices(
     event_tx: &mpsc::Sender<NetworkEvent>,
@@ -132,13 +109,10 @@ pub(crate) async fn note_new_devices(
 /// Pin a contact device's Olm identity key, and notice when it changes.
 ///
 /// Trust-on-first-use: the first key we complete an exchange with is pinned
-/// silently. A LATER, DIFFERENT key for the same device id is recorded as a
-/// notice and the pin moves forward — the exchange was authenticated, so the
-/// new key is genuinely theirs; the user is being told they reinstalled, not
-/// asked to adjudicate an attack.
-///
-/// `master_peer_id` is what the alert is filed under (the person); the pin
-/// itself is keyed by DEVICE, since each device legitimately has its own key.
+/// silently. A LATER, DIFFERENT key for the same device is a notice and the pin
+/// moves forward, because the exchange was authenticated, so the user is being
+/// told they reinstalled rather than asked to adjudicate an attack. The alert is
+/// filed under `master_peer_id`; the pin itself is keyed by DEVICE.
 pub(crate) async fn note_olm_identity_key(
     event_tx: &mpsc::Sender<NetworkEvent>,
     db_path: &str,

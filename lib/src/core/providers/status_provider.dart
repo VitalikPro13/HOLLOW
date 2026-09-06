@@ -5,11 +5,10 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 import 'package:hollow/src/rust/api/updater.dart' as updater_api;
 
-/// System status feed — a single object served alongside news.json / manifest.json
-/// on the WEBSITE host (anonlisten.com, independent of the relay VPS), so it
-/// loads even when the relay is down — which is exactly when we most need to
-/// tell users "relay maintenance, back at 02:00". Pure HTTPS GET via the same
-/// `fetchReleaseFeed` helper news uses (unsigned, unlike the update manifest); nothing touches the WS.
+/// System status feed, served alongside news.json / manifest.json on the
+/// WEBSITE host (independent of the relay VPS), so it loads even when the relay
+/// is down: exactly when we most need to say "relay maintenance, back at 02:00".
+/// Plain HTTPS GET, unsigned unlike the update manifest; nothing touches the WS.
 const kStatusUrl = 'https://anonlisten.com/hollow/releases/status.json';
 
 /// Key under which the last DISMISSED status id is persisted (SQLCipher KV).
@@ -20,10 +19,9 @@ const _kDismissedStatusKey = 'dismissed_status_id';
 /// Severity / tone of a status notice. Drives colour, icon, and whether it
 /// surfaces in the global shell banner at all.
 ///
-/// Ordering matters: `operational` is the quiet healthy default (banner shows
-/// NOTHING); everything else escalates. `info` is the neutral/playful channel
-/// (announcements, and — sparingly — jokes) kept visually distinct from the
-/// amber/red alarm levels so a light-hearted note never reads as an incident.
+/// Ordering matters: `operational` is the quiet healthy default (the banner
+/// shows NOTHING) and `info` is the neutral channel, kept visually distinct
+/// from the amber/red levels so a light note never reads as an incident.
 enum StatusLevel {
   operational,
   info,
@@ -63,9 +61,8 @@ class SystemStatus {
   final String title;
   final String message;
 
-  /// Absolute UTC instant the countdown targets (e.g. when maintenance starts).
-  /// Null when the notice has no timer. Authored in UTC; rendered as a live
-  /// countdown ("Remaining 14:23") so every timezone sees a correct value.
+  /// Absolute UTC instant the countdown targets; null when the notice has no
+  /// timer. Authored in UTC, rendered as a live countdown in every timezone.
   final DateTime? until;
 
   /// Short label preceding the countdown, e.g. "Starts in" / "Back online in".
@@ -110,24 +107,18 @@ class SystemStatus {
     );
   }
 
-  /// Parse the `until` timestamp as an absolute UTC instant — robust to the
+  /// Parse the `until` timestamp as an absolute UTC instant, robust to the
   /// author forgetting the trailing `Z`.
   ///
-  /// The countdown ("Remaining 14:23") is correct in EVERY timezone *because*
-  /// it compares two absolute UTC instants. That only holds if `until` is truly
-  /// UTC. `DateTime.tryParse` honours an explicit `Z`/offset, but treats a
-  /// suffix-less string ("2026-06-28T02:00:00") as the USER'S LOCAL time — so
-  /// the same JSON would mean a different instant on PCs in different zones
-  /// (the bug Vitalik flagged). When that happens we re-interpret the SAME
-  /// wall-clock components AS UTC (a re-label, not a conversion), so an
-  /// authored "02:00:00" always means 02:00 UTC regardless of the reader's
-  /// clock zone. Returns null for empty/garbage.
+  /// The countdown is correct in every timezone only because it compares two
+  /// absolute UTC instants. `DateTime.tryParse` treats a suffix-less string as
+  /// the USER'S LOCAL time, so a suffix-less value is re-labelled (not
+  /// converted) as UTC. Returns null for empty/garbage.
   static DateTime? _parseUntilUtc(String raw) {
     if (raw.isEmpty) return null;
     final parsed = DateTime.tryParse(raw);
     if (parsed == null) return null;
-    // Already carried a zone (Z or ±offset) → DateTime parsed it as UTC-aware;
-    // normalise to UTC and we're done.
+    // Already zone-aware: normalise to UTC and we're done.
     if (parsed.isUtc) return parsed.toUtc();
     // No zone in the string → Dart assumed local. Rebuild the identical
     // year/month/day/hh:mm:ss as a UTC instant so it's zone-independent.
@@ -142,9 +133,8 @@ class SystemStatus {
     );
   }
 
-  /// True when there is genuinely nothing to announce — operational level with
-  /// no accompanying message. Used to keep even the Home line from rendering a
-  /// stray empty card.
+  /// True when there is genuinely nothing to announce: operational level with no
+  /// message. Keeps even the Home line from rendering a stray empty card.
   bool get isEmpty =>
       level == StatusLevel.operational && title.isEmpty && message.isEmpty;
 
@@ -190,20 +180,16 @@ class StatusState {
 class StatusNotifier extends Notifier<StatusState> {
   Timer? _timer;
 
-  /// The status file changes a few times a MONTH, so a frequent poll would be
-  /// pure waste. Once a minute makes a notice appear within ~60s of publishing
-  /// — ample lead time — at a cost (one tiny HTTPS GET/min) a machine won't
-  /// even notice. Deliberately its OWN timer hitting ONLY the website: the
-  /// status feed is independent of the relay, so it keeps working (and keeps
-  /// refreshing) even when the relay is down — exactly when an outage notice
-  /// matters most.
+  /// The status file changes a few times a MONTH, so a frequent poll is waste;
+  /// once a minute is ample lead time at a cost a machine won't notice. Its OWN
+  /// timer, hitting ONLY the website, so it keeps refreshing while the relay is
+  /// down: exactly when an outage notice matters most.
   static const _pollInterval = Duration(seconds: 60);
 
   @override
   StatusState build() {
     // Fetch the network feed eagerly (independent of the DB). The persisted
-    // dismissal is loaded separately via [loadDismissed], called from the shell
-    // bootstrap AFTER the SQLCipher store is open — see the note there.
+    // dismissal loads separately via [loadDismissed], from the shell bootstrap.
     Future.microtask(_fetch);
 
     _timer?.cancel();
@@ -214,16 +200,11 @@ class StatusNotifier extends Notifier<StatusState> {
   }
 
   /// Load the persisted dismissed-id from the local DB. Called from the shell
-  /// `_bootstrap` alongside the other `.load()` providers (theme, layout, …),
-  /// which run AFTER the SQLCipher store is open.
+  /// `_bootstrap` alongside the other `.load()` providers.
   ///
-  /// It MUST be driven from bootstrap, not eagerly in [build]: `statusProvider`
-  /// is created the instant the shell banner first watches it, which during the
-  /// local-first render can be BEFORE the store opens — and `loadSetting` throws
-  /// "Message store is not open" then. The original eager load swallowed that
-  /// error, losing the dismissal on every launch (it worked per-session, since
-  /// the store is long-open by the time you press X, but never survived a
-  /// restart — the exact symptom). Bootstrap ordering removes the race entirely.
+  /// It MUST be driven from bootstrap, not eagerly in [build]: this provider is
+  /// created the instant the shell banner first watches it, which during the
+  /// local-first render can be BEFORE the store opens, and `loadSetting` throws.
   Future<void> loadDismissed() async {
     try {
       final v = await storage_api.loadSetting(key: _kDismissedStatusKey);
@@ -278,8 +259,7 @@ class StatusNotifier extends Notifier<StatusState> {
   Future<void> dismissCurrent() async {
     final id = state.status.id;
     if (id.isEmpty) {
-      // No id to remember — just hide for this session by marking a sentinel.
-      // (Rare: authored notices should always carry an id.)
+      // No id to remember, so hide for this session by marking a sentinel.
       state = state.copyWith(dismissedId: ' session-dismiss');
       return;
     }

@@ -6,9 +6,8 @@ import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 
-/// The single direct-transfer size ceiling. Files larger than this can't stream
-/// directly over P2P (no chunking/resume), so they're hosted as a Hollow Share
-/// link instead — with the user's explicit confirmation.
+/// The single direct-transfer size ceiling: past it there is no chunking or
+/// resume, so the file rides a Hollow Share link instead.
 const int kLargeFileThresholdBytes = 34 * 1024 * 1024;
 
 String _fmtMb(int bytes) {
@@ -17,9 +16,8 @@ String _fmtMb(int bytes) {
   return '${mb.toStringAsFixed(0)} MB';
 }
 
-/// Ask the user whether to send an oversized (>34 MB) file as a Hollow Share
-/// link. Returns true if they chose to send. Used by every file-send site (DM +
-/// channel, desktop + mobile) so the behavior is identical everywhere.
+/// Asks whether to send an oversized file as a Hollow Share link, true if they
+/// chose to. Every file-send site calls it, so the behaviour cannot drift.
 Future<bool> confirmLargeFileShare(
   BuildContext context, {
   required String fileName,

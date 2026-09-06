@@ -13,12 +13,10 @@ use super::crypto_handler::{
 use super::types::*;
 
 /// Owned v2-signature extras loaded from an EXISTING message row. Edit and
-/// delete signatures bind the same structural fields as the original message
-/// (the row's reply_to / file_id / order_us / link preview are immutable under
-/// edit), so the SIGN sites load them from the signer's row and the live
-/// VERIFY sites reconstruct them from the receiver's row — both ends agree by
-/// construction. A missing row degrades to mid-only extras (verification then
-/// fails unless the signer also saw no row, which is the correct outcome).
+/// delete signatures bind the same structural fields as the original message, so
+/// SIGN sites load them from the signer's row and live VERIFY sites reconstruct
+/// them from the receiver's row: both ends agree by construction. A missing row
+/// degrades to mid-only extras, which fails unless the signer saw no row either.
 pub(crate) struct RowExtras {
     pub text: Option<String>,
     pub reply_to: Option<String>,
@@ -63,24 +61,17 @@ impl RowExtras {
 // ── Deletion propagation through sync (0.8.4) ────────────────────────
 //
 // `hidden_at` on a sync item is honored ONLY with the author's own deletion
-// signature riding next to it (`hidden_sig`/`hidden_pk` — the "ch-delete" /
-// "dm-delete" proof created at deletion time and stored in
-// `message_deletions`). REJECT-ABSENT: a hidden flag with no valid proof is
-// DROPPED, never applied — a bare `hidden_at` in a sync batch is a
-// forge-a-deletion / censorship primitive (any sync responder, or a relay
-// tampering with a plaintext public-channel batch, could hide arbitrary
-// messages on the victim). There is deliberately NO tolerate-absent fallback:
-// tolerating absence reopens the gap via omit-the-sig. The accepted cost is
-// that pre-signing (ancient, unsigned) deletions no longer propagate through
-// sync. Deletes are SELF-ONLY (live handlers reject sender != author), so
-// verification is a plain author-signature check — and the author is derived
-// from the RECEIVER'S ROW, never from item fields the responder controls.
+// signature riding next to it. REJECT-ABSENT: a bare hidden flag is a
+// forge-a-deletion and censorship primitive, so it is DROPPED, and there is
+// deliberately no tolerate-absent fallback, because tolerating absence reopens
+// the gap via omit-the-sig. The cost is that ancient unsigned deletions no
+// longer propagate. Deletes are SELF-ONLY, so the author is derived from the
+// RECEIVER'S ROW, never from item fields the responder controls.
 
-/// Outbound half: the `(hidden_at, hidden_sig, hidden_pk)` triple for a sync
-/// item built from row `mid`. Attaches the stored deletion proof; prefers the
-/// proof's own `deleted_at` over a drifted row `hidden_at` so the served
-/// (ts, sig) pair is always the one the author signed. A hidden row with no
-/// signed proof is served bare (receivers drop the flag).
+/// Outbound half: the `(hidden_at, hidden_sig, hidden_pk)` triple for a sync item
+/// built from row `mid`. Prefers the proof's own `deleted_at` over a drifted row
+/// `hidden_at`, so the served pair is always the one the author signed. A hidden
+/// row with no signed proof is served bare, and receivers drop the flag.
 pub(crate) fn deletion_proof_fields(
     store: &crate::storage::MessageStore,
     hidden_at: Option<i64>,
@@ -95,12 +86,10 @@ pub(crate) fn deletion_proof_fields(
     }
 }
 
-/// Inbound half (channel): verify + apply one sync-carried deletion. The
-/// proof is checked against OUR row (author = row sender resolved to master,
-/// extras/text from the row — the same reconstruction the live DeleteMessage
-/// handler uses), then stored for onward propagation and `hidden_at` set.
-/// Returns true when the row was NEWLY hidden (callers emit their deletion
-/// event on true); false = rejected, already hidden, or no such row.
+/// Inbound half (channel): verify and apply one sync-carried deletion. The proof
+/// is checked against OUR row (author = row sender resolved to master, extras and
+/// text from the row), then stored for onward propagation. Returns true when the
+/// row was NEWLY hidden; false = rejected, already hidden, or no such row.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn apply_verified_channel_deletion(
     store: &crate::storage::MessageStore,
@@ -114,8 +103,7 @@ pub(crate) fn apply_verified_channel_deletion(
 ) -> bool {
     let already_hidden = store.get_channel_message_hidden_at(mid).is_some();
     // Converged (hidden + proof on file): quiet no-op. An already-hidden row
-    // MISSING its proof still runs the verify below so a valid arriving proof
-    // is adopted (heals legacy-hidden rows for onward propagation).
+    // MISSING its proof still runs the verify below, so a valid proof is adopted.
     if already_hidden && store.load_deletion_proof(mid).is_some() {
         return false;
     }
@@ -145,12 +133,10 @@ pub(crate) fn apply_verified_channel_deletion(
     !already_hidden
 }
 
-/// Inbound half (DM): like [`apply_verified_channel_deletion`] but signer and
-/// context depend on the ROW's direction. `is_mine` comes from OUR row —
-/// deriving it from the item's `mine` flag would let a friend "delete" OUR
-/// message with THEIR OWN (valid) signature. "dm-delete" signing convention
-/// (`handle_delete_dm_message` + the live receive arm): signer = the
-/// deleter's master, context = the OTHER party's master.
+/// Inbound half (DM): like [`apply_verified_channel_deletion`], but signer and
+/// context come from the ROW's direction. `is_mine` comes from OUR row: taking it
+/// from the item's `mine` flag would let a friend "delete" OUR message with THEIR
+/// OWN valid signature. Signer = the deleter's master, context = the other party.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn apply_verified_dm_deletion(
     store: &crate::storage::MessageStore,
@@ -199,30 +185,23 @@ pub(crate) fn apply_verified_dm_deletion(
     !already_hidden
 }
 
-/// Guest-preview half: verify a public-channel sync item's CONTENT signature
-/// from the item's own fields. `false` = drop the item entirely.
+/// Guest-preview half: verify a public-channel sync item's CONTENT signature from
+/// the item's own fields. `false` = drop the item entirely.
 ///
-/// Public-channel sync is PLAINTEXT, so the relay (or any responder) can
-/// rewrite a batch wholesale — text, sender, reply target, attachment, the
-/// lot. Members already refuse an unverified item at the four backfill sites;
-/// the guest browser used to render whatever arrived, which made the public
-/// preview — the one surface strangers see — the softest one in the app.
-///
-/// Same rule as the member path (`check_backfill_signature` under
-/// [`REQUIRE_SIGNED_BACKFILL`]): signer = `resolve(m.s)`, type "ch", context
-/// "{sid}:{cid}", extras from the item, edited rows verified against their
-/// edit signature. Failures are DROPPED rather than flagged, which keeps the
-/// FFI struct and the guest UI unchanged.
+/// Public-channel sync is PLAINTEXT, so a responder or the relay can rewrite a
+/// batch wholesale. Members already refuse an unverified item at the four
+/// backfill sites; without this the guest browser, the one surface strangers see,
+/// renders whatever arrived. Same rule as the member path: signer = `resolve(m.s)`,
+/// context "{sid}:{cid}", and edited rows verified against their edit signature.
 pub(crate) fn guest_item_accepted(
     m: &super::types::SyncMessageItem,
     sid: &str,
     cid: &str,
     pk_cache: &mut PkCache,
 ) -> bool {
-    // Digest from the shipped card, so the card is covered by the same check
-    // that covers the text. This is the whole reason a guest may render a
-    // preview at all: the batch is PLAINTEXT, so without binding the card a
-    // relay could paste a phishing one onto any message a stranger reads.
+    // Digest from the shipped card, so the card is covered by the same check that
+    // covers the text. Without binding the card, a relay could paste a phishing
+    // one onto any message a stranger reads.
     let lp_digest = super::crypto_handler::backfill_lp_digest(
         m.lp.as_deref(), m.lp_digest.as_deref(),
     );
@@ -248,11 +227,10 @@ pub(crate) fn guest_item_accepted(
     true
 }
 
-/// Guest-preview half: verify a public-channel sync item's hidden flag from
-/// the item's own fields (guests hold no rows to check against). Returns the
-/// `hidden_at` to honor, or `None` to strip the flag (absent/invalid proof).
-/// The pubkey↔signer binding inside the verify stops a non-author forging
-/// the proof; a replayed REAL deletion is legitimate propagation.
+/// Guest-preview half: verify a public-channel sync item's hidden flag from the
+/// item's own fields (guests hold no rows to check against). Returns the
+/// `hidden_at` to honor, or `None` to strip the flag. The pubkey-to-signer binding
+/// stops a non-author forging a proof; a replayed REAL deletion is propagation.
 pub(crate) fn verified_guest_hidden_at(
     m: &super::types::SyncMessageItem,
     sid: &str,
@@ -306,18 +284,14 @@ pub(crate) async fn handle_send_message(
 ) {
     hollow_log!("[HOLLOW-SWARM] SendMessage received for {peer_id_str} mid={message_id}");
 
-    // Wrap DM in signed envelope.
     let local_peer = local_peer_str.to_string();
-    // Lamport-bumped send stamp (chat_clock.rs): strictly after every message
-    // this device has seen, so cross-machine clock skew can't sort our reply
-    // above the message it answers. The signed ms `ts` and the `order_us`
-    // ordering key both derive from the ONE stamp (order_us is NOT signed;
-    // it's carried over the wire + persisted for same-ms burst ordering).
+    // Lamport-bumped send stamp (chat_clock.rs), strictly after every message this
+    // device has seen, so clock skew cannot sort our reply above the message it
+    // answers. The ms `ts` is signed; `order_us` is not, but rides the wire.
     let dm_order_us = crate::chat_clock::next_send_stamp_us();
     let dm_timestamp = dm_order_us / 1000;
-    // v2 signature binds the structured fields exactly as they ride the wire
-    // envelope below — the receiver reconstructs these extras from the same
-    // envelope fields it persists.
+    // The v2 signature binds the structured fields exactly as they ride the
+    // envelope below, so the receiver reconstructs them from what it persists.
     let lp_digest = link_preview.as_ref().map(link_preview_digest);
     let extras = SignedExtras {
         mid: Some(&message_id),
@@ -352,8 +326,7 @@ pub(crate) async fn handle_send_message(
     let sibling_envelope_json = serde_json::to_string(&build_dm(Some(recipient_master.clone())))
         .unwrap_or_else(|_| text.clone());
 
-    // Persist sent DM locally with the same Rust-generated timestamp.
-    // This ensures DM sync timestamps are consistent (no Dart DateTime.now() mismatch).
+    // Same Rust-generated timestamp as sent, so DM sync timestamps agree.
     {
         if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
             let _ = store.insert(
@@ -370,20 +343,14 @@ pub(crate) async fn handle_send_message(
     }
 
     // ── Multi-device fan-out (Phase 6, Step 3) ──────────────────────────
-    // `peer_id_str` is the recipient's MASTER identity (that's what the friend
-    // list / UI keys on). Olm sessions, `pending_messages`, and room membership
-    // are all keyed by DEVICE peer_ids, so encrypting to the bare master would
-    // hit no session and target a peer nobody authenticates as. Expand the
-    // master into its known device peer_ids and run the per-device send for
-    // each. Single-device friends (no device list ingested) resolve to an empty
-    // device set → fall back to the master id as-is = byte-for-byte old behavior.
+    // `peer_id_str` is the recipient's MASTER (what the friend list keys on), but
+    // Olm sessions, `pending_messages` and room membership are keyed by DEVICE, so
+    // encrypting to the bare master would hit no session. An empty device set
+    // falls back to the master id, which is the pre-multi-device behaviour.
     //
-    // We ALSO fan out to our OWN other online devices (self fan-out), so a DM
-    // typed on one of our devices appears live on the sibling. The local DB
-    // insert + `MessageSent` event above already happened keyed on the master,
-    // so the SENDING device's UI is correct; this delivers the same envelope to
-    // our other devices' Olm inboxes (they persist it on receive, keyed by our
-    // master via `convo_peer`).
+    // We ALSO fan out to our OWN other online devices, so a DM typed on one device
+    // appears live on the sibling; the local insert above already keyed the
+    // sending device's UI on the master.
     fan_out_dm_envelope(
         olm, crypto_store, event_tx, ws_cmd_tx, ws_room_peers,
         pending_messages, key_request_in_flight,
@@ -402,17 +369,13 @@ pub(crate) async fn handle_send_message(
     }).await;
 }
 
-/// Expand a recipient MASTER id into its device set (plus our own sibling
-/// devices for self fan-out) and deliver one already-signed DM envelope to each
-/// (Phase 6 multi-device, Step 3). Single-device recipients (no device list
-/// ingested) resolve to an empty device set → the master id is used as-is, which
-/// is byte-for-byte the pre-multi-device behavior. Used by every DM send path:
-/// new message, edit, delete, reaction add/remove.
+/// Expand a recipient MASTER id into its device set (plus our own siblings for
+/// self fan-out) and deliver one already-signed DM envelope to each. A recipient
+/// with no ingested device list resolves to an empty set and the master id is used
+/// as-is. Used by every DM send path: message, edit, delete, reactions.
 ///
-/// NOTE: `pending_messages` is keyed per DEVICE, so a queued envelope is drained
-/// to the right device when ITS session establishes (PeerJoined/RoomMembers/
-/// KeyBundle). The caller is responsible for the local DB write + UI event, both
-/// of which stay keyed on the MASTER.
+/// `pending_messages` is keyed per DEVICE, so a queued envelope drains to the
+/// right device. The caller owns the local DB write and UI event, both master-keyed.
 #[allow(clippy::too_many_arguments)]
 async fn fan_out_dm_envelope(
     olm: &mut OlmManager,
@@ -428,26 +391,20 @@ async fn fan_out_dm_envelope(
     device_peer_id: &str,
     recipient_master: &str,
     envelope_json: &str,
-    // For DirectMessage sends, a variant of the envelope with `convo` set to
-    // `recipient_master` — delivered to OUR OWN sibling devices so they file the
-    // echo under the right conversation (not under ourselves). `None` for
-    // edit/delete/reaction (siblings resolve the convo from the message row by
-    // mid on receive), so siblings get the plain `envelope_json`.
+    // For DirectMessage sends, a variant with `convo` set to `recipient_master`,
+    // delivered to OUR OWN siblings so they file the echo under the right
+    // conversation. `None` for edit/delete/reaction, which resolve it by mid.
     sibling_envelope_json: Option<&str>,
 ) {
-    // Recipient's devices (genuine other party) always get the plain envelope.
-    // Target set = the persisted device list UNION the devices CURRENTLY in the
-    // DM room that resolve to this master. The live room is authoritative: a
-    // device that's online right now must be reached even if the stored device
-    // list is stale/polluted (ghost ids from old wipe+reimport tests) or simply
-    // doesn't yet contain this freshly-rotated device id. Without the live union
-    // the fan-out would deliver only to a dead ghost id and skip the connected
-    // device — the exact "first message lost, peer shows offline" symptom.
+    // The recipient's devices always get the plain envelope. The target set is the
+    // persisted device list UNION the devices CURRENTLY in the DM room that resolve
+    // to this master: the live room is authoritative, because a stale or
+    // ghost-polluted list would deliver only to a dead id and skip the connected
+    // device ("first message lost, peer shows offline").
     let dm_room = dm_room_code(local_peer_str, recipient_master);
-    // Self-DM ("Saved messages"): the recipient IS us — there is no other party
-    // to deliver to, and the recipient-branch fallback below would queue a dead
-    // envelope under the bare master id forever. Our own siblings (next block)
-    // still get their copy.
+    // Self-DM ("Saved messages"): the recipient IS us, so there is no other party
+    // and the recipient-branch fallback would queue a dead envelope under the bare
+    // master forever. Our own siblings still get their copy below.
     let self_dm = super::resolver::same_identity(local_peer_str, recipient_master);
     let recipient_devices = if self_dm {
         Vec::new()
@@ -465,23 +422,19 @@ async fn fan_out_dm_envelope(
         ).await;
     }
 
-    // Our own sibling devices (self fan-out) get the convo-tagged variant when one
-    // is supplied; otherwise the plain envelope. Same live-union logic, excluding
-    // THIS device (never echo to ourselves).
+    // Our own siblings get the convo-tagged variant when one is supplied, same
+    // live-union logic, excluding THIS device (never echo to ourselves).
     let own_master = super::resolver::resolve(local_peer_str);
     let sibling_json = sibling_envelope_json.unwrap_or(envelope_json);
-    // Siblings: live-only (None for olm) — an offline own-sibling is reached via
-    // pending_messages queue + Step 5 backfill, NOT via the offline-buffer/push
-    // path (we never want to PUSH our own phone for our OWN outgoing message).
+    // Siblings are live-only: an offline sibling is reached via the pending queue
+    // and backfill, never a push (we never push our own phone for our own message).
     let mut siblings: HashSet<String> = collect_target_devices(
         ws_room_peers, None, &dm_room, &own_master, "", /*exclude*/ Some(device_peer_id),
     ).into_iter().collect();
     // ALSO union peers in our `inbox:{master}` room. A freshly-linked sibling joins
-    // the inbox room IMMEDIATELY (it's the sibling rendezvous) but may not have
-    // joined this specific DM-with-friend room yet when we send our FIRST message —
-    // so the DM-room union alone misses it and the echo goes to a stale ghost id
-    // from the stored device list. The inbox union catches the live sibling right
-    // away (fixes "VM's first DM to AL never mirrors to Pixel").
+    // the inbox room immediately but may not have joined this DM room yet when we
+    // send our FIRST message, so the DM-room union alone misses it and the echo
+    // goes to a stale ghost id from the stored device list.
     let inbox_room = format!("inbox:{own_master}");
     if let Some(peers) = ws_room_peers.get(&inbox_room) {
         for p in peers {
@@ -506,40 +459,31 @@ async fn fan_out_dm_envelope(
 
 /// Build the set of device peer_ids to fan a DM out to for one master identity.
 ///
-/// LIVENESS-FILTERED (Step 7 ghost fix): a stored device id from
-/// `resolver::devices_for` is targeted ONLY if it is reachable — it has an Olm
-/// session OR is currently in a room. A device list accumulates dead "ghost" ids
-/// across re-link cycles (union-merge never prunes); without this filter the
-/// fan-out addresses every ghost → no session → `send_dm_to_device` either
-/// room-sends ("Sent encrypted DM to offline <ghost>", firing a spurious push +
-/// unread on the receiver) or queues a KeyRequest forever. A ghost has been seen
-/// by NO device, so it has neither a session nor room presence → it's dropped.
-/// A genuinely-offline REAL device (seen before → has a persisted session) still
-/// passes and gets the normal offline-buffer treatment.
+/// LIVENESS-FILTERED: a stored device id is targeted ONLY if it is reachable, so
+/// it has an Olm session OR is currently in a room. A device list accumulates dead
+/// ghost ids across re-link cycles (union-merge never prunes), and without this
+/// filter the fan-out either room-sends to them, firing a spurious push and unread
+/// on the receiver, or queues a KeyRequest forever. A genuinely offline REAL
+/// device has a persisted session and still passes.
 ///
-/// The set is then UNIONed with every peer currently in `dm_room` that resolves to
-/// `master` (the live room is always authoritative — a freshly-rotated device id
-/// not yet in the stored list is still reached). `fallback_self` is returned only
-/// if the whole set is empty and non-empty itself (single-device recipient → send
-/// to the master id as-is, pre-multi-device behavior); pass "" to skip the fallback
-/// (self fan-out, where "no live siblings" must mean send to nobody). `exclude`
-/// drops one id (our own device).
+/// The set is UNIONed with every peer currently in `dm_room` that resolves to
+/// `master`, because the live room is always authoritative. `fallback_self` is
+/// returned only when the whole set is empty (single-device recipient); pass "" to
+/// skip it, which is what self fan-out needs. `exclude` drops our own device.
 fn collect_target_devices(
     ws_room_peers: &HashMap<String, HashSet<String>>,
-    // When Some, also include OFFLINE-but-real devices (Step 9A push): a device
-    // that is in the resolver's signed-list view AND we hold an Olm session with
-    // → it gets the offline-buffer/push treatment so a fully-quit phone wakes.
-    // None = live-only (self fan-out to our own siblings: never push our own phone).
+    // When Some, also include OFFLINE-but-real devices: a device in the resolver's
+    // signed-list view that we hold an Olm session with, so a fully-quit phone
+    // wakes. None = live-only, which is what self fan-out uses.
     olm: Option<&OlmManager>,
     dm_room: &str,
     master: &str,
     fallback_self: &str,
     exclude: Option<&str>,
 ) -> Vec<String> {
-    // Online devices: stored devices CURRENTLY IN A ROOM (reachable right now).
-    // Room-presence is the unambiguous liveness test that drops dead ghosts (a
-    // ghost has a STALE persisted Olm session, so `has_session` alone is NOT a
-    // liveness test — it's only used below to qualify the OFFLINE set).
+    // Stored devices CURRENTLY IN A ROOM. Room presence is the unambiguous liveness
+    // test that drops dead ghosts: `has_session` is NOT liveness, since a ghost has
+    // a stale persisted session, and it only qualifies the OFFLINE set below.
     let mut set: HashSet<String> = super::resolver::devices_for(master)
         .into_iter()
         .filter(|d| super::crypto_handler::ws_room_for_peer(ws_room_peers, d).is_some())
@@ -564,18 +508,13 @@ fn collect_target_devices(
     set.into_iter().collect()
 }
 
-/// Offline-but-real devices of one master (Step 9A push): a known device of
-/// this master that is NOT in a room but we DO hold an Olm session with. The
-/// resolver's `devices_for` reflects the signed device list MINUS revoked
-/// tombstones (Step 7 `forget`s a revoked device), so it's the authoritative
-/// "real devices" set; intersecting with `has_session` drops never-contacted
-/// ghosts (a real offline phone we've messaged has a session; a ghost we never
-/// established one with does not). These hit `send_dm_to_device`'s
-/// session+offline branch → relay buffers under the device id + pushes its
-/// token → the quit phone's background fetch (which now auths as that device)
-/// decrypts the preview. Without this a fully-quit phone was never targeted at
-/// all → no push (the Step 9A break). Also the target predicate for the
-/// channel-push offline fan-out (same "real offline device" definition).
+/// Offline-but-real devices of one master: a known device NOT in a room that we DO
+/// hold an Olm session with. `devices_for` reflects the signed device list minus
+/// revoked tombstones, and intersecting with `has_session` drops never-contacted
+/// ghosts. These take `send_dm_to_device`'s session+offline branch, so the relay
+/// buffers under the device id and pushes its token, and the quit phone's
+/// background fetch decrypts the preview. Also the target predicate for the
+/// channel-push offline fan-out.
 fn offline_session_devices(
     olm: &OlmManager,
     ws_room_peers: &HashMap<String, HashSet<String>>,
@@ -606,18 +545,14 @@ fn room_peers_of_master(
         .collect()
 }
 
-/// Send one already-signed DM envelope to ONE concrete device peer_id (Phase 6
-/// multi-device fan-out). This is the per-device half of `handle_send_message`,
-/// split out so the master→devices loop can run it once per target. `device_peer`
-/// is always a real device id (or the master id itself for a single-device
-/// recipient), never a master that no device authenticates as.
+/// Send one already-signed DM envelope to ONE concrete device peer_id: the
+/// per-device half of `handle_send_message`, so the master-to-devices loop runs it
+/// once per target. `device_peer` is always a real device id (or the master id for
+/// a single-device recipient), never a master no device authenticates as.
 ///
-/// Three branches, identical in shape to the pre-fan-out code, just keyed by the
-/// device id:
-///   - session + online → encrypt and deliver now,
-///   - session + offline → encrypt to the DM room (push trigger) + queue for
-///     reconnect,
-///   - no session → queue + KeyRequest (drained on session establishment).
+/// Three branches: session + online encrypts and delivers now; session + offline
+/// encrypts to the DM room as a push trigger and queues for reconnect; no session
+/// queues and fires a KeyRequest.
 #[allow(clippy::too_many_arguments)]
 async fn send_dm_to_device(
     olm: &mut OlmManager,
@@ -633,21 +568,16 @@ async fn send_dm_to_device(
     device_peer: &str,
     envelope_json: &str,
     dm_room: &str,
-    // True when `device_peer` is one of OUR OWN sibling devices (self-echo fan-out),
-    // not the genuine recipient. A sibling mirror is NEVER notification-worthy, so
-    // when the sibling is offline we must NOT do the "encrypt to DM room (push
-    // trigger)" room-send (the relay would fire an FCM push and the sibling would
-    // buzz for OUR OWN outgoing message). We still queue it for silent delivery on
-    // the sibling's next reconnect (+ Step 5 backfill closes any residual gap).
+    // True when `device_peer` is one of OUR OWN siblings rather than the genuine
+    // recipient. A sibling mirror is NEVER notification-worthy, so an offline
+    // sibling must NOT get the room-send push trigger; it is queued for silent
+    // delivery on the sibling's next reconnect.
     is_sibling: bool,
 ) {
     // EXACT-device reachability, not the identity-wide `peer_is_reachable`: in a
-    // fan-out, device A may be online while sibling device B is offline. The
-    // identity-wide check would report B "reachable" (because A is), send B's
-    // copy down the online path, and `send_encrypted_message`'s own
-    // `ws_room_for_peer` (exact membership) would then find no room for B and
-    // DROP it with no offline buffering. Checking exact membership here routes an
-    // offline-but-sibling-online device into the offline-buffer branch correctly.
+    // fan-out device A may be online while sibling B is offline, and the
+    // identity-wide check would send B's copy down the online path, where
+    // `ws_room_for_peer` finds no room for B and DROPS it with no buffering.
     let device_online = super::crypto_handler::ws_room_for_peer(ws_room_peers, device_peer).is_some();
 
     if !olm.has_session(device_peer) {
@@ -665,21 +595,18 @@ async fn send_dm_to_device(
             device_peer, envelope_json, dm_room,
         ).await;
     } else if is_sibling && device_online {
-        // Our OWN sibling device, online — send the self-echo NOW. Siblings meet
-        // in inbox:{our_master}, NOT dm_room_code(M,M), so route via the flexible
-        // ws_room_for_peer lookup (which finds the inbox room), NOT the DM room.
-        // The multi-room one-way risk doesn't apply here: a sibling shares only
-        // the inbox room with us, so the lookup is unambiguous.
+        // Our OWN sibling, online: siblings meet in inbox:{our_master}, NOT
+        // dm_room_code(M,M), so route via the flexible `ws_room_for_peer` lookup.
+        // A sibling shares only the inbox room with us, so it is unambiguous.
         send_encrypted_message(
             olm, crypto_store, device_peer, envelope_json,
             event_tx, ws_cmd_tx, ws_room_peers,
         ).await;
         queue_pending_envelope(pending_messages, device_peer, envelope_json);
     } else if is_sibling {
-        // Session exists but our OWN sibling device is offline. Do NOT room-send
-        // (that would trigger a push — Pixel buzzing for VM's own message). Just
-        // queue for silent delivery when the sibling reconnects; Step 5 backfill
-        // also closes the gap on next inbox-join.
+        // Session exists but our OWN sibling is offline. Do NOT room-send, which
+        // would trigger a push for our own message; queue for silent delivery, and
+        // backfill closes the gap on the next inbox-join.
         queue_pending_envelope(pending_messages, device_peer, envelope_json);
     } else {
         send_dm_offline_recipient(olm, crypto_store, ws_cmd_tx, device_peer, envelope_json, dm_room);
@@ -688,19 +615,14 @@ async fn send_dm_to_device(
     }
 }
 
-/// Genuine recipient device, online — encrypt and send into the DETERMINISTIC
-/// DM room (the master-pair `dm_room_code` the caller computed), NOT a
-/// `ws_room_for_peer` lookup. When the recipient's device is co-present in more
-/// than one of our rooms (its DM room PLUS an inbox/server room during
-/// friend-handshake churn), the first-match lookup inside
-/// send_encrypted_message can pick a room the recipient has since left → the
-/// relay buffers the frame against a room they never rejoin and it's silently
-/// lost (the one-way DM bug: sends "succeed" but never arrive). The offline
-/// path (`send_dm_offline_recipient`) already routes by dm_room for this exact
-/// reason; the online path must too. Every device of the FRIEND is a member of
-/// dm_room. NOTE: siblings never take this path — they meet in
-/// inbox:{our_master}, NOT dm_room_code(M,M), so dm_room is wrong for them;
-/// the sibling self-echo path keeps the flexible lookup.
+/// Genuine recipient device, online: encrypt into the DETERMINISTIC DM room the
+/// caller computed, NOT a `ws_room_for_peer` lookup. When the recipient's device
+/// is co-present in more than one of our rooms, the first-match lookup can pick a
+/// room they have since left, and the relay then buffers the frame against a room
+/// they never rejoin: the one-way DM bug, where sends "succeed" but never arrive.
+/// Every device of the FRIEND is a member of dm_room.
+///
+/// Siblings never take this path: they meet in inbox:{our_master} instead.
 #[allow(clippy::too_many_arguments)]
 async fn send_dm_online_recipient(
     olm: &mut OlmManager,
@@ -730,19 +652,12 @@ async fn send_dm_online_recipient(
         }
     }
     // ALSO queue for re-delivery on the next session (re)establishment.
-    // The relay never ACKs a direct message, and a session we believe is
-    // confirmed bidirectional can be silently dead on the PEER's side —
-    // the classic "KeyRequest while we hold a session — peer lost theirs"
-    // desync, which is acute right after a device link (the freshly-linked
-    // sibling and its source churn their ratchet during the snapshot
-    // handshake). A DM encrypted on that doomed ratchet is undecryptable and,
-    // without this queue, lost forever (it was the "first sibling DM never
-    // mirrors, every later one does" bug). The re-key/decrypt-fail path
-    // (swarm.rs), PeerJoined, and KeyBundle all `.remove()`-drain this queue
-    // on a FRESH session, re-delivering the envelope; the receiver dedups by
-    // `message_id`, so the redundant copy on a healthy session is harmless.
-    // Cap per-device so a long-lived healthy session (no reconnect to drain
-    // it) can't grow the queue unbounded.
+    // The relay never ACKs a direct message, and a session we believe is confirmed
+    // can be silently dead on the PEER's side, which is acute right after a device
+    // link. A DM encrypted on that doomed ratchet is undecryptable and, without
+    // this queue, lost forever. The re-key path, PeerJoined and KeyBundle all drain
+    // it on a FRESH session, and the receiver dedups by `message_id`. Capped per
+    // device, so a long-lived healthy session cannot grow it unbounded.
     const RETRY_QUEUE_CAP: usize = 20;
     let q = pending_messages.entry(device_peer.to_string()).or_default();
     q.push(envelope_json.to_string());
@@ -752,13 +667,10 @@ async fn send_dm_online_recipient(
     }
 }
 
-/// Session exists but the recipient device is offline — encrypt and send to the
-/// DM room anyway. The relay sees the target isn't in the room and triggers a
-/// push notification. The DM room is the MASTER-pair room (computed once by the
-/// caller from the recipient's master) — every device of the recipient is a
-/// member of it. `dm_room_code` is pure now, so we must NOT recompute it from
-/// `device_peer` here (that would key the room on the device id, not the
-/// identity).
+/// Session exists but the recipient device is offline: encrypt and send to the DM
+/// room anyway, so the relay sees the target is absent and triggers a push. The
+/// room is the MASTER-pair room the caller computed and must NOT be recomputed
+/// from `device_peer`, which would key the room on a device id.
 fn send_dm_offline_recipient(
     olm: &mut OlmManager,
     crypto_store: &CryptoStore,
@@ -911,10 +823,9 @@ pub(crate) async fn handle_send_channel_message(
     let order_us = crate::chat_clock::next_send_stamp_us();
     let timestamp = order_us / 1000;
 
-    // Sign the message before encryption. The v2 signature binds the
-    // structured fields as they ride BOTH wire forms below (the MLS envelope
-    // and the public-channel plaintext both carry mid/reply_to/link_preview/
-    // order_us — PublicChannelMessage gained order_us in 0.8.3 for this).
+    // The v2 signature binds the structured fields as they ride BOTH wire forms:
+    // the MLS envelope and the public-channel plaintext both carry
+    // mid/reply_to/link_preview/order_us.
     let lp_digest = link_preview.as_ref().map(link_preview_digest);
     let extras = SignedExtras {
         mid: Some(&message_id),
@@ -932,12 +843,10 @@ pub(crate) async fn handle_send_channel_message(
     // fan-out below.
     let (has_everyone, mentioned_names) = channel_mention_meta(&text);
 
-    // Wire bytes of the message as broadcast to the room — re-delivered to
-    // OFFLINE members via targeted 0x09 frames (relay offline buffer). The MLS
-    // group ciphertext / signed public plaintext is decryptable by any member,
-    // so one encryption serves both paths. None on the legacy Olm fan-out path
-    // (pairwise sessions can't pre-encrypt for offline peers without burning
-    // ratchet slots) — those members still get a content-free wake push.
+    // Wire bytes as broadcast to the room, re-delivered to OFFLINE members via
+    // targeted 0x09 frames. The MLS ciphertext or signed plaintext is decryptable
+    // by any member, so one encryption serves both paths. None on the legacy Olm
+    // fan-out, where pairwise sessions cannot pre-encrypt without burning ratchets.
     let offline_wire_bytes: Option<Vec<u8>> = if server.is_channel_public(&channel_id) {
         // Public channels: plaintext broadcast (no MLS/Olm). Guests receive it too.
         let msg = HavenMessage::PublicChannelMessage {
@@ -1033,12 +942,10 @@ pub(crate) async fn handle_send_channel_message(
     }).await;
 }
 
-/// Cooperative-client fast-fail gates for a channel send: posting permission +
-/// the moderation trio (mute / media-only / slow mode). Receivers drop
-/// violations too. Returns the user-facing error for the FIRST failed gate,
-/// `None` when the send may proceed. Async — the slow-mode check reads the
-/// `MessageStore` on the blocking pool (SQLCipher key derivation is expensive
-/// and must not stall the event loop).
+/// Cooperative-client fast-fail gates for a channel send: posting permission plus
+/// the moderation trio. Receivers drop violations too. Returns the user-facing
+/// error for the FIRST failed gate. Async, because the slow-mode check reads the
+/// store on the blocking pool (SQLCipher key derivation must not stall the loop).
 async fn channel_send_gate_error(
     server: &ServerState,
     local_peer_str: &str,
@@ -1067,12 +974,10 @@ async fn channel_send_gate_error(
     ).await
 }
 
-/// Send-side mute gate (master-keyed, lazy expiry — the same lookup the
-/// new-message gate uses): `Some(error)` when we are muted on this server.
-/// Shared by the new-message, edit, and add-reaction send paths. Deletes and
-/// reaction removals are deliberately NOT gated — removing your own content
-/// is always allowed — and slow mode / media-only never apply to
-/// edits/deletes/reactions.
+/// Send-side mute gate (master-keyed, lazy expiry): `Some(error)` when we are
+/// muted on this server. Shared by the new-message, edit and add-reaction paths.
+/// Deletes and reaction removals are deliberately NOT gated, because removing your
+/// own content is always allowed, and slow mode never applies to them.
 fn muted_send_error(server: &ServerState, local_peer_str: &str) -> Option<String> {
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1084,10 +989,9 @@ fn muted_send_error(server: &ServerState, local_peer_str: &str) -> Option<String
     None
 }
 
-/// Slow-mode half of the send gates: error when our own latest message in the
-/// channel is still inside the slow-mode window. The Mod+ exemption
-/// short-circuits BEFORE any store access; the open+query hops onto the
-/// blocking pool.
+/// Slow-mode half of the send gates: an error when our own latest message in the
+/// channel is still inside the window. The Mod+ exemption short-circuits BEFORE
+/// any store access; the open and query hop onto the blocking pool.
 async fn slow_mode_wait_error(
     server: &ServerState,
     local_peer_str: &str,
@@ -1110,11 +1014,10 @@ async fn slow_mode_wait_error(
     None
 }
 
-/// Our own latest message ts in a channel, read on the blocking pool with
-/// owned captures — the store is created and dropped entirely inside the
-/// closure (rusqlite `Connection` is !Sync, never held across an .await).
-/// Store-open failure = `None` (gate allows — mirrors the original inline
-/// behavior). Shared with the channel file send gate (file_handler).
+/// Our own latest message ts in a channel, read on the blocking pool with owned
+/// captures: the store is created and dropped inside the closure, because a
+/// rusqlite `Connection` is !Sync and must never be held across an await. A
+/// store-open failure returns `None`, so the gate allows.
 pub(crate) async fn latest_own_channel_ts_blocking(
     server_id: &str,
     channel_id: &str,
@@ -1152,23 +1055,16 @@ fn channel_mention_meta(text: &str) -> (bool, Vec<String>) {
     (has_everyone, mentioned_names)
 }
 
-/// Serialize + broadcast one public-channel `HavenMessage` to the server room
-/// (plaintext — no MLS/Olm; guests receive it too, still Ed25519-signed).
-/// Returns the wire bytes for the offline 0x09 push fan-out.
-/// `pub(crate)` — file_handler's public-channel file send uses it too.
+/// Serialize and broadcast one public-channel `HavenMessage` to the server room
+/// (plaintext, still Ed25519-signed; guests receive it too). Returns the wire
+/// bytes for the offline 0x09 push fan-out.
 ///
-/// Sent TWICE, on purpose, and the second copy is what reaches a member who
-/// was away. The room broadcast is for guests: they sit in the room, never
-/// subscribe to a channel topic, and cannot decrypt anything. But the relay
-/// only tees a 0x07 TOPIC frame into a channel's catch-up ring, so a public
-/// channel used to put nothing at all in the ring, while a file's `FileHeader`
-/// rode the topic either way. The returning member got file metadata with no
-/// message row to hang it on, and the channel list builds its rows from
-/// `channel_messages` — so the post rendered as nothing.
-///
-/// Both copies are the same signed bytes, so a member receiving both stores
-/// one row: every ingest pre-checks `channel_message_exists(mid)` and the
-/// second arrival is emitted with `duplicate`.
+/// Sent TWICE on purpose, and the second copy is what reaches a member who was
+/// away: the room broadcast is for guests, who never subscribe to a channel topic,
+/// but the relay only tees a 0x07 TOPIC frame into a channel's catch-up ring. Both
+/// copies are the same signed bytes, and every ingest pre-checks
+/// `channel_message_exists(mid)`, so a member receiving both stores one row and
+/// the second arrival is emitted with `duplicate`.
 pub(crate) fn send_public_channel_msg(
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     server_id: &str,
@@ -1188,17 +1084,14 @@ pub(crate) fn send_public_channel_msg(
     Some(data)
 }
 
-/// Broadcast one non-public channel envelope to the server. MLS path: encrypt
-/// once → single WS topic broadcast to the room; restricted channels (Option B)
-/// encrypt under their per-channel subgroup instead of the server-wide group.
-/// Olm per-device fan-out is the fallback (MLS encrypt failure) and the
-/// pre-bootstrap path (no group yet). Returns the MLS wire bytes for the
-/// offline 0x09 push fan-out when the MLS broadcast succeeded, `None`
-/// otherwise. `bootstrap_subgroup` additionally kicks off subgroup bootstrap on
-/// the no-group path (ALL content sends — a client that only edits/reacts must
-/// still escape the Olm fallback; `request_subgroup_bootstrap` is cheap and
-/// no-ops when we're the coordinator or nobody qualifying is online).
-/// Shared driver for send/edit/delete/add-reaction/remove-reaction.
+/// Broadcast one non-public channel envelope to the server. MLS path: encrypt once
+/// into a single WS topic broadcast; restricted channels encrypt under their own
+/// per-channel subgroup. Olm per-device fan-out is the fallback on MLS failure and
+/// the pre-bootstrap path. Returns the MLS wire bytes for the offline 0x09 fan-out
+/// when the MLS broadcast succeeded. `bootstrap_subgroup` also kicks off subgroup
+/// bootstrap on the no-group path, because a client that only edits or reacts must
+/// still escape the Olm fallback. Shared driver for send, edit, delete and both
+/// reaction ops.
 #[allow(clippy::too_many_arguments)]
 async fn broadcast_channel_envelope(
     olm: &mut OlmManager,
@@ -1236,10 +1129,9 @@ async fn broadcast_channel_envelope(
         }
         return None;
     }
-    // Subgroup not yet bootstrapped (or legacy server with no MLS group):
-    // Olm fan-out to qualifying members, and (for a restricted channel) kick
-    // off subgroup bootstrap by sending our KeyPackage to the subgroup
-    // coordinator so future messages can use the subgroup.
+    // Subgroup not bootstrapped (or a legacy server with no MLS group): Olm fan-out
+    // to qualifying members, and for a restricted channel send our KeyPackage to
+    // the subgroup coordinator so future messages can use it.
     if bootstrap_subgroup && use_subgroup {
         if let Some(mls_mgr) = mls.as_mut() {
             super::crypto_handler::request_subgroup_bootstrap(
@@ -1287,15 +1179,12 @@ async fn olm_fanout_channel_envelope(
     }
 }
 
-/// Offline-member push fan-out (channel push notifications). Room/topic
-/// broadcasts only reach ONLINE peers; offline members get the message later
-/// via channel sync. To make their phones light up NOW, hand the relay one
-/// targeted 0x09 frame per offline member: the same wire bytes the room just
-/// received (buffered + replayed to that member's background fetch node) plus
-/// push metadata (channel + per-target mention flag) the relay filters against
-/// the member's registered push prefs. The relay never learns server
-/// membership — the SENDER picks the targets from its CRDT. Sync — may open
-/// the `MessageStore` (reply-author lookup).
+/// Offline-member push fan-out. Room and topic broadcasts only reach ONLINE peers,
+/// so each offline member gets one targeted 0x09 frame: the same wire bytes the
+/// room received, plus the channel and a per-target mention flag the relay filters
+/// against that member's registered prefs. The relay never learns server
+/// membership, because the SENDER picks the targets from its CRDT. Sync, and may
+/// open the `MessageStore` for the reply-author lookup.
 #[allow(clippy::too_many_arguments)]
 fn queue_offline_channel_push(
     olm: &OlmManager,
@@ -1332,15 +1221,11 @@ fn queue_offline_channel_push(
         let mentioned = member_is_mentioned(
             server, member, has_everyone, reply_author, mentioned_names,
         );
-        // Expand the offline MASTER member into its real DEVICE ids — the
-        // relay keys the push token + offline buffer by DEVICE id (Step 9A).
-        // Targeting the bare master buffers under an id no device authenticates
-        // as → no push reaches any device. Real-device predicate mirrors the
-        // DM fan-out (`offline_session_devices`): a known device of this master,
-        // offline (not in a room), that we hold an Olm session with (drops
-        // never-contacted ghosts). A single-device member (no device links) →
-        // fall back to the master id, which IS that member's device id =
-        // pre-multi-device behavior.
+        // Expand the offline MASTER member into its real DEVICE ids: the relay
+        // keys the push token and offline buffer by DEVICE, so targeting the bare
+        // master buffers under an id no device authenticates as. The predicate
+        // mirrors `offline_session_devices`. A single-device member falls back to
+        // the master id, which IS that member's device id.
         let mut targets = offline_session_devices(olm, ws_room_peers, member);
         if targets.is_empty() {
             targets.push(member.clone());
@@ -1445,10 +1330,9 @@ pub(crate) async fn handle_edit_channel_message(
         }
     };
 
-    // Moderation gate: mute blocks edits (authoring content) exactly like the
-    // new-message send gate; receivers drop a muted member's edits too.
-    // Deletes stay allowed — removing your own content is never blocked —
-    // and slow mode / media-only don't apply to edits.
+    // Moderation gate: mute blocks edits exactly like the new-message send gate,
+    // and receivers drop a muted member's edits too. Deletes stay allowed, and
+    // slow mode / media-only do not apply to edits.
     if let Some(message) = muted_send_error(server, local_peer_str) {
         let _ = event_tx.send(NetworkEvent::Error { message }).await;
         return;
@@ -1460,10 +1344,9 @@ pub(crate) async fn handle_edit_channel_message(
         .unwrap_or_default()
         .as_millis() as i64;
 
-    // Sign the edit over the EDIT timestamp + new text, binding the row's
-    // structural fields (v2) so receivers verify against the same extras
-    // their own row carries. Update local DB in the same open (preserves old
-    // text in message_edits table).
+    // Sign the edit over the EDIT timestamp and new text, binding the row's
+    // structural fields so receivers verify against the same extras their own row
+    // carries. Updated in the same open, which preserves the old text.
     let mut sig = None;
     let mut pk = None;
     {
@@ -1481,7 +1364,6 @@ pub(crate) async fn handle_edit_channel_message(
         }
     }
 
-    // Broadcast edit to all server members.
     if server.is_channel_public(&channel_id) {
         let msg = HavenMessage::PublicChannelEdit {
             server_id: server_id.clone(), channel_id: channel_id.clone(),
@@ -1548,12 +1430,10 @@ pub(crate) async fn handle_edit_dm_message(
         .unwrap_or_default()
         .as_millis() as i64;
 
-    // Sign the edit over the EDIT timestamp + new text, binding the row's
-    // structural fields (v2) — see the channel-edit twin above. Binding the
-    // full row (not just mid) is what keeps `rewrite_pending_dm_edits`
-    // verifying: the queued DirectMessage envelope keeps the original
-    // mid/reply_to/order_us/link_preview, and the receiver verifies THIS edit
-    // signature against exactly those wire fields.
+    // Sign the edit over the EDIT timestamp and new text, binding the full row
+    // rather than just the mid: that is what keeps `rewrite_pending_dm_edits`
+    // verifying, since the queued envelope keeps the original
+    // mid/reply_to/order_us/link_preview the receiver verifies against.
     let mut sig = None;
     let mut pk = None;
     {
@@ -1570,13 +1450,11 @@ pub(crate) async fn handle_edit_dm_message(
         }
     }
 
-    // Update any queued pending message (pre-edit text → edited text) so a later
-    // PeerJoined drain sends the edited text, not the stale original. Multi-device:
-    // the original message was queued PER DEVICE (under device ids, not the master),
-    // so scan every queue rather than only the master's.
+    // Update any queued pending message so a later drain sends the edited text.
+    // The original was queued PER DEVICE, under device ids rather than the master,
+    // so scan every queue.
     rewrite_pending_dm_edits(pending_messages, &message_id, &new_text, edit_timestamp, &sig, &pk);
 
-    // Send edit to the DM peer.
     let envelope = MessageEnvelope::EditMessage {
         mid: message_id.clone(),
         text: new_text.clone(),
@@ -1588,9 +1466,8 @@ pub(crate) async fn handle_edit_dm_message(
     };
     let envelope_json = serde_json::to_string(&envelope).unwrap_or_default();
 
-    // Multi-device fan-out (Step 3): deliver the edit to every device of the
-    // recipient + our own siblings. A device with no session yet gets the whole
-    // edited conversation via Step 5 backfill.
+    // Deliver the edit to every device of the recipient and our own siblings. A
+    // device with no session yet gets the edited conversation via backfill.
     let recipient_master = super::resolver::resolve(&peer_id_str);
     fan_out_dm_envelope(
         olm, crypto_store, event_tx, ws_cmd_tx, ws_room_peers,
@@ -1599,9 +1476,8 @@ pub(crate) async fn handle_edit_dm_message(
         None, // edit/delete/reaction: sibling resolves convo by mid on receive
     ).await;
 
-    // Emit event so Dart updates UI — include sig/pk so the
-    // in-memory message's fields match the canonical payload.
-    // Multi-device: the DM thread key is the peer's MASTER id (no-op single-device).
+    // Include sig/pk so the in-memory message matches the canonical payload. The
+    // DM thread key is the peer's MASTER id (no-op single-device).
     let _ = event_tx.send(NetworkEvent::DmMessageEdited {
         peer_id: super::resolver::resolve(&peer_id_str),
         message_id,
@@ -1612,9 +1488,8 @@ pub(crate) async fn handle_edit_dm_message(
     }).await;
 }
 
-/// Rewrite every queued copy of an edited DM (pre-edit text → edited text)
-/// across ALL per-device pending queues, so a later PeerJoined drain sends the
-/// edited text, not the stale original.
+/// Rewrite every queued copy of an edited DM across ALL per-device pending queues,
+/// so a later drain sends the edited text rather than the stale original.
 fn rewrite_pending_dm_edits(
     pending_messages: &mut HashMap<String, Vec<String>>,
     message_id: &str,
@@ -1671,36 +1546,28 @@ fn rewrite_pending_entry_if_edited(
 
 // ── 4b. AttachChannelLinkPreview / AttachDmLinkPreview (issue #45) ───
 //
-// A card that arrives AFTER its message was sent. The compose box fetches OG
-// metadata in the background while the user types; sending before it lands
-// used to bin the result, which is why a fast sender never got cards. These
-// handlers land it on the row instead.
+// A card that arrives AFTER its message was sent: the compose box fetches OG
+// metadata while the user types, and sending before it landed used to bin it.
 //
-// This is emphatically NOT an edit. The text is untouched, `edited_at` stays
-// null, and no "(edited)" badge appears. What it does share with an edit is
-// the signature obligation: the v2 payload binds `lp_digest`, so changing a
-// row's preview without re-signing would break `verify_message_proof_v2` and
-// stop the row replicating through signed sync backfill. Every attach
-// therefore re-signs the WHOLE message payload — same text, same ts, same
-// reply_to/file_id/order_us — with the new digest, and ships that signature
-// alongside the card.
+// Emphatically NOT an edit: the text is untouched, `edited_at` stays null and no
+// "(edited)" badge appears. What it shares with an edit is the signature
+// obligation, because the v2 payload binds `lp_digest`, so every attach re-signs
+// the WHOLE payload with the new digest and ships that signature with the card.
 
 /// The re-signature for an attach, plus the row facts the caller needs to
 /// broadcast it. `None` = the row is missing, so there is nothing to attach.
 struct AttachSig {
-    /// The timestamp the signature binds: the row's `edited_at` when it has
-    /// one, else its original `timestamp`. Must match what every verifier
-    /// reconstructs (see `verify_message_proof_v2`), or the row goes
-    /// unverified the moment a card lands on it.
+    /// The timestamp the signature binds: the row's `edited_at` when it has one,
+    /// else its original `timestamp`. Must match what every verifier reconstructs,
+    /// or the row goes unverified the moment a card lands on it.
     ts: i64,
     sig: Option<String>,
     pk: Option<String>,
 }
 
-/// Re-sign message `mid` for a preview change. `msg_type`/`context` are the
-/// same discriminators the original send used ("ch" + "sid:cid", or "dm" +
-/// peer id), and `row` is the CURRENT row, so the only thing that moves is
-/// the link-preview digest.
+/// Re-sign message `mid` for a preview change. `msg_type`/`context` are the same
+/// discriminators the original send used, and `row` is the CURRENT row, so the
+/// only thing that moves is the link-preview digest.
 #[allow(clippy::too_many_arguments)]
 fn sign_attached_preview(
     row: &crate::storage::messages::MessageSigRow,
@@ -1734,27 +1601,15 @@ fn preview_column(preview: Option<&LinkPreviewRef>) -> Option<String> {
 
 /// Land the card riding a VERIFIED sync item on its row.
 ///
-/// Backfill used to carry only `lp_digest`, so a peer that was offline when a
-/// card was attached received a message whose signature bound a preview it had
-/// no copy of. It rendered a bare link — and re-serving that row computed
-/// `lp_digest = None` from its own empty column, which every downstream peer
-/// then rejected as forged. Previews ride the batch now; this is where they
-/// land.
+/// Backfill used to carry only `lp_digest`, so a peer offline when a card was
+/// attached received a message whose signature bound a preview it had no copy of,
+/// and re-serving that row computed `lp_digest = None`, which every downstream
+/// peer then rejected as forged.
 ///
-/// Card and signature are written TOGETHER because the pair is inseparable:
-/// the v2 payload binds `lp_digest`, so a card grafted on without the
-/// signature covering it produces exactly the row that used to break — one
-/// that fails its own Message Proof and replicates to nobody. The signature
-/// written is the item's own, the one `check_backfill_signature` just verified
-/// over this exact card.
-///
-/// Guarded on the item's text matching the row's, because that signature only
-/// speaks for the text it was made over. If our row has been edited since (or
-/// this item is a stale copy), the batch's edit branch owns the row and must
-/// not have its newer signature overwritten by an older one.
-///
-/// Returns true when the card actually landed, so the caller can emit
-/// `*LinkPreviewUpdated` and repaint an open pane.
+/// Card and signature are written TOGETHER because the pair is inseparable: a card
+/// grafted on without the signature covering it is exactly the row that used to
+/// break. Guarded on the item's text matching the row's, since that signature only
+/// speaks for the text it was made over. Returns true when the card landed.
 pub(crate) fn apply_synced_link_preview(
     store: &crate::storage::MessageStore,
     is_channel: bool,
@@ -1828,9 +1683,8 @@ pub(crate) async fn handle_attach_channel_link_preview(
 
     let mut attached: Option<AttachSig> = None;
     if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
-        // Local-author op: we may only re-sign our OWN row. Remote ingest has
-        // its own check; this one stops a UI bug from minting a signature over
-        // somebody else's message with our key.
+        // Local-author op: we may only re-sign our OWN row. Remote ingest has its
+        // own check; this stops a UI bug minting a signature over somebody else's.
         let sender = store.get_channel_message_sender(&message_id);
         let author_is_us = sender
             .as_deref()
@@ -1939,10 +1793,9 @@ pub(crate) async fn handle_attach_dm_link_preview(
     }
     let Some(signed) = attached else { return };
 
-    // The recipient may still be offline with the ORIGINAL message sitting in
-    // their queue. Rewrite that queued envelope in place rather than letting a
-    // bare `lp_set` chase a message they haven't received: on reconnect they
-    // get ONE message that already carries its card.
+    // The recipient may still be offline with the ORIGINAL message queued. Rewrite
+    // that envelope in place rather than letting a bare `lp_set` chase a message
+    // they have not received: on reconnect they get ONE message with its card.
     rewrite_pending_dm_preview(
         pending_messages, &message_id, lp, &signed.sig, &signed.pk,
     );
@@ -1977,8 +1830,7 @@ pub(crate) async fn handle_attach_dm_link_preview(
 
 /// Rewrite every queued copy of a DM whose preview just landed, across ALL
 /// per-device pending queues. Mirrors [`rewrite_pending_dm_edits`]: the queued
-/// `DirectMessage` keeps its original text/mid/order_us and gains the card
-/// plus the signature that now covers it.
+/// message keeps its text and gains the card plus the signature covering it.
 fn rewrite_pending_dm_preview(
     pending_messages: &mut HashMap<String, Vec<String>>,
     message_id: &str,
@@ -2049,12 +1901,10 @@ pub(crate) async fn handle_delete_channel_message(
         .unwrap_or_default()
         .as_millis() as i64;
 
-    // Sign the deletion with the text at deletion time. Uses "ch-delete" msg
-    // type so a delete signature cannot be confused with or replayed as a
-    // send signature; v2 additionally binds the row's structural fields (mid
-    // included — a v1 delete signature was replayable onto any same-text
-    // message in the same channel). Text from DB so the archive viewer can
-    // verify the delete against the same state the exporter saw.
+    // Sign the deletion with the text at deletion time, under the "ch-delete" type
+    // so a delete signature cannot be replayed as a send signature; v2 also binds
+    // the row's structural fields, since a v1 delete signature was replayable onto
+    // any same-text message in the channel. Text from DB, so the archive verifies.
     let mut sig = None;
     let mut pk = None;
     {
@@ -2074,7 +1924,6 @@ pub(crate) async fn handle_delete_channel_message(
         }
     }
 
-    // Broadcast deletion to all server members.
     if server.is_channel_public(&channel_id) {
         let msg = HavenMessage::PublicChannelDelete {
             server_id: server_id.clone(), channel_id: channel_id.clone(),
@@ -2136,9 +1985,8 @@ pub(crate) async fn handle_delete_dm_message(
         .unwrap_or_default()
         .as_millis() as i64;
 
-    // Sign the deletion with the text at deletion time. "dm-delete" msg type —
-    // distinct from "dm" to prevent replay; v2 additionally binds the row's
-    // structural fields (see the channel-delete twin above).
+    // Sign the deletion with the text at deletion time. "dm-delete" is distinct
+    // from "dm" to prevent replay; v2 also binds the row's structural fields.
     let mut sig = None;
     let mut pk = None;
     {
@@ -2149,7 +1997,6 @@ pub(crate) async fn handle_delete_dm_message(
                 bundle_keypair, pub_key_b64, "dm-delete", &peer_id_str,
                 &local_peer, delete_timestamp, &row.as_signed(&message_id), &current_text,
             );
-            // Hide in local DB.
             let _ = store.hide_dm_message(
                 &message_id, delete_timestamp,
                 sig.as_deref(), pk.as_deref(),
@@ -2157,7 +2004,6 @@ pub(crate) async fn handle_delete_dm_message(
         }
     }
 
-    // Send deletion to the DM peer.
     let envelope = MessageEnvelope::DeleteMessage {
         mid: message_id.clone(),
         ts: delete_timestamp,
@@ -2178,8 +2024,7 @@ pub(crate) async fn handle_delete_dm_message(
         None, // edit/delete/reaction: sibling resolves convo by mid on receive
     ).await;
 
-    // Emit event so Dart updates UI.
-    // Multi-device: the DM thread key is the peer's MASTER id (no-op single-device).
+    // The DM thread key is the peer's MASTER id (no-op single-device).
     let _ = event_tx.send(NetworkEvent::DmMessageDeleted {
         peer_id: super::resolver::resolve(&peer_id_str),
         message_id,
@@ -2219,10 +2064,8 @@ pub(crate) async fn handle_add_channel_reaction(
         }
     };
 
-    // Moderation gate: mute blocks adding reactions (authoring content)
-    // exactly like the new-message send gate; receivers drop them too.
-    // Removing a reaction stays allowed — removing your own content is never
-    // blocked — and slow mode / media-only don't apply to reactions.
+    // Moderation gate: mute blocks adding reactions, like the new-message send
+    // gate. Removals stay allowed, and slow mode does not apply to reactions.
     if let Some(message) = muted_send_error(server, local_peer_str) {
         let _ = event_tx.send(NetworkEvent::Error { message }).await;
         return;
@@ -2237,7 +2080,6 @@ pub(crate) async fn handle_add_channel_reaction(
     let signing_payload = format!("reaction:{}:{}:{}", message_id, emoji, reaction_ts);
     let (sig, pk) = sign_message(bundle_keypair, pub_key_b64, &signing_payload);
 
-    // Save to local DB.
     {
         if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
             let _ = store.add_reaction(
@@ -2247,7 +2089,6 @@ pub(crate) async fn handle_add_channel_reaction(
         }
     }
 
-    // Broadcast to all server members.
     if server.is_channel_public(&channel_id) {
         let msg = HavenMessage::PublicChannelAddReaction {
             server_id: server_id.clone(), channel_id: channel_id.clone(),
@@ -2320,7 +2161,6 @@ pub(crate) async fn handle_add_dm_reaction(
     // the same identity on our other devices (no-op single-device).
     let reactor_master = super::resolver::resolve(&local_peer);
 
-    // Save to local DB.
     {
         if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
             let _ = store.add_reaction(
@@ -2330,7 +2170,6 @@ pub(crate) async fn handle_add_dm_reaction(
         }
     }
 
-    // Send to DM peer.
     let envelope = MessageEnvelope::AddReaction {
         mid: message_id.clone(),
         emoji: emoji.clone(),
@@ -2401,7 +2240,6 @@ pub(crate) async fn handle_remove_channel_reaction(
     let signing_payload = format!("unreaction:{}:{}:{}", message_id, emoji, remove_ts);
     let (sig, pk) = sign_message(bundle_keypair, pub_key_b64, &signing_payload);
 
-    // Remove from local DB.
     {
         if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
             let _ = store.remove_reaction(
@@ -2411,7 +2249,6 @@ pub(crate) async fn handle_remove_channel_reaction(
         }
     }
 
-    // Broadcast to all server members.
     if server.is_channel_public(&channel_id) {
         let msg = HavenMessage::PublicChannelRemoveReaction {
             server_id: server_id.clone(), channel_id: channel_id.clone(),
@@ -2483,7 +2320,6 @@ pub(crate) async fn handle_remove_dm_reaction(
     // Multi-device: our own reaction is keyed by our MASTER id (see AddDmReaction).
     let reactor_master = super::resolver::resolve(&local_peer);
 
-    // Remove from local DB.
     {
         if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
             let _ = store.remove_reaction(
@@ -2493,7 +2329,6 @@ pub(crate) async fn handle_remove_dm_reaction(
         }
     }
 
-    // Send to DM peer.
     let envelope = MessageEnvelope::RemoveReaction {
         mid: message_id.clone(),
         emoji: emoji.clone(),
@@ -2545,21 +2380,18 @@ pub(crate) async fn handle_envelope_channel_message(
     db_path: &str,
     db_passphrase: &str,
 ) {
-    // SECURITY: conference chat NEVER rides the channel pipeline — it has its
-    // own RAM-only HavenMessage::ConferenceChat path. A modified client
-    // sending a ChannelMessage envelope under a conf group would otherwise
-    // PERSIST into channel_messages (violating the live-only invariant), so
-    // drop it here regardless of signature.
+    // SECURITY: conference chat NEVER rides the channel pipeline, it has its own
+    // RAM-only path. A modified client sending a ChannelMessage envelope under a
+    // conf group would PERSIST it, so drop it here regardless of signature.
     if super::conference::is_conference_sid(&sid) {
         hollow_log!("[HOLLOW-SECURITY] Dropped ChannelMessage envelope for conference sid {sid}");
         return;
     }
 
-    // SECURITY: a missing OR invalid signature is rejected — mirrors the direct
-    // (non-MLS) twin in swarm.rs. Covers both callers: MLS-decrypted private
-    // channels and plaintext PUBLIC channels, where this is the only authorship
-    // binding there is. The v2 extras come from the same wire fields persisted
-    // below, so what verifies is exactly what gets stored.
+    // SECURITY: a missing OR invalid signature is rejected, mirroring the direct
+    // twin in swarm.rs. Covers MLS-decrypted private channels and plaintext PUBLIC
+    // channels, where this is the only authorship binding there is. The v2 extras
+    // come from the same wire fields persisted below.
     let lp_digest = link_preview.as_ref().map(link_preview_digest);
     let extras = SignedExtras {
         mid: mid.as_deref(),
@@ -2600,10 +2432,9 @@ pub(crate) async fn handle_envelope_channel_message(
         );
         return;
     };
-    // ALWAYS emit — a ChannelSyncBatch racing this live message inserts
-    // the row first without emitting; suppressing the live event too left
-    // the open pane stale until re-entry. Dart dedups by message_id and
-    // skips unread/notifications when `duplicate`.
+    // ALWAYS emit: a ChannelSyncBatch racing this live message inserts the row
+    // first without emitting, and suppressing the live event too left an open pane
+    // stale until re-entry. Dart dedups by mid and skips unread on `duplicate`.
     let reply_to_own = reply_author
         .is_some_and(|a| super::resolver::same_identity(&a, local_peer));
     let _ = event_tx.send(NetworkEvent::ChannelMessageReceived {
@@ -2624,22 +2455,16 @@ pub(crate) async fn handle_envelope_channel_message(
 
 /// SECURITY: true = drop this LIVE channel message.
 ///
-/// A signature is REQUIRED, not merely checked when present. The old
-/// `if sig.is_none() { return false }` early-out was itself the bypass: strip
-/// `sig`/`pk` and verification was skipped entirely.
+/// A signature is REQUIRED, not merely checked when present: an
+/// `if sig.is_none() { return false }` early-out IS the bypass, because stripping
+/// `sig`/`pk` then skips verification entirely.
 ///
-/// This matters most for PUBLIC channels, which carry no MLS layer — there the
-/// signature is the ONLY thing binding content and authorship to an Ed25519
-/// identity, so without it a message's attribution rests entirely on the
-/// relay-reported sender id. On MLS channels it is defence in depth behind group
-/// membership.
-///
-/// Sync backfill applies the SAME rule as of 0.8.5 (`REQUIRE_SIGNED_BACKFILL`):
-/// it used to tolerate an unsigned row so pre-signing history (e2cc8ab,
-/// 2026-03-09) kept replicating, but tolerating absence was an injection path,
-/// so `BackfillSig::is_acceptable()` now refuses it there too. The
-/// live-enforce / backfill-tolerate split survives ONLY for the moderation trio
-/// (a mute may legitimately postdate the history being synced).
+/// This matters most for PUBLIC channels, which carry no MLS layer, so the
+/// signature is the ONLY thing binding content and authorship to an identity; on
+/// MLS channels it is defence in depth behind group membership. Sync backfill
+/// applies the same rule (`REQUIRE_SIGNED_BACKFILL`); the live-enforce /
+/// backfill-tolerate split survives ONLY for the moderation trio, because a mute
+/// may legitimately postdate the history being synced.
 #[allow(clippy::too_many_arguments)]
 fn channel_sig_rejected(
     sender_peer_id: &str,
@@ -2664,12 +2489,10 @@ fn channel_sig_rejected(
     false
 }
 
-/// Receive-side moderation trio for one LIVE channel message: true = drop
-/// (mute / media-only / slow-mode violation), so a modified client can't bypass
-/// what receivers refuse to store. Sync backfill intentionally skips these
-/// gates — history may legitimately predate a mute / slow-mode / media-only
-/// change, and dropping it there would diverge stored history. Async — the
-/// slow-mode window check reads the `MessageStore` on the blocking pool.
+/// Receive-side moderation trio for one LIVE channel message: true = drop, so a
+/// modified client cannot bypass what receivers refuse to store. Sync backfill
+/// intentionally skips these gates, because history may legitimately predate a
+/// mute or slow-mode change. Async: the slow-mode check reads the store off-loop.
 #[allow(clippy::too_many_arguments)]
 async fn live_channel_moderation_drop(
     state: &ServerState,
@@ -2695,9 +2518,8 @@ async fn live_channel_moderation_drop(
     }
     let slow = state.channel_slow_mode(cid);
     if slow > 0 && !state.bypasses_slow_mode(sender_peer_id) {
-        // Open+query on the blocking pool with owned captures (SQLCipher key
-        // derivation is expensive; the store lives entirely inside the
-        // closure — Connection is !Sync). Open failure = allow, as before.
+        // Open and query on the blocking pool with owned captures: the store lives
+        // entirely inside the closure. Open failure = allow, as before.
         let window_start = ts - (slow as i64) * 1000;
         let (sid_o, cid_o) = (sid.to_string(), cid.to_string());
         let sender = sender_peer_id.to_string();
@@ -2715,12 +2537,10 @@ async fn live_channel_moderation_drop(
     false
 }
 
-/// LIVE-ingest mute gate shared by the edit and add-reaction envelope
-/// handlers: true = drop (the sender is muted — master-keyed, lazy expiry;
-/// every call site resolves the sender to its MASTER first). Mirrors the mute
-/// half of `live_channel_moderation_drop`. Deletes and reaction removals stay
-/// allowed — removing your own content is never blocked — and sync backfill
-/// never routes through these handlers, so history predating a mute survives.
+/// LIVE-ingest mute gate shared by the edit and add-reaction envelope handlers:
+/// true = drop, because the sender is muted (master-keyed, lazy expiry, every
+/// call site resolving the sender to its MASTER first). Deletes and reaction
+/// removals stay allowed, and sync backfill never routes through these handlers.
 pub(crate) fn live_muted_ingest_drop(server_state: Option<&ServerState>, sender: &str, action: &str) -> bool {
     let Some(state) = server_state else { return false; };
     let now_ms = std::time::SystemTime::now()
@@ -2734,12 +2554,10 @@ pub(crate) fn live_muted_ingest_drop(server_state: Option<&ServerState>, sender:
     false
 }
 
-/// Persist one incoming channel message with message-id dedup (replays); the
-/// content UNIQUE index is legacy-only (WHERE message_id IS NULL) so
-/// identical-text spam in the same millisecond persists as distinct messages.
-/// Returns `Some(is_new)`, or `None` when the store could not be opened (the
-/// caller then emits nothing, matching the pre-split behavior). Sync — owns
-/// the store.
+/// Persist one incoming channel message with message-id dedup. The content UNIQUE
+/// index is legacy-only, so identical-text spam in the same millisecond persists
+/// as distinct messages. `None` when the store could not be opened, and the caller
+/// then emits nothing. Sync, and owns the store.
 #[allow(clippy::too_many_arguments)]
 fn persist_incoming_channel_message(
     sid: &str,
@@ -2759,9 +2577,8 @@ fn persist_incoming_channel_message(
     db_passphrase: &str,
 ) -> Option<(bool, Option<String>)> {
     let store = crate::storage::MessageStore::open(db_path, db_passphrase).ok()?;
-    // Replied-to message's author (MASTER id) — the caller turns this into the
-    // event's `reply_to_own` so mentions-only gates on "reply to ME" (#42).
-    // Same store open as the insert; absent parent row = None.
+    // Replied-to message's author (MASTER id), so the event's `reply_to_own` lets
+    // mentions-only gate on "reply to ME" (#42). Same store open; absent = None.
     let reply_author = reply_to.and_then(|m| store.get_channel_message_sender(m));
     let already = mid
         .map(|m| store.channel_message_exists(m))
@@ -2801,9 +2618,8 @@ pub(crate) async fn handle_envelope_edit_message(
     db_path: &str,
     db_passphrase: &str,
 ) {
-    // Moderation (LIVE ingest only): drop edits from muted members, mirroring
-    // the new-message ingest gate — a modified client can't author content
-    // through the edit path while muted.
+    // Moderation (LIVE ingest only): drop edits from muted members, so a modified
+    // client cannot author content through the edit path while muted.
     if live_muted_ingest_drop(server_state, peer_str, "edit") {
         return;
     }
@@ -2811,11 +2627,10 @@ pub(crate) async fn handle_envelope_edit_message(
     if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
         let sender = store.get_channel_message_sender(&mid);
         if sender.as_deref() == Some(peer_str) {
-            // SECURITY: a LIVE edit must carry a signature that verifies —
-            // the row-ownership check above trusts the transport-reported
-            // sender, which on plaintext PUBLIC channels is relay-controlled.
-            // The extras come from OUR row (immutable under edit), matching
-            // what the editor's row-loaded signature bound.
+            // SECURITY: a LIVE edit must carry a signature that verifies. The
+            // row-ownership check above trusts the transport-reported sender,
+            // which on plaintext PUBLIC channels is relay-controlled. The extras
+            // come from OUR row, matching what the editor's signature bound.
             let ctx = format!(
                 "{}:{}", sid.as_deref().unwrap_or_default(), cid.as_deref().unwrap_or_default(),
             );
@@ -2853,15 +2668,12 @@ pub(crate) async fn handle_envelope_edit_message(
 }
 
 /// Handle `MessageEnvelope::LinkPreviewSet` / `HavenMessage::PublicLinkPreviewSet`
-/// (issue #45). One handler for all three ingest paths — Olm-direct DM/channel,
-/// MLS-decrypted channel, and plaintext public channel — because the rule is the
+/// (issue #45). One handler for all three ingest paths, because the rule is the
 /// same everywhere: the card only lands if the AUTHOR signed it.
 ///
-/// `peer_str` is the transport sender (a DEVICE id on the DM path). `sid`
-/// present = channel message, absent = DM.
-///
-/// Applying the same card twice is a quiet no-op, so a duplicated frame or a
-/// re-broadcast costs nothing.
+/// `peer_str` is the transport sender (a DEVICE id on the DM path); `sid` present
+/// = channel message, absent = DM. Applying the same card twice is a quiet no-op,
+/// so a duplicated frame or a re-broadcast costs nothing.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_envelope_link_preview_set(
     event_tx: &mpsc::Sender<NetworkEvent>,
@@ -2906,9 +2718,8 @@ pub(crate) async fn handle_envelope_link_preview_set(
         );
         (sender_master, ctx, String::new())
     } else {
-        // DM. Normally the attacher is the other party (the row is not ours).
-        // The exception is our OWN sibling echoing our own attach back at us,
-        // which is legitimate precisely because it resolves to our master.
+        // DM. Normally the attacher is the other party; the exception is our OWN
+        // sibling echoing our attach back, legitimate because it resolves to us.
         let is_mine = store.get_dm_message_is_mine(&mid);
         let is_sibling = super::resolver::same_identity(peer_str, local_master);
         if !(is_mine == Some(false) || (is_mine == Some(true) && is_sibling)) {
@@ -2937,10 +2748,9 @@ pub(crate) async fn handle_envelope_link_preview_set(
         return;
     };
 
-    // SECURITY: the signature must verify over the row we hold, with the NEW
-    // digest folded in. This is what stops a relay pasting a card of its
-    // choosing onto a plaintext public-channel message, and it REJECTS —
-    // there is deliberately no log-and-accept path.
+    // SECURITY: the signature must verify over the row we hold with the NEW digest
+    // folded in. That is what stops a relay pasting a card of its choosing onto a
+    // plaintext public-channel message, and it REJECTS; there is no accept path.
     let lp_digest = lp.as_deref().map(link_preview_digest);
     let extras = SignedExtras {
         mid: Some(&mid),
@@ -3005,12 +2815,10 @@ pub(crate) async fn handle_envelope_delete_message(
             hollow_log!("[HOLLOW-SECURITY] REJECTED MLS DeleteMessage from {sender_peer_id} — not the sender of {mid}");
             return;
         }
-        // SECURITY: a LIVE delete must carry a signature that verifies — on
+        // SECURITY: a LIVE delete must carry a signature that verifies. On
         // plaintext PUBLIC channels the transport-reported sender is
         // relay-controlled, and an unauthenticated delete is a censorship
-        // primitive. The deleter signed over OUR row's current text + extras
-        // ("ch-delete" payload); a receiver whose text lags (missed edit)
-        // rejects here and converges via sync's hidden_at instead.
+        // primitive. A receiver whose text lags rejects and converges via sync.
         let ctx = format!(
             "{}:{}", sid.as_deref().unwrap_or_default(), cid.as_deref().unwrap_or_default(),
         );
@@ -3055,9 +2863,8 @@ pub(crate) async fn handle_envelope_add_reaction(
     db_path: &str,
     db_passphrase: &str,
 ) {
-    // Choke-point validation for EVERY inbound add path (MLS envelope, Olm
-    // fallback, public channel): short Unicode emoji or a well-formed custom
-    // emote token — nothing else reaches the DB.
+    // Choke-point validation for EVERY inbound add path: a short Unicode emoji or
+    // a well-formed custom emote token, nothing else reaches the DB.
     if !super::emotes::valid_reaction_emoji(&emoji) {
         hollow_log!("[HOLLOW-SECURITY] REJECTED reaction from {peer_str} — invalid emoji string ({} bytes)", emoji.len());
         return;
@@ -3067,11 +2874,9 @@ pub(crate) async fn handle_envelope_add_reaction(
     if live_muted_ingest_drop(server_state, peer_str, "reaction") {
         return;
     }
-    // SECURITY: a LIVE reaction must carry a signature that verifies — on
-    // plaintext PUBLIC channels the transport-reported reactor is
-    // relay-controlled, so an unsigned reaction is attributable to anyone.
-    // The reaction payload has its own grammar (binds mid+emoji+ts already);
-    // no v2 needed.
+    // SECURITY: a LIVE reaction must carry a signature that verifies. On plaintext
+    // PUBLIC channels the reactor is relay-controlled, so an unsigned reaction is
+    // attributable to anyone. The payload has its own grammar, so no v2 is needed.
     if reaction_sig_rejected(peer_str, "reaction", &mid, &emoji, ts, sig.as_deref(), pk.as_deref()) {
         return;
     }
@@ -3093,17 +2898,13 @@ pub(crate) async fn handle_envelope_add_reaction(
     }
 }
 
-/// SECURITY: `true` = this SYNCED reaction may be stored. Reactions riding a
-/// sync batch used to be inserted unverified — the item-level backfill check
-/// covers the MESSAGE, not the reaction rows hanging off it, and each reaction
-/// names its own reactor (`r.p`). So a sync responder (or, on a plaintext
-/// public channel, the relay) could attribute any reaction to any member.
-///
-/// Same grammar and signer rule as the live path (`reaction_sig_rejected`):
-/// `reaction:{mid}:{emoji}:{ts}` signed by the reactor's MASTER. Sync items
-/// only ever carry ADDITIONS, so there is no `unreaction:` case here.
-///
-/// Absent is refused alongside invalid — see [`REQUIRE_SIGNED_BACKFILL`].
+/// SECURITY: `true` = this SYNCED reaction may be stored. Reactions riding a sync
+/// batch used to be inserted unverified: the item-level backfill check covers the
+/// MESSAGE, not the reaction rows hanging off it, and each names its own reactor,
+/// so a responder (or the relay, on a plaintext public channel) could attribute
+/// any reaction to any member. Same grammar and signer rule as the live path,
+/// `reaction:{mid}:{emoji}:{ts}` signed by the reactor's MASTER; sync items only
+/// carry ADDITIONS. Absent is refused alongside invalid.
 pub(crate) fn sync_reaction_accepted(mid: &str, r: &super::types::SyncReactionItem) -> bool {
     let reactor = super::resolver::resolve(&r.p);
     let payload = format!("reaction:{}:{}:{}", mid, r.e, r.ts);
@@ -3118,12 +2919,10 @@ pub(crate) fn sync_reaction_accepted(mid: &str, r: &super::types::SyncReactionIt
     false
 }
 
-/// SECURITY: true = drop this LIVE reaction add/remove — signature missing or
-/// invalid. Reactions sign their own canonical payload
-/// (`{kind}:{mid}:{emoji}:{ts}`, kind = "reaction" | "unreaction"), which
-/// already binds the message id, so a valid signature cannot be replayed onto
-/// another message or emoji. Reactions arriving in a SYNC batch go through
-/// [`sync_reaction_accepted`] instead — same rule, item-local signer.
+/// SECURITY: true = drop this LIVE reaction add or remove, signature missing or
+/// invalid. Reactions sign `{kind}:{mid}:{emoji}:{ts}`, which already binds the
+/// message id, so a valid signature cannot be replayed onto another message or
+/// emoji. Sync-batch reactions go through [`sync_reaction_accepted`] instead.
 pub(crate) fn reaction_sig_rejected(
     reactor: &str,
     kind: &str,
@@ -3282,8 +3081,7 @@ mod tests {
     }
 
     /// DM deletions bind to the ROW's direction: the signer derives from OUR
-    /// is_mine, so a friend cannot censor OUR OWN message by signing a
-    /// "deletion" of it with their (valid) key and a flipped mine flag.
+    /// is_mine, so a friend cannot censor OUR message with their own valid key.
     #[test]
     fn synced_dm_deletion_binds_author_direction() {
         let _g = crate::node::resolver::test_lock();
@@ -3307,8 +3105,7 @@ mod tests {
         assert_eq!(store.get_dm_message_hidden_at("dm-1"), Some(2_000));
 
         // OUR message (is_mine=true): the friend signs a "deletion" of it with
-        // their own key. The row says WE authored it, so their proof must be
-        // rejected — deletes are self-only.
+        // their own key, and the row says WE authored it, so it must be rejected.
         store.insert(&them_id, "our message", true, 3_000, None, None, Some("dm-2"), None, None, None).unwrap();
         let row2 = RowExtras::load_dm(&store, "dm-2");
         let text2 = row2.text.clone().unwrap_or_default();
@@ -3462,16 +3259,12 @@ mod tests {
         }
     }
 
-    /// Issue #45 follow-up — a card riding a sync batch is covered by the SAME
-    /// signature that covers the text, because the digest is recomputed from
-    /// the shipped preview rather than trusted from the wire's `lp_digest`.
+    /// Issue #45 follow-up: a card riding a sync batch is covered by the SAME
+    /// signature that covers the text, because the digest is recomputed from the
+    /// shipped preview rather than trusted from the wire's `lp_digest`.
     ///
-    /// That ordering is the security property. Backfill now carries thumbnail
-    /// bytes a peer will render, so a responder (or, on the plaintext
-    /// public-channel path, the relay) that could swap the card while keeping
-    /// the author's `lp_digest` would have a phishing primitive: same message,
-    /// same signature, attacker's image and title. Recomputing means any swap
-    /// produces a digest the author never signed.
+    /// That ordering is the security property: backfill carries thumbnail bytes a
+    /// peer will render, so a swap that kept the author's digest would phish.
     #[test]
     fn synced_link_preview_is_covered_by_the_item_signature() {
         let _g = crate::node::resolver::test_lock();
@@ -3545,9 +3338,8 @@ mod tests {
              that was offline",
         );
 
-        // A responder swaps the card and updates `lp_digest` to match, which is
-        // the best a tamperer can do. Recomputing from `lp` means the digest we
-        // check is the swapped one, and the author's signature does not cover it.
+        // A responder swaps the card and updates `lp_digest` to match, the best a
+        // tamperer can do; recomputing means the author's signature misses it.
         let mut phish = item.clone();
         let evil = LinkPreviewRef {
             title: "Free crypto, click here".to_string(),
@@ -3575,10 +3367,9 @@ mod tests {
             "the wire's lp_digest must not be able to vouch for a different card",
         );
 
-        // Digest-only, no card: a responder whose own row arrived before
-        // previews rode backfill. Still verifies, stores card-less — the
-        // behaviour every peer had before this change, and the reason
-        // `lp_digest` stays on the wire.
+        // Digest-only, no card: a responder whose row arrived before previews rode
+        // backfill. Still verifies, stores card-less, which is the behaviour every
+        // peer had before this change, and the reason `lp_digest` stays on the wire.
         let mut legacy = item.clone();
         legacy.lp = None;
         assert_eq!(

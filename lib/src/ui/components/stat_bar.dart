@@ -5,9 +5,8 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
 
-/// Single stat row with icon + label + right-aligned value + animated
-/// progress bar. Promoted from the desktop Home `_RelayStatsCard` so the
-/// mobile Settings relay card renders the identical bar.
+/// Single stat row: icon, label, right-aligned value and an animated progress
+/// bar. Shared so desktop Home and the mobile relay card render the same one.
 class StatBar extends StatelessWidget {
   final HollowTheme hollow;
   final IconData icon;
@@ -43,13 +42,9 @@ class StatBar extends StatelessWidget {
           children: [
             Icon(icon, size: 12, color: hollow.textSecondary),
             const SizedBox(width: HollowSpacing.xs),
-            // The label yields, the value does not: "480 / 7940 MB" is the
-            // number you came to read, while "Daily relay data" can ellipse.
-            // Both were bare Texts either side of a Spacer, which overflowed
-            // this card by 8px at EVERY window size — the Spacer claimed the
-            // free space, so a long label + long value had nowhere to go.
-            // Expanded, not Flexible: beside a Spacer they would each take
-            // half the room and the label would ellipse far too early.
+            // The label yields and the value does not: the number is what you
+            // came to read. Expanded rather than a Spacer, which claims the
+            // free space and leaves a long label and value nowhere to go.
             Expanded(
               child: Text(
                 label,

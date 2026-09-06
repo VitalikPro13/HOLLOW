@@ -19,16 +19,14 @@ class ServerBannerEntry {
   });
 }
 
-/// Cache of server banner bytes keyed by server_id. Near-copy of
-/// [ServerAvatarNotifier], plus the asset-rail pull: the CRDT carries only
-/// the banner HASH — when the blob isn't cached yet we request it once via
+/// Cache of server banner bytes keyed by server_id. The CRDT carries only the
+/// banner HASH; when the blob isn't cached we request it once via
 /// `request_assets(kind: banner)` and reload when `EmoteAssetsReceived`
-/// delivers it (see `onAssetsReceived`, wired in event_provider).
+/// delivers it.
 class ServerBannerNotifier extends Notifier<Map<String, ServerBannerEntry>> {
-  // Local-write bookkeeping: `set_server_banner`/`clear_server_banner` only
-  // QUEUE a node command — the CRDT apply + CrdtStore persist land later, so
-  // a DB read right after the FFI returns the PREVIOUS banner. Same pattern
-  // (and same "second upload applies the first icon" bug) as avatars.
+  // `set_server_banner`/`clear_server_banner` only QUEUE a node command, so a
+  // DB read right after the FFI returns the PREVIOUS banner: the same "second
+  // upload applies the first icon" bug as avatars.
   final Map<String, int> _writeGen = {};
   final Set<String> _writePending = {};
 
@@ -58,9 +56,8 @@ class ServerBannerNotifier extends Notifier<Map<String, ServerBannerEntry>> {
       final bytes = data.bytes;
       if (bytes != null && bytes.isNotEmpty) {
         _pendingPulls.remove(data.hash);
-        // Same hash = same content-addressed bytes: skip the state write so
-        // ServerUpdated churn doesn't hand AnimatedGifImage a fresh bytes
-        // instance (it re-decodes and restarts on !identical bytes).
+        // Same hash = same content-addressed bytes: skip the state write, or
+        // ServerUpdated churn hands AnimatedGifImage a fresh instance and it re-decodes.
         final existing = state[serverId];
         if (existing != null && existing.hash == data.hash) return;
         state = {
@@ -72,9 +69,8 @@ class ServerBannerNotifier extends Notifier<Map<String, ServerBannerEntry>> {
           ),
         };
       } else {
-        // Hash replicated but the blob hasn't been pulled yet — ask one
-        // online member of this server's room. Any previous banner stays
-        // rendered until the new bytes land (no flash to empty).
+        // Hash replicated but the blob isn't pulled yet: ask one online member. Any
+        // previous banner stays rendered until the new bytes land.
         _pendingPulls[data.hash] = serverId;
         requestAssetOnce(data.hash, kind: 'banner', serverId: serverId);
       }
@@ -99,8 +95,7 @@ class ServerBannerNotifier extends Notifier<Map<String, ServerBannerEntry>> {
     _writeGen[serverId] = gen;
     _writePending.add(serverId);
     if (optimistic != null) {
-      // Hash is unknown until the Rust processing lands; the reload below
-      // replaces this placeholder entry with the real one.
+      // Hash is unknown until the Rust processing lands; the reload replaces this.
       state = {
         ...state,
         serverId: ServerBannerEntry(

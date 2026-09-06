@@ -1,7 +1,5 @@
-// Hollow Share — FFI surface (Phase 7A).
-//
-// Each function pushes a NodeCommand into the swarm event loop and returns
-// immediately. Results stream back via watch_network_events as Share* events.
+// Hollow Share FFI: each function pushes a NodeCommand into the swarm loop and returns
+// immediately, with results streaming back as Share* network events.
 
 use flutter_rust_bridge::frb;
 
@@ -33,8 +31,8 @@ pub fn share_create_from_file(source_path: String) -> Result<(), String> {
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
-    // Release the global node mutex BEFORE the (possibly waiting) send —
-    // holding it across block_on(send) serializes all other FFI calls.
+    // Drop the mutex before the send: holding it across block_on(send) serializes
+    // every other FFI call.
     drop(guard);
     let rt = get_runtime();
     rt.block_on(cmd_tx.send(node::NodeCommand::ShareCreate { source_path }))
@@ -50,8 +48,6 @@ pub fn share_open_link(link: String) -> Result<(), String> {
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
-    // Release the global node mutex BEFORE the (possibly waiting) send —
-    // holding it across block_on(send) serializes all other FFI calls.
     drop(guard);
     let rt = get_runtime();
     rt.block_on(cmd_tx.send(node::NodeCommand::ShareOpenLink { link, server_id: None, context_type: None }))
@@ -59,16 +55,13 @@ pub fn share_open_link(link: String) -> Result<(), String> {
     Ok(())
 }
 
-/// Begin downloading after ShareManifestReady.
-/// When `sequential` is true, chunks are fetched in order (0, 1, 2, ...)
-/// instead of rarest-first. Used for progressive video streaming.
+/// Begin downloading after ShareManifestReady. `sequential` fetches chunks in order
+/// instead of rarest-first, for progressive video streaming.
 #[frb]
 pub fn share_start_download(root_hash: String, save_dir: String, link: String, sequential: bool) -> Result<(), String> {
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
-    // Release the global node mutex BEFORE the (possibly waiting) send —
-    // holding it across block_on(send) serializes all other FFI calls.
     drop(guard);
     let rt = get_runtime();
     rt.block_on(cmd_tx.send(node::NodeCommand::ShareStart { root_hash, save_dir, link, sequential }))
@@ -83,8 +76,6 @@ pub fn share_cancel(root_hash: String) -> Result<(), String> {
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
-    // Release the global node mutex BEFORE the (possibly waiting) send —
-    // holding it across block_on(send) serializes all other FFI calls.
     drop(guard);
     let rt = get_runtime();
     rt.block_on(cmd_tx.send(node::NodeCommand::ShareCancel { root_hash }))
@@ -98,8 +89,6 @@ pub fn share_set_seeding(root_hash: String, seeding: bool) -> Result<(), String>
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
-    // Release the global node mutex BEFORE the (possibly waiting) send —
-    // holding it across block_on(send) serializes all other FFI calls.
     drop(guard);
     let rt = get_runtime();
     rt.block_on(cmd_tx.send(node::NodeCommand::ShareSetSeeding { root_hash, seeding }))
@@ -114,8 +103,6 @@ pub fn share_remove(root_hash: String, delete_file: bool) -> Result<(), String> 
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
-    // Release the global node mutex BEFORE the (possibly waiting) send —
-    // holding it across block_on(send) serializes all other FFI calls.
     drop(guard);
     let rt = get_runtime();
     rt.block_on(cmd_tx.send(node::NodeCommand::ShareRemove { root_hash, delete_file }))
@@ -123,9 +110,8 @@ pub fn share_remove(root_hash: String, delete_file: bool) -> Result<(), String> 
     Ok(())
 }
 
-/// Start a hidden Share download from raw root_hash + key (no link URL parsing).
-/// Used by the receiver when a FileHeader carries a ShareRef.
-/// Joins the swarm room, fetches manifest, and starts sequential download.
+/// Start a hidden Share download from a raw root_hash and key, which is what a receiver
+/// does when a FileHeader carries a ShareRef.
 #[frb]
 pub fn share_start_from_ref(root_hash: String, key_hex: String, save_dir: String, sequential: bool, server_id: Option<String>, context_type: Option<String>) -> Result<(), String> {
     let key_bytes = hex::decode(&key_hex)
@@ -147,8 +133,6 @@ pub fn share_start_from_ref(root_hash: String, key_hex: String, save_dir: String
     let node_lock = get_node();
     let guard = node_lock.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
-    // Release the global node mutex BEFORE the (possibly waiting) send —
-    // holding it across block_on(send) serializes all other FFI calls.
     drop(guard);
     let rt = get_runtime();
     rt.block_on(cmd_tx.send(node::NodeCommand::ShareOpenLink { link: link.clone(), server_id, context_type }))
@@ -162,8 +146,6 @@ pub fn share_list() -> Result<(), String> {
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
-    // Release the global node mutex BEFORE the (possibly waiting) send —
-    // holding it across block_on(send) serializes all other FFI calls.
     drop(guard);
     let rt = get_runtime();
     rt.block_on(cmd_tx.send(node::NodeCommand::ShareList))
@@ -184,9 +166,8 @@ pub fn evict_vault_cache(exempt_paths: Vec<String>) -> Result<u64, String> {
     )
 }
 
-/// Move a completed share-backed file from vault_cache to ~/.hollow/files/
-/// and enable seeding. Returns the new file path.
-/// Used by "Keep & Seed" button on video/file cards.
+/// Move a completed share-backed file out of the vault cache into the files directory
+/// and enable seeding, behind the "Keep & Seed" action. Returns the new path.
 #[frb]
 pub fn share_keep_and_seed(root_hash: String) -> Result<String, String> {
     use crate::identity::data_dir;

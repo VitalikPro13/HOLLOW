@@ -1,15 +1,10 @@
 //! OpenGraph link preview fetcher.
 //!
-//! **Privacy contract:** This module is ONLY called from the sender side.
-//! When a user types a URL into the compose box, Hollow fetches the OG tags
-//! and embeds a preview card (title/description/domain + small WebP
-//! thumbnail) into the outgoing message envelope. Receivers render the
-//! embedded card and NEVER make an HTTP request to the previewed URL —
-//! that's a privacy requirement, not a cache optimization. Routing link
-//! fetches through N receivers would turn Hollow into an IP-harvesting
-//! amplifier.
-//!
-//! Phase 6.75.
+//! **Privacy contract:** ONLY called from the sender side. Hollow fetches the OG
+//! tags when a user types a URL and embeds the card into the outgoing envelope;
+//! receivers render the embedded card and NEVER request the previewed URL.
+//! Routing link fetches through N receivers would turn Hollow into an
+//! IP-harvesting amplifier.
 
 use std::sync::{Mutex, OnceLock};
 
@@ -18,16 +13,12 @@ use scraper::{Html, Selector};
 use crate::node::image_convert;
 use crate::node::LinkPreviewRef;
 
-/// Max HTML response body we'll accept (2 MB). Modern bloated sites like
-/// YouTube ship ~1.2 MB of inline JSON + JS in a single HTML document,
-/// so a 1 MB cap cuts them off before the OG tags are even reachable.
-/// 2 MB is generous enough to cover realistic sites while still refusing
-/// pathologically-large responses. The 3-second total timeout is the
-/// real ceiling on misbehavior.
+/// Max HTML response body (2 MB). Bloated sites ship over a megabyte of inline
+/// JSON and JS before the OG tags are reachable, so a 1 MB cap cuts them off.
+/// The 3-second total timeout is the real ceiling on misbehavior.
 const MAX_HTML_BYTES: usize = 2 * 1_024 * 1_024;
-/// Max image response body we'll accept (4 MB). Typical OG images are
-/// under 500 KB; cap at 4 MB to avoid pulling a huge hero shot we'd just
-/// downsize anyway.
+/// Max image response body (4 MB). Typical OG images are under 500 KB; this only
+/// avoids pulling a huge hero shot we would downsize anyway.
 const MAX_IMAGE_BYTES: usize = 4 * 1_024 * 1_024;
 /// Total timeout for the HTML + image fetches combined.
 const FETCH_TIMEOUT_SECS: u64 = 3;
@@ -41,9 +32,8 @@ const THUMB_MAX_DIM: u32 = 400;
 /// full-width across the card instead of as an 80px row thumb.
 const THUMB_MAX_DIM_LARGE: u32 = 800;
 
-/// Optional override that routes social lookups through a configured service
-/// instead of calling the upstream API directly. `None`/empty = direct, which
-/// is the default and the shipped behavior.
+/// Optional override routing social lookups through a configured service instead
+/// of the upstream API. `None` or empty = direct, which is the default.
 static EMBED_PROXY_BASE: OnceLock<Mutex<Option<String>>> = OnceLock::new();
 
 /// The configured proxy base, or `None` for direct.
@@ -55,9 +45,8 @@ fn embed_proxy_base() -> Option<String> {
         .and_then(|g| g.clone())
 }
 
-/// Set (or clear) the social-preview proxy base. Empty string clears it.
-/// Validated by the FFI setter before Dart persists it, mirroring the GIF
-/// proxy's shape.
+/// Set (or clear) the social-preview proxy base; an empty string clears it.
+/// Validated by the FFI setter before Dart persists it, like the GIF proxy's.
 pub fn set_embed_proxy_base(base: Option<String>) {
     if let Ok(mut g) = EMBED_PROXY_BASE.get_or_init(|| Mutex::new(None)).lock() {
         *g = base.filter(|s| !s.trim().is_empty());
@@ -65,29 +54,24 @@ pub fn set_embed_proxy_base(base: Option<String>) {
 }
 /// User-Agent we identify as.
 ///
-/// The `compatible; …bot…` shape is load-bearing, not decoration: the embed
-/// proxies people paste (fixupx, vxtiktok, ddinstagram) sniff for a
-/// crawler-shaped UA and serve OpenGraph tags to it, while serving a JS shell
-/// with no metadata to anything that looks like a browser. The `+url` is the
-/// crawler convention — it is the only thing a site operator sees in their
-/// access log besides an IP, and the page it points at explains what triggers
-/// a fetch and how to block us. A `+url` that 404s reads as a scraper
-/// pretending to be a crawler, so the page has to exist.
+/// The `compatible; ...bot...` shape is load-bearing: the embed proxies people
+/// paste sniff for a crawler-shaped UA and serve OpenGraph to it, while serving
+/// a JS shell to anything that looks like a browser. The `+url` is the crawler
+/// convention and the only thing a site operator sees besides an IP, so the page
+/// it points at has to exist or we read as a scraper pretending to be a crawler.
 const USER_AGENT: &str =
     "Mozilla/5.0 (compatible; HollowBot/1.0; +https://anonlisten.com/bot)";
 
-/// One shared HTTP client, keyed on the anti-censorship tunnel's SOCKS
-/// address so it is rebuilt only when that changes. The old code built a
-/// fresh `reqwest::Client` on every keystroke-triggered fetch, throwing away
-/// the connection pool and re-doing the TLS config each time.
+/// One shared HTTP client, keyed on the anti-censorship tunnel's SOCKS address
+/// so it is rebuilt only when that changes. A fresh `reqwest::Client` per
+/// keystroke-triggered fetch throws away the pool and re-does the TLS config.
 #[allow(clippy::type_complexity)]
 static HTTP_CLIENT: OnceLock<Mutex<Option<(Option<String>, reqwest::Client)>>> =
     OnceLock::new();
 
 /// The client to fetch with, honouring the proxy tunnel when it is up.
-///
-/// `reqwest::Client` is an `Arc` internally, so cloning the cached one is
-/// cheap and every caller shares the same pool.
+/// `reqwest::Client` is an `Arc` internally, so cloning the cached one is cheap
+/// and every caller shares the same pool.
 fn http_client() -> Result<reqwest::Client, String> {
     let proxy = crate::api::network::get_proxy_socks_addr();
 
@@ -106,11 +90,9 @@ fn http_client() -> Result<reqwest::Client, String> {
         .timeout(std::time::Duration::from_secs(FETCH_TIMEOUT_SECS))
         .redirect(reqwest::redirect::Policy::limited(3));
     if let Some(addr) = proxy.as_deref() {
-        // When the tunnel is up, preview fetches ride it too. Going direct
-        // would leak the fetch to exactly the network the tunnel exists to
-        // hide from, and would fail anyway whenever the previewed host is the
-        // thing being blocked. `socks5h` keeps DNS resolution on the far side
-        // so the hostname never hits the local resolver either.
+        // When the tunnel is up, preview fetches ride it too: going direct would
+        // leak to exactly the network the tunnel hides from. `socks5h` keeps DNS
+        // resolution on the far side, so the hostname never hits the local one.
         let p = reqwest::Proxy::all(format!("socks5h://{addr}"))
             .map_err(|e| format!("Invalid SOCKS proxy address: {e}"))?;
         builder = builder.proxy(p);
@@ -125,15 +107,11 @@ fn http_client() -> Result<reqwest::Client, String> {
 
 /// Fetch OG metadata for `url` and build a `LinkPreviewRef`.
 ///
-/// Social posts (see [`social`]) take the adapter path first, because sites
-/// like X serve a crawler nothing worth rendering. Any adapter failure falls
-/// back to the plain OpenGraph scrape below, which is exactly what shipped
-/// before — a dead adapter degrades to the old behavior, never to an error.
-///
-/// Returns `Err` on any fetch/parse/compress failure so the caller can
-/// silently drop the preview without blocking the message send.
+/// Social posts take the adapter path first, because sites like X serve a
+/// crawler nothing worth rendering; any adapter failure falls back to the plain
+/// OpenGraph scrape. Returns `Err` on any failure, so the caller can drop the
+/// preview silently rather than block the message send.
 pub async fn fetch_link_preview(url: &str) -> Result<LinkPreviewRef, String> {
-    // Parse + sanity-check the URL up front. Extract the display domain.
     let parsed = reqwest::Url::parse(url)
         .map_err(|e| format!("Invalid URL: {e}"))?;
     if parsed.scheme() != "http" && parsed.scheme() != "https" {
@@ -152,23 +130,18 @@ pub async fn fetch_link_preview(url: &str) -> Result<LinkPreviewRef, String> {
         }
     }
 
-    // Fetch the HTML with a body-size cap.
     let html_bytes = fetch_bounded(&client, url, MAX_HTML_BYTES).await?;
     let html_str = String::from_utf8_lossy(&html_bytes).into_owned();
 
     let parsed_meta = parse_og_metadata(&html_str);
 
-    // Sites that publish a designed share image deserve the layout that
-    // shows it, and they say so themselves via `twitter:card` / `og:type`.
-    // Provisional here because the final call needs the image's REAL size,
-    // which we only know after decoding it; this just picks how big to
-    // download. `convert_to_webp_preview` only ever downscales, so guessing
-    // large for a small source costs nothing.
+    // Sites that publish a designed share image say so via `twitter:card` /
+    // `og:type`. Provisional, because the final call needs the image's REAL size;
+    // this only picks the download size, and the encoder only ever downscales.
     let maybe_large =
         declares_large_card(&parsed_meta) || parsed_meta.image_w.is_some_and(|w| w >= HERO_MIN_W);
     let thumb_dim = if maybe_large { THUMB_MAX_DIM_LARGE } else { THUMB_MAX_DIM };
 
-    // Resolve og:image to an absolute URL if present, then fetch + compress.
     let mut thumb_webp_b64 = None;
     let mut thumb_w = None;
     let mut thumb_h = None;
@@ -191,10 +164,9 @@ pub async fn fetch_link_preview(url: &str) -> Result<LinkPreviewRef, String> {
     let rich = if wants_large_card(&parsed_meta, thumb_w, thumb_h) {
         crate::node::RichCard {
             kind: Some("large".to_string()),
-            // Prefer a declared `og:video` when it is a real media file — that
-            // plays inline. Otherwise point at the page, so the card still
-            // gets its "there's a video here" affordance and opens it. See
-            // `isDirectPlayableVideo` on the Dart side for the split.
+            // Prefer a declared `og:video` when it is a real media file, because
+            // that plays inline; otherwise point at the page so the card still
+            // opens it. `isDirectPlayableVideo` on the Dart side splits them.
             video_url: declares_video(&parsed_meta).then(|| {
                 parsed_meta
                     .video_url
@@ -222,25 +194,21 @@ pub async fn fetch_link_preview(url: &str) -> Result<LinkPreviewRef, String> {
     })
 }
 
-/// Below this width a big card is worse than a small one — a 200px logo
-/// stretched across the card is blurry and silly, and plenty of sites set
-/// `og:image` to exactly that.
+/// Below this width a big card is worse than a small one: a 200px logo stretched
+/// across the card is blurry, and plenty of sites set `og:image` to exactly that.
 const MIN_LARGE_THUMB_W: u32 = 320;
-/// An image nobody declared a card for, but which is unmistakably a made-for-
-/// sharing hero: wide, and big enough to fill the card cleanly. The classic
-/// 1200x630 social image lands here.
+/// An image nobody declared a card for but which is unmistakably a made-for-
+/// sharing hero: wide, and big enough to fill the card. 1200x630 lands here.
 const HERO_MIN_W: u32 = 600;
 const HERO_MIN_ASPECT: f32 = 1.3;
 const HERO_MAX_ASPECT: f32 = 3.0;
 
 /// Whether the page ASKED for a big card.
 ///
-/// No host list: the web already standardised this. `twitter:card` is the
-/// site declaring which layout it wants (`summary_large_image` / `player`
-/// vs the default small `summary`), and `og:type` says whether the thing is
-/// a video or a track. Those tags are near-universal on anything with a
-/// designed share image, which is exactly the set that deserves the layout —
-/// and it stays correct for sites nobody has ever added to a list.
+/// No host list: `twitter:card` is the site declaring which layout it wants and
+/// `og:type` says whether the thing is a video or a track. Those tags are
+/// near-universal on anything with a designed share image, and they stay correct
+/// for sites nobody has ever added to a list.
 fn declares_large_card(meta: &ParsedMeta) -> bool {
     let card = meta.twitter_card.to_ascii_lowercase();
     if card == "summary_large_image" || card == "player" {
@@ -278,23 +246,19 @@ fn wants_large_card(meta: &ParsedMeta, thumb_w: Option<u32>, thumb_h: Option<u32
 
 /// Rich previews for social posts, via key-free public APIs (issue #45).
 ///
-/// **Why adapters at all:** X serves a crawler a login wall, so the plain
-/// OpenGraph path produces an empty card for the single most-pasted link type
-/// there is. FxEmbed reads the post server-side and hands back structured
-/// JSON; TikTok publishes a key-free oEmbed endpoint.
+/// X serves a crawler a login wall, so the plain OpenGraph path produces an
+/// empty card for the single most-pasted link type there is. FxEmbed reads the
+/// post server-side; TikTok publishes a key-free oEmbed endpoint.
 ///
-/// **Why the client calls them directly** (and not via a Hollow-run proxy):
-/// FxEmbed fetches the post itself, so X never sees the user's IP for the
-/// metadata either way, and someone pasting an x.com link has almost always
-/// just loaded that post in a browser anyway. Proxying would also collapse
-/// every user into one IP against FxEmbed's per-IP budget, so a rate limit
-/// would break previews for everyone at once instead of degrading per user.
-/// The genuinely new exposure is FxEmbed's operator learning that some IP
-/// looked up some post — which is what the opt-in proxy override below is
-/// for. See tmp3.txt D2.
+/// The client calls them DIRECTLY rather than through a Hollow-run proxy:
+/// FxEmbed fetches the post itself, so X never sees the user's IP either way,
+/// and proxying would collapse every user into one IP against FxEmbed's per-IP
+/// budget, so one rate limit would break previews for everyone at once instead
+/// of degrading per user. The new exposure is FxEmbed's operator learning that
+/// some IP looked up some post, which is what the opt-in proxy override is for.
 ///
-/// **Privacy contract is unchanged:** this is still sender-side only. The
-/// receiver renders bytes that travelled with the message.
+/// Privacy contract unchanged: sender-side only, and the receiver renders bytes
+/// that travelled with the message.
 mod social {
     use super::{
         fetch_bounded, truncate_chars, MAX_DESC_CHARS, MAX_IMAGE_BYTES,
@@ -347,7 +311,6 @@ mod social {
         domain: &str,
     ) -> Result<LinkPreviewRef, String> {
         // An explicitly configured proxy takes over the whole adapter step.
-        // Empty (the default) means direct, which is the shipped behavior.
         let normalized = match super::embed_proxy_base() {
             Some(base) => via_proxy(client, &base, url).await?,
             None => match kind {
@@ -370,10 +333,9 @@ mod social {
         pub video_h: Option<u32>,
     }
 
-    /// Shared tail: fetch the post's image with the sender's own connection
-    /// (exactly as the OpenGraph path does) and compress it to the WebP that
-    /// actually travels with the message. A failed image is not fatal — a
-    /// text-only large card still beats no card.
+    /// Shared tail: fetch the post's image with the sender's own connection and
+    /// compress it to the WebP that travels with the message. A failed image is
+    /// not fatal, a text-only large card still beats no card.
     async fn build(
         n: Normalized,
         client: &reqwest::Client,
@@ -431,10 +393,9 @@ mod social {
         cur.as_str().filter(|s| !s.is_empty())
     }
 
-    /// api.fxtwitter.com reads the post server-side and returns structured
-    /// JSON. Parsed through `Value` rather than a mirrored struct so an
-    /// upstream field addition or rename degrades one field instead of
-    /// failing the whole card.
+    /// api.fxtwitter.com reads the post server-side and returns structured JSON.
+    /// Parsed through `Value` rather than a mirrored struct, so an upstream field
+    /// rename degrades one field instead of failing the whole card.
     async fn via_fxembed(
         client: &reqwest::Client,
         url: &reqwest::Url,
@@ -446,11 +407,9 @@ mod social {
 
     /// Pull a [`Normalized`] out of an FxEmbed response body.
     ///
-    /// Split out from the request so it can be tested against real payloads:
-    /// the v2 endpoint nests the post under `status` while the v1 one uses
-    /// `tweet`, which is exactly the mismatch that made every X card silently
-    /// fall back to plain OpenGraph on first ship. Accept either key rather
-    /// than betting on one.
+    /// Split out from the request so it can be tested against real payloads: the
+    /// v2 endpoint nests the post under `status` and v1 under `tweet`, so accept
+    /// either key rather than betting on one.
     fn parse_fxembed(body: &serde_json::Value) -> Result<Normalized, String> {
         let tweet = body
             .get("status")
@@ -539,8 +498,7 @@ mod social {
     }
 
     /// Optional override: hand the whole lookup to a configured service that
-    /// speaks the same normalized shape. Off by default — see `tmp3.txt` D2
-    /// for the parked `embed.anonlisten.com` design.
+    /// speaks the same normalized shape. Off by default.
     async fn via_proxy(
         client: &reqwest::Client,
         base: &str,
@@ -600,11 +558,9 @@ mod social {
             assert!(classify(&u("https://github.com/x/status/1")).is_none());
         }
 
-        /// Both FxEmbed response shapes must parse. The `/2/status/{id}`
-        /// endpoint nests the post under `status`; the older `/status/{id}`
-        /// uses `tweet`. Reading only `tweet` is what silently sent every X
-        /// link back to plain OpenGraph on first ship — the card looked
-        /// almost right, so nothing screamed.
+        /// Both FxEmbed response shapes must parse: `/2/status/{id}` nests the
+        /// post under `status`, the older `/status/{id}` under `tweet`. Reading
+        /// only `tweet` sends every X link back to plain OpenGraph, silently.
         #[test]
         fn parses_both_fxembed_container_keys() {
             let inner = serde_json::json!({
@@ -748,7 +704,6 @@ fn parse_og_metadata(html: &str) -> ParsedMeta {
     let meta_sel = Selector::parse("meta").unwrap();
     let title_sel = Selector::parse("title").unwrap();
 
-    // Collect all <meta> tags indexed by name/property.
     let mut og_title = None;
     let mut og_desc = None;
     let mut og_site = None;
@@ -790,7 +745,6 @@ fn parse_og_metadata(html: &str) -> ParsedMeta {
         }
     }
 
-    // Fallback to <title> tag if og:title is missing.
     let title_tag = doc
         .select(&title_sel)
         .next()
@@ -881,10 +835,9 @@ mod tests {
         assert_eq!(m.image_url, None);
     }
 
-    /// The layout comes from what the SITE declares, not from a host list —
-    /// so it is already right for sites nobody has ever heard of.
-    ///
-    /// Fixtures are the real tags, measured 2026-08-02 from the live pages.
+    /// The layout comes from what the SITE declares, not from a host list, so it
+    /// is already right for sites nobody has ever heard of. Fixtures are the real
+    /// tags, measured 2026-08-02 from the live pages.
     #[test]
     fn sites_that_declare_a_big_card_get_one() {
         let cases: &[(&str, &str, &str, u32, u32)] = &[
@@ -995,10 +948,9 @@ mod tests {
         assert_eq!(truncate_chars(s, 200), "hello");
     }
 
-    /// Regression guard for the YouTube case: OG tags buried deep inside
-    /// a huge bloated HTML document. As long as MAX_HTML_BYTES is large
-    /// enough to fit the whole doc, parse_og_metadata should extract the
-    /// tags correctly regardless of position.
+    /// Regression guard for the YouTube case: OG tags buried deep inside a huge
+    /// bloated HTML document. As long as MAX_HTML_BYTES fits the whole document,
+    /// their position must not matter.
     #[test]
     fn parses_youtube_shaped_html() {
         // Realistic YouTube structure: head with OG tags, followed by a

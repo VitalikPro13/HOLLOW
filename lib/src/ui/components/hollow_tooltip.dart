@@ -7,15 +7,12 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
 
-/// Hollow-styled tooltip — dark, compact, fast.
+/// Hollow-styled tooltip, replacing Material's everywhere. Edge-aware: it
+/// repositions to stay inside the window.
 ///
-/// Appears after 400ms hover delay. Fades in 100ms + slides from 4px offset.
-/// Edge-aware: automatically repositions to stay within window bounds.
-/// Replaces Material Tooltip everywhere.
-///
-/// IMPORTANT: Hide always removes the overlay entry immediately (no reverse
-/// animation). This prevents orphaned tooltips when parent widgets rebuild
-/// or leave the tree during hover (e.g., call bar buttons disappearing).
+/// Hide always removes the overlay entry IMMEDIATELY, with no reverse
+/// animation, or a parent that rebuilds or leaves the tree mid-hover orphans
+/// the tooltip.
 class HollowTooltip extends StatefulWidget {
   final String message;
   final Widget child;
@@ -82,14 +79,12 @@ class _HollowTooltipState extends State<HollowTooltip>
     super.dispose();
   }
 
-  /// Immediately kill the tooltip overlay — no animation, no delay.
+  /// Kills the tooltip overlay at once, with no animation.
   ///
-  /// Never rewinds the controller here: `deactivate()` calls this while the
-  /// framework is mid-build, and moving the VALUE notifies the still-mounted
-  /// [FadeTransition]/[SlideTransition] inside the entry, which is a
-  /// `setState() called during build` crash. `stop()` only fires status
-  /// listeners, which nothing here registers. The rewind happens in
-  /// [_showTooltip] instead, before the next entry is in the tree.
+  /// Never rewinds the controller: `deactivate()` calls this mid-build, and
+  /// moving the VALUE notifies the still-mounted transitions inside the entry,
+  /// which is a `setState() called during build` crash. [_showTooltip] rewinds
+  /// instead, before the next entry is in the tree.
   void _dismiss() {
     _hovering = false;
     _controller.stop();
@@ -111,14 +106,14 @@ class _HollowTooltipState extends State<HollowTooltip>
         final hollow = HollowTheme.of(context);
 
         return Positioned.fill(
-          // The layout box spans the whole overlay so the delegate can place
-          // the tooltip against the space it MEASURES. It must never take
-          // pointers — the control that is being hovered sits underneath.
+          // The layout box spans the whole overlay so the delegate places the
+          // tooltip against the space it MEASURES, and it must never take
+          // pointers, because the hovered control sits underneath.
           child: IgnorePointer(
             child: CustomSingleChildLayout(
               delegate: _TooltipPositionDelegate(
-                // `positionDependentBox` centres on the target and flips to
-                // the other side when the real tooltip does not fit.
+                // `positionDependentBox` flips to the other side when the real
+                // tooltip does not fit.
                 target: position + Offset(size.width / 2, size.height / 2),
                 verticalOffset: size.height / 2 + 6,
                 preferBelow: widget.preferBelow,
@@ -185,14 +180,10 @@ class _HollowTooltipState extends State<HollowTooltip>
 /// Places the tooltip against the overlay it actually renders in, using the
 /// tooltip's MEASURED size.
 ///
-/// The old code estimated 7px per character and a flat 28px height and
-/// compared them against `MediaQuery.size`. Both were wrong at the bottom of
-/// the window: the desktop title bar makes the overlay shorter than the
-/// window, so a dock-bar tooltip "fit" below its button and rendered off the
-/// bottom edge — the user saw an empty sliver of a box (issue #20). Larger
-/// text made it worse, since a wrapped two-line tooltip is nowhere near 28px.
-/// [size] here is the overlay's own box and [childSize] is the real tooltip,
-/// so neither estimate is needed.
+/// [size] is the overlay's own box, not `MediaQuery.size`, and [childSize] is
+/// the real tooltip. Estimating either put dock-bar tooltips off the bottom
+/// edge, because the desktop title bar makes the overlay shorter than the
+/// window and a wrapped tooltip is taller than any flat guess (issue #20).
 class _TooltipPositionDelegate extends SingleChildLayoutDelegate {
   final Offset target;
   final double verticalOffset;

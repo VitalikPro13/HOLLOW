@@ -7,20 +7,16 @@ import 'emote_provider.dart' show clearRequestedEmotes, requestAssetOnce;
 /// Avatar-frame art (issue #54), keyed by FRAME ID.
 ///
 /// A profile carries only the ID; the art rides the content-addressed asset
-/// rail, pulled on demand and LRU-evicted under the Storage Manager cap.
-/// That is the whole point of the design: decoration must be the first thing
-/// evicted, never something that inflates every profile push.
-///
+/// rail, pulled on demand and LRU-evicted under the Storage Manager cap:
+/// decoration must be evicted first, never inflate every profile push.
 /// Built-in frames (`b:<hue>`) are procedural and never reach this cache.
 class AvatarFrameNotifier extends Notifier<Map<String, Uint8List>> {
   /// Hashes read from disk or in flight, so a rebuild storm can't re-ask.
   final _loading = <String>{};
 
-  /// Hash -> the peer we asked for it, for hashes we don't hold yet. The
-  /// asset rail asks ONCE per session, so a frame whose owner was offline
-  /// would otherwise stay blank for the rest of the session; a fresh profile
-  /// announce from that peer (which is what a reconnect produces) is the
-  /// signal to try again.
+  /// Hash -> the peer we asked for it, for hashes we don't hold yet. The rail
+  /// asks ONCE per session, so a fresh profile announce from that peer (what a
+  /// reconnect produces) is the signal to try again.
   final _awaiting = <String, String>{};
 
   @override
@@ -32,10 +28,8 @@ class AvatarFrameNotifier extends Notifier<Map<String, Uint8List>> {
     if (!isFrameHash(id) ||
         state.containsKey(id) ||
         _loading.contains(id) ||
-        // Already asked and still waiting. Without this every rebuild of
-        // every avatar wearing a frame we don't hold fires a fresh SQLCipher
-        // query across the FFI - the same negative-cache hole avatarProvider
-        // had. [onAssetsReceived] and [onProfileUpdated] are what clear it.
+        // Already asked and still waiting: without this every rebuild of every
+        // framed avatar we don't hold fires a fresh SQLCipher query across the FFI.
         _awaiting.containsKey(id)) {
       return;
     }
@@ -80,8 +74,7 @@ class AvatarFrameNotifier extends Notifier<Map<String, Uint8List>> {
     }
   }
 
-  /// A peer re-announced. Retry any frame of theirs we asked for and never
-  /// got — this is the reconnect path (see [_awaiting]).
+  /// A peer re-announced: retry any frame of theirs we asked for and never got.
   void onProfileUpdated(String peerId) {
     final retry = _awaiting.entries
         .where((e) => e.value == peerId)

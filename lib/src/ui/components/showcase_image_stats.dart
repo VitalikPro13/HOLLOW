@@ -3,32 +3,23 @@ import 'dart:ui' as ui;
 
 import 'package:flutter/painting.dart';
 
-/// One-shot pixel statistics for showcase images, computed at RENDER time
-/// from the replicated bytes (no wire change — existing boards get the same
-/// treatment as fresh bakes).
+/// One-shot pixel statistics for showcase images, computed at RENDER time from
+/// the replicated bytes, so existing boards get the same treatment as fresh
+/// bakes with no wire change.
 ///
-/// Two consumers on the game card:
-///  - covers/key art → [accent], the game's dominant vibrant color, used to
-///    tint washes/borders/gradients (never raw text — callers run any
-///    text/icon use through `Contrast.ensureContrast`);
-///  - company logos → [isMonochrome] (single-ink wordmarks get re-tinted to
-///    the theme text color so black-on-transparent logos survive dark mode)
-///    and [avgLuminance] (colorful logos too close to the panel's own
-///    luminance get a subtle plate behind them).
+/// [accent] tints washes and borders, never raw text: a caller wanting text or
+/// an icon runs it through `Contrast.ensureContrast` first.
 class ShowcaseImageStats {
-  /// Dominant vibrant color, lightness-clamped to a usable mid range.
-  /// Null when the image is effectively colorless (caller keeps the theme
-  /// accent).
+  /// Dominant vibrant colour, lightness-clamped to a usable mid range. Null
+  /// when the image is effectively colourless.
   final Color? accent;
 
-  /// True when ~all opaque pixels share one ink (saturation ≈ 0 spread) —
-  /// the classic black/white wordmark logo.
+  /// True when nearly all opaque pixels share one ink, as a wordmark logo does.
   final bool isMonochrome;
 
-  /// True when a meaningful share of the canvas is transparent — the mark
-  /// is drawn as INK on nothing. Tinting/plating only makes sense for these;
-  /// a fully opaque image carries its own background (an srcIn tint on one
-  /// paints the entire rectangle a single color — the "white slab" bug).
+  /// True when a meaningful share of the canvas is transparent, so the mark is
+  /// INK on nothing. Only these may be tinted or plated: an srcIn tint on a
+  /// fully opaque image paints the whole rectangle one colour.
   final bool hasTransparency;
 
   /// Mean sRGB luminance (0..1) of opaque pixels.
@@ -47,7 +38,6 @@ class ShowcaseImageStats {
 /// Cheap content key: FNV-1a over strided samples + length. Cosmetic cache
 /// only — a collision merely tints with the wrong color.
 int _contentKey(Uint8List bytes) {
-  // 32-bit FNV-1a (web-safe ints).
   var hash = 0x811C9DC5;
   final stride = bytes.length > 4096 ? bytes.length ~/ 4096 : 1;
   for (var i = 0; i < bytes.length; i += stride) {
@@ -153,8 +143,8 @@ ShowcaseImageStats _fromRgba(Uint8List rgba) {
         green: (bucketG[best] / w).clamp(0.0, 1.0),
         blue: (bucketB[best] / w).clamp(0.0, 1.0),
       );
-      // Pull into a usable mid range: never near-black/near-white washes,
-      // keep enough saturation to read as "this game's color".
+      // A usable mid range: never a near-black or near-white wash, and
+      // saturated enough to read as the game's colour.
       final hsl = HSLColor.fromColor(raw);
       accent = hsl
           .withLightness(hsl.lightness.clamp(0.35, 0.62))

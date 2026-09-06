@@ -4,10 +4,8 @@ import 'package:flutter/material.dart';
 
 /// Pre-compiles GPU shaders used by Hollow's UI before the first frame.
 ///
-/// Skia lazily compiles a GPU shader the first time it encounters a draw
-/// operation type. Each compilation can cost 20-200ms, causing dropped frames.
-/// By drawing all our common primitives on an offscreen canvas at startup,
-/// the shaders are compiled before any animation runs.
+/// Skia compiles a shader the first time it meets a draw operation, at 20-200ms
+/// each, so every primitive the UI uses is drawn offscreen at startup instead.
 class HollowShaderWarmUp extends ShaderWarmUp {
   @override
   ui.Size get size => const ui.Size(200, 200);
@@ -16,7 +14,6 @@ class HollowShaderWarmUp extends ShaderWarmUp {
   Future<void> warmUpOnCanvas(Canvas canvas) async {
     final rect = Offset.zero & size;
 
-    // ── 1. Solid filled rectangles (backgrounds, surfaces) ──
     canvas.drawRect(
       rect,
       Paint()..color = const Color(0xFF0D0F14),
@@ -26,17 +23,14 @@ class HollowShaderWarmUp extends ShaderWarmUp {
       Paint()..color = const Color(0xFF14161C),
     );
 
-    // ── 2. Rounded rectangles (buttons, cards, icons, text fields) ──
     for (final radius in [4.0, 6.0, 8.0, 12.0, 16.0, 24.0]) {
       final rrect = RRect.fromRectAndRadius(rect, Radius.circular(radius));
 
-      // Filled
       canvas.drawRRect(
         rrect,
         Paint()..color = const Color(0xFF00BFA6),
       );
 
-      // With border
       canvas.drawRRect(
         rrect,
         Paint()
@@ -45,7 +39,6 @@ class HollowShaderWarmUp extends ShaderWarmUp {
           ..strokeWidth = 1.0,
       );
 
-      // With border + alpha
       canvas.drawRRect(
         rrect,
         Paint()
@@ -55,7 +48,6 @@ class HollowShaderWarmUp extends ShaderWarmUp {
       );
     }
 
-    // ── 3. Circles (avatars, status dots) ──
     canvas.drawCircle(
       const Offset(100, 100),
       24,
@@ -67,7 +59,6 @@ class HollowShaderWarmUp extends ShaderWarmUp {
       Paint()..color = const Color(0xFF10B981),
     );
 
-    // ── 4. Linear gradients (server strip bg, selection shimmer) ──
     canvas.drawRect(
       rect,
       Paint()
@@ -78,7 +69,6 @@ class HollowShaderWarmUp extends ShaderWarmUp {
         ).createShader(rect),
     );
 
-    // Horizontal gradient (shimmer)
     canvas.drawRect(
       rect,
       Paint()
@@ -87,7 +77,6 @@ class HollowShaderWarmUp extends ShaderWarmUp {
         ).createShader(rect),
     );
 
-    // ── 5. Radial gradients (ambient background blobs) ──
     canvas.drawCircle(
       const Offset(100, 100),
       100,
@@ -115,14 +104,12 @@ class HollowShaderWarmUp extends ShaderWarmUp {
         ).createShader(Rect.fromCircle(center: const Offset(100, 100), radius: 100)),
     );
 
-    // ── 6. Box shadows (dialogs, toast, hover glow) ──
     canvas.drawRRect(
       RRect.fromRectAndRadius(rect.deflate(20), const Radius.circular(12)),
       Paint()
         ..color = const Color(0x33000000)
         ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 24),
     );
-    // Smaller shadow (button hover glow)
     canvas.drawRRect(
       RRect.fromRectAndRadius(rect.deflate(40), const Radius.circular(6)),
       Paint()
@@ -130,7 +117,6 @@ class HollowShaderWarmUp extends ShaderWarmUp {
         ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 8),
     );
 
-    // ── 7. Clipping with rounded rect (avatar clips, RevealClip) ──
     canvas.save();
     canvas.clipRRect(
       RRect.fromRectAndRadius(rect.deflate(10), const Radius.circular(24)),
@@ -138,13 +124,11 @@ class HollowShaderWarmUp extends ShaderWarmUp {
     canvas.drawRect(rect, Paint()..color = const Color(0xFF1A1D25));
     canvas.restore();
 
-    // ── 8. Clipping with rect (RevealClip, width/height factor clips) ──
     canvas.save();
     canvas.clipRect(Rect.fromLTWH(0, 0, size.width * 0.5, size.height));
     canvas.drawRect(rect, Paint()..color = const Color(0xFF14161C));
     canvas.restore();
 
-    // ── 9. Lines (dividers) ──
     canvas.drawLine(
       Offset.zero,
       Offset(size.width, 0),
@@ -153,7 +137,6 @@ class HollowShaderWarmUp extends ShaderWarmUp {
         ..strokeWidth = 1.0,
     );
 
-    // ── 10. Text rendering (trigger text shader compilation) ──
     final paragraphBuilder = ui.ParagraphBuilder(
       ui.ParagraphStyle(
         textDirection: TextDirection.ltr,
@@ -166,7 +149,6 @@ class HollowShaderWarmUp extends ShaderWarmUp {
       ..layout(const ui.ParagraphConstraints(width: 200));
     canvas.drawParagraph(paragraph, Offset.zero);
 
-    // Bold text
     final boldBuilder = ui.ParagraphBuilder(
       ui.ParagraphStyle(
         textDirection: TextDirection.ltr,
@@ -183,7 +165,6 @@ class HollowShaderWarmUp extends ShaderWarmUp {
       ..layout(const ui.ParagraphConstraints(width: 200));
     canvas.drawParagraph(boldParagraph, const Offset(0, 20));
 
-    // ── 11. Alpha compositing (Opacity, FadeTransition) ──
     canvas.saveLayer(rect, Paint()..color = const Color(0x80FFFFFF));
     canvas.drawRRect(
       RRect.fromRectAndRadius(rect, const Radius.circular(8)),
@@ -191,18 +172,15 @@ class HollowShaderWarmUp extends ShaderWarmUp {
     );
     canvas.restore();
 
-    // ── 12. BackdropFilter / ImageFilter.blur (glassmorphism dialogs) ──
     canvas.saveLayer(rect, Paint());
     canvas.drawRect(rect, Paint()..color = const Color(0xFF14161C));
     canvas.restore();
-    // Draw with blur to trigger the blur shader compilation.
     canvas.drawRect(
       rect,
       Paint()
         ..imageFilter = ui.ImageFilter.blur(sigmaX: 8, sigmaY: 8),
     );
 
-    // ── 13. Transform (ScaleTransition, SlideTransition) ──
     canvas.save();
     canvas.translate(100, 100);
     canvas.scale(0.5);

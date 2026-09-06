@@ -10,18 +10,12 @@ import 'package:record/record.dart' as rec;
 import 'package:hollow/src/core/services/linux_pulse_capture.dart';
 import 'package:hollow/src/core/services/video_thumbnail_service.dart';
 
-/// Fixed encoding profile for voice messages.
+/// Fixed encoding profile for voice messages: Opus in an Ogg container,
+/// 16 kHz mono at 24 kbps, about 90 KB per 30s of speech.
 ///
-/// **Desktop (Windows/macOS/Linux):** PCM16 captured by the `record` package
-/// is piped into the bundled ffmpeg and re-encoded as Opus in an Ogg container
-/// (16 kHz mono, 24 kbps). We go through ffmpeg because on Windows the
-/// `record_windows` plugin relies on Media Foundation, which does not ship an
-/// Opus MFT.
-///
-/// **Mobile (Android/iOS):** The `record` package encodes Opus natively via
-/// Android's `MediaRecorder` / iOS's `AVAudioRecorder`. No ffmpeg needed.
-///
-/// ~90 KB per 30s of speech — Discord/WhatsApp-tier quality-per-byte.
+/// Desktop pipes PCM16 from the `record` package through the bundled ffmpeg,
+/// because `record_windows` relies on Media Foundation, which ships no Opus
+/// MFT. Mobile encodes Opus natively and needs no ffmpeg.
 class VoiceRecordingResult {
   final String filePath;
   final Duration duration;
@@ -60,12 +54,12 @@ class VoiceMessageRecorder {
   bool _disposed = false;
   bool _started = false;
 
-  /// Throws [RecorderPermissionException] if mic permission is denied, or
-  /// [RecorderFfmpegMissingException] if the bundled ffmpeg can't be found
-  /// (desktop only — mobile uses native Opus encoder).
+  /// Throws [RecorderPermissionException] when mic permission is denied, or
+  /// [RecorderFfmpegMissingException] when the bundled ffmpeg cannot be found
+  /// on desktop.
   Future<void> start({String? preferredDeviceId}) async {
-    // Linux never touches the `record` plugin (its capture shells out to
-    // `parecord`, absent on PipeWire) and has no mic permission prompt —
+    // Linux never touches the `record` plugin, whose capture shells out to
+    // `parecord`, absent on PipeWire, and has no mic permission prompt:
     // capture goes through libpulse-simple instead.
     if (!Platform.isLinux && !await _recorder.hasPermission()) {
       throw const RecorderPermissionException();
@@ -319,8 +313,8 @@ class VoiceMessageRecorder {
     await _elapsedController.close();
   }
 
-  /// Public read-only flag — the widget needs to know whether capture
-  /// actually started before cleanup (to decide between stop vs cancel).
+  /// Whether capture actually started, so cleanup can choose between stop
+  /// and cancel.
   bool get hasStarted => _started;
 
   Future<void> _teardownCapture() async {

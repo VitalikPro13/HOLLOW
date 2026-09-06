@@ -1,8 +1,7 @@
-//! Per-stream state: one ingest leg fanning SFrame-ciphertext RTP to N egress
-//! legs, plus the PLI aggregation task and aggregate counters.
-//!
-//! Zero metadata logging: the ONLY observable per-stream state is the
-//! aggregate packet/byte counters — never per-viewer timing or identity logs.
+//! Per-stream state: one ingest leg fanning SFrame-ciphertext RTP to N egress legs,
+//! plus the PLI aggregation task and aggregate counters. Zero metadata logging: the
+//! only observable per-stream state is the aggregate packet and byte counters,
+//! never per-viewer timing or identity.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -19,11 +18,9 @@ use crate::node::types::StreamOrigin;
 
 use super::leg::LegCmd;
 
-/// One fanned-out packet: the ingest pump resolves each packet's simulcast
-/// layer (rid) ONCE — from str0m's SSRC↔rid mapping, which outlives the RID
-/// header extension the sender stops emitting after RTCP establishes the
-/// SSRC — so egress legs can select layers without re-deriving it. `None` =
-/// non-simulcast source (every old sharer).
+/// One fanned-out packet. The ingest pump resolves each packet's simulcast layer
+/// ONCE from str0m's SSRC-rid mapping, which outlives the RID header extension the
+/// sender stops emitting after RTCP; `None` = a non-simulcast source.
 pub(crate) type FanPkt = (Arc<RtpPacket>, Option<Rid>);
 
 /// Streams key on the full origin triple — `(peer, kind, stream)` — never on
@@ -38,9 +35,8 @@ pub(crate) fn stream_key(o: &StreamOrigin) -> StreamKey {
 pub(crate) struct StreamWiring {
     /// ingest -> every egress leg (spike-proven capacity 512).
     pub fanout_tx: broadcast::Sender<FanPkt>,
-    /// egress -> PLI aggregation task. `Some(rid)` targets one simulcast
-    /// layer's source; `None` = layer unknown → the ingest requests on every
-    /// source it has seen (safe: the aggregator coalesces to ≤1/s per layer).
+    /// egress -> PLI aggregation task. `Some(rid)` targets one layer's source, `None`
+    /// asks on every source seen, which is safe because the aggregator coalesces.
     pub kf_tx: mpsc::UnboundedSender<Option<Rid>>,
     /// The ingest leg's negotiated payload types: (pt, codec, clock_rate).
     /// Egress legs translate each packet's PT to their own numbering.
@@ -73,19 +69,16 @@ impl LegHandle {
 
 pub(crate) struct StreamState {
     pub origin: StreamOrigin,
-    /// The Olm-authenticated registrant — always == origin.peer (admission
-    /// enforces it), kept separately so ownership checks survive any future
-    /// origin evolution.
+    /// The Olm-authenticated registrant, always == origin.peer (admission enforces
+    /// it), kept separately so ownership checks survive any origin evolution.
     pub owner: String,
     pub allowlist: HashSet<String>,
-    /// Simulcast (phase 3): viewers the sharer wants on the LOW layer
-    /// (rid "q"). Applied when a viewer's egress leg spawns — a later
-    /// register refresh changes FUTURE attaches only.
+    /// Viewers the sharer wants on the LOW layer, applied when a viewer's egress leg
+    /// spawns; a later register refresh changes FUTURE attaches only.
     pub low_viewers: HashSet<String>,
-    /// Feeder election: the ONE peer the OWNER delegated to supply this
-    /// stream's ingest in its place (empty = nobody). Set only from an
-    /// owner-authored register; grants SUPPLY only, never authority — see
-    /// `dispatch::admit_ingest_offer`.
+    /// Feeder election: the ONE peer the OWNER delegated to supply this stream's
+    /// ingest in its place (empty = nobody). Set only from an owner-authored register,
+    /// and it grants SUPPLY only, never authority.
     pub feeder: String,
     pub ingest: Option<LegHandle>,
     /// viewer peer_id -> egress leg.
@@ -95,19 +88,16 @@ pub(crate) struct StreamState {
     /// The ingest leg's command sender, shared with the PLI aggregation task
     /// (the leg may not exist yet / may be replaced by a re-offer).
     pub ingest_cmd: Arc<tokio::sync::Mutex<Option<mpsc::UnboundedSender<LegCmd>>>>,
-    /// The owner's room presence was lost while the stream still carried live
-    /// media (presence-flap tolerance spared it). The engine's sweep tick
-    /// removes the stream once the media legs dry up — presence events alone
-    /// must never kill live forwarding (the client-side iron rule, field
-    /// 2026-08-06, mirrored here).
+    /// The owner's room presence was lost while the stream still carried live media.
+    /// The engine's sweep removes the stream once the media legs dry up: presence
+    /// events alone must never kill live forwarding.
     pub owner_gone: bool,
     pli_task: tokio::task::JoinHandle<()>,
 }
 
 impl StreamState {
-    /// Create the stream shell (no legs yet) and spawn its PLI aggregation
-    /// task: egress keyframe requests are deduped to at most one PLI per
-    /// second upstream (spike-proven interval).
+    /// Create the stream shell (no legs yet) and spawn its PLI aggregation task, which
+    /// dedupes egress keyframe requests to at most one PLI per second upstream.
     pub(crate) fn new(origin: StreamOrigin, owner: String, allowlist: HashSet<String>) -> Self {
         let (fanout_tx, _) = broadcast::channel::<FanPkt>(512);
         let (kf_tx, mut kf_rx) = mpsc::unbounded_channel::<Option<Rid>>();
@@ -125,15 +115,10 @@ impl StreamState {
                 const MIN_INTERVAL: Duration = Duration::from_secs(1);
                 let mut last: Option<Instant> = None;
                 while let Some(first) = kf_rx.recv().await {
-                    // COALESCE, never drop. Rate limiting upstream matters (k
-                    // viewers must not become k PLIs), but discarding a request
-                    // inside the window can discard the ONLY one that mattered
-                    // and leave a viewer black until the encoder happens to
-                    // emit a keyframe — minutes, for screen content. So wait
-                    // out the remainder instead, then collapse everything that
-                    // piled up into one request PER LAYER (simulcast layers
-                    // are independent encoders — a low-layer keyframe does
-                    // nothing for a full-layer viewer).
+                    // COALESCE, never drop. Rate limiting upstream matters (k viewers must
+                    // not become k PLIs), but discarding a request inside the window can
+                    // discard the ONLY one that mattered and leave a viewer black for
+                    // minutes. Collapse per LAYER: layers are independent encoders.
                     if let Some(l) = last {
                         let elapsed = l.elapsed();
                         if elapsed < MIN_INTERVAL {
@@ -181,8 +166,8 @@ impl StreamState {
         }
     }
 
-    /// Any ICE-connected media leg (ingest or egress)? While true, presence
-    /// loss may not tear this stream down — leg death is the only truth.
+    /// Any ICE-connected media leg? While true, presence loss may not tear this
+    /// stream down: leg death is the only truth.
     pub(crate) fn has_live_media(&self) -> bool {
         self.ingest
             .as_ref()
@@ -193,8 +178,8 @@ impl StreamState {
                 .any(|l| l.connected.load(Ordering::Relaxed))
     }
 
-    /// Tear the whole stream down (unregister / owner gone / shutdown).
-    /// Returns the ports the legs held so the allocator can reclaim them.
+    /// Tear the whole stream down, returning the ports the legs held so the allocator
+    /// can reclaim them.
     pub(crate) fn shut_down(self) -> Vec<u16> {
         let mut ports = Vec::new();
         if let Some(leg) = &self.ingest {

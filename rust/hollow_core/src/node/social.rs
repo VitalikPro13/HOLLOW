@@ -16,26 +16,23 @@ use super::types::*;
 
 /// Plaintext of the ONE Olm pre-key message the accepter sends so the requester
 /// ends up with an inbound session having never been online at the same moment.
-///
-/// A leading NUL keeps it out of the space of anything a person can type, and the
-/// `Encrypted` receive arm matches it BEFORE the `MessageEnvelope` parse, so it
-/// never reaches the legacy raw-text fallback that would render it as a bubble.
+/// A leading NUL keeps it out of anything a person can type, and the `Encrypted`
+/// receive arm matches it BEFORE the `MessageEnvelope` parse, so it never reaches
+/// the legacy raw-text fallback that would render it as a bubble.
 pub(crate) const FRIEND_HANDSHAKE_SENTINEL: &str = "\u{0}hollow-friend-handshake";
 
 /// Ceiling on outstanding pending-OUTGOING friend requests.
 ///
 /// Each one holds a minted one-time key whose private half lives in the Olm
-/// account, and the account keeps a bounded number of those. Minting without a
-/// ceiling would silently rotate the oldest keys out from under bundles already
-/// sitting in a relay mailbox, so a carried bundle would verify and then build a
-/// session the requester could not decrypt. Refusing at the cap, visibly, is the
-/// honest failure.
+/// account, and that account keeps a bounded number of them. Minting without a
+/// ceiling silently rotates the oldest out from under bundles already sitting in
+/// a relay mailbox, so a carried bundle would verify and then build a session the
+/// requester could not decrypt. Refusing at the cap is the honest failure.
 pub(crate) const MAX_OUTSTANDING_FRIEND_REQUESTS: usize = 32;
 
-/// The carried bundle plus the device list that authenticates it, as persisted
+/// The carried bundle plus the device list that authenticates it, persisted
 /// between "the request arrived" and "the human clicked Accept" (which may be a
-/// reboot apart), and between "we sent a request" and "we re-deposit it on the
-/// next connect".
+/// reboot apart), and between "we sent a request" and the next re-deposit.
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 pub(crate) struct CarriedRequestRecord {
     #[serde(default)]
@@ -45,23 +42,26 @@ pub(crate) struct CarriedRequestRecord {
     /// True when the request reached us while the requester was actually in a
     /// room with us, rather than out of the relay mailbox.
     ///
-    /// This is the glare gate, and it is load-bearing. Bootstrapping a session
-    /// from the carried bundle is a THIRD way to establish Olm, alongside
-    /// KeyRequest/KeyBundle and the DM-room co-presence heal. Run it while a live
-    /// path is also running and the two sides end up holding halves of two
-    /// different sessions, which is the classic every-frame-fails-to-decrypt
-    /// state. So the carried path serves only the case the live path CANNOT: a
-    /// requester who was not there.
+    /// The glare gate, and load-bearing. Bootstrapping a session from the carried
+    /// bundle is a THIRD way to establish Olm, and running it while a live path is
+    /// also running leaves the two sides holding halves of two different sessions.
+    /// So the carried path serves only the case the live path CANNOT.
     #[serde(default)]
     pub live_at_receipt: bool,
 }
 
 /// `app_settings` key for the bundle WE minted for `target_master`. Reused for
 /// every re-send and mailbox re-deposit: minting per send would burn a one-time
-/// key on every reconnect AND hand the target a bundle whose private half our
-/// account had already rotated away.
+/// key and hand the target a bundle whose private half we had already rotated.
 fn out_bundle_key(target_master: &str) -> String {
     format!("friendreq_out:{target_master}")
+}
+
+/// `app_settings` key for the VERIFIED bundle a requester sent US, read at accept
+/// time and never deleted, so a second idempotent accept still finds it. The
+/// `has_session` guard stops it building a session on an already-spent key.
+pub(crate) fn in_bundle_key(requester_master: &str) -> String {
+    format!("friendreq_in:{requester_master}")
 }
 
 /// KV key of the removal tombstone for `master`. Written by every removal, read only
@@ -70,20 +70,10 @@ pub(crate) fn removed_key(master: &str) -> String {
     format!("friend_removed:{master}")
 }
 
-/// `app_settings` key for the VERIFIED bundle a requester sent US. Read at accept
-/// time. Kept after acceptance (never deleted) so a second, idempotent accept
-/// still finds it; the `has_session` guard stops it building a second session on
-/// a one-time key that is already spent.
-pub(crate) fn in_bundle_key(requester_master: &str) -> String {
-    format!("friendreq_in:{requester_master}")
-}
-
 /// Build the `FriendRequest` for `target_master`, carrying the Olm prekey bundle
 /// that lets the target establish a session at ACCEPT time with no co-presence.
-///
-/// The bundle is minted ONCE per target and cached; every later send of the same
-/// request (presence-drain, mailbox re-deposit, reconnect) reuses it, so the
-/// target dedups on the friends row and the one-time key stays valid.
+/// The bundle is minted ONCE per target and cached, so every later send reuses
+/// it, the target dedups on its friends row and the one-time key stays valid.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn build_friend_request(
     olm: &mut crate::crypto::OlmManager,
@@ -142,10 +132,8 @@ pub(crate) fn build_friend_request(
     };
 
     // Carry our own signed profile so a stranger's incoming card renders our name
-    // (and, once online, our avatar) instead of a raw peer id. LIGHT — hash only,
-    // never bytes — and signed on the fly if the stored row predates signing, the
-    // same way `own_profile_proof` does for the announce path. Absent when we have
-    // no profile yet; the receiver then falls back to the peer id, as today.
+    // instead of a raw peer id. LIGHT (the hash only, never bytes) and signed on
+    // the fly if the stored row predates signing. Absent when we have no profile.
     let carried_profile = build_own_carried_profile(
         master_keypair, &master_keypair.peer_id(), db_path, db_passphrase,
     );
@@ -159,14 +147,12 @@ pub(crate) fn build_friend_request(
 }
 
 /// Build OUR OWN signed profile to carry inside a friend request. `None` when we
-/// hold no profile row yet, or it is blank, or it cannot be signed — in every one
-/// of those cases the receiver's card simply falls back to the peer id, exactly
-/// as a pre-carried-profile client leaves it.
+/// hold no profile row yet, or it is blank, or it cannot be signed; the
+/// receiver's card then falls back to the peer id.
 ///
-/// LIGHT by contract: the avatar HASH rides (inside the proof), never the bytes.
-/// Reuses `own_profile_proof`, so a row written before 0.8.5 (no stored sig) is
-/// signed fresh here rather than shipping unsigned — a receiver REQUIRES the
-/// signature and would otherwise drop the whole carried profile.
+/// LIGHT by contract: the avatar HASH rides inside the proof, never the bytes.
+/// A row written before signing existed is signed fresh here rather than shipped
+/// unsigned, because a receiver REQUIRES the signature.
 pub(crate) fn build_own_carried_profile(
     master_keypair: &crate::identity::native_identity::NativeKeypair,
     local_master: &str,
@@ -200,18 +186,14 @@ pub(crate) fn build_own_carried_profile(
     })
 }
 
-/// Verify + persist a `CarriedProfile` that rode in on a friend request from
-/// `sender_master`. Returns the MASTER the profile was stored under (so the
-/// caller can emit `ProfileUpdated`), or `None` when nothing was stored.
+/// Verify and persist a `CarriedProfile` that rode in on a friend request from
+/// `sender_master`. Returns the MASTER the profile was stored under, or `None`.
 ///
 /// Same trust rule as a `ProfileRelay` ingest: the subject's own signature is
 /// REQUIRED, checked over the fields EXACTLY as received (before any clamp), and
 /// over-long fields are DROPPED rather than truncated. It additionally binds the
-/// profile to the request sender — a sender may carry only ITS OWN identity's
-/// profile, never a captured third party's (that is what `ProfileRelay`, with
-/// its relay-source semantics, is for). Any failure drops JUST the profile; the
-/// request the caller is processing is untouched. `if sig.is_some()` would be the
-/// bypass, so we verify and never store-and-log.
+/// profile to the request sender, who may carry only ITS OWN identity's profile.
+/// Any failure drops JUST the profile; `if sig.is_some()` would be the bypass.
 pub(crate) fn store_carried_profile(
     profile: &CarriedProfile,
     sender_master: &str,
@@ -315,9 +297,8 @@ fn outstanding_outgoing_requests(db_path: &str, db_passphrase: &str) -> usize {
 /// offline: a plain targeted send to a master reaches no socket and is dropped.
 ///
 /// Joins the inbox first (the relay gates every frame on SENDER room membership)
-/// and STAYS: while a request is still pending, the target's device appearing in
-/// that room is what drains the live queue. The inbox is left only once the
-/// request has actually been delivered to a device (the drain sites do that).
+/// and STAYS while the request is pending, because the target's device appearing
+/// in that room is what drains the live queue.
 pub(crate) fn deposit_friend_request_to_inbox(
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     target_master: &str,
@@ -331,36 +312,55 @@ pub(crate) fn deposit_friend_request_to_inbox(
 }
 
 /// Deliver a decline to the requester by every leg that can reach it: the live
-/// fan to its ONLINE devices (as before) AND a deposit into the requester's own
-/// master-keyed mailbox `inbox:{requester_master}`, which the relay replays
-/// (TTL-only) to every device that proves it owns that master on its next boot.
+/// fan to its ONLINE devices, AND a deposit into the requester's own master-keyed
+/// mailbox `inbox:{requester_master}`, which the relay replays (TTL-only) to
+/// every device that proves it owns that master on its next boot.
 ///
-/// The live fan alone was the whole bug. A decline of an ASYNC request answers
-/// somebody who is by definition not here: the request came out of a mailbox
-/// precisely because the requester was gone. So the reject reached nobody, the
+/// The live fan alone was the whole bug: a decline of an ASYNC request answers
+/// somebody who is by definition not here, so the reject reached nobody, the
 /// requester's row stayed "pending outgoing" forever, and it re-deposited the
-/// same request into the decliner's mailbox on every reconnect. The decline has
-/// to travel the same road the request did.
+/// same request on every reconnect. The decline travels the road the request did.
 ///
 /// Deposit ALWAYS, even when a live device target exists: a live send can race
 /// the target's disconnect, and the mailbox copy is a no-op on a requester that
-/// has already cleaned up (its handler acts only on a live pending-outgoing row).
+/// has already cleaned up.
 ///
 /// CARRIES OUR OWN master-signed device list, for the same reason the request
-/// does. The requester has never been online with us (that is the definition of
-/// the case this leg serves), so its resolver holds no device -> master link for
-/// us: attribution by `resolve()` alone yields our raw DEVICE id, and the
-/// requester's friend row is keyed by our MASTER, so the reject finds `row None`
-/// and is dropped. Field-verified on two fresh installs. The list makes the
-/// attribution cryptographic instead of dependent on a prior meeting.
+/// does: the requester has never been online with us, so `resolve()` yields our
+/// raw DEVICE id while its friend row is MASTER-keyed, and the reject is dropped
+/// with `row None`. The list makes attribution cryptographic instead.
 ///
-/// Join → send → LEAVE: we are a SENDER in their inbox, not an owner, and must
-/// not linger there (unlike the request deposit, which stays until delivered).
-/// The three WS commands are ordered on one channel, so the leave is processed
-/// after the send.
+/// Join, send, then LEAVE: we are a SENDER in their inbox, not an owner, and the
+/// three WS commands are ordered on one channel, so the leave lands last.
 pub(crate) fn send_friend_reject(
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    peer_id_str: &str,
+    master: &str,
+    requested_at: i64,
+    device_list: Option<SignedDeviceList>,
+) {
+    let msg = HavenMessage::FriendReject { requested_at, device_list };
+
+    // Live leg: the row (and often the UI key) is the MASTER, which no socket
+    // authenticates as, so a raw send to it is silently dropped — fan to the
+    // requester's concrete online DEVICES.
+    for t in &friend_device_targets(ws_room_peers, peer_id_str, master) {
+        send_message_to_peer(ws_cmd_tx, ws_room_peers, t, msg.clone());
+    }
+
+    // Mailbox leg: the one that reaches a requester who is simply not here.
+    let inbox_room = format!("inbox:{master}");
+    let _ = ws_cmd_tx.send(super::ws_client::WsCommand::JoinRoom {
+        room_code: inbox_room.clone(),
+    });
+    send_message_to_peer_in_room(ws_cmd_tx, &inbox_room, master, msg);
+    let _ = ws_cmd_tx.send(super::ws_client::WsCommand::LeaveRoom {
+        room_code: inbox_room,
+    });
+    hollow_log!("[HOLLOW-FRIENDS] Sent friend reject for request {requested_at} to {master} (live devices + inbox:{master})");
+}
+
 /// Builds the accept for the request stamped `requested_at`; 0 means no row was
 /// found and the accept goes out bare, as a pre-0.11.1 client would send it.
 pub(crate) fn friend_accept_msg(requested_at: i64) -> HavenMessage {
@@ -391,49 +391,21 @@ pub(crate) fn holds_accepted_friend(db_path: &str, db_passphrase: &str, master: 
         == Some("accepted")
 }
 
-    peer_id_str: &str,
-    master: &str,
-    requested_at: i64,
-    device_list: Option<SignedDeviceList>,
-) {
-    let msg = HavenMessage::FriendReject { requested_at, device_list };
-
-    // Live leg: the row (and often the UI key) is the MASTER, which no socket
-    // authenticates as, so a raw send to it is silently dropped — fan to the
-    // requester's concrete online DEVICES.
-    for t in &friend_device_targets(ws_room_peers, peer_id_str, master) {
-        send_message_to_peer(ws_cmd_tx, ws_room_peers, t, msg.clone());
-    }
-
-    // Mailbox leg: the one that reaches a requester who is simply not here.
-    let inbox_room = format!("inbox:{master}");
-    let _ = ws_cmd_tx.send(super::ws_client::WsCommand::JoinRoom {
-        room_code: inbox_room.clone(),
-    });
-    send_message_to_peer_in_room(ws_cmd_tx, &inbox_room, master, msg);
-    let _ = ws_cmd_tx.send(super::ws_client::WsCommand::LeaveRoom {
-        room_code: inbox_room,
-    });
-    hollow_log!("[HOLLOW-FRIENDS] Sent friend reject for request {requested_at} to {master} (live devices + inbox:{master})");
-}
-
 /// The concrete, ONLINE device peer_ids to target when we want to reach a friend
-/// identity. A bare master id authenticates as no socket, so a send addressed to it
-/// is dropped — we must resolve to real devices. Sources, deduped: the literal
-/// `original` id (the device that contacted us, if any), every resolver-known device
-/// of `master`, AND every peer currently in a SHARED ROOM that resolves to `master`
-/// (the load-bearing source when we don't yet hold the friend's device list). Only
-/// ids that are actually reachable (in some room we know) are returned.
+/// identity: a bare master id authenticates as no socket, so a send addressed to
+/// it is dropped. Sources, deduped: the literal `original` id, every
+/// resolver-known device of `master`, and every peer in a SHARED ROOM that
+/// resolves to `master` (load-bearing before we hold their device list). Only
+/// ids actually reachable in a room we know are returned.
 pub(crate) fn friend_device_targets(
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     original: &str,
     master: &str,
 ) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
-    // EXACT room membership, not identity-wide `peer_is_reachable`: this function
-    // returns socket-addressable DEVICE ids for raw SendDirect. An identity-wide
-    // check would admit the bare MASTER whenever any of its devices is online —
-    // and a send addressed to the master is silently dropped.
+    // EXACT room membership, not identity-wide `peer_is_reachable`: this returns
+    // socket-addressable DEVICE ids for a raw SendDirect, and an identity-wide
+    // check would admit the bare MASTER, whose sends are silently dropped.
     let mut push = |id: String, out: &mut Vec<String>| {
         if !out.contains(&id)
             && ws_room_peers.values().any(|peers| peers.contains(&id))
@@ -483,10 +455,9 @@ pub(crate) async fn handle_send_friend_request(
     }
 
     // Outstanding-request ceiling. Every pending outgoing request holds a minted
-    // one-time key, and the Olm account's supply of those is bounded — past the
-    // cap, minting silently rotates keys out from under bundles already sitting
-    // in a relay mailbox. An already-pending target is exempt: re-requesting the
-    // same person reuses its cached bundle and mints nothing.
+    // one-time key from a bounded supply, and past the cap minting rotates keys out
+    // from under bundles already sitting in a relay mailbox. An already-pending
+    // target is exempt: re-requesting reuses its cached bundle and mints nothing.
     {
         let already_pending = crate::storage::MessageStore::open(db_path, db_passphrase)
             .ok()
@@ -521,11 +492,9 @@ pub(crate) async fn handle_send_friend_request(
         .unwrap_or_default()
         .as_millis() as i64;
 
-    // CANCEL any pending REMOVAL for this person — re-adding a friend you just
-    // removed (before the removal was delivered) must NOT also fire the queued
-    // FriendRemove. Without this, the request drain and the removal drain BOTH
-    // fired on the target's reconnect, sending a contradictory FriendRequest +
-    // FriendRemove → the peer removed us back and the friendship ping-ponged.
+    // CANCEL any pending REMOVAL for this person: re-adding a friend you just
+    // removed must not also fire the queued FriendRemove, or both drains fire on
+    // the target's reconnect and the friendship ping-pongs.
     let cancel_master = super::resolver::resolve(&peer_id_str);
     pending_friend_removals.remove(&cancel_master);
     pending_friend_removals.remove(&peer_id_str);
@@ -545,33 +514,27 @@ pub(crate) async fn handle_send_friend_request(
         }
     }
 
-    // Register DM room code immediately so signaling can help
-    // discover the peer even before they accept. Use the target's MASTER (resolved
-    // above) so we join the SAME pure room the target will (`dm_room_code` is
-    // f(masters)); a nickname-resolved device id would otherwise diverge the room.
+    // Register the DM room code immediately so signaling can help discover the peer
+    // before they accept. Use the target's MASTER so we join the SAME pure room the
+    // target will; a nickname-resolved device id would diverge the room.
     let local_peer = local_peer_str.to_string();
     let room = dm_room_code(&local_peer, &master);
-    // Join WS relay room for this DM.
     let _ = ws_cmd_tx.send(super::ws_client::WsCommand::JoinRoom {
         room_code: room,
     });
 
-    // Send via the target peer's inbox room (every peer joins inbox:{peer_id} on startup).
-    // Join their inbox temporarily to send the request.
+    // Join the target's inbox temporarily, to deliver the request.
     let inbox_room = format!("inbox:{}", peer_id_str);
     let _ = ws_cmd_tx.send(super::ws_client::WsCommand::JoinRoom {
         room_code: inbox_room.clone(),
     });
 
-    // Try to send immediately if the peer has an online DEVICE (shared server or
-    // inbox). The send must target concrete devices: `peer_id_str` may be (or
-    // resolve to) a bare MASTER, which no socket authenticates as — a direct
-    // `send_message_to_peer(master)` is silently dropped AND would have skipped
-    // the queue below, losing the request entirely.
-    // ONE message for every leg: the live send, the mailbox deposit, and every
-    // later re-send. It carries our Olm prekey bundle + our master-signed device
-    // list, which is what lets the target accept and build a session while we are
-    // long gone (async friending).
+    // Try to send immediately if the peer has an online DEVICE. The send must
+    // target concrete devices: `peer_id_str` may resolve to a bare MASTER, which no
+    // socket authenticates as, so a direct send is silently dropped AND would skip
+    // the queue below, losing the request. ONE message serves every leg (live send,
+    // mailbox deposit, later re-sends): it carries our Olm prekey bundle and
+    // master-signed device list, which is what lets the target accept while we are gone.
     let request_msg = build_friend_request(
         olm, crypto_store, master_keypair, device_keypair, device_peer_id,
         &master, now, db_path, db_passphrase,
@@ -585,43 +548,29 @@ pub(crate) async fn handle_send_friend_request(
                 t, request_msg.clone(),
             );
         }
-        // Defense in depth: we only joined the TARGET's inbox to DELIVER the request.
-        // Leaving it now stops us lingering in the target's inbox set, where their
-        // sibling-proof challenge would (correctly) reject us but we needn't be at all.
-        // WS commands are ordered on one channel, so this leave is processed AFTER the
-        // SendDirect above. The friend ACCEPT comes back via the shared DM room (joined
-        // above), not the inbox, so leaving here does not break acceptance.
+        // We only joined the TARGET's inbox to DELIVER the request, so leave now rather
+        // than linger in their inbox set. WS commands are ordered on one channel, so
+        // this leave is processed AFTER the SendDirect above, and the accept comes back
+        // via the shared DM room, not the inbox.
         let _ = ws_cmd_tx.send(super::ws_client::WsCommand::LeaveRoom {
             room_code: inbox_room.clone(),
         });
     } else {
-        // Peer not in any WS room yet — queue the request AND deposit it into the
-        // target's master-keyed mailbox. The queue alone only ever fired while
-        // both people were online at once: the target is addressed by MASTER, no
-        // socket authenticates as a master, so a targeted send reaches nobody and
-        // the request waited for a co-presence that async friending is defined by
-        // never happening. The deposit is buffered by the relay under the master
-        // and collected on the target's next boot, when it joins its own inbox
-        // with an ownership proof.
+        // Peer not in any WS room yet: queue the request AND deposit it into the
+        // target's master-keyed mailbox. The queue alone only ever fired while both
+        // people were online at once, because a targeted send to a master reaches
+        // nobody. The deposit is buffered by the relay under the master and collected
+        // on the target's next boot, when it joins its inbox with an ownership proof.
         pending_friend_requests.insert(peer_id_str.clone(), now);
         deposit_friend_request_to_inbox(ws_cmd_tx, &master, &request_msg);
         hollow_log!("[HOLLOW-FRIENDS] Peer {peer_id_str} not reachable yet, deposited friend request in inbox:{master} and queued it");
     }
-    // The accept names the request it answers; `save_friend` freezes that stamp on
-    // the row, so it is read back after the write.
-    let mut answered_at = 0i64;
 
     let _ = event_tx.send(NetworkEvent::FriendRequestReceived {
         peer_id: peer_id_str,
     }).await;
 }
 
-            answered_at = store
-                .get_friend_row(&master)
-                .ok()
-                .flatten()
-                .map(|(_, _, t)| t)
-                .unwrap_or(0);
 /// Handle `NodeCommand::AcceptFriendRequest`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_accept_friend_request(
@@ -642,13 +591,11 @@ pub(crate) async fn handle_accept_friend_request(
 ) {
     hollow_log!("[HOLLOW-FRIENDS] Accepting friend request from {peer_id_str}");
 
-    // Update to accepted, keyed by the friend's MASTER. The incoming peer_id may be a
-    // DEVICE id (e.g. a nickname-resolved request, or a multi-device sender), but
-    // friendships key on the master (presence/DM/profile all do). Resolve here so the
-    // row is correct from the moment of acceptance — otherwise it stays stranded under
-    // the device id until the next device-list ingest re-keys it (which never happens
-    // if the device list was already ingested BEFORE the accept). Also migrate any
-    // pre-existing pending row that was saved under the device id.
+    // Update to accepted, keyed by the friend's MASTER. The incoming peer_id may be
+    // a DEVICE id, but friendships key on the master like presence, DMs and
+    // profiles, so resolve here: otherwise the row stays stranded under the device
+    // id until a device-list ingest re-keys it, which never happens if that ingest
+    // already ran. Also migrate a pre-existing pending row under the device id.
     let master = super::resolver::resolve(&peer_id_str);
 
     // CANCEL any pending REMOVAL for this person — accepting a (re)friend supersedes a
@@ -660,26 +607,31 @@ pub(crate) async fn handle_accept_friend_request(
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as i64;
+    // The accept names the request it answers; `save_friend` freezes that stamp on
+    // the row, so it is read back after the write.
+    let mut answered_at = 0i64;
     {
         if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
             if master != peer_id_str {
                 let _ = store.migrate_friend_to_master(&peer_id_str, &master);
             }
             let _ = store.save_friend(&master, "accepted", "", now);
+            answered_at = store
+                .get_friend_row(&master)
+                .ok()
+                .flatten()
+                .map(|(_, _, t)| t)
+                .unwrap_or(0);
         }
     }
 
-    // Send acceptance. The send must target a DEVICE (the bare master authenticates as
-    // no socket → dropped). Build the target set from: the original id (may be the
-    // device that sent the request), every resolver-known device of the master, AND —
-    // crucially — every peer CURRENTLY IN A SHARED ROOM that resolves to the master.
-    // That last source is what makes this work when we DON'T yet hold the friend's
-    // device list (so `devices_for` is empty) but their device is right there in our
-    // DM/inbox room: the master id alone is unreachable.
-    // Join the shared DM room BEFORE anything is addressed into it. The relay
-    // gates every frame on SENDER room membership, so a buffered accept sent from
-    // outside the room is dropped rather than buffered — which is the whole
-    // zero-overlap case. (The join is idempotent; it used to sit below.)
+    // Send acceptance. The send must target a DEVICE, since the bare master
+    // authenticates as no socket. The target set comes from the original id, every
+    // resolver-known device of the master, AND every peer CURRENTLY IN A SHARED
+    // ROOM that resolves to it; that last source is what works when we do not yet
+    // hold the friend's device list. Join the shared DM room BEFORE anything is
+    // addressed into it: the relay gates every frame on SENDER room membership, so
+    // an accept sent from outside the room is dropped rather than buffered.
     let dm_room = dm_room_code(local_peer_str, &master);
     let _ = ws_cmd_tx.send(super::ws_client::WsCommand::JoinRoom {
         room_code: dm_room.clone(),
@@ -687,14 +639,10 @@ pub(crate) async fn handle_accept_friend_request(
 
     // -- Async friending: establish the Olm session from the CARRIED bundle. --
     //
-    // This is the leg that makes acceptance work with zero overlap. The requester
-    // shipped a prekey bundle inside the request; we build the outbound half now
-    // and send ONE pre-key establisher, which the relay buffers. When the
-    // requester next boots, that single frame gives it an inbound session and the
-    // pair can DM in both directions without ever having been online together.
-    //
-    // Failure is never fatal: an unverifiable, missing or already-used bundle just
-    // falls back to today's lazy co-presence key exchange.
+    // The leg that makes acceptance work with zero overlap. The requester shipped a
+    // prekey bundle inside the request; we build the outbound half now and send ONE
+    // pre-key establisher, which the relay buffers, so the requester wakes with an
+    // inbound session. Failure is never fatal: it falls back to lazy co-presence.
     {
         let stored: Option<CarriedRequestRecord> =
             crate::storage::MessageStore::open(db_path, db_passphrase)
@@ -716,10 +664,8 @@ pub(crate) async fn handle_accept_friend_request(
                     // ONLY when the live path cannot serve this: the request came
                     // out of the mailbox, the requester is in no room with us now,
                     // and we hold no session with it. Any of those being false means
-                    // the live key exchange is already running (or has run), and a
-                    // second session built from the carried bundle at that moment is
-                    // Olm glare: the two sides end up holding halves of two
-                    // different sessions and every frame fails to decrypt.
+                    // the live key exchange is already running, and a second session
+                    // from the carried bundle is Olm glare: two halves, no decrypts.
                     let reachable = super::crypto_handler::ws_room_for_peer(
                         ws_room_peers, &device,
                     ).is_some();
@@ -773,6 +719,9 @@ pub(crate) async fn handle_accept_friend_request(
         }
     }
 
+    // Into the DM room, never the first room the device is listed in: a copy sent to
+    // a room the device already left parks at the relay until its next join of THAT
+    // room, which can be a re-add long after a removal.
     let targets = friend_device_targets(&ws_room_peers, &peer_id_str, &master);
     for t in &targets {
         send_message_to_peer_in_room(ws_cmd_tx, &dm_room, t, friend_accept_msg(answered_at));
@@ -791,11 +740,10 @@ pub(crate) async fn handle_accept_friend_request(
     // The DM room (`dm_room_code`, pure f(masters) so both sides compute the same
     // one) was joined above, before anything was addressed into it.
 
-    // Push OUR profile + device list to the friend now (over the inbox/DM room where
-    // they're reachable), so they learn our device→master mapping. We are the ACCEPTER:
-    // if we never sent our own request (we only clicked Accept), no FriendRequest
-    // handler on the friend pushed our list to them — this is the path that delivers
-    // it. Fan to the friend's online devices.
+    // Push OUR profile and device list to the friend now, over the inbox or DM room
+    // where they are reachable, so they learn our device-to-master mapping. We are
+    // the ACCEPTER: if we never sent our own request, no FriendRequest handler on
+    // their side pushed our list, so this is the path that delivers it.
     for t in &friend_device_targets(&ws_room_peers, &peer_id_str, &master) {
         send_own_profile_to_peer(
             &ws_cmd_tx, &ws_room_peers,
@@ -825,33 +773,27 @@ pub(crate) async fn handle_reject_friend_request(
     db_passphrase: &str,
 ) {
     // The UI may pass a DEVICE id (a pending incoming request is keyed under the
-    // sender's device id until the device-list ingest re-keys it) OR a master.
-    // We fold any device-stranded row up to the master, then tombstone the master
-    // row as "declined" (below) so the decline sticks regardless of which key the
-    // pending request currently lives under.
+    // sender's device id until the device-list ingest re-keys it) or a master. Fold
+    // any device-stranded row up to the master, then tombstone the master row as
+    // "declined", so the decline sticks whichever key the request lives under.
     let master = super::resolver::resolve(&peer_id_str);
     hollow_log!("[HOLLOW-FRIENDS] Rejecting friend request from {peer_id_str} (master {master})");
 
-    // CANCEL any pending outgoing REQUEST and queued ACCEPT for this person —
-    // rejecting supersedes them. In the MUTUAL case (both sides requested), our
-    // own outgoing request was still queued; without this the request drain
-    // (swarm.rs PeerJoined/RoomMembers) re-sends it after the reject, the peer
-    // accepts, and the pair silently becomes friends behind the user's back (the
-    // reject/accept race). Mirrors handle_remove_friend's cancellation.
+    // CANCEL any pending outgoing REQUEST and queued ACCEPT for this person, since
+    // rejecting supersedes them. In the MUTUAL case our own outgoing request was
+    // still queued, and without this the request drain re-sends it after the reject,
+    // the peer accepts, and the pair becomes friends behind the user's back.
     pending_friend_requests.remove(&master);
     pending_friend_requests.remove(&peer_id_str);
     pending_friend_accepts.remove(&master);
     pending_friend_accepts.remove(&peer_id_str);
 
     // Write a STICKY "declined" tombstone instead of deleting the row. The relay
-    // inbox mailbox is TTL-only (3 days), so a DELETED row let the buffered
-    // request re-deliver on every reboot and resurface in Incoming for the whole
-    // TTL. The tombstone is what the anti-downgrade guard on the FriendRequest
-    // handler reads to drop a re-delivery of the SAME (or older) request. We
-    // PRESERVE the original `requested_at` so that guard's freshness check works:
-    // a genuinely NEWER request (a cancel + re-add) is strictly greater and still
-    // shows. A later re-add overwrites this row with pending-outgoing (save_friend
-    // is an upsert), so declining never permanently blocks re-friending.
+    // inbox mailbox is TTL-only, so a DELETED row let the buffered request
+    // re-deliver on every reboot and resurface in Incoming for the whole TTL. The
+    // tombstone is what the anti-downgrade guard reads, and it PRESERVES the
+    // original `requested_at` so that guard's freshness check works: a genuinely
+    // NEWER request is strictly greater and still shows, and a re-add overwrites.
     let mut original_requested_at: i64 = 0;
     {
         if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
@@ -861,7 +803,6 @@ pub(crate) async fn handle_reject_friend_request(
                 let _ = store.migrate_friend_to_master(&peer_id_str, &master);
             }
             original_requested_at = store
-        let _ = store.save_setting(&removed_key(&master), "1");
                 .get_friend_row(&master)
                 .ok()
                 .flatten()
@@ -872,12 +813,10 @@ pub(crate) async fn handle_reject_friend_request(
     }
 
     // Answer the requester on EVERY leg that can reach it: the live fan to its
-    // online devices AND a deposit into its own master-keyed mailbox. Rejects
-    // used to be best-effort live sends, so an offline requester never learned,
-    // stayed "pending outgoing" forever, and re-deposited the same request into
-    // our mailbox on every reconnect — the decline could not stick. The reject
-    // carries the request's ORIGINAL requested_at (the tombstone's), which is
-    // what stops a replay of it deleting a NEWER request or a friendship.
+    // online devices AND a deposit into its own master-keyed mailbox. A
+    // best-effort live send left an offline requester "pending outgoing" forever,
+    // re-depositing the same request on every reconnect. The reject carries the
+    // ORIGINAL requested_at, so a replay cannot delete a newer request.
     send_friend_reject(
         ws_cmd_tx, ws_room_peers, &peer_id_str, &master, original_requested_at,
         super::crypto_handler::build_local_device_list(
@@ -903,28 +842,26 @@ pub(crate) async fn handle_remove_friend(
     db_path: &str,
     db_passphrase: &str,
 ) {
-    // The UI passes the friend's MASTER id (the friends list collapses
-    // device→master). The friend row is master-keyed, so resolve here too and
-    // always delete the MASTER row — a raw device-id delete silently no-ops
-    // against a master-keyed row (the bug where "Remove friend" did nothing /
-    // left a ghost). `resolve` is idempotent for a single-device friend.
+    // The UI passes the friend's MASTER id, and the friend row is master-keyed, so
+    // resolve here too and always delete the MASTER row: a raw device-id delete
+    // silently no-ops against a master-keyed row. `resolve` is idempotent for a
+    // single-device friend.
     let master = super::resolver::resolve(&peer_id_str);
     hollow_log!("[HOLLOW-FRIENDS] Removing friend {peer_id_str} (master {master})");
 
-    // CANCEL any pending outgoing REQUEST and queued ACCEPT for this person —
-    // removing supersedes them. Otherwise a queued request/accept would re-fire on
-    // the peer's next appearance and contradict the removal (the ping-pong where
-    // request + remove went out together and the friendship flapped).
+    // CANCEL any pending outgoing REQUEST and queued ACCEPT, since removing
+    // supersedes them. Otherwise a queued request or accept re-fires on the peer's
+    // next appearance, contradicts the removal, and the friendship flaps.
     pending_friend_requests.remove(&master);
     pending_friend_requests.remove(&peer_id_str);
     pending_friend_accepts.remove(&master);
     pending_friend_accepts.remove(&peer_id_str);
 
-    // Delete the local row up-front, unconditionally. Removal is a local-first
-    // action — it must take effect immediately whether or not the peer is online
-    // to receive the notification. Also clean up any legacy row still keyed under
-    // the original id (device-stranded) so no duplicate survives.
+    // Delete the local row up-front, unconditionally: removal is a local-first
+    // action and must take effect whether or not the peer is online to hear about
+    // it. Also clean up any legacy device-stranded row so no duplicate survives.
     if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+        let _ = store.save_setting(&removed_key(&master), "1");
         let _ = store.remove_friend(&master);
         if master != peer_id_str {
             let _ = store.remove_friend(&peer_id_str);
@@ -932,10 +869,9 @@ pub(crate) async fn handle_remove_friend(
     }
 
     // Notify the friend. The bare master authenticates as NO socket, so fan the
-    // FriendRemove out to every online device of theirs (devices_for(master) ∪
-    // live room peers resolving to master). If none are reachable, queue a
-    // tombstone keyed by the MASTER and a pending entry (the drain resolves a
-    // reconnecting device→master to match it).
+    // FriendRemove to every online device of theirs. If none are reachable, queue
+    // a tombstone keyed by the MASTER plus a pending entry; the drain resolves a
+    // reconnecting device to its master to match it.
     let targets = friend_device_targets(&ws_room_peers, &peer_id_str, &master);
     if targets.is_empty() {
         pending_friend_removals.insert(master.clone());
@@ -953,12 +889,10 @@ pub(crate) async fn handle_remove_friend(
         hollow_log!("[HOLLOW-FRIENDS] Sent FriendRemove for {master} to {} device(s)", targets.len());
     }
 
-    // NOTE: we deliberately do NOT LeaveRoom the DM room here. Leaving right after the
-    // send raced our own FriendRemove — the relay processed our room-leave and dropped
-    // us from the room's routing set BEFORE it fanned out the message, so the peer never
-    // received the removal (one-sided removal). The ex-friend's lingering presence is a
-    // pure UI-count concern, handled in the Network column (it counts only peers that
-    // resolve to an accepted friend), not by tearing down the room mid-send.
+    // Deliberately no LeaveRoom for the DM room here. Leaving right after the send
+    // raced our own FriendRemove: the relay dropped us from the room's routing set
+    // BEFORE it fanned the message out, so the peer never received the removal. The
+    // lingering ex-friend presence is a UI-count concern, not a room teardown.
 
     let _ = event_tx.send(NetworkEvent::FriendRemoved {
         peer_id: master,
@@ -983,16 +917,12 @@ pub(crate) fn handle_send_typing_indicator(
     };
 
     if server_id.is_empty() {
-        // DM typing: `channel_id` is the recipient's MASTER id (what the UI keys
-        // the DM on). Multi-device: the master authenticates as NO socket — only
-        // its device peer_ids do — so `send_message_to_peer(master)` finds no room
-        // and silently drops (the bug where a multi-device / keystone-rotated
-        // friend never saw "typing…"). Fan out to the recipient's DEVICES, exactly
-        // like a DM message: the device set is `devices_for(master)` UNION every
-        // peer currently in the DM room that resolves to that master (live
-        // presence is authoritative — robust to a stale/polluted stored list).
-        // Single-device recipient → the set is just the master id itself (it both
-        // is the device and authenticates as it), so this is the old behavior.
+        // DM typing: `channel_id` is the recipient's MASTER id, and a master
+        // authenticates as NO socket, so `send_message_to_peer(master)` finds no room
+        // and silently drops. Fan out to the recipient's DEVICES exactly like a DM: the
+        // set is `devices_for(master)` UNION every peer in the DM room resolving to
+        // that master, since live presence is authoritative and robust to a stale
+        // stored list. For a single-device recipient the set is just the master id.
         let recipient_master = super::resolver::resolve(&channel_id);
         let dm_room = super::types::dm_room_code(local_peer_str, &recipient_master);
         let mut targets: std::collections::HashSet<String> =
@@ -1030,15 +960,13 @@ pub(crate) fn handle_send_typing_indicator(
             "[HOLLOW-TYPING] DM typing → master {recipient_master}: sent to {sent_to} device(s)"
         );
     } else {
-        // Channel typing: MLS broadcast to the group, PLUS the plaintext copy to
+        // Channel typing: an MLS broadcast to the group, PLUS the plaintext copy to
         // exactly the online member devices that hold no leaf in our group.
         //
-        // COMPLEMENT rule, not `if !mls_ok`: our own encrypt succeeding says
-        // nothing about whether a given member can DECRYPT. A member with no
-        // leaf (the ordinary case for a just-admitted parked joiner) would
-        // never see "typing…" as long as anybody else's leaf existed. A fully
-        // formed group still costs zero extra frames, because the leaf-less set
-        // is then empty, so nobody gets a duplicate.
+        // COMPLEMENT rule, not `if !mls_ok`: our own encrypt succeeding says nothing
+        // about whether a given member can DECRYPT, and a member with no leaf would
+        // never see "typing" as long as anybody else's leaf existed. A fully formed
+        // group costs zero extra frames, because the leaf-less set is then empty.
         let mls_ok = mls.as_ref().is_some_and(|m| m.has_group(&server_id));
         hollow_log!("[HOLLOW-TYPING] Channel typing send for {server_id}/{channel_id} (mls={mls_ok})");
         if mls_ok {
@@ -1175,11 +1103,10 @@ pub(crate) async fn handle_update_profile(
         stored
     };
 
-    // Sign the relayable subset (0.8.5). This has to happen AFTER the save +
-    // reload: the avatar arg may be None = "unchanged", so only the STORED
-    // blob's hash describes what receivers will actually check against.
-    // Re-persisted onto our own row so `handle_profile_request_for` can forward
-    // it — receivers refuse a relayed profile that carries no owner signature.
+    // Sign the relayable subset. This has to happen AFTER the save and reload: the
+    // avatar arg may be None = "unchanged", so only the STORED blob's hash
+    // describes what receivers check against. Re-persisted onto our own row so
+    // `handle_profile_request_for` can forward it; receivers refuse an unsigned relay.
     let master_pub_b64 = base64::engine::general_purpose::STANDARD
         .encode(master_keypair.public_key_protobuf());
     let (profile_sig, profile_pk) = super::crypto_handler::sign_profile(
@@ -1237,7 +1164,6 @@ pub(crate) async fn handle_update_profile(
         profile_pk: profile_pk.clone(),
     };
     let mut mls_reached: std::collections::HashSet<String> = std::collections::HashSet::new();
-    // Send via MLS to each server we're in.
     for sid in server_states.keys() {
         let mls_ok = mls.as_ref().is_some_and(|m| m.has_group(sid));
         if mls_ok {
@@ -1245,14 +1171,11 @@ pub(crate) async fn handle_update_profile(
                 hollow_log!("[HOLLOW-MLS] Profile broadcast to server {sid} failed: {e}");
             } else {
                 // Track members ACTUALLY reached via MLS so we skip them in
-                // plaintext. "Reached" = holds at least one LEAF in this
-                // group, not "is listed in `state.members`": our encrypt
-                // succeeding says nothing about whether a given member can
-                // decrypt. Marking every member of the server reached is how a
-                // leaf-less member (the ordinary case for a just-admitted
-                // parked joiner) never got the plaintext copy either, so its
-                // view of everyone's profile froze at whatever it had.
-                // The leaf ids are DEVICE ids; `mls_reached` is master-keyed.
+                // plaintext. "Reached" = holds at least one LEAF in this group,
+                // not "is listed in `state.members`": our encrypt succeeding says
+                // nothing about whether a member can decrypt, and marking every
+                // member reached is how a leaf-less member never got the plaintext
+                // copy either. Leaf ids are DEVICE ids; `mls_reached` is master-keyed.
                 if let Some(m) = mls.as_ref() {
                     for dev in m.group_members(sid) {
                         mls_reached.insert(super::resolver::resolve(&dev));
@@ -1287,7 +1210,6 @@ pub(crate) async fn handle_update_profile(
     };
     hollow_log!("[HOLLOW-SWARM] Broadcasting profile update");
     {
-        // Send to all reachable peers not already reached via MLS.
         let all_ws_peers: std::collections::HashSet<String> = ws_room_peers
             .values()
             .flat_map(|peers| peers.iter().cloned())
@@ -1309,40 +1231,34 @@ pub(crate) async fn handle_update_profile(
             all_ws_peers.len().saturating_sub(mls_reached.len()), mls_reached.len());
     }
 
-    // Emit event so Dart updates UI.
     let _ = event_tx.send(NetworkEvent::ProfileUpdated {
         peer_id: local_peer_str.to_string(),
     }).await;
 }
 
-/// Persist an incoming profile under the sender's MASTER identity (multi-device).
+/// Persist an incoming profile under the sender's MASTER identity.
 ///
 /// Profiles must be keyed by the master, not the raw sender DEVICE id: presence
-/// and the UI collapse an identity to its master, so a profile stored under a
-/// device id would never be read for the collapsed person, and a second device
-/// would write a SEPARATE profile row. Resolving to the master means ANY device's
-/// profile update lands on the one identity profile.
+/// and the UI collapse an identity to its master, so a device-keyed profile
+/// would never be read for the collapsed person, and a second device would write
+/// a SEPARATE row.
 ///
 /// EMPTY-PROFILE GUARD: a freshly-imported device holds the master KEY but none
-/// of the master's profile CONTENT, so it broadcasts a blank profile. If the
-/// incoming `display_name` is empty AND we already hold a populated profile for
-/// this master, SKIP the write — never let a profile-less device blank a good
-/// row. Returns the master key the profile was (or would be) stored under, plus
-/// whether a save actually happened.
+/// of its profile CONTENT, so it broadcasts a blank profile. An empty incoming
+/// `display_name` against a populated stored profile SKIPS the write. Returns the
+/// master key it was (or would be) stored under, plus whether a save happened.
 #[allow(clippy::too_many_arguments)]
 /// Receive gate for a peer's profile still (PROFILE-1). The ONE validator, on
 /// every path that stores avatar or banner bytes somebody else sent us.
 ///
 /// `None` in means nothing was offered and `None` out means PRESERVE what we
-/// hold, so a refusal and an absence land in the same place on purpose: a
-/// blob we will not accept must never blank the one already stored.
-/// `Some(&[])` is the owner's explicit CLEAR and is not an image, so it goes
-/// straight through.
+/// hold, so a refusal and an absence land in the same place on purpose: a blob
+/// we will not accept must never blank the one already stored. `Some(&[])` is
+/// the owner's explicit CLEAR and is not an image, so it goes straight through.
 ///
-/// SECURITY: these bytes used to be stored with no format, size or canvas
-/// check at all, and `process_sync_avatar` decodes them later when a guest
-/// asks for a public channel preview. A peer could park arbitrary bytes in
-/// our database and pick the moment we decoded a bomb out of them.
+/// SECURITY: these bytes are decoded later, when a guest asks for a public
+/// channel preview, so unchecked they let a peer park arbitrary bytes in our
+/// database and pick the moment we decode a bomb out of them.
 pub(crate) fn gated_profile_image<'a>(
     master: &str,
     what: &str,
@@ -1394,11 +1310,10 @@ pub(crate) fn save_incoming_profile(
     db_passphrase: &str,
 ) -> (String, bool) {
     let master = super::resolver::resolve(sender_peer_id);
-    // SECURITY (0.8.5): no verified owner proof, no stored profile. See
-    // `verified_profile_proof` — the plaintext ProfileUpdate fallback is a JSON
-    // body the relay can rewrite in flight. The caller has already ingested the
-    // sender's device list, which is separately master-signed, so presence
-    // collapse is unaffected by this refusal.
+    // SECURITY: no verified owner proof, no stored profile. The plaintext
+    // ProfileUpdate fallback is a JSON body the relay can rewrite in flight. The
+    // caller has already ingested the sender's device list, which is separately
+    // master-signed, so presence collapse is unaffected by this refusal.
     let Some(proof) = proof else {
         return (master, false);
     };
@@ -1460,26 +1375,19 @@ fn creds_sig_complaints() -> &'static std::sync::Mutex<std::collections::HashSet
 /// Refusing and clearing are opposite outcomes here, and every refusal below
 /// preserves.
 ///
-/// * `None` in                    -> `None` out. An update that did not touch
-///   the field at all.
-/// * an announce OLDER than the row we hold -> `None` out, signature or not.
-///   A relay that captured a genuine older announce, from before the holder
-///   redeemed anything, could otherwise replay it to clear the marks; the
-///   profile row's own freshness guard tolerates 24 hours of backdating, so
-///   this field needs its own rule.
+/// * `None` in -> `None` out. An update that did not touch the field at all.
+/// * an announce OLDER than the row we hold -> `None` out, signature or not,
+///   so a relay cannot replay a genuine older announce (from before the holder
+///   redeemed anything) to clear the marks. The profile row's own freshness
+///   guard tolerates 24 hours of backdating, so this field needs its own rule.
 /// * no VALID signature -> `None` out. The field is accepted ONLY under a
 ///   signature by the master it claims to describe, `Some("")` included: the
-///   explicit clear is the single most useful thing for a relay to forge, so
-///   it has to be signed like everything else.
+///   explicit clear is the single most useful thing for a relay to forge.
 /// * a VALID signature -> the field, through the entry validator.
 ///
-/// This used to be softer: an unsigned field applied unless the master had
-/// been seen signing before (a per-master pin). That pin could never be set on
-/// a master whose FIRST announce was stripped, so a relay that stripped the
-/// field and its signature from the very first frame kept that master on the
-/// unsigned branch permanently and could then write the field at will. There
-/// is no version of trust-on-first-use that survives an attacker who is
-/// present for the first use, so the rule is now simply the signature.
+/// Trust-on-first-use was tried and rejected: a per-master pin could never be
+/// set on a master whose FIRST announce was stripped, so an attacker present
+/// for the first use kept that master on the unsigned branch permanently.
 fn gated_support_creds(
     db: &crate::storage::MessageStore,
     master: &str,
@@ -1541,17 +1449,16 @@ pub(crate) fn sanitize_incoming_frame(avatar_frame: Option<&str>) -> Option<&str
 
 /// Receive-side gate for an ANIMATED avatar/banner reference. Exactly two
 /// shapes reach the DB:
-///   * `""`   — no animated variant (or cleared),
-///   * 64-hex — an asset-rail blob hash.
+///   * `""`   - no animated variant (or cleared),
+///   * 64-hex - an asset-rail blob hash.
 ///
 /// Anything else is ABSENT (`None` = preserve what we stored), which is also
-/// what an old client sends. Same reasoning as [`sanitize_incoming_frame`],
-/// and it matters for the same reason: this value keys a network PULL, so an
-/// unvalidated string would be a request-anything primitive.
+/// what an old client sends. Same reasoning as [`sanitize_incoming_frame`]:
+/// this value keys a network PULL, so an unvalidated string would be a
+/// request-anything primitive.
 ///
-/// Deliberately NOT covered by the profile signature, matching `avatar_frame`
-/// — a rewritten hash points a viewer at some other blob the rewriter already
-/// holds, which is a decoration swap, not an identity claim, and the still
+/// Deliberately NOT covered by the profile signature, matching `avatar_frame`:
+/// a rewritten hash swaps decoration the rewriter already holds, and the still
 /// avatar the signature DOES cover keeps rendering underneath.
 pub(crate) fn sanitize_incoming_anim(anim: Option<&str>) -> Option<&str> {
     match anim {
@@ -1579,27 +1486,18 @@ pub(crate) fn valid_avatar_frame_id(id: &str) -> bool {
 /// plaintext). `None` = the PROFILE FIELDS must not be stored.
 ///
 /// REQUIRED, not tolerated. The tempting argument is that the sender IS the
-/// subject here — there is no `source_peer_id` to lie about, attribution comes
-/// from the transport — so an absent signature cannot spoof anyone. That
-/// covers a malicious PEER and misses a malicious RELAY: the plaintext
-/// `HavenMessage::ProfileUpdate` fallback (used for DM peers and pre-MLS
-/// servers) passes through the relay as an unencrypted JSON body it can
-/// rewrite in flight. Without a required signature it could rename anyone to
-/// anything. The MLS variant is not exposed to that, but there is no reason
-/// for the two to disagree.
+/// subject here, so an absent signature cannot spoof anyone; that covers a
+/// malicious PEER and misses a malicious RELAY, because the plaintext
+/// `HavenMessage::ProfileUpdate` fallback passes through the relay as an
+/// unencrypted JSON body it can rewrite in flight.
 ///
 /// **This gates the profile fields ONLY.** The caller ingests the sender's
-/// signed DEVICE LIST first, and independently of this result: the list stands
-/// on its own two gates, the master's signature (`verify_device_list`) and
-/// `device_list_binds_sender`, which requires that signature to NAME the device
-/// that delivered it. It also has to run first, because this function verifies
-/// against `resolve(sender_peer_id)` and the ingest is what teaches the
-/// resolver that mapping. And a node with no profile row yet signs nothing at
-/// all while still announcing a device list — that announce is what collapses
-/// its devices into one online identity, so gating it here would break presence.
-///
-/// The signer is the sender's MASTER — profiles are one per identity and any
-/// device announces the same one.
+/// signed DEVICE LIST first and independently: that list stands on its own two
+/// gates, and it must run first because this verifies against
+/// `resolve(sender_peer_id)`. A node with no profile row signs nothing while
+/// still announcing a device list, and that announce is what collapses its
+/// devices into one online identity, so gating it here would break presence.
+/// The signer is the sender's MASTER: profiles are one per identity.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn verified_profile_proof(
     sender_peer_id: &str,
@@ -1629,12 +1527,10 @@ pub(crate) fn verified_profile_proof(
 
 /// The proof to attach to an outgoing announce of OUR OWN profile.
 ///
-/// Prefers the stored one (its `profile_avatar_hash` is the hash the signature
-/// really covers, which a re-hash of a mid-update blob could disagree with) and
-/// signs fresh when there is none. Signing fresh is what stops an upgrade from
-/// silently blanking us at every peer: rows written before 0.8.5 carry no
-/// proof, receivers now REQUIRE one, and without this our profile would stay
-/// invisible until the user happened to edit it.
+/// Prefers the stored one, whose `profile_avatar_hash` is the hash the
+/// signature really covers, and signs fresh when there is none. Signing fresh
+/// is what stops an upgrade silently blanking us at every peer: older rows
+/// carry no proof and receivers now REQUIRE one.
 ///
 /// Returns `(sig, pk, avatar_hash)`; the hash is what must ride the wire.
 pub(crate) fn own_profile_proof(
@@ -1671,16 +1567,13 @@ pub(crate) fn profile_blob_hash(bytes: Option<&[u8]>) -> String {
     }
 }
 
-/// Send our own profile to a specific peer (used after session establishment, on PeerJoined, etc.).
+/// Send our own profile to a specific peer.
 ///
-/// LIGHT by default: avatar/banner ride as EMPTY strings ("no change" under the
-/// receiver's COALESCE save) plus content hashes. A receiver whose cached blobs
-/// don't match the hashes pulls the full profile ONCE via ProfileRequest. This
-/// keeps the many re-announce paths (first RoomMembers, PeerJoined/is_new,
-/// sibling merge, revocation pushes, friend handshakes) at ~1 KB instead of
-/// re-shipping megabytes of unchanged avatar+banner on every reconnect — which
-/// counted against the relay per-IP byte budget in BOTH directions and was the
-/// "File Usage jumps on every restart" leak.
+/// LIGHT by default: avatar and banner ride as EMPTY strings ("no change" under
+/// the receiver's COALESCE save) plus content hashes, and a receiver whose
+/// cached blobs do not match pulls the full profile ONCE via ProfileRequest.
+/// That keeps the many re-announce paths at about 1 KB instead of re-shipping
+/// megabytes of unchanged avatar and banner on every reconnect.
 pub(crate) fn send_own_profile_to_peer(
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
@@ -1701,11 +1594,9 @@ pub(crate) fn send_own_profile_to_peer(
 /// Light profile announce addressed into an EXPLICIT room, so the relay buffers
 /// it for a recipient who is not online at all.
 ///
-/// Async friending needs this in one place: the accepter. The requester learned
-/// OUR master from the carried request; we have to teach it the reverse, and the
-/// normal announce is a `ws_room_for_peer` lookup that finds nothing for someone
-/// who is simply gone. Without it the requester wakes up holding an Olm session
-/// with a DEVICE it cannot map to an identity, so its own reply targets nobody.
+/// The accepter needs this: the requester learned OUR master from the carried
+/// request and we must teach it the reverse, but the normal announce is a
+/// `ws_room_for_peer` lookup that finds nothing for someone who is simply gone.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn send_own_profile_to_peer_in_room(
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
@@ -1761,17 +1652,12 @@ fn send_own_profile_inner(
     room_code: Option<&str>,
 ) {
     if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
-        // CRITICAL (presence collapse): ALWAYS attach + send the device list, even
-        // when we have no profile row yet. The device list is what teaches a friend
-        // `our-device → our-master`, which is what collapses our devices to ONE
-        // online identity on their side. Gating the whole ProfileUpdate (device
-        // list included) on `load_profile == Some` was the bug where a friend never
-        // ingested our device list — every `[HOLLOW-DEVICES]` ingest was missing in
-        // the logs and the identity showed OFFLINE. A profile-less node (fresh
-        // import, or a master row not yet written) sends empty profile fields with
-        // a populated `device_list`. Mirrors the de-gated backfill announce
-        // (swarm.rs) and the receive-side empty-profile guard that ignores blank
-        // names so this never clobbers a real cached profile.
+        // CRITICAL (presence collapse): ALWAYS attach and send the device list, even
+        // when we have no profile row yet. The list is what teaches a friend
+        // `our-device -> our-master`, which collapses our devices to ONE online
+        // identity on their side; gating the whole ProfileUpdate on `load_profile ==
+        // Some` was the bug where a friend never ingested it and the identity showed
+        // OFFLINE. A profile-less node sends empty fields with a populated list.
         let profile = store.load_profile(local_peer_str).ok().flatten();
         // Our proof rides along: receivers REQUIRE it to store the profile at
         // all, and forward it when relaying us onward. Signed fresh if the row
@@ -1811,14 +1697,11 @@ fn send_own_profile_inner(
         let device_list = super::crypto_handler::build_local_device_list(
             master_keypair, device_peer_id, db_path, db_passphrase,
         );
-        // The board is small capped text — it rides the LIGHT announce too
-        // (only blobs are hash-pulled). So do the avatar frame and the two
-        // animated-media hashes, which are IDs rather than art for exactly
-        // this reason: 64 bytes on every announce, and the bytes behind them
-        // are pulled once and cached.
-        // The field's own signature, over the STORED field and the STORED
-        // timestamp: this frame re-announces what is on disk, so both halves
-        // must be the ones a receiver will check against.
+        // The board is small capped text, so it rides the LIGHT announce too; only
+        // blobs are hash-pulled. So do the avatar frame and the two animated-media
+        // hashes, which are IDs rather than art for exactly this reason.
+        // The field's own signature covers the STORED field and the STORED
+        // timestamp, because this frame re-announces what is on disk.
         let support_creds_sig = super::crypto_handler::sign_support_creds(
             master_keypair, local_peer_str, updated_at, Some(&support_creds),
         );
@@ -1843,15 +1726,14 @@ fn send_own_profile_inner(
     }
 }
 
-/// If a LIGHT ProfileUpdate (no blob payload) advertises avatar/banner hashes
-/// that don't match our cached blobs for this identity, pull the full profile
-/// once via ProfileRequest.
+/// If a LIGHT ProfileUpdate advertises avatar/banner hashes that do not match
+/// our cached blobs for this identity, pull the full profile once via
+/// ProfileRequest.
 ///
-/// Cooldown-deduped per identity (10 min, process-global keyed by OUR device id
-/// so harness nodes sharing one process don't share buckets) — an oversized or
-/// undeliverable blob must not turn into a request loop on announce churn.
-/// An EMPTY incoming hash while we cache a blob is deliberately NOT treated as
-/// stale: blob clears propagate via the live full broadcast, same as before.
+/// Cooldown-deduped per identity (10 min, keyed by OUR device id so harness
+/// nodes sharing one process do not share buckets), so an oversized or
+/// undeliverable blob cannot become a request loop. An EMPTY incoming hash
+/// while we cache a blob is deliberately NOT stale: clears ride the full send.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn maybe_request_full_profile(
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
@@ -1952,17 +1834,14 @@ pub(crate) async fn handle_envelope_profile_update(
     db_path: &str,
     db_passphrase: &str,
 ) -> Vec<String> {
-    // Multi-device: ingest the sender's signed device list (verify + monotonic +
-    // persist + resolver update + DeviceListUpdated). A list for our OWN master
-    // is a sibling device → merged (union). No-op for old clients.
+    // Multi-device: ingest the sender's signed device list (verify, monotonic,
+    // persist, resolver update, DeviceListUpdated). A list for our OWN master is
+    // a sibling device and is merged as a union. No-op for old clients.
     //
-    // The returned "our device set grew" flag is consumed by the PLAINTEXT
-    // `HavenMessage::ProfileUpdate` handler (swarm.rs), which re-announces our
-    // profile to friends on a sibling merge. Siblings meet in the inbox room via
-    // that plaintext path, not this MLS server-member envelope, so we don't
-    // re-broadcast here (a sibling is not an MLS co-member in the DM/inbox case).
-    // Step 7: we DO surface `newly_revoked` so the swarm caller (which holds olm/mls)
-    // drops Olm sessions + removes MLS leaves for a device revoked via this path.
+    // Siblings meet in the inbox room over the PLAINTEXT path, not this MLS
+    // server-member envelope, so the "our device set grew" re-announce is that
+    // handler's job, not ours. `newly_revoked` is surfaced so the swarm caller can
+    // drop Olm sessions and remove MLS leaves for a device revoked this way.
     let outcome = super::crypto_handler::ingest_device_list(
         event_tx, local_master_peer_id, local_device_peer_id, master_keypair,
         &sender_peer_id, ws_cmd_tx, ws_room_peers, device_list, db_path, db_passphrase,
@@ -2111,18 +1990,15 @@ pub(crate) async fn handle_profile_relay(
     db_path: &str,
     db_passphrase: &str,
 ) {
-    // SECURITY (0.8.5): this frame asserts a THIRD party's profile — the sender
-    // picks `source_peer_id` AND `updated_at`, and it arrives in plaintext, so
-    // before this check any co-present peer (or the relay) could permanently
-    // overwrite anyone's display name and avatar by claiming updated_at =
-    // i64::MAX. Only the subject's own signature makes the claim credible.
+    // SECURITY: this frame asserts a THIRD party's profile. The sender picks
+    // `source_peer_id` AND `updated_at`, and it arrives in plaintext, so without
+    // this check any co-present peer (or the relay) could permanently overwrite
+    // anyone's display name and avatar by claiming updated_at = i64::MAX. Only
+    // the subject's own signature makes the claim credible.
     //
-    // Fields are checked EXACTLY as received, before any clamping — verifying a
-    // clamped copy would check a string the signer never signed
-    // (feedback_signature_enforcement_not_logging). Over-long fields are
-    // therefore REJECTED rather than truncated: a genuine client is bounded by
-    // the same limits, and truncating would also make the stored copy diverge
-    // from the signature we forward on the next hop.
+    // Fields are checked EXACTLY as received, before any clamping: verifying a
+    // clamped copy checks a string the signer never signed. Over-long fields are
+    // therefore REJECTED rather than truncated.
     if display_name.len() > 64 || status.len() > 96
         || about_me.len() > 256 || twitch_username.len() > 64
     {

@@ -34,44 +34,34 @@ import 'package:hollow/src/ui/settings/manage_member_dialog.dart';
 import 'package:hollow/src/ui/settings/moderation_dialogs.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-/// The right-click menu for a person (issue #61, phase 3).
+/// The right-click menu for a person (issue #61).
 ///
 /// ONE menu behind every surface that shows a user: the member panel, a sender
-/// name or avatar in chat, a voice participant row, and a DM tile in the home
-/// sidebar. Mobile already had all of this as bottom sheets; desktop had a
-/// profile card and nothing else, so half of these actions were only reachable
-/// by opening Server Settings.
+/// in chat, a voice participant row, a DM tile. Left click still opens the
+/// profile card, which is an identity surface a list of text rows cannot
+/// replace, so the menu carries "Profile" as its first row instead.
 ///
-/// Left click still opens the profile card. The card is an identity surface —
-/// banner, showcase, roles — and a list of text rows cannot replace it, so the
-/// menu carries "Profile" as its first row rather than trying to be one.
-///
-/// ## Master vs device
-/// Everything about a PERSON is master-keyed: friendship, blocking, verified
-/// contacts, roles, nicknames. [peerId] may arrive as either form (voice rows
-/// are device-keyed by design), so the first thing this does is collapse it
-/// through the resolver. The one thing that stays device-keyed is per-peer
-/// call volume, which is a property of an audio stream, not of a person —
-/// hence [routablePeerId].
+/// Everything about a PERSON is master-keyed (friendship, blocking, verified
+/// contacts, roles, nicknames), and [peerId] may arrive as either form, so it is
+/// collapsed through the resolver first. Per-peer call volume stays
+/// device-keyed, because it is a property of an audio stream: [routablePeerId].
 
-/// Which surface opened the menu. Rows that only make sense in one place hang
+/// Which surface opened the menu. Rows that make sense in only one place hang
 /// off this rather than off a pile of booleans.
 enum UserMenuSurface {
   /// Member panel, chat sender, anywhere with no extra context.
   generic,
 
-  /// A DM row in the home sidebar: adds the conversation rows (mark read,
-  /// mute, favourite) and the friendship one.
+  /// A DM row in the home sidebar: adds the conversation and friendship rows.
   dmTile,
 
-  /// A voice channel participant row: adds the per-peer volume slider that
-  /// used to BE the right-click on that row.
+  /// A voice channel participant row: adds the per-peer volume slider.
   voice,
 }
 
-/// Opens the user menu for [peerId] at [anchor] (overlay space).
+/// Opens the user menu for [peerId] at [anchor], in overlay space.
 ///
-/// [serverId] unlocks the moderation rows; pass it from any server-scoped
+/// [serverId] unlocks the moderation rows, so pass it from any server-scoped
 /// surface. [routablePeerId] is the device id a voice row is keyed by.
 void showUserContextMenu({
   required BuildContext context,
@@ -88,11 +78,10 @@ void showUserContextMenu({
   showHollowMenu(
     context: context,
     anchor: anchor,
-    // menuRef is deliberately NOT named `ref`: it belongs to the menu route's
-    // Consumer and dies with the menu, while actions run AFTER the menu has
-    // closed and must use the caller's longer-lived ref. Naming it `ref` here
-    // shadows the parameter and makes every row silently do nothing; the
-    // build fails on it (test/menu_builder_ref_guard_test.dart).
+    // menuRef is deliberately NOT named `ref`: it dies with the menu, while
+    // actions run AFTER the menu closes and need the caller's longer-lived ref.
+    // Shadowing it makes every row silently do nothing
+    // (test/menu_builder_ref_guard_test.dart).
     builder: (_, menuRef) => userMenuEntries(
       context: context,
       menuRef: menuRef,
@@ -111,10 +100,9 @@ void showUserContextMenu({
 
 /// The rows, exposed for tests.
 ///
-/// [menuRef] watches live state for display and dies with the menu; [ref] is
-/// the caller's and is what every action uses. [context] is likewise the
-/// caller's, so a dialog opened by a row is parented above the menu rather
-/// than under the route that is closing.
+/// [menuRef] watches live state for display and dies with the menu; every action
+/// uses [ref], the caller's. [context] is the caller's too, so a dialog opened
+/// by a row is parented above the menu rather than under a closing route.
 List<HollowMenuEntry> userMenuEntries({
   required BuildContext context,
   required WidgetRef menuRef,
@@ -139,9 +127,8 @@ List<HollowMenuEntry> userMenuEntries({
 
   final entries = <HollowMenuEntry>[];
 
-  // The volume slider comes FIRST on a voice row: right-clicking a participant
-  // used to open it directly, and a live control belongs above a list of
-  // one-shot actions anyway.
+  // The volume slider comes FIRST on a voice row: a live control belongs above
+  // a list of one-shot actions.
   if (surface == UserMenuSurface.voice && !isSelf) {
     entries.add(HollowMenuCustom(
       _PeerVolumeRow(peerId: routablePeerId ?? peerId),
@@ -165,8 +152,8 @@ List<HollowMenuEntry> userMenuEntries({
   ));
 
   if (!isSelf) {
-    // Mention drops "@Name " into the composer of the channel currently on
-    // screen. No channel open means nothing to type into, so no row.
+    // Mention types into the composer of the channel currently on screen, so no
+    // open channel means no row.
     final mentionScope = _openChannelScope(menuRef);
     if (mentionScope != null) {
       entries.add(HollowMenuItem(
@@ -200,7 +187,6 @@ List<HollowMenuEntry> userMenuEntries({
     }
   }
 
-  // ── Conversation rows (DM tile only) ──
   if (surface == UserMenuSurface.dmTile) {
     final dmMuted = !menuRef
         .watch(notificationSettingsProvider)
@@ -242,7 +228,6 @@ List<HollowMenuEntry> userMenuEntries({
   }
 
   if (!isSelf) {
-    // ── Personal, local-only rows ──
     entries.add(const HollowMenuDivider());
     entries.add(HollowMenuItem(
       icon: localNick != null ? LucideIcons.pencil : LucideIcons.tag,
@@ -257,7 +242,6 @@ List<HollowMenuEntry> userMenuEntries({
       onTap: () => showVerifyContactDialog(context, peerId: master),
     ));
 
-    // ── Moderation ──
     entries.addAll(_moderationEntries(
       context: context,
       menuRef: menuRef,
@@ -268,7 +252,6 @@ List<HollowMenuEntry> userMenuEntries({
       name: name,
     ));
 
-    // ── Safety ──
     entries.add(const HollowMenuDivider());
     final isBlocked = menuRef.watch(blockedUsersProvider).contains(master);
     entries.add(HollowMenuItem(
@@ -287,8 +270,8 @@ List<HollowMenuEntry> userMenuEntries({
           showReportUserDialog(context, masterId: master, displayName: name),
     ));
 
-    // Removing a friend belongs where the friendship is visible, and nowhere
-    // else: doing it from a chat sender's name would be an easy misclick.
+    // Removing a friend belongs where the friendship is visible: from a chat
+    // sender's name it would be an easy misclick.
     if (surface == UserMenuSurface.dmTile) {
       entries.add(HollowMenuItem(
         icon: LucideIcons.userMinus,
@@ -309,9 +292,8 @@ List<HollowMenuEntry> userMenuEntries({
   return entries;
 }
 
-/// Manage member, mute, kick and ban — the rows that need a server AND a
-/// permission. Each is hidden rather than disabled when it is not available:
-/// a greyed row still tells you the action exists and taunts you with it.
+/// The rows that need a server AND a permission. Each is hidden rather than
+/// disabled when unavailable: a greyed row still says the action exists.
 List<HollowMenuEntry> _moderationEntries({
   required BuildContext context,
   required WidgetRef menuRef,
@@ -325,9 +307,8 @@ List<HollowMenuEntry> _moderationEntries({
 
   final myRole = menuRef.watch(myRoleProvider(serverId)).valueOrNull ?? 'member';
   final perms = menuRef.watch(myPermissionsProvider(serverId)).valueOrNull ?? 0;
-  // The target's role from the member list, falling back to what the calling
-  // tile already knew. Reading it live matters: a promotion that lands while
-  // the menu is open must close the moderation rows.
+  // Read live, falling back to what the calling tile knew: a promotion landing
+  // while the menu is open must close the moderation rows.
   final members = menuRef.watch(serverMembersProvider(serverId)).valueOrNull;
   final targetRole = members
           ?.where((m) => m.peerId == master)
@@ -335,7 +316,7 @@ List<HollowMenuEntry> _moderationEntries({
           .firstOrNull ??
       role ??
       'member';
-  // Not a member of this server: no moderation rows even for an owner.
+  // Not a member of this server means no moderation rows, even for an owner.
   if (members != null && !members.any((m) => m.peerId == master)) {
     return const [];
   }
@@ -382,13 +363,11 @@ List<HollowMenuEntry> _moderationEntries({
   return entries;
 }
 
-/// Runs an un-awaited write and reports a failure instead of letting it reach
-/// the zone crash handler.
+/// Runs an un-awaited write and reports failure instead of letting it reach the
+/// zone crash handler.
 ///
-/// A menu row is a VoidCallback, so every provider write from one is a
-/// dangling Future. A sync try/catch around it catches NOTHING — the rejection
-/// lands later — and a row that silently did nothing is exactly the bug class
-/// this menu work keeps producing.
+/// A menu row is a VoidCallback, so every provider write from one is a dangling
+/// Future and a sync try/catch around it catches NOTHING.
 void _report(BuildContext context, Future<void> work, String failure) {
   work.catchError((Object _) {
     if (context.mounted) {
@@ -397,8 +376,8 @@ void _report(BuildContext context, Future<void> work, String failure) {
   });
 }
 
-/// The composer scope of the channel currently on screen, or null when the
-/// chat area is showing something else.
+/// The composer scope of the channel on screen, or null when the chat area is
+/// showing something else.
 String? _openChannelScope(WidgetRef ref) {
   final serverId = ref.watch(selectedServerProvider);
   final channelId = ref.watch(selectedChannelProvider);
@@ -427,8 +406,8 @@ void _openProfile(
     role: role,
     labels: (labels != null && labels.isNotEmpty) ? labels : null,
     serverId: serverId,
-    // Nothing to follow: this came from a menu row that is already gone, so
-    // the card keeps the point the menu was opened at.
+    // Nothing to follow: the menu row is already gone, so the card keeps the
+    // point the menu was opened at.
     anchorOf: () => anchor,
   );
 }
@@ -481,9 +460,8 @@ Future<void> _confirmRemoveFriend(
 
 /// The per-peer voice volume slider, as a menu row.
 ///
-/// Right-clicking a voice participant opened this and only this before the
-/// user menu existed. Folding it in as a custom row keeps the feature and
-/// still gives the row every other user action, instead of choosing.
+/// Folded in as a custom row so the participant row keeps this control AND
+/// gains every other user action.
 class _PeerVolumeRow extends ConsumerStatefulWidget {
   final String peerId;
 

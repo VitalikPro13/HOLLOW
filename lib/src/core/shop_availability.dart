@@ -5,13 +5,11 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/android_platform.dart';
 import 'package:hollow/src/core/providers/shop_unlock_provider.dart';
 
-/// Store builds show NO shop UI at all (Apple 3.1.1 / Play policy; design 8):
-/// no gallery, no prices, no import, no redeem. The safest sentence is no
-/// sentence.
+/// Store builds show NO shop UI at all (Apple 3.1.1 / Play policy): no gallery,
+/// no prices, no import, no redeem. The safest sentence is no sentence.
 ///
 /// Rendering is unaffected: purchased art is ordinary profile data and paints
-/// everywhere, so a frame bought on desktop still shows on the phone. Only the
-/// commerce surfaces are gone.
+/// everywhere. Only the commerce surfaces are gone.
 const bool kStoreBuild = bool.fromEnvironment('HOLLOW_STORE_BUILD');
 
 /// Android package names of the app stores whose policy this gate exists for.
@@ -23,10 +21,9 @@ const Set<String> _kAndroidStoreInstallers = {
   'com.sec.android.app.samsungapps', // Samsung Galaxy Store
 };
 
-/// Whether this build may show shop UI at all.
-///
-/// Resolved ONCE at startup rather than per-widget: the answer cannot change
-/// while the process lives, and every read site is a `build()`.
+/// Whether this build may show shop UI at all. Resolved ONCE at startup rather
+/// than per-widget: the answer cannot change while the process lives, and
+/// every read site is a `build()`.
 class ShopAvailability {
   ShopAvailability._();
 
@@ -40,10 +37,9 @@ class ShopAvailability {
   /// True once [prime] has resolved. Diagnostics only.
   static bool get primed => _primed;
 
-  /// Resolve the verdict. Call once before `runApp`.
-  ///
-  /// Desktop: yes. iOS and web: no (the App Store is the only channel).
-  /// Android: no when a store installed us, yes for a sideload.
+  /// Resolve the verdict. Call once before `runApp`. Desktop yes; iOS and web no
+  /// (the App Store is the only channel); Android no when a store installed us,
+  /// yes for a sideload.
   static Future<void> prime() async {
     if (_primed) return;
     _primed = true;
@@ -76,12 +72,9 @@ class ShopAvailability {
 /// The effective shop gate: watch this, never [ShopAvailability.available]
 /// directly, so a widget test can override the verdict.
 ///
-/// Two things have to agree. [ShopAvailability.available] is the STORE
-/// verdict, fixed for the life of the process: a Play, Amazon or Samsung
-/// install answers no and nothing can talk it round. [shopUnlockedProvider]
-/// is the install's own answer, persisted and flipped by seven taps on the
-/// version row in Settings > About, because the shop ships put away rather
-/// than removed. A store build therefore stays false whatever the taps say.
+/// Two things have to agree. [ShopAvailability.available] is the STORE verdict,
+/// fixed for the life of the process. [shopUnlockedProvider] is the install's
+/// own answer, flipped by seven taps. A store build stays false regardless.
 final shopAvailableProvider = Provider<bool>(
   (ref) => ShopAvailability.available && ref.watch(shopUnlockedProvider),
 );

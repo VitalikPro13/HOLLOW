@@ -9,12 +9,10 @@ void _log(String msg) {
 
 /// Out-of-process audio renderer for received screen share audio (Windows).
 ///
-/// Spawns `screen_audio_capturer.exe --mode render` which reads framed Opus
-/// packets from stdin and plays them via waveOut — completely outside the
-/// Flutter/libwebrtc process.
-///
-/// Wire protocol (stdin, binary):
-///   [uint16_le: payload_len][uint32_le: seq][...opus_bytes...]
+/// Spawns `screen_audio_capturer.exe --mode render`, which reads framed Opus
+/// packets from stdin and plays them via waveOut, completely outside the
+/// Flutter and libwebrtc process. Wire format on stdin is
+/// `[uint16_le payload_len][uint32_le seq][opus_bytes]`.
 class ScreenAudioRenderer {
   Process? _process;
   bool _active = false;
@@ -122,9 +120,9 @@ class ScreenAudioRenderer {
     return true;
   }
 
-  /// Set the playback gain target (0.0..=1.0); the exe ramps toward it
-  /// click-free (fast down / slow up). Sent as a control frame — seq
-  /// 0xFFFFFFFF, cmd 0x01, float32 LE — on the same stdin pipe as audio.
+  /// Sets the playback gain target (0.0..=1.0); the exe ramps toward it
+  /// click-free. Sent as a control frame (seq 0xFFFFFFFF, cmd 0x01, float32
+  /// LE) on the same stdin pipe as the audio.
   void setGain(double gain) {
     final clamped = gain.clamp(0.0, 1.0).toDouble();
     // Control frames ride between audio packets; skip byte-identical resends.

@@ -3,18 +3,13 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/peers_provider.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 
-/// Device → master identity map for the UI attribution layer (multi-device,
-/// Phase 6).
+/// Device -> master identity map for the UI attribution layer (multi-device).
 ///
-/// The Rust node owns the authoritative resolver (learned from verified, signed
-/// device lists). This provider mirrors it into Dart so the UI can synchronously
-/// collapse a friend's several device peer_ids into the one person — without an
-/// async FFI hop per message bubble / member row. It is refreshed whenever a
-/// `DeviceListUpdated` event fires (see `event_provider`).
-///
-/// On a single-device install the map is empty (or only self-mappings), so
-/// `identityOf()` returns the input unchanged — i.e. a perfect no-op. Never gate
-/// rendering on this: an unknown peer always resolves to itself.
+/// The Rust node owns the authoritative resolver, learned from verified signed
+/// device lists. This mirrors it into Dart so the UI can synchronously collapse
+/// a friend's device peer_ids into one person, without an async FFI hop per
+/// bubble. Refreshed on `DeviceListUpdated`. On a single-device install the map
+/// is empty, so `identityOf()` is a no-op; never gate rendering on it.
 class DeviceLinkState {
   /// device_peer_id → master_peer_id.
   final Map<String, String> links;
@@ -34,9 +29,8 @@ class DeviceLinkNotifier extends Notifier<DeviceLinkState> {
   @override
   DeviceLinkState build() => const DeviceLinkState();
 
-  /// Pull the current (device → master) links from the running node's resolver.
-  /// Cheap (in-memory snapshot on the Rust side); safe to call on every
-  /// `DeviceListUpdated`.
+  /// Pull the current (device -> master) links from the running node's resolver.
+  /// Cheap in-memory snapshot, safe on every `DeviceListUpdated`.
   Future<void> refresh() async {
     try {
       final rows = await network_api.getDeviceLinks();
@@ -59,31 +53,22 @@ final deviceLinkProvider =
   DeviceLinkNotifier.new,
 );
 
-/// The set of **master identities** that have at least one visible device
-/// online (multi-device, Phase 6).
+/// The set of **master identities** with at least one visible device online.
 ///
-/// Presence (`peersProvider`) and invisibility (`invisiblePeersProvider`) are
-/// keyed by the **device** peer_id the relay actually reports. Friend / DM /
-/// profile UI, however, keys on the **master** identity (a friendship is with a
-/// person, not a device). This provider bridges the two: it folds every visible
-/// online device into its master identity, so a friend connected via *any* of
-/// their devices shows as one online person.
+/// Presence and invisibility are keyed by the **device** peer_id the relay
+/// reports, while friend / DM / profile UI keys on the **master** identity.
+/// This folds every visible online device into its master, mirroring the Rust
+/// resolver's `peer_is_reachable`. On a single-device install it collapses to
+/// the old `peers.keys - invisible` set.
 ///
-/// Mirrors the Rust resolver's `peer_is_reachable` ("a master is reachable if
-/// any of its devices is in a room"). On a single-device install the resolver is
-/// the identity map (device == master), so this collapses to exactly the old
-/// `peers.keys - invisible` set — a perfect no-op.
-///
-/// Use [identityIsOnline] rather than the raw `peers.containsKey(id)` for any
-/// friend/DM/profile online check.
+/// Use [identityIsOnline] rather than a raw `peers.containsKey(id)`.
 final onlineIdentitiesProvider =
     NotifierProvider<OnlineIdentitiesNotifier, Set<String>>(
         OnlineIdentitiesNotifier.new);
 
-/// Notifier (not a plain Provider) purely for [updateShouldNotify]: the
-/// recompute mints a fresh Set every time a peer event fires, and identity
-/// `==` meant ~20 always-mounted watchers rebuilt per event even when the
-/// online set hadn't actually changed (e.g. markEncrypted).
+/// A Notifier purely for [updateShouldNotify]: the recompute mints a fresh Set
+/// on every peer event, and identity `==` rebuilt ~20 always-mounted watchers
+/// per event even when the online set hadn't changed.
 class OnlineIdentitiesNotifier extends Notifier<Set<String>> {
   @override
   Set<String> build() {
@@ -109,8 +94,6 @@ class OnlineIdentitiesNotifier extends Notifier<Set<String>> {
 /// peers resolve to themselves, so this is correct in both worlds.
 bool identityIsOnline(WidgetRef ref, String masterPeerId) =>
     ref.watch(onlineIdentitiesProvider).contains(masterPeerId);
-
-// ── Step 8: Devices panel ──────────────────────────────────────────────
 
 /// The transport peer_id of the device this app is RUNNING on (distinct from the
 /// master identity in `get_local_peer_id`). Used to mark "This device" + hide its
@@ -171,11 +154,10 @@ class MyDevice {
 }
 
 /// My own devices (every device peer_id that resolves to MY master), with live
-/// online status + local label. Empty / single-entry on a single-device install.
+/// online status + local label.
 ///
-/// Sourced from the resolver mirror (`deviceLinkProvider.links`) inverted against
-/// my master id: `seed_self` puts my own devices in that map. The running device
-/// is always included even if the resolver hasn't folded it in yet.
+/// Sourced from the resolver mirror inverted against my master id; the running
+/// device is always included even if the resolver hasn't folded it in yet.
 final myDevicesProvider = Provider<List<MyDevice>>((ref) {
   final links = ref.watch(deviceLinkProvider);
   final labels = ref.watch(deviceLabelProvider);
@@ -189,8 +171,7 @@ final myDevicesProvider = Provider<List<MyDevice>>((ref) {
 
   final ids = <String>{};
   if (myMaster != null) {
-    // Every device whose master is mine (excludes the bare master, which is not a
-    // real device — it never appears as a transport peer).
+    // Excludes the bare master, which never appears as a transport peer.
     for (final entry in links.links.entries) {
       if (entry.value == myMaster && entry.key != myMaster) ids.add(entry.key);
     }

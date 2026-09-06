@@ -46,9 +46,8 @@ class NotificationSettingsNotifier
 
   /// Load all notification settings from DB.
   ///
-  /// One batched `notif:` prefix read — this used to issue a serial FFI
-  /// `loadSetting` per server, per channel, and per DM (hundreds of
-  /// round-trips sitting in front of the startup spinner).
+  /// One batched `notif:` prefix read, not a serial `loadSetting` per server,
+  /// channel and DM (hundreds of round-trips in front of the startup spinner).
   Future<void> loadAll(
       List<String> serverIds, Map<String, List<String>> channelIds,
       List<String> dmPeerIds) async {
@@ -92,12 +91,10 @@ class NotificationSettingsNotifier
   }
 
   /// Register the current server/channel levels with the relay as channel-push
-  /// filters. The relay checks these BEFORE firing a channel push — required on
-  /// iOS, where an alert push can't be suppressed after delivery. Mobile only:
-  /// pushes go to the device that registered an FCM/APNs token, and a desktop
-  /// sync would overwrite the phone's filters with desktop-local settings.
-  /// Fire-and-forget: the node caches the prefs and re-sends on every
-  /// reconnect; if the node isn't running yet, the next loadAll() retries.
+  /// filters. The relay checks these BEFORE firing a push, which is required on
+  /// iOS where an alert push can't be suppressed after delivery. Mobile only: a
+  /// desktop sync would overwrite the phone's filters. Fire-and-forget, since
+  /// the node caches the prefs and the next loadAll() retries.
   void _syncPushPrefsToRelay() {
     if (kIsWeb || (!Platform.isAndroid && !Platform.isIOS)) return;
     final prefs = <String, Map<String, dynamic>>{};

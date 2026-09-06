@@ -20,8 +20,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:hollow/src/core/providers/layout_prefs_provider.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-/// Appearance category of the desktop Settings dialog: theme (dark mode +
-/// accent color), background image, and layout toggles. Everything here
+/// Appearance category of the desktop Settings dialog. Everything here
 /// auto-saves on change.
 class AppearanceSettingsView extends ConsumerWidget {
   const AppearanceSettingsView({super.key});
@@ -58,8 +57,8 @@ class AppearanceSettingsView extends ConsumerWidget {
       SettingsCard(
         title: 'Layout',
         children: [
-          // A two-way switch, not an on/off toggle: "Dock Mode off" gave no
-          // hint that what you land in is the familiar Discord/Slack shell.
+          // A two-way switch, not an on/off toggle: "Dock Mode off" gives no
+          // hint that what you land in is the familiar Discord-style shell.
           Row(
             children: [
               Icon(LucideIcons.layoutDashboard,
@@ -96,8 +95,8 @@ class AppearanceSettingsView extends ConsumerWidget {
               (LayoutMode.classic, 'Classic'),
             ],
             onChanged: (m) {
-              // Classic has no split view — leaving a split open would strand
-              // the right pane invisibly until the user switched back.
+              // Classic has no split view, and leaving one open strands the
+              // right pane invisibly until the user switches back.
               if (m == LayoutMode.classic) {
                 ref.read(splitViewProvider.notifier).closeSplit();
               }
@@ -126,8 +125,8 @@ class AppearanceSettingsView extends ConsumerWidget {
           ],
           if (isDesktop) ...[
             const SizedBox(height: HollowSpacing.md),
-            // Issue #54: one click can go straight to the full profile
-            // instead of the small card with an expand button on it.
+            // Issue #54: one click can go straight to the full profile instead
+            // of the small card with an expand button on it.
             SettingsToggleRow(
               icon: LucideIcons.idCard,
               label: 'Open profiles expanded',
@@ -176,7 +175,6 @@ class _BackgroundPicker extends ConsumerWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        // Label + buttons
         Row(
           children: [
             Icon(LucideIcons.image, size: 14, color: hollow.textSecondary),
@@ -206,7 +204,6 @@ class _BackgroundPicker extends ConsumerWidget {
           ],
         ),
 
-        // Opacity slider (only when background is set)
         if (bg.hasBackground) ...[
           const SizedBox(height: HollowSpacing.sm),
           Row(
@@ -282,7 +279,6 @@ class _AccentColorPickerState extends ConsumerState<_AccentColorPicker> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        // Label row with color preview
         Row(
           children: [
             Icon(LucideIcons.palette, size: 14, color: hollow.textSecondary),
@@ -300,7 +296,6 @@ class _AccentColorPickerState extends ConsumerState<_AccentColorPicker> {
         ),
         const SizedBox(height: HollowSpacing.sm),
 
-        // Hue slider (rainbow gradient)
         AccentHueSliderRow(
           hue: currentHue,
           height: 24,
@@ -313,12 +308,10 @@ class _AccentColorPickerState extends ConsumerState<_AccentColorPicker> {
 
         const SizedBox(height: HollowSpacing.sm),
 
-        // Preset swatches row
         Wrap(
           spacing: 6,
           runSpacing: 6,
           children: [
-            // Default teal
             _ColorSwatch(
               hue: defaultAccentHue,
               isSelected: (currentHue - defaultAccentHue).abs() < 1,
@@ -327,7 +320,6 @@ class _AccentColorPickerState extends ConsumerState<_AccentColorPicker> {
                   ref.read(accentHueProvider.notifier).setHue(defaultAccentHue),
               hollow: hollow,
             ),
-            // Saved presets
             for (final hue in presets)
               _ColorSwatch(
                 hue: hue,
@@ -338,7 +330,6 @@ class _AccentColorPickerState extends ConsumerState<_AccentColorPicker> {
                     ref.read(accentPresetsProvider.notifier).removePreset(hue),
                 hollow: hollow,
               ),
-            // Save current button
             if (!presets.any((h) => (h - currentHue).abs() < 1) &&
                 (currentHue - defaultAccentHue).abs() > 1)
               GestureDetector(

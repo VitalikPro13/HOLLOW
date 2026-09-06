@@ -13,13 +13,13 @@ import 'package:hollow/src/ui/settings/settings_shared.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Verified-contacts pieces shared by the desktop Security category and the
-/// mobile Security tab (Issue 1-D).
+/// mobile Security tab.
 ///
-/// The point of listing them here is auditability: a verified badge is a claim
-/// the app makes on the user's behalf, so the user must be able to see every
-/// claim in one place and withdraw any of them.
+/// Listing them is auditability: a verified badge is a claim the app makes on
+/// the user's behalf, so they must be able to see every claim in one place and
+/// withdraw any of them.
 
-/// Explainer shown above the list (both surfaces).
+/// Explainer shown above the list on both surfaces.
 Widget verifiedContactsIntro(HollowTheme hollow) {
   return Text(
     'You confirmed these contacts by comparing safety numbers in person or '
@@ -29,7 +29,7 @@ Widget verifiedContactsIntro(HollowTheme hollow) {
   );
 }
 
-/// One verified-contact row: avatar + name + short id + view/remove.
+/// One verified-contact row.
 class VerifiedContactRow extends ConsumerWidget {
   final String id;
   final double avatarSize;
@@ -120,7 +120,7 @@ class VerifiedContactRow extends ConsumerWidget {
   }
 }
 
-/// Desktop card: verified list inside a [SettingsCard] (Security category).
+/// The verified list inside a [SettingsCard], for desktop Security.
 class VerifiedContactsCard extends ConsumerWidget {
   const VerifiedContactsCard({super.key});
 

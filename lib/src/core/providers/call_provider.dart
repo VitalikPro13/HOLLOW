@@ -75,13 +75,11 @@ class CallState {
   /// we pressed Watch — [remoteScreenSharing] alone is just the badge.
   final bool watchingRemoteShare;
 
-  /// Viewer asked for SOURCE quality on the remote share (media forwarding
-  /// step 1). OFF by default: the sharer clamps our stream to our display
-  /// resolution until this is on. Per watch session, never sticky.
+  /// Viewer asked for SOURCE quality on the remote share. OFF by default: the
+  /// sharer clamps to our display until this is on. Per watch session, never sticky.
   final String sframeKey; // hex-encoded 32-byte SFrame key for E2EE
-  // NOTE: speaking (VAD) state deliberately lives in callSpeakingProvider,
-  // NOT here — it flips 1-4x/sec while talking and a copyWith here rebuilt
-  // every callProvider watcher (shell, panes, video subtrees) per flip.
+  // Speaking (VAD) state lives in callSpeakingProvider, not here: it flips
+  // 1-4x/sec while talking and would rebuild every callProvider watcher.
 
   /// Mobile audio route: true = loudspeaker, false = earpiece.
   final bool isSpeakerOn;
@@ -99,10 +97,9 @@ class CallState {
   /// Quality label for the remote peer's screen share. Null when they're not sharing.
   final String? remoteScreenShareLabel;
 
-  /// Bumped whenever a remote video renderer becomes ready. The renderer
-  /// itself lives outside this state (on VoiceService), so without this the
-  /// UI never rebuilds when the track arrives AFTER the video_state signal —
-  /// the remote camera stays invisible until some unrelated state change.
+  /// Bumped whenever a remote video renderer becomes ready. The renderer lives
+  /// outside this state (on VoiceService), so without this the UI never rebuilds
+  /// when the track arrives AFTER the video_state signal.
   final int remoteVideoTrackSeq;
 
   const CallState({
@@ -193,10 +190,8 @@ class CallNotifier extends Notifier<CallState> {
   /// SECURITY (Phase 6.25): Guard against concurrent renegotiations.
   bool _renegotiationInProgress = false;
 
-  /// Remote renegotiation offer that arrived while we were busy — processed
-  /// when the current renegotiation settles instead of being dropped (a
-  /// dropped offer means the remote's new track is never announced →
-  /// one-way video).
+  /// Remote renegotiation offer that arrived while we were busy, processed when
+  /// the current one settles: a dropped offer means one-way video.
   String? _queuedRenegOfferPeer;
   String? _queuedRenegOfferPayload;
   int _renegOfferAttempts = 0;
@@ -208,37 +203,26 @@ class CallNotifier extends Notifier<CallState> {
 
   /// Holds the call open across network trouble instead of hanging it up, and
   /// governs the outbound camera so the picture degrades before the call does.
-  /// Created on connect, torn down in [_cleanup]. Null outside a live call.
-  ///
   /// This is the ONLY thing allowed to end a call because of network state.
   LinkWatchdog? _linkWatch;
 
   /// A hangup the peer never heard, held for the next time the relay is up.
   ///
-  /// Giving up on a link is often something we can only do while our OWN relay
-  /// connection is down, which is precisely when the `end` signal announcing it
-  /// gets dropped before it leaves the machine. Field-caught 2026-08-27: the
-  /// VM tore its call down, the `end` logged `DROPPED — not in any WS room`,
-  /// and the host was left sitting in a call with nobody in it.
-  ///
-  /// The peer's own hold-open ladder would eventually notice and resolve it,
-  /// but a minute of talking to a corpse is a bad way to find that out.
+  /// Giving up on a link often happens while our OWN relay connection is down,
+  /// which is exactly when the `end` signal is dropped before it leaves the
+  /// machine, leaving the peer sitting in a call with nobody in it.
   ({String peerId, String callId})? _undeliveredEnd;
 
-  /// A media-session rebuild we are performing because the peer asked for one.
-  /// Held so the `sdp_offer` that follows waits for our teardown and is then
-  /// handled as an INITIAL offer rather than as a renegotiation.
+  /// A media-session rebuild we are performing because the peer asked for one:
+  /// the `sdp_offer` that follows waits for our teardown and is then an INITIAL offer.
   Future<void>? _pendingMediaRestart;
 
   /// Guards against starting a second rebuild while one is in flight.
   bool _mediaRestartInFlight = false;
 
   /// When a rebuild last began on EITHER side. Both ends are eligible to
-  /// initiate (the polite one just goes first), and in the field both did: the
-  /// polite side's `media_restart` was dropped while its peer's relay was
-  /// still down, and the peer initiated its own moments later. Two crossing
-  /// rebuilds would tear down each other's fresh connection, so whichever
-  /// starts first owns the window and the other stands down.
+  /// initiate and in the field both did, so whichever starts first owns the
+  /// window and the other stands down; two crossing rebuilds tear each other down.
   DateTime? _mediaRestartAt;
 
   /// How long one rebuild owns the recovery. Comfortably longer than a call
@@ -251,16 +235,11 @@ class CallNotifier extends Notifier<CallState> {
         DateTime.now().difference(at) < _mediaRestartWindow;
   }
 
-  /// What to put back once the rebuilt session connects. A rebuild is a fresh
-  /// peer connection, so mute and camera come back at their defaults and would
-  /// otherwise silently contradict what the UI is showing.
+  /// What to put back once the rebuilt session connects: a rebuild is a fresh
+  /// peer connection, so mute and camera return at their defaults.
   ///
-  /// A LATCH, never an assignment: a rebuild sets `isVideoEnabled` false as it
-  /// starts, so a second claim on the same recovery (ours, then the peer's
-  /// crossing `media_restart`) read that cleared flag and forgot the camera
-  /// had ever been on. Field-caught 2026-08-27: audio came back, the picture
-  /// never did. Cleared only once the camera is actually restored, or by
-  /// [_cleanup].
+  /// A LATCH, never an assignment: a rebuild clears `isVideoEnabled` as it
+  /// starts, so a second claim on the same recovery would forget the camera.
   bool _restoreVideoAfterRestart = false;
 
   /// Remember that the camera was on before a rebuild took it down.
@@ -277,22 +256,17 @@ class CallNotifier extends Notifier<CallState> {
   ScreenShareService? _incomingScreenShare; // They share their screen to us
 
   /// True while the entire-screen anti-echo voice redirect is armed (Windows):
-  /// the remote call voice is rendered out-of-process so the screen capture can
-  /// exclude its pid. Reset on stop so we only call voiceRedirectStop when armed.
+  /// the call voice renders out-of-process so the capture can exclude its pid.
   bool _voiceRedirectActive = false;
 
-  /// Renderer for the incoming remote screen share. Used by UI.
   RTCVideoRenderer? get screenShareRenderer =>
       _incomingScreenShare?.remoteRenderer;
 
-  /// Renderer for the local outgoing screen share (self-preview).
-  /// Bound to the provider-owned capture stream so the preview lives even
-  /// before the peer opts in to watch (issue #38); the service-owned
-  /// renderer is the pre-opt-in-era fallback.
+  /// Renderer for the local outgoing screen share, bound to the provider-owned
+  /// capture stream so the preview lives before the peer opts in (issue #38).
   RTCVideoRenderer? get localScreenShareRenderer =>
       _dmScreenPreviewRenderer ?? _outgoingScreenShare?.localRenderer;
 
-  // --- Opt-in screen share watching, DM side (issue #38) ------------------
   /// Capture stream + preview owned by the PROVIDER (not the share PC), so
   /// capture/preview live independently of whether the peer watches.
   MediaStream? _dmScreenStream;
@@ -302,10 +276,8 @@ class CallNotifier extends Notifier<CallState> {
   /// Sharer side: the peer asked to receive our share.
   bool _dmPeerWantsShare = false;
 
-  /// Sharer side: the peer's display resolution + source-quality request
-  /// from their screen_watch (media forwarding step 1) — clamps their
-  /// encoder to what they can actually show. 0x0 = unknown (old client)
-  /// = no clamp.
+  /// Sharer side: the peer's display resolution + source-quality request, which
+  /// clamps their encoder to what they can show. 0x0 = unknown = no clamp.
   int _dmViewerWidth = 0;
   int _dmViewerHeight = 0;
 
@@ -333,9 +305,7 @@ class CallNotifier extends Notifier<CallState> {
       // Keep ICE config up to date (TURN credentials refresh).
       _voiceService!.iceServers = ref.read(iceConfigProvider);
     }
-    // Keep device preferences up to date.
-    // Use .valueOrNull — async providers may still be loading on first access.
-    // _ensureDevicePreferences() awaits them before the first call.
+    // Use .valueOrNull: async providers may still be loading on first access.
     _voiceService!.preferredAudioInputDeviceId =
         ref.read(audioInputDeviceProvider).valueOrNull;
     _voiceService!.preferredAudioOutputDeviceId =
@@ -367,8 +337,7 @@ class CallNotifier extends Notifier<CallState> {
 
   void _wireCallbacks() {
     // SFrame heal-lite: on sustained cryptor failure the service rebinds its
-    // receiver itself and pings us to re-apply the (static) call key — covers
-    // a lost/failed key application without restarting the call.
+    // receiver and pings us to re-apply the static call key.
     _voiceService!.onSframeHealNeeded = () {
       final peerId = state.peerId;
       final keyHex = state.sframeKey;
@@ -380,9 +349,8 @@ class CallNotifier extends Notifier<CallState> {
     };
     _voiceService!.onConnected = (peerId) {
       debugPrint('[HOLLOW-CALL] Voice connected with $peerId');
-      // A rebuilt media session lands here with the call ALREADY active, so it
-      // never enters the setup branch below. Mute and camera came back at
-      // their defaults on the fresh connection and have to be re-applied.
+      // A rebuilt media session lands here with the call ALREADY active, so mute
+      // and camera came back at their defaults and must be re-applied.
       if (state.status == CallStatus.active) _restoreAfterMediaRestart();
       // Media is flowing — emit the setup timeline (see call_setup_trace.dart).
       CallSetupTrace.finishCurrent();
@@ -391,21 +359,16 @@ class CallNotifier extends Notifier<CallState> {
           status: CallStatus.active,
           startedAt: DateTime.now(),
         );
-        // Connected — the twin of the hang-up cue in `_cleanup()`. Fires on
-        // both sides, and only once (the guard above makes this edge-only).
+        // Connected: the twin of the hang-up cue in `_cleanup()`, edge-only.
         SoundService.instance.play(HollowSound.joinVoice, duringCall: true);
-        // Apply the PTT transmit gate now that capture is live — in PTT
-        // mode the mic starts gated until the key is held (issue #38).
+        // In PTT mode the mic starts gated until the key is held (issue #38).
         _applyTxGate();
         _scheduleStatsDump(peerId);
         _scheduleIceRepair(peerId);
         _startLinkWatch(peerId);
 
-        // AI-NS fallback check for calls that STARTED with the toggle on
-        // (the toggle listener only covers mid-call flips): if DFN proves
-        // unable to run once frames flow, re-arm WebRTC NS + renegotiate.
-        // Also logs the engine status either way — a field test must never
-        // be ambiguous about whether DFN was denoising.
+        // AI-NS fallback check for calls that STARTED with the toggle on; the
+        // toggle listener only covers mid-call flips.
         final nsService = _voiceService;
         if (nsService != null && nsService.noiseSuppressAi) {
           unawaited(Future.delayed(const Duration(seconds: 4), () async {
@@ -418,27 +381,21 @@ class CallNotifier extends Notifier<CallState> {
           }));
         }
 
-        // Mobile audio route: voice calls start on the earpiece, video
-        // calls on the loudspeaker.
+        // Voice calls start on the earpiece, video calls on the loudspeaker.
         _setSpeakerRoute(state.isVideoCall);
 
-        // Start VAD for speaking indicators. Writes go to the dedicated
-        // callSpeakingProvider (NOT CallState) so a flip only rebuilds the
-        // avatar glow, never every callProvider watcher. No status gate:
-        // stopVad() emits (false, false), which resets the provider on hangup.
+        // VAD writes go to callSpeakingProvider, not CallState, so a flip rebuilds
+        // only the avatar glow. stopVad() emits (false,false), resetting it on hangup.
         _voiceService!.onSpeakingChanged = (localSpeaking, remoteSpeaking) {
           ref.read(callSpeakingProvider.notifier).set(
                 local: localSpeaking,
                 remote: remoteSpeaking,
               );
-          // Sidechain for share-audio ducking: anyone talking (self
-          // included) pulls received share audio down.
+          // Sidechain: anyone talking pulls received share audio down.
           ShareAudioLevel.setSpeaking(localSpeaking || remoteSpeaking);
         };
         _voiceService!.startVad();
 
-        // Wire screen audio receiver (Windows) for DM calls.
-        // Wire screen audio receiver (Windows sender → data channel → us).
         {
           final webrtc = ref.read(webRtcProvider.notifier).service;
           webrtc.onScreenAudioReceived = (fromPeer, data) async {
@@ -455,11 +412,9 @@ class CallNotifier extends Notifier<CallState> {
           };
         }
 
-        // Video call: auto-enable the camera now that the audio connection
-        // is up. Both sides do this — the side without a camera will see
-        // toggleVideo() return false (no-op) and stay audio-only. The side
-        // with a camera goes through the mid-call addTrack/renegotiate
-        // path which is the proven-working flow for cross-peer video.
+        // Both sides auto-enable the camera once audio is up; a side without a
+        // camera sees toggleVideo() no-op and stays audio-only. The mid-call
+        // addTrack/renegotiate path is the proven flow for cross-peer video.
         if (state.isVideoCall) {
           final autoEnableMs = _cameraAutoEnableDelayMs(peerId);
           _callLog('[HOLLOW-CALL] Video call connected — scheduling '
@@ -469,9 +424,8 @@ class CallNotifier extends Notifier<CallState> {
                 state.isVideoCall &&
                 !state.isVideoEnabled) {
               _callLog('[HOLLOW-CALL] Auto-enabling camera for video call');
-              // toggleVideo itself re-asserts the speaker route after the
-              // renegotiation settles (the camera flip restarts the platform
-              // audio unit, which can drop the loudspeaker route).
+              // toggleVideo re-asserts the speaker route after the renegotiation: a
+              // camera flip restarts the platform audio unit and can drop the route.
               toggleVideo();
             } else {
               _callLog('[HOLLOW-CALL] Auto-toggle skipped: '
@@ -483,19 +437,16 @@ class CallNotifier extends Notifier<CallState> {
       }
     };
 
-    // Transport states go to the hold-open ladder, never straight to a
-    // hangup. `disconnected` means ICE consent has gone unanswered for a
-    // couple of seconds, which is what a Wi-Fi stutter looks like; answering
-    // it by signalling `end` hung the call up on BOTH machines over a blip.
-    // See [LinkWatchdog] and `link_resilience.dart`.
+    // Transport states go to the hold-open ladder, never straight to a hangup.
+    // `disconnected` means ICE consent went unanswered for a couple of seconds,
+    // which is a Wi-Fi stutter; answering it with `end` hung up BOTH machines.
     _voiceService!.onTransportState = (transportState) {
       final watch = _linkWatch;
       if (watch != null) {
         watch.noteTransportState(transportState);
         return;
       }
-      // No watchdog yet: the call has not connected, so this is a setup
-      // failure and the pre-existing fail-fast behaviour is the right one.
+      // No watchdog yet: the call never connected, so fail fast as a setup failure.
       if (transportState ==
               RTCPeerConnectionState.RTCPeerConnectionStateFailed ||
           transportState ==
@@ -509,28 +460,20 @@ class CallNotifier extends Notifier<CallState> {
     _voiceService!.onRemoteVideoTrack = (peerId) {
       _callLog('[HOLLOW-CALL] Remote video track/renderer ready for $peerId '
           '(status=${state.status}, remoteVideoEnabled=${state.remoteVideoEnabled})');
-      // Renderer is now available for when the remote peer explicitly
-      // enables their camera via the video_state signal. Don't set
-      // remoteVideoEnabled here — on mobile, SDP negotiation can create
-      // video transceivers that trigger onTrack/onRemoteVideoTrack even
-      // for audio-only calls (stale transceiver from safety net). The
-      // explicit video_state signal in _handleVideoState is the only
-      // source of truth for remote camera state.
+      // Don't set remoteVideoEnabled here: SDP negotiation can create video
+      // transceivers that fire onTrack even for audio-only calls, so the explicit
+      // video_state signal is the only source of truth for the remote camera.
       //
-      // DO bump the seq so the UI rebuilds: when video_state lands BEFORE
-      // the track (common — the plaintext signal beats the SDP handshake),
-      // the screen has already rebuilt with a null renderer and nothing
-      // else re-triggers it; the remote camera stays invisible until the
-      // peer toggles again.
+      // DO bump the seq so the UI rebuilds: video_state usually lands BEFORE the
+      // track, and nothing else re-triggers a screen built with a null renderer.
       if (state.status != CallStatus.idle) {
         state = state.copyWith(
             remoteVideoTrackSeq: state.remoteVideoTrackSeq + 1);
       }
     };
 
-    // Share-audio playback level: seed the bus now and live-update it when
-    // the slider / duck toggle change mid-share. DM calls have no deafen, so
-    // clear any state a previous voice-channel session left behind.
+    // Share-audio playback level: seed the bus and live-update it mid-share. DM
+    // calls have no deafen, so clear state a previous voice session left behind.
     ShareAudioLevel.setDeafened(false);
     ShareAudioLevel.setVolumePercent(
         ref.read(shareAudioVolumeProvider).valueOrNull ??
@@ -545,13 +488,11 @@ class CallNotifier extends Notifier<CallState> {
       ShareAudioLevel.setDuckEnabled(next.valueOrNull ?? true);
     });
 
-    // Update mic gain mid-call when user adjusts the slider.
     ref.listen(micGainProvider, (_, next) {
       final gain = next.valueOrNull ?? kMicGainDefault;
       _voiceService?.updateMicGain(gain);
     });
 
-    // Live A/B of the voice-enhancement chain mid-call.
     ref.listen(voiceEnhanceProvider, (_, next) {
       final enabled = next.valueOrNull ?? true;
       _voiceService?.updateVoiceEnhance(enabled);
@@ -565,18 +506,15 @@ class CallNotifier extends Notifier<CallState> {
       _voiceService?.updateVoiceEnhanceDynamic(enabled);
     });
 
-    // AI noise suppression: flips the native DFN engine AND the WebRTC-NS
-    // capture constraint — mid-call that means a mic re-capture + reneg,
-    // so guard on prev==next like the device switches below.
+    // AI noise suppression flips the native DFN engine AND the WebRTC-NS capture
+    // constraint, so mid-call it means a re-capture + reneg: guard on prev==next.
     ref.listen(noiseSuppressAiProvider, (prev, next) {
       if (prev?.valueOrNull == next.valueOrNull) return;
       unawaited(_applyNoiseSuppressAiChange(next.valueOrNull ?? false));
     });
 
-    // AI-NS engine switch: the native side swaps the engine handle in place
-    // (no constraint flip, no re-capture, no reneg — safe mid-call), but a
-    // heavier engine can prove unable to run once frames flow, so the same
-    // delayed fallback check as the toggle applies.
+    // AI-NS engine switch: the native side swaps the handle in place (no reneg),
+    // but a heavier engine can prove unable to run once frames flow.
     ref.listen(noiseSuppressEngineProvider, (prev, next) {
       if (prev?.valueOrNull == next.valueOrNull) return;
       unawaited(_applyNoiseSuppressEngineChange(
@@ -601,9 +539,7 @@ class CallNotifier extends Notifier<CallState> {
     });
   }
 
-  /// AI-NS engine switch: live native handle swap, then the same delayed
-  /// fallback check as the toggle (the new engine may bail once frames
-  /// flow).
+  /// AI-NS engine switch: live native handle swap, then the delayed fallback check.
   Future<void> _applyNoiseSuppressEngineChange(String engine) async {
     final service = _voiceService;
     if (service == null) return; // no service yet — next call seeds from it
@@ -624,12 +560,9 @@ class CallNotifier extends Notifier<CallState> {
     }));
   }
 
-  /// AI-NS toggle: update the service (re-captures the mic when in-call —
-  /// same reneg contract as a device switch), then schedule the fallback
-  /// check: the engine may only prove unable to run once frames start
-  /// flowing (unsupported capture shape, realtime bail), and a call must
-  /// never sit with NO noise suppression while the constraint has legacy
-  /// NS off.
+  /// AI-NS toggle: update the service (re-captures the mic in-call, same reneg
+  /// contract as a device switch), then schedule the fallback check, because a
+  /// call must never sit with NO noise suppression while legacy NS is off.
   Future<void> _applyNoiseSuppressAiChange(bool enabled) async {
     final service = _voiceService;
     if (service == null) return; // no service yet — next call seeds from it
@@ -650,9 +583,8 @@ class CallNotifier extends Notifier<CallState> {
     }));
   }
 
-  /// Live mic switch: swap the sender in the service, then renegotiate so
-  /// the remote stack picks up the fresh track (same contract as
-  /// toggleVideo — an addTrack without renegotiation is never announced).
+  /// Live mic switch: swap the sender, then renegotiate so the remote stack
+  /// picks up the fresh track (an addTrack without reneg is never announced).
   Future<void> _applyInputDeviceChange(String? deviceId) async {
     final service = _voiceService;
     if (service == null) {
@@ -678,9 +610,8 @@ class CallNotifier extends Notifier<CallState> {
     }
   }
 
-  /// Renegotiate after a mid-call sender swap — same glare guard as
-  /// [toggleVideo]. Any new renegotiation trigger must respect the queue
-  /// rules (see feedback_renegotiation_glare).
+  /// Renegotiate after a mid-call sender swap, same glare guard as [toggleVideo].
+  /// Any new trigger must respect the queue rules (feedback_renegotiation_glare).
   Future<void> _sendDeviceSwitchReneg(String what) async {
     final peerId = state.peerId;
     final callId = state.callId;
@@ -707,35 +638,28 @@ class CallNotifier extends Notifier<CallState> {
 
   /// Start holding this call open across network trouble.
   ///
-  /// Called once the call goes active, because everything before that is
-  /// call setup and belongs to the ring timeout instead. From here on, the
-  /// watchdog owns every network-driven decision about this call: when to
-  /// restart ICE, how far to step the camera down, what the flair says, and
-  /// the one case that still ends the call.
+  /// Called once the call goes active; everything before that is call setup and
+  /// belongs to the ring timeout. From here the watchdog owns every
+  /// network-driven decision, including the one case that ends the call.
   void _startLinkWatch(String peerId) {
     _linkWatch?.stop();
     _linkWatch = LinkWatchdog(
       label: 'CALL-LINK',
       log: _callLog,
       peerConnection: () => _voiceService?.peerConnection,
-      // Same lexicographic convention the rest of the codebase arbitrates
-      // renegotiation glare with, so the two ends do not restart into each
-      // other. Both sides stay eligible; the impolite one just waits longer.
+      // Same lexicographic convention the rest of the codebase arbitrates glare
+      // with, so the two ends do not restart into each other.
       isPolite: shouldInitiateIceRepair(localPeerId, peerId),
       onHealth: (snapshot) =>
           ref.read(callLinkHealthProvider.notifier).set(snapshot),
       onRecoverLink: _restartMediaSession,
       onApplyRung: (rung) => _service.applyVideoRung(rung),
-      // A recovery that followed an ICE restart may have rebuilt the transport
-      // without any SDP completing, which is the one case the ufrag detector
-      // cannot see. The re-assert itself collapses the duplicate when both
-      // triggers fire.
+      // A recovery after an ICE restart can rebuild the transport without any SDP
+      // completing, the one case the ufrag detector cannot see.
       onTransportRebuilt: () =>
           unawaited(_service.healSframeAfterTransportRebuild()),
       // An ICE restart is only half a recovery: the offer carrying the fresh
-      // credentials goes over the relay. With our own relay link down it is
-      // dropped before it leaves the machine (`DROPPED — not in any WS room`),
-      // so there is nothing to gain by firing one and the attempt waits.
+      // credentials rides the relay, so with our link down there is nothing to gain.
       canSignal: () =>
           ref.read(connectionStatusProvider).relayStatus ==
           RelayConnectionStatus.connected,
@@ -745,17 +669,11 @@ class CallNotifier extends Notifier<CallState> {
 
   /// Rebuild this call's media session from scratch, keeping the call alive.
   ///
-  /// This replaced an in-place `restartIce()` plus renegotiation. That
-  /// recovered the transport and destroyed SFrame with it: the cryptors end up
-  /// bound to a transport that no longer exists, and repairing them afterwards
-  /// was attempted four separate ways in the field (re-bind, atomic ladder,
-  /// re-key, both trigger paths) without ever once producing working audio.
-  ///
-  /// A fresh peer connection fixes both at once, and it is not a new code path
-  /// to get wrong: it is exactly what `_handleAccept` does at call start, which
-  /// has always worked. The call id, the SFrame key, the UI state and the
-  /// conversation all survive, so the user sees the "Reconnecting" flair go
-  /// away rather than a hangup followed by a new ring.
+  /// NOT an in-place `restartIce()`: that recovers the transport and destroys
+  /// SFrame with it, leaving cryptors bound to a transport that no longer
+  /// exists, and four separate repair approaches never produced working audio.
+  /// A fresh peer connection fixes both at once and is the same path call
+  /// setup already takes; the call id, SFrame key and UI state all survive.
   Future<void> _restartMediaSession() async {
     final peerId = state.peerId;
     final callId = state.callId;
@@ -771,9 +689,8 @@ class CallNotifier extends Notifier<CallState> {
     _mediaRestartAt = DateTime.now();
     try {
       _callLog('[HOLLOW-CALL] Rebuilding the media session for call=$callId');
-      // Tell the peer FIRST. It tears its own connection down, so the offer
-      // below lands on its initial-offer path instead of being applied to a
-      // peer connection that is about to be replaced.
+      // Tell the peer FIRST: it tears its own connection down, so the offer below
+      // lands on its initial-offer path.
       _sendSignal(peerId, 'media_restart', callId);
 
       _claimVideoRestore();
@@ -781,8 +698,7 @@ class CallNotifier extends Notifier<CallState> {
       // Fresh transport, fresh budget, and no stale rung to re-apply.
       _linkWatch?.noteConnectionRebuilt();
 
-      // Audio-only, exactly like call setup: the camera goes back on through
-      // the proven mid-call addTrack path once this is connected.
+      // Audio-only, exactly like call setup; the camera returns via addTrack.
       final sdp = await _service.createOffer(peerId, callId, withVideo: false);
 
       final keyHex = state.sframeKey;
@@ -806,16 +722,14 @@ class CallNotifier extends Notifier<CallState> {
   /// that follows is handled as an initial one.
   Future<void> _handleMediaRestart(String peerId, String callId) async {
     if (state.callId != callId) return;
-    // Their rebuild owns the window now, so ours (if it was about to fire)
-    // stands down.
+    // Their rebuild owns the window now, so ours stands down.
     _mediaRestartAt = DateTime.now();
     _callLog('[HOLLOW-CALL] Peer is rebuilding the media session — dropping '
         'our side so the next offer is treated as a fresh one');
     _claimVideoRestore();
     state = state.copyWith(isVideoEnabled: false, remoteVideoEnabled: false);
     _linkWatch?.noteConnectionRebuilt();
-    // Assigned BEFORE the await so a fast-following offer can see it even if
-    // the teardown has not finished.
+    // Assigned BEFORE the await so a fast-following offer can see it.
     _pendingMediaRestart = _service.endCall();
     await _pendingMediaRestart;
   }
@@ -823,27 +737,22 @@ class CallNotifier extends Notifier<CallState> {
   /// Put back what a fresh peer connection does not carry over. Called once
   /// the rebuilt session is connected.
   void _restoreAfterMediaRestart() {
-    // Through the tx gate, not a bare setMuted: mute is only one of the three
-    // things that silence the microphone, and deafen and push-to-talk have to
-    // come back with it. `force` because the rebuild replaced the capture
-    // track while the cached flag stayed behind, which is exactly the case the
-    // ordinary early-return would swallow.
+    // Through the tx gate, not a bare setMuted: mute is one of three things that
+    // silence the mic, and deafen and PTT have to come back with it. `force`
+    // because the rebuild replaced the capture track behind the cached flag.
     _applyTxGate(force: true);
     if (!_restoreVideoAfterRestart) return;
     _restoreVideoAfterRestart = false;
     final peerId = state.peerId;
     if (peerId == null) return;
-    // Both ends restore their own camera onto the same fresh, audio-only peer
-    // connection, and each restore is a renegotiation — so the two must not
-    // fire together. Same deterministic stagger the call-start auto-enable
-    // uses, for the same reason.
+    // Both ends restore their own camera onto the same fresh connection, and each
+    // restore is a renegotiation: stagger them the way call-start does.
     final delayMs = _cameraAutoEnableDelayMs(peerId);
     _callLog('[HOLLOW-CALL] Restoring camera after the media rebuild '
         'in ${delayMs}ms');
     unawaited(Future<void>.delayed(Duration(milliseconds: delayMs), () {
       if (state.status != CallStatus.active) return;
-      // The user can beat us to it while the rebuild settles; toggling then
-      // would turn the camera they just switched on straight back off.
+      // The user can beat us to it; toggling would turn their camera back off.
       if (state.isVideoEnabled) {
         _callLog('[HOLLOW-CALL] Camera already back on — restore not needed');
         return;
@@ -852,29 +761,23 @@ class CallNotifier extends Notifier<CallState> {
     }));
   }
 
-  /// How long to wait before auto-enabling the camera, so two ends bringing a
-  /// camera up on the same connection do not collide.
-  ///
-  /// Both offers crossing is textbook renegotiation glare: one of them is
-  /// never processed and the video ends up one-way. The polite peer (lower
-  /// peer_id, the convention invite glare already uses) goes first; the other
-  /// waits for that round trip to settle.
+  /// How long to wait before auto-enabling the camera. Both offers crossing is
+  /// textbook renegotiation glare: one is never processed and video ends up
+  /// one-way, so the polite peer (lower peer_id) goes first.
   int _cameraAutoEnableDelayMs(String peerId) =>
       localPeerId.compareTo(peerId) < 0 ? 300 : 1500;
 
   /// End the call because the link is genuinely gone.
   ///
-  /// The ONLY path from a network problem to a hangup. Everything short of
-  /// this (a lapse, a failed ICE check, an ICE restart, a peer that vanished
-  /// from the relay) holds the call open instead.
+  /// The ONLY path from a network problem to a hangup; everything short of this
+  /// holds the call open instead.
   Future<void> _endCallForLinkLoss(String reason) async {
     if (state.status != CallStatus.active &&
         state.status != CallStatus.connecting) {
       return;
     }
     _callLog('[HOLLOW-CALL] Ending call: $reason');
-    // If we cannot reach the relay right now, the `end` below is dropped
-    // before it leaves the machine. Remember it and say it when we can.
+    // With the relay unreachable the `end` below is dropped before it leaves.
     final peerId = state.peerId;
     final callId = state.callId;
     if (peerId != null &&
@@ -885,26 +788,19 @@ class CallNotifier extends Notifier<CallState> {
       _callLog('[HOLLOW-CALL] Relay is down — holding the hangup for $peerId '
           'until it is back');
     }
-    // The FULL teardown, not just a state reset. The path this replaced sent
-    // `end` and cleaned up the state while leaving the peer connection, the
-    // microphone and the camera running: the call vanished from the UI with
-    // the capture device still held, and an undisposed PC costs about 200 MB
-    // per session (`feedback_webrtc_close_dispose_eventchannel`).
+    // The FULL teardown, not just a state reset: the path this replaced left the
+    // peer connection, mic and camera running, and an undisposed PC costs about
+    // 200 MB per session (`feedback_webrtc_close_dispose_eventchannel`).
     await endCall();
   }
 
   /// One-shot "direct whenever direct is possible" repair for the call PC.
   ///
-  /// libwebrtc nominates whichever candidate pair completes its check first,
-  /// and TURN's pre-warmed allocation often wins by a single RTT on a path
-  /// where a direct pair would have worked — then ICE never migrates on its
-  /// own. If both sides advertised a non-relay candidate, one ICE restart on a
-  /// warmed network usually lands the hole punch.
-  ///
-  /// Constraints honoured: never under "Always relay calls" (forced TURN is a
-  /// deliberate privacy choice, not a defect); only ONE attempt per call; only
-  /// in a QUIESCENT window (no renegotiation in flight or queued); and only the
-  /// polite side initiates, so the two ends can't restart into each other.
+  /// libwebrtc nominates whichever candidate pair completes first, and TURN's
+  /// pre-warmed allocation often wins by a single RTT on a path where direct
+  /// would work; ICE never migrates on its own afterwards. Never under "Always
+  /// relay calls" (a deliberate privacy choice); ONE attempt per call; only in
+  /// a QUIESCENT window; only the polite side initiates.
   void _scheduleIceRepair(String peerId, {int attempt = 0}) {
     if (_iceRepairDone) return;
     if (ref.read(alwaysRelayCallsProvider)) return;
@@ -923,9 +819,8 @@ class CallNotifier extends Notifier<CallState> {
         final pc = _service.peerConnection;
         if (pc == null) return;
 
-        // Quiescent window only — an ICE restart is a renegotiation trigger,
-        // and firing one into an in-flight negotiation is the glare case the
-        // reneg rules exist to prevent. Re-check a few times, then give up.
+        // Quiescent window only: an ICE restart is a renegotiation trigger, and
+        // firing one into an in-flight negotiation is the glare case.
         if (_renegotiationInProgress || _queuedRenegOfferPeer != null) {
           if (attempt < 5) {
             _scheduleIceRepair(peerId, attempt: attempt + 1);
@@ -940,8 +835,7 @@ class CallNotifier extends Notifier<CallState> {
         final verdict = await assessIceRepair(pc);
         if (verdict == null) return;
         if (!verdict.shouldRepair) {
-          // Either already direct, or genuinely no direct pair on offer
-          // (symmetric NAT / UDP-hostile firewall — TURN is doing its job).
+          // Either already direct, or no direct pair on offer (symmetric NAT).
           _iceRepairDone = true;
           return;
         }
@@ -952,8 +846,7 @@ class CallNotifier extends Notifier<CallState> {
         if (!await restartIceOn(pc)) return;
         await _sendDeviceSwitchReneg('ice-repair');
 
-        // Verify on the retry ladder, never a single fixed delay: the pair
-        // does not read back as succeeded the instant the PC reports connected.
+        // A retry ladder: the pair does not read back succeeded the instant connected.
         final after = await probeIceRoute(() => _service.peerConnection);
         _callLog(after == null
             ? '[HOLLOW-ICE-REPAIR] post-restart route unknown'
@@ -964,9 +857,8 @@ class CallNotifier extends Notifier<CallState> {
     );
   }
 
-  /// Ensure audio device preferences are loaded from SQLCipher before starting
-  /// a call. On first access after app launch, the async providers may not have
-  /// completed yet, causing the call to use system defaults (wrong device).
+  /// Ensure audio device preferences are loaded from SQLCipher before a call:
+  /// on first launch the async providers may not have completed yet.
   Future<void> _ensureDevicePreferences() async {
     try {
       final input = await ref.read(audioInputDeviceProvider.future);
@@ -974,7 +866,6 @@ class CallNotifier extends Notifier<CallState> {
       _voiceService?.preferredAudioInputDeviceId = input;
       _voiceService?.preferredAudioOutputDeviceId = output;
 
-      // Apply audio quality preset.
       final quality = await ref.read(audioQualityProvider.future);
       _voiceService?.opusBitrate = quality.bitrate;
       _voiceService?.opusStereo = quality.stereo;
@@ -989,13 +880,8 @@ class CallNotifier extends Notifier<CallState> {
     await _service.setRemoteAudioVolume(volume);
   }
 
-  // ---------------------------------------------------------------------------
-  // Call actions
-  // ---------------------------------------------------------------------------
-
   /// A DM call and a server voice channel must never run at the same time
-  /// (issue #49) — the session the user just chose wins, so leave the
-  /// channel (tears down its screen share too) before the call proceeds.
+  /// (issue #49): the session the user just chose wins, so leave the channel first.
   Future<void> _leaveVoiceChannelIfActive() async {
     if (!ref.read(voiceChannelProvider).isInVoiceChannel) return;
     _callLog('[HOLLOW-CALL] Leaving voice channel before DM call');
@@ -1008,23 +894,18 @@ class CallNotifier extends Notifier<CallState> {
 
   /// Start an outgoing call to a peer.
   Future<void> startCall(String peerId, {bool withVideo = false}) async {
-    // The relay socket stops backing off while a call is live, so a network
-    // blip is recovered from in about a second instead of up to thirty. Taken
-    // at the START of the call, not at connect: the invite and the accept ride
-    // that socket too.
+    // The relay socket stops backing off while a call is live, so a blip recovers
+    // in about a second. Taken at the START: the invite and accept ride it too.
     RealtimeSessionFlag.acquire('dm-call');
     if (state.status != CallStatus.idle) return;
 
     await _leaveVoiceChannelIfActive();
-    // The leave awaited real teardown — an incoming invite may have started
-    // ringing in the meantime; don't stomp it.
+    // The leave awaited real teardown; an incoming invite may have started ringing.
     if (state.status != CallStatus.idle) return;
 
     final callId = _generateCallId();
     final sframeKey = _generateSframeKey();
-    // File-visible breadcrumb (debugPrint never reaches hollow_debug.log):
-    // outgoing attempts used to be invisible, so a call that silently went
-    // nowhere left zero evidence on the caller.
+    // File-visible breadcrumb: debugPrint never reaches hollow_debug.log.
     _callLog('[HOLLOW-CALL] Starting ${withVideo ? 'video' : 'voice'} call '
         'to $peerId call=$callId');
     CallSetupTrace.begin(callId: callId, outgoing: true);
@@ -1034,17 +915,14 @@ class CallNotifier extends Notifier<CallState> {
       callId: callId,
       direction: CallDirection.outgoing,
       isVideoCall: withVideo,
-      // Do NOT preset isVideoEnabled — the camera isn't actually captured
-      // until onConnected → auto-toggleVideo runs after the call goes
-      // active. Pre-setting this would make the auto-toggle skip its
-      // !state.isVideoEnabled guard and the camera would never turn on.
+      // Do NOT preset isVideoEnabled: the camera is only captured by the
+      // post-connect auto-toggle, whose `!state.isVideoEnabled` guard this would skip.
       isVideoEnabled: false,
       sframeKey: sframeKey,
     );
 
-    // Ringback (#55): you press Call and hear the same Hollow ring the other
-    // side is hearing. Every path out of "ringing" stops it — the accept
-    // below, and `_cleanup()` for reject / busy / timeout / hang-up.
+    // Ringback (#55): every path out of "ringing" stops it, the accept below and
+    // `_cleanup()` for reject / busy / timeout / hang-up.
     SoundService.instance.startRingback();
 
     final payload = jsonEncode({
@@ -1054,7 +932,6 @@ class CallNotifier extends Notifier<CallState> {
     });
     _sendSignal(peerId, 'invite', payload);
 
-    // 30-second ring timeout.
     _ringTimer?.cancel();
     _ringTimer = Timer(const Duration(seconds: 30), () async {
       if (state.status == CallStatus.ringing &&
@@ -1069,10 +946,7 @@ class CallNotifier extends Notifier<CallState> {
 
   /// Accept an incoming call.
   Future<void> acceptCall() async {
-    // The relay socket stops backing off while a call is live, so a network
-    // blip is recovered from in about a second instead of up to thirty. Taken
-    // at the START of the call, not at connect: the invite and the accept ride
-    // that socket too.
+    // Same relay back-off suppression as startCall: the accept rides that socket.
     RealtimeSessionFlag.acquire('dm-call');
     if (state.status != CallStatus.ringing ||
         state.direction != CallDirection.incoming) {
@@ -1087,15 +961,13 @@ class CallNotifier extends Notifier<CallState> {
     CallSetupTrace.markCurrent(CallSetupTrace.kAccept);
     state = state.copyWith(status: CallStatus.connecting);
 
-    // Leave any voice channel before the call media comes up (issue #49) —
-    // otherwise both sessions run at once.
+    // Leave any voice channel before the call media comes up (issue #49).
     await _leaveVoiceChannelIfActive();
     // The caller may have hung up while the channel tore down.
     if (state.status != CallStatus.connecting || state.callId != callId) {
       return;
     }
 
-    // Tell caller we accepted — they will send SDP offer.
     final acceptPayload = jsonEncode({
       'call_id': callId,
       'sframe_key': state.sframeKey,
@@ -1124,7 +996,6 @@ class CallNotifier extends Notifier<CallState> {
       _sendSignal(peerId, 'end', callId);
     }
 
-    // Tear down screen share PCs.
     await _outgoingScreenShare?.close();
     _outgoingScreenShare = null;
     await _incomingScreenShare?.close();
@@ -1134,11 +1005,9 @@ class CallNotifier extends Notifier<CallState> {
     await _cleanup();
   }
 
-  // --- Push-to-talk transmit gate (issue #38) ---------------------------
-  // Mirrors voiceChannelProvider: PTT flags live OUTSIDE CallState (no
-  // rebuild per key edge, no audio_state fan per press). state.isMuted is
-  // the USER's intent — under PTT the service mute differs from it, so the
-  // service's isMuted is no longer read back into state.
+  // Push-to-talk transmit gate (issue #38). PTT flags live OUTSIDE CallState
+  // (no rebuild per key edge, no audio_state fan per press). state.isMuted is
+  // the USER's intent, so the service's isMuted is no longer read back into it.
   bool _pttMode = false;
   bool _pttTransmit = false;
 
@@ -1172,7 +1041,6 @@ class CallNotifier extends Notifier<CallState> {
     if (state.status == CallStatus.active) _applyTxGate();
   }
 
-  /// Toggle microphone mute.
   void toggleMute() {
     if (state.status != CallStatus.active) return;
     state = state.copyWith(isMuted: !state.isMuted);
@@ -1222,10 +1090,9 @@ class CallNotifier extends Notifier<CallState> {
     unawaited(_applySpeakerRoute(speaker));
   }
 
-  /// "Speaker on" means the LOUDEST SENSIBLE route — which, whenever a headset
-  /// is attached, is the HEADSET. Forcing the built-in loudspeaker over one
-  /// leaves the user in silent headphones (iOS's port override outranks them
-  /// and drags capture to the built-in mic with it). See [AudioRoutes].
+  // "Speaker on" means the LOUDEST SENSIBLE route, which with a headset
+  // attached is the HEADSET: iOS's port override outranks headphones and drags
+  // capture to the built-in mic with it. See [AudioRoutes].
   Future<void> _applySpeakerRoute(bool speaker) async {
     await AudioRoutes.preferLoudRoute(speaker);
     try {
@@ -1244,22 +1111,16 @@ class CallNotifier extends Notifier<CallState> {
   /// Switch this call to an explicit output route (mobile route sheet).
   Future<void> selectAudioRoute(AudioRoute route) async {
     if (!_isMobile || state.status == CallStatus.idle) return;
-    // Keep isSpeakerOn meaning "hands-free" so proximity blanking and the
-    // control-row highlight stay consistent with the chosen route.
+    // Keep isSpeakerOn meaning "hands-free" for proximity blanking and the row.
     state = state.copyWith(isSpeakerOn: route.kind != AudioRouteKind.earpiece);
     await ref.read(audioRouteProvider.notifier).select(route);
   }
 
   /// Toggle camera on/off.
   ///
-  /// Sends a plaintext `video_state` signal so the remote UI immediately
-  /// knows to update its layout, AND triggers an SDP renegotiation so the
-  /// remote peer's WebRTC stack actually receives (or stops receiving) the
-  /// video track. Without the renegotiation, `replaceTrack()` alone does
-  /// not fire `onTrack` on the remote side — the track is silently swapped
-  /// at the sender but never announced to the receiver, so the remote
-  /// renderer is never created and the video layout stays audio-only.
-  /// Matches the pattern used by voice_channel_service.dart.
+  /// Sends a plaintext `video_state` so the remote UI updates its layout, AND
+  /// renegotiates: `replaceTrack()` alone never fires `onTrack` on the remote
+  /// side, so the renderer is never created and the layout stays audio-only.
   Future<void> toggleVideo() async {
     if (state.status != CallStatus.active) return;
 
@@ -1270,23 +1131,18 @@ class CallNotifier extends Notifier<CallState> {
       isFrontCamera: _service.useFrontCamera,
     );
 
-    // Only on a real flip: `toggleVideo` returns the unchanged state when
-    // there is no camera to open, and a no-op must stay silent.
+    // Only on a real flip: toggleVideo returns unchanged state with no camera.
     if (enabled != wasEnabled) {
       SoundService.instance.play(HollowSound.toggle, duringCall: true);
     }
 
-    // Turning the camera on mid-call implies hands-off use — switch to the
-    // loudspeaker (mobile). Turning it off keeps whatever route is active.
+    // Camera on mid-call implies hands-off use; off keeps the active route.
     if (enabled && !wasEnabled && _isMobile && !state.isSpeakerOn) {
       _setSpeakerRoute(true);
     }
 
-    // Any actual camera flip (on OR off) restarts the platform audio unit
-    // (iOS VPIO especially), which can drop the active route — re-assert
-    // once the renegotiation settles. The native template fix makes iOS
-    // self-healing; this also covers Android and manual toggles, which the
-    // old auto-enable-only re-assert missed.
+    // Any camera flip restarts the platform audio unit (iOS VPIO especially) and
+    // can drop the active route: re-assert once the renegotiation settles.
     if (enabled != wasEnabled && _isMobile) {
       Future.delayed(const Duration(milliseconds: 1200), () {
         if (state.status == CallStatus.active) {
@@ -1299,24 +1155,19 @@ class CallNotifier extends Notifier<CallState> {
     final callId = state.callId;
     if (peerId == null || callId == null) return;
 
-    // If the service returned the SAME state we already had, the toggle was
-    // a no-op (e.g. tried to enable but no camera available). Don't send
-    // any signals or renegotiation — there's nothing to communicate.
+    // Same state back means the toggle was a no-op: nothing to communicate.
     if (enabled == wasEnabled) {
       _callLog('[HOLLOW-CALL] toggleVideo: no-op (enabled=$enabled)');
       return;
     }
 
-    // Send video_state notification so remote UI knows to update the layout.
     final videoStatePayload = jsonEncode({
       'call_id': callId,
       'enabled': enabled,
     });
     _sendSignal(peerId, 'video_state', videoStatePayload);
 
-    // Send SDP renegotiation offer so the remote peer's WebRTC stack
-    // picks up the new track. Guarded by _renegotiationInProgress to
-    // avoid glare with inbound reneg.
+    // Guarded by _renegotiationInProgress to avoid glare with inbound reneg.
     if (_renegotiationInProgress) {
       _callLog('[HOLLOW-CALL] toggleVideo: renegotiation already in '
           'progress, skipping offer');
@@ -1364,10 +1215,8 @@ class CallNotifier extends Notifier<CallState> {
     final peerId = state.peerId!;
     final callId = state.callId!;
 
-    // Opt-in watching (issue #38): capture + preview start NOW (provider-
-    // owned, so the sharer always sees their own screen), but the offer is
-    // only sent once the peer asks via screen_watch — no bandwidth until
-    // they press Watch.
+    // Opt-in watching (issue #38): capture + preview start NOW (provider-owned,
+    // so the sharer sees their screen), but no offer until the peer presses Watch.
     _dmShareMaxWidth = width;
     _dmShareMaxHeight = height;
     _dmShareFps = fps;
@@ -1389,9 +1238,8 @@ class CallNotifier extends Notifier<CallState> {
           'audio': false,
         });
       } else {
-        // A Wayland portal-first share MUST NOT re-enumerate (extra portal
-        // dialog); Windows/Linux audio rides the data channel, never
-        // getDisplayMedia.
+        // A Wayland portal-first share MUST NOT re-enumerate (extra portal dialog);
+        // Windows/Linux audio rides the data channel, never getDisplayMedia.
         if (!DesktopCaptureSupport.isPortalSourceId(sourceId)) {
           await desktopCapturer.getSources(
               types: DesktopCaptureSupport.sourceTypes);
@@ -1414,21 +1262,18 @@ class CallNotifier extends Notifier<CallState> {
         }
       }
 
-      // Local preview renderer, independent of any peer connection.
       _dmScreenPreviewRenderer = RTCVideoRenderer();
       await _dmScreenPreviewRenderer!.initialize();
       _dmScreenPreviewRenderer!.srcObject = _dmScreenStream;
 
-      // Build quality label (e.g. "1080p60", "4K30"). Use the SHORT side so a
-      // portrait mobile capture (1080x1920) reads "1080p", same as landscape.
+      // Use the SHORT side so a portrait capture (1080x1920) reads "1080p".
       const resLabels = {360: '360p', 480: '480p', 720: '720p', 1080: '1080p', 1440: '1440p', 2160: '4K'};
       final shortSide = height < width ? height : width;
       final qualityLabel = '${resLabels[shortSide] ?? '${shortSide}p'}$fps';
       state = state.copyWith(isScreenSharing: true, screenShareLabel: qualityLabel);
       SoundService.instance.play(HollowSound.joinStream, duringCall: true);
 
-      // Sharing WITH audio: freeze the mic servo for the whole share so
-      // speaker bleed of the shared music can't re-calibrate the trim.
+      // Freeze the mic servo so speaker bleed can't re-calibrate the trim.
       if (shareAudio) {
         ShareAudioLevel.setSendingShareAudio(true);
       }
@@ -1438,8 +1283,7 @@ class CallNotifier extends Notifier<CallState> {
 
       _startDmScreenTrackPoller();
 
-      // Peer already asked to watch (e.g. re-share while they kept the view
-      // open) — send the offer immediately.
+      // Peer already asked to watch (re-share while their view stayed open).
       if (_dmPeerWantsShare) {
         await _sendDmScreenOffer();
       }
@@ -1462,8 +1306,7 @@ class CallNotifier extends Notifier<CallState> {
     final callId = state.callId!;
     final iceConfig = ref.read(iceConfigProvider);
 
-    // Close any prior outgoing share before overwriting the field, so its PC +
-    // thread-set can't be orphaned (e.g. re-watch after a glitch).
+    // Close any prior outgoing share first, or its PC + thread-set is orphaned.
     await _outgoingScreenShare?.close();
 
     _outgoingScreenShare = ScreenShareService(
@@ -1482,8 +1325,7 @@ class CallNotifier extends Notifier<CallState> {
     };
 
     try {
-      // Per-viewer cap: the share quality clamped to what the peer's display
-      // can show (media forwarding step 1).
+      // Clamp the share quality to what the peer's display can show.
       final (effMaxW, effMaxH) = _dmEffectiveCap();
       final offerSdp = await _outgoingScreenShare!.createOfferFromStream(
         _dmScreenStream!,
@@ -1493,7 +1335,6 @@ class CallNotifier extends Notifier<CallState> {
         profile: _dmShareProfile,
       );
 
-      // Enable SFrame E2EE on the screen share PC.
       if (_outgoingScreenShare!.pc != null) {
         await _enableSframeOnScreenShare(
             _outgoingScreenShare!.pc!, peerId, isSender: true);
@@ -1502,10 +1343,8 @@ class CallNotifier extends Notifier<CallState> {
       _sendSignal(peerId, 'screen_offer',
           jsonEncode({'call_id': callId, 'sdp': offerSdp}));
 
-      // Start screen audio capture via data channel on the data-channel-audio
-      // platforms: Windows (WASAPI), Linux (PulseAudio monitor), macOS 13.0+
-      // (ScreenCaptureKit), Android 10+ (AudioPlaybackCapture), and iOS
-      // (broadcast extension). Mobile failures degrade gracefully (video-only).
+      // Share audio rides the data channel on Windows, Linux, macOS 13+, Android
+      // 10+ and iOS; mobile failures degrade gracefully to video-only.
       final dcAudio = Platform.isWindows ||
           Platform.isLinux ||
           Platform.isAndroid ||
@@ -1513,18 +1352,14 @@ class CallNotifier extends Notifier<CallState> {
           (Platform.isMacOS && MacOsScreenAudioSupport.hasSckAudio);
       if (_dmShareAudio && dcAudio) {
         final webrtc = ref.read(webRtcProvider.notifier).service;
-        // Ensure the file-transfer DC exists with this peer.
         if (!webrtc.hasPeerChannel(peerId)) {
           _callLog('[HOLLOW-AU-SCREEN] Ensuring WebRtcService DC for $peerId');
           await webrtc.connectToPeer(peerId);
         }
 
         // ENTIRE-SCREEN anti-echo (Windows): the remote call voice plays from
-        // hollow.exe, so a whole-system capture would re-capture it. Move that
-        // voice to an out-of-process renderer (separate pid) and exclude THAT
-        // pid from the capture — so the voice isn't re-captured while Hollow's
-        // own in-app media (a video opened in chat) still is. Only for an
-        // entire-screen share (no per-app window/pid target).
+        // hollow.exe, so render it out-of-process and exclude THAT pid from the
+        // capture; Hollow's own in-app media is still captured.
         int excludePid = 0;
         final isEntireScreen = _dmSharePid == 0 && _dmShareHwnd == 0;
         if (Platform.isWindows && isEntireScreen) {
@@ -1584,10 +1419,8 @@ class CallNotifier extends Notifier<CallState> {
       await _dmScreenPreviewRenderer!.dispose();
       _dmScreenPreviewRenderer = null;
     }
-    // track.stop() is async (it calls native trackDispose), so forEach would
-    // fire all of them and return before any had finished, letting the stream
-    // dispose out from under its own tracks. Unawaited WebRTC teardown is the
-    // ~200 MB-per-session leak.
+    // track.stop() is async, so a forEach would let the stream dispose out from
+    // under its own tracks. Unawaited WebRTC teardown is the ~200 MB/session leak.
     for (final t in _dmScreenStream?.getTracks() ?? []) {
       try { await t.stop(); } catch (_) {}
     }
@@ -1615,9 +1448,8 @@ class CallNotifier extends Notifier<CallState> {
     });
   }
 
-  /// Disarm the entire-screen anti-echo voice redirect if armed: restores the
-  /// remote call voice to normal in-process playout and shuts the renderer child
-  /// down. Safe/no-op when not armed.
+  /// Disarm the entire-screen anti-echo voice redirect: restores in-process
+  /// playout and shuts the renderer child down. No-op when not armed.
   Future<void> _disarmVoiceRedirect() async {
     if (!_voiceRedirectActive) return;
     _voiceRedirectActive = false;
@@ -1639,9 +1471,8 @@ class CallNotifier extends Notifier<CallState> {
     _dmPeerWantsShare = false;
     _dmViewerWidth = 0;
     _dmViewerHeight = 0;
-    // Stop the capturer FIRST, then disarm the redirect — so the brief window
-    // where the remote voice's in-process volume is restored isn't captured
-    // (the capturer is already gone), avoiding a momentary echo blip on stop.
+    // Stop the capturer FIRST, then disarm: otherwise the window where the
+    // remote voice's in-process volume is restored gets captured (echo blip).
     await _outgoingScreenShare?.close();
     _outgoingScreenShare = null;
     await _disarmVoiceRedirect();
@@ -1674,12 +1505,9 @@ class CallNotifier extends Notifier<CallState> {
       _dmViewerHeight = viewerH;
       if (!state.isScreenSharing) return;
       if (_outgoingScreenShare != null) {
-        // Already streaming — a re-sent watch is a cap change (Source-quality
-        // toggle): try a live setParameters first; when the sender rejects it
-        // (Windows libwebrtc always does — field-verified 2026-08-05),
-        // renegotiate: _sendDmScreenOffer closes the old PC and re-offers
-        // with the new cap riding the init sendEncodings, the guaranteed
-        // path. Brief stream restart.
+        // A re-sent watch is a cap change: try live setParameters first, and
+        // renegotiate when the sender rejects it (Windows libwebrtc always does),
+        // which closes the old PC and re-offers with the cap on init sendEncodings.
         final (effW, effH) = _dmEffectiveCap();
         final ok = await _outgoingScreenShare!.updateResolutionCap(effW, effH);
         if (!ok) {
@@ -1702,10 +1530,8 @@ class CallNotifier extends Notifier<CallState> {
     }
   }
 
-  /// The resolution cap for the outgoing DM share PC: the share's chosen
-  /// quality clamped to the peer's reported MONITOR (media forwarding
-  /// step 1). There is no per-viewer opt-out — see
-  /// [ScreenShareService.effectiveViewerCap].
+  /// The resolution cap for the outgoing DM share PC: the share quality clamped
+  /// to the peer's reported MONITOR. No per-viewer opt-out.
   (int, int) _dmEffectiveCap() => ScreenShareService.effectiveViewerCap(
         _dmShareMaxWidth,
         _dmShareMaxHeight,
@@ -1721,8 +1547,7 @@ class CallNotifier extends Notifier<CallState> {
     final callId = state.callId!;
 
     state = state.copyWith(watchingRemoteShare: true);
-    // Ship our display resolution so the sharer clamps our stream to what
-    // we can actually show (media forwarding step 1).
+    // Ship our display resolution so the sharer clamps to what we can show.
     final (viewerW, viewerH) = largestDisplayResolution();
     _sendSignal(
         peerId,
@@ -1734,8 +1559,7 @@ class CallNotifier extends Notifier<CallState> {
           'viewer_height': viewerH,
         }));
 
-    // If no offer produces a live track in time, revert so the view doesn't
-    // spin forever.
+    // If no offer produces a live track in time, revert so the view doesn't spin.
     _dmWatchConnectTimer?.cancel();
     _dmWatchConnectTimer = Timer(const Duration(seconds: 20), () {
       _dmWatchConnectTimer = null;
@@ -1818,17 +1642,11 @@ class CallNotifier extends Notifier<CallState> {
 
   /// Handle the relay reporting this peer offline.
   ///
-  /// This used to end the call outright, which was wrong: relay presence and
-  /// the media path are different sockets. A WS reconnect on a flaky line
-  /// makes a peer vanish from the relay's rooms for a few seconds while a
-  /// perfectly healthy TURN or peer-to-peer path carries their voice, and
-  /// hanging up on that turned a signalling blip into a dropped call.
-  ///
-  /// Once the call is up it is therefore corroboration, not a verdict: it
-  /// shortens the hold-open window only if the media link is ALSO in trouble,
-  /// so someone who really did close their laptop resolves in seconds while a
-  /// working call is left alone. Before the call connects there is no media
-  /// path to judge by, so the old behaviour stands.
+  /// NOT a hangup: relay presence and the media path are different sockets, and
+  /// a WS reconnect makes a peer vanish for seconds while TURN carries their
+  /// voice. Once the call is up this is corroboration only, shortening the
+  /// hold-open window when the media link is ALSO in trouble. Before connect
+  /// there is no media path to judge by, so it still fails fast.
   Future<void> handlePeerDisconnected(String peerId) async {
     ref.read(recordingProvider.notifier).onPeerDisconnected(peerId);
     if (state.peerId != peerId || state.status == CallStatus.idle) return;
@@ -1846,9 +1664,8 @@ class CallNotifier extends Notifier<CallState> {
 
   /// Our relay connection is back. Deliver any hangup the peer never heard.
   ///
-  /// Deliberately fire-and-forget and deliberately unconditional: by now the
-  /// call is long gone locally, and a duplicate `end` for a call the peer has
-  /// already dropped is ignored by `_handleEnd`'s call-id check.
+  /// Fire-and-forget and unconditional: a duplicate `end` is ignored by
+  /// `_handleEnd`'s call-id check.
   void handleRelayReconnected() {
     final pending = _undeliveredEnd;
     if (pending == null) return;
@@ -1858,9 +1675,8 @@ class CallNotifier extends Notifier<CallState> {
     _sendSignal(pending.peerId, 'end', pending.callId);
   }
 
-  /// The relay says this peer is back in its rooms. Withdraws the
-  /// corroboration above so a peer who merely reconnected does not keep a
-  /// shortened window hanging over the call.
+  /// The relay says this peer is back. Withdraws the corroboration above so a
+  /// reconnect does not keep a shortened window hanging over the call.
   void handlePeerReconnected(String peerId) {
     if (state.peerId != peerId) return;
     _linkWatch?.notePeerPresenceReturned();
@@ -1876,10 +1692,6 @@ class CallNotifier extends Notifier<CallState> {
     await _voiceService?.dispose();
     state = const CallState();
   }
-
-  // ---------------------------------------------------------------------------
-  // Stats diagnostic
-  // ---------------------------------------------------------------------------
 
   /// Schedule a getStats() dump 5 seconds after call goes active.
   void _scheduleStatsDump(String peerId) {
@@ -1930,12 +1742,7 @@ class CallNotifier extends Notifier<CallState> {
     });
   }
 
-  // ---------------------------------------------------------------------------
-  // Signal handlers
-  // ---------------------------------------------------------------------------
-
   void _handleInvite(String peerId, String payload) {
-    // Parse JSON payload {call_id, video, sframe_key}.
     String callId;
     bool withVideo = false;
     String sframeKey = '';
@@ -1948,15 +1755,12 @@ class CallNotifier extends Notifier<CallState> {
       callId = payload;
     }
 
-    // Glare has to be settled BEFORE the busy guard: `ringing` is not `idle`,
-    // so with busy first the glare branch was unreachable and two people
-    // dialling at once busy-rejected each other. See [decideInviteAction],
-    // which exists to keep that ordering under test.
+    // Glare has to be settled BEFORE the busy guard: `ringing` is not `idle`, so
+    // with busy first two people dialling at once busy-rejected each other. See
+    // [decideInviteAction], which keeps that ordering under test.
     //
-    // Identity, not raw ids: our outgoing `state.peerId` is a MASTER (that is
-    // what startCall targets) while an inbound signal carries the sender's
-    // DEVICE, so the old `state.peerId == peerId` never matched a
-    // multi-device peer even when the ordering was right.
+    // Identity, not raw ids: our outgoing `state.peerId` is a MASTER while an
+    // inbound signal carries the sender's DEVICE.
     final links = ref.read(deviceLinkProvider);
     final action = decideInviteAction(
       ringingOutgoingToSamePerson: state.status == CallStatus.ringing &&
@@ -1973,8 +1777,7 @@ class CallNotifier extends Notifier<CallState> {
             'call=${state.callId}');
         return;
       case InviteAction.busy:
-        // _callLog, not debugPrint: a rejected invite is exactly what you go
-        // looking for in a release log, and it was invisible there.
+        // _callLog, not debugPrint: a rejected invite belongs in the release log.
         _callLog('[HOLLOW-CALL] Busy, rejecting invite from $peerId');
         _sendSignal(peerId, 'busy', callId);
         return;
@@ -1982,21 +1785,17 @@ class CallNotifier extends Notifier<CallState> {
         final abandoned = state.callId;
         _callLog('[HOLLOW-CALL] Glare with $peerId: polite, taking theirs '
             '(abandoning call=$abandoned)');
-        // We were the caller a heartbeat ago, so our own ringback has to stop
-        // before we become the callee.
+        // Our own ringback has to stop before we become the callee.
         SoundService.instance.stopRingback();
-        // Retire our invite so a peer that read it while idle (and so never
-        // saw the glare) is not left ringing for a call we have dropped.
+        // Retire our invite so a peer that read it while idle isn't left ringing.
         if (abandoned != null) _sendSignal(peerId, 'end', abandoned);
       case InviteAction.ring:
         break;
     }
 
-    // The polite glare path deliberately falls through to the ordinary
-    // incoming setup, THEIR sframe key included. The caller always encrypts
-    // with the key it generated in startCall — `_handleAccept` never reads the
-    // one acceptCall echoes back — so keeping ours here would leave the two
-    // ends on different keys: a call that connects and cannot be understood.
+    // The polite glare path falls through to ordinary incoming setup, THEIR
+    // sframe key included: the caller always encrypts with the key it generated
+    // in startCall, so keeping ours would leave the two ends on different keys.
     state = CallState(
       status: CallStatus.ringing,
       peerId: peerId,
@@ -2008,7 +1807,6 @@ class CallNotifier extends Notifier<CallState> {
     // The ring starts the clock on this side.
     CallSetupTrace.begin(callId: callId, outgoing: false);
 
-    // 30-second auto-reject timeout.
     _ringTimer?.cancel();
     _ringTimer = Timer(const Duration(seconds: 30), () {
       if (state.status == CallStatus.ringing &&
@@ -2021,7 +1819,6 @@ class CallNotifier extends Notifier<CallState> {
   }
 
   Future<void> _handleAccept(String peerId, String payload) async {
-    // Parse JSON payload to extract call_id.
     String callId;
     try {
       final v = jsonDecode(payload);
@@ -2037,28 +1834,22 @@ class CallNotifier extends Notifier<CallState> {
     }
 
     _ringTimer?.cancel();
-    // They picked up — the ring stops here, well before the media comes up.
-    // Machine time starts here too: everything earlier was them deciding.
+    // They picked up; machine time starts here, everything earlier was deciding.
     CallSetupTrace.markCurrent(CallSetupTrace.kAccept);
     SoundService.instance.stopRingback();
     state = state.copyWith(status: CallStatus.connecting);
 
-    // Ensure device preferences are loaded before starting media.
     await _ensureDevicePreferences();
 
-    // We are the caller — create a dedicated voice PC, capture audio, create
-    // offer. Always start as audio-only — even for video calls. The camera
-    // gets turned on automatically once the connection is `active` via the
-    // mid-call addTrack/renegotiate path (which is the proven-working flow).
-    // Starting with `withVideo: true` here would put us back into the
-    // initial-SDP video transceiver mess that broke onTrack on the receiver.
+    // We are the caller: create the voice PC and offer, always audio-only even
+    // for video calls. `withVideo: true` here puts us back in the initial-SDP
+    // transceiver mess that broke onTrack on the receiver.
     final sdp = await _service.createOffer(
       peerId,
       callId,
       withVideo: false,
     );
 
-    // Enable SFrame E2EE using the key we generated in startCall.
     final keyHex = state.sframeKey;
     if (keyHex.isNotEmpty) {
       final keyBytes = _hexToBytes(keyHex);
@@ -2092,19 +1883,16 @@ class CallNotifier extends Notifier<CallState> {
   Future<void> _handleBusy(String peerId, String callId) async {
     if (state.callId != callId) return;
     debugPrint('[HOLLOW-CALL] Peer $peerId is busy');
-    // Tear the call down FIRST. The toast below must never be able to block
-    // this — a thrown toast used to abort _handleBusy before cleanup, leaving
-    // the "Calling..." sheet stuck on screen.
+    // Tear the call down FIRST: a thrown toast used to abort _handleBusy before
+    // cleanup, leaving the "Calling..." sheet stuck on screen.
     final busyPeer = peerId;
     await _cleanup();
     _showBusyToast(busyPeer);
   }
 
   /// Toast the caller that the peer they dialed is already in another call.
-  /// Best-effort + fully guarded: the notifier has no BuildContext of its own,
-  /// so we reach for the global navigator's Overlay context. Wrapped in a
-  /// try/catch + post-frame so an Overlay-lookup failure can never crash the
-  /// call teardown.
+  /// Best-effort: the notifier has no BuildContext, so it reaches for the global
+  /// navigator's Overlay, guarded so a lookup failure can't crash the teardown.
   void _showBusyToast(String peerId) {
     final profile = ref.read(profileProvider)[peerId];
     final name = displayNameForPeer(profile, peerId);
@@ -2116,10 +1904,8 @@ class CallNotifier extends Notifier<CallState> {
           debugPrint('[HOLLOW-CALL] busy toast: no overlay');
           return;
         }
-        // Insert directly into the root navigator's Overlay — passing
-        // overlayState avoids the Overlay.of() ancestor lookup that fails
-        // from a navigator-key context. The positional context is unused
-        // when overlayState is set.
+        // Insert directly into the root navigator's Overlay: passing overlayState
+        // avoids the Overlay.of() lookup that fails from a navigator-key context.
         HollowToast.show(
           overlay.context,
           msg,
@@ -2139,26 +1925,20 @@ class CallNotifier extends Notifier<CallState> {
 
     if (state.callId != callId) return;
 
-    // A rebuild we were asked for may still be tearing down. Wait for it, so
-    // the branch below sees no active call and takes the initial-offer path.
+    // A rebuild we were asked for may still be tearing down; wait for it.
     final restarting = _pendingMediaRestart;
     if (restarting != null) {
       await restarting;
       _pendingMediaRestart = null;
     }
 
-    // Route by call identity, NOT by status: `active` is only set in
-    // onConnected (ICE/DTLS complete), which lags seconds behind the SDP
-    // answer. A renegotiation offer arriving in that window (the staggered
-    // camera auto-enable lands right in it) used to fall into the
-    // initial-setup branch below and was silently consumed — never answered,
-    // never retried → the first camera enable showed nothing until the
-    // peer toggled again. If we already have a PC for this call, ANY
-    // further offer is a renegotiation.
+    // Route by call identity, NOT by status: `active` is only set in onConnected,
+    // which lags the SDP answer by seconds, and a renegotiation offer arriving in
+    // that window fell into the initial-setup branch and was silently consumed.
+    // If we already have a PC for this call, ANY further offer is a renegotiation.
     if (_service.hasActiveCall) {
-      // SECURITY (Phase 6.25): Prevent concurrent renegotiations — but queue
-      // the offer instead of dropping it (a dropped offer is never retried by
-      // the sender → its new track is never announced → one-way video).
+      // SECURITY (Phase 6.25): prevent concurrent renegotiations, but QUEUE the
+      // offer: a dropped offer is never retried, so its new track is never announced.
       if (_renegotiationInProgress) {
         _callLog('[HOLLOW-CALL] Renegotiation in progress — queueing offer');
         _queueRenegOffer(peerId, payload);
@@ -2167,7 +1947,6 @@ class CallNotifier extends Notifier<CallState> {
       _renegotiationInProgress = true;
       var answered = false;
       try {
-        // Renegotiation on existing voice PC (e.g., remote toggled video).
         final answerSdp = await _service.handleRenegotiationOffer(sdp);
         if (answerSdp != null) {
           final answerPayload =
@@ -2184,14 +1963,12 @@ class CallNotifier extends Notifier<CallState> {
         _renegOfferAttempts = 0;
         _drainQueuedRenegOffer();
       } else if (_renegOfferAttempts < 2) {
-        // Likely SDP glare: this offer arrived while our own offer was
-        // unanswered (have-local-offer). Retry after our round-trip settles.
+        // Likely SDP glare (have-local-offer); retry after our round-trip settles.
         _renegOfferAttempts++;
         _callLog('[HOLLOW-CALL] Scheduling renegotiation offer retry '
             '(attempt $_renegOfferAttempts)');
         Future.delayed(const Duration(milliseconds: 1200), () {
-          // hasActiveCall, not status==active — the call may still be in
-          // the connecting window (same reason as the routing gate above).
+          // hasActiveCall, not status==active: the call may still be connecting.
           if (_service.hasActiveCall && state.peerId == peerId) {
             _handleSdpOffer(peerId, payload);
           }
@@ -2199,12 +1976,9 @@ class CallNotifier extends Notifier<CallState> {
       }
     } else {
       CallSetupTrace.markCurrent(CallSetupTrace.kRemoteSdp);
-      // Ensure device preferences are loaded before starting media.
       await _ensureDevicePreferences();
-      // Initial call setup — create a dedicated voice PC, capture audio,
-      // answer. Always start as audio-only (matching createOffer above);
-      // camera is turned on automatically post-connect via the mid-call
-      // addTrack/renegotiate path.
+      // Initial call setup: always audio-only, matching createOffer above; the
+      // camera is enabled post-connect via the mid-call addTrack path.
       final answerSdp = await _service.handleOffer(
         peerId,
         callId,
@@ -2212,7 +1986,6 @@ class CallNotifier extends Notifier<CallState> {
         withVideo: false,
       );
 
-      // Enable SFrame E2EE using the key from the invite.
       final keyHex = state.sframeKey;
       if (keyHex.isNotEmpty) {
         final keyBytes = _hexToBytes(keyHex);
@@ -2237,8 +2010,7 @@ class CallNotifier extends Notifier<CallState> {
     // The deadline gathering had to beat: checks can start from here.
     CallSetupTrace.markCurrent(CallSetupTrace.kRemoteSdp);
     await _service.handleAnswer(sdp);
-    // Our renegotiation round-trip just settled (PC back to stable) —
-    // process any remote offer that collided with it.
+    // Our renegotiation round-trip settled: process any offer that collided.
     _drainQueuedRenegOffer();
   }
 
@@ -2292,11 +2064,9 @@ class CallNotifier extends Notifier<CallState> {
     state = state.copyWith(remoteVideoEnabled: enabled);
 
     if (enabled) {
-      // Re-poke the UI after the SDP round-trip typically lands. The remote
-      // renderer lives OUTSIDE provider state, so if its ready-callback ever
-      // fails to produce a rebuild (one missed frame of state change), the
-      // camera stays invisible until the peer re-toggles. Three cheap
-      // scheduled bumps make the first enable deterministic.
+      // Re-poke the UI after the SDP round-trip. The remote renderer lives OUTSIDE
+      // provider state, so a missed ready-callback leaves the camera invisible
+      // until the peer re-toggles; three cheap bumps make the first enable reliable.
       for (final d in const [
         Duration(milliseconds: 400),
         Duration(milliseconds: 1200),
@@ -2334,8 +2104,7 @@ class CallNotifier extends Notifier<CallState> {
     debugPrint(
         '[HOLLOW-CALL] Remote screen share: enabled=$enabled quality=$quality from $peerId');
 
-    // Edge only — a re-announce of a share that is already up stays silent —
-    // and deafened means deafened.
+    // Edge only: a re-announce of a live share stays silent, and so does deafen.
     if (enabled != state.remoteScreenSharing && !state.isDeafened) {
       SoundService.instance.play(
         enabled ? HollowSound.joinStream : HollowSound.leaveStream,
@@ -2344,11 +2113,9 @@ class CallNotifier extends Notifier<CallState> {
     }
 
     if (!enabled) {
-      // Remote stopped sharing — tear down the incoming screen share PC.
-      // Capture + null synchronously so a concurrent screen_offer doesn't
-      // double-tear-down the same PC, then AWAIT the close so the native
-      // thread-set is fully gone before we move on (an unawaited close that
-      // races a new offer's close() corrupts the PC's threads).
+      // Capture + null synchronously so a concurrent screen_offer can't
+      // double-tear-down the same PC, then AWAIT the close: an unawaited close
+      // racing a new offer's close() corrupts the PC's threads.
       final incoming = _incomingScreenShare;
       _incomingScreenShare = null;
       await incoming?.close();
@@ -2358,8 +2125,7 @@ class CallNotifier extends Notifier<CallState> {
 
     state = state.copyWith(
       remoteScreenSharing: enabled,
-      // The share is gone — the watch opt-in dies with it (a re-share asks
-      // again via the Watch banner). Source quality dies with the watch.
+      // The watch opt-in dies with the share; a re-share asks again.
       watchingRemoteShare: enabled && state.watchingRemoteShare,
       remoteScreenShareLabel: enabled ? quality : null,
       clearRemoteScreenShareLabel: !enabled,
@@ -2383,19 +2149,16 @@ class CallNotifier extends Notifier<CallState> {
 
     final iceConfig = ref.read(iceConfigProvider);
 
-    // Phase 6.25: Dispose old incoming screen share before creating new one.
     if (_incomingScreenShare != null) {
       await _incomingScreenShare!.close();
       _incomingScreenShare = null;
     }
 
-    // Create incoming screen share service (separate PC to receive their screen).
     _incomingScreenShare = ScreenShareService(
       localPeerId: localPeerId,
       iceServers: iceConfig,
     );
 
-    // Wire ICE callback.
     _incomingScreenShare!.onIceCandidate = (candidate) {
       _sendSignal(peerId, 'screen_ice', jsonEncode({
         'call_id': callId,
@@ -2407,24 +2170,19 @@ class CallNotifier extends Notifier<CallState> {
     };
 
     _incomingScreenShare!.onRemoteTrackReady = () {
-      // The share we asked for is live — stop the "offer never came" timer.
       _dmWatchConnectTimer?.cancel();
       _dmWatchConnectTimer = null;
-      // Force UI rebuild so RTCVideoView picks up the renderer.
       debugPrint('[HOLLOW-CALL] Screen share remote track ready');
       state = state.copyWith();
     };
 
-    // Set preferred audio output so screen share audio plays to the right speaker.
     try {
       final output = await ref.read(audioOutputDeviceProvider.future);
       _incomingScreenShare!.preferredAudioOutputDeviceId = output;
     } catch (_) {}
 
-    // Handle the offer and send answer.
     final answerSdp = await _incomingScreenShare!.handleOffer(sdp);
 
-    // Enable SFrame E2EE on the incoming screen share PC.
     if (_incomingScreenShare!.pc != null) {
       await _enableSframeOnScreenShare(
           _incomingScreenShare!.pc!, peerId, isSender: false);
@@ -2456,8 +2214,7 @@ class CallNotifier extends Notifier<CallState> {
     final sdpMLineIndex = (json['sdpMLineIndex'] as num?)?.toInt();
     final role = json['role'] as String;
 
-    // Route to the opposite PC: offerer's candidates go to our incoming PC,
-    // answerer's candidates go to our outgoing PC.
+    // Offerer's candidates go to our incoming PC, answerer's to our outgoing.
     if (role == 'offerer') {
       await _incomingScreenShare?.handleIceCandidate(
           candidate, sdpMid, sdpMLineIndex);
@@ -2466,10 +2223,6 @@ class CallNotifier extends Notifier<CallState> {
           candidate, sdpMid, sdpMLineIndex);
     }
   }
-
-  // ---------------------------------------------------------------------------
-  // Helpers
-  // ---------------------------------------------------------------------------
 
   String get localPeerId => ref.read(identityProvider).peerId ?? '';
 
@@ -2482,19 +2235,16 @@ class CallNotifier extends Notifier<CallState> {
   }
 
   Future<void> _cleanup() async {
-    // A call that never reached `connected` still has a story worth reading
-    // (where it stopped); no-op once finishCurrent() ran on connect.
+    // A call that never reached `connected` still has a story worth reading.
     CallSetupTrace.finishCurrent(reason: 'torn-down');
     _ringTimer?.cancel();
     _ringTimer = null;
     // The single teardown chokepoint — reject, busy, ring timeout, remote end
     // and local hang-up all land here, so the ringback can't outlive the call.
     SoundService.instance.stopRingback();
-    // Hang-up cue. Only for a call that actually connected: a decline or a
-    // ring timeout already announces itself (the ringback stopping, plus the
-    // busy toast), and a "left" tone there would read as "they hung up on you".
-    // No dedicated hangup asset was contributed for #55 — leaving a call is
-    // the same event as leaving voice, so it borrows that one.
+    // Hang-up cue, only for a call that actually connected: a decline or ring
+    // timeout already announces itself, and a "left" tone there would read as
+    // "they hung up on you". Borrows the leave-voice asset (#55).
     if (state.status == CallStatus.active) {
       SoundService.instance.play(HollowSound.leaveVoice, duringCall: true);
     }
@@ -2508,9 +2258,8 @@ class CallNotifier extends Notifier<CallState> {
     _restoreVideoAfterRestart = false;
     RealtimeSessionFlag.release('dm-call');
     ref.read(callLinkHealthProvider.notifier).clear();
-    // NOTE: _undeliveredEnd is deliberately NOT cleared here. _cleanup runs as
-    // part of the very teardown that queued it, and clearing it would throw
-    // away the message the peer is waiting for. It is cleared on delivery.
+    // _undeliveredEnd is deliberately NOT cleared here: _cleanup runs as part of
+    // the teardown that queued it. It is cleared on delivery.
     _iceRepairTimer?.cancel();
     _iceRepairTimer = null;
     _iceRepairDone = false;
@@ -2519,13 +2268,11 @@ class CallNotifier extends Notifier<CallState> {
     _queuedRenegOfferPayload = null;
     _renegOfferAttempts = 0;
     _lastRemoteVolume = 1.0;
-    // Stop out-of-process screen audio renderer.
     if (_screenAudioRenderer != null) {
       ShareAudioLevel.detach(_screenAudioRenderer!);
       await _screenAudioRenderer!.stop();
       _screenAudioRenderer = null;
     }
-    // Call over — any outgoing-share servo hold is stale.
     ShareAudioLevel.setSendingShareAudio(false);
     try {
       ref.read(webRtcProvider.notifier).service.onScreenAudioReceived = null;
@@ -2542,15 +2289,12 @@ class CallNotifier extends Notifier<CallState> {
     _dmWatchConnectTimer?.cancel();
     _dmWatchConnectTimer = null;
     await _teardownDmShareCapture();
-    // Disarm the entire-screen anti-echo voice redirect AFTER the capturer is
-    // gone (restores remote-voice playout + kills the renderer child) so the
-    // restored voice isn't briefly re-captured.
+    // Disarm the anti-echo redirect AFTER the capturer is gone, so the restored
+    // voice isn't briefly re-captured.
     await _disarmVoiceRedirect();
-    // Reset the screen-share view focus so the next call starts fresh.
     ref.read(focusedDmSourceProvider.notifier).state =
         const DmFocusedSource.none();
-    // Restore the default audio route so the next call doesn't inherit a
-    // stale speakerphone state.
+    // So the next call doesn't inherit a stale speakerphone state.
     if (_isMobile) {
       unawaited(Helper.setSpeakerphoneOn(false).catchError((_) {}));
       ref.read(audioRouteProvider.notifier).reset();
@@ -2603,7 +2347,6 @@ class CallNotifier extends Notifier<CallState> {
     }
   }
 
-  /// Convert hex string to Uint8List.
   Uint8List _hexToBytes(String hex) {
     final result = Uint8List(hex.length ~/ 2);
     for (var i = 0; i < result.length; i++) {
@@ -2616,13 +2359,9 @@ class CallNotifier extends Notifier<CallState> {
 final callProvider =
     NotifierProvider<CallNotifier, CallState>(CallNotifier.new);
 
-/// Which DM call source is focused (big tile) in the screen-share view.
-/// `peerId` = which peer's source. `type` = 'screen' or 'camera'.
-/// `null` means "no explicit focus — use default layout for the current
-/// share state". Lifted to a provider so both `_ChatPaneState` (the source
-/// switcher pill) and `_ScreenShareFullView` (the big tile renderer) can
-/// read and write it. Modeled after voice_channel_pane's
-/// focusedScreenSharePeerId / focusedSourceType pair.
+/// Which DM call source is focused (big tile) in the screen-share view:
+/// `peerId` names the peer, `type` is 'screen' or 'camera', null means no
+/// explicit focus. A provider so the switcher pill and the big tile share it.
 class DmFocusedSource {
   final String? peerId;
   final String? type; // 'screen' | 'camera'

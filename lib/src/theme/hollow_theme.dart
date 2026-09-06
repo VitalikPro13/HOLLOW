@@ -4,10 +4,8 @@ import 'contrast.dart';
 import 'hollow_colors.dart';
 import 'hollow_spacing.dart';
 
-/// Hollow's custom theme extension — travels with ThemeData.
-///
-/// Access via: `Theme.of(context).extension<HollowTheme>()!`
-/// or the convenience: `HollowTheme.of(context)`
+/// Hollow's custom theme extension, travelling with ThemeData. Reach it
+/// through [HollowTheme.of].
 class HollowTheme extends ThemeExtension<HollowTheme> {
   final Color background;
   final Color surface;
@@ -15,19 +13,17 @@ class HollowTheme extends ThemeExtension<HollowTheme> {
   final Color accent;
   final Color accentHover;
   final Color accentMuted;
-  /// Accent guaranteed legible as FOREGROUND (text/icons/links) on
-  /// [background] — clears ~4.5:1. Use this anywhere accent is text/icon;
-  /// keep raw [accent] for fills (which pair with dark [textOnAccent]).
+  /// The accent as FOREGROUND, clearing ~4.5:1 on [background]. Use it wherever
+  /// accent is text or an icon; raw [accent] is for fills only.
   final Color accentText;
-  /// Keyboard-focus ring color (a11y 2.6). Accent auto-adjusted to clear the
-  /// WCAG non-text-contrast minimum (~3:1) against [background], so the focus
-  /// indicator stays visible on every surface and custom accent hue. Drawn
-  /// ONLY on keyboard/assistive-tech focus — never on mouse hover/press.
+  /// Keyboard-focus ring (a11y 2.6): the accent adjusted to clear ~3:1 against
+  /// [background], so the indicator survives every custom hue. Drawn ONLY on
+  /// keyboard or assistive-tech focus, never on hover or press.
   final Color focusRing;
   final Color textPrimary;
   final Color textSecondary;
-  /// Faded-metadata token (timestamps, "(edited)", counters) that still
-  /// clears 4.5:1 — replaces ad-hoc alpha-faded textSecondary.
+  /// The faded-metadata token that still clears 4.5:1, in place of an
+  /// alpha-faded textSecondary.
   final Color textTertiary;
   final Color textOnAccent;
   final Color border;
@@ -62,7 +58,6 @@ class HollowTheme extends ThemeExtension<HollowTheme> {
     required this.radiusXl,
   });
 
-  /// Default dark theme.
   factory HollowTheme.dark() => HollowTheme(
         background: HollowColors.background,
         surface: HollowColors.surface,
@@ -90,7 +85,6 @@ class HollowTheme extends ThemeExtension<HollowTheme> {
         radiusXl: HollowRadius.xl,
       );
 
-  /// Light theme.
   factory HollowTheme.light() => const HollowTheme(
         background: HollowColors.backgroundLight,
         surface: HollowColors.surfaceLight,
@@ -99,9 +93,8 @@ class HollowTheme extends ThemeExtension<HollowTheme> {
         accentHover: HollowColors.accentHover,
         accentMuted: HollowColors.accentMutedLight,
         accentText: HollowColors.accentTextLight,
-        // Light-theme focus ring: the dark-on-teal accent is too light on white
-        // (~2.3:1) to ring against it; reuse the legible foreground variant
-        // (accentTextLight, 5.32:1 — comfortably past the 3:1 ring floor).
+        // The accent is ~2.3:1 on white, too light to ring against it, so the
+        // legible foreground variant carries the focus ring here.
         focusRing: HollowColors.accentTextLight,
         textPrimary: HollowColors.textPrimaryLight,
         textSecondary: HollowColors.textSecondaryLight,
@@ -117,7 +110,6 @@ class HollowTheme extends ThemeExtension<HollowTheme> {
         radiusXl: HollowRadius.xl,
       );
 
-  /// Dark theme with custom accent hue.
   factory HollowTheme.darkWithHue(double hue) => HollowTheme(
         background: HollowColors.background,
         surface: HollowColors.surface,
@@ -145,7 +137,6 @@ class HollowTheme extends ThemeExtension<HollowTheme> {
         radiusXl: HollowRadius.xl,
       );
 
-  /// Light theme with custom accent hue.
   factory HollowTheme.lightWithHue(double hue) => HollowTheme(
         background: HollowColors.backgroundLight,
         surface: HollowColors.surfaceLight,
@@ -173,8 +164,8 @@ class HollowTheme extends ThemeExtension<HollowTheme> {
         radiusXl: HollowRadius.xl,
       );
 
-  /// Returns a copy with semi-transparent panel backgrounds for custom background images.
-  /// [opacity] is 0.0 (fully transparent) to 1.0 (fully opaque).
+  /// Returns a copy with semi-transparent panels, for a custom background
+  /// image. [opacity] runs 0.0 (clear) to 1.0 (opaque).
   HollowTheme withPanelOpacity(double opacity) {
     return copyWith(
       background: background.withValues(alpha: opacity),
@@ -183,22 +174,18 @@ class HollowTheme extends ThemeExtension<HollowTheme> {
     );
   }
 
-  /// Returns the background color with full opacity (for bars that should stay opaque).
+  /// The background at full opacity, for bars that must stay opaque.
   Color get opaqueBackground => background.withValues(alpha: 1.0);
 
-  /// Background for a notice strip tinted by [tint] — the guest banner, the
-  /// system-status bar, the "you are viewing this as a guest" chrome.
+  /// Background for a notice strip tinted by [tint].
   ///
-  /// A bare `tint.withValues(alpha: 0.1)` is transparent, so over the chat
-  /// area the bar shows whatever is behind it (the user's wallpaper) and
-  /// stops reading as part of the app at all (issue #54). Blending the tint
-  /// ONTO [surface] gives the same colour note on the same material the rest
-  /// of the chrome is made of — and it still honours the panel-opacity
-  /// setting, because that lives in [surface].
+  /// A bare `tint.withValues(alpha: …)` is transparent, so over the chat the
+  /// bar shows the user's wallpaper and stops reading as part of the app
+  /// (issue #54). Blending onto [surface] keeps it on the same material as the
+  /// rest of the chrome, and still honours the panel-opacity setting.
   Color noticeSurface(Color tint, {double alpha = 0.14}) =>
       Color.alphaBlend(tint.withValues(alpha: alpha), surface);
 
-  /// Convenience accessor.
   static HollowTheme of(BuildContext context) =>
       Theme.of(context).extension<HollowTheme>()!;
 

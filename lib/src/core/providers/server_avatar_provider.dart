@@ -4,9 +4,8 @@ import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 
 /// Cache of server avatar bytes keyed by server_id.
 class ServerAvatarNotifier extends Notifier<Map<String, Uint8List>> {
-  // Local-write bookkeeping: `set_server_avatar`/`clear_server_avatar` only
-  // QUEUE a node command — the CRDT apply + CrdtStore persist land later, so
-  // a DB read right after the FFI returns the PREVIOUS avatar. That was the
+  // `set_server_avatar`/`clear_server_avatar` only QUEUE a node command, so a
+  // DB read right after the FFI returns the PREVIOUS avatar. That was the
   // "second upload applies the first icon" bug.
   final Map<String, int> _writeGen = {};
   final Set<String> _writePending = {};
@@ -39,10 +38,9 @@ class ServerAvatarNotifier extends Notifier<Map<String, Uint8List>> {
     }
   }
 
-  /// Seed the cache for a local avatar write ([optimistic] bytes, or null for
-  /// a clear), then reconcile from the DB once the fire-and-forget CRDT
-  /// persist has had time to land. Callers fire-and-forget this; it never
-  /// throws.
+  /// Seed the cache for a local avatar write ([optimistic] bytes, or null for a
+  /// clear), then reconcile from the DB once the fire-and-forget CRDT persist has
+  /// had time to land. Callers fire-and-forget this; it never throws.
   Future<void> applyLocalWrite(String serverId, Uint8List? optimistic) async {
     final gen = (_writeGen[serverId] ?? 0) + 1;
     _writeGen[serverId] = gen;

@@ -257,7 +257,6 @@ impl ContentStore {
         let data =
             std::fs::read(&path).map_err(|e| format!("Failed to read shard file: {e}"))?;
 
-        // Look up expected hash from DB
         let stored_hash: String = self
             .conn
             .query_row(
@@ -274,7 +273,6 @@ impl ContentStore {
             ));
         }
 
-        // Update last_verified
         let _ = self.conn.execute(
             "UPDATE vault_shards SET last_verified = ?1 WHERE shard_key = ?2",
             params![now_secs(), shard_key_str],
@@ -310,7 +308,6 @@ impl ContentStore {
 
     /// Delete all shards for a content item. Returns count deleted.
     pub fn delete_content(&self, server_id: &str, cid: &str) -> Result<u32, String> {
-        // First collect shard keys to delete files
         let mut stmt = self
             .conn
             .prepare_cached("SELECT shard_key FROM vault_shards WHERE server_id = ?1 AND content_id = ?2")
@@ -322,13 +319,11 @@ impl ContentStore {
             .filter_map(|r| r.ok())
             .collect();
 
-        // Delete files
         for key in &keys {
             let path = self.shard_path(server_id, key);
             let _ = std::fs::remove_file(&path);
         }
 
-        // Delete DB records
         let deleted = self
             .conn
             .execute(
@@ -404,8 +399,8 @@ impl ContentStore {
             .map_err(|e| format!("Failed to query storage used: {e}"))
     }
 
-    /// Total original file sizes from all manifests for a server (bytes).
-    /// This represents the total data the server "has" — not the local shard size.
+    /// Total original file size across a server's manifests: what the server "has", not
+    /// what this node stores.
     pub fn total_manifest_size(&self, server_id: &str) -> Result<u64, String> {
         self.conn
             .query_row(

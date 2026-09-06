@@ -4,8 +4,8 @@ import 'annotation_controller.dart';
 import 'annotation_models.dart';
 import 'annotation_painter.dart';
 
-/// Captures pointer input and renders the strokes through
-/// [AnnotationPainter]. Drives the [AnnotationController].
+/// Captures pointer input, drives the [AnnotationController] and renders its
+/// strokes through [AnnotationPainter].
 class AnnotationCanvas extends StatefulWidget {
   final AnnotationController controller;
   const AnnotationCanvas({super.key, required this.controller});
@@ -46,8 +46,6 @@ class _AnnotationCanvasState extends State<AnnotationCanvas> {
   void _onChange() {
     if (mounted) setState(() {});
   }
-
-  // ── Pointer handlers ─────────────────────────────────────────────────────
 
   void _onPointerDown(PointerDownEvent e) {
     final p = e.localPosition;
@@ -135,8 +133,6 @@ class _AnnotationCanvasState extends State<AnnotationCanvas> {
   }
 
   double get _eraserRadius => (_c.width * 4).clamp(12.0, 60.0);
-
-  // ── Build ────────────────────────────────────────────────────────────────
 
   @override
   Widget build(BuildContext context) {

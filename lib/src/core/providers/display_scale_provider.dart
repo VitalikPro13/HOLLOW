@@ -4,29 +4,19 @@ import 'package:flutter/foundation.dart' show debugPrint, kIsWeb;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 
-/// In-app display scaling (GitHub issue #20 — "Interface text size / message
-/// text size"). Until now the only way to enlarge Hollow was the OS setting
-/// (Windows "Scale and layout" / "Text size", Android Display Size, iOS
-/// Dynamic Type). These two knobs are the in-app equivalent, and they stack
-/// ON TOP of whatever the OS already applies — they never replace it.
+/// In-app display scaling (issue #20). Two knobs that stack ON TOP of whatever
+/// the OS already applies; they never replace it.
 ///
-/// * [uiScaleProvider] — the interface scale ("zoom"). Multiplies EVERYTHING:
-///   text, icons, avatars, borders, padding. Applied exactly once, at the
-///   root, by `UiScale` (`ui/components/ui_scale.dart`). A zoom is the only
-///   honest answer to the "icon size" half of the request: icon sizes live in
-///   ~800 hardcoded `size:` literals, so no token or theme knob can reach
-///   them, and a text-only scaler leaves 16px icons stranded next to 24px
-///   labels.
-/// * [chatTextScaleProvider] — an extra TEXT-only multiplier for the message
-///   surfaces (message list + composer), on top of the interface scale. This
-///   is the "messages font size" half: bigger message text without spending
-///   screen real estate on bigger chrome.
+/// [uiScaleProvider] is the interface zoom, applied exactly once at the root by
+/// `UiScale`. A zoom is the only honest answer to the "icon size" half of the
+/// request: icon sizes live in ~800 hardcoded `size:` literals, so a text-only
+/// scaler strands 16px icons next to 24px labels. [chatTextScaleProvider] is an
+/// extra TEXT-only multiplier for the message surfaces.
 ///
-/// Both are synchronous [Notifier]s loaded from `HollowShell._bootstrap`
-/// rather than eager `AsyncNotifier`s: they are watched by the very first
-/// frame, and `loadSetting` THROWS until the SQLCipher store is open, so an
-/// eager read in `build()` would silently lose the saved value on every
-/// launch (feedback_load_persisted_setting_from_bootstrap_not_build).
+/// Both are synchronous [Notifier]s loaded from `HollowShell._bootstrap`, never
+/// eager `AsyncNotifier`s: `loadSetting` THROWS until the SQLCipher store is
+/// open, so an eager read in `build()` loses the saved value every launch
+/// (feedback_load_persisted_setting_from_bootstrap_not_build).
 
 /// True on phones/tablets, where the shell is the single-panel mobile UI.
 bool get _isMobileForm => !kIsWeb && (Platform.isAndroid || Platform.isIOS);
@@ -35,11 +25,9 @@ bool get _isMobileForm => !kIsWeb && (Platform.isAndroid || Platform.isIOS);
 /// legible on any display.
 double get uiScaleMin => _isMobileForm ? 0.9 : 0.75;
 
-/// Interface-scale ceiling. Desktop windows can afford a real zoom (a 1080p
-/// window at 2.0x still lays out at 960x540 logical, comfortably inside the
-/// desktop shell). A phone cannot: a 360dp device at 2.0x would lay out at
-/// 180dp, which is narrower than the mobile shell's own chrome — including
-/// the Settings list needed to undo it.
+/// Interface-scale ceiling. Desktop can afford a real zoom; a phone cannot: a
+/// 360dp device at 2.0x lays out at 180dp, narrower than the mobile shell's own
+/// chrome, including the Settings list needed to undo it.
 double get uiScaleMax => _isMobileForm ? 1.5 : 2.0;
 
 /// Both sliders move on a 5% grid.
@@ -81,9 +69,8 @@ class UiScaleNotifier extends Notifier<double> {
   }
 
   /// Applies [scale] immediately, then persists. The state moves first so a
-  /// keyboard zoom (Ctrl +/-) lands on the very next frame instead of after a
-  /// DB round trip; a failed write only costs the setting on next launch, so
-  /// it is logged rather than surfaced.
+  /// keyboard zoom lands on the next frame instead of after a DB round trip; a
+  /// failed write only costs the setting on next launch, so it is logged.
   Future<void> setScale(double scale) async {
     final clamped = _clamp(scale);
     if (state == clamped) return;

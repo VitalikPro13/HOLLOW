@@ -13,8 +13,8 @@ import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/status_dot.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-/// Floating pill shown when in a voice channel on mobile.
-/// Mute, deafen, leave, duration timer. Tap body to return to voice route.
+/// Floating pill shown while in a voice channel on mobile; its body taps back
+/// to the voice route.
 class MobileVoiceChannelPill extends ConsumerStatefulWidget {
   const MobileVoiceChannelPill({super.key});
 
@@ -75,7 +75,7 @@ class _MobileVoiceChannelPillState
     final vcState = ref.watch(voiceChannelProvider);
     final callState = ref.watch(callProvider);
 
-    // Hide when not in a voice channel or during a DM call.
+    // Hidden outside a voice channel, and during a DM call.
     final isVisible =
         vcState.isInVoiceChannel && callState.status == CallStatus.idle;
 
@@ -102,8 +102,8 @@ class _MobileVoiceChannelPillState
         child: Center(
           child: GestureDetector(
             onPanUpdate: (details) {
-              // Clamp so the pill can't be dragged below its anchor (into
-              // the bottom nav) or off-screen.
+              // Clamped so the pill cannot be dragged into the bottom nav or
+              // off-screen.
               final size = MediaQuery.sizeOf(context);
               final topInset = MediaQuery.viewPaddingOf(context).top;
               final next = _dragOffset + details.delta;
@@ -163,7 +163,6 @@ class _MobileVoiceChannelPillState
                       ),
                     ),
                     const SizedBox(width: HollowSpacing.md),
-                    // Mute
                     HollowPressable(
                       semanticLabel: vcState.isMuted ? 'Unmute' : 'Mute',
                       onTap: () => vcNotifier.toggleMute(),
@@ -178,7 +177,6 @@ class _MobileVoiceChannelPillState
                       ),
                     ),
                     const SizedBox(width: HollowSpacing.xs),
-                    // Deafen
                     HollowPressable(
                       semanticLabel: vcState.isDeafened ? 'Undeafen' : 'Deafen',
                       onTap: () => vcNotifier.toggleDeafen(),
@@ -193,7 +191,6 @@ class _MobileVoiceChannelPillState
                       ),
                     ),
                     const SizedBox(width: HollowSpacing.xs),
-                    // Leave
                     HollowPressable(
                       semanticLabel: 'Leave call',
                       onTap: () => vcNotifier.leaveChannel(),

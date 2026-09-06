@@ -5,20 +5,13 @@ import '../services/link_resilience.dart';
 
 /// What the UI is allowed to say about a live media link.
 ///
-/// ## Why this is not on CallState
+/// NOT on CallState, for the same reason speaking state is not: a `copyWith`
+/// rebuilds the shell, the call panes and the video subtrees, and link health
+/// changes precisely when the machine is least able to absorb that.
 ///
-/// The same reason speaking state is not (see `callSpeakingProvider`): a
-/// `copyWith` on CallState rebuilds every watcher, which includes the shell,
-/// the call panes and the video subtrees. Link health changes far less often
-/// than VAD does, but it changes precisely when the machine is least able to
-/// absorb a full rebuild, which is the worst possible moment to ask for one.
-///
-/// Keeping it separate also keeps `CallStatus` alone. A link in trouble is not
-/// a new call status: the call is still `active`, which is the entire point of
-/// the hold-open ladder. Adding a `reconnecting` status would have meant
-/// auditing 46 `status == CallStatus.active` guards, and every one that was
-/// missed would be a feature that silently switches itself off the moment the
-/// network wobbles.
+/// It also keeps `CallStatus` alone. A link in trouble is not a new status: the
+/// call is still `active`, which is the point of the hold-open ladder. A
+/// `reconnecting` status would mean auditing 46 `status == active` guards.
 @immutable
 class LinkHealthSnapshot {
   final LinkHealth health;
@@ -29,12 +22,9 @@ class LinkHealthSnapshot {
   /// The outbound camera has been given up entirely to protect the audio.
   final bool videoPaused;
 
-  // NOTE: deliberately no "time left in the grace window" field. It would
-  // change every second while lapsing, so every watcher of this provider would
-  // rebuild once a second on the machine that is, by hypothesis, already
-  // struggling — and nothing renders a countdown. `LinkResilience.remainingGrace`
-  // is still there for the day something wants to show one; it just must not
-  // ride the snapshot that drives rebuilds.
+  // Deliberately no "time left in the grace window" field: it would change every
+  // second, rebuilding every watcher on the machine that is already struggling,
+  // and nothing renders a countdown. `LinkResilience.remainingGrace` still exists.
 
   const LinkHealthSnapshot({
     this.health = LinkHealth.healthy,
@@ -43,8 +33,7 @@ class LinkHealthSnapshot {
   });
 
   /// Whether there is anything worth putting on screen. A healthy link with an
-  /// untouched camera says nothing, which is the overwhelmingly common case
-  /// and the one that must cost nothing.
+  /// untouched camera says nothing, the common case and the one that must be free.
   bool get hasFlair => health != LinkHealth.healthy || videoDegraded;
 
   /// Primary line for the flair. Sentence case, no em dashes: this is UI text.
@@ -87,9 +76,8 @@ class CallLinkHealthNotifier extends Notifier<LinkHealthSnapshot> {
   LinkHealthSnapshot build() => const LinkHealthSnapshot();
 
   void set(LinkHealthSnapshot snapshot) {
-    // Guarded assignment: the sampler runs on a timer and most samples say
-    // exactly what the last one did. Writing an equal value would rebuild the
-    // call surfaces once a second for no reason at all.
+    // Guarded assignment: the sampler runs on a timer and most samples repeat the
+    // last one, so writing an equal value would rebuild the call surfaces per second.
     if (state != snapshot) state = snapshot;
   }
 
@@ -100,9 +88,7 @@ class CallLinkHealthNotifier extends Notifier<LinkHealthSnapshot> {
 /// the mesh connects to.
 ///
 /// Per peer rather than aggregated: in a mesh, one member on hotel Wi-Fi is a
-/// problem with that member, and telling the whole channel their connection is
-/// unstable would be both wrong and alarming. The UI reads the entry for the
-/// tile it is drawing.
+/// problem with that member, not the whole channel.
 final vcLinkHealthProvider =
     NotifierProvider<VcLinkHealthNotifier, Map<String, LinkHealthSnapshot>>(
         VcLinkHealthNotifier.new);

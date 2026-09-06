@@ -1,10 +1,8 @@
 /// One parked server join, as the UI sees it.
 ///
-/// Mirrors Rust's `PendingJoinFfi` row (`pending_server_joins`). A join lands
-/// here when every member of the server was offline at request time: instead
-/// of failing after 15 seconds, Rust persists the request and answers it
-/// whenever a member finally returns. That can be days, so nothing about this
-/// state spins.
+/// Mirrors Rust's `PendingJoinFfi` row. A join lands here when every member
+/// was offline at request time: Rust persists it and answers whenever a member
+/// returns, which can be days, so nothing about this state spins.
 class PendingJoinInfo {
   /// The only thing an invite link carries, and therefore the only identity a
   /// parked join has: there is no name and no icon until a member answers.
@@ -13,9 +11,8 @@ class PendingJoinInfo {
   /// Unix milliseconds. Doubles as the request nonce on the wire.
   final int requestedAt;
 
-  /// `pending` while we wait, `rejected` once a member turned us down.
-  /// Kept as the raw string the FFI hands over so the two sides can never
-  /// drift over an enum name.
+  /// `pending` while we wait, `rejected` once a member turned us down. Kept as
+  /// the raw FFI string so the two sides can never drift over an enum name.
   final String state;
 
   /// The raw rejection reason (`banned`, `server_private:{name}`, ...).
@@ -46,9 +43,7 @@ class PendingJoinInfo {
 
 /// Turns a wire rejection reason into the one sentence the user reads.
 ///
-/// ONE function, shared by the toast, the desktop menu and the mobile sheet:
-/// the same rejection must not be worded three ways depending on where you
-/// happen to be looking when it arrives.
+/// ONE function, shared by the toast, the desktop menu and the mobile sheet.
 String pendingJoinReasonText(String reason) {
   if (reason == 'banned') return 'You are banned from this server';
 

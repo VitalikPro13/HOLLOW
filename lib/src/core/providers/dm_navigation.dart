@@ -7,10 +7,8 @@ import 'package:hollow/src/core/providers/split_view_provider.dart';
 import 'package:hollow/src/core/providers/unread_provider.dart';
 
 /// Open the DM conversation with [peerId] (MASTER identity) in the desktop
-/// shell. The canonical selection sequence — honors a focused right split
-/// pane, closes any exclusive centre tab via [setShellTab], and batches the
-/// selection providers in one synchronous block (mirrors the friends bar,
-/// which delegates here).
+/// shell: honors a focused right split pane, closes any exclusive centre tab,
+/// and batches the selection providers in one synchronous block.
 void openDmConversation(WidgetRef ref, String peerId) {
   final split = ref.read(splitViewProvider);
   if (split.isSplit && split.focusedPane == 1) {
@@ -23,6 +21,5 @@ void openDmConversation(WidgetRef ref, String peerId) {
     ref.read(selectedChannelProvider.notifier).state = null;
     ref.read(serverSettingsOpenProvider.notifier).state = false;
   }
-  // Mark as read.
   ref.read(unreadProvider.notifier).markDmSeen(peerId, null);
 }

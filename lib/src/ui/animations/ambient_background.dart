@@ -7,15 +7,9 @@ import 'package:hollow/src/core/shared_tickers.dart';
 
 /// Very slow-drifting ambient background for the chat area.
 ///
-/// Two soft radial gradient blobs (teal + purple/blue) at low opacity
-/// drift in a slow figure-8 pattern over ~45 seconds.
-///
 /// Driven by [SharedTickers.ambient], a shared 30fps timer rather than a
-/// per-widget [Ticker], so the cost is 30 frames a second while the blobs are
-/// on screen and none at all when they are not.
-///
-/// When a custom background image is set, blobs are hidden (image is
-/// rendered at the shell level behind everything).
+/// per-widget [Ticker], so it costs nothing at all while the blobs are off
+/// screen. A custom background image replaces them entirely.
 class AmbientBackground extends ConsumerWidget {
   final Color color1;
   final Color color2;
@@ -34,18 +28,12 @@ class AmbientBackground extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final hasCustomBg = ref.watch(backgroundProvider).hasBackground;
 
-    // Skip blobs when custom background is active.
     if (hasCustomBg) return child;
 
-    // The blobs and the content are SEPARATE layers on purpose.
-    //
-    // This used to be one RepaintBoundary wrapped around both, with the
-    // content passed through the builder as `child`. Passing it through spared
-    // the REBUILD, but not the RASTER: a repaint inside a boundary re-rasters
-    // the whole boundary, so every blob tick re-rendered the entire pane
-    // underneath it. Thirty times a second, over the largest surface in the
-    // app. Giving the overlay its own boundary means a blob tick re-rasters
-    // two soft circles and composites them over an untouched content layer.
+    // The blobs and the content are SEPARATE layers on purpose. One boundary
+    // around both spares the rebuild but not the raster: a repaint inside a
+    // boundary re-rasters the whole boundary, so every blob tick would
+    // re-render the largest surface in the app, thirty times a second.
     return Stack(
       children: [
         RepaintBoundary(child: child),

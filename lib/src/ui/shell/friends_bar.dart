@@ -37,16 +37,15 @@ import 'package:hollow/src/core/providers/help_panel_provider.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Horizontal friends bar for the Dock layout.
-/// Shows accepted friends as avatars with online dots, plus "Add Friend" button.
 class FriendsBar extends ConsumerWidget {
   const FriendsBar({super.key});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final hollow = HollowTheme.of(context);
-    // The DOCK shows favourites-only when favourites are set (its purpose), via
-    // the dedicated display provider. The Friends dialog/home/chats use the
-    // unfiltered sortedFriendsProvider so favouriting never hides a friend there.
+    // The DOCK shows favourites only once any are set, which is its purpose.
+    // Every other surface uses the unfiltered list, so favouriting never hides
+    // a friend there.
     final displayList = ref.watch(friendsBarDisplayProvider);
     final pendingCount = ref.watch(pendingFriendCountProvider);
     final online = ref.watch(onlineIdentitiesProvider);
@@ -63,16 +62,15 @@ class FriendsBar extends ConsumerWidget {
           bottom: BorderSide(color: hollow.border),
         ),
       ),
-      // a11y Phase 3: fixed-height (44px) friends-bar chrome — cap label scale
-      // across the whole strip (chip names, counts, empty state) so it stays in
-      // the bar at high OS text size. Content areas honor full 2.0×.
+      // Fixed-height chrome, so the label scale is capped across the strip to
+      // keep it in the bar at high OS text size. Content areas honour the full
+      // range.
       child: MediaQuery.withClampedTextScaling(
         maxScaleFactor: 1.3,
         child: Row(
         children: [
           const SizedBox(width: HollowSpacing.sm),
 
-          // Add Friend button
           Stack(
             clipBehavior: Clip.none,
             children: [
@@ -93,7 +91,6 @@ class FriendsBar extends ConsumerWidget {
                   ),
                 ),
               ),
-              // Pending badge
               if (pendingCount > 0)
                 Positioned(
                   right: 0,
@@ -120,7 +117,6 @@ class FriendsBar extends ConsumerWidget {
             ],
           ),
 
-          // Vertical divider
           Container(
             width: 1,
             height: 24,
@@ -128,7 +124,6 @@ class FriendsBar extends ConsumerWidget {
             color: hollow.border,
           ),
 
-          // Friends list (horizontal scroll)
           Expanded(
             child: displayList.isEmpty
                 ? Padding(
@@ -140,10 +135,9 @@ class FriendsBar extends ConsumerWidget {
                       ),
                     ),
                   )
-                // .builder, not the children: form — this list is LAZY and a
-                // long friends list must stay that way. Arrows + wheel appear
-                // only while it overflows; before this, friends past the edge
-                // were unreachable on a plain wheel mouse.
+                // .builder, not the children: form, so a long friends list
+                // stays LAZY. Arrows and wheel appear only while it overflows,
+                // or friends past the edge are unreachable on a wheel mouse.
                 : EdgeScrollRow.builder(
                     semanticLabel: 'friends',
                     builder: (context, scrollController) =>
@@ -160,7 +154,6 @@ class FriendsBar extends ConsumerWidget {
                       final isSelected = friend.peerId == selectedPeerId;
                       final name = displayNameFor(profiles, friend.peerId);
 
-                      // Check unread
                       final unreadCount =
                           notifSettings.isDmEnabled(friend.peerId)
                           ? (unreadState.dmUnreadCounts[friend.peerId] ?? 0)
@@ -178,7 +171,6 @@ class FriendsBar extends ConsumerWidget {
                   )),
           ),
 
-          // Vertical divider (mirrors the left side for symmetry)
           Container(
             width: 1,
             height: 24,
@@ -186,9 +178,8 @@ class FriendsBar extends ConsumerWidget {
             color: hollow.border,
           ),
 
-          // Hollow Shop button. Absent entirely (not disabled) on store
-          // builds: Apple 3.1.1 and Play policy want no shop surface at all,
-          // and the safest sentence is no sentence.
+          // Absent entirely, not disabled, on store builds: Apple 3.1.1 and
+          // Play policy want no shop surface at all.
           if (ref.watch(shopAvailableProvider)) ...[
             Builder(builder: (context) {
               final shopOpen = ref.watch(shopTabOpenProvider);
@@ -197,7 +188,7 @@ class FriendsBar extends ConsumerWidget {
                 child: HollowPressable(
                   semanticLabel: 'Hollow Shop',
                   // Toggles like every other lit button on this strip
-                  // (issue #28): pressing it again puts the shop away.
+                  // (issue #28).
                   onTap: () => shopOpen
                       ? setShellTab(ref.read, null)
                       : openShopTab(ref.read),
@@ -217,7 +208,7 @@ class FriendsBar extends ConsumerWidget {
             const SizedBox(width: HollowSpacing.xs),
           ],
 
-          // Saved messages button — opens the DM with your own master identity.
+          // Saved messages is the DM with your own master identity.
           Builder(builder: (context) {
             final savedId = ref.watch(savedMessagesPeerIdProvider);
             final isActive = savedId != null && savedId == selectedPeerId;
@@ -225,10 +216,9 @@ class FriendsBar extends ConsumerWidget {
               message: 'Saved messages',
               child: HollowPressable(
                 semanticLabel: 'Saved messages',
-                // Toggles, like Conferences beside it: pressing the lit
-                // button again puts the centre pane back to Home. Every
-                // other button on this strip that lights up also unlights,
-                // so the one that didn't read as a dead press.
+                // Toggles, like Conferences beside it. Every other button on
+                // this strip that lights up also unlights, so one that does not
+                // reads as a dead press.
                 onTap: savedId == null
                     ? null
                     : () => _toggleSavedMessages(ref, savedId),
@@ -247,15 +237,14 @@ class FriendsBar extends ConsumerWidget {
           }),
           const SizedBox(width: HollowSpacing.xs),
 
-          // Conferences button — opens the Conferences center tab.
           Builder(builder: (context) {
             final conferencesOpen = ref.watch(conferenceTabOpenProvider);
             return HollowTooltip(
               message: 'Conferences',
               child: HollowPressable(
                 semanticLabel: 'Conferences',
-                // Toggles: pressing the lit button again is how you get back
-                // to what you were doing (issue #28).
+                // Toggles: the lit button is how you get back to what you were
+                // doing (issue #28).
                 onTap: () => conferencesOpen
                     ? setShellTab(ref.read, null)
                     : ref.read(conferenceProvider.notifier).openTab(),
@@ -276,7 +265,6 @@ class FriendsBar extends ConsumerWidget {
           }),
           const SizedBox(width: HollowSpacing.xs),
 
-          // Help button (right side — symmetric with Add Friend on the left)
           Builder(builder: (context) {
             final helpOpen = ref.watch(helpPanelOpenProvider);
             return HollowTooltip(
@@ -306,19 +294,15 @@ class FriendsBar extends ConsumerWidget {
     );
   }
 
-  /// Saved messages behaves like the Conferences button next to it: press to
-  /// show, press again to put it away.
+  /// Press to show, press again to put away, like the Conferences button.
   ///
-  /// The two need different machinery for the same feel. Conferences is a
-  /// centre TAB layered over whatever is selected, so closing it is one
-  /// `setShellTab(null)` and the selection underneath re-appears. Saved
-  /// messages IS the selection — opening it replaces what was there — so
-  /// there is nothing underneath to reveal and "away" means Home.
+  /// The two need different machinery for the same feel: Conferences is a
+  /// centre tab layered over the selection, while Saved messages IS the
+  /// selection, so there is nothing underneath to reveal and "away" means Home.
   void _toggleSavedMessages(WidgetRef ref, String savedId) {
     final split = ref.read(splitViewProvider);
-    // In split view the right pane is its own context: the button targets
-    // that pane rather than the global selection, so there is no global
-    // "lit" state to toggle off. Same branch `_selectFriend` takes.
+    // In split view the button targets the right pane rather than the global
+    // selection, so there is no global "lit" state to toggle off.
     if (split.isSplit && split.focusedPane == 1) {
       _selectFriend(ref, savedId);
       return;
@@ -330,10 +314,8 @@ class FriendsBar extends ConsumerWidget {
     _selectFriend(ref, savedId);
   }
 
-  /// The exact inverse of [_selectFriend]'s non-split branch — same providers,
-  /// peer cleared instead of set. Deliberately does NOT close an open split:
-  /// the press that lit this button didn't open one, so putting it away
-  /// shouldn't tear one down.
+  /// The exact inverse of [_selectFriend]'s non-split branch. Deliberately does
+  /// NOT close an open split: the press that lit this button did not open one.
   void _clearToHome(WidgetRef ref) {
     setShellTab(ref.read, null);
     ref.read(selectedPeerProvider.notifier).state = null;
@@ -357,10 +339,8 @@ class FriendsBar extends ConsumerWidget {
       transitionDuration: HollowDurations.normal,
       pageBuilder: (context, anim1, anim2) {
         // Padding, not just Center: the interface zoom shrinks the logical
-        // viewport (`window / scale`), so at 200% on 1080p this 520x480 popup
-        // is laid out inside ~960x504. Flutter's constraint enforcement stops
-        // it overflowing, but without a margin it clamps flush to the window
-        // edges and loses the rounded border that tells you it's a popup.
+        // viewport, and with no margin the popup clamps flush to the window
+        // edges and loses the rounded border that says it is a popup.
         return const Center(
           child: Padding(
             padding: EdgeInsets.all(HollowSpacing.lg),
@@ -408,11 +388,9 @@ class _FriendsManagerState extends ConsumerState<_FriendsManager> {
     final hollow = HollowTheme.of(context);
     final friends = ref.watch(friendsProvider);
 
-    // Accepted list is master-collapsed + deduped + sorted by the shared provider
-    // (so a friend stranded under a device id by a nickname-add resolves to the
-    // right person here too). Pending requests stay raw — the device→master
-    // mapping usually isn't known until after acceptance (the re-key then moves
-    // the row to the master).
+    // The accepted list is master-collapsed and deduped by the shared provider.
+    // Pending requests stay raw, because the device to master mapping is not
+    // usually known until after acceptance.
     final accepted = ref.watch(sortedFriendsProvider);
     final incoming = friends.values
         .where((f) => f.status == 'pending' && f.direction == 'incoming')
@@ -441,7 +419,6 @@ class _FriendsManagerState extends ConsumerState<_FriendsManager> {
         ),
         child: Column(
           children: [
-            // Header with title + close
             Container(
               height: 48,
               padding: const EdgeInsets.symmetric(
@@ -478,7 +455,6 @@ class _FriendsManagerState extends ConsumerState<_FriendsManager> {
               ),
             ),
 
-            // Tab bar
             Container(
               height: 40,
               padding: const EdgeInsets.symmetric(
@@ -490,9 +466,8 @@ class _FriendsManagerState extends ConsumerState<_FriendsManager> {
                   bottom: BorderSide(color: hollow.border),
                 ),
               ),
-              // Five labelled tabs with counts and badges — a bare Row
-              // overflows at a larger-text setting and clips "Add Friend"
-              // out of reach.
+              // A bare Row overflows at a larger-text setting and clips the
+              // last tab out of reach.
               child: EdgeScrollRow(
                 semanticLabel: 'tabs',
                 children: [
@@ -537,7 +512,6 @@ class _FriendsManagerState extends ConsumerState<_FriendsManager> {
               ),
             ),
 
-            // Tab content
             Expanded(
               child: AnimatedSwitcher(
                 duration: HollowDurations.fast,
@@ -648,7 +622,7 @@ class _TabButton extends StatelessWidget {
   }
 }
 
-/// Friends list tab — shows accepted friends with remove button.
+/// Friends list tab.
 class _FriendsListTab extends ConsumerWidget {
   final List<FriendInfo> accepted;
   const _FriendsListTab({super.key, required this.accepted});
@@ -787,9 +761,9 @@ class _FriendsListTab extends ConsumerWidget {
                     semanticLabel: 'Remove friend',
                     onTap: () async {
                       final peerId = friend.peerId;
-                      // Capture notifiers/state up front — the awaited
-                      // removal rebuilds the friends list and may unmount
-                      // this row before the cleanup below runs.
+                      // Captured up front: the awaited removal rebuilds the
+                      // friends list and may unmount this row before the
+                      // cleanup below runs.
                       final favourites =
                           ref.read(favouriteFriendsProvider.notifier);
                       final selectedPeer =
@@ -813,11 +787,8 @@ class _FriendsListTab extends ConsumerWidget {
                         }
                         return;
                       }
-                      // Also remove from favourites.
                       favourites.remove(peerId);
-                      // Close chat if viewing this friend.
                       if (wasSelected) selectedPeer.state = null;
-                      // Close split pane if it shows this friend.
                       if (shownInSplit) splitView.closeSplit();
                     },
                     borderRadius:
@@ -836,7 +807,7 @@ class _FriendsListTab extends ConsumerWidget {
   }
 }
 
-/// Favourites reorder tab — drag to reposition favourite friends.
+/// Favourites reorder tab.
 class _FavouritesReorderTab extends ConsumerWidget {
   final List<FriendInfo> accepted;
   const _FavouritesReorderTab({super.key, required this.accepted});
@@ -849,7 +820,6 @@ class _FavouritesReorderTab extends ConsumerWidget {
     final online = ref.watch(onlineIdentitiesProvider);
     final acceptedIds = accepted.map((f) => f.peerId).toSet();
 
-    // Filter to valid favourites only.
     final validFavs = favourites.where((id) => acceptedIds.contains(id)).toList();
 
     if (validFavs.isEmpty) {
@@ -1073,9 +1043,8 @@ class _RequestsTabState extends ConsumerState<_RequestsTab> {
     );
   }
 
-  /// Await a friend-request mutation and surface failure — the notifier
-  /// rethrows (e.g. node not running), and a silent drop here left the row
-  /// stuck with no feedback.
+  /// Awaits a friend-request mutation and surfaces failure: the notifier
+  /// rethrows, and a silent drop leaves the row stuck with no feedback.
   Future<void> _requestAction(
       Future<void> Function() action, String failMsg) async {
     try {
@@ -1102,11 +1071,9 @@ class _RequestsTabState extends ConsumerState<_RequestsTab> {
       ),
       itemBuilder: (context, index) {
         final req = requests[index];
-        // Resolve the stored id → master for DISPLAY (name + avatar key on the
-        // master). A pending request added by nickname can be keyed under a device
-        // id until the backend re-key lands; resolving here heals the name/avatar
-        // immediately. Accept/reject still target `req.peerId` (the device that sent
-        // it / a reachable id), so only the display is resolved.
+        // DISPLAY only: a request added by nickname can be keyed under a device
+        // id until the re-key lands, and resolving heals the name and avatar.
+        // Accept and reject still target `req.peerId`, which is reachable.
         final displayId = ref.watch(deviceLinkProvider).identityOf(req.peerId);
         final name = displayNameFor(profiles, displayId);
         final direction = widget.direction;
@@ -1148,10 +1115,9 @@ class _RequestsTabState extends ConsumerState<_RequestsTab> {
                           fontSize: 10,
                         ),
                       ),
-                      // Reassure the sender that a pending outgoing request is
-                      // not lost while the other person is offline — it waits in
-                      // their mailbox and lands on their next boot (async
-                      // friending), even if the sender has since gone offline.
+                      // An outgoing request is not lost while the other person
+                      // is offline: it waits in their mailbox and lands on their
+                      // next boot, even if the sender has gone offline since.
                       if (direction == 'outgoing')
                         Padding(
                           padding: const EdgeInsets.only(top: 2),
@@ -1230,7 +1196,7 @@ class _RequestsTabState extends ConsumerState<_RequestsTab> {
   }
 }
 
-/// Add Friend tab — unified input: auto-detects peer ID vs nickname.
+/// Add Friend tab, taking either a peer id or a nickname.
 class _AddFriendTab extends ConsumerStatefulWidget {
   final TextEditingController controller;
   const _AddFriendTab({super.key, required this.controller});
@@ -1288,7 +1254,6 @@ class _AddFriendTabState extends ConsumerState<_AddFriendTab> {
             ],
           ),
           const SizedBox(height: HollowSpacing.xl),
-          // -- Your temporary nickname section --
           Divider(color: hollow.border, height: 1),
           const SizedBox(height: HollowSpacing.lg),
           Text(
@@ -1384,8 +1349,8 @@ class _AddFriendTabState extends ConsumerState<_AddFriendTab> {
   Future<void> _send() async {
     final input = widget.controller.text.trim();
     if (input.isEmpty) return;
-    // Await the send so a failure (e.g. node not running) surfaces here —
-    // the input is kept for a retry instead of toasting a false success.
+    // Awaited so a failure surfaces here and the input is kept for a retry,
+    // instead of toasting a false success.
     try {
       if (_isPeerId(input)) {
         await ref.read(friendsProvider.notifier).sendRequest(input);
@@ -1440,9 +1405,9 @@ class _FriendChip extends StatelessWidget {
 
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 3),
-      // Right click gives the chip the same conversation menu the sidebar DM
-      // tile has (issue #61, phase 4). A Consumer rather than a ref field:
-      // passing a WidgetRef into a constructor cascades rebuilds.
+      // The same conversation menu the sidebar DM tile has (issue #61). A
+      // Consumer rather than a ref field, because passing a WidgetRef into a
+      // constructor cascades rebuilds.
       child: Consumer(
         builder: (context, ref, child) => ContextMenuTarget(
           semanticLabel: 'Conversation actions',
@@ -1470,7 +1435,6 @@ class _FriendChip extends StatelessWidget {
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              // Avatar with status dot
               Stack(
                 clipBehavior: Clip.none,
                 children: [
@@ -1494,7 +1458,6 @@ class _FriendChip extends StatelessWidget {
                       ),
                     ),
                   ),
-                  // Unread indicator
                   if (unreadCount > 0)
                     Positioned(
                       left: -4,
@@ -1524,7 +1487,6 @@ class _FriendChip extends StatelessWidget {
                 ],
               ),
               const SizedBox(width: 6),
-              // Name
               ConstrainedBox(
                 constraints: const BoxConstraints(maxWidth: 72),
                 child: Text(

@@ -41,17 +41,13 @@ import 'package:hollow/src/core/brand_icons.dart';
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 import 'package:url_launcher/url_launcher.dart';
 
-/// Total visible DM message count across all conversations. An honest
-/// multi-device sync-comparison number: DMs fully converge across a person's
-/// devices (fan-out + sibling backfill), so two synced devices should report
-/// the same value. Channel messages are deliberately excluded — they are
-/// lazy-paged per device and would diverge even when fully synced.
+/// Total visible DM message count, the number two synced devices compare.
 ///
-/// Cheap (one indexed COUNT) and refreshed whenever the DM list changes. The
-/// stats card invalidates this on a DM event to keep it live.
+/// DMs fully converge across a person's devices, so both should report the
+/// same value. Channel messages are excluded: they are lazy-paged per device
+/// and would diverge even when fully synced.
 final _dmMessageCountProvider = FutureProvider.autoDispose<int>((ref) async {
-  // Recompute when a DM arrives/changes (last-message map is the cheapest
-  // proxy for "DM table changed").
+  // The last-message map is the cheapest proxy for "the DM table changed".
   ref.watch(lastDmMessageProvider);
   try {
     return await storage_api.countAllDmMessages();
@@ -60,8 +56,7 @@ final _dmMessageCountProvider = FutureProvider.autoDispose<int>((ref) async {
   }
 });
 
-/// Home dashboard — shown when no server or DM is selected in dock mode.
-/// Three-column layout: Profile | Recent Conversations | Stats overview.
+/// Home dashboard, shown when no server or DM is selected in dock mode.
 class HomeDashboard extends ConsumerWidget {
   const HomeDashboard({super.key});
 
@@ -69,7 +64,6 @@ class HomeDashboard extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final hollow = HollowTheme.of(context);
 
-    // Staggered reveal animations for each column.
     final leftReveal =
         StartupRevealScope.interval(context, 0.30, 0.55);
     final centerReveal =
@@ -77,8 +71,6 @@ class HomeDashboard extends ConsumerWidget {
     final rightReveal =
         StartupRevealScope.interval(context, 0.40, 0.65);
 
-    // Each column's content, reveal wrapper included; the widths are decided
-    // per-layout below (see `sideColumnWidths`).
     Widget revealed(Widget child, Animation<double>? reveal) {
       if (reveal == null) return child;
       return FadeTransition(
@@ -112,7 +104,7 @@ class HomeDashboard extends ConsumerWidget {
 
     return Container(
       color: hollow.background,
-      // Outside the padding on purpose — `sideColumnWidths` subtracts the
+      // Outside the padding on purpose: `dashboardColumnWidths` subtracts the
       // padding and dividers itself, so it needs the full width.
       child: LayoutBuilder(
         builder: (context, constraints) {
@@ -139,49 +131,41 @@ class HomeDashboard extends ConsumerWidget {
   }
 }
 
-/// Height band for the news panel in the network column. [_kNewsPanelMin] is
-/// enough to read a post heading plus the start of its body; [_kNewsPanelMax]
-/// exists to bound what the panel contributes to the column's intrinsic
-/// height — see the comment at its use site.
+/// Height band for the news panel. The minimum reads a post heading plus the
+/// start of its body; the maximum bounds what the panel contributes to the
+/// column's intrinsic height (see its use site).
 const double _kNewsPanelMin = 140;
 const double _kNewsPanelMax = 280;
 
-/// Natural widths of the two fixed dashboard columns, and the width the
-/// centre conversation list needs before they start giving ground.
+/// Natural widths of the two fixed columns, and the width the centre list
+/// needs before they start giving ground.
 const double _kLeftColumnWidth = 240;
 const double _kRightColumnWidth = 260;
 const double _kCentreColumnMin = 200;
 
 /// How far the side columns may shrink before the layout gives up a column
-/// instead. Squeezing harder than this does not degrade gracefully — at 0.62
-/// the relay `StatBar`s, the stats rows and the conversation header all start
-/// overflowing on their own, so the columns would fit at the cost of their
-/// contents.
+/// instead. Squeezing harder makes the relay bars, stats rows and conversation
+/// header overflow on their own, fitting the columns at the cost of contents.
 const double _kSideColumnMinFactor = 0.85;
 
-/// Below this the dashboard drops to two columns. Three need
-/// 204 + 221 of side column, two dividers and the outer padding, and still
-/// leave the conversation list something to live in.
+/// Below this the dashboard drops to two columns, so the conversation list
+/// keeps something to live in.
 const double _kThreeColumnMin = 720;
 
 /// The dashboard layout for a given width.
 ///
-/// The zoom shrinks the viewport horizontally as well as vertically
-/// (`window / scale`), and 240 + 260 of fixed column plus dividers does not
-/// fit once the dashboard is ~640 wide — 200% zoom on a 1280px window. The
-/// side columns give ground together so the layout stays balanced, and below
-/// [_kThreeColumnMin] the Network column drops out entirely rather than every
-/// card inside it breaking. That mirrors the member panel, which already
-/// auto-hides when the shell gets narrow.
+/// The interface zoom shrinks the viewport horizontally too, so the fixed
+/// columns stop fitting at high zoom. They give ground together to stay
+/// balanced, and below [_kThreeColumnMin] the Network column drops out rather
+/// than every card inside it breaking.
 ({double left, double? right}) dashboardColumnWidths(double available) {
-  // Outer padding (xl each side) + two dividers, each lg padding either side.
+  // Outer padding either side, plus two dividers with their own padding.
   const divider = HollowSpacing.lg * 2 + 1;
   const chrome = HollowSpacing.xl * 2 + divider * 2;
   if (!available.isFinite) {
     return (left: _kLeftColumnWidth, right: _kRightColumnWidth);
   }
   if (available < _kThreeColumnMin) {
-    // Two columns: profile + conversations, one divider between them.
     final free = available - HollowSpacing.xl * 2 - divider;
     return (left: _kLeftColumnWidth.clamp(0.0, free - _kCentreColumnMin), right: null);
   }
@@ -198,35 +182,20 @@ const double _kThreeColumnMin = 720;
   );
 }
 
-/// The linked Twitch name for the profile badge.
-///
-/// Was `FutureBuilder(future: twitchGetUsername())` built inline, which
-/// creates a NEW future — and so fires a fresh FFI call — on every rebuild of
-/// the profile column, and this column rebuilds on every connection-status
-/// tick. A provider caches it and, as a bonus, routes a failure into
-/// `AsyncError` instead of throwing out of `build()`.
 /// Our own verified Twitch login, read exactly as a viewer reads it.
 ///
 /// Deliberately NOT `twitchGetUsername()`, which answers from our own OAuth
 /// token: a connected account is not a verified one, and the purple chip means
-/// verified everywhere else. Showing it here off the token would tell a person
-/// they are wearing a mark that nobody else can see.
+/// verified everywhere else.
 String? _myVerifiedTwitch(WidgetRef ref, String? peerId) =>
     peerId == null ? null : ref.watch(twitchLoginProvider(peerId));
 
 /// A fixed-width dashboard column that scrolls once it outgrows the viewport.
 ///
-/// The two side columns were plain [Column]s — only the centre one had a
-/// [ListView] — so they simply got clipped by the shell's `ClipRect` with no
-/// scrollbar and nothing to say more was there. That is invisible at 100%
-/// (the dashboard fits) and unmissable once the interface zoom shrinks the
-/// logical viewport: at 165% on a 1596x991 window the dashboard has ~580
-/// logical px of height, and the profile column's "Your Stats" card and the
-/// network column's news section fall off the bottom.
-///
-/// The scrollbar uses the DEFAULT fade behaviour, matching the Recent
-/// Conversations list beside it — `thumbVisibility: true` pinned it on screen
-/// permanently, which read as a stuck UI element rather than a hint.
+/// A plain [Column] here is clipped by the shell's `ClipRect` with nothing to
+/// say more is below, which only shows up once the interface zoom shrinks the
+/// logical viewport. The scrollbar keeps the DEFAULT fade behaviour, since
+/// `thumbVisibility: true` reads as a stuck UI element rather than a hint.
 class _ScrollableColumn extends StatefulWidget {
   final double width;
   final Widget child;
@@ -251,20 +220,15 @@ class _ScrollableColumnState extends State<_ScrollableColumn> {
     return SizedBox(
       width: widget.width,
       child: LayoutBuilder(
-        // No explicit Scrollbar: HollowScrollBehavior gives every desktop
-        // vertical scrollable a gutter-reserved one (issue #54), and a manual
-        // wrapper here only painted a second thumb on top of it.
+        // No explicit Scrollbar: HollowScrollBehavior already gives every
+        // desktop vertical scrollable a gutter-reserved one (issue #54), and a
+        // manual wrapper paints a second thumb on top of it.
         builder: (context, constraints) => SingleChildScrollView(
           controller: _controller,
-          // minHeight + IntrinsicHeight, not a bare scroll view. The
-          // network column ends in `Expanded(_NewsPanel)` — it is MEANT to
-          // absorb the slack on a tall window and scroll internally — and
-          // an Expanded inside an unbounded scroll view is a hard error
-          // ("RenderFlex children have non-zero flex but incoming height
-          // constraints are unbounded"). This keeps the column exactly as
-          // it is whenever it fits, and lets it fall back to its intrinsic
-          // height — news panel at its natural size — when it does not,
-          // which is the case that needed a scrollbar.
+          // minHeight + IntrinsicHeight, not a bare scroll view: the network
+          // column ends in a flexible news panel, and flex inside an unbounded
+          // scroll view is a hard error. This keeps the column as it is
+          // whenever it fits and falls back to its intrinsic height when not.
           child: ConstrainedBox(
             constraints: BoxConstraints(minHeight: constraints.maxHeight),
             child: IntrinsicHeight(child: widget.child),
@@ -294,8 +258,8 @@ class _ProfileColumn extends ConsumerWidget {
     final profile = localProfile;
     final statusText = profile?.status ?? '';
     final aboutMe = profile?.aboutMe ?? '';
-    // "Online" here means actually reachable (relay connected), not merely that
-    // the local node started — otherwise you'd show Online with no internet.
+    // "Online" means actually reachable (relay connected), not merely that the
+    // local node started, which would show Online with no internet.
     final isOnline = ref.watch(overallConnectionProvider).isOnline;
     final amInvisible =
         ref.watch(invisibleModeProvider);
@@ -306,7 +270,6 @@ class _ProfileColumn extends ConsumerWidget {
       children: [
         const SizedBox(height: HollowSpacing.lg),
 
-        // Avatar
         if (localPeerId != null)
           HollowAvatar(peerId: localPeerId, size: 72, animate: true)
         else
@@ -321,7 +284,6 @@ class _ProfileColumn extends ConsumerWidget {
 
         const SizedBox(height: HollowSpacing.md),
 
-        // Name
         Text(
           displayName,
           style: HollowTypography.heading.copyWith(
@@ -335,7 +297,6 @@ class _ProfileColumn extends ConsumerWidget {
 
         const SizedBox(height: HollowSpacing.xs),
 
-        // Online status
         Row(
           mainAxisSize: MainAxisSize.min,
           children: [
@@ -360,7 +321,6 @@ class _ProfileColumn extends ConsumerWidget {
           ],
         ),
 
-        // Twitch badge
         if (verifiedTwitch != null && verifiedTwitch.isNotEmpty)
           Padding(
             padding: const EdgeInsets.only(top: HollowSpacing.sm),
@@ -404,7 +364,6 @@ class _ProfileColumn extends ConsumerWidget {
             ),
           ),
 
-        // Custom status
         if (statusText.isNotEmpty) ...[
           const SizedBox(height: HollowSpacing.sm),
           Text(
@@ -420,7 +379,6 @@ class _ProfileColumn extends ConsumerWidget {
           ),
         ],
 
-        // Divider + About Me
         if (aboutMe.isNotEmpty) ...[
           Padding(
             padding: const EdgeInsets.symmetric(
@@ -450,23 +408,14 @@ class _ProfileColumn extends ConsumerWidget {
         ] else
           const SizedBox(height: HollowSpacing.lg),
 
-        // System status — replaces the old Recovery Phrase card. Shows the calm
-        // "All systems operational" line when healthy, and the active notice
-        // (with countdown) otherwise. The recovery phrase stays reachable via
-        // the user bar + Settings → Security.
         const HomeStatusCard(),
 
         const SizedBox(height: HollowSpacing.md),
 
-        // Sync / stats card — fills the gap below the recovery card. Shows
-        // locally-knowable counts that converge across a person's devices, so
-        // two devices can be eyeball-compared for sync (DM messages especially:
-        // channel messages are lazy-paged and intentionally NOT counted here).
         _SyncStatsCard(hollow: hollow),
 
         const Spacer(),
 
-        // Peer ID (copyable, centered, bottom)
         if (localPeerId != null)
           HollowPressable(
             onTap: () {
@@ -507,14 +456,11 @@ class _ProfileColumn extends ConsumerWidget {
   }
 }
 
-/// Sync / stats card on the left column. Shows counts that fully converge
-/// across a person's devices, so two devices can be compared at a glance to
-/// confirm they are in sync. Local-only: no cross-device protocol — the numbers
-/// themselves are the sync truth.
+/// Counts that fully converge across a person's devices, so two devices can be
+/// compared at a glance. Local-only: the numbers themselves are the sync truth.
 ///
-/// Deliberately omits channel-message counts: those are lazy-paged per device
-/// (each device only stores the slices it has scrolled to) and would differ
-/// even when fully synced, which would falsely read as "out of sync".
+/// Deliberately omits channel messages, which are lazy-paged per device and
+/// would differ even when fully synced, reading falsely as "out of sync".
 class _SyncStatsCard extends ConsumerWidget {
   final HollowTheme hollow;
   const _SyncStatsCard({required this.hollow});
@@ -525,8 +471,8 @@ class _SyncStatsCard extends ConsumerWidget {
     final devices = ref.watch(myDevicesProvider);
     final dmCount = ref.watch(_dmMessageCountProvider);
 
-    // Count via the master-collapsed+deduped list so a friend stranded under a
-    // device id isn't double-counted (nor counted separately from its master).
+    // Master-collapsed and deduped, so a friend stranded under a device id is
+    // not counted twice.
     final friendCount = ref.watch(sortedFriendsProvider).length;
     final serverCount = servers.length;
     final devicesOnline = devices.where((d) => d.online).length;
@@ -585,10 +531,9 @@ class _SyncStatsCard extends ConsumerWidget {
             ),
           ),
 
-          // Devices line only matters once you've linked a second device. On a
-          // single-device install it's just "1" — show it anyway as a gentle
-          // hint that linking exists, but with the online/total form that
-          // becomes the actual sync indicator on multi-device.
+          // Shown even on a single-device install, as a hint that linking
+          // exists; the online/total form is the sync indicator once there are
+          // siblings.
           const SizedBox(height: HollowSpacing.xs + 2),
           _StatRow(
             hollow: hollow,
@@ -597,8 +542,8 @@ class _SyncStatsCard extends ConsumerWidget {
             value: deviceCount > 1
                 ? '$devicesOnline / $deviceCount online'
                 : '1',
-            // When you have siblings, green if every one is online (actively
-            // converging) — a quick "are we synced right now?" tell.
+            // Green only when every sibling is online, so the colour answers
+            // "are we converging right now?".
             valueColor: deviceCount > 1
                 ? (devicesOnline == deviceCount
                     ? hollow.success
@@ -665,11 +610,9 @@ class _RecentConversationsColumn extends ConsumerWidget {
     final online = ref.watch(onlineIdentitiesProvider);
     final dmUnreads = ref.watch(unreadProvider.select((s) => s.dmUnreadCounts));
 
-    // Build list of friends with their last message, sorted by recency. Use the
-    // shared sorted provider, which collapses a friend's stored id → master and
-    // dedupes — so a friend stranded under a DEVICE id (nickname-added, pre-re-key)
-    // does NOT show as a phantom duplicate conversation here. Messages/unreads key
-    // on the master, so all lookups below resolve correctly.
+    // The shared provider collapses a friend's stored id to their master and
+    // dedupes, so a friend stranded under a DEVICE id does not appear as a
+    // phantom duplicate conversation.
     final accepted = ref.watch(sortedFriendsProvider);
 
     final conversations = <_ConversationInfo>[];
@@ -685,13 +628,11 @@ class _RecentConversationsColumn extends ConsumerWidget {
       ));
     }
 
-    // Sort by most recent first.
     conversations.sort((a, b) => b.timestamp.compareTo(a.timestamp));
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        // Header
         Padding(
           padding: const EdgeInsets.only(
             top: HollowSpacing.lg,
@@ -702,9 +643,8 @@ class _RecentConversationsColumn extends ConsumerWidget {
               Icon(LucideIcons.messageCircle, size: 18,
                   color: hollow.textSecondary),
               const SizedBox(width: HollowSpacing.sm),
-              // Flexible: this column is the Expanded one, so the zoom
-              // squeezes it first — a bare Text here overflowed by 162px
-              // once the viewport reached ~800 logical wide.
+              // This column is the Expanded one, so the zoom squeezes it
+              // first and a bare Text here overflows.
               Flexible(
                 child: Text(
                   'Recent Conversations',
@@ -759,8 +699,8 @@ class _RecentConversationsColumn extends ConsumerWidget {
                   padding: const EdgeInsets.only(
                     bottom: HollowSpacing.xs,
                   ),
-                  // Right click: the same conversation menu the sidebar DM
-                  // tile carries (issue #61, phase 4).
+                  // The same conversation menu the sidebar DM tile carries
+                  // (issue #61).
                   child: ContextMenuTarget(
                     semanticLabel: 'Conversation actions',
                     onOpen: (anchor) => showUserContextMenu(
@@ -791,7 +731,6 @@ class _RecentConversationsColumn extends ConsumerWidget {
                     ),
                     child: Row(
                       children: [
-                        // Avatar with status
                         Stack(
                           clipBehavior: Clip.none,
                           children: [
@@ -823,7 +762,6 @@ class _RecentConversationsColumn extends ConsumerWidget {
                         ),
                         const SizedBox(width: HollowSpacing.sm),
 
-                        // Name + last message
                         Expanded(
                           child: Column(
                             crossAxisAlignment:
@@ -875,7 +813,6 @@ class _RecentConversationsColumn extends ConsumerWidget {
                           ),
                         ),
 
-                        // Time + unread badge (vertically centered)
                         if (conv.lastMessage != null) ...[
                           const SizedBox(width: HollowSpacing.sm),
                           Text(
@@ -956,7 +893,6 @@ class _ConversationInfo {
   });
 }
 
-/// Right column — stats overview.
 /// Right column — live network & connection status.
 class _NetworkColumn extends ConsumerWidget {
   final HollowTheme hollow;
@@ -965,38 +901,31 @@ class _NetworkColumn extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final peers = ref.watch(peersProvider);
-    // Multi-device: a friend can be online via a device whose peer_id differs
-    // from their master friend.peerId, so the master key won't be in `peers`.
+    // A friend can be online via a device whose peer_id differs from their
+    // master, so the master key will not be in `peers`.
     final online = ref.watch(onlineIdentitiesProvider);
     final relayStats = ref.watch(relayStatsProvider);
 
-    // Real connection state (local node + relay WS), not just "node started".
+    // Real connection state (local node and relay WS), not "node started".
     final overall = ref.watch(overallConnectionProvider);
 
-    // Friends connection status (granular via connectionStatusProvider).
     final connStatus = ref.watch(connectionStatusProvider);
-    // Master-collapsed list: each friend's `peerId` is their MASTER, so the
-    // `links.identityOf(device) == f.peerId` device scans below match. A friend
-    // stranded under a device id would otherwise never match its own devices and
-    // stick in a fake "connecting"/offline state.
+    // Master-collapsed, so the `links.identityOf(device) == f.peerId` scans
+    // below match; a friend stranded under a device id would never match its
+    // own devices and would stick in a fake "connecting" state.
     final accepted = ref.watch(sortedFriendsProvider);
-    // Multi-device (Phase 6): `peers` / `connStatus` are keyed by the DEVICE
-    // peer_id the relay reports, but a friend is `f.peerId` = their MASTER id.
-    // So resolve per friend by scanning for ANY of their devices: a friend is
-    // encrypted/connected if any device session is, online if any device is in
-    // `online` (master-collapsed). Looking up the master id directly leaves a
-    // multi-device friend stuck in a fake "connecting" state forever even though
-    // the DM works. Single-device: the device id IS the master, so this collapses
-    // to the old direct lookup.
+    // `peers` and `connStatus` are keyed by the DEVICE peer_id the relay
+    // reports while a friend is their MASTER id, so each friend resolves by
+    // scanning ANY of their devices. Looking the master up directly leaves a
+    // multi-device friend stuck in a fake "connecting" state while the DM works.
     final links = ref.watch(deviceLinkProvider);
     final encryptedFriends = <String>[];
     final activeFriends = <PeerConnectionStatus>[];
     final offlineFriends = <String>[];
     for (final f in accepted) {
-      // A device session for this friend's master that is encrypted?
       final hasEncrypted = peers.entries.any((e) =>
           links.identityOf(e.key) == f.peerId && e.value.isEncrypted);
-      // The most-advanced connection status across this friend's devices.
+      // The most-advanced status across this friend's devices.
       PeerConnectionStatus? bestCs;
       for (final e in connStatus.peers.entries) {
         if (links.identityOf(e.key) != f.peerId) continue;
@@ -1012,8 +941,8 @@ class _NetworkColumn extends ConsumerWidget {
       } else if (bestCs != null) {
         activeFriends.add(bestCs);
       } else if (online.contains(f.peerId)) {
-        // Online via a device whose PeerInfo/connStatus isn't surfaced yet —
-        // count them as connecting, not offline.
+        // Online via a device whose status is not surfaced yet, so connecting
+        // rather than offline.
         activeFriends.add(PeerConnectionStatus(
           peerId: f.peerId,
           stage: PeerConnectionStage.keyExchange,
@@ -1027,7 +956,6 @@ class _NetworkColumn extends ConsumerWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        // Header
         Padding(
           padding: const EdgeInsets.only(
             top: HollowSpacing.lg,
@@ -1049,7 +977,6 @@ class _NetworkColumn extends ConsumerWidget {
           ),
         ),
 
-        // Node status
         Container(
           width: double.infinity,
           padding: const EdgeInsets.all(HollowSpacing.sm + 2),
@@ -1085,12 +1012,9 @@ class _NetworkColumn extends ConsumerWidget {
                       ),
                     ),
                     Builder(builder: (context) {
-                      // Count reachable FRIENDS (master identities), not raw relay
-                      // device peers. A just-removed friend can linger in `peers`
-                      // (still in a shared room) — counting raw peers showed a
-                      // phantom "1 peer reachable" after removal. Counting accepted
-                      // friends who are online keys on the relationship, not the
-                      // socket, so it drops to 0 the moment they're no longer a friend.
+                      // Reachable FRIENDS, not raw relay device peers: a
+                      // just-removed friend lingers in `peers` while still in a
+                      // shared room, so counting sockets shows a phantom peer.
                       final reachable =
                           accepted.where((f) => online.contains(f.peerId)).length;
                       return Text(
@@ -1110,11 +1034,9 @@ class _NetworkColumn extends ConsumerWidget {
 
         const SizedBox(height: HollowSpacing.lg),
 
-        // ── Friends Connections ──
         _SectionLabel(hollow: hollow, label: 'FRIENDS'),
         const SizedBox(height: HollowSpacing.sm),
 
-        // Active connections — per-peer detail rows
         for (final cs in activeFriends)
           _ConnectionRow(
             hollow: hollow,
@@ -1130,7 +1052,6 @@ class _NetworkColumn extends ConsumerWidget {
                 cs.stage != PeerConnectionStage.encrypted,
           ),
 
-        // Summary counters
         if (encryptedFriends.isNotEmpty)
           _CounterRow(
             hollow: hollow,
@@ -1164,7 +1085,6 @@ class _NetworkColumn extends ConsumerWidget {
 
         const SizedBox(height: HollowSpacing.lg),
 
-        // ── Relay Server ──
         _SectionLabel(hollow: hollow, label: 'RELAY SERVER'),
         const SizedBox(height: HollowSpacing.sm),
 
@@ -1172,21 +1092,11 @@ class _NetworkColumn extends ConsumerWidget {
 
         const SizedBox(height: HollowSpacing.lg),
 
-        // Flexible + a bounded box, not a bare `Expanded`.
-        //
-        // The panel is meant to absorb this column's slack and scroll its
-        // posts INTERNALLY, and it still does whenever there is room: loose
-        // fit hands it everything left over and its own Column fills it.
-        //
-        // The two bounds matter under the column's outer scroll view. `max`
-        // caps what this contributes to the column's INTRINSIC height —
-        // without it the intrinsic includes both posts at full un-scrolled
-        // height, which inflates the column past the viewport and hands the
-        // scrolling to the outer bar even on a tall window (the panel then
-        // never collapses into its own scrollbar, which is the regression).
-        // `min` is the other end: when the column really is too short, the
-        // panel stops at a usable size and the outer scroll takes over,
-        // instead of being squeezed to nothing the way it was in the report.
+        // Flexible plus a bounded box, not a bare `Expanded`: under the
+        // column's outer scroll view the max caps what this contributes to the
+        // INTRINSIC height, or the un-scrolled posts inflate the column past
+        // the viewport and the outer bar takes over the scrolling. The min
+        // stops the panel being squeezed to nothing on a short column.
         Flexible(
           child: ConstrainedBox(
             constraints: const BoxConstraints(
@@ -1199,7 +1109,6 @@ class _NetworkColumn extends ConsumerWidget {
 
         const SizedBox(height: HollowSpacing.sm),
 
-        // ── Online Users (bottom) ──
         Padding(
           padding: const EdgeInsets.only(bottom: HollowSpacing.sm),
           child: Row(
@@ -1254,7 +1163,7 @@ class _SectionLabel extends StatelessWidget {
   }
 }
 
-/// News panel — fetches developer posts from news.json, shows version + updates.
+/// News panel: developer posts from news.json, plus version and updates.
 class _NewsPanel extends ConsumerWidget {
   final HollowTheme hollow;
   const _NewsPanel({required this.hollow});
@@ -1561,7 +1470,7 @@ class _NewsPostEntry extends StatelessWidget {
   }
 }
 
-/// Relay server stats card — RAM + bandwidth progress bars + synced poll bar.
+/// Relay server stats card: RAM and bandwidth bars, plus the poll-cycle bar.
 class _RelayStatsCard extends ConsumerStatefulWidget {
   final HollowTheme hollow;
   final RelayStats stats;
@@ -1574,31 +1483,18 @@ class _RelayStatsCard extends ConsumerStatefulWidget {
 class _RelayStatsCardState extends ConsumerState<_RelayStatsCard> {
   /// Progress of the decorative poll-cycle sweep, 0..1.
   ///
-  /// Deliberately a [Timer] and a [ValueNotifier] rather than an
-  /// [AnimationController]. The controller's duration was 7 seconds and
-  /// `didUpdateWidget` restarted it on every stats fetch — which arrives
-  /// every 7 seconds. It therefore never finished before being restarted, so
-  /// its Ticker never stopped, so this card asked the engine for a frame at
-  /// every vsync for as long as Home was open.
-  ///
-  /// Measured before the change: an idle Home ran at **fps=240** on a 240Hz
-  /// display, 1.8ms of raster each, or 43% of a CPU core — to sweep a bar
-  /// three pixels tall. Nothing about the animation was wrong; the cost was
-  /// entirely in asking for 240 frames a second to draw it.
-  ///
-  /// A ramp over seven seconds does not need vsync, and it turns out it does
-  /// not want to be a ramp at all: it advances ONE STEP PER SECOND, seven
-  /// steps to fill. That reads as what it actually is — a countdown to the
-  /// next poll — where a smooth crawl just read as a loading bar. Seven
-  /// frames per cycle instead of 1,680, and it is the ONE thing on an
-  /// otherwise still Home screen, so those seven frames are the whole cost.
+  /// A [Timer] and a [ValueNotifier], never an [AnimationController]: one
+  /// restarted as often as its own duration never stops its Ticker, and a
+  /// running Ticker asks the engine for a frame at every vsync for as long as
+  /// Home is open (feedback_ticker_is_a_frame_request). It advances one step
+  /// per second, which also reads as the countdown to the next poll that it is.
   final ValueNotifier<double> _sweep = ValueNotifier<double>(0);
   final Stopwatch _since = Stopwatch();
   Timer? _timer;
   int _lastFetchCount = 0;
 
-  /// One step per second, seven to fill — matched to the 7s stats poll in
-  /// `relay_stats_provider.dart`. Keep them in step if either moves.
+  /// Matched to the 7s stats poll in `relay_stats_provider.dart`. Keep the two
+  /// in step if either moves.
   static const _sweepStep = Duration(seconds: 1);
   static const _sweepSteps = 7;
 
@@ -1624,7 +1520,7 @@ class _RelayStatsCardState extends ConsumerState<_RelayStatsCard> {
           .floor()
           .clamp(0, _sweepSteps);
       _sweep.value = step / _sweepSteps;
-      // Full: stop asking for frames until the next fetch restarts it.
+      // Stop asking for frames until the next fetch restarts the sweep.
       if (step >= _sweepSteps) {
         t.cancel();
         _timer = null;
@@ -1636,7 +1532,6 @@ class _RelayStatsCardState extends ConsumerState<_RelayStatsCard> {
   @override
   void didUpdateWidget(_RelayStatsCard oldWidget) {
     super.didUpdateWidget(oldWidget);
-    // Reset the sweep when a new fetch completes.
     if (widget.stats.fetchCount != _lastFetchCount) {
       _lastFetchCount = widget.stats.fetchCount;
       _restartSweep();
@@ -1665,7 +1560,6 @@ class _RelayStatsCardState extends ConsumerState<_RelayStatsCard> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // RAM usage
           StatBar(
             hollow: hollow,
             icon: LucideIcons.memoryStick,
@@ -1674,7 +1568,6 @@ class _RelayStatsCardState extends ConsumerState<_RelayStatsCard> {
             progress: stats.memUsagePercent,
           ),
           const SizedBox(height: HollowSpacing.sm),
-          // Bandwidth usage
           StatBar(
             hollow: hollow,
             icon: LucideIcons.activity,
@@ -1683,7 +1576,6 @@ class _RelayStatsCardState extends ConsumerState<_RelayStatsCard> {
             progress: stats.bandwidthUsagePercent,
           ),
           const SizedBox(height: HollowSpacing.sm),
-          // Poll cycle bar — synced to 5s fetch interval
           RepaintBoundary(
             child: ValueListenableBuilder<double>(
             valueListenable: _sweep,
@@ -1708,7 +1600,7 @@ class _RelayStatsCardState extends ConsumerState<_RelayStatsCard> {
   }
 }
 
-/// Row showing a friend currently in-progress (encrypting).
+/// Row for a friend whose session is still being established.
 class _ConnectionRow extends StatelessWidget {
   final HollowTheme hollow;
   final String peerId;
@@ -1781,7 +1673,7 @@ class _ConnectionRow extends StatelessWidget {
   }
 }
 
-/// Compact counter row (e.g., "✓ Encrypted  3").
+/// Compact counter row, e.g. "Encrypted 3".
 class _CounterRow extends StatelessWidget {
   final HollowTheme hollow;
   final IconData icon;

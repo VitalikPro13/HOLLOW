@@ -58,10 +58,9 @@ class _MobileFriendsTabState extends ConsumerState<MobileFriendsTab> {
     final links = ref.watch(deviceLinkProvider);
     ref.watch(localNicknameProvider);
 
-    // Accepted friends come master-collapsed + deduped from the shared provider
-    // (parity with desktop) so a friend stranded under a DEVICE id doesn't appear
-    // twice or under a raw id. Pending requests stay raw (their device→master
-    // mapping usually isn't known until after acceptance).
+    // Accepted friends arrive master-collapsed and deduped, so a friend
+    // stranded under a DEVICE id does not appear twice. Pending requests stay
+    // raw, their mapping being unknown until acceptance.
     final accepted = ref.watch(sortedFriendsProvider);
     final incoming = <FriendInfo>[];
     final outgoing = <FriendInfo>[];
@@ -74,8 +73,8 @@ class _MobileFriendsTabState extends ConsumerState<MobileFriendsTab> {
       }
     }
 
-    // Favourite ids are resolved device→master before matching, so a favourite
-    // saved under a device id still matches its (collapsed) friend row.
+    // Resolved device to master first, so a favourite saved under a device id
+    // still matches its collapsed friend row.
     final favMasters = favourites.map(links.identityOf).toList();
     int favRank(String peerId) {
       final i = favMasters.indexOf(peerId);
@@ -83,7 +82,6 @@ class _MobileFriendsTabState extends ConsumerState<MobileFriendsTab> {
     }
     bool isFav(String peerId) => favMasters.contains(peerId);
 
-    // Separate favourites from non-favourites
     final favFriends = <FriendInfo>[];
     final onlineFriends = <FriendInfo>[];
     final offlineFriends = <FriendInfo>[];
@@ -101,7 +99,6 @@ class _MobileFriendsTabState extends ConsumerState<MobileFriendsTab> {
       }
     }
 
-    // Sort favourites by fav order, others alphabetically
     favFriends.sort((a, b) => favRank(a.peerId).compareTo(favRank(b.peerId)));
 
     int sortByName(FriendInfo a, FriendInfo b) =>
@@ -114,7 +111,6 @@ class _MobileFriendsTabState extends ConsumerState<MobileFriendsTab> {
 
     return CustomScrollView(
       slivers: [
-        // Search + Add Friend
         SliverToBoxAdapter(
           child: Padding(
             padding: const EdgeInsets.fromLTRB(
@@ -140,7 +136,6 @@ class _MobileFriendsTabState extends ConsumerState<MobileFriendsTab> {
           ),
         ),
 
-        // Pending requests
         if (hasPending && _searchQuery.isEmpty) ...[
           _SectionHeader(label: 'REQUESTS', count: incoming.length + outgoing.length),
           SliverList(
@@ -156,7 +151,6 @@ class _MobileFriendsTabState extends ConsumerState<MobileFriendsTab> {
           ),
         ],
 
-        // Favourites
         if (favFriends.isNotEmpty) ...[
           _SectionHeader(label: 'FAVOURITES', count: favFriends.length),
           SliverList(
@@ -170,7 +164,6 @@ class _MobileFriendsTabState extends ConsumerState<MobileFriendsTab> {
           ),
         ],
 
-        // Online
         if (onlineFriends.isNotEmpty) ...[
           _SectionHeader(label: 'ONLINE', count: onlineFriends.length),
           SliverList(
@@ -181,7 +174,6 @@ class _MobileFriendsTabState extends ConsumerState<MobileFriendsTab> {
           ),
         ],
 
-        // Offline
         if (offlineFriends.isNotEmpty) ...[
           _SectionHeader(label: 'OFFLINE', count: offlineFriends.length),
           SliverList(
@@ -192,7 +184,6 @@ class _MobileFriendsTabState extends ConsumerState<MobileFriendsTab> {
           ),
         ],
 
-        // Empty state
         if (accepted.isEmpty && !hasPending)
           SliverToBoxAdapter(
             child: Padding(
@@ -242,10 +233,6 @@ class _MobileFriendsTabState extends ConsumerState<MobileFriendsTab> {
   }
 }
 
-// ─────────────────────────────────────────────────
-// Section header
-// ─────────────────────────────────────────────────
-
 class _SectionHeader extends StatelessWidget {
   final String label;
   final int count;
@@ -281,10 +268,6 @@ class _SectionHeader extends StatelessWidget {
     );
   }
 }
-
-// ─────────────────────────────────────────────────
-// Friend row with long-press actions
-// ─────────────────────────────────────────────────
 
 class _FriendRow extends ConsumerWidget {
   final String peerId;
@@ -545,8 +528,8 @@ class _FriendRow extends ConsumerWidget {
           HollowButton.danger(
             onPressed: () async {
               Navigator.pop(context);
-              // Capture the notifier first — the awaited removal rebuilds the
-              // friends list and may unmount this tile.
+              // The awaited removal rebuilds the friends list and may unmount
+              // this tile.
               final favourites = ref.read(favouriteFriendsProvider.notifier);
               try {
                 await ref.read(friendsProvider.notifier).removeFriend(peerId);
@@ -557,8 +540,7 @@ class _FriendRow extends ConsumerWidget {
                 }
                 return;
               }
-              // Also drop them from favourites so no stale entry lingers (parity
-              // with desktop). peerId is the master from the collapsed list.
+              // Dropped from favourites too, so no stale entry lingers.
               favourites.remove(peerId);
               if (context.mounted) {
                 HollowToast.show(context, 'Friend removed',
@@ -572,10 +554,6 @@ class _FriendRow extends ConsumerWidget {
     );
   }
 }
-
-// ─────────────────────────────────────────────────
-// Action row for bottom sheet
-// ─────────────────────────────────────────────────
 
 class _ActionRow extends StatelessWidget {
   final IconData icon;
@@ -611,10 +589,6 @@ class _ActionRow extends StatelessWidget {
   }
 }
 
-// ─────────────────────────────────────────────────
-// Pending request row
-// ─────────────────────────────────────────────────
-
 class _PendingRow extends ConsumerWidget {
   final String peerId;
   final bool isIncoming;
@@ -648,9 +622,8 @@ class _PendingRow extends ConsumerWidget {
                     style: HollowTypography.bodySmall.copyWith(
                       color: hollow.textSecondary,
                     )),
-                // Reassure the sender that a pending outgoing request survives
-                // both people being offline — it waits in the recipient's
-                // mailbox and lands on their next boot (async friending).
+                // An outgoing request survives both people being offline: it
+                // waits in the recipient's mailbox until their next boot.
                 if (!isIncoming)
                   Padding(
                     padding: const EdgeInsets.only(top: 2),
@@ -726,10 +699,6 @@ class _PendingRow extends ConsumerWidget {
     );
   }
 }
-
-// ─────────────────────────────────────────────────
-// Add Friend bottom sheet
-// ─────────────────────────────────────────────────
 
 class _AddFriendSheet extends ConsumerStatefulWidget {
   const _AddFriendSheet();
@@ -865,8 +834,7 @@ class _AddFriendSheetState extends ConsumerState<_AddFriendSheet> {
                   onSubmitted: (_) => _send(),
                 ),
                 const SizedBox(height: HollowSpacing.md),
-                // Primary action sits directly under the input — no
-                // competing buttons in between.
+                // Directly under the input, with no competing buttons between.
                 HollowButton.filled(
                   onPressed: _sending ? null : _send,
                   expand: true,
@@ -876,9 +844,8 @@ class _AddFriendSheetState extends ConsumerState<_AddFriendSheet> {
 
                 const SizedBox(height: HollowSpacing.xl),
 
-                // Secondary: claim a nickname so OTHERS can add YOU.
-                // Visually boxed off so it doesn't read as part of the
-                // add-friend flow above.
+                // Claiming a nickname is the reverse direction, so it is boxed
+                // off from the add-friend flow above.
                 Container(
                   width: double.infinity,
                   padding: const EdgeInsets.all(HollowSpacing.md),

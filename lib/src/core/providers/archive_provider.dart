@@ -52,8 +52,6 @@ final archiveJumpToDateProvider = StateProvider<DateTime?>((ref) => null);
 /// Selected channel within an imported server archive (null = first channel).
 final importedArchiveSelectedChannelProvider = StateProvider<String?>((ref) => null);
 
-// ── Edit history for My Data archive viewers ───────────────────
-
 /// A single edit history entry.
 class ArchiveEditEntry {
   final String messageId;
@@ -139,8 +137,6 @@ final archiveChannelEditsProvider = FutureProvider.autoDispose
   return map;
 });
 
-// ── Conversation list providers ─────────────────────────────────
-
 /// All DM peers with message counts.
 final archiveDmListProvider =
     FutureProvider<List<ArchiveDmEntry>>((ref) async {
@@ -152,7 +148,6 @@ final archiveDmListProvider =
       entries.add(ArchiveDmEntry(peerId: pid, messageCount: count));
     }
   }
-  // Sort by message count descending (most active first).
   entries.sort((a, b) => b.messageCount.compareTo(a.messageCount));
   return entries;
 });
@@ -195,14 +190,11 @@ final archiveChannelListProvider =
   return groups;
 });
 
-// ── Message loading providers ───────────────────────────────────
-
 /// Load all DM messages for a peer (including deleted). Auto-disposes on key change.
 final archiveDmMessagesProvider = FutureProvider.autoDispose
     .family<List<ChatMessage>, String>((ref, peerId) async {
   final stored = await storage_api.loadAllDmMessages(peerId: peerId);
 
-  // Bulk-load reactions.
   final messageIds = stored
       .where((m) => m.messageId != null)
       .map((m) => m.messageId!)
@@ -221,7 +213,6 @@ final archiveDmMessagesProvider = FutureProvider.autoDispose
     } catch (_) {}
   }
 
-  // Bulk-load file attachments.
   final fileIds =
       stored.where((m) => m.fileId != null).map((m) => m.fileId!).toSet();
   final fileMap = <String, FileAttachment>{};
@@ -286,7 +277,6 @@ final archiveChannelMessagesProvider = FutureProvider.autoDispose
     channelId: channelId,
   );
 
-  // Bulk-load reactions.
   final messageIds = stored
       .where((m) => m.messageId != null)
       .map((m) => m.messageId!)
@@ -305,7 +295,6 @@ final archiveChannelMessagesProvider = FutureProvider.autoDispose
     } catch (_) {}
   }
 
-  // Bulk-load file attachments.
   final fileIds =
       stored.where((m) => m.fileId != null).map((m) => m.fileId!).toSet();
   final fileMap = <String, FileAttachment>{};
@@ -356,8 +345,6 @@ final archiveChannelMessagesProvider = FutureProvider.autoDispose
           ))
       .toList();
 });
-
-// ── Imported Archives providers ─────────────────────────────────
 
 /// Selected imported archive file path.
 final selectedImportedArchiveProvider = StateProvider<String?>((ref) => null);
@@ -422,8 +409,6 @@ final importedArchiveDataProvider =
   return await archive_api.loadArchive(archivePath: path);
 });
 
-// ── Conversion: ArchiveMessageFfi → ChatMessage / ChannelChatMessage ──
-
 List<ChatMessage> convertArchiveDmMessages(
     archive_api.ArchiveData data, String localPeerId) {
   final fileMap = {for (final f in data.files) f.fileId: f};
@@ -456,9 +441,8 @@ List<ChatMessage> convertArchiveDmMessages(
       replyToMid: m.replyToMid,
       reactions: reactions.isNotEmpty ? reactions : null,
       fileAttachment: fileAttachment,
-      // The Rust loader already verified this row against the v2 payload with
-      // every signed field (order_us / link-preview digest) in hand; carry its
-      // verdict so the proof dialog reports it instead of re-deriving one.
+      // The Rust loader already verified this row against the v2 payload with every
+      // signed field in hand; carry its verdict rather than re-deriving one.
       archiveSignatureValid: m.signatureValid,
     );
   }).toList();

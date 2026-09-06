@@ -18,8 +18,6 @@ import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-// ── Folder Icon (2x2 mini-grid) ─────────────────────────────────
-
 /// 2x2 mini-grid preview of the first 4 servers in a folder.
 class ServerFolderIcon extends ConsumerWidget {
   final FolderStripItem folder;
@@ -82,8 +80,8 @@ class ServerFolderIcon extends ConsumerWidget {
       );
     }
 
-    // Use LayoutBuilder so the grid adapts to the actual available space
-    // (important when parent has a border that eats into the size)
+    // The grid adapts to the space actually available, which a parent border
+    // eats into.
     return LayoutBuilder(builder: (context, constraints) {
       final actualSize = constraints.biggest.shortestSide > 0
           ? constraints.biggest.shortestSide
@@ -159,8 +157,6 @@ class ServerFolderIcon extends ConsumerWidget {
     });
   }
 }
-
-// ── Folder Popup ────────────────────────────────────────────────
 
 /// Show a folder popup overlay near the anchor.
 void showServerFolderPopup({
@@ -261,13 +257,11 @@ class _FolderPopupOverlayState extends ConsumerState<_FolderPopupOverlay>
     final avatars = ref.watch(serverAvatarProvider);
     final notifSettings = ref.watch(notificationSettingsProvider);
 
-    // Find the current folder state (may have changed)
     final currentFolder = layout
         .whereType<FolderStripItem>()
         .where((f) => f.id == widget.folder.id)
         .firstOrNull;
 
-    // Auto-dismiss if folder was dissolved
     if (currentFolder == null) {
       WidgetsBinding.instance.addPostFrameCallback((_) => widget.onDismiss());
       return const SizedBox.shrink();
@@ -283,7 +277,6 @@ class _FolderPopupOverlayState extends ConsumerState<_FolderPopupOverlay>
 
     final screenSize = MediaQuery.of(context).size;
 
-    // Position
     double left = widget.anchor.dx - cardWidth / 2;
     if (left < 8) left = 8;
     if (left + cardWidth > screenSize.width - 8) {
@@ -305,7 +298,6 @@ class _FolderPopupOverlayState extends ConsumerState<_FolderPopupOverlay>
 
     return Stack(
       children: [
-        // Dismiss barrier
         Positioned.fill(
           child: GestureDetector(
             onTap: _dismiss,
@@ -314,7 +306,6 @@ class _FolderPopupOverlayState extends ConsumerState<_FolderPopupOverlay>
           ),
         ),
 
-        // Popup card
         Positioned(
           left: left,
           top: top,
@@ -356,7 +347,6 @@ class _FolderPopupOverlayState extends ConsumerState<_FolderPopupOverlay>
                     child: Column(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        // Header
                         Padding(
                           padding: const EdgeInsets.fromLTRB(
                             cardPadding,
@@ -398,7 +388,6 @@ class _FolderPopupOverlayState extends ConsumerState<_FolderPopupOverlay>
                         ),
                         Container(height: 1, color: hollow.border),
 
-                        // Server grid
                         Padding(
                           padding: const EdgeInsets.all(cardPadding),
                           child: Wrap(
@@ -423,7 +412,6 @@ class _FolderPopupOverlayState extends ConsumerState<_FolderPopupOverlay>
                                       widget.onServerSelected(sid),
                                   onRemove: currentFolder.serverIds.length > 1
                                       ? () {
-                                          // Find the folder's index in the layout to insert after it
                                           final layoutItems = ref.read(serverStripLayoutProvider);
                                           final folderIdx = layoutItems.indexWhere(
                                               (e) => e is FolderStripItem && e.id == currentFolder.id);
@@ -449,8 +437,6 @@ class _FolderPopupOverlayState extends ConsumerState<_FolderPopupOverlay>
     );
   }
 }
-
-// ── Server item inside folder popup ─────────────────────────────
 
 class _FolderServerItem extends StatelessWidget {
   final String serverId;
@@ -489,7 +475,6 @@ class _FolderServerItem extends StatelessWidget {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            // Icon with unread badge + remove button
             Stack(
               clipBehavior: Clip.none,
               children: [
@@ -540,7 +525,6 @@ class _FolderServerItem extends StatelessWidget {
                       ),
                     ),
                   ),
-                // Remove from folder button
                 if (onRemove != null)
                   Positioned(
                     top: -5,
@@ -569,7 +553,6 @@ class _FolderServerItem extends StatelessWidget {
               ],
             ),
             const SizedBox(height: 3),
-            // Name
             Text(
               name.isNotEmpty ? name : 'Server',
               style: HollowTypography.caption.copyWith(
@@ -586,8 +569,6 @@ class _FolderServerItem extends StatelessWidget {
     );
   }
 }
-
-// ── Rename Dialog ───────────────────────────────────────────────
 
 /// Show a dialog to rename a folder.
 void showFolderRenameDialog({
@@ -691,8 +672,6 @@ class _FolderRenameDialogState extends ConsumerState<_FolderRenameDialog> {
     );
   }
 }
-
-// ── Shared Helpers ──────────────────────────────────────────────
 
 String _initialsFromName(String name) {
   final words = name.trim().split(RegExp(r'\s+'));

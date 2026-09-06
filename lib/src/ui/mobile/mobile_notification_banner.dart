@@ -15,22 +15,17 @@ import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/mobile/mobile_chat_route.dart';
 import 'package:hollow/src/ui/mobile/mobile_page_route.dart';
 
-/// Compact in-app banner — the ONLY mobile in-app notification. Shown WHILE the
-/// user is sitting inside a chat route, mounted inside [MobileChatRoute], so a
-/// message arriving in ANOTHER conversation still surfaces. Outside a chat there
-/// is no in-app banner (mobile relies on OS notifications then). Deliberately
-/// small (single card, last 3 lines, a countdown ring, anchored just below the
-/// chat header) so it doesn't cover the conversation. Tap opens, swipe-up or the
-/// 5s countdown dismisses.
+/// The ONLY mobile in-app notification, mounted inside [MobileChatRoute] so a
+/// message arriving in ANOTHER conversation still surfaces. Outside a chat
+/// route mobile relies on OS notifications instead, and deliberately shows no
+/// in-app banner.
 class MobileInChatBanner extends ConsumerStatefulWidget {
-  /// The conversation currently open in this route — banners for it are
-  /// suppressed (the user is already reading it).
+  /// The conversation open in this route; its own banners are suppressed.
   final String? currentPeerId;
   final String? currentServerId;
   final String? currentChannelId;
 
-  /// Top offset (below the header). The caller passes a value that clears the
-  /// chat header + any status strips.
+  /// Top offset the caller sizes to clear the chat header and status strips.
   final double topOffset;
 
   const MobileInChatBanner({
@@ -51,15 +46,13 @@ class _MobileInChatBannerState extends ConsumerState<MobileInChatBanner>
   late final AnimationController _controller;
   late final Animation<Offset> _slide;
   late final Animation<double> _opacity;
-  // Drives the 5s countdown ring (and the auto-dismiss when it completes).
+  // Drives the countdown ring and the auto-dismiss it completes into.
   late final AnimationController _countdown;
   static const int _countdownSeconds = 5;
 
-  /// A card only surfaces here if its newest message is at most this old.
-  /// Cards can be created while NO banner is mounted (user sitting on a main
-  /// tab — there is deliberately no banner outside chat routes), so without
-  /// this window an old notification would replay the moment the user enters
-  /// any chat. Unread badges already carry the stale signal.
+  /// A card only surfaces if its newest message is at most this old. Cards are
+  /// created while no banner is mounted, so without the window an old
+  /// notification replays the moment the user enters any chat.
   static const Duration _freshnessWindow = Duration(seconds: 10);
 
   NotificationCard? _currentCard;
@@ -92,10 +85,9 @@ class _MobileInChatBannerState extends ConsumerState<MobileInChatBanner>
 
   @override
   void dispose() {
-    // The banner leaves with its route. If a card is still on screen the user
-    // has seen it — drop it from the provider so it doesn't replay in the
-    // next chat they open. (Post-frame: providers must not be mutated while
-    // the tree is locked for dismantling.)
+    // A card still on screen has been seen, so it is dropped rather than
+    // replayed in the next chat. Post-frame, because providers must not be
+    // mutated while the tree is locked for dismantling.
     final shownKey = _currentCard?.sourceKey;
     if (shownKey != null) {
       final notifier = ref.read(systemNotificationProvider.notifier);
@@ -139,14 +131,11 @@ class _MobileInChatBannerState extends ConsumerState<MobileInChatBanner>
     _countdown.stop();
     ref.read(systemNotificationProvider.notifier).dismissCard(card.sourceKey);
 
-    // This banner only ever shows INSIDE a chat route, so a plain push would
-    // stack the new chat on top of the current one (and ping-ponging between
-    // two conversations via banners grew the stack unboundedly). Instead:
-    // write the new selection FIRST (so the popped route's guarded cleanup
-    // no-ops), then pop every chat route off the top, then push the new one.
-    //
-    // The container is captured now — this banner dies with the route it sits
-    // in, so `ref` is unusable by the time the pushed route pops.
+    // A plain push would stack chats without bound as banners ping-pong between
+    // conversations. The new selection is written FIRST so the popped route's
+    // guarded cleanup no-ops, then the chat routes pop, then the new one
+    // pushes. The container is captured now because this banner dies with its
+    // route, leaving `ref` unusable by the time the pushed route pops.
     final nav = Navigator.of(context, rootNavigator: true);
     final container = ProviderScope.containerOf(context, listen: false);
 
@@ -164,8 +153,7 @@ class _MobileInChatBannerState extends ConsumerState<MobileInChatBanner>
           builder: (_) => MobileChatRoute(peerId: peerId),
         ))
             .then((_) {
-          // Guarded: only clear if this chat is still the selected one — a
-          // later banner tap may have replaced it already.
+          // A later banner tap may have replaced this chat already.
           if (container.read(selectedPeerProvider) == peerId) {
             container.read(selectedPeerProvider.notifier).state = null;
           }
@@ -186,10 +174,9 @@ class _MobileInChatBannerState extends ConsumerState<MobileInChatBanner>
           ref.read(selectedChannelProvider.notifier).state = channelId;
           ref.read(selectedServerProvider.notifier).state = serverId;
           ref.read(selectedPeerProvider.notifier).state = null;
-          // Subscribe the relay topic — without this the freshly opened
-          // channel receives NO live topic broadcasts (the relay only routes
-          // a topic message to subscribed sockets). Node-safe helper: never
-          // throws, retries if the node isn't running yet.
+          // The relay only routes a topic message to subscribed sockets, so
+          // without this the freshly opened channel gets no live broadcasts.
+          // The helper never throws and retries until the node is up.
           subscribeChannelTopics(serverId: serverId, channelIds: [channelId]);
           final channelName = channels[channelId]?.name ?? '';
           nav.popUntil(
@@ -228,24 +215,22 @@ class _MobileInChatBannerState extends ConsumerState<MobileInChatBanner>
     final hollow = HollowTheme.of(context);
     final cards = ref.watch(systemNotificationProvider);
 
-    // Pick the newest FRESH card that's NOT the conversation we're currently
-    // reading (cards are appended in arrival order — iterate newest-first).
-    // Stale cards (queued while no banner was mounted, or left behind by a
-    // popped route) are pruned instead of shown.
+    // The newest FRESH card that is not the conversation being read. Stale
+    // cards are pruned rather than shown.
     final now = DateTime.now();
     NotificationCard? relevantCard;
     final staleKeys = <String>[];
     for (final card in cards.reversed) {
       if (_isCurrentConversation(card)) {
-        // The user is reading this conversation — the card must never show,
-        // here or after they leave. Drop it instead of just skipping it.
+        // Never show this one, here or after they leave, so drop it rather
+        // than skip it.
         staleKeys.add(card.sourceKey);
         continue;
       }
       final lastMessageAt =
           card.messages.isNotEmpty ? card.messages.last.timestamp : card.createdAt;
       if (now.difference(lastMessageAt) > _freshnessWindow) {
-        // Don't prune the card we're actively displaying — _dismiss owns it.
+        // `_dismiss` owns the card being displayed.
         if (card.sourceKey != _currentCard?.sourceKey) {
           staleKeys.add(card.sourceKey);
         }
@@ -268,9 +253,8 @@ class _MobileInChatBannerState extends ConsumerState<MobileInChatBanner>
           if (mounted) _show(relevantCard!);
         });
       } else if (relevantCard.messages.length != _lastMessageCount) {
-        // Same conversation got more messages — adopt the FRESH card (the old
-        // _currentCard is an immutable snapshot with the old, shorter list) and
-        // restart the timer so the accumulated stack shows + stays a bit longer.
+        // `_currentCard` is an immutable snapshot with the shorter list, so the
+        // fresh card is adopted and the timer restarted.
         _currentCard = relevantCard;
         _lastMessageCount = relevantCard.messages.length;
         _startDismissTimer();
@@ -283,7 +267,7 @@ class _MobileInChatBannerState extends ConsumerState<MobileInChatBanner>
         : (_currentCard ?? relevantCard);
     if (card == null) return const SizedBox.shrink();
 
-    // Last 3 messages (compact — don't clutter the chat below).
+    // Kept short so the banner does not clutter the chat below.
     final msgs = card.messages.length > 3
         ? card.messages.sublist(card.messages.length - 3)
         : card.messages;
@@ -296,9 +280,8 @@ class _MobileInChatBannerState extends ConsumerState<MobileInChatBanner>
       top: widget.topOffset,
       left: HollowSpacing.sm,
       right: HollowSpacing.sm,
-      // Material ancestor so the Text widgets don't get the yellow debug
-      // double-underline (this banner is a Positioned child of a Stack with no
-      // Material between it and the Text).
+      // A Material ancestor, or the Text widgets get the yellow debug
+      // double-underline: nothing else sits between this Stack child and them.
       child: Material(
         type: MaterialType.transparency,
         child: SlideTransition(
@@ -334,9 +317,8 @@ class _MobileInChatBannerState extends ConsumerState<MobileInChatBanner>
                     HollowAvatar(peerId: card.avatarId, size: 28),
                     const SizedBox(width: HollowSpacing.sm),
                     Expanded(
-                      // Emote pull context for the previews — a token from a
-                      // chat the user doesn't have open may not have its
-                      // bytes cached yet.
+                      // A token from a chat the user does not have open may not
+                      // have its bytes cached yet.
                       child: EmoteScope(
                         serverId: card.serverId,
                         peerHint: card.peerId,
@@ -358,8 +340,8 @@ class _MobileInChatBannerState extends ConsumerState<MobileInChatBanner>
                           for (final m in msgs)
                             Padding(
                               padding: const EdgeInsets.only(top: 1),
-                              // Text.rich so emote tokens render as inline
-                              // images instead of the raw [e:name:hash] form.
+                              // Or emote tokens render as their raw
+                              // [e:name:hash] form.
                               child: Text.rich(
                                 TextSpan(
                                   style: msgStyle,
@@ -397,8 +379,7 @@ class _MobileInChatBannerState extends ConsumerState<MobileInChatBanner>
   }
 }
 
-/// Small circular countdown shown in the banner's right space: a depleting ring
-/// + the remaining whole seconds (5→1) in the center.
+/// A depleting ring with the remaining whole seconds in the centre.
 class _CountdownRing extends StatelessWidget {
   final AnimationController controller;
   final int totalSeconds;
@@ -422,8 +403,8 @@ class _CountdownRing extends StatelessWidget {
       child: AnimatedBuilder(
         animation: controller,
         builder: (context, _) {
-          // controller.value runs 0→1 over the countdown. Whole seconds left
-          // count 5→1; the ring fills as time elapses (value 0→1).
+          // `controller.value` runs 0 to 1 as time elapses, so the seconds
+          // left count down against it.
           final left = (totalSeconds * (1.0 - controller.value))
               .ceil()
               .clamp(1, totalSeconds);

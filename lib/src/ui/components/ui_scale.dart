@@ -8,24 +8,17 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/display_scale_provider.dart';
 import 'package:hollow/src/core/providers/layout_prefs_provider.dart';
 
-/// The smallest logical viewport the app is allowed to lay out in, whatever
-/// zoom the user picks. Desktop's floor is the Settings dialog's own
-/// requirement (360x420 of dialog plus its 24px padding on each side): go
-/// below it and the dialog cannot render whole, which is how a user zooms
-/// themselves out of the one control that undoes the zoom.
-///
-/// Mobile's floor is far lower because nothing there is a fixed-size box; the
-/// shell is verified to fit at 240dp by the interface-scale group in
-/// `test/widget/text_scale_overflow_test.dart`.
+/// The smallest logical viewport the app may lay out in at any zoom. The
+/// desktop floor is the Settings dialog plus its padding, or a user can zoom
+/// away the one control that undoes the zoom; mobile's floor is lower because
+/// nothing there is a fixed-size box.
 const Size _kDesktopViewportFloor = Size(410, 470);
 const Size _kMobileViewportFloor = Size(240, 400);
 
 bool get _isMobileForm => !kIsWeb && (Platform.isAndroid || Platform.isIOS);
 
-/// The scale actually applied: the user's choice, reduced if this window is
-/// too small to show the app at it. Never reduces below 1.0 — a window
-/// smaller than the floor is the window's problem, not something to solve by
-/// shrinking the UI under the user.
+/// The scale actually applied: the user's choice, reduced when this window is
+/// too small for it, never below 1.0.
 double effectiveUiScale(double requested, Size viewport) {
   if (requested <= 1.0) return requested;
   final floor = _isMobileForm ? _kMobileViewportFloor : _kDesktopViewportFloor;
@@ -37,20 +30,13 @@ double effectiveUiScale(double requested, Size viewport) {
   return math.min(requested, math.max(1.0, fits));
 }
 
-/// Root-level interface scaling — the in-app equivalent of Windows' "Scale
-/// and layout" or a browser's zoom (GitHub issue #20).
+/// Root-level interface scaling, the in-app equivalent of Windows' "Scale and
+/// layout" (issue #20).
 ///
-/// Everything below this widget is laid out at `windowSize / scale` logical
-/// pixels and then painted through a [Transform], so text, icons, avatars,
-/// borders and padding all grow together and stay crisp (Skia rasterises
-/// through the composited transform). Nothing else in the app has to know:
-/// no design token changes, no per-icon `size:` edits.
-///
-/// **The one rule this creates:** below this widget, window ("global")
-/// coordinates and widget coordinates differ by the scale factor. Anything
-/// that hands a position to an [OverlayEntry] must convert it through the
-/// overlay — see `overlay_anchor.dart`. A bare
-/// `renderBox.localToGlobal(Offset.zero)` lands the popup off by the zoom.
+/// Everything below is laid out at `windowSize / scale` and painted through one
+/// [Transform]. The rule this creates: window ("global") coordinates and widget
+/// coordinates differ by the scale factor, so anything handing a position to an
+/// [OverlayEntry] converts through `overlay_anchor.dart`.
 class UiScale extends ConsumerWidget {
   final Widget child;
 
@@ -63,8 +49,7 @@ class UiScale extends ConsumerWidget {
   }
 }
 
-/// The pure, provider-free half of [UiScale] (kept separate so it is
-/// directly testable and reusable for previews).
+/// The pure, provider-free half of [UiScale], kept directly testable.
 class UiScaleBox extends StatelessWidget {
   final double scale;
   final Widget child;
@@ -73,11 +58,9 @@ class UiScaleBox extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    // Measure the BOX WE ARE GIVEN, never `MediaQuery.size`. On desktop this
-    // widget sits in the Expanded below the 32px title bar, so the window
-    // size is 32px taller than the space we may paint into — sizing from it
-    // pushed exactly that much of the app (the whole bottom dock) off the
-    // bottom edge at every scale except 1.0.
+    // Measure the BOX WE ARE GIVEN, never `MediaQuery.size`: the window is
+    // 32px taller than the space below the desktop title bar, and sizing from
+    // it pushes the bottom dock off the screen at every scale but 1.0.
     return LayoutBuilder(
       builder: (context, constraints) {
         final mq = MediaQuery.of(context);
@@ -85,25 +68,16 @@ class UiScaleBox extends StatelessWidget {
           constraints.hasBoundedWidth ? constraints.maxWidth : mq.size.width,
           constraints.hasBoundedHeight ? constraints.maxHeight : mq.size.height,
         );
-        // Clamp to what this window can actually show, so no combination of
-        // zoom + window size can hide the controls that undo the zoom.
+        // Clamped so no combination of zoom and window size can hide the
+        // controls that undo the zoom.
         final scale = effectiveUiScale(this.scale, available);
         final isNoop = (scale - 1.0).abs() < 0.001;
 
-        // Every measurement below the transform shrinks by the same factor:
-        // the viewport, the safe-area padding and the keyboard inset.
-        // devicePixelRatio grows instead — one of our logical pixels now
-        // covers `scale` more device pixels, which is what keeps
-        // `cacheWidth`-style image decoding sharp.
-        //
-        // At 100% this is NOT a no-op, and that is the point: `size` becomes
-        // the SLOT rather than the window. The desktop title bar owns the top
-        // 32px, so everything below here — dialogs sizing themselves, every
-        // popup that clamps itself into the `Overlay` — was working from a
-        // viewport 32px taller than the one it actually renders in, and
-        // anything anchored near the bottom edge got cut off (issue #20:
-        // bottom-dock tooltips rendered below the button and off the screen).
-        // The Overlay fills this box exactly, so this size IS overlay space.
+        // devicePixelRatio grows as the measurements shrink, which keeps
+        // `cacheWidth` image decoding sharp. At 100% this is deliberately not a
+        // no-op: `size` becomes the SLOT rather than the window, so a popup
+        // clamping itself into the Overlay stops working from a viewport 32px
+        // taller than the one it renders in (issue #20).
         final scaledSize = available / scale;
         final scaled = mq.copyWith(
           size: scaledSize,
@@ -120,7 +94,7 @@ class UiScaleBox extends StatelessWidget {
           child: MediaQuery(
             data: scaled,
             // Published either way so the Settings slider can say why it
-            // stopped; at 100% the app is laid out and painted untouched.
+            // stopped.
             child: isNoop
                 ? child
                 : _ScaledViewport(
@@ -135,24 +109,13 @@ class UiScaleBox extends StatelessWidget {
   }
 }
 
-/// The one box that does the zoom: it occupies [viewport] (its slot), lays the
-/// app out at `viewport / scale`, and paints — and hit-tests — it back through
-/// a single scale transform.
+/// The one box that does the zoom: it occupies [viewport], lays the app out at
+/// `viewport / scale` and paints and hit-tests it back through one transform.
 ///
-/// **Why this is a render object and not `Transform.scale` over an
-/// `OverflowBox`.** That composition painted correctly but hit-tested wrong
-/// below 100% (issue #20 follow-up). At 0.9x the app lays out LARGER than the
-/// window, and every `RenderBox.hitTest` starts with `size.contains(position)`
-/// — the OverflowBox in between was pinned to the slot by the incoming tight
-/// constraints, so as soon as the inverse transform pushed a pointer past
-/// `slot` in child space the hit test was rejected before it ever reached the
-/// app. The dead strip was the bottom `slot.height * (1 - scale)` and the
-/// right `slot.width * (1 - scale)` of the window: the entire bottom dock and
-/// the right end of the top bar, growing as you zoomed further out.
-///
-/// Here there is nothing in between. This box's own size IS the slot, so every
-/// pointer in the window passes its bounds check, and [hitTestChildren] hands
-/// the child a position through the same matrix used to paint it.
+/// A render object rather than `Transform.scale` over an `OverflowBox`, which
+/// hit-tested wrong below 100% (issue #20): pinned to the slot by the incoming
+/// tight constraints, its bounds check rejected pointers in the bottom and
+/// right strips. Here this box's own size IS the slot.
 class _ScaledViewport extends SingleChildRenderObjectWidget {
   final double scale;
   final Size viewport;
@@ -208,8 +171,6 @@ class _RenderScaledViewport extends RenderBox
 
   @override
   void performLayout() {
-    // Our size is the slot; the app inside is laid out at slot / scale and
-    // painted back up (or down) to fill it exactly.
     size = constraints.constrain(_viewport);
     child?.layout(BoxConstraints.tight(size / _scale));
   }
@@ -240,18 +201,16 @@ class _RenderScaledViewport extends RenderBox
     );
   }
 
-  /// Keeps `localToGlobal`/`globalToLocal` and the semantics rects honest —
-  /// which is also what makes `overlay_anchor.dart` land popups correctly.
+  /// Keeps `localToGlobal`, `globalToLocal` and the semantics rects honest,
+  /// which is what lets `overlay_anchor.dart` land popups correctly.
   @override
   void applyPaintTransform(RenderBox child, Matrix4 transform) {
     transform.multiply(_transform);
   }
 }
 
-/// What the interface scale actually resolved to, published to everything
-/// below it. `requested` is the user's setting; `effective` is what this
-/// window could show. They differ only when [effectiveUiScale] had to step
-/// in, and the Settings slider says so rather than looking broken.
+/// What the interface scale resolved to: `requested` is the user's setting,
+/// `effective` what this window could show, and the Settings slider says so.
 class UiScaleInfo extends InheritedWidget {
   final double requested;
   final double effective;
@@ -273,33 +232,18 @@ class UiScaleInfo extends InheritedWidget {
       old.requested != requested || old.effective != effective;
 }
 
-/// Zooms ONE panel's contents (issue #54: "ability to manually adjust left
-/// server panel and user member panel icon size and text size").
+/// Zooms ONE panel's contents (issue #54).
 ///
-/// Same machinery as [UiScale] and for the same reason: icon sizes live in
-/// hundreds of hardcoded `size:` literals, so a text scaler would leave 16px
-/// icons stranded next to 24px labels. The panel is laid out at
-/// `slot / scale` and painted back through one transform, so avatars, status
-/// dots, names and counts all grow together — and because
-/// [_RenderScaledViewport] implements `applyPaintTransform`, the popups these
-/// panels anchor (profile cards, context menus) still land in the right place
-/// through `overlay_anchor.dart`.
-///
-/// The panel's SLOT does not change: this makes the contents bigger, not the
-/// column wider. Widening is the resize handle's job, and the two are meant to
-/// be used together.
+/// Same machinery as [UiScale]: icon sizes live in hundreds of hardcoded `size:`
+/// literals, so a text scaler alone would strand 16px icons next to 24px labels.
+/// The panel's SLOT does not change, so widening stays the resize handle's job.
 class PanelScale extends ConsumerWidget {
   final Widget child;
 
   /// Layout height this panel's UNSHRINKABLE chrome needs, if it has any.
   ///
-  /// A zoomed panel is laid out at `slot / scale`, so raising the zoom SHRINKS
-  /// the space its contents get. A panel that is one long list does not care
-  /// (it just scrolls), but the server strip is a fixed stack of icons with a
-  /// list wedged in the middle, and past a certain zoom that stack no longer
-  /// fits its own column — a RenderFlex overflow stripe down the rail. Same
-  /// answer as [effectiveUiScale] gives the window: cap the zoom at what this
-  /// box can actually show, never below 1.0.
+  /// Zoom shrinks the space contents get, so as in [effectiveUiScale] it is
+  /// capped at what this box can show, never below 1.0.
   final double minContentHeight;
 
   const PanelScale({
@@ -327,9 +271,7 @@ class PanelScale extends ConsumerWidget {
         if ((scale - 1.0).abs() < 0.001) return child;
         final mq = MediaQuery.of(context);
         // devicePixelRatio only: `size` here is still the WINDOW, and lying
-        // about it would mislead anything inside the panel that measures the
-        // screen. One of our logical pixels now covers `scale` more device
-        // pixels, which is what keeps avatar decoding sharp.
+        // about it would mislead anything measuring the screen.
         return MediaQuery(
           data: mq.copyWith(devicePixelRatio: mq.devicePixelRatio * scale),
           child: _ScaledViewport(scale: scale, viewport: slot, child: child),
@@ -339,12 +281,9 @@ class PanelScale extends ConsumerWidget {
   }
 }
 
-/// A [TextScaler] that multiplies whatever the platform already applies.
-///
-/// Composing instead of replacing matters: the OS scaler may be non-linear
-/// (Android 14+ grows small text more than large text), and a user who has
-/// already set 130% at the OS level expects the in-app slider to be relative
-/// to that, not to override it.
+/// A [TextScaler] that multiplies whatever the platform already applies, rather
+/// than replacing it: the OS scaler may be non-linear (Android 14+), and a user
+/// already at 130% expects the in-app slider to be relative to that.
 @immutable
 class MultipliedTextScaler extends TextScaler {
   final TextScaler base;
@@ -371,12 +310,9 @@ class MultipliedTextScaler extends TextScaler {
   String toString() => 'MultipliedTextScaler($base x $factor)';
 }
 
-/// Applies the user's chat text scale to a message surface (the message list
-/// and the composer). Text-only: avatars, file cards and attachments keep the
-/// interface scale, which is exactly how the OS/desktop chat apps behave.
-/// Custom emotes are the one thing that has to follow along by hand — they
-/// are [WidgetSpan]s, which a text scaler cannot reach (see
-/// `message_text_parser.dart`).
+/// Applies the user's chat text scale to a message surface. Text only, and
+/// custom emotes follow by hand because a [WidgetSpan] is out of a text scaler's
+/// reach.
 class ChatTextScale extends ConsumerWidget {
   final Widget child;
 

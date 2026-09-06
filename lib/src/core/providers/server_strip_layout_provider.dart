@@ -39,7 +39,6 @@ class ServerStripLayoutNotifier extends Notifier<List<StripItem>> {
     var changed = false;
     final items = List<StripItem>.from(state);
 
-    // Collect all server IDs in layout
     final layoutIds = <String>{};
     for (final item in items) {
       switch (item) {
@@ -55,7 +54,6 @@ class ServerStripLayoutNotifier extends Notifier<List<StripItem>> {
       }
     }
 
-    // Remove deleted servers from top-level
     final toRemove = <int>[];
     for (int i = 0; i < items.length; i++) {
       final item = items[i];
@@ -68,17 +66,15 @@ class ServerStripLayoutNotifier extends Notifier<List<StripItem>> {
       items.removeAt(i);
     }
 
-    // Remove deleted servers from folders, dissolve empty/single folders
     for (int i = items.length - 1; i >= 0; i--) {
       final item = items[i];
       if (item is FolderStripItem) {
         final filtered =
             item.serverIds.where((id) => validIds.contains(id)).toList();
         if (filtered.length != item.serverIds.length) changed = true;
-        // Only an EMPTY folder is dissolved here. A one-server folder used to
-        // be collapsed too, which quietly undid "Move to folder > New folder"
-        // on the next launch (issue #61, phase 4) — the drag paths still
-        // dissolve explicitly when a drag empties a folder out.
+        // Only an EMPTY folder is dissolved here. A one-server folder used to be
+        // collapsed too, which quietly undid "Move to folder > New folder" on the
+        // next launch (issue #61); the drag paths still dissolve explicitly.
         if (filtered.isEmpty) {
           items.removeAt(i);
           changed = true;
@@ -88,7 +84,6 @@ class ServerStripLayoutNotifier extends Notifier<List<StripItem>> {
       }
     }
 
-    // Append new servers not in layout
     for (final id in validIds) {
       if (!layoutIds.contains(id)) {
         items.add(ServerStripItem(serverId: id));
@@ -100,7 +95,6 @@ class ServerStripLayoutNotifier extends Notifier<List<StripItem>> {
       state = items;
       _save();
     } else if (state.isEmpty && validIds.isNotEmpty) {
-      // First launch — no saved layout
       state = validIds.map((id) => ServerStripItem(serverId: id)).toList();
       _save();
     }
@@ -141,7 +135,6 @@ class ServerStripLayoutNotifier extends Notifier<List<StripItem>> {
     if (idx1 < 0 || idx2 < 0) return;
 
     final insertAt = idx1 < idx2 ? idx1 : idx2;
-    // Remove both (higher index first to avoid shift)
     if (idx1 > idx2) {
       items.removeAt(idx1);
       items.removeAt(idx2);
@@ -164,10 +157,8 @@ class ServerStripLayoutNotifier extends Notifier<List<StripItem>> {
   void addToFolder(String folderId, String serverId) {
     final items = List<StripItem>.from(state);
 
-    // Remove server from top-level
     items.removeWhere((e) => e is ServerStripItem && e.serverId == serverId);
 
-    // Also remove from any other folder
     for (int i = 0; i < items.length; i++) {
       final item = items[i];
       if (item is FolderStripItem && item.id != folderId) {
@@ -184,7 +175,6 @@ class ServerStripLayoutNotifier extends Notifier<List<StripItem>> {
       }
     }
 
-    // Add to target folder
     for (int i = 0; i < items.length; i++) {
       final item = items[i];
       if (item is FolderStripItem && item.id == folderId) {
@@ -209,10 +199,9 @@ class ServerStripLayoutNotifier extends Notifier<List<StripItem>> {
       if (item is FolderStripItem && item.id == folderId) {
         final filtered =
             item.serverIds.where((id) => id != serverId).toList();
-        // ONE rule for folder lifetime, everywhere: a folder disappears when
-        // it is EMPTY, never at one server. Collapsing at one made "Move to
-        // folder > New folder" impossible to keep, and made drag-out and the
-        // menu disagree about what a folder is.
+        // ONE rule for folder lifetime, everywhere: a folder disappears when it is
+        // EMPTY, never at one server. Collapsing at one made "Move to folder > New
+        // folder" impossible to keep, and made drag-out and the menu disagree.
         if (filtered.isEmpty) {
           items.removeAt(i);
         } else {
@@ -222,7 +211,6 @@ class ServerStripLayoutNotifier extends Notifier<List<StripItem>> {
       }
     }
 
-    // Insert the removed server at the target position
     final clampedIndex = insertIndex.clamp(0, items.length);
     items.insert(clampedIndex, ServerStripItem(serverId: serverId));
 
@@ -247,8 +235,7 @@ class ServerStripLayoutNotifier extends Notifier<List<StripItem>> {
 
   /// Puts [serverId] in a brand new folder called [name], in place.
   ///
-  /// A folder of one is legal: it is how "Move to folder > New folder" starts,
-  /// and the next server dropped or moved in joins it.
+  /// A folder of one is legal: it is how "Move to folder > New folder" starts.
   void createFolderWith(String serverId, String name) {
     final items = List<StripItem>.from(state);
     var insertAt = items.length;
@@ -287,8 +274,7 @@ class ServerStripLayoutNotifier extends Notifier<List<StripItem>> {
   /// immediately after that folder.
   ///
   /// When it was the folder's LAST server the folder goes away, so the server
-  /// lands in the folder's own slot rather than one past it — otherwise the
-  /// icon appears to jump over its neighbour on the way out.
+  /// lands in the folder's own slot rather than appearing to jump a neighbour.
   void moveOutOfFolder(String serverId) {
     final folderId = folderIdOf(serverId);
     if (folderId == null) return;
@@ -350,14 +336,12 @@ class ServerStripLayoutNotifier extends Notifier<List<StripItem>> {
 
   /// Called when a new server is created/joined.
   void onServerCreated(String serverId) {
-    // Check if already in layout
     for (final item in state) {
       if (item is ServerStripItem && item.serverId == serverId) return;
       if (item is FolderStripItem && item.serverIds.contains(serverId)) return;
     }
-    // A parked join that finally completed becomes the real server IN PLACE,
-    // so the tile the user has been looking at for days turns into the server
-    // rather than vanishing and reappearing at the end of the strip.
+    // A parked join that finally completed becomes the real server IN PLACE, so
+    // the tile the user watched for days turns into the server instead of moving.
     final pendingIndex =
         state.indexWhere((e) => e is PendingStripItem && e.serverId == serverId);
     if (pendingIndex >= 0) {
@@ -371,11 +355,9 @@ class ServerStripLayoutNotifier extends Notifier<List<StripItem>> {
     _save();
   }
 
-  /// Reconciles the parked-join tiles against [pendingIds].
-  ///
-  /// ONE mutation path: [PendingJoinsNotifier] owns the set and pushes it here
-  /// after every change, so the strip can never disagree with the rows Rust
-  /// holds. Tiles are appended; an id that is already shown keeps its slot.
+  /// Reconciles the parked-join tiles against [pendingIds]. ONE mutation path:
+  /// [PendingJoinsNotifier] owns the set and pushes it here after every change,
+  /// so the strip can never disagree with the rows Rust holds.
   void setPendingJoins(Set<String> pendingIds) {
     final items = List<StripItem>.from(state);
     var changed = false;
@@ -407,10 +389,8 @@ class ServerStripLayoutNotifier extends Notifier<List<StripItem>> {
   void onServerDeleted(String serverId) {
     final items = List<StripItem>.from(state);
 
-    // Remove from top-level
     items.removeWhere((e) => e is ServerStripItem && e.serverId == serverId);
 
-    // Remove from folders
     for (int i = items.length - 1; i >= 0; i--) {
       final item = items[i];
       if (item is FolderStripItem && item.serverIds.contains(serverId)) {

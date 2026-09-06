@@ -108,7 +108,6 @@ class _MobileStorageRouteState extends ConsumerState<MobileStorageRoute> {
       body: SafeArea(
         child: Column(
           children: [
-            // Header
             Padding(
               padding: const EdgeInsets.fromLTRB(
                 HollowSpacing.xs, HollowSpacing.sm,
@@ -135,7 +134,6 @@ class _MobileStorageRouteState extends ConsumerState<MobileStorageRoute> {
                   : ListView(
                       padding: const EdgeInsets.all(HollowSpacing.lg),
                       children: [
-                        // Server Storage
                         _SectionCard(
                           hollow: hollow,
                           icon: LucideIcons.server,
@@ -145,7 +143,6 @@ class _MobileStorageRouteState extends ConsumerState<MobileStorageRoute> {
 
                         const SizedBox(height: HollowSpacing.md),
 
-                        // Your Storage (6+ members)
                         if (memberCount >= 6) ...[
                           _SectionCard(
                             hollow: hollow,
@@ -156,7 +153,6 @@ class _MobileStorageRouteState extends ConsumerState<MobileStorageRoute> {
                           const SizedBox(height: HollowSpacing.md),
                         ],
 
-                        // Retention Policy
                         _SectionCard(
                           hollow: hollow,
                           icon: LucideIcons.clock,
@@ -166,7 +162,6 @@ class _MobileStorageRouteState extends ConsumerState<MobileStorageRoute> {
 
                         const SizedBox(height: HollowSpacing.md),
 
-                        // Vault Health
                         _SectionCard(
                           hollow: hollow,
                           icon: LucideIcons.shield,
@@ -174,7 +169,6 @@ class _MobileStorageRouteState extends ConsumerState<MobileStorageRoute> {
                           child: _buildVaultHealth(hollow, vaultStatus, memberCount),
                         ),
 
-                        // Member Pledges (6+ members)
                         if (memberCount >= 6) ...[
                           const SizedBox(height: HollowSpacing.md),
                           _SectionCard(

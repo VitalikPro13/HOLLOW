@@ -36,15 +36,13 @@ class NodeNotifier extends Notifier<NodeState> {
       final networkService = ref.read(networkServiceProvider);
       final peerId = await networkService.startNode();
 
-      // Update identity with the peer ID from the node.
       final identity = ref.read(identityProvider.notifier);
       identity.state = identity.state.copyWith(peerId: peerId);
 
       state = state.copyWith(status: NodeStatus.connected);
 
-      // Reset stale file paths (files marked complete but missing on disk).
-      // Cleared entries are re-fetched by the viewport sweep
-      // (requestVisibleFiles) when their messages scroll into view.
+      // Reset stale file paths (marked complete but missing on disk); cleared
+      // entries are re-fetched by the viewport sweep when they scroll into view.
       try {
         final resetCount = await storage_api.resetStaleFiles();
         if (resetCount > 0) {
@@ -54,21 +52,15 @@ class NodeNotifier extends Notifier<NodeState> {
         debugPrint('[HOLLOW] Failed to reset stale files: $e');
       }
 
-      // Start polling for network events. Stale files (reset above) are
-      // re-fetched on demand by the viewport sweep (requestVisibleFiles).
       ref.read(eventStreamProvider.notifier).start();
 
       // Auto-join saved guest rooms (realtime + onLaunch).
       autoJoinGuestRooms(ref);
 
-      // Initialize push notifications on mobile (registers FCM token with relay).
-      //
-      // Both guards are needed. The Firebase getters throw SYNCHRONOUSLY when
-      // no Firebase app exists (a probe launch, a build without the config
-      // file), and a synchronous throw never reaches catchError: it fell
-      // straight through to the outer catch below and marked a node that was
-      // up and connected as NodeStatus.error. Push is optional; the node is
-      // not, so nothing here may fail it.
+      // Initialize push notifications on mobile. Both guards are needed: the
+      // Firebase getters throw SYNCHRONOUSLY when no Firebase app exists, and a
+      // synchronous throw never reaches catchError, so it marked a live node as
+      // NodeStatus.error. Push is optional; the node is not.
       if (Platform.isAndroid || Platform.isIOS) {
         try {
           PushNotificationService().initialize().catchError((e) {

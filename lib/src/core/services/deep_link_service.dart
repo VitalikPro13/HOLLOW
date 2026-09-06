@@ -25,17 +25,10 @@ import 'package:hollow/src/ui/shop/redeem_code_dialog.dart';
 
 /// Receives hollow:// deep links from the OS (browser clicks, other apps) on
 /// every platform via app_links, and routes them into the same flows the
-/// in-chat link cards use. Links arriving before the shell is mounted
-/// (cold-start protocol launch) are buffered and flushed when HollowShell
-/// calls [notifyShellReady].
-///
-/// Handled forms (see hollow_link_utils.dart):
-///   hollow://join?server=ID          → confirm dialog → joinServer
-///   hollow://join?room=CODE          → confirm dialog → roomProvider.join
-///   hollow://share/...               → PasteLinkDialog (own confirm flow)
-///   hollow://recovery?server=&token= → recovery pool join dialog (prefilled)
-///   hollow://redeem/CODE             → keep a Hollow Shop support code
-///   https://hollow.anonlisten.com/join#server=ID → same as join?server
+/// in-chat link cards use. Links arriving before the shell is mounted, from a
+/// cold-start protocol launch, are buffered and flushed when HollowShell calls
+/// [notifyShellReady]. The forms handled are the ones hollow_link_utils.dart
+/// parses.
 class DeepLinkService {
   DeepLinkService._();
   static final DeepLinkService instance = DeepLinkService._();
@@ -49,20 +42,20 @@ class DeepLinkService {
   final List<Uri> _pending = [];
   bool _shellReady = false;
 
-  /// Called once from main() right after the ProviderContainer exists.
-  /// Instantiated before runApp so the cold-start initial link is captured.
+  /// Called once from main() right after the ProviderContainer exists, before
+  /// runApp so the cold-start initial link is captured.
   Future<void> init(ProviderContainer container) async {
     _container = container;
 
     // Self-heal the hollow:// registration on Windows every launch: covers
-    // portable-zip users (no installer to write the keys) and moved installs.
-    // HKCU only — no admin. The Inno installer writes the same keys.
+    // portable-zip users with no installer to write the keys, and moved
+    // installs. HKCU only, so no admin needed.
     if (Platform.isWindows) {
       unawaited(_registerWindowsProtocol());
     }
 
     try {
-      // uriLinkStream emits the initial (cold-start) link as well as links
+      // uriLinkStream emits the initial cold-start link as well as links
       // delivered while running.
       _sub = AppLinks().uriLinkStream.listen(_onUri, onError: (Object e) {
         debugPrint('[HOLLOW] deep link stream error: $e');
@@ -136,9 +129,9 @@ class DeepLinkService {
         await _confirmJoinConference(context, link);
       case HollowLinkType.redeem:
         // No shop surface means no redeem dialog either: the link reads as
-        // unrecognized. That covers a store build (Apple 3.1.1 / Play) and an
-        // install where the shop is simply still put away, and the two look
-        // the same on purpose. The effective gate, not the store verdict.
+        // unrecognized. A store build (Apple 3.1.1 / Play) and an install
+        // where the shop is merely put away look the same on purpose. The
+        // effective gate, not the store verdict.
         if (!(_container?.read(shopAvailableProvider) ?? false)) {
           _toast('Unrecognized Hollow link', HollowToastType.error);
           return;
@@ -267,9 +260,9 @@ class DeepLinkService {
     HollowToast.show(context, message, type: type, overlayState: overlay);
   }
 
-  /// Write `HKCU\Software\Classes\hollow` → `"<exe>" "%1"` via reg.exe (always
-  /// present on Windows, avoids a win32 package version pin). Idempotent,
-  /// fire-and-forget, a few ms of hidden child processes at startup.
+  /// Writes `HKCU\Software\Classes\hollow` via reg.exe, which is always
+  /// present on Windows and avoids pinning a win32 package version.
+  /// Idempotent and fire-and-forget.
   Future<void> _registerWindowsProtocol() async {
     try {
       final exe = Platform.resolvedExecutable;

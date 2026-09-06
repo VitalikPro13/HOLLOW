@@ -65,23 +65,20 @@ pub fn restore_identity_from_mnemonic(phrase: String) -> Result<IdentityInfo, St
     })
 }
 
-/// Try every stored keychain candidate (per-profile slot, legacy machine
-/// slot, Windows DPAPI blob) and return the first key that actually decrypts
-/// THIS identity file. On success the verified key is re-stored so every slot
-/// self-heals to the active profile — with multiple profiles on one machine
-/// the legacy slot routinely holds the OTHER profile's key, and trusting it
-/// unverified funneled users into mnemonic recovery, which rotates the
-/// device key, discards the MLS identity + groups, and turns voice into
-/// undecryptable garbage audio (issue #47 → #27).
+/// Try every stored keychain candidate and return the first key that actually decrypts
+/// THIS identity file, re-storing the winner so every slot self-heals to the active
+/// profile. With several profiles on one machine the legacy slot routinely holds the
+/// OTHER profile's key, and trusting it unverified funnelled users into mnemonic
+/// recovery, which rotates the device key and discards the MLS identity and groups.
 fn keychain_key_that_decrypts(bytes: &[u8]) -> Option<[u8; 32]> {
     keychain_key_that_decrypts_opts(bytes, true)
 }
 
-/// `heal = false` is the read-only form: it answers "can this machine unwrap
-/// this file" WITHOUT re-storing the winning key. Every unlock path wants the
-/// healing form; the profile-erase gate must not use it, because the file it
-/// is testing belongs to a DIFFERENT profile and writing that key back into
-/// the shared slots is exactly the overwrite that caused issue #47 -> #27.
+/// `heal = false` is the read-only form: it answers "can this machine unwrap this
+/// file" WITHOUT re-storing the winning key. Every unlock path wants the healing form;
+/// the profile-erase gate must not, because the file it tests belongs to a DIFFERENT
+/// profile and writing that key into the shared slots is the overwrite that started
+/// all this.
 fn keychain_key_that_decrypts_opts(bytes: &[u8], heal: bool) -> Option<[u8; 32]> {
     use crate::identity::{encryption, platform_keystore};
     let candidates = platform_keystore::retrieve_key_candidates().ok()?;
@@ -101,10 +98,9 @@ fn keychain_key_that_decrypts_opts(bytes: &[u8], heal: bool) -> Option<[u8; 32]>
     None
 }
 
-/// Unlock the identity file for this session.
-/// For plaintext identities: loads directly (password ignored).
-/// For encrypted identities: decrypts using password and/or OS keychain.
-/// Must be called before open_message_store() or start_node().
+/// Unlock the identity file for this session, before `open_message_store()` or
+/// `start_node()`. A plaintext identity loads directly and ignores `password`; an
+/// encrypted one decrypts with the password and/or the OS keychain.
 #[frb]
 pub fn unlock_identity(password: Option<String>) -> Result<IdentityInfo, String> {
     use crate::identity::encryption;
@@ -123,14 +119,13 @@ pub fn unlock_identity(password: Option<String>) -> Result<IdentityInfo, String>
 
     match format {
         encryption::IdentityFormat::Plaintext => {
-            // No encryption — load directly. OS keychain is opt-in from Settings.
         }
         encryption::IdentityFormat::Encrypted { flags, salt, .. } => {
             let wrapping_key = if encryption::flags_has_password(flags)
                 && encryption::flags_has_os_keychain(flags)
             {
-                // Password + keychain (flags=0x03): try silent keychain first,
-                // fall back to password prompt if no stored key decrypts.
+                // Password + keychain: silent keychain first, password prompt when no stored
+                // key decrypts.
                 match keychain_key_that_decrypts(&bytes) {
                     Some(key) => key,
                     None => {
@@ -165,7 +160,6 @@ pub fn unlock_identity(password: Option<String>) -> Result<IdentityInfo, String>
         }
     }
 
-    // Now load the identity normally (will use session key if encrypted).
     let data = identity::load_or_create_identity()?;
     Ok(IdentityInfo {
         peer_id: data.peer_id,
@@ -182,10 +176,9 @@ pub fn lock_identity() -> Result<(), String> {
     Ok(())
 }
 
-/// Enable password protection on the current identity.
-/// If `require_on_launch` is true (flags=0x01), the password is required every launch.
-/// If false (flags=0x03), the password-derived key is also stored in OS keychain
-/// for silent unlock — identity is encrypted but app opens normally on this device.
+/// Enable password protection. With `require_on_launch` the password is needed every
+/// launch; without it the password-derived key is also stored in the OS keychain, so
+/// the identity is encrypted but the app opens normally on this device.
 #[frb]
 pub fn enable_password_protection(
     password: String,
@@ -259,7 +252,6 @@ pub fn change_password(old_password: String, new_password: String) -> Result<(),
         _ => return Err("Identity is not password-protected".into()),
     };
 
-    // Verify old password.
     let old_key = encryption::derive_wrapping_key_from_password(&old_password, &old_salt)?;
     let plaintext = encryption::decrypt_identity(&bytes, &old_key)?;
 
@@ -314,7 +306,6 @@ pub fn remove_password_protection(password: String) -> Result<(), String> {
         _ => return Err("Identity is not encrypted".into()),
     };
 
-    // Verify password.
     let key = encryption::derive_wrapping_key_from_password(&password, &salt)?;
     let plaintext = encryption::decrypt_identity(&bytes, &key)?;
 
@@ -332,10 +323,9 @@ pub fn remove_password_protection(password: String) -> Result<(), String> {
     Ok(())
 }
 
-/// Toggle whether the password is required on each app launch.
-/// When true (flags=0x01): password prompt on every launch.
-/// When false (flags=0x03): password-derived key cached in OS keychain, silent unlock.
-/// Requires the identity to already be password-protected and unlocked.
+/// Toggle whether the password is required on each launch: on means a prompt every
+/// time, off caches the password-derived key in the OS keychain for a silent unlock.
+/// The identity must already be password-protected and unlocked.
 #[frb]
 pub fn set_require_password_on_launch(require: bool) -> Result<(), String> {
     use crate::identity::encryption;
@@ -378,8 +368,7 @@ pub fn set_require_password_on_launch(require: bool) -> Result<(), String> {
     std::fs::write(&path, &encrypted)
         .map_err(|e| format!("Failed to write identity: {e}"))?;
 
-    // Keep the device key file's flags in sync. Session key is unchanged, so the
-    // device key remains decryptable regardless; this keeps the files consistent.
+    // Keep the device key file's flags in sync; the session key is unchanged either way.
     let device = identity::device_key::load_device_keypair_with_key(&session_key)?;
     identity::device_key::rewrite_device_key_protection(
         &device,
@@ -491,10 +480,9 @@ pub fn get_identity_protection_status() -> Result<ProtectionStatus, String> {
 
 /// Protection status of the identity file inside an ARBITRARY data root.
 ///
-/// The profile switcher (issue #47) needs to know whether the profile it is
-/// about to erase is protected, and that profile is by definition not the one
-/// this process unlocked, so `get_identity_protection_status` (which only ever
-/// looks at the running `data_dir()`) cannot answer it.
+/// The profile switcher needs to know whether the profile it is about to erase is
+/// protected, and that profile is by definition not the one this process unlocked, so
+/// `get_identity_protection_status` cannot answer it.
 #[frb]
 pub fn identity_protection_status_at(data_dir: String) -> Result<ProtectionStatus, String> {
     protection_status_of(&std::path::Path::new(&data_dir).join("identity.key"))
@@ -503,11 +491,10 @@ pub fn identity_protection_status_at(data_dir: String) -> Result<ProtectionStatu
 /// Verify that `password` (or, when it is None, a key this machine's keystore
 /// already holds) really unwraps the identity file in `data_dir`.
 ///
-/// A GATE, not an unlock: it never touches the session key and never heals the
-/// keystore slots, so asking about another profile cannot disturb the running
-/// one. A plaintext identity has nothing to prove and answers true. A wrong
-/// password is `Ok(false)`, not an error - only a missing or malformed file
-/// errors.
+/// A GATE, not an unlock: it never touches the session key and never heals the keystore
+/// slots, so asking about another profile cannot disturb the running one. A plaintext
+/// identity answers true, a wrong password is `Ok(false)`, and only a missing or
+/// malformed file errors.
 #[frb]
 pub fn verify_identity_password_at(
     data_dir: String,

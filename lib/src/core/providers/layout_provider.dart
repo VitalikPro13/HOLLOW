@@ -14,13 +14,10 @@ enum LayoutMode {
 
 /// Persisted layout mode preference. Default: dock.
 ///
-/// A plain [Notifier] with an explicit [LayoutModeNotifier.load] called from
-/// `HollowShell._bootstrap` — NOT an `AsyncNotifier` that reads the setting in
-/// `build()`. Rust `load_setting` throws until the SQLCipher store is open, and
-/// the shell mounts (and watches this provider) during the local-first render,
-/// well before the DB is ready. The eager read therefore always lost the race,
-/// the error was swallowed by the `valueOrNull ?? dock` fallback at every call
-/// site, and Classic mode silently reverted to Dock on every launch (#58).
+/// A plain [Notifier] with an explicit [LayoutModeNotifier.load] from
+/// `HollowShell._bootstrap`, NOT an `AsyncNotifier` reading in `build()`: Rust
+/// `load_setting` throws until the store is open, so the eager read always lost
+/// the race and Classic silently reverted to Dock on every launch (#58).
 final layoutModeProvider =
     NotifierProvider<LayoutModeNotifier, LayoutMode>(LayoutModeNotifier.new);
 

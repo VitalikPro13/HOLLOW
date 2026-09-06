@@ -1,8 +1,5 @@
-// Hollow Share — Phase 7A backend.
-//
-// Private, encrypted, zero-tracker file sharing built on the existing relay
-// rooms + WebRTC data channel pipeline. See the plan at
-// ~/.claude/plans/yeah-better-to-have-composed-haven.md for the full design.
+// Hollow Share: private, encrypted, zero-tracker file sharing built on the
+// existing relay rooms and WebRTC data channel pipeline (HOLLOW_PLAN 7A).
 
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
@@ -186,38 +183,25 @@ const FALLBACK_DOWNLOAD_NAME: &str = "download";
 /// SECURITY: reduce a sender-controlled manifest file name to a single, inert
 /// path component.
 ///
-/// `ShareManifest.file_name` is authored entirely by the sender. The manifest
-/// root hash is NOT a trust signal here — the sender computes it over their own
-/// manifest, so a hostile name hashes just fine. Joining it to the download
-/// directory unchanged let a peer write anywhere the process can reach:
+/// `ShareManifest.file_name` is authored entirely by the sender, and the manifest
+/// root hash is NOT a trust signal, since the sender hashes their own manifest.
+/// Joining it to the download directory unchanged let a peer write anywhere the
+/// process can reach: `..\..\poc.txt` walks out, and an ABSOLUTE name makes
+/// `Path::join` DISCARD the base entirely, so a traversal-only filter would miss
+/// it. Share-backed files under the auto-download threshold arrive with no user
+/// interaction, and one landing in an OS autostart directory is code execution at
+/// next login. This is the boundary that has to hold.
 ///
-///   * `..\..\..\poc.txt` walks out of the download directory, and
-///   * an ABSOLUTE name (`C:\...\Startup\x.exe`, `/home/u/.bashrc`) makes
-///     `Path::join` DISCARD the base directory entirely — no `..` required, so
-///     a traversal-only filter would not have caught it.
+/// Rules, in order: keep only the text after the last `/` or `\` (BOTH are
+/// separators on every platform here, so a Linux-minted name cannot become a
+/// traversal on Windows); trim whitespace then trailing dots and spaces (Windows
+/// strips those at create time, so a check on the un-stripped form is bypassable);
+/// reject `.` and `..`; map control characters and the Windows-illegal set to `_`,
+/// including `:`, which kills drive-relative names and NTFS alternate data
+/// streams; prefix reserved device names with `_`; truncate on a char boundary.
 ///
-/// Share-backed files under the auto-download threshold are fetched with no user
-/// interaction, and a file landing in an OS autostart directory is code
-/// execution at next login. This is the boundary that has to hold.
-///
-/// Rules, in order:
-///  1. Keep only the text after the last `/` or `\`. BOTH are separators on
-///     EVERY platform here: a name minted on Linux (where `\` is a legal
-///     filename character) must not become a traversal when it reaches Windows.
-///  2. Trim surrounding whitespace, then trailing dots and spaces — Windows
-///     silently strips those when creating a file, so `evil.exe. ` and
-///     `evil.exe` are the same file and any check on the un-stripped form is
-///     bypassable.
-///  3. Reject the pure-dot components `.` and `..`.
-///  4. Map control characters and the Windows-illegal set to `_`. This includes
-///     `:`, which kills both drive-relative names (`C:evil`, which `join` also
-///     treats as a prefix) and NTFS alternate data streams (`a.txt:evil`).
-///  5. Prefix reserved Windows device names (`CON`, `NUL`, `COM1`, ...) with
-///     `_`; they are reserved with any extension and on every drive.
-///  6. Truncate to `MAX_DOWNLOAD_NAME_BYTES` on a char boundary, then re-trim.
-///
-/// The result is always exactly one component, never empty, and never `.`/`..`,
-/// so `dir.join(safe_file_name(x))` is always inside `dir`.
+/// The result is always exactly one component, never empty and never `.`/`..`, so
+/// `dir.join(safe_file_name(x))` is always inside `dir`.
 pub(crate) fn safe_file_name(raw: &str) -> String {
     // 1. Last component only, treating both separators as separators everywhere.
     let name = raw.rsplit(['/', '\\']).next().unwrap_or(raw);
@@ -230,11 +214,9 @@ pub(crate) fn safe_file_name(raw: &str) -> String {
         return FALLBACK_DOWNLOAD_NAME.to_string();
     }
 
-    // 4. Neutralize control chars and everything Windows forbids in a component.
-    //    Also the bidi override/isolate characters: they are category Cf, so
-    //    `is_control()` does NOT catch them, and `evil\u{202E}txt.exe` renders as
-    //    `evil exe.txt` in a file manager — the classic right-to-left-override
-    //    extension spoof, which matters exactly because these files auto-download.
+    // 4. Neutralize control chars and everything Windows forbids in a component,
+    //    plus the bidi override characters: they are category Cf, so `is_control()`
+    //    misses them, and `evil\u{202E}txt.exe` renders as `evil exe.txt`.
     let mut cleaned: String = name
         .chars()
         .map(|c| {
@@ -285,12 +267,10 @@ fn partial_path(root_hash_hex: &str) -> Result<PathBuf, String> {
     Ok(partial_path_in(&shares_dir()?, root_hash_hex))
 }
 
-// REMOVED: `final_path_in` / `final_path`. Both were dead code that built a
-// download path from `{root_hash}.{ext}`, where `ext` is derived from the
-// sender-controlled `manifest.file_name` via `rsplit_once('.')`. A name like
-// `poc.\..\..\Startup\x` yields the ext `\..\..\Startup\x`, so wiring either one
-// up would have silently reintroduced the path traversal that `safe_file_name`
-// exists to close. Build download paths with `unique_final_path` instead.
+// REMOVED: `final_path_in` / `final_path`. Both built a download path from an
+// extension derived from the sender-controlled `manifest.file_name`, so a name
+// like `poc.\..\..\Startup\x` yields a traversal ext. Build download paths with
+// `unique_final_path` instead.
 
 // ── Bitmap (compact Have representation) ─────────────────────────────────
 
@@ -352,9 +332,8 @@ pub const CHUNK_REQUEST_TIMEOUT: Duration = Duration::from_secs(8);
 pub const MAX_INFLIGHT_PER_PEER: usize = 4;
 /// Speed measurement window: bytes received in the last N seconds.
 const SPEED_WINDOW_SECS: f64 = 3.0;
-/// Outbound seeding cap. Refill rate in bytes/sec, max burst in bytes.
-/// 20 MiB/s with 40 MiB burst. The coexistence pause (200ms after messaging)
-/// already protects real-time traffic; the bucket just prevents runaway saturation.
+/// Outbound seeding cap: 20 MiB/s refill with a 40 MiB burst. The coexistence
+/// pause already protects real-time traffic; this only stops runaway saturation.
 const SEED_REFILL_BPS: u64 = 20 * 1024 * 1024;
 const SEED_BURST_BYTES: u64 = 40 * 1024 * 1024;
 /// Pause share scheduling for this long after any messaging/voice traffic.
@@ -1026,11 +1005,9 @@ pub async fn broadcast_have(
 
 // ── Auto-rejoin on startup ───────────────────────────────────────────────
 
-/// Called once from spawn_node after the registry is created. Walks the
-/// `shares` table for rows with `state='completed' AND seeding=1` and
-/// rebuilds in-memory state for each, then sends `JoinRoom` so we start
-/// serving chunks immediately. Without this, restarting the app would
-/// silently kill all seeding.
+/// Called once from spawn_node after the registry is created: rebuild in-memory
+/// state for every completed seeding row and rejoin its room, so chunks are
+/// served immediately. Without this a restart silently kills all seeding.
 pub fn auto_rejoin_seeders(
     registry: &mut ShareRegistry,
     bundle_keypair: &NativeKeypair,
@@ -1161,19 +1138,14 @@ impl SeedBudget {
 
 // ── Scheduler tick ───────────────────────────────────────────────────────
 
-/// Driven once per second from the swarm main loop. Three jobs:
+/// Driven once per second from the swarm main loop. Three jobs: re-broadcast our
+/// Have bitmap into each share room every 10s; time out in-flight chunk requests
+/// older than CHUNK_REQUEST_TIMEOUT so the rarest-first picker can re-issue
+/// against another peer; and pick rarest chunks not yet held or in flight and
+/// request them, capped at MAX_INFLIGHT_PER_PEER.
 ///
-///   1. Re-broadcast our Have bitmap into each share room every 10s so peers
-///      learn about chunks we acquire after the initial join.
-///   2. Time out in-flight chunk requests older than CHUNK_REQUEST_TIMEOUT —
-///      forget them so the rarest-first picker can re-issue against another peer.
-///   3. For each downloading share, pick rarest chunks not yet in `have` and
-///      not in-flight, and send `ShareChunkRequest` to peers that hold them.
-///      Caps in-flight per peer at MAX_INFLIGHT_PER_PEER.
-///
-/// `messaging_active` is set true if voice/message traffic happened in the
-/// last COEXIST_PAUSE window — when true, we skip new chunk requests this
-/// tick (Have rebroadcast and timeout still run).
+/// `messaging_active` means voice or message traffic happened in the last
+/// COEXIST_PAUSE window, and new chunk requests are skipped for that tick.
 pub async fn tick(
     registry: &mut ShareRegistry,
     ws_cmd_tx: &mpsc::UnboundedSender<WsCommand>,
@@ -1330,16 +1302,12 @@ async fn tick_schedule_requests(
         let Some(state) = registry.get(root_hash) else { return; };
         if state.peer_have.is_empty() { return; }
 
-        // Request Share data channels for peers we know about but aren't
-        // connected to. This runs BEFORE the completeness guard on purpose, so
-        // a pure SEEDER asks for the link too — it would otherwise only ever
-        // answer, and both ends dialling is what gets the STUN-only Share
-        // config applied symmetrically (HOLLOW_PLAN §7A).
-        //
-        // `webrtc_share_peers` is the SHARE lane's set, not the general
-        // hollow-data one: a general channel to this peer proves nothing about
-        // Share reachability, and treating it as if it did is what used to let
-        // Share inherit that channel's TURN candidates.
+        // Request Share data channels for peers we know but are not connected to.
+        // BEFORE the completeness guard on purpose, so a pure SEEDER asks for the
+        // link too: both ends dialling is what applies the STUN-only Share config
+        // symmetrically. `webrtc_share_peers` is the SHARE lane's set, not the
+        // general one: a general channel proves nothing about Share reachability,
+        // and treating it as if it did is how Share inherited TURN candidates.
         request_missing_webrtc_links(state, webrtc_share_peers, event_tx).await;
 
         if state.have.is_complete() { return; }
@@ -1578,12 +1546,10 @@ pub async fn handle_envelope_share_have(
 
 // ── Share data-channel liveness (NodeCommand handlers) ───────────────
 //
-// Hollow Share runs its OWN peer connection per peer, built from the STUN-only
-// Share ICE config, and `webrtc_share_peers` is that lane's liveness set. It is
-// deliberately NOT the general `webrtc_peers` set: the general hollow-data
-// connection carries TURN (TURN-ONLY while "Always relay calls" is on), so
-// scheduling or serving chunks on the strength of THAT channel is exactly how
-// multi-GB Share payloads used to end up on the relay (HOLLOW_PLAN §7A).
+// Hollow Share runs its OWN peer connection per peer from the STUN-only Share ICE
+// config, and `webrtc_share_peers` is that lane's liveness set. Deliberately NOT
+// the general `webrtc_peers`: that connection carries TURN, and serving chunks on
+// the strength of it is how multi-GB Share payloads ended up on the relay.
 
 /// Dart: the dedicated Share data channel to `peer_id` is open.
 pub(crate) fn handle_share_peer_connected(
@@ -1785,11 +1751,10 @@ async fn finalize_completed_download(
     }
     let is_hidden = match registry.get(root_hash) {
         Some(s) => s.hidden,
-        // Registry entry gone mid-finalize: fall back to the persisted share
-        // row — hidden shares are exactly the channel-context ones (server_id
-        // set; same derivation as handle_command_share_open_link). If even the
-        // row is missing, treat as hidden so we never auto-seed / un-hide a
-        // hidden download (persist_share_completion then leaves seeding alone).
+        // Registry entry gone mid-finalize: fall back to the persisted share row,
+        // where hidden shares are exactly the channel-context ones (server_id set).
+        // If even the row is missing, treat as hidden, so a hidden download is
+        // never auto-seeded or un-hidden.
         None => open_message_store(bundle_keypair)
             .and_then(|store| store.load_share(root_hash).ok().flatten())
             .map(|s| s.server_id.is_some())
@@ -1810,8 +1775,7 @@ async fn finalize_completed_download(
 /// ... before the extension to avoid collisions with existing files.
 ///
 /// SECURITY: `file_name` is sender-controlled, so it goes through
-/// `safe_file_name` before it ever touches the filesystem. See that function for
-/// the escape primitives this closes.
+/// `safe_file_name` before it ever touches the filesystem.
 fn unique_final_path(dir: &std::path::Path, file_name: &str) -> PathBuf {
     let safe_name = safe_file_name(file_name);
     if safe_name != file_name {
@@ -1956,15 +1920,12 @@ pub async fn handle_envelope_share_chunk_response(
 
 // ── WebRTC binary chunk completion (called from swarm.rs WebRtcTransferComplete dispatch) ──
 
-/// Receiver-side handler when a chunk arrives via WebRTC binary frames.
-/// Mirrors the verify+decrypt+write+progress+complete logic of
-/// handle_envelope_share_chunk_response, but reads the ciphertext from the
-/// temp file Dart wrote (not from a base64 envelope).
+/// Receiver-side handler when a chunk arrives via WebRTC binary frames. Mirrors
+/// the verify, decrypt, write and progress logic of the envelope path, but reads
+/// the ciphertext from the temp file Dart wrote.
 ///
-/// `transfer_id` is the wire id from the sender — format `"{short_root}:{idx}"`
-/// where short_root is the first 32 hex chars of the root_hash. We resolve to
-/// the full root_hash by matching against active shares in the registry
-/// (collisions vanishingly unlikely with 128 bits).
+/// `transfer_id` is the wire id `"{short_root}:{idx}"`, resolved to the full
+/// root_hash by matching active shares (128 bits, so collisions are negligible).
 pub async fn handle_webrtc_share_chunk_complete(
     registry: &mut ShareRegistry,
     bundle_keypair: &NativeKeypair,
@@ -2075,11 +2036,10 @@ pub async fn handle_webrtc_share_chunk_complete(
 mod tests {
     use super::*;
 
-    /// The Share lane's liveness set gates BOTH scheduling (which peers we ask
-    /// for chunks) and serving (`prefer_webrtc`). A peer that only has the
-    /// general hollow-data channel must be invisible to it — that channel
-    /// carries TURN, and treating it as a Share transport is what put Share
-    /// bytes on the relay (HOLLOW_PLAN §7A).
+    /// The Share lane's liveness set gates BOTH scheduling and serving. A peer with
+    /// only the general hollow-data channel must be invisible to it: that channel
+    /// carries TURN, and treating it as a Share transport is what put Share bytes
+    /// on the relay (HOLLOW_PLAN 7A).
     #[test]
     fn share_peer_set_is_independent_of_the_general_channel() {
         let mut share_peers: std::collections::HashSet<String> = Default::default();
@@ -2099,10 +2059,9 @@ mod tests {
         assert!(share_peers.is_empty());
     }
 
-    /// Share signalling rides its OWN HavenMessage variants so a client that
-    /// predates the Share lane DROPS them (unknown tag → parse error) instead
-    /// of feeding a Share offer to its single-connection data-channel layer,
-    /// where the glare tiebreaker would tear down its live hollow-data link.
+    /// Share signalling rides its OWN HavenMessage variants, so a client predating
+    /// the Share lane DROPS them rather than feeding a Share offer to its
+    /// single-connection data-channel layer, where glare would tear down its link.
     #[test]
     fn share_rtc_variants_round_trip_and_are_distinct_from_general() {
         let offer = HavenMessage::RtcShareOffer {

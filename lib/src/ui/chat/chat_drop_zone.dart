@@ -7,21 +7,13 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-/// A drop zone wrapper for chat panes.
-///
-/// Wraps [child] in a [DropTarget] that accepts file drops. When a file
-/// is dragged over, an accent-bordered overlay appears with "Drop file
-/// to attach" text. On drop, the first file is staged via [onFileDropped].
-///
-/// File size validation and image detection are the caller's responsibility
-/// — see `_pickAndStageFile` in chat_pane / channel_chat_pane for the
-/// existing pattern. This widget is purely a visual + drop event wrapper.
+/// A drop zone wrapper for chat panes: purely the overlay and the drop event.
+/// Size validation and image detection belong to [onFileDropped].
 class ChatDropZone extends StatefulWidget {
   final Widget child;
 
-  /// Called when a file is dropped. Receives the file path, name, and size
-  /// in bytes. The callback is responsible for size validation and staging.
-  /// May be sync or async — return value is ignored.
+  /// Called with the dropped file's path, name and size in bytes, and owns the
+  /// size validation and staging. May be sync or async.
   final dynamic Function(String path, String name, int sizeBytes) onFileDropped;
 
   const ChatDropZone({
@@ -41,12 +33,11 @@ class _ChatDropZoneState extends State<ChatDropZone> {
     setState(() => _dragging = false);
     if (details.files.isEmpty) return;
 
-    // Take only the first file (multi-file support is a separate todo).
+    // First file only.
     final file = details.files.first;
     final path = file.path;
     if (path.isEmpty) return;
 
-    // Get file size from disk (XFile.length is async).
     int sizeBytes;
     try {
       sizeBytes = await File(path).length();
@@ -54,7 +45,6 @@ class _ChatDropZoneState extends State<ChatDropZone> {
       sizeBytes = 0;
     }
 
-    // Use XFile.name when available, fallback to basename of path.
     final name = file.name.isNotEmpty
         ? file.name
         : path.split(Platform.pathSeparator).last;

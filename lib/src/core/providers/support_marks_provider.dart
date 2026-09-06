@@ -8,16 +8,13 @@ import 'package:hollow/src/core/providers/shop_provider.dart' as shop;
 import 'package:hollow/src/core/shop_availability.dart';
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 
-/// Support marks (design 5.5, 5.6; amended by Vitalik 2026-09-02): the support
-/// credentials a profile carries, shown as a BADGE.
+/// Support marks: the support credentials a profile carries, shown as a BADGE.
 ///
-/// The credentials themselves were verified in Rust before they reached the
-/// database (`support_creds::sanitize_incoming_support_creds` for a peer, the
-/// redeem path for ourselves), so nothing here checks a signature. What this
-/// decides is display only. A credential is a receipt for bought art, and it
-/// shows whether or not that art is worn right now: taking a frame off does
-/// not un-buy it. The first draft lit a mark only beside worn art; that rule
-/// is gone.
+/// The credentials were verified in Rust before they reached the database
+/// (`support_creds::sanitize_incoming_support_creds` for a peer, the redeem
+/// path for ourselves), so nothing here checks a signature; this decides
+/// display only. A credential is a receipt for bought art and shows whether or
+/// not that art is worn: taking a frame off does not un-buy it.
 
 /// One credential as the profile field carries it, reduced to what a mark
 /// needs.
@@ -89,8 +86,7 @@ List<SupportCred> parseSupportCreds(String json) {
 }
 
 /// The credentials on a profile, parsed once per field VALUE: the field is a
-/// string, so the same string parses to the same list and the cache is by
-/// content.
+/// string, so the same string parses to the same list and the cache is by content.
 final Map<String, List<SupportCred>> _parsed = {};
 
 List<SupportCred> supportCredsOf(storage_api.UserProfile? profile) {
@@ -113,26 +109,20 @@ final supportMarksProvider =
 });
 
 /// Whether [peerId]'s name carries the glyph: at least one credential whose
-/// holder left the badge on. Selected as a bool so a chat row never rebuilds
-/// for anything but a flip.
+/// holder left the badge on. A bool, so a chat row rebuilds only on a flip.
 final supportBadgeVisibleProvider = Provider.family<bool, String>((ref, peerId) {
   return ref.watch(supportMarksProvider(peerId)).any((cred) => cred.badge);
 });
 
-// ── The verified Twitch account ───────────────────────────────────────
+// The verified Twitch account: the purple chip draws from a `t = 3` credential
+// on the same field and nothing else. `twitch_username` is still on the wire
+// for old clients, but a self-declared handle is a claim anybody's modified
+// client can make, so no new client renders one.
 //
-// The purple chip draws from a `t = 3` credential on the same field and from
-// nothing else. `twitch_username` is still on the wire for old clients, but a
-// self-declared handle is a claim anybody's modified client can make, so no
-// new client renders one (Vitalik, 2026-09-03: no "claims to be" chip).
-//
-// Nothing here verifies a signature, and nothing here needs to: Rust checked
-// the whole chain against the pinned root before the row was written
-// (`support_creds::sanitize_incoming_support_creds` for a peer, the verify
-// path for ourselves). What is checked is the SHAPE, so a malformed local row
-// renders nothing rather than junk, and the WINDOW, so a credential that has
-// aged out stops showing here the moment it expires instead of at whatever
-// point its holder next announces.
+// Nothing here verifies a signature: Rust checked the whole chain against the
+// pinned root before the row was written. What is checked is the SHAPE, so a
+// malformed row renders nothing, and the WINDOW, so an aged-out credential
+// stops showing the moment it expires.
 
 final _kTwitchLogin = RegExp(r'^[a-z0-9_]{4,25}$');
 
@@ -192,15 +182,11 @@ final twitchLoginProvider = Provider.family<String?, String>((ref, peerId) {
 });
 
 /// [supportMarksProvider] with names attached, looked up in the order that
-/// cannot mislead: our own redeem records first (they name the listing the
-/// credential was minted for, by its exact item hash), then the shop's
-/// catalog by that same exact hash (when there is a shop here and the catalog
-/// has been fetched), then our library by an EXACT match of the file set.
-/// A looser match came last and lied: a bundle's pack carries the same
-/// avatar file as the single avatar's credential, so "any shared hash" named
-/// the bundle for both. When only a shared file is known, only the artist is
-/// taken from it, never the title. Store builds never fetch the catalog for
-/// this (section 8: no shop surface, marks still render).
+/// cannot mislead: our own redeem records first (they name the listing by its
+/// exact item hash), then the shop's catalog by that same hash, then our
+/// library by an EXACT match of the file set. A looser match lied: a bundle's
+/// pack carries the same avatar file as the single avatar's credential. From a
+/// shared file only the artist is taken, never the title.
 final supportMarkInfosProvider =
     Provider.family<List<SupportCredInfo>, String>((ref, peerId) {
   final creds = ref.watch(supportMarksProvider(peerId));

@@ -38,11 +38,10 @@ pub(crate) struct OutSignal {
     pub envelope: MessageEnvelope,
 }
 
-/// Round-robin port allocation over the configured UDP range. No used-set —
-/// a port still held by a live leg simply fails to bind and we try the next.
-/// `min == 0` = embedded peer forwarder: bind an OS-assigned ephemeral port
-/// per leg (clients have no firewall config; outbound-first UDP is what their
-/// NAT/host firewall already handles for every WebRTC socket).
+/// Round-robin port allocation over the configured UDP range. No used-set: a port
+/// still held by a live leg simply fails to bind and we try the next. `min == 0` =
+/// embedded peer forwarder, which binds an OS-assigned ephemeral port per leg
+/// because clients have no firewall config and outbound-first UDP already works.
 struct PortAllocator {
     min: u16,
     max: u16,
@@ -72,9 +71,8 @@ impl PortAllocator {
     }
 }
 
-/// How legs advertise themselves — fixed public IP (VPS) or auto-discovered
-/// (embedded peer forwarder: LAN IP of the default-route interface + per-leg
-/// STUN mapping, resolved from `cfg.stun_server`).
+/// How legs advertise themselves: a fixed public IP on the VPS, or auto-discovered
+/// (LAN IP of the default route plus a per-leg STUN mapping) when embedded.
 #[derive(Clone, Copy)]
 enum AdvertiseMode {
     Fixed(IpAddr),
@@ -82,8 +80,8 @@ enum AdvertiseMode {
 }
 
 impl AdvertiseMode {
-    /// Build the per-leg advertise info. Auto mode re-reads the local IP per
-    /// leg (a laptop can change networks mid-session; one connect() syscall).
+    /// Build the per-leg advertise info. Auto mode re-reads the local IP per leg,
+    /// because a laptop can change networks mid-session.
     fn for_leg(&self, port: u16) -> Advertise {
         match *self {
             AdvertiseMode::Fixed(ip) => Advertise { host: SocketAddr::new(ip, port), stun: None },
@@ -95,9 +93,8 @@ impl AdvertiseMode {
     }
 }
 
-/// The local IP of the default-route interface: connect() on a UDP socket
-/// sends nothing but resolves the route. Falls back through the STUN address
-/// to a public anycast IP purely for route selection.
+/// The local IP of the default-route interface: connect() on a UDP socket sends
+/// nothing but resolves the route. The fallbacks exist purely for route selection.
 fn local_route_ip(stun: Option<SocketAddr>) -> Option<IpAddr> {
     let target = stun.unwrap_or_else(|| SocketAddr::from(([1, 1, 1, 1], 53)));
     let sock = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
@@ -105,8 +102,8 @@ fn local_route_ip(stun: Option<SocketAddr>) -> Option<IpAddr> {
     Some(sock.local_addr().ok()?.ip())
 }
 
-/// Resolve the configured STUN server, IPv4-only — the D6 field bug #2 was an
-/// IPv6-first answer with no routable IPv6; media legs are v4.
+/// Resolve the configured STUN server, IPv4-only: an IPv6-first answer with no
+/// routable IPv6 leaves media legs stranded.
 async fn resolve_stun(server: &str) -> Option<SocketAddr> {
     match tokio::net::lookup_host(server).await {
         Ok(mut addrs) => addrs.find(|a| a.is_ipv4()),
@@ -153,10 +150,8 @@ pub(crate) async fn run(
     let mut shutting_down = false;
     let (ended_tx, mut ended_rx) = mpsc::unbounded_channel::<LegEnded>();
 
-    // Egress bps estimate: sampled over the tick interval from the aggregate
-    // counters. Admission-only granularity (never touches existing legs).
-    // Ingest bps rides along for the aggregate log only — egress/ingest ≈ k
-    // is the headline `B + B·k` vs TURN's `2·B·k` number (D6 follow-up #2).
+    // Egress bps estimate, sampled over the tick interval. Admission-only
+    // granularity, and it never touches existing legs.
     let mut egress_bps: u64 = 0;
     let mut last_egress_bytes: u64 = 0;
     let mut ingest_bps: u64 = 0;
@@ -194,9 +189,9 @@ pub(crate) async fn run(
                 if let Some(s) = streams.get_mut(&stream) {
                     match viewer {
                         None => {
-                            // Ingest died on its own (ICE loss, sharer gone).
-                            // Egress legs stay — viewers' feeds dry up and the
-                            // receiver-initiates heal re-requests direct.
+                            // Ingest died on its own (ICE loss, sharer gone). Egress legs
+                            // stay: viewers' feeds dry up and the receiver-initiates heal
+                            // re-requests direct.
                             if let Some(leg) = s.ingest.take() {
                                 leg.task.abort();
                             }
@@ -213,8 +208,8 @@ pub(crate) async fn run(
             _ = tick.tick() => {
                 ticks += 1;
                 sweep_unconnected_legs(&mut streams).await;
-                // Reap streams spared by the presence-flap tolerance once
-                // their media legs have dried up (owner never came back).
+                // Reap streams spared by the presence-flap tolerance once their media
+                // legs have dried up.
                 let orphaned: Vec<StreamKey> = streams.iter()
                     .filter(|(_, s)| s.owner_gone && !s.has_live_media())
                     .map(|(k, _)| k.clone())
@@ -225,7 +220,6 @@ pub(crate) async fn run(
                         hollow_log!("[HOLLOW-FWD] swept a stream whose owner left (media legs gone)");
                     }
                 }
-                // Recompute the bps estimates.
                 let total: u64 = streams.values()
                     .map(|s| s.counters.egress_bytes.load(Ordering::Relaxed))
                     .sum();
@@ -236,11 +230,9 @@ pub(crate) async fn run(
                     .sum();
                 ingest_bps = total_in.saturating_sub(last_ingest_bytes) * 8 / 10;
                 last_ingest_bytes = total_in;
-                // ONE aggregate line per minute — zero metadata logging — but
-                // ONLY while active (plus one trailing idle line at the
-                // transition): an unchanging "0 streams" line every minute
-                // flooded journald on the VPS and rotated an entire field
-                // session's evidence out of retention (found 2026-08-07).
+                // ONE aggregate line per minute, and ONLY while active plus one trailing
+                // idle line: an unchanging "0 streams" line every minute flooded journald
+                // and rotated a whole field session's evidence out of retention.
                 if ticks % 6 == 0 {
                     let active = !streams.is_empty();
                     if active || was_active {
@@ -320,13 +312,12 @@ async fn handle_signal(
                 if let Some(s) = streams.get_mut(&key) {
                     s.allowlist = allowlist;
                     s.low_viewers = low;
-                    // Feeder election: only an OWNER-authored register can set
-                    // (or clear) the delegation, and `admit_register` above has
-                    // already pinned origin == sender. Re-registers refresh it
-                    // like the allowlist, so revoking is just an empty field.
+                    // Feeder election: only an OWNER-authored register can set or clear the
+                    // delegation, and `admit_register` has already pinned origin == sender.
+                    // Re-registers refresh it, so revoking is just an empty field.
                     s.feeder = feeder;
-                    // An admitted owner op proves the owner is back — undo a
-                    // presence-flap mark so the sweep doesn't reap a live re-share.
+                    // An admitted owner op proves the owner is back, so undo a presence-flap
+                    // mark and let a live re-share survive the sweep.
                     s.owner_gone = false;
                 }
             } else {
@@ -368,9 +359,8 @@ async fn handle_signal(
         }
         MessageEnvelope::FwdIngestOffer { origin, sdp } => {
             let key = stream_key(&origin);
-            // The owner OR its delegated feeder may supply the ingest. This is
-            // the only relaxation of the owner binding; everything else on this
-            // stream stays owner-only (see dispatch::admit_ingest_offer).
+            // The owner OR its delegated feeder may supply the ingest. This is the only
+            // relaxation of the owner binding; everything else stays owner-only.
             if let Err(code) = admit_ingest_offer(view_of(streams, &key, &sender).as_ref(), &sender) {
                 send_error(out_tx, &sender, &origin, code, "ingest refused");
                 return;
@@ -405,8 +395,8 @@ async fn handle_signal(
                 connected,
                 spawned_at: Instant::now(),
             });
-            // The pump answers synchronously (no network wait); forward it as
-            // soon as the oneshot lands without blocking the engine loop.
+            // The pump answers synchronously, so forward it as soon as the oneshot lands
+            // rather than blocking the engine loop.
             let (reply_tx, reply_rx) = oneshot::channel();
             let _ = cmd_tx.send(LegCmd::AcceptOffer(sdp, reply_tx));
             let out_tx = out_tx.clone();
@@ -446,8 +436,8 @@ async fn handle_signal(
             if let Some(old) = s.egress.remove(&sender) {
                 old.shut_down();
             }
-            // Simulcast layer choice is attach-time: the sharer's register
-            // named the viewers that should ride the low layer.
+            // Simulcast layer choice is attach-time: the sharer's register named the
+            // viewers that ride the low layer.
             let want_low = s.low_viewers.contains(&sender);
             let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<LegCmd>();
             let connected = Arc::new(AtomicBool::new(false));
@@ -505,25 +495,20 @@ async fn handle_signal(
                 let _ = leg.cmd_tx.send(LegCmd::AcceptAnswer(sdp));
             }
         }
-        // Client-bound or non-fwd envelopes never reach the engine
-        // (signaling.rs whitelists) — drop defensively.
+        // signaling.rs whitelists, so anything else here is dropped defensively.
         _ => {}
     }
 }
 
-/// A peer left the fwd room: their owned streams unregister, their egress
-/// legs detach. (Signaling loses presence on ITS reconnect too — it only
-/// reports peers that vanished from the room, never a wholesale clear, so a
-/// forwarder-side WS blip doesn't kill live media.)
+/// A peer left the fwd room: their owned streams unregister, their egress legs
+/// detach. Signaling only reports peers that vanished from the room, never a
+/// wholesale clear, so a forwarder-side WS blip does not kill live media.
 fn handle_peer_gone(peer: &str, streams: &mut HashMap<StreamKey, StreamState>) {
-    // Presence is a WEAK signal: the relay's ghost-socket eviction (and
-    // members-snapshot races) fires PeerLeft/absences for peers whose media
-    // legs are alive and pumping. THE MEDIA LEG IS THE ONLY TRUTH that may
-    // kill live forwarding (client-side iron rule, field 2026-08-06 — latent
-    // here too). Presence loss tears down only what carries NO connected
-    // media; live streams are marked `owner_gone` and the sweep tick removes
-    // them once their legs dry up (LegEnded / the unconnected sweep own real
-    // cleanup).
+    // Presence is a WEAK signal: ghost-socket eviction and members-snapshot races
+    // report absences for peers whose media legs are alive. THE MEDIA LEG IS THE ONLY
+    // TRUTH that may kill live forwarding, so presence loss tears down only what
+    // carries no connected media and live streams are marked `owner_gone` for the
+    // sweep.
     let owned: Vec<StreamKey> = streams
         .iter()
         .filter(|(_, s)| s.owner == peer)

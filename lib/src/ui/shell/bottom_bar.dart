@@ -43,8 +43,6 @@ import 'package:hollow/src/core/providers/guest_provider.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Horizontal bottom bar for the Dock layout.
-///
-/// Layout: [User Panel] | [Server Strip (center)] | [Utility Buttons]
 class BottomBar extends ConsumerStatefulWidget {
   const BottomBar({super.key});
 
@@ -55,7 +53,7 @@ class BottomBar extends ConsumerStatefulWidget {
 class _BottomBarState extends ConsumerState<BottomBar> {
   bool _isDragging = false;
 
-  /// Tracks initial server IDs to skip entrance animation.
+  /// Servers that existed on first build skip the entrance animation.
   Set<String>? _initialServerIds;
 
   @override
@@ -75,9 +73,9 @@ class _BottomBarState extends ConsumerState<BottomBar> {
     final myDisplayName =
         localPeerId != null ? displayNameForPeer(localProfile, localPeerId) : '---';
 
-    // Connection dot — the REAL node+relay state, shared with the Classic user
-    // bar so the two layouts can never disagree. The local node status alone
-    // goes "connected" the instant it boots, internet or not.
+    // The REAL node and relay state, shared with the Classic user bar so the
+    // two layouts cannot disagree. Local node status alone goes "connected" the
+    // instant it boots, internet or not.
     final amInvisible =
         ref.watch(invisibleModeProvider);
     final visual = connectionVisual(
@@ -86,7 +84,6 @@ class _BottomBarState extends ConsumerState<BottomBar> {
       invisible: amInvisible,
     );
 
-    // DM unread count for Home button (pre-computed, notification-filtered).
     final dmUnreadTotal = ref.watch(dmUnreadBadgeProvider);
 
     final archiveOpen = ref.watch(archiveTabOpenProvider);
@@ -105,9 +102,8 @@ class _BottomBarState extends ConsumerState<BottomBar> {
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.center,
         children: [
-          // ── Left: Compact User Panel ──
-          // The dot is the only status surface here (no room for a word), so
-          // the tooltip carries the label the Classic user bar prints.
+          // The dot is the only status surface here, so the tooltip carries the
+          // label the Classic user bar prints.
           SizedBox(
             width: 140,
             child: HollowTooltip(
@@ -151,8 +147,8 @@ class _BottomBarState extends ConsumerState<BottomBar> {
                         children: [
                           const SizedBox(width: 4),
                           Expanded(
-                            // a11y Phase 3: fixed-height dock chrome — cap the
-                            // label scale (tab-bar norm) so it stays in the bar.
+                            // Fixed-height chrome, so the label scale is capped
+                            // to keep it in the bar.
                             child: MediaQuery.withClampedTextScaling(
                               maxScaleFactor: 1.3,
                               child: Text(
@@ -178,15 +174,12 @@ class _BottomBarState extends ConsumerState<BottomBar> {
 
           Container(width: 1, height: 28, color: hollow.border),
 
-          // ── Center: Server Strip ──
-          // Home pinned left, Add pinned right, server icons centered
           Expanded(
             child: Row(
               crossAxisAlignment: CrossAxisAlignment.center,
               children: [
                 const SizedBox(width: HollowSpacing.sm),
 
-                // Home button (pinned left)
                 _BottomServerIcon(
                   isSelected: selectedServerId == null &&
                       !ref.watch(anyShellTabOpenProvider),
@@ -195,7 +188,7 @@ class _BottomBarState extends ConsumerState<BottomBar> {
                   tooltip: 'Home',
                   backgroundColor: hollow.accent,
                   onTap: () => _goHome(ref),
-                  // Right click: "mark all DMs as read" (#61 phase 4).
+                  // Right click is "mark all DMs as read" (#61).
                   onContextMenu: (position) => showHomeMenu(
                     context: context,
                     ref: ref,
@@ -223,22 +216,16 @@ class _BottomBarState extends ConsumerState<BottomBar> {
                   ),
                 ),
 
-                // Server icons, CENTRED in the available space until there
-                // are too many, then scrollable with arrows + wheel.
-                //
-                // `center: true` rather than an outer `Center`: the arrow
-                // slots make EdgeScrollRow's own row take the full width, so
-                // an outer Center would have nothing to centre (that is
-                // exactly how this strip briefly ended up left-aligned).
-                // The arrows are SIBLINGS of the scroller, which is what
-                // makes them safe here — an overlay would sit on top of the
-                // _ReorderGap drop zones at both ends.
+                // `center: true` rather than an outer `Center`: the arrow slots
+                // make EdgeScrollRow's own row take the full width, leaving an
+                // outer Center nothing to centre. The arrows are SIBLINGS of the
+                // scroller, so they never sit on top of the _ReorderGap drop
+                // zones at either end.
                 Expanded(
                   child: EdgeScrollRow(
                       semanticLabel: 'servers',
                       center: true,
                       children: [
-                          // Reorder drop zone before first item
                           _ReorderGap(index: 0, hollow: hollow, onAccept: (data) {
                             ref.read(serverStripLayoutProvider.notifier).reorder(data.sourceIndex, 0);
                           }),
@@ -278,7 +265,6 @@ class _BottomBarState extends ConsumerState<BottomBar> {
                                   ),
                               };
                             }),
-                            // Reorder drop zone after each item
                             _ReorderGap(index: i + 1, hollow: hollow, onAccept: (data) {
                               ref.read(serverStripLayoutProvider.notifier).reorder(data.sourceIndex, i + 1);
                             }),
@@ -298,7 +284,6 @@ class _BottomBarState extends ConsumerState<BottomBar> {
                   ),
                 ),
 
-                // Add server button (pinned right)
                 _BottomServerIcon(
                   tooltip: 'Create a server',
                   backgroundColor: hollow.elevated,
@@ -317,7 +302,6 @@ class _BottomBarState extends ConsumerState<BottomBar> {
 
           Container(width: 1, height: 28, color: hollow.border),
 
-          // ── Right: Utility Buttons (same width as left for symmetry) ──
           SizedBox(
             width: 170,
             child: Row(
@@ -349,9 +333,8 @@ class _BottomBarState extends ConsumerState<BottomBar> {
                   message: 'Share',
                   child: HollowPressable(
                     semanticLabel: 'Share',
-                    // Every centre-tab button toggles: the accent-coloured
-                    // icon reads as "on", so pressing it again has to take
-                    // you back out (issue #28).
+                    // Every centre-tab button toggles: the accent icon reads as
+                    // "on", so pressing it again takes you back out (#28).
                     onTap: () => shareOpen
                         ? setShellTab(ref.read, null)
                         : _openShare(ref),
@@ -483,8 +466,8 @@ class _BottomBarState extends ConsumerState<BottomBar> {
     ref.read(serverSettingsOpenProvider.notifier).state = false;
   }
 
-  /// Selects [serverId] then opens its settings — the panel reads the
-  /// SELECTED server, so flipping the flag alone opens the wrong one.
+  /// Selects [serverId] then opens its settings: the panel reads the SELECTED
+  /// server, so flipping the flag alone opens the wrong one.
   Future<void> _openServerSettings(WidgetRef ref, String serverId) async {
     if (ref.read(selectedServerProvider) != serverId) {
       await _selectServer(ref, serverId);
@@ -495,9 +478,9 @@ class _BottomBarState extends ConsumerState<BottomBar> {
   Future<void> _selectServer(WidgetRef ref, String serverId) async {
     final split = ref.read(splitViewProvider);
     if (split.isSplit && split.focusedPane == 1) {
-      // Navigate right pane to server — load channels directly from FFI
-      // to avoid overwriting the global channelListProvider. Restricted
-      // channels the local user can't see must never be auto-selected.
+      // Channels load straight from FFI so the global channelListProvider is
+      // not overwritten. A restricted channel the local user cannot see must
+      // never be auto-selected.
       try {
         final channels =
             (await crdt_api.getServerChannels(serverId: serverId))
@@ -510,7 +493,6 @@ class _BottomBarState extends ConsumerState<BottomBar> {
             channels.any((c) => c.channelId == lastChannel)) {
           channelToSelect = lastChannel;
         } else if (channels.isNotEmpty) {
-          // Prefer first text channel over voice channels.
           channelToSelect = channels
               .where((c) => c.channelType == 'text')
               .firstOrNull
@@ -526,7 +508,7 @@ class _BottomBarState extends ConsumerState<BottomBar> {
       return;
     }
 
-    // Fetch data from DB first — no provider writes yet, so no rebuilds.
+    // Read the DB first, with no provider writes yet, so nothing rebuilds.
     final channels = await ChannelListNotifier.fetchChannels(serverId);
     final layout = await ChannelLayoutNotifier.fetchLayout(serverId);
 
@@ -541,10 +523,10 @@ class _BottomBarState extends ConsumerState<BottomBar> {
           ?? channels.keys.first;
     }
 
-    // Batch all provider writes synchronously — single rebuild with
-    // consistent server + channels + selectedChannel state. Closing EVERY
-    // centre tab is part of that: one left open covers the channel we just
-    // selected (issue #28).
+    // Every provider write batches in ONE synchronous block, so the rebuild
+    // sees consistent server, channel and selection state. Closing EVERY centre
+    // tab belongs in that block: one left open covers the channel just selected
+    // (issue #28).
     setShellTab(ref.read, null);
     ref.read(selectedPeerProvider.notifier).state = null;
     ref.read(serverSettingsOpenProvider.notifier).state = false;
@@ -580,7 +562,7 @@ class _BottomBarState extends ConsumerState<BottomBar> {
         ? 0
         : ref.watch(unreadProvider.select((s) => s.serverUnreadCount(serverId)));
     // Admitted after a parked join, still waiting on a member to add our MLS
-    // leaf. Same flair the Classic strip shows.
+    // leaf; the same flair the Classic strip shows.
     final awaitingSetup = ref.watch(
         awaitingSetupProvider.select((s) => s.contains(serverId)));
     final name = server?.name ?? '';
@@ -602,7 +584,6 @@ class _BottomBarState extends ConsumerState<BottomBar> {
     Widget icon = DragTarget<_StripDragData>(
       onWillAcceptWithDetails: (details) {
         final data = details.data;
-        // Accept server drops (for folder creation) but not self
         return data.serverId != null && data.serverId != serverId;
       },
       onAcceptWithDetails: (details) {
@@ -687,10 +668,9 @@ class _BottomBarState extends ConsumerState<BottomBar> {
     return icon;
   }
 
-  /// The Dock's twin of the Classic strip's parked-join tile: dimmed, glyph
-  /// only, never selectable, one menu on both click and right click. The two
-  /// shells render the same strip model, so a tile that existed in one and not
-  /// the other would be a bug nobody notices until they switch layouts.
+  /// The Dock's twin of the Classic strip's parked-join tile. Both shells
+  /// render the same strip model, so a tile in one and not the other is a bug
+  /// nobody notices until they switch layouts.
   Widget _buildPendingIcon({
     required WidgetRef ref,
     required String serverId,
@@ -717,9 +697,9 @@ class _BottomBarState extends ConsumerState<BottomBar> {
             backgroundColor: colorFromId(serverId),
             tooltip: _isDragging ? null : title,
             semanticLabel: '$title, show actions',
-            // Anchored at the icon's top-left: the menu layout flips upward
-            // when opening downward would leave the window, which is always
-            // the case for a bar pinned to the bottom.
+            // Anchored at the icon's top-left: the menu flips upward when
+            // opening downward would leave the window, which a bar pinned to
+            // the bottom always does.
             onTap: () => open(overlayAnchorOf(iconContext)),
             child: Icon(
               rejected ? LucideIcons.ban : LucideIcons.clock,
@@ -756,7 +736,6 @@ class _BottomBarState extends ConsumerState<BottomBar> {
 
     return DragTarget<_StripDragData>(
       onWillAcceptWithDetails: (details) {
-        // Accept servers being added to this folder
         return details.data.serverId != null &&
             !folder.serverIds.contains(details.data.serverId);
       },
@@ -842,8 +821,7 @@ class _BottomBarState extends ConsumerState<BottomBar> {
   }
 }
 
-/// Deterministic color from an ID string.
-/// Extract 1-2 letter initials from a server name.
+/// Extracts one or two letter initials from a server name.
 String _initialsFromName(String name) {
   final words = name.trim().split(RegExp(r'\s+'));
   if (words.length >= 2) {
@@ -865,30 +843,27 @@ class _StripDragData {
   });
 }
 
-/// Server icon for the horizontal bottom bar.
-/// Rounded square with bottom-edge selection indicator.
+/// Server icon for the bottom bar, with a bottom-edge selection indicator.
 class _BottomServerIcon extends StatefulWidget {
   final Widget child;
   final Color backgroundColor;
   final VoidCallback? onTap;
 
-  /// Right click, position already resolved to OVERLAY space (see the Classic
-  /// strip's twin). Folder icons pass their own detector instead, because
-  /// they sit inside the drag machinery.
+  /// Right click, position already resolved to OVERLAY space. Folder icons pass
+  /// their own detector, because they sit inside the drag machinery.
   final void Function(Offset overlayPosition)? onContextMenu;
 
   final String? tooltip;
 
-  /// Overrides [tooltip] as the screen-reader name. Needed where the tooltip
-  /// states a CONDITION ("Join request pending") but the control's purpose is
-  /// to open a menu.
+  /// Overrides [tooltip] as the screen-reader name, for a control whose tooltip
+  /// states a CONDITION while its purpose is to open a menu.
   final String? semanticLabel;
 
   final bool isSelected;
   final bool showBorder;
   final int unreadCount;
 
-  /// Admitted to the server, waiting for a member to finish the MLS setup.
+  /// Admitted, but waiting for a member to finish the MLS setup.
   final bool awaitingSetup;
 
   const _BottomServerIcon({
@@ -921,12 +896,10 @@ class _BottomServerIconState extends State<_BottomServerIcon> {
         ? Color.lerp(widget.backgroundColor, hollow.accent, 0.15)!
         : widget.backgroundColor;
 
-    // Bottom-edge indicator width.
     final indicatorWidth =
         widget.isSelected ? 28.0 : (_hovering ? 16.0 : 0.0);
 
-    // Stack layout: icon centered, indicator pinned to bottom edge.
-    // Indicator uses Positioned so it doesn't affect icon centering.
+    // The indicator is Positioned so it cannot affect icon centring.
     Widget icon = MouseRegion(
       cursor: widget.onTap != null
           ? SystemMouseCursors.click
@@ -943,8 +916,8 @@ class _BottomServerIconState extends State<_BottomServerIcon> {
           alignment: Alignment.center,
           clipBehavior: Clip.none,
           children: [
-            // Icon (centered). Clip.none is load-bearing: an avatar frame
-            // paints outside the icon box and a clipping badge stack cuts it.
+            // Clip.none is load bearing: an avatar frame paints outside the
+            // icon box and a clipping badge stack cuts it off.
             Stack(
               clipBehavior: Clip.none,
               children: [
@@ -967,9 +940,8 @@ class _BottomServerIconState extends State<_BottomServerIcon> {
                   alignment: Alignment.center,
                   child: widget.child,
                 ),
-                // Awaiting-setup flair. Top-LEFT here, not top-right like the
-                // Classic strip: on the Dock the unread badge owns the top
-                // right corner, and two badges in one corner would overlap.
+                // Top-LEFT here, not top-right like the Classic strip: on the
+                // Dock the unread badge owns the top-right corner.
                 if (widget.awaitingSetup)
                   const Positioned(
                     left: -5,
@@ -979,7 +951,6 @@ class _BottomServerIconState extends State<_BottomServerIcon> {
                       child: AwaitingSetupBadge(size: 14),
                     ),
                   ),
-                // Unread badge
                 if (widget.unreadCount > 0)
                   Positioned(
                     right: -5,
@@ -1013,7 +984,6 @@ class _BottomServerIconState extends State<_BottomServerIcon> {
                   ),
               ],
             ),
-            // Bottom-edge indicator — pinned to bottom, no layout impact
             Positioned(
               bottom: -8,
               child: AnimatedContainer(
@@ -1039,13 +1009,14 @@ class _BottomServerIconState extends State<_BottomServerIcon> {
       icon = HollowTooltip(message: widget.tooltip!, child: icon);
     }
 
-    // Tooltips don't surface to screen readers — give tappable icons a name.
+    // Tooltips do not surface to screen readers, so a tappable icon needs a
+    // name of its own.
     final label = widget.semanticLabel ?? widget.tooltip;
     if (label != null && widget.onTap != null) {
       icon = Semantics(button: true, label: label, child: icon);
     }
 
-    // ABOVE the focus ring, so Menu / Shift+F10 reach it while the icon is
+    // ABOVE the focus ring, so Menu and Shift+F10 reach it while the icon is
     // keyboard-focused (issue #61).
     final onContextMenu = widget.onContextMenu;
     if (onContextMenu != null) {
@@ -1060,8 +1031,7 @@ class _BottomServerIconState extends State<_BottomServerIcon> {
   }
 }
 
-/// Scale-bounce entrance animation for new server icons.
-/// Thin drop zone between items for reordering. Shows accent line when hovered.
+/// Thin drop zone between items, for reordering.
 class _ReorderGap extends StatelessWidget {
   final int index;
   final HollowTheme hollow;
@@ -1077,7 +1047,7 @@ class _ReorderGap extends StatelessWidget {
   Widget build(BuildContext context) {
     return DragTarget<_StripDragData>(
       onWillAcceptWithDetails: (details) {
-        // Don't accept drop right next to the source (no-op reorder)
+        // A drop right next to the source would be a no-op reorder.
         final src = details.data.sourceIndex;
         return src != index && src != index - 1;
       },

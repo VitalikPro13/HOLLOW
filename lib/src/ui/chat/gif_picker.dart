@@ -24,16 +24,12 @@ import '../components/edge_scroll_row.dart';
 import '../components/overlay_anchor.dart';
 import '../components/popup_animator.dart';
 
-/// The GIF picker (issue #26): Popular / Favourites / Recent plus search
-/// through the Hollow website's no-log Klipy proxy, sharing chrome with the
-/// emoji picker. A pick downloads the full source, re-encodes it into a
-/// ≤480px content-addressed WebP blob (Rust `gif_fetch_and_store`) and hands
-/// the caller an `[a:g:hash:w:h]` wire token — callers treat it as an opaque
-/// string, exactly like emoji picks.
-/// [serverId] is the server the composer belongs to, when there is one. It
-/// only feeds the content-rating clamp (a server not flagged NSFW caps
-/// results at pg-13); DMs and conferences pass null and use the user's own
-/// setting.
+/// The GIF picker (issue #26): Popular, Favourites and Recent plus search
+/// through the Hollow website's no-log Klipy proxy.
+///
+/// A pick re-encodes the source into a content-addressed WebP blob and hands
+/// the caller an opaque `[a:g:hash:w:h]` wire token. [serverId] feeds the
+/// content-rating clamp only; DMs and conferences pass null.
 void showGifPicker({
   required BuildContext context,
   required Offset anchorPosition,
@@ -44,7 +40,7 @@ void showGifPicker({
   late OverlayEntry entry;
   final anim = PopupAnimationController();
 
-  // Removal guard — same rapid-double-fire protection as the emoji picker.
+  // Rapid-double-fire guard, as in the emoji picker.
   var removed = false;
   void teardown() {
     if (removed) return;
@@ -57,16 +53,14 @@ void showGifPicker({
   }
 
   entry = OverlayEntry(
-    // wrapEntry: the barrier must stop taking clicks the instant the
-    // exit starts, or a dismiss immediately followed by another click
-    // eats the second one.
+    // The barrier must stop taking clicks the instant the exit starts, or a
+    // dismiss followed straight away by a click eats the second one.
     builder: (ctx) => anim.wrapEntry(_GifPickerOverlay(
       anchorPosition: anchorPosition,
       anim: anim,
       serverId: serverId,
       // A pick SENDS and the panel STAYS OPEN, mirroring the sticker picker
-      // (issue #36) — picking used to tear the overlay down here, which made
-      // sending two GIFs two round trips through the composer button.
+      // (issue #36), so sending two GIFs is not two trips through the button.
       onSelect: onSelect,
       onDismiss: teardown,
     )),
@@ -106,8 +100,8 @@ class _GifPickerOverlay extends StatelessWidget {
     if (left + pickerWidth > screenSize.width - 8) {
       left = screenSize.width - pickerWidth - 8;
     }
-    // Flips below the anchor when there is no room above; the growth origin
-    // flips with it so the animation always starts at the opening control.
+    // The growth origin flips with the panel, so the animation always starts
+    // at the opening control.
     var flippedBelow = false;
     if (top < 8) {
       flippedBelow = true;
@@ -160,20 +154,14 @@ class _GifPickerOverlay extends StatelessWidget {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Picker body (reusable: overlay on desktop, bottom sheet on mobile)
-// ---------------------------------------------------------------------------
-
-/// Browse modes shown when the search field is empty. Popular is the default
-/// (and the only one that talks to the proxy); the other two read the local
-/// [gifLibraryProvider].
+/// Browse modes shown when the search field is empty. Only Popular talks to
+/// the proxy; the other two read [gifLibraryProvider].
 enum GifPickerTab { popular, favorites, recent }
 
 class GifPickerBody extends ConsumerStatefulWidget {
   final void Function(String token) onSelect;
 
-  /// Server the composer belongs to, when there is one — feeds the content
-  /// rating clamp only (see [showGifPicker]).
+  /// Server the composer belongs to; feeds the content rating clamp only.
   final String? serverId;
 
   const GifPickerBody({super.key, required this.onSelect, this.serverId});
@@ -194,10 +182,9 @@ class _GifPickerBodyState extends ConsumerState<GifPickerBody> {
   /// Selected favourites list; null = All.
   String? _collectionId;
 
-  /// Non-null while the inline list-name field is open: '' = creating a new
-  /// list, otherwise the id of the list being renamed. Inline rather than a
-  /// dialog because the picker is a raw OverlayEntry — a dialog route renders
-  /// BEHIND it.
+  /// Non-null while the inline list-name field is open: '' creates a list,
+  /// otherwise the id being renamed. Inline rather than a dialog because the
+  /// picker is a raw OverlayEntry, and a dialog route renders BEHIND it.
   String? _listEditId;
 
   bool _loading = false;
@@ -211,13 +198,12 @@ class _GifPickerBodyState extends ConsumerState<GifPickerBody> {
 
   static const _maxPages = 5; // bounds the non-lazy masonry
 
-  /// True when the grid is showing proxy results rather than the local
-  /// library — search always wins over the selected tab.
+  /// True when the grid shows proxy results rather than the local library;
+  /// search always wins over the selected tab.
   bool get _networkView => _search.isNotEmpty || _tab == GifPickerTab.popular;
 
-  /// Rating for the next request: the user's setting, clamped for a server
-  /// that is not flagged NSFW. `ref.read` — this is called from callbacks,
-  /// and build() listens for changes separately.
+  /// Rating for the next request: the user's setting, clamped for a server not
+  /// flagged NSFW. `build` listens for changes separately.
   String get _rating {
     final rating = ref.read(gifRatingProvider);
     final sid = widget.serverId;
@@ -226,8 +212,8 @@ class _GifPickerBodyState extends ConsumerState<GifPickerBody> {
     return clampGifRating(rating, serverAllowsNsfw: nsfw);
   }
 
-  /// Release-visible diagnostics (hollow_debug.log). Never logs query TEXT —
-  /// only lengths/counts/timings.
+  /// Release-visible diagnostics. Never logs query TEXT, only lengths, counts
+  /// and timings.
   static void _dbg(String msg) {
     try {
       network_api.logFromDart(message: '[HOLLOW-GIF-UI] $msg').catchError((_) {});
@@ -245,15 +231,14 @@ class _GifPickerBodyState extends ConsumerState<GifPickerBody> {
     });
     _scrollController.addListener(() {
       final pos = _scrollController.position;
-      // maxScrollExtent > 0: content that FITS the viewport must never
-      // auto-paginate (pixels 0 > -300 is true on every tick — that
-      // avalanches into pages of thumbnail downloads nobody asked for).
+      // Content that FITS the viewport must never auto-paginate: the threshold
+      // holds on every tick and avalanches into unasked-for downloads.
       if (pos.maxScrollExtent > 0 &&
           pos.pixels > pos.maxScrollExtent - 300) {
         _loadMore();
       }
-      // Visibility gates use full-viewport margins — 40px granularity is
-      // plenty, and it keeps scrolling from rebuilding every cell per frame.
+      // Visibility gates use full-viewport margins, so 40px granularity keeps
+      // scrolling from rebuilding every cell per frame.
       if ((pos.pixels - _scrollOffset).abs() > 40) {
         setState(() => _scrollOffset = pos.pixels);
       }
@@ -270,7 +255,7 @@ class _GifPickerBodyState extends ConsumerState<GifPickerBody> {
   }
 
   void _selectTab(GifPickerTab tab) {
-    // While searching, even the ALREADY-selected tab is a real action: it is
+    // While searching, even the already-selected tab is a real action: it is
     // how you leave the search.
     final searching = _search.isNotEmpty;
     if (_tab == tab && !searching) return;
@@ -282,20 +267,19 @@ class _GifPickerBodyState extends ConsumerState<GifPickerBody> {
     });
     _resetScroll();
     if (searching) {
-      // Clearing the field fires the controller listener, which sets _search
-      // and runs the query against the tab assigned above — calling
-      // _runQuery here too would issue a second, immediately-superseded one.
+      // Clearing the field fires the controller listener, which runs the query;
+      // calling _runQuery here too issues a second, superseded one.
       _searchController.clear();
     } else {
       // Bumps the seq either way, so a Popular request still in flight can
-      // never land on top of a library view.
+      // never land on a library view.
       _runQuery();
     }
   }
 
   void _resetScroll() {
-    // The controller is shared across the tab views and keeps its offset —
-    // jump after the new view has attached.
+    // The shared controller keeps its offset, so the jump waits for the new
+    // view to attach.
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted && _scrollController.hasClients) _scrollController.jumpTo(0);
     });
@@ -318,8 +302,8 @@ class _GifPickerBodyState extends ConsumerState<GifPickerBody> {
     final rating = _rating;
     final t0 = DateTime.now();
 
-    // A warm cache page (trending is prefetched at boot) renders with no
-    // spinner frame at all — the plan's "opening must never show a spinner".
+    // A warm cache page renders with no spinner frame at all: opening must
+    // never show one.
     final warm = catalog.peek(q, 1, rating);
     if (warm != null) {
       _dbg('query seq=$seq len=${q.length} WARM ${warm.items.length} items');
@@ -336,9 +320,8 @@ class _GifPickerBodyState extends ConsumerState<GifPickerBody> {
       _loading = true;
       _error = null;
     });
-    // The debounce re-checks the seq BEFORE issuing the request — a
-    // superseded query must never reach the proxy (its rate valve counts
-    // every hit), not just have its result dropped.
+    // The debounce re-checks the seq BEFORE issuing: a superseded query must
+    // never reach the proxy, whose rate valve counts every hit.
     Future<gifs_api.GifPage?> run() async {
       if (q.isNotEmpty) {
         await Future.delayed(const Duration(milliseconds: 250));
@@ -411,9 +394,8 @@ class _GifPickerBodyState extends ConsumerState<GifPickerBody> {
     final t0 = DateTime.now();
     setState(() => _pickingId = item.id);
     try {
-      // sourceUrl matters only in direct mode, and only for a favourite
-      // whose variants are no longer in Rust's session registry. Proxy mode
-      // ignores it outright and builds its own URL.
+      // sourceUrl matters only in direct mode, for a favourite whose variants
+      // have left Rust's session registry. Proxy mode builds its own URL.
       final stored = await gifs_api.gifFetchAndStore(
           id: item.id, sourceUrl: item.fullUrl);
       _dbg('pick ok in ${DateTime.now().difference(t0).inMilliseconds}ms');
@@ -427,9 +409,8 @@ class _GifPickerBodyState extends ConsumerState<GifPickerBody> {
       HollowToast.show(context, 'Could not add GIF',
           type: HollowToastType.error);
     } finally {
-      // The panel now SURVIVES the pick, so this has to be cleared on the
-      // success path too — it used to ride out on the teardown, and leaving
-      // it set would freeze every later pick behind `if (_pickingId != null)`.
+      // The panel SURVIVES the pick, so this must clear on the success path
+      // too, or every later pick freezes behind `if (_pickingId != null)`.
       if (mounted) setState(() => _pickingId = null);
     }
   }
@@ -437,12 +418,10 @@ class _GifPickerBodyState extends ConsumerState<GifPickerBody> {
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
-    // Rating changes (Settings, or a clamp resolving once the server's NSFW
-    // flag loads) must re-issue the current query — results are cached per
-    // rating, so the old grid would otherwise just sit there. ref.listen
-    // belongs in build(); registering it in initState silently no-ops. The
-    // re-query is deferred a frame because _runQuery calls setState and a
-    // listener can fire inside someone else's build.
+    // Results are cached per rating, so a rating change must re-issue the
+    // query or the old grid sits there. `ref.listen` belongs in build and
+    // no-ops in initState, and the re-query waits a frame because _runQuery
+    // calls setState from inside someone else's build.
     void requery(_, __) => WidgetsBinding.instance.addPostFrameCallback((_) {
           if (mounted) _runQuery();
         });
@@ -457,18 +436,16 @@ class _GifPickerBodyState extends ConsumerState<GifPickerBody> {
               HollowSpacing.sm, HollowSpacing.sm, HollowSpacing.sm, 0),
           child: HollowTextField(
             controller: _searchController,
-            // Attribution: KLIPY asks for this exact placeholder.
+            // KLIPY's attribution terms ask for this exact placeholder.
             hintText: 'Search KLIPY',
             isDense: true,
             prefixIcon: const Icon(LucideIcons.search, size: 14),
-            // Desktop only — on mobile the autofocus summons the software
-            // keyboard right over the sheet.
+            // On mobile the autofocus summons the keyboard over the sheet.
             autofocus: !(Platform.isAndroid || Platform.isIOS),
           ),
         ),
-        // The tabs stay PUT while searching — they just lose their selected
-        // state (see _tabChip). A row that vanishes under you as you type
-        // moves the content beneath it and hides where you came from.
+        // The tabs stay PUT while searching and only lose their selected
+        // state: a row that vanishes as you type hides where you came from.
         _tabRow(hollow),
         Divider(height: 1, color: hollow.border),
         Expanded(child: _content(hollow)),
@@ -485,9 +462,7 @@ class _GifPickerBodyState extends ConsumerState<GifPickerBody> {
   }
 
   Widget _tabRow(HollowTheme hollow) {
-    // Scrollable so a larger-text setting can never overflow the 360px
-    // panel; with three short labels it never actually scrolls, and
-    // EdgeScrollRow shows nothing until it does.
+    // Scrollable so a larger-text setting cannot overflow the 360px panel.
     return EdgeScrollRow(
       height: 34,
       semanticLabel: 'tabs',
@@ -504,8 +479,8 @@ class _GifPickerBodyState extends ConsumerState<GifPickerBody> {
   }
 
   Widget _tabChip(HollowTheme hollow, GifPickerTab tab, String label) {
-    // Searching is its own view, so NOTHING is selected while the field has
-    // text — tapping a tab is how you get back out (see _selectTab).
+    // Searching is its own view, so nothing is selected while the field has
+    // text and tapping a tab is the way back out.
     final selected = _tab == tab && _search.isEmpty;
     return HollowPressable(
       onTap: () => _selectTab(tab),
@@ -576,8 +551,6 @@ class _GifPickerBodyState extends ConsumerState<GifPickerBody> {
     return _grid(hollow, _items);
   }
 
-  // --- Favourites -----------------------------------------------------------
-
   Widget _favoritesView(HollowTheme hollow) {
     final library = ref.watch(gifLibraryProvider);
     final base = ref.watch(gifProxyUrlProvider);
@@ -601,11 +574,9 @@ class _GifPickerBodyState extends ConsumerState<GifPickerBody> {
 
   Widget _listChips(HollowTheme hollow, GifLibrary library) {
     if (_listEditId != null) return _listNameField(hollow);
-    // EdgeScrollRow, not a bare horizontal ListView: past a handful of lists
-    // the chips overflow the 360px panel, and on a desktop with a plain
-    // wheel mouse a bare scroller has no affordance and no gesture — the
-    // extra lists were simply unreachable. Arrows + wheel-to-pan appear only
-    // while there IS overflow.
+    // EdgeScrollRow, not a bare horizontal ListView: once the chips overflow
+    // the panel, a plain wheel mouse has no affordance and no gesture, so the
+    // extra lists are unreachable.
     return EdgeScrollRow(
       height: 34,
       semanticLabel: 'lists',
@@ -758,8 +729,6 @@ class _GifPickerBodyState extends ConsumerState<GifPickerBody> {
     );
   }
 
-  // --- Recent ---------------------------------------------------------------
-
   Widget _recentView(HollowTheme hollow) {
     final recents = ref.watch(gifLibraryProvider).visibleRecents;
     final base = ref.watch(gifProxyUrlProvider);
@@ -770,8 +739,6 @@ class _GifPickerBodyState extends ConsumerState<GifPickerBody> {
     return _grid(hollow, [for (final g in recents) g.toItem(base)],
         inRecents: true);
   }
-
-  // --- Shared grid ----------------------------------------------------------
 
   static const _gap = 4.0;
 
@@ -786,7 +753,7 @@ class _GifPickerBodyState extends ConsumerState<GifPickerBody> {
           (constraints.maxWidth - HollowSpacing.sm * 2 - _gap) / 2;
       final viewport = constraints.maxHeight;
 
-      // Masonry from known aspect ratios — nothing reflows when bytes land.
+      // Masonry from known aspect ratios, so nothing reflows when bytes land.
       final colTops = [0.0, 0.0];
       final cols = [<Widget>[], <Widget>[]];
       for (final item in items) {
@@ -794,11 +761,11 @@ class _GifPickerBodyState extends ConsumerState<GifPickerBody> {
         final cellH = colW / aspect;
         final c = colTops[0] <= colTops[1] ? 0 : 1;
         final top = colTops[c];
-        // "Visible viewport + ~1 row" gate — this is what autoplays.
+        // Visible viewport plus about a row: this is what autoplays.
         final visible = top < _scrollOffset + viewport + cellH &&
             top + cellH > _scrollOffset - cellH;
-        // Stills load only near the viewport (±1 screen) — an off-screen
-        // tail of 30-150 cells must not open downloads at picker-open.
+        // Stills load only within a screen of the viewport, or a tail of 150
+        // cells opens that many downloads the moment the picker opens.
         final nearViewport = top < _scrollOffset + viewport * 2 &&
             top + cellH > _scrollOffset - viewport;
         cols[c].add(Padding(
@@ -870,7 +837,7 @@ class _GifPickerBodyState extends ConsumerState<GifPickerBody> {
           danger: fav,
           onTap: () => notifier.toggleFavorite(item),
         ),
-        // Lists sort FAVOURITES, so they only appear once the GIF is one.
+        // Lists sort favourites, so they appear only once the GIF is one.
         if (fav)
           for (final c in library.collections)
             GifMenuItem(
@@ -915,11 +882,9 @@ class _GifPickerBodyState extends ConsumerState<GifPickerBody> {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Anchored menu — inserted as an OverlayEntry ON TOP of the root overlay. The
-// picker is itself a raw OverlayEntry above the navigator's routes, so a
-// dialog route would render BEHIND it (same trap as the emote context menu).
-// ---------------------------------------------------------------------------
+// An OverlayEntry on top of the root overlay: the picker is itself a raw
+// OverlayEntry above the navigator's routes, so a dialog route renders BEHIND
+// it.
 
 class GifMenuItem {
   final IconData icon;
@@ -952,7 +917,6 @@ void showGifMenu(
 
   final overlay = Overlay.of(context);
   late OverlayEntry entry;
-  // Same double-remove guard as the picker itself.
   var removed = false;
   void dismiss() {
     if (removed) return;
@@ -1059,11 +1023,8 @@ void showGifMenu(
   overlay.insert(entry);
 }
 
-// ---------------------------------------------------------------------------
-// Grid cell: still thumbnail, animating to the sm variant on hover (desktop)
-// or while in the viewport (mobile). Reduce-motion is handled inside
-// AnimatedGifImage; stills always render.
-// ---------------------------------------------------------------------------
+// Grid cell: a still thumbnail that swaps to the animated variant on hover or
+// in the viewport. AnimatedGifImage handles reduce-motion.
 
 class _GifCell extends ConsumerStatefulWidget {
   final gifs_api.GifItem item;
@@ -1145,16 +1106,10 @@ class _GifCellState extends ConsumerState<_GifCell> {
     final focused = ref.watch(windowFocusedProvider);
     final isFavorite = ref.watch(
         gifLibraryProvider.select((l) => l.isFavorite(widget.item.id)));
-    // AUTOPLAY (default): anything actually in the viewport animates, on
-    // every platform. Bounded on three sides — only VISIBLE cells (not the
-    // ±1-screen still-preload margin), only while the window is focused, and
-    // AnimatedGifImage freezes itself under reduce-motion.
-    //
-    // OFF falls back to hover-to-play, which on mobile means stills only —
-    // that IS the point, since the setting's real cost is data: autoplay
-    // fetches the animated variant for everything on screen where hover
-    // fetches one. Either way the still paints first and the animation swaps
-    // in as it lands.
+    // Autoplay is bounded on three sides: only VISIBLE cells, not the preload
+    // margin, only while the window is focused, and frozen under reduce-motion.
+    // Off falls back to hover-to-play, which on mobile means stills only, since
+    // the setting's real cost is data.
     final wantsAnim =
         focused && (ref.watch(gifAutoplayProvider) ? widget.visible : _hovering);
     if (wantsAnim) _loadSm();
@@ -1205,7 +1160,7 @@ class _GifCellState extends ConsumerState<_GifCell> {
                 children: [
                   image,
                   // Always visible once favourited, so the grid shows at a
-                  // glance what is saved; otherwise hover-only on desktop.
+                  // glance what is saved.
                   if (isFavorite || _hovering || _isMobile)
                     Positioned(
                       top: 2,
@@ -1234,10 +1189,8 @@ class _GifCellState extends ConsumerState<_GifCell> {
   }
 
   Widget _star(HollowTheme hollow, bool isFavorite) {
-    // Material's star pair rather than Lucide: neither Lucide nor Atlas ships
-    // a FILLED star, and filled-vs-outline is the whole signal here (same
-    // reasoning as the composer's "GIF" text badge, which exists because
-    // neither set has a GIF glyph).
+    // Material's star pair, because neither Lucide nor Atlas ships a FILLED
+    // star and filled-versus-outline is the whole signal here.
     return HollowPressable(
       onTap: () => ref
           .read(gifLibraryProvider.notifier)

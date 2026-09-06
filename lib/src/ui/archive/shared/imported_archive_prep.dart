@@ -7,8 +7,7 @@ import 'package:hollow/src/core/providers/archive_provider.dart'
         convertArchiveDmMessages;
 import 'package:hollow/src/rust/api/archive.dart' as archive_api;
 
-/// All derived state for the imported-archive viewers (desktop + mobile).
-/// Pure data — no widgets, no Riverpod. Both viewers call
+/// All derived state for the imported-archive viewers, as pure data: both call
 /// [prepareImportedArchive] and only render the result.
 class ImportedArchivePrep {
   final bool isDm;
@@ -31,7 +30,7 @@ class ImportedArchivePrep {
   final String proofMsgType;
   final String headerTitle;
   final String? headerSubtitle;
-  // Verification banner. Tone booleans map to color/icon in the widget.
+  // Tone booleans; the widget maps them to a colour and an icon.
   final bool archiveSigValid;
   final String archiveSigText;
   final bool msgSigWarning;
@@ -60,9 +59,9 @@ class ImportedArchivePrep {
   });
 }
 
-/// Converts + filters an imported archive into everything the viewers render.
-/// [mobile] keeps each form factor's existing wording (banner strings).
-/// [avatarOf] is desktop-only (filter dropdown avatars); omit on mobile.
+/// Converts and filters an imported archive into everything the viewers render.
+/// [mobile] picks that form factor's banner wording; [avatarOf] is desktop-only
+/// and omitted on mobile.
 ImportedArchivePrep prepareImportedArchive({
   required archive_api.ArchiveData data,
   required String localPeerId,
@@ -76,13 +75,11 @@ ImportedArchivePrep prepareImportedArchive({
   final isDm = data.archiveType == 'dm';
   final isServer = data.archiveType == 'server';
 
-  // Verification banner data.
   final exportDate = DateTime.fromMillisecondsSinceEpoch(v.exportTimestamp);
   final dateStr =
       '${exportDate.year}-${exportDate.month.toString().padLeft(2, '0')}-${exportDate.day.toString().padLeft(2, '0')}';
   final exporterName = displayNameOf(v.exporterPeerId);
 
-  // Archive-level signature (file integrity).
   final archiveSigValid = v.archiveSignatureValid;
   final String archiveSigText;
   if (archiveSigValid) {
@@ -95,7 +92,6 @@ ImportedArchivePrep prepareImportedArchive({
         : 'Archive signature invalid: may have been tampered with';
   }
 
-  // Per-message signatures.
   final msgSigWarning = v.messagesWithInvalidSig > 0;
   final String msgSigText;
   if (msgSigWarning) {
@@ -110,7 +106,6 @@ ImportedArchivePrep prepareImportedArchive({
     msgSigText = '${v.messageCount} messages (no signatures)';
   }
 
-  // For server archives, handle channel selection.
   String? activeChannelId;
   String? activeChannelName;
   if (isServer && data.channels.isNotEmpty) {
@@ -122,7 +117,6 @@ ImportedArchivePrep prepareImportedArchive({
         activeChannelId;
   }
 
-  // Convert archive messages (filter by channel for server archives).
   List<ChatMessage>? dmMessages;
   List<ChannelChatMessage>? channelMessages;
 
@@ -131,7 +125,6 @@ ImportedArchivePrep prepareImportedArchive({
   } else {
     final allChannelMessages = convertArchiveChannelMessages(data, localPeerId);
     if (isServer && activeChannelId != null) {
-      // Filter messages by selected channel using the raw FFI data's channel_id.
       final channelMsgIds = <String>{};
       for (final m in data.messages) {
         if (m.channelId == activeChannelId) {
@@ -146,14 +139,12 @@ ImportedArchivePrep prepareImportedArchive({
     }
   }
 
-  // Apply sender filter (capture the pre-filter list first).
   final unfilteredChannelMessages = channelMessages;
   if (filterSender != null && channelMessages != null) {
     channelMessages =
         channelMessages.where((m) => m.senderId == filterSender).toList();
   }
 
-  // Collect unique senders for filter (channel archives only).
   final uniqueSenders =
       unfilteredChannelMessages?.map((m) => m.senderId).toSet().toList()
         ?..sort();
@@ -164,7 +155,6 @@ ImportedArchivePrep prepareImportedArchive({
       ? <String, dynamic>{for (final id in uniqueSenders) id: avatarOf(id)}
       : <String, dynamic>{};
 
-  // Build edits map from archive data.
   final editsMap = <String, List<ArchiveEditEntry>>{};
   for (final e in data.edits) {
     editsMap.putIfAbsent(e.messageId, () => []).add(ArchiveEditEntry(
@@ -180,13 +170,11 @@ ImportedArchivePrep prepareImportedArchive({
         ));
   }
 
-  // Context for Message Proof.
   final proofContext = isDm
       ? (data.peerId ?? '')
       : '${data.serverId ?? ''}:${activeChannelId ?? data.channelId ?? ''}';
   final proofMsgType = isDm ? 'dm' : 'ch';
 
-  // Header title/subtitle.
   String headerTitle;
   String? headerSubtitle;
   if (isDm) {

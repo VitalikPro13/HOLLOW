@@ -11,11 +11,10 @@ pub struct HlcTimestamp {
     pub actor: String,
 }
 
-/// How far ahead of our wall clock a remote timestamp may sit before we treat
-/// it as hostile. Guards two things: `Hlc::witness` refuses to advance OUR
-/// clock past it, and `ServerState::admit_remote_op` refuses the op outright
-/// (an op with `physical_ms = u64::MAX` would otherwise win every future LWW
-/// comparison and lock the field forever).
+/// How far ahead of our wall clock a remote timestamp may sit before we treat it as
+/// hostile. `Hlc::witness` refuses to advance OUR clock past it and
+/// `ServerState::admit_remote_op` refuses the op outright: a `physical_ms = u64::MAX`
+/// would otherwise win every future LWW comparison and lock the field forever.
 pub(crate) const MAX_DRIFT_MS: u64 = 5 * 60 * 1000; // 5 minutes
 
 impl HlcTimestamp {
@@ -98,11 +97,9 @@ impl Hlc {
     pub fn witness(&mut self, other: &HlcTimestamp) {
         let wall = wall_clock_ms();
 
-        // SECURITY: Reject timestamps more than 5 minutes ahead of wall clock.
-        // Prevents a malicious peer from advancing our HLC to the far future,
-        // which would give their LWW values permanent precedence. This only
-        // protects OUR clock; the op itself is refused by
-        // `ServerState::admit_remote_op` against the same bound.
+        // SECURITY: a peer that advanced our HLC to the far future would give their LWW
+        // values permanent precedence. This protects OUR clock only; the op itself is
+        // refused against the same bound by `ServerState::admit_remote_op`.
         if other.physical_ms > wall + MAX_DRIFT_MS {
             hollow_log!("[HOLLOW-SECURITY] HLC drift rejected: remote physical_ms {} is {} ms ahead of wall clock {}", other.physical_ms, other.physical_ms - wall, wall);
             return;

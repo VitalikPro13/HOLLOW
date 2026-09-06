@@ -24,11 +24,10 @@ class ChannelInfo {
   /// Label gate for posting; same semantics as [visibilityLabels].
   final List<String> postingLabels;
 
-  /// Whether the LOCAL user can see / post in this channel — computed by
-  /// Rust with the full predicate (tier ladder + label gates + unexpired
-  /// grants + SEND_MESSAGES bit). Dart must never re-implement that ladder.
-  /// Defaults to true for optimistically-constructed instances (e.g. the
-  /// creator of a brand-new channel can always see it).
+  /// Whether the LOCAL user can see / post in this channel, computed by Rust
+  /// with the full predicate (tier ladder + label gates + unexpired grants +
+  /// SEND_MESSAGES). Dart must never re-implement that ladder. Defaults to true
+  /// for optimistically-constructed instances.
   final bool meCanSee;
   final bool meCanPost;
 

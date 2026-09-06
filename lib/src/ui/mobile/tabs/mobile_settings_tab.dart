@@ -106,7 +106,6 @@ class MobileSettingsTab extends ConsumerWidget {
         ),
         const SizedBox(height: HollowSpacing.lg),
 
-        // Profile card — tap to edit profile.
         HollowPressable(
           onTap: () => _push(
               context, 'Profile', const _ProfileTab(key: ValueKey('profile'))),
@@ -272,47 +271,37 @@ class MobileSettingsTab extends ConsumerWidget {
         ),
         const SizedBox(height: HollowSpacing.lg),
 
-        // System status — same calm card as the desktop Home (green "All
-        // systems operational" when healthy; the active notice + countdown
-        // otherwise). Gives mobile a pull-surface for status, since the mobile
-        // banner is push-only-for-problems.
+        // Mobile's pull surface for status; the mobile banner only pushes
+        // problems.
         const HomeStatusCard(),
 
         const SizedBox(height: HollowSpacing.md),
 
-        // Sync stats — same numbers as the desktop Home stats card, so this
-        // device can be eyeball-compared against another for sync. DM messages
-        // converge across a person's devices; channel messages are lazy-paged
-        // per device and intentionally not counted (they'd diverge).
+        // DM messages converge across a person's devices, so they can be
+        // eyeball-compared; channel messages are lazy-paged per device and
+        // would diverge, so they are not counted.
         const _MobileStatsCard(),
 
         const SizedBox(height: HollowSpacing.md),
 
-        // Relay server card — desktop Home `_RelayStatsCard` parity: relay
-        // RAM/bandwidth plus this connection's daily relay data budget.
         const _MobileRelayCard(),
 
         const SizedBox(height: HollowSpacing.md),
-        // Relay "Online" counter — mirrors the desktop Home shell's bottom
-        // online-users row (relay-reported peers currently connected).
         const _MobileOnlineCounter(),
       ],
     );
   }
 }
 
-/// Relay online-users counter — a port of the desktop Home shell's bottom
-/// "Online … N" row (users icon + shimmer divider + live count from the relay
-/// /server-stats poll).
+/// Live count of peers the relay reports as connected.
 class _MobileOnlineCounter extends ConsumerWidget {
   const _MobileOnlineCounter();
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final hollow = HollowTheme.of(context);
-    // Poll gate: all four mobile tabs stay mounted, so only WATCH the relay
-    // stats while the Settings tab is the visible one — relayStatsProvider is
-    // autoDispose, so dropping the watch stops its 7s HTTP poll entirely.
+    // All four mobile tabs stay mounted, so the watch is gated on this one
+    // being visible: dropping it disposes the provider and stops its poll.
     final onSettingsTab = ref.watch(mobileTabProvider) == 3;
     final relayStats =
         onSettingsTab ? ref.watch(relayStatsProvider) : const RelayStats();
@@ -343,18 +332,15 @@ class _MobileOnlineCounter extends ConsumerWidget {
   }
 }
 
-/// Relay server card for the mobile Settings tab — port of the desktop Home
-/// `_RelayStatsCard`: relay RAM + line bandwidth, plus this connection's
-/// daily relay data budget with a reset countdown.
+/// Relay RAM and bandwidth, plus this connection's daily relay data budget.
 class _MobileRelayCard extends ConsumerWidget {
   const _MobileRelayCard();
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final hollow = HollowTheme.of(context);
-    // Poll gate: all four mobile tabs stay mounted, so only WATCH the relay
-    // stats provider while the Settings tab is the visible one. It is
-    // autoDispose, so dropping the watch stops the 7s HTTP poll entirely.
+    // All four mobile tabs stay mounted, so the watch is gated on this one
+    // being visible: dropping it disposes the provider and stops its poll.
     final onSettingsTab = ref.watch(mobileTabProvider) == 3;
     final stats =
         onSettingsTab ? ref.watch(relayStatsProvider) : const RelayStats();
@@ -406,9 +392,8 @@ class _MobileRelayCard extends ConsumerWidget {
   }
 }
 
-/// Compact sync-stats card for the mobile Settings tab. Mirror of the desktop
-/// Home `_SyncStatsCard` — locally-knowable counts that converge across a
-/// person's devices, for at-a-glance multi-device sync comparison.
+/// Locally-knowable counts that converge across a person's devices, so two
+/// devices can be compared at a glance.
 class _MobileStatsCard extends ConsumerWidget {
   const _MobileStatsCard();
 
@@ -418,7 +403,6 @@ class _MobileStatsCard extends ConsumerWidget {
     final friends = ref.watch(friendsProvider);
     final servers = ref.watch(serverListProvider);
     final devices = ref.watch(myDevicesProvider);
-    // Recompute the DM count whenever the DM list changes.
     ref.watch(lastDmMessageProvider);
     final dmCount = ref.watch(_mobileDmCountProvider);
 
@@ -548,8 +532,8 @@ class _MobileStatRow extends StatelessWidget {
   }
 }
 
-/// Full-screen pushed settings subpage — same chrome as
-/// MobileServerSettingsRoute (back arrow + title + divider).
+/// Full-screen pushed settings subpage, with MobileServerSettingsRoute's
+/// chrome.
 class _SettingsSubPage extends StatelessWidget {
   final String title;
   final Widget child;
@@ -670,10 +654,6 @@ class _SettingsNavTile extends StatelessWidget {
   }
 }
 
-// ─────────────────────────────────────────────────
-// Profile Tab
-// ─────────────────────────────────────────────────
-
 class _ProfileTab extends ConsumerStatefulWidget {
   const _ProfileTab({super.key});
 
@@ -690,22 +670,20 @@ class _ProfileTabState extends ConsumerState<_ProfileTab> {
   Uint8List? _pendingBanner;
   // An animated pick splits in two: the animation is cached on the asset rail
   // under a hash and only the STILL companion rides the profile push. Null on
-  // a still pick, which is also what CLEARS a previous animation on save.
+  // a still pick, which is what CLEARS a previous animation on save.
   Uint8List? _pendingAvatarStill;
   Uint8List? _pendingBannerStill;
   String? _pendingAvatarAnim;
   String? _pendingBannerAnim;
   bool _avatarChanged = false;
   bool _bannerChanged = false;
-  // In-flight WebP processing (never-throwing futures — errors handled
-  // inside). The preview stages the raw CROPPED bytes instantly; processing
-  // swaps in the WebP when done. _save AWAITS these — before this, a Save
-  // tapped during the processing window sent `avatarBytes: null` and the new
-  // image was silently dropped.
+  // In-flight WebP processing; these futures never throw. `_save` MUST await
+  // them, or a Save tapped inside the processing window sends
+  // `avatarBytes: null` and silently drops the new image.
   Future<void>? _avatarProcessing;
   Future<void>? _bannerProcessing;
-  // Stale-completion guards: newer pick/clear/GIF bumps the generation so a
-  // late processing result can't clobber it.
+  // A newer pick, clear or GIF bumps the generation so a late processing
+  // result cannot clobber it.
   int _avatarPickGen = 0;
   int _bannerPickGen = 0;
   bool _avatarBusy = false;
@@ -756,11 +734,10 @@ class _ProfileTabState extends ConsumerState<_ProfileTab> {
     final bytes = await result.files.first.xFile.readAsBytes();
     if (!mounted) return;
 
-    // Animated? Decide from the BYTES, never the extension — an animated
-    // WebP or an APNG named anything but `.gif` used to go through the
-    // cropper and come out a frozen still, silently.
-    // No SOURCE size check: Rust rejects on what it PRODUCES, and a 1.98 MB
-    // GIF that converts to 971 KB is a fine avatar.
+    // Decide animation from the BYTES, never the extension: an animated WebP
+    // or an APNG under another name goes through the cropper and comes out a
+    // frozen still. No SOURCE size check either, because Rust rejects on what
+    // it PRODUCES.
     if (isAnimatedImageBytes(bytes)) {
       _processAnimated(bytes, avatar: true);
       return;
@@ -776,8 +753,8 @@ class _ProfileTabState extends ConsumerState<_ProfileTab> {
           );
     if (cropped == null || !mounted) return;
 
-    // Instant feedback: preview the cropped PNG NOW; the WebP encode runs in
-    // the background and swaps in (or reverts + toasts on failure).
+    // The cropped PNG previews now; the WebP encode swaps in behind it, or
+    // reverts and toasts on failure.
     final prevBytes = _pendingAvatar;
     final prevChanged = _avatarChanged;
     final gen = ++_avatarPickGen;
@@ -814,9 +791,8 @@ class _ProfileTabState extends ConsumerState<_ProfileTab> {
       return;
     }
 
-    // 2.5:1 for the USER banner, matching every profile banner surface and
-    // Rust's 1200x480 storage. Server banners are a different feature and
-    // stay at 3:1.
+    // 2.5:1 for the USER banner, matching Rust's 1200x480 storage. SERVER
+    // banners are a different feature and stay at 3:1.
     final isMobile = Platform.isAndroid || Platform.isIOS;
     final cropped = isMobile
         ? await showMobileImageCrop(
@@ -850,10 +826,8 @@ class _ProfileTabState extends ConsumerState<_ProfileTab> {
     }();
   }
 
-  /// An ANIMATED pick: Rust crops, walks the quality ladder and caches the
-  /// result on the asset rail, handing back the hash, the animation (for the
-  /// preview) and the still companion that rides the profile push. Mirrors the
-  /// desktop dialog exactly.
+  /// Hands an ANIMATED pick to Rust, which caches it on the asset rail and
+  /// returns the hash, the animation and the still that rides the profile push.
   void _processAnimated(Uint8List rawBytes, {required bool avatar}) {
     final gen = avatar ? ++_avatarPickGen : ++_bannerPickGen;
     setState(() {
@@ -898,7 +872,7 @@ class _ProfileTabState extends ConsumerState<_ProfileTab> {
             _bannerBusy = false;
           }
         });
-        // Rust's message is the useful one ("about 9s fits at 1200x480").
+        // Rust's message is the useful one, so it is shown verbatim.
         HollowToast.show(context, '$e', type: HollowToastType.error);
       }
     }();
@@ -929,26 +903,25 @@ class _ProfileTabState extends ConsumerState<_ProfileTab> {
     if (_saving) return;
     setState(() => _saving = true);
     try {
-      // A Save tapped during image processing must WAIT for the final WebP
-      // (or the failure revert) — this is what used to silently drop the
-      // freshly-cropped image (`_avatarChanged` was still false).
+      // A Save tapped during processing must WAIT for the final WebP or the
+      // failure revert, or `_avatarChanged` is still false and the freshly
+      // cropped image is dropped.
       final avatarWait = _avatarProcessing;
       if (avatarWait != null) await avatarWait;
       final bannerWait = _bannerProcessing;
       if (bannerWait != null) await bannerWait;
       if (!mounted) return;
 
-      // The legacy `twitch_username` field is carried through UNCHANGED. It is
-      // a self-declaration, no new client renders it, and the verified mark it
-      // was standing in for lives in `support_creds` now; writing it here from
-      // a connected account would only keep an unverifiable claim alive on the
-      // wire for the sake of old builds that already have one.
+      // The legacy `twitch_username` is carried through UNCHANGED: it is a
+      // self-declaration, and the verified mark it stood in for lives in
+      // `support_creds` now. Writing it from a connected account would keep an
+      // unverifiable claim alive on the wire.
       await ref.read(profileProvider.notifier).updateMyProfile(
         displayName: _nameController.text.trim(),
         status: _statusController.text.trim(),
         aboutMe: _aboutController.text.trim(),
-        // The STILL rides the push; the animation is already on the rail and
-        // travels as its hash. An empty hash on a still pick drops it.
+        // The STILL rides the push; the animation travels as its rail hash,
+        // and an empty hash on a still pick drops it.
         avatarBytes:
             _avatarChanged ? (_pendingAvatarStill ?? _pendingAvatar) : null,
         bannerBytes:
@@ -996,7 +969,6 @@ class _ProfileTabState extends ConsumerState<_ProfileTab> {
     return ListView(
       padding: const EdgeInsets.all(HollowSpacing.lg),
       children: [
-        // Profile preview card
         Container(
           decoration: BoxDecoration(
             color: hollow.surface,
@@ -1007,7 +979,6 @@ class _ProfileTabState extends ConsumerState<_ProfileTab> {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              // Banner (tappable)
               GestureDetector(
                 onTap: _pickBanner,
                 onLongPress: _bannerChanged || bannerBytes != null
@@ -1020,12 +991,10 @@ class _ProfileTabState extends ConsumerState<_ProfileTab> {
                         _bannerChanged = true;
                       })
                     : null,
-                // The height TRACKS the card's width at 2.5:1 — the one ratio
-                // every user banner surface, the banner cropper and Rust's
-                // 1200x480 storage share. This preview used to be the lone
-                // surface cropping the OPPOSITE axis (a flat 100px read as
-                // roughly 3.6:1). LayoutBuilder rather than an AspectRatio so
-                // AnimatedGifImage still gets a real number to decode against.
+                // The height TRACKS the card's width at 2.5:1, the ratio every
+                // user banner surface shares. LayoutBuilder rather than
+                // AspectRatio so AnimatedGifImage gets a real number to decode
+                // against.
                 child: LayoutBuilder(
                   builder: (context, constraints) {
                     final width = constraints.maxWidth.isFinite
@@ -1064,14 +1033,12 @@ class _ProfileTabState extends ConsumerState<_ProfileTab> {
                 ),
               ),
 
-              // Avatar overlapping banner + preview info
               Transform.translate(
                 offset: const Offset(0, -32),
                 child: Padding(
                   padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.md),
                   child: Column(
                     children: [
-                      // Avatar (tappable)
                       GestureDetector(
                         onTap: _pickAvatar,
                         onLongPress: _avatarChanged
@@ -1091,7 +1058,7 @@ class _ProfileTabState extends ConsumerState<_ProfileTab> {
                                 borderRadius: BorderRadius.circular(hollow.radiusMd + 2),
                                 border: Border.all(color: hollow.surface, width: 3),
                               ),
-                              // One widget for both states so the frame
+                              // One widget for both states, so the frame
                               // preview survives picking a new avatar.
                               child: HollowAvatar(
                                 peerId: peerId,
@@ -1117,7 +1084,6 @@ class _ProfileTabState extends ConsumerState<_ProfileTab> {
 
                       const SizedBox(height: HollowSpacing.xs),
 
-                      // Name
                       Text(
                         previewName,
                         style: HollowTypography.body.copyWith(
@@ -1129,7 +1095,6 @@ class _ProfileTabState extends ConsumerState<_ProfileTab> {
                         textAlign: TextAlign.center,
                       ),
 
-                      // Status
                       if (previewStatus.isNotEmpty) ...[
                         const SizedBox(height: 2),
                         Text(
@@ -1147,7 +1112,6 @@ class _ProfileTabState extends ConsumerState<_ProfileTab> {
                       const SizedBox(height: HollowSpacing.sm),
                       Container(height: 1, color: hollow.border),
 
-                      // About me
                       if (previewAbout.isNotEmpty) ...[
                         const SizedBox(height: HollowSpacing.sm),
                         Text('ABOUT ME', style: HollowTypography.caption.copyWith(
@@ -1168,7 +1132,6 @@ class _ProfileTabState extends ConsumerState<_ProfileTab> {
                         ),
                       ],
 
-                      // Peer ID footer
                       if (peerId.length >= 16) ...[
                         const SizedBox(height: HollowSpacing.sm),
                         Text(
@@ -1208,7 +1171,6 @@ class _ProfileTabState extends ConsumerState<_ProfileTab> {
 
         const SizedBox(height: HollowSpacing.xl),
 
-        // Display name
         Text('Display name', style: HollowTypography.caption.copyWith(color: hollow.textSecondary)),
         const SizedBox(height: HollowSpacing.xs),
         HollowTextField(
@@ -1220,7 +1182,6 @@ class _ProfileTabState extends ConsumerState<_ProfileTab> {
 
         const SizedBox(height: HollowSpacing.lg),
 
-        // Status
         Text('Status', style: HollowTypography.caption.copyWith(color: hollow.textSecondary)),
         const SizedBox(height: HollowSpacing.xs),
         HollowTextField(
@@ -1232,7 +1193,6 @@ class _ProfileTabState extends ConsumerState<_ProfileTab> {
 
         const SizedBox(height: HollowSpacing.lg),
 
-        // About me
         Text('About me', style: HollowTypography.caption.copyWith(color: hollow.textSecondary)),
         const SizedBox(height: HollowSpacing.xs),
         HollowTextField(
@@ -1245,7 +1205,6 @@ class _ProfileTabState extends ConsumerState<_ProfileTab> {
 
         const SizedBox(height: HollowSpacing.xl),
 
-        // Save
         HollowButton.filled(
           onPressed: _saving ? null : _save,
           expand: true,
@@ -1254,7 +1213,6 @@ class _ProfileTabState extends ConsumerState<_ProfileTab> {
 
         const SizedBox(height: HollowSpacing.xl),
 
-        // Twitch connection
         _TwitchRow(),
       ],
     );
@@ -1284,7 +1242,7 @@ class _TwitchRowState extends ConsumerState<_TwitchRow> {
   /// A verify or a disconnect is in flight; both talk to the shop.
   bool _busy = false;
   /// The login on our verified credential, which is what the purple chip
-  /// draws. A connected account with none of these is not verified.
+  /// draws; a connected account without one is not verified.
   String? _verifiedLogin;
 
   @override
@@ -1314,7 +1272,7 @@ class _TwitchRowState extends ConsumerState<_TwitchRow> {
     }
   }
 
-  /// Ask the shop to verify the connected account and wear the credential.
+  /// Asks the shop to verify the connected account and wear the credential.
   /// The mark, not the connection, is what anyone else can see.
   Future<void> _verifyAccount() async {
     if (_busy) return;
@@ -1347,8 +1305,8 @@ class _TwitchRowState extends ConsumerState<_TwitchRow> {
     if (_busy) return;
     setState(() => _busy = true);
     try {
-      // Rust drops the account credential and republishes before the token is
-      // wiped: the mark outlives the token otherwise.
+      // Rust drops the credential and republishes BEFORE the token is wiped,
+      // or the mark outlives the token.
       await twitch_api.twitchDisconnect();
       if (mounted) {
         setState(() {
@@ -1444,10 +1402,6 @@ class _TwitchRowState extends ConsumerState<_TwitchRow> {
   }
 }
 
-// ─────────────────────────────────────────────────
-// System Tab
-// ─────────────────────────────────────────────────
-
 class _NetworkTab extends ConsumerStatefulWidget {
   const _NetworkTab({super.key});
 
@@ -1483,7 +1437,6 @@ class _NetworkTabState extends ConsumerState<_NetworkTab> {
     return ListView(
       padding: const EdgeInsets.all(HollowSpacing.lg),
       children: [
-        // ── Peer ID ──
         const _SectionLabel(label: 'Peer ID'),
         const SizedBox(height: HollowSpacing.sm),
         HollowPressable(
@@ -1518,34 +1471,28 @@ class _NetworkTabState extends ConsumerState<_NetworkTab> {
 
         const SizedBox(height: HollowSpacing.xl),
 
-        // ── Network ──
         const _SectionLabel(label: 'Network'),
         const SizedBox(height: HollowSpacing.sm),
         _buildRelaySection(hollow),
 
         const SizedBox(height: HollowSpacing.xl),
 
-        // ── Offline delivery (relay message-availability cache) ──
         const _SectionLabel(label: 'Offline Delivery'),
         const SizedBox(height: HollowSpacing.sm),
         const _OfflineInboxSection(),
 
         const SizedBox(height: HollowSpacing.xl),
 
-        // ── GIF search proxy (self-hosting) — shared card with desktop;
-        // the card carries its own "GIF Search" title.
         const GifProxySettingsCard(),
 
         const SizedBox(height: HollowSpacing.xl),
 
-        // ── Link previews (issue #45) — shared card with desktop; carries
-        // its own "Link Previews" title.
+        // Link previews (issue #45); the card carries its own title.
         const LinkPreviewSettingsCard(),
 
-        // Anti-censorship (VLESS+REALITY) section hidden from the UI: the
-        // current REALITY transport is non-functional. Desktop showed a
-        // disabled toggle here; on mobile the tunnel was never supported.
-        // Kept out of the UI (not deleted) for a future transport attempt.
+        // The anti-censorship (VLESS+REALITY) section stays out of the UI
+        // while that transport is non-functional; kept rather than deleted for
+        // a future attempt.
 
         const SizedBox(height: HollowSpacing.xl),
       ],
@@ -1566,7 +1513,6 @@ class _NetworkTabState extends ConsumerState<_NetworkTab> {
         ),
         const SizedBox(height: HollowSpacing.sm),
 
-        // Relay list
         for (final domain in relays) ...[
           HollowPressable(
             onTap: () => setState(() => _selectedRelay = domain),
@@ -1661,7 +1607,6 @@ class _NetworkTabState extends ConsumerState<_NetworkTab> {
 
         const SizedBox(height: HollowSpacing.sm),
 
-        // Add relay
         if (_showAddRelay) ...[
           Row(
             children: [
@@ -1708,7 +1653,6 @@ class _NetworkTabState extends ConsumerState<_NetworkTab> {
             child: const Text('Add relay'),
           ),
 
-        // Apply & Close (only when relay changed)
         if (_selectedRelay != _initialRelay) ...[
           const SizedBox(height: HollowSpacing.md),
           HollowButton.filled(
@@ -1736,12 +1680,6 @@ class _NetworkTabState extends ConsumerState<_NetworkTab> {
     );
   }
 }
-
-// ─────────────────────────────────────────────────
-// Category sub-pages (split from the old monolithic System/Security tabs to
-// mirror the desktop category rail). Each composes the already-modular
-// section widgets below.
-// ─────────────────────────────────────────────────
 
 class _AppearanceTab extends StatelessWidget {
   const _AppearanceTab({super.key});
@@ -1832,7 +1770,7 @@ class _AudioTab extends StatelessWidget {
   }
 }
 
-/// UI sound pack toggle + volume (issue #55) — desktop twin lives in
+/// UI sound pack toggle and volume (issue #55); the desktop twin lives in
 /// `audio_section.dart`.
 class _SoundEffectsControls extends ConsumerWidget {
   @override
@@ -1873,8 +1811,8 @@ class _SoundEffectsControls extends ConsumerWidget {
                 if (v) SoundService.instance.play(HollowSound.notification);
               },
               activeTrackColor: hollow.accent,
-              // The siblings in this file still pass the deprecated
-              // `activeColor`; same knob, current name.
+              // Same knob as the deprecated `activeColor` its siblings in this
+              // file still pass.
               activeThumbColor: Colors.white,
               inactiveTrackColor: hollow.border,
             ),
@@ -2030,9 +1968,9 @@ class _BackupTab extends StatelessWidget {
   }
 }
 
-// Restores the a114376-removed export button (iOS has no adb — this is the
-// only zero-Mac way to pull logs off a test device). Bundles the push
-// diagnostics files plus a hollow_debug.log tail into one shareable text file.
+// iOS has no adb, so bundling the push diagnostics and a hollow_debug.log tail
+// into one shareable file is the only zero-Mac way to pull logs off a test
+// device.
 class _ExportDiagnosticsButton extends StatelessWidget {
   const _ExportDiagnosticsButton();
 
@@ -2112,10 +2050,6 @@ class _ExportDiagnosticsButton extends StatelessWidget {
   }
 }
 
-// ─────────────────────────────────────────────────
-// Appearance widgets
-// ─────────────────────────────────────────────────
-
 class _ThemeToggleRow extends ConsumerWidget {
   const _ThemeToggleRow();
 
@@ -2161,7 +2095,6 @@ class _AccentHueSection extends ConsumerWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        // Label row with color preview
         Row(
           children: [
             Icon(LucideIcons.palette, size: 18, color: hollow.textSecondary),
@@ -2175,7 +2108,6 @@ class _AccentHueSection extends ConsumerWidget {
         ),
         const SizedBox(height: HollowSpacing.sm),
 
-        // Rainbow hue slider
         AccentHueSliderRow(
           hue: currentHue,
           height: 28,
@@ -2187,18 +2119,15 @@ class _AccentHueSection extends ConsumerWidget {
 
         const SizedBox(height: HollowSpacing.sm),
 
-        // Preset swatches
         Wrap(
           spacing: 10,
           runSpacing: 10,
           children: [
-            // Default teal
             _MobileColorSwatch(
               hue: defaultAccentHue,
               isSelected: (currentHue - defaultAccentHue).abs() < 1,
               onTap: () => ref.read(accentHueProvider.notifier).setHue(defaultAccentHue),
             ),
-            // Saved presets
             for (final hue in presets)
               _MobileColorSwatch(
                 hue: hue,
@@ -2210,7 +2139,6 @@ class _AccentHueSection extends ConsumerWidget {
                       type: HollowToastType.info);
                 },
               ),
-            // Save current button
             if (!presets.any((h) => (h - currentHue).abs() < 1) &&
                 (currentHue - defaultAccentHue).abs() > 1)
               GestureDetector(
@@ -2333,7 +2261,6 @@ class _BackgroundSection extends ConsumerWidget {
           ],
         ),
 
-        // Opacity slider (only when background is set)
         if (bg.hasBackground) ...[
           const SizedBox(height: HollowSpacing.sm),
           Row(
@@ -2450,8 +2377,8 @@ class _ReduceTransparencyRow extends ConsumerWidget {
   }
 }
 
-/// Footnote under the Display Size controls — these stack on top of the OS
-/// setting rather than replacing it.
+/// Footnote saying the Display Size controls stack on top of the OS setting
+/// rather than replacing it.
 class _DisplaySizeFootnote extends StatelessWidget {
   const _DisplaySizeFootnote();
 
@@ -2508,9 +2435,9 @@ class _InvisibleToggleRow extends ConsumerWidget {
   }
 }
 
-/// "Always relay calls" — force every real-time connection through the relay
-/// so co-participants never see this device's IP address. Mirrors the desktop
-/// Security > Call Privacy row; the copy is shared so the two can't drift.
+/// "Always relay calls": forces every real-time connection through the relay so
+/// co-participants never see this device's IP address. The copy is shared with
+/// the desktop row so the two cannot drift.
 class _AlwaysRelayCallsRow extends ConsumerWidget {
   const _AlwaysRelayCallsRow();
 
@@ -2558,9 +2485,7 @@ class _AlwaysRelayCallsRow extends ConsumerWidget {
   }
 }
 
-/// Offline message delivery (relay message-availability cache) — opt-in
-/// toggle + retention segment. Mirrors the desktop Network > Offline Delivery
-/// card.
+/// Offline message delivery: the opt-in toggle and its retention segment.
 class _OfflineInboxSection extends ConsumerWidget {
   const _OfflineInboxSection();
 
@@ -2628,10 +2553,6 @@ class _OfflineInboxSection extends ConsumerWidget {
     );
   }
 }
-
-// ─────────────────────────────────────────────────
-// Files section widgets
-// ─────────────────────────────────────────────────
 
 class _ImageQualityPicker extends ConsumerWidget {
   const _ImageQualityPicker();
@@ -2722,8 +2643,8 @@ class _AutoDownloadSlider extends ConsumerWidget {
           divisions: 50,
           activeColor: hollow.accent,
           inactiveColor: hollow.border,
-          // Below the 34 MB floor snaps to Off (0) — 1–33 MB has no meaning
-          // (34 MB is the direct-transfer cap).
+          // Below the 34 MB direct-transfer cap there is nothing to threshold,
+          // so anything under it snaps to Off.
           onChanged: (v) => ref
               .read(autoDownloadThresholdProvider.notifier)
               .setThreshold(v.round() < 34 ? 0 : v.round()),
@@ -3335,10 +3256,6 @@ class _RingtoneVolumeSlider extends ConsumerWidget {
   }
 }
 
-// ─────────────────────────────────────────────────
-// Security Tab
-// ─────────────────────────────────────────────────
-
 class _SecurityTab extends ConsumerStatefulWidget {
   const _SecurityTab({super.key});
 
@@ -3396,7 +3313,6 @@ class _SecurityTabState extends ConsumerState<_SecurityTab> {
     return ListView(
       padding: const EdgeInsets.all(HollowSpacing.lg),
       children: [
-        // Call Privacy section
         const _SectionLabel(label: 'Call Privacy'),
         const SizedBox(height: HollowSpacing.sm),
         Container(
@@ -3411,7 +3327,6 @@ class _SecurityTabState extends ConsumerState<_SecurityTab> {
 
         const SizedBox(height: HollowSpacing.xl),
 
-        // App Lock section
         const _SectionLabel(label: 'App Lock'),
         const SizedBox(height: HollowSpacing.sm),
         Container(
@@ -3464,8 +3379,6 @@ class _SecurityTabState extends ConsumerState<_SecurityTab> {
           ),
         ),
 
-        // Biometric unlock — only when App Lock is on and the device has an
-        // enrolled fingerprint / Face ID.
         if (_isMobilePlatform && _hasPassword && _canBiometric) ...[
           const SizedBox(height: HollowSpacing.md),
           Container(
@@ -3512,7 +3425,6 @@ class _SecurityTabState extends ConsumerState<_SecurityTab> {
 
         const SizedBox(height: HollowSpacing.md),
 
-        // Device protection
         if (Platform.isWindows || Platform.isMacOS) ...[
           Container(
             padding: const EdgeInsets.all(HollowSpacing.md),
@@ -3554,13 +3466,11 @@ class _SecurityTabState extends ConsumerState<_SecurityTab> {
 
         const SizedBox(height: HollowSpacing.xl),
 
-        // Recovery phrase
         const _SectionLabel(label: 'Recovery'),
         const SizedBox(height: HollowSpacing.sm),
         _RecoveryPhraseButton(),
         const SizedBox(height: HollowSpacing.xl),
 
-        // Verify a Proof — same placement as the desktop Security tab.
         const _SectionLabel(label: 'Verify a Proof'),
         const SizedBox(height: HollowSpacing.sm),
         const VerifyProofSection(),
@@ -3570,7 +3480,7 @@ class _SecurityTabState extends ConsumerState<_SecurityTab> {
   }
 
   Future<void> _enableAppLock() async {
-    // Mobile: choose PIN or password. Desktop layouts keep password only.
+    // Desktop layouts keep password only.
     final type = _isMobilePlatform ? await _chooseLockType() : 'password';
     if (type == null) return;
     if (!mounted) return;
@@ -3629,12 +3539,12 @@ class _SecurityTabState extends ConsumerState<_SecurityTab> {
       return;
     }
     final isPin = _lockType == 'pin';
-    // Need the current secret to store behind the biometric gate. Use the
-    // one captured this session (set/unlock) or ask for it.
+    // The secret has to be stored behind the biometric gate, so it comes from
+    // this session's capture or from the user.
     var secret = appLock.sessionSecret;
     secret ??= await _askSecret(context, isPin: isPin);
     if (secret == null || secret.isEmpty) return;
-    // One live prompt so a broken/cancelled sensor never gets trusted.
+    // One live prompt, so a broken or cancelled sensor is never trusted.
     final ok = await appLock.promptBiometric();
     if (!ok) {
       if (mounted) {
@@ -3652,7 +3562,7 @@ class _SecurityTabState extends ConsumerState<_SecurityTab> {
     }
   }
 
-  /// Bottom sheet: PIN or password?
+  /// Asks for the lock type; null when the sheet is dismissed.
   Future<String?> _chooseLockType() async {
     final hollow = HollowTheme.of(context);
     return showModalBottomSheet<String>(
@@ -3692,8 +3602,8 @@ class _SecurityTabState extends ConsumerState<_SecurityTab> {
               subtitle: 'Anything you like, stronger',
               onTap: () => Navigator.pop(ctx, 'password'),
             ),
-            // Biometric is a layer on top of a PIN/password, not a lock type
-            // of its own — show it here (grayed out) so it's discoverable.
+            // Biometric is a layer on top of a PIN or password, not a lock
+            // type of its own, but it is listed here to be discoverable.
             _LockTypeOption(
               icon: LucideIcons.fingerprint,
               title: Platform.isIOS
@@ -3801,8 +3711,7 @@ class _LockTypeOption extends StatelessWidget {
   final String title;
   final String subtitle;
 
-  /// Null = disabled (grayed out, not pressable). Used for the
-  /// Fingerprint / Face ID entry, which only becomes available once a
+  /// Null disables the row, which is how Fingerprint / Face ID reads until a
   /// PIN or password is set.
   final VoidCallback? onTap;
 
@@ -3901,10 +3810,8 @@ class _RecoveryPhraseButton extends ConsumerWidget {
 
 /// Exports a passphrase-encrypted `.hollow` account backup.
 ///
-/// The Rust `exportBackup` writes to a path it owns, so on mobile we export to
-/// a temp file inside the app data dir, read the bytes, hand them to the system
-/// file picker (`saveFile(bytes:)` — required on Android/iOS), then delete the
-/// temp file. Import is handled by the first-launch welcome dialog.
+/// Rust writes to a path it owns, so mobile exports to a temp file and hands
+/// the bytes to the picker: `saveFile(bytes:)` is required on Android and iOS.
 class _BackupExportButton extends ConsumerStatefulWidget {
   const _BackupExportButton();
 
@@ -3973,7 +3880,6 @@ class _BackupExportButtonState extends ConsumerState<_BackupExportButton> {
         fileName: 'hollow-backup.hollow',
         bytes: bytes,
       );
-      // Clean up the temp file regardless of whether the user saved.
       try {
         await File(tmpPath).delete();
       } catch (_) {}
@@ -3996,7 +3902,7 @@ class _BackupExportButtonState extends ConsumerState<_BackupExportButton> {
   }
 }
 
-/// Simple label + Switch row used by the backup export options.
+/// Label and Switch row used by the backup export options.
 class _ToggleRow extends StatelessWidget {
   final String label;
   final bool value;
@@ -4030,8 +3936,8 @@ class _ToggleRow extends StatelessWidget {
   }
 }
 
-/// Compact passphrase prompt with confirmation, keyboard-aware via
-/// showHollowDialog (which strips/pads viewInsets globally).
+/// Passphrase prompt with confirmation. `showHollowDialog` already pads for the
+/// keyboard, so this must not pad again.
 Future<String?> _askBackupPassphrase(
     BuildContext context, String title) async {
   final controller = TextEditingController();
@@ -4086,15 +3992,7 @@ Future<String?> _askBackupPassphrase(
   );
 }
 
-/// iOS-only: bundle the Notification Service Extension's footprint/metrics log
-/// (written into the App Group) + the app's push_debug.log into one text file and
-/// save it via the file picker, so it can be shared back for diagnosis. There's
-/// no debugger access on TestFlight builds — this is how we read the NSE's
-/// runtime memory and whether the on-device fetch+decrypt succeeded.
-/// Opens the multi-device link flow in show-code mode (this device has the data;
-/// an empty device enters the code to pull a full snapshot). Mirrors the desktop
-/// Settings → Security entry.
-/// Step 8 — the "Your Devices" list (mobile twin of `_DevicesSection`).
+/// One row of the "Your Devices" list.
 class _DeviceRowMobile extends ConsumerWidget {
   final MyDevice device;
   const _DeviceRowMobile({required this.device});
@@ -4160,31 +4058,24 @@ class _ResetDeviceListButton extends StatelessWidget {
       resetDeviceListsFlow(context);
 }
 
-// ─────────────────────────────────────────────────
-// About Tab
-// ─────────────────────────────────────────────────
-
 class _AboutTab extends ConsumerWidget {
   const _AboutTab({super.key});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final hollow = HollowTheme.of(context);
-    // Poll gate — see _MobileOnlineCounter: watch only while Settings is the
-    // active tab so the autoDispose stats poll stops when the user leaves.
+    // Gated like _MobileOnlineCounter, so the stats poll stops on leaving.
     final onSettingsTab = ref.watch(mobileTabProvider) == 3;
     final relayStats =
         onSettingsTab ? ref.watch(relayStatsProvider) : const RelayStats();
     final newsState = ref.watch(newsProvider);
     final relayDomain = ref.watch(relayDomainProvider);
-    // Single source of truth for the app version — same as desktop About
-    // (Rust APP_VERSION via getCurrentVersion()), not a hardcoded string.
+    // Rust's APP_VERSION is the one source for this, never a literal.
     final appVersion = ref.watch(updaterProvider).currentVersion;
 
     return ListView(
       padding: const EdgeInsets.all(HollowSpacing.lg),
       children: [
-        // Logo + name
         Center(
           child: Column(
             children: [
@@ -4213,8 +4104,8 @@ class _AboutTab extends ConsumerWidget {
 
         const _SectionLabel(label: 'Info'),
         const SizedBox(height: HollowSpacing.sm),
-        // Seven taps on this row wake the Hollow Shop, or put it away again
-        // (the same widget desktop About uses, so the two cannot drift).
+        // Seven taps on this row wake the Hollow Shop or put it away; the
+        // widget is shared with desktop About so the two cannot drift.
         VersionEggTapTarget(
           child: _InfoRow(
             label: 'Version',
@@ -4226,7 +4117,6 @@ class _AboutTab extends ConsumerWidget {
 
         const SizedBox(height: HollowSpacing.xl),
 
-        // Relay stats
         const _SectionLabel(label: 'Relay'),
         const SizedBox(height: HollowSpacing.sm),
         Container(
@@ -4264,7 +4154,6 @@ class _AboutTab extends ConsumerWidget {
                 ],
               ),
               const SizedBox(height: HollowSpacing.md),
-              // Memory bar
               _StatBar(
                 label: 'RAM',
                 value: relayStats.memLabel,
@@ -4273,7 +4162,6 @@ class _AboutTab extends ConsumerWidget {
                 hollow: hollow,
               ),
               const SizedBox(height: HollowSpacing.sm),
-              // Bandwidth bar
               _StatBar(
                 label: 'Bandwidth',
                 value: relayStats.bandwidthLabel,
@@ -4287,7 +4175,6 @@ class _AboutTab extends ConsumerWidget {
 
         const SizedBox(height: HollowSpacing.xl),
 
-        // News
         const _SectionLabel(label: 'News'),
         const SizedBox(height: HollowSpacing.sm),
         if (!newsState.hasFetched)
@@ -4345,7 +4232,6 @@ class _AboutTab extends ConsumerWidget {
 
         const SizedBox(height: HollowSpacing.xl),
 
-        // Contact
         const _SectionLabel(label: 'Contact'),
         const SizedBox(height: HollowSpacing.sm),
         aboutLinkButton(
@@ -4368,7 +4254,6 @@ class _AboutTab extends ConsumerWidget {
 
         const SizedBox(height: HollowSpacing.xl),
 
-        // Follow & Support
         Row(
           children: [
             Text('Follow', style: HollowTypography.label.copyWith(
@@ -4431,7 +4316,6 @@ class _AboutTab extends ConsumerWidget {
 
         const SizedBox(height: HollowSpacing.xl),
 
-        // Legal
         const _SectionLabel(label: 'Legal'),
         const SizedBox(height: HollowSpacing.sm),
         aboutLinkButton(
@@ -4618,8 +4502,8 @@ class _AboutTab extends ConsumerWidget {
     );
   }
 
-  /// Strip common markdown markers so the 4-line card teaser reads cleanly
-  /// (the full post renders as real markdown in the expanded dialog).
+  /// Strips markdown markers so the card teaser reads cleanly; the expanded
+  /// dialog renders the real markdown.
   String _plainTeaser(String body) {
     return body
         .replaceAll(RegExp(r'^#{1,6}\s+', multiLine: true), '')
@@ -4679,10 +4563,6 @@ class _StatBar extends StatelessWidget {
   }
 }
 
-// ─────────────────────────────────────────────────
-// Shared widgets
-// ─────────────────────────────────────────────────
-
 class _SectionLabel extends StatelessWidget {
   final String label;
   const _SectionLabel({required this.label});
@@ -4733,9 +4613,8 @@ class _InfoRow extends StatelessWidget {
   }
 }
 
-/// Verified contacts — mobile parity with the desktop Security tab's Verified
-/// Contacts card (Issue 1-D). Every badge the app shows is reviewable and
-/// withdrawable here.
+/// Verified contacts: every badge the app shows is reviewable and withdrawable
+/// here.
 class _VerifiedContactsTab extends ConsumerWidget {
   const _VerifiedContactsTab({super.key});
 
@@ -4777,8 +4656,7 @@ class _VerifiedContactsTab extends ConsumerWidget {
   }
 }
 
-/// Blocked users management — mobile parity with the desktop Security tab's
-/// Blocked Users card: HollowAvatar + name + truncated master id + Unblock.
+/// Blocked users, with an Unblock action per row.
 class _BlockedUsersTab extends ConsumerWidget {
   const _BlockedUsersTab({super.key});
 

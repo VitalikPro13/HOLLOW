@@ -8,11 +8,10 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 
-/// Press-to-set keybind field (issue #38): shows the current binding as key
-/// badges; tap to arm capture — the next non-modifier key (with live
-/// modifiers) becomes the binding. Esc or focus loss cancels. While armed,
-/// [keybindCaptureActiveProvider] suspends the live hotkey controller so
-/// the captured combo never fires an action.
+/// Press-to-set keybind field (issue #38). Tap arms capture and the next
+/// non-modifier key becomes the binding; Esc or focus loss cancels. While armed,
+/// [keybindCaptureActiveProvider] suspends the live hotkey controller so the
+/// captured combo never fires an action.
 class KeybindCaptureField extends ConsumerStatefulWidget {
   final String serialized;
   final ValueChanged<String> onChanged;
@@ -37,7 +36,7 @@ class _KeybindCaptureFieldState extends ConsumerState<KeybindCaptureField> {
   @override
   void dispose() {
     if (_capturing) {
-      // Post-frame: provider writes during teardown are illegal.
+      // Provider writes during teardown are illegal.
       final container = ProviderScope.containerOf(context, listen: false);
       WidgetsBinding.instance.addPostFrameCallback((_) {
         container.read(keybindCaptureActiveProvider.notifier).state = false;
@@ -71,7 +70,7 @@ class _KeybindCaptureFieldState extends ConsumerState<KeybindCaptureField> {
       widget.onChanged(binding.serialize());
       _disarm();
     }
-    // Swallow everything while armed (modifier presses stay pending).
+    // Swallow everything while armed; modifier presses stay pending.
     return KeyEventResult.handled;
   }
 
@@ -102,7 +101,7 @@ class _KeybindCaptureFieldState extends ConsumerState<KeybindCaptureField> {
           ),
           decoration: BoxDecoration(
             borderRadius: BorderRadius.circular(hollow.radiusSm),
-            // Never lerp from transparent (goes via black) — idle shows the
+            // Never lerp from transparent, which goes via black: idle shows the
             // normal field border instead.
             border: Border.all(
               color: _capturing ? hollow.accent : hollow.border,
@@ -125,7 +124,7 @@ class _KeybindCaptureFieldState extends ConsumerState<KeybindCaptureField> {
   }
 }
 
-/// Key badges matching the Shortcuts page style.
+/// Key badges in the Shortcuts page style.
 class _BindingBadges extends StatelessWidget {
   final String display;
 

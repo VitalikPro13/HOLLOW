@@ -4,14 +4,11 @@ import 'package:flutter/material.dart';
 
 import 'package:hollow/src/core/reduce_motion.dart';
 
-/// Pulsing red dot + "REC" text. Used to mark anyone (self or remote peer)
-/// who is currently recording the call. Self version can also show the
-/// elapsed recording time next to the label.
+/// Pulsing red dot and "REC", marking anyone recording the call.
 class RecordingIndicator extends StatefulWidget {
   /// If non-null, the elapsed recording time is shown next to "REC".
   final DateTime? startedAt;
 
-  /// Override sizes for tighter contexts (e.g. participant row).
   final double dotSize;
   final double fontSize;
   final bool showLabel;
@@ -24,13 +21,12 @@ class RecordingIndicator extends StatefulWidget {
     this.showLabel = true,
   });
 
-  /// Compact variant for tight places (participant rows, name tags).
   const RecordingIndicator.compact({super.key, this.startedAt})
       : dotSize = 6,
         fontSize = 9,
         showLabel = true;
 
-  /// Dot-only variant — no text. Useful as an overlay badge on avatars.
+  /// No text, for use as an overlay badge on an avatar.
   const RecordingIndicator.dotOnly({super.key})
       : startedAt = null,
         dotSize = 8,

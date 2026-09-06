@@ -1,22 +1,16 @@
 /// The ONE file that touches Rust for parked server joins.
 ///
-/// A join whose members were all offline used to fail after 15 seconds. It is
-/// now PARKED: Rust persists the request and answers it whenever a member
-/// finally comes back, which can be days later. Everything the UI needs from
-/// that lives behind the four entry points below, so the generated bindings
-/// for this feature are named in exactly one file.
-///
-/// The matching `NetworkEvent` variants (`ServerJoinParked`,
-/// `PendingJoinUpdated`) are dispatched from `event_provider.dart` like every
-/// other event: that switch is exhaustive over the union, so a new variant has
-/// to be named there or the analyzer rejects the file.
+/// A join whose members were all offline used to fail after 15 seconds; it is
+/// now PARKED, and Rust answers it whenever a member comes back, days later
+/// if need be. The matching `NetworkEvent` variants (`ServerJoinParked`,
+/// `PendingJoinUpdated`) are dispatched from `event_provider.dart`, whose
+/// switch is exhaustive over the union, so a new one has to be named there.
 library;
 
 import 'package:hollow/src/core/models/pending_join_info.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 
-/// The backend the UI talks to. Swappable so widget tests can drive the menus
-/// and sheets without an FFI bridge.
+/// The backend the UI talks to; swappable so widget tests need no FFI bridge.
 abstract class PendingJoinBackend {
   Future<List<PendingJoinInfo>> list();
 

@@ -14,15 +14,11 @@ import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 
-/// Hard ceiling on recording length — mirrors the 34 MB DM file limit vibe.
-/// At 24 kbps that's ~366 MB, but no one is actually going to hit this.
+/// Hard ceiling on recording length. Far past anything reachable in practice.
 const Duration kVoiceMessageMaxDuration = Duration(hours: 34);
 
-/// Inline bar shown in place of the chat input row while recording.
-///
-/// - Tap mic to start is handled by the parent.
-/// - Cancel button discards the file.
-/// - Send button stops recording and calls [onFinished] with the result.
+/// Inline bar shown in place of the chat input row while recording. The parent
+/// owns the start; Send stops and calls [onFinished], Cancel discards.
 class VoiceRecorderBar extends ConsumerStatefulWidget {
   final void Function(VoiceRecordingResult result) onFinished;
   final VoidCallback onCancelled;
@@ -114,7 +110,7 @@ class _VoiceRecorderBarState extends ConsumerState<VoiceRecorderBar>
     _ampSub?.cancel();
     _elapsedSub?.cancel();
     _pulse.dispose();
-    // Defensive: if the widget is torn down mid-recording, drop the file.
+    // A teardown mid-recording drops the file.
     if (_started && !_stopping) {
       _recorder.cancel().whenComplete(() => _recorder.dispose());
     } else {
@@ -164,7 +160,6 @@ class _VoiceRecorderBarState extends ConsumerState<VoiceRecorderBar>
 
     return Row(
       children: [
-        // Cancel (discard).
         HollowPressable(
           onTap: _cancel,
           semanticLabel: 'Discard recording',
@@ -175,7 +170,6 @@ class _VoiceRecorderBarState extends ConsumerState<VoiceRecorderBar>
         ),
         const SizedBox(width: HollowSpacing.xs),
 
-        // Pulsing recording dot + timer + waveform strip.
         Expanded(
           child: Container(
             height: 40,
@@ -213,10 +207,9 @@ class _VoiceRecorderBarState extends ConsumerState<VoiceRecorderBar>
                 ),
                 const SizedBox(width: HollowSpacing.sm),
                 Expanded(
-                  // Decorative live-amplitude visual — conveys nothing a screen
-                  // reader can use (the recording state is carried by the timer
-                  // text and the labeled Discard/Send controls). Keep it out of
-                  // the semantics tree.
+                  // Decorative: the recording state is carried by the timer
+                  // text and the labelled controls, so this stays out of the
+                  // semantics tree.
                   child: ExcludeSemantics(
                     child: RepaintBoundary(
                       child: CustomPaint(
@@ -236,7 +229,6 @@ class _VoiceRecorderBarState extends ConsumerState<VoiceRecorderBar>
         ),
         const SizedBox(width: HollowSpacing.sm),
 
-        // Send.
         HollowPressable(
           onTap: _send,
           semanticLabel: 'Send voice message',

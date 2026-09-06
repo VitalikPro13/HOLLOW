@@ -4,20 +4,17 @@ use super::hlc::HlcTimestamp;
 
 /// A Last-Writer-Wins register: pure deterministic LWW on the HLC total order.
 ///
-/// "Latest authorized write wins." WHO may write is enforced by `op_allowed`
-/// at every ingest plus the author-side gates — the merge's only job is
-/// convergence. It must NOT consult the author's role: role-priority
-/// dominance made every value sticky to the highest role that ever wrote it
-/// (an Admin with MANAGE_SERVER could never overwrite an Owner-written server
-/// setting), and the priority was derived from the ROLE MAP AT APPLY TIME,
-/// which differs across mid-sync replicas — a permanent divergence source.
-/// HLC-first merge is a pure function of the op: commutative, idempotent,
-/// convergent. `HlcTimestamp`'s ordering (physical_ms, counter, actor) is
-/// total, so distinct writes never tie.
+/// "Latest authorized write wins." WHO may write is enforced by `op_allowed` at every
+/// ingest plus the author-side gates, so the merge's only job is convergence.
 ///
-/// `priority` is retained as inert metadata purely for serde compat: it is a
-/// required field in persisted SQLCipher state JSON AND the
-/// `ServerStateSnapshot` wire format consumed by older clients.
+/// It must NOT consult the author's role: role-priority dominance made every value
+/// sticky to the highest role that ever wrote it, and the priority was derived from
+/// the ROLE MAP AT APPLY TIME, which differs across mid-sync replicas. HLC-first merge
+/// is a pure function of the op, and `HlcTimestamp`'s (physical_ms, counter, actor)
+/// order is total, so distinct writes never tie.
+///
+/// `priority` is inert metadata kept for serde compat: it is a required field in
+/// persisted state JSON and in the snapshot wire format older clients consume.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AdminLwwReg<V: Clone> {
     value: V,
@@ -60,10 +57,9 @@ impl<V: Clone> AdminLwwReg<V> {
 
     /// Pull a register's timestamp back to `max_ms` if it sits beyond it.
     ///
-    /// A `ServerStateSnapshot` is adopted wholesale during a join, so a
-    /// hostile responder could hand us registers stamped in the far future
-    /// that no later honest write could ever overtake. Clamping on adoption
-    /// bounds them without discarding the value. Returns true if it changed.
+    /// A `ServerStateSnapshot` is adopted wholesale during a join, so a hostile responder
+    /// could hand us registers stamped in the far future that no later honest write could
+    /// overtake. Clamping bounds them without discarding the value.
     pub fn clamp_hlc(&mut self, max_ms: u64) -> bool {
         if self.hlc.physical_ms > max_ms {
             self.hlc.physical_ms = max_ms;
@@ -125,8 +121,7 @@ mod tests {
 
     #[test]
     fn later_admin_write_overrides_older_owner_write() {
-        // The live bug this rewrite fixes: an Owner-written value could never
-        // be overwritten by an authorized Admin. Latest write wins now.
+        // An Owner-written value must not be permanently unwritable by an authorized Admin.
         let mut admin_reg =
             AdminLwwReg::new("admin".to_string(), ts(5000, 0, "admin"), 2);
         let owner_reg =
@@ -177,9 +172,8 @@ mod tests {
 
     #[test]
     fn legacy_serialized_register_still_deserializes() {
-        // `priority` must stay a required serialized field: it appears in old
-        // persisted SQLCipher state JSON and in ServerStateSnapshot frames
-        // from/to older clients.
+        // `priority` must stay a required serialized field: old persisted state JSON and
+        // snapshot frames from older clients carry it.
         let legacy = r#"{"value":"x","priority":3,"hlc":{"physical_ms":1000,"counter":0,"actor":"owner"}}"#;
         let reg: AdminLwwReg<String> = serde_json::from_str(legacy).unwrap();
         assert_eq!(reg.read(), "x");

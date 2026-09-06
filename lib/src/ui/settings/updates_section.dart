@@ -42,7 +42,6 @@ class _UpdatesTabState extends ConsumerState<UpdatesTab> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // Header — current version
           Row(
             children: [
               Text(
@@ -73,7 +72,6 @@ class _UpdatesTabState extends ConsumerState<UpdatesTab> {
 
           const SizedBox(height: HollowSpacing.lg),
 
-          // Check for updates button
           Align(
             alignment: Alignment.centerLeft,
             child: HollowButton.filled(
@@ -92,24 +90,19 @@ class _UpdatesTabState extends ConsumerState<UpdatesTab> {
             ),
           ),
 
-          // Error state
           if (state.status == UpdateStatus.error && state.error != null)
             ..._errorChildren(hollow, state),
 
-          // Download progress
           if (state.status == UpdateStatus.downloading ||
               state.status == UpdateStatus.extracting)
             ..._progressChildren(hollow, state, notifier),
 
-          // Ready to install
           if (state.status == UpdateStatus.readyToInstall)
             ..._readyChildren(hollow, state, notifier),
 
-          // Version list
           if (state.manifest != null)
             ..._versionListChildren(hollow, state, notifier),
 
-          // Empty state
           if (state.manifest == null &&
               state.status == UpdateStatus.idle) ...[
             const SizedBox(height: HollowSpacing.xl),
@@ -234,9 +227,8 @@ class _UpdatesTabState extends ConsumerState<UpdatesTab> {
     ];
   }
 
-  /// What the indeterminate step after the download is doing here: a zip
-  /// is extracted, a Linux tarball is unpacked and staged, and a flatpak is
-  /// already being installed by the host (the longest of the three).
+  /// What the indeterminate step after the download is doing: extracting a zip,
+  /// staging a tarball, or waiting on the host's flatpak install.
   static String _applyVerb() {
     if (!Platform.isLinux) return 'Extracting';
     return isFlatpakInstall ? 'Installing' : 'Preparing';
@@ -244,7 +236,7 @@ class _UpdatesTabState extends ConsumerState<UpdatesTab> {
 
   List<Widget> _readyChildren(
       HollowTheme hollow, UpdateState state, UpdateNotifier notifier) {
-    // A flatpak is installed by the time we get here; only the restart is
+    // A flatpak is installed by the time we get here and only the restart is
     // left, so the card must not promise an install that already happened.
     final installed = Platform.isLinux && isFlatpakInstall;
     return [

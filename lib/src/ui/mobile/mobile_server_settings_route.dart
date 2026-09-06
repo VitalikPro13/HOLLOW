@@ -66,9 +66,8 @@ class _MobileServerSettingsRouteState
   bool _saving = false;
   bool _savingNickname = false;
 
-  // Optimistic server-icon staging: the cropped bytes render instantly while
-  // the Rust WebP encode + CRDT write run behind a small spinner. Any newer
-  // pick/clear bumps the generation so a stale completion can't clobber it.
+  // The cropped bytes render while the WebP encode and CRDT write run. A newer
+  // pick or clear bumps the generation so a stale completion cannot clobber it.
   Uint8List? _stagedIcon;
   bool _iconBusy = false;
   int _iconPickGen = 0;
@@ -80,8 +79,8 @@ class _MobileServerSettingsRouteState
   bool _isNsfw = false;
   bool _savingAccess = false;
 
-  /// Relay offline catch-up retention in DAYS (0 = off). Mirrors the CRDT
-  /// setting `relay_catchup_secs` (stored in seconds).
+  /// Relay offline catch-up retention in DAYS, 0 for off. The CRDT setting
+  /// `relay_catchup_secs` stores seconds.
   int _catchupDays = 0;
 
   @override
@@ -112,10 +111,10 @@ class _MobileServerSettingsRouteState
         setState(() {
           _isPrivate = isPrivate == 'true';
           _isNsfw = isNsfw == 'true';
-          // 0 / empty = unlimited; leave the field blank in that case.
+          // 0 and empty both mean unlimited.
           _maxMembersController.text =
               (maxMembers.isEmpty || maxMembers == '0') ? '' : maxMembers;
-          // Absent = default ON at 3 days (matches Rust relay_catchup_secs()).
+          // Absent means on at 3 days, as in Rust's relay_catchup_secs().
           if (catchupSecs.isEmpty) {
             _catchupDays = 3;
           } else {
@@ -129,7 +128,7 @@ class _MobileServerSettingsRouteState
     } catch (_) {}
   }
 
-  /// Applies immediately (single CRDT key, optimistic local apply in Rust).
+  /// Applies immediately: one CRDT key, applied optimistically in Rust.
   Future<void> _setRelayCatchup(int days) async {
     final prev = _catchupDays;
     setState(() => _catchupDays = days);
@@ -155,7 +154,7 @@ class _MobileServerSettingsRouteState
       final raw = _maxMembersController.text.trim();
       final parsed = int.tryParse(raw) ?? 0;
 
-      // A finite cap can't be set below the current member count.
+      // A finite cap cannot go below the current member count.
       if (parsed > 0) {
         final members = await crdt_api.getServerMembers(serverId: sid);
         if (parsed < members.length) {
@@ -313,8 +312,8 @@ class _MobileServerSettingsRouteState
     Uint8List toSend;
     final animated = _isAnimatedPick(bytes);
     if (animated) {
-      // Animated picks skip the crop dialog (it flattens to a still PNG);
-      // Rust center-crops square per frame and splits still + anim variants.
+      // Animated picks skip the crop dialog, which flattens to a still PNG;
+      // Rust centre-crops each frame instead.
       if (bytes.length > 2 * 1024 * 1024) {
         HollowToast.show(context, 'Animated icon too large (max 2MB)',
             type: HollowToastType.error);
@@ -336,8 +335,8 @@ class _MobileServerSettingsRouteState
       toSend = cropped;
     }
 
-    // Instant feedback: show the picked bytes NOW; the Rust WebP encode +
-    // CRDT write (a real wall-clock wait) runs behind the spinner.
+    // The picked bytes show now; the encode and CRDT write are a real
+    // wall-clock wait behind the spinner.
     setState(() {
       _stagedIcon = toSend;
       _iconBusy = true;
@@ -348,11 +347,9 @@ class _MobileServerSettingsRouteState
         rawBytes: toSend,
       );
       if (!mounted || gen != _iconPickGen) return;
-      // Seed the providers with the bytes we just sent — reading the DB here
-      // races the fire-and-forget CRDT persist and returns the PREVIOUS
-      // avatar ("second upload applies the first" bug). applyLocalWrite
-      // reconciles to the processed bytes once the write lands. A still
-      // pick clears any previous animated icon.
+      // Seed the providers with the bytes we just sent: a DB read here races
+      // the fire-and-forget CRDT persist and returns the PREVIOUS icon.
+      // `applyLocalWrite` reconciles once the write lands.
       ref
           .read(serverAvatarProvider.notifier)
           .applyLocalWrite(widget.serverId, toSend);
@@ -367,7 +364,6 @@ class _MobileServerSettingsRouteState
           type: HollowToastType.success);
     } catch (e) {
       if (!mounted || gen != _iconPickGen) return;
-      // Revert the optimistic staging — the pick failed.
       setState(() {
         _stagedIcon = null;
         _iconBusy = false;
@@ -378,8 +374,7 @@ class _MobileServerSettingsRouteState
   }
 
   Future<void> _clearAvatar() async {
-    // Invalidate any in-flight pick — its late completion must not resurrect
-    // the staged icon after the clear.
+    // A late completion must not resurrect the staged icon after the clear.
     _iconPickGen++;
     setState(() {
       _stagedIcon = null;
@@ -388,8 +383,7 @@ class _MobileServerSettingsRouteState
     try {
       await crdt_api.clearServerAvatar(serverId: widget.serverId);
       if (!mounted) return;
-      // Drop the cached bytes NOW — a DB read here races the queued write
-      // and would resurrect the just-removed avatar.
+      // A DB read here races the queued write and resurrects the removed icon.
       ref
           .read(serverAvatarProvider.notifier)
           .applyLocalWrite(widget.serverId, null);
@@ -406,9 +400,7 @@ class _MobileServerSettingsRouteState
     }
   }
 
-  /// GIF / animated-WebP magic — animated picks skip the crop dialog (the
-  /// cropper flattens to a still PNG); Rust center-crops per frame
-  /// (3:1 for banners, square for icons).
+  /// Whether the bytes are a GIF or animated WebP, which skips the cropper.
   static bool _isAnimatedPick(Uint8List bytes) {
     if (bytes.length > 4 && bytes[0] == 0x47 && bytes[1] == 0x49 && bytes[2] == 0x46 && bytes[3] == 0x38) {
       return true; // GIF8
@@ -459,9 +451,8 @@ class _MobileServerSettingsRouteState
         rawBytes: toSend,
       );
       if (!mounted || gen != _bannerPickGen) return;
-      // Seed the provider with the bytes we just sent — reading the DB here
-      // races the fire-and-forget CRDT persist ("second upload applies the
-      // first" bug). applyLocalWrite reconciles once the write lands.
+      // Seed the provider with the bytes we just sent: a DB read here races
+      // the fire-and-forget CRDT persist and returns the previous banner.
       ref
           .read(serverBannerProvider.notifier)
           .applyLocalWrite(widget.serverId, toSend);
@@ -686,7 +677,6 @@ class _MobileServerSettingsRouteState
       body: SafeArea(
         child: Column(
           children: [
-            // Header
             Container(
               padding: const EdgeInsets.symmetric(
                 horizontal: HollowSpacing.sm,
@@ -719,12 +709,10 @@ class _MobileServerSettingsRouteState
                 ],
               ),
             ),
-            // Content
             Expanded(
               child: ListView(
                 padding: const EdgeInsets.all(HollowSpacing.lg),
                 children: [
-                  // Server avatar + name header
                   Center(
                     child: Column(
                       children: [
@@ -744,12 +732,8 @@ class _MobileServerSettingsRouteState
                                       BorderRadius.circular(hollow.radiusLg),
                                 ),
                                 clipBehavior: Clip.antiAlias,
-                                // Staged bytes (optimistic pick) win over the
-                                // provider cache; AnimatedGifImage previews
-                                // an animated pick live. Otherwise the shared
-                                // icon widget renders the animated variant
-                                // when one exists (authoring tile counts as
-                                // watched).
+                                // Staged bytes win over the provider cache,
+                                // which still holds the previous icon.
                                 child: _stagedIcon != null
                                     ? AnimatedGifImage(
                                         bytes: _stagedIcon!,
@@ -772,9 +756,8 @@ class _MobileServerSettingsRouteState
                                         ),
                                       ),
                               ),
-                              // Small non-blocking spinner while the WebP
-                              // encode + CRDT write run (the tile already
-                              // shows the cropped bytes).
+                              // Non-blocking: the tile already shows the
+                              // cropped bytes.
                               if (_iconBusy)
                                 Positioned(
                                   right: 4,
@@ -804,8 +787,7 @@ class _MobileServerSettingsRouteState
                   ),
                   const SizedBox(height: HollowSpacing.xl),
 
-                  // Server Banner (admin only, issue #25) — tap to upload,
-                  // long-press to clear; mirrors the avatar tile idiom.
+                  // Server banner (issue #25): tap uploads, long-press clears.
                   if (canManage) ...[
                     const _SectionDivider(label: 'Server Banner'),
                     const SizedBox(height: HollowSpacing.sm),
@@ -862,7 +844,6 @@ class _MobileServerSettingsRouteState
                     const SizedBox(height: HollowSpacing.xl),
                   ],
 
-                  // Server Name (admin only)
                   if (canManage) ...[
                     const _SectionDivider(label: 'Server Name'),
                     const SizedBox(height: HollowSpacing.sm),
@@ -909,7 +890,7 @@ class _MobileServerSettingsRouteState
                     const SizedBox(height: HollowSpacing.xl),
                   ],
 
-                  // Access (admin only) — private / NSFW / member cap
+                  // Private, NSFW and the member cap.
                   if (canManage) ...[
                     const _SectionDivider(label: 'Access'),
                     const SizedBox(height: HollowSpacing.sm),
@@ -1014,7 +995,6 @@ class _MobileServerSettingsRouteState
                     ),
                     const SizedBox(height: HollowSpacing.xl),
 
-                    // ── Offline catch-up (relay availability cache) ──
                     const _SectionDivider(label: 'Offline Catch-Up'),
                     const SizedBox(height: HollowSpacing.sm),
                     Row(
@@ -1085,7 +1065,6 @@ class _MobileServerSettingsRouteState
                     const SizedBox(height: HollowSpacing.xl),
                   ],
 
-                  // Channels (admin only)
                   if (canManageChannels) ...[
                     const _SectionDivider(label: 'Channels'),
                     const SizedBox(height: HollowSpacing.sm),
@@ -1093,7 +1072,6 @@ class _MobileServerSettingsRouteState
                     const SizedBox(height: HollowSpacing.xl),
                   ],
 
-                  // Management rows
                   const _SectionDivider(label: 'Management'),
                   const SizedBox(height: HollowSpacing.sm),
                   _NavRow(
@@ -1127,8 +1105,8 @@ class _MobileServerSettingsRouteState
                       ),
                     ),
                   ),
-                  // Everyone can view emotes (like the desktop tab);
-                  // add/remove is gated on MANAGE_EMOTES inside the route.
+                  // Everyone can view emotes; add and remove are gated on
+                  // MANAGE_EMOTES inside the route.
                   _NavRow(
                     icon: LucideIcons.smile,
                     label: 'Emotes',
@@ -1170,13 +1148,11 @@ class _MobileServerSettingsRouteState
                   ),
                   const SizedBox(height: HollowSpacing.xl),
 
-                  // Notifications
                   const _SectionDivider(label: 'Notifications'),
                   const SizedBox(height: HollowSpacing.sm),
                   _NotificationSection(serverId: widget.serverId),
                   const SizedBox(height: HollowSpacing.xl),
 
-                  // Server ID
                   const _SectionDivider(label: 'Server ID'),
                   const SizedBox(height: HollowSpacing.sm),
                   Container(
@@ -1216,7 +1192,6 @@ class _MobileServerSettingsRouteState
                   ),
                   const SizedBox(height: HollowSpacing.xl),
 
-                  // Your Nickname
                   const _SectionDivider(label: 'Your Nickname'),
                   const SizedBox(height: HollowSpacing.sm),
                   Row(
@@ -1271,7 +1246,6 @@ class _MobileServerSettingsRouteState
                   ],
                   const SizedBox(height: HollowSpacing.xl + HollowSpacing.lg),
 
-                  // Danger zone
                   const _SectionDivider(label: 'Danger Zone', danger: true),
                   const SizedBox(height: HollowSpacing.md),
                   if (isOwner)
@@ -1360,10 +1334,6 @@ class _SectionDivider extends StatelessWidget {
   }
 }
 
-// ─────────────────────────────────────────────────
-// Notification level settings
-// ─────────────────────────────────────────────────
-
 class _NotificationSection extends ConsumerWidget {
   final String serverId;
 
@@ -1374,7 +1344,7 @@ class _NotificationSection extends ConsumerWidget {
     final hollow = HollowTheme.of(context);
     final notifState = ref.watch(notificationSettingsProvider);
     final notifNotifier = ref.read(notificationSettingsProvider.notifier);
-    // Only channels the local user can see (restricted names must not leak).
+    // Restricted channel names must not leak here.
     final allChannels =
         ref.watch(serverChannelsProvider(serverId)).valueOrNull ?? {};
     final channels = <String, ChannelInfo>{
@@ -1390,7 +1360,6 @@ class _NotificationSection extends ConsumerWidget {
             style: HollowTypography.caption.copyWith(
               color: hollow.textSecondary, fontSize: 11)),
         const SizedBox(height: HollowSpacing.sm),
-        // Server-wide level pills
         Row(
           children: [
             Expanded(
@@ -1643,10 +1612,6 @@ class _ChannelNotifRow extends StatelessWidget {
   }
 }
 
-// ─────────────────────────────────────────────────
-// Channel layout editor (reorder, categories, CRUD)
-// ─────────────────────────────────────────────────
-
 class _ChannelLayoutEditor extends ConsumerStatefulWidget {
   final String serverId;
 
@@ -1870,9 +1835,8 @@ class _ChannelLayoutEditorState extends ConsumerState<_ChannelLayoutEditor> {
     );
   }
 
-  /// Apply an optimistic channel-map update, commit the CRDT write, and on
-  /// failure revert + toast (parity with desktop channels_tab) — otherwise a
-  /// dead node leaves the control lying silently.
+  /// Applies optimistically, commits the CRDT write, then reverts and toasts on
+  /// failure: without that a dead node leaves the control lying silently.
   Future<void> _commitChannelProp(
     String channelId,
     ChannelInfo Function(ChannelInfo) update,
@@ -1897,7 +1861,7 @@ class _ChannelLayoutEditorState extends ConsumerState<_ChannelLayoutEditor> {
     }
   }
 
-  /// Toggle a channel's public flag (mirrors desktop channels_tab globe).
+  /// Toggles a channel's public flag.
   Future<void> _toggleChannelPublic(String channelId, bool currentlyPublic) {
     final newVal = !currentlyPublic;
     return _commitChannelProp(
@@ -1912,9 +1876,8 @@ class _ChannelLayoutEditorState extends ConsumerState<_ChannelLayoutEditor> {
     );
   }
 
-  /// Set who can SEE a channel (everyone / moderator / admin). Mirrors desktop's
-  /// visibility _AccessChip: optimistic local update then the CRDT op. The
-  /// Rust tier handler clears any label gate — mirrored optimistically.
+  /// Sets who can SEE a channel. Rust's tier handler clears any label gate, so
+  /// the optimistic update clears it too.
   Future<void> _setChannelVisibility(String channelId, String visibility) {
     final prev = _channels[channelId]?.visibility ?? 'everyone';
     final prevLabels =
@@ -1931,8 +1894,7 @@ class _ChannelLayoutEditorState extends ConsumerState<_ChannelLayoutEditor> {
     );
   }
 
-  /// Set who can POST in a channel (everyone / moderator / admin). Mirrors
-  /// desktop's posting _AccessChip.
+  /// Sets who can POST in a channel.
   Future<void> _setChannelPosting(String channelId, String posting) {
     final prev = _channels[channelId]?.posting ?? 'everyone';
     final prevLabels =
@@ -1949,11 +1911,11 @@ class _ChannelLayoutEditorState extends ConsumerState<_ChannelLayoutEditor> {
     );
   }
 
-  /// Category bulk-apply (mirrors desktop channels_tab): forward-scan the
-  /// live layout from the category's INDEX (never its name — duplicates are
-  /// legal) to the next Category/Separator, then stamp each channel
-  /// sequentially with per-channel optimistic+revert and a summary toast
-  /// that never implies rollback of ops that already landed.
+  /// Applies an access change to every channel under a category.
+  ///
+  /// Scans from the category's INDEX, never its name, because duplicate names
+  /// are legal. Each channel reverts on its own and the summary toast must not
+  /// imply rollback of ops that already landed.
   Future<void> _bulkApplyAccess(int categoryIndex, String categoryName) async {
     final targetIds = <String>[];
     for (var i = categoryIndex + 1; i < _layout.length; i++) {
@@ -1961,7 +1923,7 @@ class _ChannelLayoutEditorState extends ConsumerState<_ChannelLayoutEditor> {
       if (item is CategoryItem || item is SeparatorItem) break;
       if (item is ChannelItem) {
         final info = _channels[item.channelId];
-        // Public channels have no access gates (plaintext by design).
+        // Public channels are plaintext, so they have no access gates.
         if (info != null && !info.isPublic) targetIds.add(item.channelId);
       }
     }
@@ -2051,9 +2013,8 @@ class _ChannelLayoutEditorState extends ConsumerState<_ChannelLayoutEditor> {
     }
   }
 
-  /// Open the access-label picker for a channel's visibility or posting gate
-  /// (the "Custom…" chip entry). Mirrors desktop _editGateLabels, including
-  /// the Rust-side Admin+ tier stamp reflected optimistically.
+  /// Opens the access-label picker for a channel's visibility or posting gate.
+  /// A label gate pairs with Rust's Admin+ tier stamp, mirrored optimistically.
   Future<void> _editGateLabels(String channelId,
       {required bool forVisibility}) async {
     final info = _channels[channelId];
@@ -2098,8 +2059,7 @@ class _ChannelLayoutEditorState extends ConsumerState<_ChannelLayoutEditor> {
     );
   }
 
-  /// Set a channel's slow-mode interval (seconds, 0 = off). Mirrors the
-  /// desktop _SlowModeChip: optimistic local update then the CRDT op.
+  /// Sets a channel's slow-mode interval in seconds, 0 for off.
   Future<void> _setChannelSlowMode(String channelId, int seconds) {
     final prev = _channels[channelId]?.slowModeSecs ?? 0;
     return _commitChannelProp(
@@ -2114,7 +2074,7 @@ class _ChannelLayoutEditorState extends ConsumerState<_ChannelLayoutEditor> {
     );
   }
 
-  /// Toggle a channel's media-only flag. Mirrors the desktop image-icon toggle.
+  /// Toggles a channel's media-only flag.
   Future<void> _toggleChannelMediaOnly(String channelId, bool current) {
     final newVal = !current;
     return _commitChannelProp(
@@ -2288,7 +2248,7 @@ class _ChannelLayoutEditorState extends ConsumerState<_ChannelLayoutEditor> {
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
 
-    // Reload when channel events fire (per-server, no cascade).
+    // Per-server, so a channel event elsewhere does not cascade.
     ref.listen(
       serverListProvider.select((s) => s[widget.serverId]),
       (prev, next) { if (prev != next) _load(); },
@@ -2310,7 +2270,6 @@ class _ChannelLayoutEditorState extends ConsumerState<_ChannelLayoutEditor> {
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
-        // Action buttons
         Row(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
@@ -2343,7 +2302,6 @@ class _ChannelLayoutEditorState extends ConsumerState<_ChannelLayoutEditor> {
         ),
         const SizedBox(height: HollowSpacing.md),
 
-        // Reorderable list
         ReorderableListView.builder(
           shrinkWrap: true,
           physics: const NeverScrollableScrollPhysics(),
@@ -2372,7 +2330,6 @@ class _ChannelLayoutEditorState extends ConsumerState<_ChannelLayoutEditor> {
           },
         ),
 
-        // Save/Discard bar
         if (_dirty) ...[
           const SizedBox(height: HollowSpacing.md),
           Row(
@@ -2495,9 +2452,8 @@ class _ChannelLayoutEditorState extends ConsumerState<_ChannelLayoutEditor> {
                     overflow: TextOverflow.ellipsis,
                   ),
                 ),
-                // Public-channel toggle (text channels only) — mirrors desktop's
-                // channels_tab globe. Accent = public, grey = private. Gated by the
-                // MANAGE_CHANNELS permission that already wraps this whole editor.
+                // Gated by the MANAGE_CHANNELS permission that already wraps
+                // this whole editor.
                 if (!isVoice)
                   HollowPressable(
                     onTap: () =>
@@ -2528,15 +2484,12 @@ class _ChannelLayoutEditorState extends ConsumerState<_ChannelLayoutEditor> {
                 ),
               ],
             ),
-            // Visibility + posting access controls — mirror desktop's _AccessChip
-            // pair. Only meaningful for PRIVATE (MLS) channels: a public channel
-            // is plaintext for everyone, so who-can-see/post is moot. Voice
-            // channels have no posting/visibility gating either.
+            // Only meaningful for PRIVATE (MLS) channels: a public one is
+            // plaintext for everyone, and voice has no gating at all.
             if (!isVoice && !(ch?.isPublic ?? false)) ...[
               const SizedBox(height: HollowSpacing.xs),
               Padding(
-                // Align the chips under the "#" channel icon (drag handle 20 +
-                // sm gap 8), not under the channel name.
+                // Aligned under the "#" channel icon, not the channel name.
                 padding: const EdgeInsets.only(left: 28),
                 child: Row(
                   children: [
@@ -2584,8 +2537,8 @@ class _ChannelLayoutEditorState extends ConsumerState<_ChannelLayoutEditor> {
                 ),
               ),
             ],
-            // Slow mode + media-only — text channels (public or private; both
-            // are enforced at send AND ingest so they work for plaintext too).
+            // Both are enforced at send AND ingest, so they hold for public
+            // plaintext channels too.
             if (!isVoice) ...[
               const SizedBox(height: HollowSpacing.xs),
               Padding(
@@ -2645,7 +2598,6 @@ class _ChannelLayoutEditorState extends ConsumerState<_ChannelLayoutEditor> {
       );
     }
 
-    // SeparatorItem
     return Container(
       key: key,
       margin: const EdgeInsets.only(bottom: HollowSpacing.xs),
@@ -2675,9 +2627,8 @@ class _ChannelLayoutEditorState extends ConsumerState<_ChannelLayoutEditor> {
   }
 }
 
-/// Compact popup chip for channel visibility or posting access on mobile.
-/// Mirrors the desktop `_AccessChip` (channels_tab): tap → Everyone / Mod+ /
-/// Admin+. Restricted values render in the warning color.
+/// Compact popup chip for channel visibility or posting access. Restricted
+/// values render in the warning colour.
 class _MobileSlowModeChip extends StatelessWidget {
   final int seconds;
   final Future<void> Function(int) onChanged;

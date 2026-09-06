@@ -21,9 +21,8 @@ class ChannelChatNotifier
 
   String _key(String serverId, String channelId) => '$serverId:$channelId';
 
-  /// Send a message to a channel.
-  /// Returns the generated message id so a caller that sent before its link
-  /// preview finished fetching can attach the card afterwards (issue #45).
+  /// Send a message to a channel. Returns the generated message id so a caller
+  /// that sent before its link preview finished can attach the card (issue #45).
   /// Conference chat returns its own RAM-only id, which no attach path uses.
   Future<String> sendMessage(String serverId, String channelId, String text,
       {String? replyToMid, network_api.LinkPreviewRef? linkPreview}) async {
@@ -31,10 +30,8 @@ class ChannelChatNotifier
     final localPeerId = ref.read(identityProvider).peerId ?? 'unknown';
 
     // Conference chat ('conf:<id>' virtual servers) is RAM-ONLY: it rides the
-    // conference MLS pipeline, never the channel send path (which persists to
-    // SQLCipher and fans through channel machinery). Same pane, different
-    // backend — the message id is derived from the Rust Lamport stamp so an
-    // improbable relay echo dedups by message_id like everything else.
+    // conference MLS pipeline, never the channel send path. The message id
+    // derives from the Rust Lamport stamp so a relay echo dedups by message_id.
     if (serverId.startsWith('conf:')) {
       final confId = serverId.substring('conf:'.length);
       final ts = await conference_api.conferenceSendChat(
@@ -56,7 +53,6 @@ class ChannelChatNotifier
 
     final messageId = generateMessageId();
 
-    // Rust will generate the timestamp and persist to DB.
     await networkService.sendChannelMessage(
       serverId: serverId,
       channelId: channelId,
@@ -66,7 +62,6 @@ class ChannelChatNotifier
       linkPreview: linkPreview,
     );
 
-    // Add to in-memory state for instant UI feedback.
     final now = DateTime.now();
     final msg = ChannelChatMessage(
       senderId: localPeerId,
@@ -81,9 +76,8 @@ class ChannelChatNotifier
     return messageId;
   }
 
-  /// Receive a message from a peer in a channel.
-  /// Called only for genuinely new messages (Rust deduplicates before emitting).
-  /// [timestampMs] is the sender's original timestamp in milliseconds.
+  /// Receive a message from a peer in a channel; Rust deduplicates before
+  /// emitting. [timestampMs] is the sender's original timestamp.
   void receiveMessage(String serverId, String channelId, String fromPeer,
       String text, int timestampMs, String messageId, String replyToMid,
       {network_api.LinkPreviewRef? linkPreview,
@@ -113,12 +107,10 @@ class ChannelChatNotifier
     // No DB save here — Rust already persisted before emitting the event.
   }
 
-  /// Hydrate signature, public key, and (critically) timestamp on an existing
-  /// in-memory message. Called from the ChannelMessageSent event handler after
-  /// Rust has signed+persisted the message — we overwrite the optimistic
-  /// Dart-side `DateTime.now()` timestamp with Rust's exact value that the
-  /// signature was actually computed over. Without the timestamp replacement,
-  /// verification fails on machines with coarse OS timer resolution (e.g. VMs).
+  /// Hydrate signature, public key and (critically) timestamp on an existing
+  /// in-memory message: the optimistic Dart `DateTime.now()` is replaced with
+  /// Rust's exact value that the signature was computed over, or verification
+  /// fails on machines with coarse OS timer resolution.
   void hydrateSignature(String serverId, String channelId, String messageId,
       int timestampMs, String? signature, String? publicKey) {
     final key = _key(serverId, channelId);
@@ -146,7 +138,6 @@ class ChannelChatNotifier
       messageId: messageId,
       newText: newText,
     );
-    // UI update happens via the ChannelMessageEdited event.
   }
 
   /// Apply an edit to an in-memory message (from network event or own edit).
@@ -186,7 +177,6 @@ class ChannelChatNotifier
       messageId: messageId,
       preview: preview,
     );
-    // UI update happens via the ChannelLinkPreviewUpdated event.
   }
 
   /// Apply a late link preview to an in-memory message. Never touches
@@ -219,7 +209,6 @@ class ChannelChatNotifier
       channelId: channelId,
       messageId: messageId,
     );
-    // UI update happens via the ChannelMessageDeleted event.
   }
 
   /// Remove a message from in-memory state (from network event or own deletion).
@@ -333,8 +322,6 @@ class ChannelChatNotifier
     // Conference chat is RAM-only: nothing in the DB, no sync to request —
     // whatever is in memory IS the meeting's chat.
     if (serverId.startsWith('conf:')) return;
-    // Always request sync from connected peers when opening a channel.
-    // New messages arrive via MessageSyncCompleted → cache clear → reload.
     // .catchError, not try/catch: fire-and-forget — an async rejection (e.g.
     // "Node is not running" at startup) would escape a sync try/catch.
     network_api.requestChannelSync(
@@ -348,7 +335,6 @@ class ChannelChatNotifier
                 limit: 200,
               );
       if (stored.isNotEmpty) {
-        // Collect message IDs for bulk reaction loading.
         final messageIds = stored
             .where((m) => m.messageId != null)
             .map((m) => m.messageId!)
@@ -368,7 +354,6 @@ class ChannelChatNotifier
           } catch (_) {}
         }
 
-        // Load file attachments for messages that have file_id.
         final fileIds = stored
             .where((m) => m.fileId != null)
             .map((m) => m.fileId!)
@@ -425,10 +410,8 @@ class ChannelChatNotifier
                 ))
             .toList();
 
-        // DB is the source of truth, but preserve any in-memory messages
-        // (by messageId) that aren't in the DB snapshot yet — covers the
-        // tiny race where a message arrives mid-load, and keeps optimistic
-        // in-flight sends that haven't round-tripped through Rust.
+        // DB is the source of truth, but preserve in-memory messages not yet in the
+        // snapshot: a message arriving mid-load, and optimistic in-flight sends.
         final key = _key(serverId, channelId);
         final existing = state[key] ?? const <ChannelChatMessage>[];
         final loadedIds = messages
@@ -501,11 +484,9 @@ class ChannelChatNotifier
       final key = _key(serverId, channelId);
       final existing = state[key] ?? <ChannelChatMessage>[];
 
-      // Build a set of message IDs from DB results for dedup.
       final dbMessageIds = <String>{};
       final dbMessages = <ChannelChatMessage>[];
 
-      // Load reactions + file attachments for DB messages (same as loadHistory).
       final messageIds = stored
           .where((m) => m.messageId != null)
           .map((m) => m.messageId!)
@@ -576,11 +557,9 @@ class ChannelChatNotifier
         ));
       }
 
-      // Merge: DB messages + any in-memory messages not in DB (live-delivered).
       final liveOnly = existing.where((m) =>
           m.messageId != null && !dbMessageIds.contains(m.messageId));
-      // Stable sort by timestamp (newest last) and cap — same-millisecond
-      // messages keep their DB (order_us) order.
+      // Stable sort by timestamp; same-millisecond messages keep their DB order.
       final merged = _stableSortByTimestamp([...dbMessages, ...liveOnly]);
       final capped = merged.length > _maxMessages
           ? merged.sublist(merged.length - _maxMessages)
@@ -648,7 +627,6 @@ class ChannelChatNotifier
     // (cross-machine clock skew would reorder the live conversation). Correct
     // ordering for synced/out-of-order arrivals comes from the loadHistory resort.
     var list = <ChannelChatMessage>[...current, message];
-    // Trim oldest messages to prevent unbounded memory growth.
     if (list.length > _maxMessages) {
       list = list.sublist(list.length - _maxMessages);
     }
@@ -665,9 +643,8 @@ class ChannelChatNotifier
       List<ChannelChatMessage> messages,
       int firstVisible, int lastVisible) async {
     // Auto-download off for this server (#41): the viewport sweep IS the
-    // auto-download for channel files — skip it; file cards offer a manual
-    // Download button instead. VOICE NOTES stay exempt (they behave like
-    // text), so the per-file loop below still pulls those.
+    // auto-download for channel files, so skip it and offer a manual Download
+    // button. VOICE NOTES stay exempt, so the per-file loop still pulls those.
     final gated = effectiveAutoDownloadMbRead(ref, 'server:$serverId') == 0;
     final start = (firstVisible - 15).clamp(0, messages.length - 1);
     final end = (lastVisible + 15).clamp(0, messages.length - 1);
@@ -682,10 +659,9 @@ class ChannelChatNotifier
       final msg = messages[i];
       final att = msg.fileAttachment;
       if (att == null || att.isComplete || att.diskPath != null) continue;
-      // The name alone would let a sender label any bytes `voice_x.ogg` and
-      // have a gated client pull them anyway. The wire header's `voice` flag
-      // is not surfaced to Dart yet (see isGenuineVoiceNote), so the name,
-      // extension and size carry the whole test here.
+      // The name alone would let a sender label any bytes `voice_x.ogg` and have a
+      // gated client pull them. The wire header's `voice` flag is not surfaced to
+      // Dart yet, so name, extension and size carry the whole test here.
       if (gated &&
           !isGenuineVoiceNote(
             voice: true,
@@ -699,10 +675,9 @@ class ChannelChatNotifier
       final transfer = ref.read(fileTransferProvider)[att.fileId];
       if (transfer != null && (transfer.isDownloading || transfer.isComplete)) continue;
 
-      // Prefer the SENDER (most likely holder) when online, else any other
-      // online member (sorted for determinism). ONE request only — Rust
-      // reroutes an offline/failed target to another member, and multiple
-      // parallel streams would poison the single FileHeader AES key.
+      // Prefer the SENDER (most likely holder) when online, else any other online
+      // member (sorted for determinism). ONE request only: Rust reroutes a failed
+      // target, and parallel streams would poison the single FileHeader AES key.
       final senderMaster = links.identityOf(msg.senderId ?? '');
       final others = onlineMembers
           .where((m) => m != senderMaster && m != myMaster)
@@ -724,12 +699,10 @@ class ChannelChatNotifier
     }
   }
 
-  /// Attach file metadata to an in-RAM row that has none yet. Guest live
-  /// path: a public-channel file post's metadata arrives (FileHeaderReceived)
-  /// right after the message row, which was stored without an attachment —
-  /// without this the guest bubble renders the raw `[file:<id>]` token.
-  /// No-op when the row is absent or already carries an attachment (member
-  /// rows are rebuilt from the DB by `_reloadChatForFile` regardless).
+  /// Attach file metadata to an in-RAM row that has none yet. Guest live path:
+  /// a public-channel file post's metadata arrives right after the message row,
+  /// which was stored without an attachment, so the bubble would render the raw
+  /// `[file:<id>]` token. No-op when the row is absent or already has one.
   void attachFileMeta(String serverId, String channelId, String messageId,
       FileAttachment attachment) {
     final key = '$serverId:$channelId';

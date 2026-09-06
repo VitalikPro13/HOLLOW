@@ -51,14 +51,12 @@ pub const MAX_GOSSIP_OP_BYTES: usize = 15_000;
 
 // ── Small-message gossip frame (Tier 2 large-server scaling) ────────────────
 
-/// Wire frame for a CRDT op flooded over the WebRTC data-channel mesh
-/// (type byte 0x04 on 'hollow-data'). See `reports/LARGE_SERVER_SCALING_2026.md`.
+/// Wire frame for a CRDT op flooded over the WebRTC data-channel mesh (type byte
+/// 0x04 on 'hollow-data'). See `reports/LARGE_SERVER_SCALING_2026.md`.
 ///
-/// Propagation model: a receiving node re-floods ONLY when the op was NEW to
-/// its own op_log (validated + applied first), so each node forwards a given
-/// op at most once — the flood is bounded by op-newness, not by `ttl`.
-/// `broadcast_id` suppresses re-ingest of exact duplicate frames; `ttl` is a
-/// reserved safety bound carried on the wire.
+/// A receiving node re-floods ONLY when the op was NEW to its own op_log, so each
+/// node forwards a given op at most once: the flood is bounded by op-newness, not
+/// by `ttl`, which is a reserved safety bound carried on the wire.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GossipCrdtOp {
     pub broadcast_id: String,
@@ -80,11 +78,10 @@ pub struct PeerScore {
     pub bandwidth_score: f64,
     /// Number of vault shards this peer holds that we recently accessed.
     pub shard_overlap: u32,
-    /// ICE route reachability (Tier 3, `reports/LARGE_SERVER_SCALING_2026.md`):
-    /// `Some(true)` = direct route (host/srflx/LAN), `Some(false)` = TURN-relayed,
-    /// `None` = not yet measured. Reported by Dart from `getStats()` once per
-    /// connection. Direct peers are preferred neighbors — a TURN-relayed mesh
-    /// "offload" still burns relay-class bandwidth.
+    /// ICE route reachability (Tier 3): `Some(true)` = a direct route,
+    /// `Some(false)` = TURN-relayed, `None` = not yet measured. Reported by Dart
+    /// from `getStats()` once per connection; direct peers are preferred, because
+    /// a TURN-relayed mesh "offload" still burns relay-class bandwidth.
     pub is_direct: Option<bool>,
     /// When this peer's data channel connected (None if not currently connected).
     pub connected_since: Option<Instant>,
@@ -112,13 +109,9 @@ impl PeerScore {
         }
     }
 
-    /// Composite score: higher is better. Used for neighbor selection & rotation.
-    ///
-    /// Weights:
-    /// - Shard overlap is heavily weighted (priority connections for vault)
-    /// - Low latency is important for real-time (voice, fast file delivery)
-    /// - Uptime matters for reliability
-    /// - Bandwidth matters for file transfers
+    /// Composite score, higher is better, for neighbor selection and rotation.
+    /// Shard overlap weighs heaviest (vault priority connections), then latency,
+    /// uptime, bandwidth and reachability.
     pub fn composite(&self) -> f64 {
         let latency_score = if self.avg_latency_ms > 0.0 {
             // Invert: lower latency = higher score. Cap at 500ms.
@@ -129,11 +122,9 @@ impl PeerScore {
 
         let bw_score = (self.bandwidth_score / 10_000_000.0).min(1.0); // normalize to 10 MB/s
 
-        // Reachability (Tier 3): known-direct > unmeasured > TURN-relayed.
-        // The neutral midpoint keeps unmeasured peers from being starved of
-        // the connection they need to GET measured; the ±0.075 spread clears
-        // the rotation's 10% improvement margin for otherwise-similar peers,
-        // so the mesh drifts toward directly-reachable neighbors.
+        // Reachability (Tier 3): known-direct > unmeasured > TURN-relayed. The
+        // neutral midpoint keeps unmeasured peers from being starved of the
+        // connection they need to GET measured, and the spread clears the 10% margin.
         let reach_score = match self.is_direct {
             Some(true) => 0.15,
             None => 0.075,
@@ -207,10 +198,9 @@ pub struct PendingRelay {
     pub created: Instant,
 }
 
-/// Per-server gossip overlay state.
-///
-/// Manages which peers we maintain WebRTC data channels with (our "gossip
-/// neighbors"), peer scoring for selection/rotation, and broadcast dedup.
+/// Per-server gossip overlay state: which peers we keep WebRTC data channels with
+/// (our "gossip neighbors"), the peer scoring that selects and rotates them, and
+/// broadcast dedup.
 #[derive(Debug)]
 pub struct GossipOverlay {
     pub server_id: String,
@@ -468,11 +458,9 @@ impl GossipOverlay {
             .collect()
     }
 
-    /// Gossip neighbors with a LIVE data channel right now (`mark_connected`
-    /// fired, no disconnect since), excluding a specific peer (the sender).
-    /// Flood targets for small-message gossip: a neighbor whose channel is
-    /// still dialing can't carry a frame, and the caller falls back to the
-    /// relay when this comes back empty.
+    /// Gossip neighbors with a LIVE data channel right now, excluding the sender.
+    /// Flood targets for small-message gossip: a neighbor whose channel is still
+    /// dialing cannot carry a frame, and an empty result sends the caller to the relay.
     pub fn connected_relay_targets(&self, exclude_peer: Option<&str>) -> Vec<String> {
         self.neighbors
             .iter()

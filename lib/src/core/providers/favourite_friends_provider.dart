@@ -6,9 +6,8 @@ import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 
 const _settingsKey = 'favourite_friends';
 
-/// Ordered list of favourite friend peer IDs.
-/// When non-empty, the FriendsBar shows only these (in this order).
-/// When empty, the FriendsBar falls back to showing all accepted friends.
+/// Ordered list of favourite friend peer IDs. When non-empty the FriendsBar
+/// shows only these, in this order; when empty it shows all accepted friends.
 class FavouriteFriendsNotifier extends Notifier<List<String>> {
   @override
   List<String> build() => const [];

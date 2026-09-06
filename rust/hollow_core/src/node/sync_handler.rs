@@ -15,11 +15,10 @@ use super::crypto_handler::{
 };
 use super::types::*;
 
-/// Multi-device (Step 6): fan pre-serialized bytes out to EVERY online device of
-/// EVERY server member except our own identity. Members are master-keyed and the
-/// master has no socket, so a direct `send_message_to_peer(master)` is dropped —
-/// every member-broadcast loop must go through this. Single-device collapses to
-/// one device per member (or the member id itself if no link is known).
+/// Multi-device: fan pre-serialized bytes to EVERY online device of EVERY server
+/// member except our own identity. Members are master-keyed and a master has no
+/// socket, so a direct `send_message_to_peer(master)` is dropped: every
+/// member-broadcast loop must go through this.
 fn broadcast_raw_to_members(
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
@@ -33,17 +32,14 @@ fn broadcast_raw_to_members(
     }
 }
 
-/// Multi-device (Step 9C): fan pre-serialized bytes to our OWN online sibling
-/// devices, EXCLUDING the acting device (`local_device_id`).
+/// Multi-device: fan pre-serialized bytes to our OWN online sibling devices,
+/// EXCLUDING the acting device (`local_device_id`).
 ///
-/// The remaining-member broadcast skips the actor's own identity (members are
-/// master-keyed; the actor's siblings resolve to the same master), so a
-/// moderation/leave CRDT op — and the MLS leaf-removal commit for kick/ban —
-/// never reaches a person's OTHER devices. Without this they only converge on
-/// restart / the next SyncRequest. We exclude the acting device itself because
-/// (a) it already applied the change locally and (b) re-feeding a node its OWN
-/// MLS commit fails `process_commit` (epoch already advanced) → self-drops the
-/// group. Returns the number of sibling devices reached (0 for a sole device).
+/// The remaining-member broadcast skips the actor's own identity, so a moderation
+/// or leave op, and the MLS leaf-removal commit behind it, never reaches a
+/// person's OTHER devices. The acting device is excluded because it already
+/// applied the change and because re-feeding a node its OWN MLS commit fails
+/// `process_commit` and self-drops the group. Returns the sibling count reached.
 pub(crate) fn fan_to_own_siblings(
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
@@ -67,16 +63,14 @@ pub(crate) fn fan_to_own_siblings(
 }
 
 /// Convenience: broadcast a `CrdtOpBroadcast` (plaintext fallback) to all members'
-/// devices. Used by every sync-handler CRDT op whose MLS broadcast failed/absent.
+/// devices. Used by every sync-handler CRDT op whose MLS broadcast failed or was
+/// absent.
 ///
-/// Tier 2 (large-server scaling, `reports/LARGE_SERVER_SCALING_2026.md`): when
-/// the server's gossip overlay has live data channels, the op floods over the
-/// P2P mesh instead — the sender stops paying O(members × devices) relay
-/// uploads AND the relay stops seeing plaintext op JSON. The MLS twin (single
-/// SendToRoom, sent by the caller) still reaches every online member; mesh
-/// stragglers converge via the sync backstop. Falls back to the per-identity
-/// relay fan-out whenever the mesh can't carry it (small server, channels
-/// still dialing, oversized op).
+/// Tier 2 (`reports/LARGE_SERVER_SCALING_2026.md`): when the server's gossip
+/// overlay has live data channels the op floods over the P2P mesh instead, so the
+/// sender stops paying O(members x devices) relay uploads and the relay stops
+/// seeing plaintext op JSON. Falls back to the relay fan-out whenever the mesh
+/// cannot carry it.
 fn broadcast_crdt_op_to_members(
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
@@ -97,10 +91,9 @@ fn broadcast_crdt_op_to_members(
     broadcast_raw_to_members(ws_cmd_tx, ws_room_peers, state, local_peer_str, data);
 }
 
-/// Multi-device (Step 6): all MLS-credential ids belonging to one identity —
-/// the master plus every known device id. Used to remove EVERY leaf of a kicked/
-/// banned human in one commit (a leaf may be an offline device, so we can't rely
-/// on live-room presence here). `master` resolves to itself for single-device.
+/// Multi-device: all MLS-credential ids belonging to one identity, the master plus
+/// every known device id. Used to remove EVERY leaf of a kicked or banned human in
+/// one commit, since a leaf may be an offline device.
 fn identity_credential_ids(master: &str) -> Vec<String> {
     let m = super::resolver::resolve(master); // normalize if a device id slipped in
     let mut ids = super::resolver::devices_for(&m);
@@ -111,8 +104,7 @@ fn identity_credential_ids(master: &str) -> Vec<String> {
 // ── Shared authoring / broadcast plumbing ─────────────────────────────
 //
 // Nearly every handler in this file authors one CRDT op and pushes it out the
-// same way. The helpers below hold that shape ONCE; handlers keep only their
-// own gate, payload, event, and side effects.
+// same way; the helpers below hold that shape ONCE.
 
 /// Emit the standard permission-denied `Error` event. Returns `true` so
 /// handlers can `return deny(...).await` straight out.
@@ -138,11 +130,9 @@ fn author_op(
 }
 
 /// Broadcast an authored op MLS-first, then ALWAYS also as the plaintext
-/// `CrdtOpBroadcast` twin (idempotent — op_log dedups; receivers re-validate
-/// author+permission). MLS broadcast is confidential but a receiver at a
-/// skewed epoch silently drops it with no recovery, permanently losing the op
-/// (e.g. a new channel it never learns exists). The plaintext copy guarantees
-/// server-metadata convergence.
+/// `CrdtOpBroadcast` twin (idempotent: op_log dedups and receivers re-validate).
+/// An MLS broadcast is confidential, but a receiver at a skewed epoch drops it
+/// silently with no recovery, permanently losing the op.
 #[allow(clippy::too_many_arguments)]
 fn broadcast_op_mls_first(
     mls: &mut Option<MlsManager>,
@@ -229,21 +219,17 @@ fn gate_allows(state: &ServerState, local_peer: &str, gate: &OpGate<'_>) -> bool
 /// How [`author_broadcast_op`] pushes the authored op out, carrying exactly
 /// the state that route needs.
 enum OpBroadcast<'a> {
-    /// MLS broadcast when the server group exists, plus the plaintext twin
-    /// (always).
+    /// MLS broadcast when the server group exists, plus the plaintext twin.
     MlsFirst { mls: &'a mut Option<MlsManager>, crypto_store: &'a CryptoStore },
     /// Plaintext-only op (no MLS path) + own-sibling fan.
     PlaintextWithFan { local_device_id: &'a str },
 }
 
-/// Shared driver for locally-authored server CRDT ops: permission gate →
-/// author (create/apply/persist) → emit the prebuilt UI event → broadcast.
+/// Shared driver for locally-authored server CRDT ops: permission gate, author
+/// (create, apply, persist), emit the prebuilt UI event, broadcast.
 ///
-/// `denied_msg` = the user-facing `Error` message on a failed gate (`None` =
-/// log-only silent deny).
-///
-/// Returns `true` when the gate denied (callers `continue`), `false` otherwise
-/// — mirroring the per-handler bodies this replaced.
+/// `denied_msg` = the user-facing `Error` on a failed gate (`None` = silent deny).
+/// Returns `true` when the gate denied, so callers `continue`.
 #[allow(clippy::too_many_arguments)]
 async fn author_broadcast_op(
     server_states: &mut ServerStates,
@@ -292,10 +278,9 @@ fn other_member_targets(state: &ServerState, local_peer: &str) -> Vec<String> {
 }
 
 /// Fan a member-removal CRDT op to the remaining members (collected before the
-/// removal applied) and to our OWN online siblings (excluded from the
-/// master-keyed member list). `skip` = the removed identity — it gets a
-/// `MemberKickBroadcast` instead of the op; `None` for a voluntary leave
-/// (the leaver's own siblings must apply the self-removal too).
+/// removal applied) and to our OWN online siblings, which the master-keyed member
+/// list excludes. `skip` = the removed identity, which gets a
+/// `MemberKickBroadcast` instead; `None` for a voluntary leave.
 #[allow(clippy::too_many_arguments)]
 fn broadcast_removal_op(
     ws_cmd_tx: &WsCmdTx,
@@ -319,15 +304,12 @@ fn broadcast_removal_op(
     fan_to_own_siblings(ws_cmd_tx, ws_room_peers, local_peer_str, local_device_id, data);
 }
 
-/// Remove EVERY MLS leaf of `identity` from the server group (epoch rotation
-/// for forward secrecy; credential ids = {master} ∪ all its known devices) and
-/// broadcast the commit — Tier 1: ONE room broadcast replaces the per-identity
-/// fan-out AND the sibling fan (our siblings are in the room too). A kicked/
-/// banned identity's devices receive it but can't rejoin — the MlsKeyPackage
-/// non-member check rejects their re-bootstrap.
-///
-/// Kick/ban pass `emit_epoch_event` (SFrame key rotation); self-removal on
-/// leave passes `drop_group_on_err` (we're abandoning the group either way).
+/// Remove EVERY MLS leaf of `identity` from the server group (epoch rotation for
+/// forward secrecy) and broadcast the commit: ONE room broadcast replaces the
+/// per-identity fan-out and the sibling fan. A kicked identity's devices receive
+/// it but cannot rejoin, because the MlsKeyPackage non-member check rejects their
+/// re-bootstrap. Kick and ban pass `emit_epoch_event` for SFrame rotation;
+/// self-removal on leave passes `drop_group_on_err`.
 #[allow(clippy::too_many_arguments)]
 async fn mls_remove_identity_and_broadcast(
     mls_mgr: &mut MlsManager,
@@ -380,18 +362,13 @@ async fn mls_remove_identity_and_broadcast(
 
 // ── Link previews in backfill (issue #45 follow-up) ──────────────────
 //
-// A card's thumbnail is a lossy WebP up to 800px on its long edge — tens of
-// kilobytes, base64'd into the JSON on top — and a sync page holds up to 200
-// messages. A link-heavy channel could therefore mint a multi-megabyte batch
-// out of one request.
+// A card's thumbnail is tens of kilobytes and a sync page holds up to 200
+// messages, so a link-heavy channel could mint a multi-megabyte batch.
 //
-// The answer is NOT to strip cards past some limit. A stripped card never
-// comes back: nothing in the protocol re-requests one, which is exactly the
-// bug that made previews vanish for anyone who was offline. Instead the PAGE
-// is cut short. Pages are already the wire's unit of flow control — every
-// responder reports `has_more` and the requester re-asks from its advanced
-// watermark — so a short page costs one extra round trip and still delivers
-// every card.
+// The answer is NOT to strip cards past some limit: a stripped card never comes
+// back, which is exactly the bug that made previews vanish for anyone offline.
+// The PAGE is cut short instead, because pages are already the wire's unit of
+// flow control, so a short page costs one round trip and still delivers the card.
 
 /// Link-preview bytes one sync batch may carry before its page is cut short.
 pub(crate) const SYNC_PREVIEW_BUDGET_BYTES: usize = 2 * 1_024 * 1_024;
@@ -399,17 +376,11 @@ pub(crate) const SYNC_PREVIEW_BUDGET_BYTES: usize = 2 * 1_024 * 1_024;
 /// Messages a page always carries before the byte budget may end it.
 ///
 /// This floor is what keeps pagination LIVE, and it is not a tuning knob. A
-/// requester re-asks from its own watermark, and two of the three watermark
-/// queries are INCLUSIVE (`timestamp >= …`, to catch same-millisecond
-/// messages — `INSERT OR IGNORE` absorbs the overlap). So the first rows of
-/// every page after the first are rows the requester ALREADY has. Cut a page
-/// short enough and it could contain nothing but that overlap: the requester
-/// stores nothing new, its watermark does not move, it asks again, and gets
-/// the identical page forever.
-///
-/// Keeping at least this many messages means a stall needs ~50 messages
-/// sitting exactly on their sender's watermark — the same "overlap is tiny"
-/// assumption the 200-message page limit has always rested on.
+/// requester re-asks from its own watermark and two of the three watermark
+/// queries are INCLUSIVE, so the first rows of every later page are rows it
+/// already has. Cut a page short enough and it contains nothing but that overlap:
+/// the watermark never moves and the identical page comes back forever. This many
+/// messages means a stall needs ~50 sitting exactly on their sender's watermark.
 const MIN_ITEMS_BEFORE_TRUNCATION: usize = 50;
 
 /// A packed sync page: the items, plus whether the preview budget ended it
@@ -430,10 +401,8 @@ impl PreviewBudget {
         Self { remaining: SYNC_PREVIEW_BUDGET_BYTES }
     }
 
-    /// Charge one preview to the budget. `false` = it does not fit, and the
-    /// caller must END the page there rather than pack the message card-less.
-    ///
-    /// `packed` is how many messages the page already holds; below
+    /// Charge one preview to the budget. `false` = it does not fit, and the caller
+    /// must END the page there rather than pack the message card-less. Below
     /// [`MIN_ITEMS_BEFORE_TRUNCATION`] the answer is always yes, which is what
     /// guarantees the page outruns the requester's inclusive watermark.
     pub(crate) fn fits(&mut self, lp: &LinkPreviewRef, packed: usize) -> bool {
@@ -464,10 +433,8 @@ fn preview_wire_cost(lp: &LinkPreviewRef) -> usize {
 }
 
 /// Pack stored channel messages into wire `SyncMessageItem`s, joining in each
-/// message's reactions and file metadata via two batch queries. The channel
-/// twin of swarm.rs's `build_dm_sync_items`; shared by every channel-sync
-/// responder (Olm/MLS retry, MLS `ChannelSyncReq`, plaintext
-/// `ChannelSyncRequest` in swarm.rs).
+/// message's reactions and file metadata via two batch queries. The channel twin
+/// of `build_dm_sync_items`, shared by every channel-sync responder.
 pub(crate) fn channel_sync_items(
     store: &crate::storage::MessageStore,
     messages: &[crate::storage::messages::StoredChannelMessage],
@@ -545,10 +512,9 @@ pub(crate) fn channel_sync_items(
     SyncPage { items, truncated }
 }
 
-/// Build one page (≤200 messages) of a channel-sync response: query per-sender
-/// watermarks when the requester sent them (legacy single-timestamp fallback
-/// otherwise), pack the items, and stamp `total`/`has_more` for pagination.
-/// Returns the ready envelope plus the item count.
+/// Build one page (at most 200 messages) of a channel-sync response: per-sender
+/// watermarks when the requester sent them, a legacy single timestamp otherwise,
+/// then pack and stamp `total`/`has_more`. Returns the envelope and item count.
 pub(crate) fn build_channel_sync_batch(
     store: &crate::storage::MessageStore,
     sid: &str,
@@ -619,7 +585,6 @@ pub(crate) async fn handle_create_server(
     // the HLC `ServerState::new` seeded).
     super::swarm::install_op_signer(&mut state, bundle_keypair);
 
-    // Create the initial ServerCreated op, apply + persist it.
     author_op(&mut state, crdt_store, &server_id, CrdtPayload::ServerCreated {
         name: name.clone(),
         owner_peer_id: local_peer,
@@ -627,17 +592,14 @@ pub(crate) async fn handle_create_server(
 
     server_states.insert(server_id.clone(), state);
 
-    // Join the WS relay room for this server.
     let _ = ws_cmd_tx.send(super::ws_client::WsCommand::JoinRoom {
         room_code: server_id.clone(),
     });
 
-    // Register the room's catch-up rings straight away, the same way
-    // `handle_create_channel` does. The `RoomMembers` site would do it a moment
-    // later anyway, but the JOIN ring is registered by MEMBERS on behalf of
-    // people who are not members yet: until it exists, a stranger's parked
-    // request is dropped by the relay instead of buffered. Doing it here means
-    // a server is joinable-while-empty from the instant it is created.
+    // Register the room's catch-up rings straight away: the JOIN ring is registered
+    // by MEMBERS on behalf of people who are not members yet, so until it exists a
+    // stranger's parked request is dropped rather than buffered. Doing it here makes
+    // a server joinable-while-empty from the instant it is created.
     if let Some(state) = server_states.get(&server_id) {
         register_relay_catchup(ws_cmd_tx, state, &server_id);
     }
@@ -651,7 +613,6 @@ pub(crate) async fn handle_create_server(
         });
     }
 
-    // Create MLS group for this server (owner is sole member).
     if let Some(mls_mgr) = mls {
         match mls_mgr.create_group(&server_id) {
             Ok(()) => persist_mls_state(mls_mgr, crypto_store),
@@ -664,12 +625,9 @@ pub(crate) async fn handle_create_server(
         name,
     }).await;
 
-    // Multi-device: announce the new server to our OWN online sibling devices so
-    // they auto-onboard (the server room is brand-new; siblings aren't in it and
-    // have no other way to learn it exists). Each sibling runs its join flow and we
-    // serve the snapshot + add its MLS leaf via the same-identity ServerJoinRequest
-    // fast-path. Offline siblings onboard when they next come online + we re-announce.
-    // No-op for a sole single-device install (no siblings online).
+    // Announce the new server to our OWN online siblings so they auto-onboard: the
+    // room is brand-new, so they are not in it and have no other way to learn it
+    // exists. Offline siblings onboard on their next connect, via re-announce.
     let announce = serde_json::to_vec(&HavenMessage::SiblingServerAnnounce {
         server_id: server_id.clone(),
     }).unwrap_or_default();
@@ -681,12 +639,10 @@ pub(crate) async fn handle_create_server(
 
 // ── Relay offline catch-up registration ──────────────────────────────
 
-/// Register this server's text channels with the relay's per-channel offline
-/// ring buffer when the CRDT `relay_catchup_secs` setting is on. Registration
-/// is additive/refresh-only — it NEVER clears here, because a member holding a
-/// stale CRDT (flag still off locally) must not wipe a buffer everyone else
-/// relies on. Clearing happens only at the Owner/Admin toggle site in
-/// `handle_update_server_setting`.
+/// Register this server's text channels with the relay's per-channel offline ring
+/// when the CRDT `relay_catchup_secs` setting is on. Additive and refresh-only: it
+/// NEVER clears here, because a member holding a stale CRDT must not wipe a buffer
+/// everyone else relies on. Clearing happens only at the Owner/Admin toggle site.
 pub(crate) fn register_relay_catchup(
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     state: &ServerState,
@@ -702,16 +658,13 @@ pub(crate) fn register_relay_catchup(
         .filter(|c| matches!(c.channel_type, crate::crdt::server_state::ChannelType::Text))
         .map(|c| c.channel_id.clone())
         .collect();
-    // The join ring (pending joins, rung 1). ALWAYS registered alongside the
-    // text channels, because a parked join is deposited by somebody who is not
-    // a member yet and can therefore never register the ring itself: the
-    // members have to have done it while they were here. That also makes the
-    // list never empty, so the old `channels.is_empty()` early return is gone
-    // (a server with only voice channels still needs its join ring).
+    // The join ring. ALWAYS registered alongside the text channels, because a parked
+    // join is deposited by somebody who is not a member yet and can therefore never
+    // register the ring itself. That also keeps the list non-empty, so a server with
+    // only voice channels still gets its join ring.
     //
-    // `relay_catchup_secs == 0` (the owner turned catch-up off) means no ring
-    // at all, so a parked join on that server degrades to "pending until
-    // co-presence" — today's behaviour, minus the loud failure.
+    // `relay_catchup_secs == 0` (the owner turned catch-up off) means no ring at
+    // all, so a parked join degrades to "pending until co-presence".
     channels.push(super::types::JOIN_TOPIC.to_string());
     hollow_log!("[HOLLOW-TOPIC] Registering relay catch-up rings for {server_id}: {} channel(s) + the join ring, retention {secs}s", channels.len() - 1);
     let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SetTopicBuffer {
@@ -722,24 +675,16 @@ pub(crate) fn register_relay_catchup(
     });
 }
 
-/// Age window (seconds) for a relay topic catch-up request: how far back the
-/// relay should replay ring frames for each channel. Derived from the local
-/// channel watermark (newest stored message) + a 30-minute overlap, mirroring
-/// the peer-sync `SYNC_LOOKBACK_MS` pattern — frames older than what we
-/// already hold are undecryptable (MLS consumed those generations) and were
-/// pure SecretReuse noise on every reconnect. 0 = no watermark (fresh
-/// channel) → replay the whole retention window.
+/// Age window (seconds) for a relay topic catch-up request: how far back the relay
+/// replays ring frames per channel. Derived from the local watermark plus a
+/// 30-minute overlap, because frames older than what we hold are undecryptable
+/// (MLS consumed those generations) and were pure SecretReuse noise. 0 = no
+/// watermark, so replay the whole retention window.
 ///
-/// Batched over the whole server and answered on the `CrdtStore` actor's
-/// long-lived connection. The previous per-channel form opened a TRANSIENT
-/// `MessageStore` (fresh SQLCipher handle + full schema re-parse) inline on
-/// the swarm event loop, once per channel, at connect time. On iOS the DB
-/// lives in the App Group container, and RunningBoard kills any process
-/// suspended while holding a lock there — which is exactly the TestFlight
-/// 0.9.5(50) crash (`EXC_CRASH 0xdead10cc`, thread caught inside
-/// `MessageStore::open` → `execute_batch` → `sqlite3ReadSchema`). Returns
-/// pairs in the SAME order as `channel_ids` so the emitted requests stay
-/// deterministic.
+/// Batched over the server and answered on the `CrdtStore` actor's long-lived
+/// connection: the per-channel form opened a TRANSIENT `MessageStore` on the event
+/// loop, which on iOS is what got the process killed for holding an App Group lock
+/// across a suspend (`EXC_CRASH 0xdead10cc`). Pairs come back in `channel_ids` order.
 pub(crate) async fn catchup_watermark_ages(
     crdt_store: &CrdtStore,
     server_id: &str,
@@ -770,22 +715,16 @@ pub(crate) async fn catchup_watermark_ages(
         .collect()
 }
 
-/// Ask the relay to replay every Text channel ring in `room` this connection
-/// has not pulled yet, for the channels we can actually see.
+/// Ask the relay to replay every Text channel ring in `room` this connection has
+/// not pulled yet, for the channels we can actually see.
 ///
 /// ONE definition, called from two places that need identical behaviour: the
-/// connect-time sweep in the `RoomMembers` arm, and again after the Welcome
-/// that ends a parked join. The second call exists because a returning parked
-/// joiner can process `RoomMembers` BEFORE its buffered `SyncResponse` lands —
-/// at that instant the server is not in `server_states` at all, so no channel
-/// catch-up was requested for it — and because any channel frame that DID
-/// replay before the leaf formed failed to decrypt and was dropped. The
-/// re-issue fetches them once there is a group to read them with; dedup is by
-/// message_id, so a frame that arrived twice is stored once.
-///
-/// `relay_catchup_done` is the per-connection "already pulled" set. The caller
-/// clears the room's entries before a re-issue, otherwise this filters the
-/// whole request away.
+/// connect-time sweep in the `RoomMembers` arm, and again after the Welcome that
+/// ends a parked join. The second call exists because a returning parked joiner
+/// can process `RoomMembers` BEFORE its buffered `SyncResponse` lands, and because
+/// any channel frame that replayed before the leaf formed failed to decrypt. Dedup
+/// is by message_id. `relay_catchup_done` is the per-connection "already pulled"
+/// set, and the caller must clear the room's entries before a re-issue.
 pub(crate) async fn request_channel_catchups(
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     crdt_store: &CrdtStore,
@@ -876,7 +815,6 @@ pub(crate) async fn handle_create_channel(
             channel_type,
         }).await;
 
-        // Broadcast to server members — MLS first, plaintext twin always.
         broadcast_op_mls_first(
             mls, ws_cmd_tx, ws_room_peers, gossip_overlays, event_tx, state, local_peer_str, &server_id, &op, crypto_store,
         );
@@ -1013,10 +951,9 @@ pub(crate) async fn handle_update_server_setting(
     crypto_store: &CryptoStore,
     crdt_store: &CrdtStore,
 ) {
-    // Local permission gate (MANAGE_SERVER, override-aware), mirroring what
-    // every RECEIVER enforces for ServerSettingChanged. Without it an
-    // unauthorized FFI call applies the op locally, the network rejects it,
-    // and the caller's own state diverges from everyone else's.
+    // Local permission gate (MANAGE_SERVER, override-aware), mirroring what every
+    // RECEIVER enforces. Without it an unauthorized FFI call applies the op
+    // locally, the network rejects it, and our state diverges from everyone else's.
     if author_broadcast_op(
         server_states, event_tx, ws_cmd_tx, ws_room_peers, gossip_overlays, local_peer_str,
         &server_id,
@@ -1079,22 +1016,18 @@ pub(crate) async fn handle_delete_server(
 
     hollow_log!("[HOLLOW-CRDT] Deleting server {server_id} (tombstone)");
 
-    // CRDT-op-only deletion (replaces the old missable one-shot ServerDeleteBroadcast):
-    // create a replicable `ServerDeleted` tombstone op. Online members get it via the
-    // normal CrdtOpBroadcast gossip near-instantly; an OFFLINE member reconciles it on
-    // reconnect via grow-only SyncRequest/SyncResponse (the owner RETAINS the tombstone
-    // shell + op_log to serve it). This is what lets an offline member ever learn the
-    // server is gone — the previous one-shot was missed forever.
+    // A replicable `ServerDeleted` tombstone op rather than the old missable
+    // one-shot broadcast: online members get it via normal gossip, and an OFFLINE
+    // member reconciles it on reconnect through SyncRequest/SyncResponse, because
+    // the owner RETAINS the tombstone shell and op_log to serve it.
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as i64;
     let Some(state) = server_states.get_mut(&server_id) else { return false; };
-    // Capture the membership BEFORE the tombstone is applied. `ServerDeleted`
-    // DRAINS `members` (and roles/channels/...) as part of apply, so anything
-    // that reads `state.members` afterwards to decide who to tell is iterating
-    // an empty map. That is why the plaintext leg here reached nobody even on
-    // the path that was supposed to run it.
+    // Capture the membership BEFORE the tombstone is applied: `ServerDeleted`
+    // DRAINS `members` as part of apply, so anything that reads `state.members`
+    // afterwards to decide who to tell is iterating an empty map.
     let member_targets: Vec<String> = state
         .members
         .keys()
@@ -1109,28 +1042,15 @@ pub(crate) async fn handle_delete_server(
     crdt_store.insert_op(op.clone());
     crdt_store.save_state_snapshot(server_id.clone(), state);
 
-    // Fan the tombstone op to remaining members AND to our OWN siblings (the
-    // master-keyed member broadcast excludes our identity).
+    // Fan the tombstone op to remaining members AND to our OWN siblings, which the
+    // master-keyed member broadcast excludes.
     //
-    // The plaintext twin goes out UNCONDITIONALLY, alongside the MLS copy. It
-    // used to be sent only `if !mls_sent`, i.e. only when OUR OWN encrypt
-    // failed — which measures the wrong end of the wire. A member can be
-    // perfectly reachable and still unable to read an MLS frame: it may hold no
-    // leaf yet (a parked join completes its CRDT half BEFORE co-presence forms
-    // the leaf, by design), or sit at a skewed epoch. Neither is visible from
-    // here, so the sender's success told us nothing about the receiver.
-    //
-    // Field-caught on a fleet run: a parked joiner held the server, the owner
-    // deleted it, the tombstone went MLS-only, the joiner logged "Received
-    // MlsChannelMessage for unknown group" and kept listing a server that no
-    // longer existed. This is exactly the rule in CLAUDE.md
-    // (`feedback_owner_coordinator_mls_recovery`): a CRDT-mutating handler
-    // ALWAYS also broadcasts the op as plaintext, because an MLS-only op
-    // silently drops at a skewed epoch.
-    //
-    // Duplication is free: `ServerDeleted` ingest is owner-author validated at
-    // every site and `apply_op` is idempotent, so a member with a working leaf
-    // simply sees the same tombstone twice.
+    // The plaintext twin goes out UNCONDITIONALLY, alongside the MLS copy. Sending
+    // it only `if !mls_sent` measures the WRONG end of the wire: a member can be
+    // perfectly reachable and still unable to read an MLS frame, holding no leaf
+    // yet or sitting at a skewed epoch, and neither is visible from here
+    // (`feedback_owner_coordinator_mls_recovery`). Duplication is free, because
+    // `ServerDeleted` ingest is owner-author validated and `apply_op` is idempotent.
     if let Ok(op_json) = serde_json::to_string(&op) {
         if mls.as_ref().is_some_and(|m| m.has_group(&server_id)) {
             let envelope = MessageEnvelope::CrdtOp { sid: server_id.clone(), op_json: op_json.clone() };
@@ -1183,26 +1103,20 @@ pub(crate) fn pending_join_row(
         // Only used on INSERT: the upsert preserves the original on conflict,
         // so a repeat request keeps saying when the user first asked.
         created_at: pending.requested_at,
-        // The private half lives in the MLS store, which survives a restart on
-        // its own; this is the public half the ring copy carries, and it has to
-        // survive with it or a restarted joiner deposits a DIFFERENT package
-        // than the one already in the ring.
+        // The private half lives in the MLS store, which survives a restart on its
+        // own; this is the public half the ring copy carries, and it has to survive
+        // with it or a restarted joiner deposits a DIFFERENT package.
         key_package: pending.key_package.clone(),
     }
 }
 
 /// Write the parked copy of a request into the server room's `~join` ring.
 ///
-/// The copy CARRIES `twitch_proof_json`, which it did not before 2026-09-03.
-/// A ring frame can be pulled by any socket in the room, i.e. anyone holding
-/// the invite, for the ring's whole retention — so what rides it has to be
-/// readable by strangers without cost. The old proof was a JSON body naming a
-/// Twitch account, which it is not; a follow CREDENTIAL names a channel id, an
-/// age bucket and a subscription tier, all of them facts about the server's
-/// own channel, and binds them to the joiner's master with a blind signature
-/// that reveals nothing else. That is what lifts the strip: a Twitch-gated
-/// server now parks and resolves like every other one, instead of waiting for
-/// co-presence.
+/// The copy CARRIES `twitch_proof_json`. A ring frame can be pulled by any socket
+/// in the room for the ring's whole retention, so what rides it has to be readable
+/// by strangers without cost: a follow CREDENTIAL names a channel id, an age
+/// bucket and a subscription tier, all facts about the server's own channel, bound
+/// to the joiner's master by a blind signature that reveals nothing else.
 pub(crate) fn deposit_parked_join(
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     server_id: &str,
@@ -1215,11 +1129,9 @@ pub(crate) fn deposit_parked_join(
         requested_at: pending.requested_at,
         device_list: pending.device_list.clone(),
         parked: true,
-        // Rung 2: the ring copy carries the LEAF as well as the membership, so
-        // the member that admits it can add us to the MLS group in the same
-        // batch instead of leaving that to a future co-presence. Only the
-        // parked copy: a live join is answered by somebody who is right there
-        // and bootstraps on its SyncResponse.
+        // Rung 2: the ring copy carries the LEAF as well as the membership, so the
+        // member that admits it can add us to the MLS group in the same batch. Only
+        // the parked copy; a live join bootstraps on its SyncResponse.
         key_package: pending.key_package.clone(),
     })
     .unwrap_or_default();
@@ -1236,9 +1148,8 @@ pub(crate) fn deposit_parked_join(
 
 /// Publish a member's answer to a join into the room's `~join` ring.
 ///
-/// Two jobs at once: it reaches a joiner that is not here (they read the ring
-/// on their next connect), and it tells the OTHER members the join is already
-/// resolved, so a member that returns days later does not re-serve it.
+/// Two jobs at once: it reaches a joiner that is not here, and it tells the OTHER
+/// members the join is resolved, so a member returning later does not re-serve it.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn publish_join_resolution(
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
@@ -1268,17 +1179,13 @@ pub(crate) fn publish_join_resolution(
 
 /// Drop the MLS KeyPackage a join will now never use.
 ///
-/// The package's private half (its init key and its leaf encryption key) sits
-/// in the MLS store from the moment it is minted until a Welcome consumes it.
-/// A join that ends in a refusal or a discard has no Welcome coming, so without
-/// this the private material would sit in the persisted storage blob for the
-/// life of the install. Best effort: a package we cannot parse is one we did
-/// not write, and there is nothing to reclaim.
+/// The package's private half sits in the MLS store from the moment it is minted
+/// until a Welcome consumes it, so a join ending in a refusal or a discard would
+/// leave that material in the persisted storage blob for the life of the install.
+/// Best effort: a package we cannot parse is one we did not write.
 ///
-/// Called LAST, after the row and the events that describe the decision. It
-/// writes the whole MLS storage blob through the crypto store, and that write
-/// sits on the same SQLCipher file the pending-join row does: run it first and
-/// the row a caller is about to read is still queued behind it.
+/// Called LAST, after the row and the events: it writes the whole MLS storage blob
+/// through the crypto store, on the same SQLCipher file the pending-join row uses.
 fn discard_join_key_package(
     mls: &mut Option<MlsManager>,
     crypto_store: &CryptoStore,
@@ -1303,21 +1210,17 @@ fn discard_join_key_package(
 /// A refusal that is really a QUESTION: the member is asking the joiner for
 /// something (NSFW consent, a Twitch proof) and the next request will carry it.
 ///
-/// Questions are handled differently at both ends. The member never writes one
-/// into the `~join` ring (a question parked in a TTL buffer would be re-served
-/// on every member's catch-up for days), and the joiner never keeps a row for
-/// one (a persisted tile would restore a pending join at every boot and pop the
-/// same dialog forever).
+/// Handled differently at both ends. The member never writes one into the `~join`
+/// ring (a question parked in a TTL buffer is re-served for days), and the joiner
+/// never keeps a row for one (a persisted tile pops the same dialog every boot).
 pub(crate) fn is_interactive_reason(reason: &str) -> bool {
     reason.starts_with("nsfw_confirm:") || reason.starts_with("twitch_required:")
 }
 
-/// ONE place where a refusal lands on the joiner, whichever leg carried it (the
-/// targeted `ServerJoinRejected`, or a `join_resolved` frame out of the ring).
+/// ONE place where a refusal lands on the joiner, whichever leg carried it.
 ///
-/// Always leaves the room: "no row means we are not in that room" is the
-/// invariant that makes both a refusal and a discard stick, because it is what
-/// stops the relay replaying a late admission's buffered snapshot at us.
+/// Always leaves the room: "no row means we are not in that room" is the invariant
+/// that stops the relay replaying a late admission's buffered snapshot at us.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_join_refused(
     pending_server_joins: &mut HashMap<String, PendingJoin>,
@@ -1333,27 +1236,20 @@ pub(crate) async fn handle_join_refused(
     let _ = ws_cmd_tx.send(super::ws_client::WsCommand::LeaveRoom {
         room_code: server_id.clone(),
     });
-    // Whichever branch we take below, this ask is over: the interactive one
-    // deletes the row so the user's answer can mint a fresh package, and the
-    // final one keeps a row that is a tile, not a join in flight. The package
-    // is taken off the entry HERE (so neither branch writes a row naming a
-    // package that no longer exists) and reclaimed at the end of the branch.
+    // Whichever branch runs, this ask is over. The package is taken off the entry
+    // HERE, so neither branch writes a row naming a package that no longer exists,
+    // and it is reclaimed at the end of the branch.
     let spent = pending.key_package.take();
 
     if is_interactive_reason(&reason) {
-        // The row goes. The user answers the dialog, and their answer
-        // re-requests through `handle_join_server`, which writes a FRESH row
-        // carrying the consent or the proof. Keeping the old row instead would
-        // restore a pending tile on the next boot, rejoin the room, get the
-        // same question re-served from the ring copy, and pop the dialog again
-        // at every launch.
+        // The row goes: the user's answer re-requests through `handle_join_server`
+        // with a FRESH row carrying the consent or the proof. Keeping the old row
+        // would restore a tile, re-serve the question, and pop the dialog at launch.
         hollow_log!("[HOLLOW-CRDT] Join for {server_id} needs an answer from the user: {reason}");
         crdt_store.delete_pending_join(server_id.clone());
-        // Tile first, then the question. The pending tile is about to be
-        // answered by a dialog, so it must not still be sitting there behind
-        // it; and a UI that only ever sees one of the two events gets the
-        // safer one (a tile that went) rather than a dialog with a stale tile
-        // underneath.
+        // Tile first, then the question: the tile is about to be answered by a
+        // dialog and must not still sit behind it, and a UI that sees only one of
+        // the two events gets the safer one.
         let _ = event_tx.send(NetworkEvent::PendingJoinUpdated {
             server_id: server_id.clone(),
             state: "discarded".to_string(),
@@ -1369,11 +1265,9 @@ pub(crate) async fn handle_join_refused(
 
     hollow_log!("[HOLLOW-CRDT] Join for {server_id} refused: {reason}");
     crdt_store.upsert_pending_join(pending_join_row(&server_id, &pending, "rejected", &reason));
-    // A join still inside its LIVE window keeps today's surfaces: the user is
-    // standing in front of the dialog they just triggered, and the existing
-    // toast is the right place to say no. A PARKED one is answered hours later
-    // with nobody watching, so the tile is the only surface and a toast out of
-    // nowhere would be noise.
+    // A join inside its LIVE window keeps today's surfaces: the user is standing in
+    // front of the dialog they triggered. A PARKED one is answered hours later with
+    // nobody watching, so the tile is the only surface and a toast would be noise.
     if !pending.parked {
         let _ = event_tx.send(NetworkEvent::TwitchJoinRejected {
             server_id: server_id.clone(),
@@ -1390,15 +1284,11 @@ pub(crate) async fn handle_join_refused(
 
 /// Refuse a join, by both legs.
 ///
-/// The targeted leg goes to the DETERMINISTIC server room rather than through
-/// presence lookup, so the relay buffers it for an absent joiner and replays it
-/// when that device next joins that room.
+/// The targeted leg goes to the DETERMINISTIC server room rather than through a
+/// presence lookup, so the relay buffers it for an absent joiner and replays it.
 ///
-/// INTERACTIVE reasons are deliberately NOT written into the ring. They are
-/// questions, not answers: `nsfw_confirm:` and `twitch_required:` ask the
-/// joiner for something and the next request carries it. A question parked in a
-/// TTL ring would be re-served on every member's catch-up and would re-open the
-/// same dialog for days.
+/// INTERACTIVE reasons are deliberately NOT written into the ring: they are
+/// questions, and one parked in a TTL ring re-opens the same dialog for days.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn send_join_rejection(
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
@@ -1450,19 +1340,16 @@ pub(crate) async fn handle_join_server(
     // The request NONCE. Every answer names it, so an answer replayed out of a
     // three-day ring can never resolve the join the user made afterwards.
     let requested_at = super::types::now_ms();
-    // Our own signed device list, built ONCE and cached on the entry for the
-    // re-sends. A member serving this from the ring has never been online with
-    // us, so this is the only thing that can attribute the request to our
-    // MASTER instead of to this device. Same call the boot `JoinInbox` makes.
+    // Our own signed device list, built ONCE and cached for the re-sends. A member
+    // serving this from the ring has never been online with us, so it is the only
+    // thing that attributes the request to our MASTER rather than to this device.
     let device_list = super::crypto_handler::build_local_device_list(
         master_keypair, device_peer_id, db_path, db_passphrase,
     );
-    // The KeyPackage this join will be added with (pending joins, rung 2).
-    // Minted ONCE per row: a re-ask refreshes the nonce and keeps the package,
-    // because the ring may already hold a copy naming it and because OpenMLS is
-    // happy to re-add the same package once the old leaf is gone. `mint_key_package`
-    // persists the private half immediately, which is what makes the package
-    // still usable when the answer comes back days and one restart later.
+    // The KeyPackage this join will be added with. Minted ONCE per row: a re-ask
+    // refreshes the nonce and keeps the package, because the ring may already hold
+    // a copy naming it. `mint_key_package` persists the private half immediately,
+    // which is what keeps it usable days and one restart later.
     let key_package = stored_key_package.or_else(|| {
         pending_server_joins
             .get(&server_id)
@@ -1492,12 +1379,10 @@ pub(crate) async fn handle_join_server(
     crdt_store.upsert_pending_join(pending_join_row(&server_id, &pending, "pending", ""));
     pending_server_joins.insert(server_id.clone(), pending.clone());
 
-    // Join the WS relay room for this server so we can discover members.
     let _ = ws_cmd_tx.send(super::ws_client::WsCommand::JoinRoom {
         room_code: server_id.clone(),
     });
 
-    // Send join request to any peers already visible in WS rooms.
     if let Some(room_peers) = ws_room_peers.get(&server_id) {
         for peer in room_peers.iter() {
             send_message_to_peer(
@@ -1520,13 +1405,10 @@ pub(crate) async fn handle_join_server(
     // If no peers found yet, the PeerJoined/RoomMembers handler
     // will pick up pending_server_joins and send the request then.
 
-    // Members serve a join through their elected coordinator (one responder
-    // instead of N — see the gate in the `ServerJoinRequest` handler). That
-    // election reads each member's OWN presence view, so a coordinator whose
-    // socket has just died can be elected by everyone and answer for nobody.
-    // Re-send at 4s while still pending: the second request is served by every
-    // member, so the worst case degrades to the old fan-out instead of the 15s
-    // failure. Costs nothing on the happy path, where the join is long gone.
+    // Members serve a join through their elected coordinator, and that election
+    // reads each member's OWN presence view, so a coordinator whose socket has just
+    // died can be elected by everyone and answer for nobody. The 4s re-send is
+    // served by every member, degrading to the old fan-out instead of a failure.
     let retry_cmd_tx = cmd_tx.clone();
     let retry_sid = server_id.clone();
     tokio::spawn(async move {
@@ -1536,10 +1418,9 @@ pub(crate) async fn handle_join_server(
         }).await;
     });
 
-    // Both windows. The short one parks only when the relay has already told us
-    // the room is empty; the long one is the authority for everything else.
-    // Either is a no-op once the join has completed or been discarded, so a
-    // "request again" inherits the pair with nothing extra to arrange.
+    // Both windows. The short one parks only when the relay has told us the room is
+    // empty; the long one is the authority for everything else. Either is a no-op
+    // once the join has completed or been discarded.
     for (window, only_if_empty) in [
         (JOIN_EMPTY_ROOM_WINDOW, true),
         (JOIN_LIVE_WINDOW, false),
@@ -1610,17 +1491,15 @@ pub(crate) async fn handle_change_role(
         let local_peer = local_peer_str.to_string();
         let new_member_role = crate::crdt::operations::MemberRole::from_str(&new_role);
 
-        // Permission check: can the local user change this peer's role?
         if !state.can_change_role(&local_peer, &peer_id, &new_member_role) {
             hollow_log!("[HOLLOW-CRDT] Permission denied: cannot change {peer_id} to {new_role} in {server_id}");
             return deny(event_tx, &format!("Permission denied: cannot change role to {new_role}")).await;
         }
 
         hollow_log!("[HOLLOW-CRDT] Changing role of {peer_id} to {new_role} in {server_id}");
-        // The payload priority (the author's role priority, not the target's)
-        // is wire-compat metadata for old clients that still merge
-        // priority-first; current merge is pure HLC LWW, so demotions land
-        // because the demotion op is later — can_change_role carries authority.
+        // The payload priority is wire-compat metadata for old clients that merge
+        // priority-first; current merge is pure HLC LWW, so demotions land because
+        // the op is later, and `can_change_role` carries the authority.
         let author_role = state.get_role(&local_peer);
         let op = author_op(state, crdt_store, &server_id, CrdtPayload::RoleChanged {
             peer_id: peer_id.clone(),
@@ -1661,7 +1540,6 @@ pub(crate) async fn handle_kick_member(
     crdt_store: &CrdtStore,
 ) -> bool {
     if let Some(state) = server_states.get_mut(&server_id) {
-        // Permission check
         if !state.can_kick(local_peer_str, &peer_id) {
             hollow_log!("[HOLLOW-CRDT] Permission denied: cannot kick {peer_id} from {server_id}");
             return deny(event_tx, "Permission denied: cannot kick this member").await;
@@ -1719,12 +1597,10 @@ pub(crate) async fn handle_kick_member(
 
 // ── 10a. RevokeDevice (Step 7) ────────────────────────────────────────
 
-/// Revoke one of OUR OWN devices (manual, lost/stolen). Bumps our master-signed
-/// device list with the target tombstoned, re-broadcasts it to friends so they
-/// converge (and stop encrypting to the revoked device), emits `DeviceListUpdated`,
-/// and returns the revoked device id so the caller (which holds olm/mls/pending_mls
-/// state) drops the Olm session + removes the MLS leaf where it coordinates.
-/// Returns `None` if the revocation was rejected (self, or not our device).
+/// Revoke one of OUR OWN devices (manual, lost or stolen). Bumps our master-signed
+/// device list with the target tombstoned, re-broadcasts it so friends stop
+/// encrypting to the revoked device, and returns the revoked device id so the
+/// caller drops the Olm session and removes the MLS leaf. `None` when rejected.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_revoke_device(
     event_tx: &mpsc::Sender<NetworkEvent>,
@@ -1749,14 +1625,11 @@ pub(crate) async fn handle_revoke_device(
         return None;
     }
 
-    // CRITICAL — send the tombstone TO THE REVOKED DEVICE FIRST. It is the one peer
-    // that most needs the v+1 list naming itself revoked: its ingest fires
-    // `SelfRevoked` → wipe + relaunch (the honest self-teardown). We send it first,
-    // before the relay drops it from our shared rooms as a side effect of the MLS
-    // leaf removal, so the message still routes. (Previously we SKIPPED the target
-    // entirely — "why message a device we're removing?" — which meant the revoked
-    // device NEVER learned it was revoked, kept running as the master, and kept
-    // talking to friends as a phantom peer. That was the whole bug.)
+    // CRITICAL: send the tombstone TO THE REVOKED DEVICE FIRST. It is the one peer
+    // that most needs the v+1 list naming itself revoked, because its ingest fires
+    // `SelfRevoked` and it wipes itself. Sent before the relay drops it from our
+    // shared rooms as a side effect of the MLS leaf removal, so the message still
+    // routes; skipping it left a revoked device running as the master forever.
     super::social::send_own_profile_to_peer(
         ws_cmd_tx, ws_room_peers,
         local_peer_str, master_keypair, device_peer_id, &target_device,
@@ -1786,10 +1659,9 @@ pub(crate) async fn handle_revoke_device(
 
 // ── 10a2. ResetDeviceLists (full sibling teardown) ───────────────────
 
-/// "Reset Device List" — tombstone EVERY sibling device in one version bump and
-/// propagate it: friends converge + drop them, and each revoked sibling self-nukes
-/// on ingest. Returns the device ids that were revoked (so the caller drops their
-/// Olm sessions + MLS leaves), or `None` if we were already the sole device.
+/// Tombstone EVERY sibling device in one version bump and propagate it: friends
+/// converge and drop them, and each revoked sibling self-nukes on ingest. Returns
+/// the revoked device ids, or `None` when we were already the sole device.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_reset_device_lists(
     event_tx: &mpsc::Sender<NetworkEvent>,
@@ -1875,10 +1747,9 @@ pub(crate) async fn handle_leave_server(
             peer_id: local_peer_str.to_string(),
         });
 
-        // Leaving is an identity-level action: `skip: None` — the fan also sends
-        // the self-removal op to our OWN siblings so they leave the server too
-        // (each applies the self-MemberRemoved, allowed because peer_id ==
-        // op.author). The acting device already left.
+        // Leaving is an identity-level action: `skip: None`, so the fan also sends
+        // the self-removal op to our OWN siblings, each applying it because
+        // peer_id == op.author. The acting device already left.
         broadcast_removal_op(
             ws_cmd_tx, ws_room_peers, &targets, None,
             local_peer_str, local_device_id, &server_id, &op,
@@ -1906,16 +1777,13 @@ pub(crate) async fn handle_leave_server(
         }
     }
 
-    // Remove server from local state.
     server_states.remove(&server_id);
 
 
-    // Leave the WS relay room.
     let _ = ws_cmd_tx.send(super::ws_client::WsCommand::LeaveRoom {
         room_code: server_id.clone(),
     });
 
-    // Delete server state from DB.
     crdt_store.delete_server(server_id.clone());
 
     let _ = event_tx.send(NetworkEvent::ServerDeleted {
@@ -2150,11 +2018,10 @@ pub(crate) async fn handle_label_op(
     crypto_store: &CryptoStore,
     crdt_store: &CrdtStore,
 ) -> bool {
-    // Self-assign/unassign: any member can toggle their own COSMETIC labels.
-    // Access labels (and unknown label ids) require MANAGE_ROLES even on
-    // yourself — they gate channels, so self-assignment would be privilege
-    // escalation. Shared rule with op_allowed via can_self_toggle_label so
-    // the authoring gate and the ingest gate can never drift.
+    // Self-assign/unassign: any member can toggle their own COSMETIC labels. Access
+    // labels (and unknown label ids) require MANAGE_ROLES even on yourself, because
+    // they gate channels and self-assignment would be privilege escalation. Shared
+    // rule with op_allowed via `can_self_toggle_label`, so the gates cannot drift.
     let is_self_toggle = match &payload {
         CrdtPayload::LabelAssigned { label_id, peer_id }
         | CrdtPayload::LabelUnassigned { label_id, peer_id } => server_states
@@ -2178,15 +2045,11 @@ pub(crate) async fn handle_label_op(
 
 // ── 10e2. Custom emote + sticker operations ─────────────────────────
 
-/// Author an EmojiAdded/EmojiRemoved or StickerAdded/StickerRemoved op.
-/// Mirrors [handle_label_op] (apply → CrdtStore persist → ServerUpdated →
-/// MLS broadcast + plaintext twin). The BYTES never ride the CRDT — the
-/// caller stored them in the local asset blob cache before issuing the
-/// command; members pull them on demand via EmoteRequest.
+/// Author an EmojiAdded/EmojiRemoved or StickerAdded/StickerRemoved op. Mirrors
+/// [handle_label_op]. The BYTES never ride the CRDT: the caller stored them in the
+/// local asset blob cache and members pull them on demand via EmoteRequest.
 ///
-/// Both families share `Permission::MANAGE_EMOTES` (one authoring surface,
-/// one audience — no new permission bit), which is why one handler serves
-/// them.
+/// Both families share `Permission::MANAGE_EMOTES`, which is why one handler serves them.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_emote_op(
     server_states: &mut ServerStates,
@@ -2285,10 +2148,9 @@ pub(crate) async fn handle_set_channel_visibility(
         return true;
     }
 
-    // Picking a plain tier on a label-gated channel also clears the label
-    // gate (the UI presents them as ONE selector; leaving a stale label list
-    // behind would silently keep gating on new clients while old clients
-    // honored the tier). Authored second → HLC-later → wins everywhere.
+    // Picking a plain tier on a label-gated channel also clears the label gate (the
+    // UI presents them as ONE selector, and a stale label list would keep gating on
+    // new clients). Authored second, so HLC-later wins everywhere.
     let had_labels = server_states
         .get(&server_id)
         .and_then(|s| s.channels.get(&channel_id))
@@ -2309,10 +2171,9 @@ pub(crate) async fn handle_set_channel_visibility(
         }
     }
 
-    // Per-channel MLS subgroup (Option B): if the channel is no longer
-    // restricted (now Everyone/public), tear down its subgroup locally —
-    // messages revert to the server-wide group. (Becoming restricted is
-    // handled by the swarm reconciler, which owns the pending batch queues.)
+    // Per-channel MLS subgroup: if the channel is no longer restricted, tear its
+    // subgroup down locally and messages revert to the server-wide group. Becoming
+    // restricted is handled by the swarm reconciler, which owns the batch queues.
     if let Some(state) = server_states.get(&server_id)
         && !state.channel_uses_subgroup(&channel_id)
         && let Some(mls_mgr) = mls.as_mut()
@@ -2382,12 +2243,10 @@ pub(crate) async fn handle_set_channel_posting(
 
 // ── 10f-1b. Label-gated access + temporary grants (issue #32) ────────
 
-/// Set (or clear, empty vec) the visibility label gate. When the gate turns
-/// ON, a plain `ChannelVisibilityChanged{"admin"}` stamp is authored FIRST:
-/// clients that predate the labels op drop it but honor the stamp, so the
-/// channel fails closed (hidden from non-admins) instead of open. Both ops
-/// come from our HLC in sequence, so every replica converges on
-/// tier=admin + labels=L regardless of arrival order.
+/// Set (or clear, empty vec) the visibility label gate. When the gate turns ON a
+/// plain `ChannelVisibilityChanged{"admin"}` stamp is authored FIRST: clients that
+/// predate the labels op drop it but honor the stamp, so the channel fails closed
+/// rather than open. Both ops come from our HLC in sequence, so replicas converge.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_set_channel_visibility_labels(
     server_states: &mut ServerStates,
@@ -2455,11 +2314,9 @@ pub(crate) async fn handle_set_channel_visibility_labels(
     false
 }
 
-/// Set (or clear) the posting label gate. Same old-client stamp pairing as
-/// the visibility twin (`ChannelPostingChanged{"admin"}`) — old clients
-/// enforce posting send-side, so without the stamp they would let anyone
-/// post into a label-gated channel. Posting never affects subgrouping, so
-/// there is no reconcile/teardown here.
+/// Set (or clear) the posting label gate. Same old-client stamp pairing as the
+/// visibility twin, because old clients enforce posting send-side and would
+/// otherwise let anyone post into a label-gated channel. Posting never subgroups.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_set_channel_posting_labels(
     server_states: &mut ServerStates,
@@ -2594,9 +2451,8 @@ pub(crate) async fn handle_set_channel_public(
     crypto_store: &CryptoStore,
     crdt_store: &CrdtStore,
 ) -> bool {
-    // Voice channels can never be public (#44): the browser's list responders
-    // filter them out (the toggle produced an appear-then-vanish ghost) and a
-    // public voice channel flips its SFrame key domain. Desktop/mobile hide
+    // Voice channels can never be public (#44): the browser's list responders filter
+    // them out and a public voice channel flips its SFrame key domain. The UIs hide
     // the toggle; this covers stale UIs and any other caller.
     if server_states
         .get(&server_id)
@@ -2913,31 +2769,25 @@ pub(crate) async fn handle_set_storage_pledge(
 
 /// How long a join waits for a member who is THERE.
 ///
-/// The coordinator election, its 4s retry, a full state snapshot and the whole
-/// op log all have to cross the wire inside this, and a member one round trip
-/// from answering is the normal case, not the slow one. Parking under them
-/// would put a "waiting for a member to finish setup" tile in front of a join
-/// that is about to complete.
+/// The coordinator election, its 4s retry, a full state snapshot and the whole op
+/// log all have to cross the wire inside this, and a member one round trip from
+/// answering is the normal case, so parking under it would front a live join.
 pub(crate) const JOIN_LIVE_WINDOW: Duration = Duration::from_secs(15);
 
 /// How long a join waits when the relay has already answered the question.
 ///
-/// Two windows exist because "nobody answered" has two very different causes.
-/// A room with somebody in it needs [`JOIN_LIVE_WINDOW`]. A room the relay
-/// described to us as EMPTY needs nothing: there is no member to wait for, and
-/// holding a spinner for fifteen seconds is just a slower way of saying what we
-/// already know. Saying it early costs nothing, because parking is not a
-/// failure: the request goes into the `~join` ring, the live paths stay armed,
-/// and a member that comes back still completes the join.
+/// Two windows exist because "nobody answered" has two very different causes. A
+/// room with somebody in it needs [`JOIN_LIVE_WINDOW`]; a room the relay described
+/// as EMPTY needs nothing. Saying so early costs nothing, because parking is not a
+/// failure: the request goes into the `~join` ring and a member still completes it.
 pub(crate) const JOIN_EMPTY_ROOM_WINDOW: Duration = Duration::from_secs(3);
 
-/// Nobody answered inside the window. That is not a failure any more.
+/// Nobody answered inside the window, which is not a failure any more.
 ///
-/// The request is marked parked, deposited into the server room's `~join` ring
-/// and left there: the next member to come back reads the ring, answers, and
-/// publishes the answer back into it. We STAY IN THE ROOM, because that is how
-/// both legs of the answer reach us later (the relay's buffered targeted frames
-/// replay on a room join, and the ring catch-up is gated on room membership).
+/// The request is marked parked and deposited into the server room's `~join` ring.
+/// We STAY IN THE ROOM, because that is how both legs of the answer reach us
+/// later: buffered targeted frames replay on a room join, and the ring catch-up is
+/// gated on room membership.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_check_pending_join_timeout(
     pending_server_joins: &mut HashMap<String, PendingJoin>,
@@ -2957,19 +2807,15 @@ pub(crate) async fn handle_check_pending_join_timeout(
         return;
     }
     if only_if_empty {
-        // The short window speaks only for a room the relay has actually
-        // described to us. An entry appears the moment `RoomMembers` answers our
-        // join (an empty room included) and is dropped on disconnect, so NO
-        // entry means we have not looked yet rather than that nobody is there,
-        // and a park on that would be a guess.
+        // The short window speaks only for a room the relay has actually described
+        // to us. An entry appears the moment `RoomMembers` answers our join (an
+        // empty room included) and is dropped on disconnect, so NO entry means we
+        // have not looked yet rather than that nobody is there.
         //
-        // OUR OWN ids are filtered here rather than trusted to be absent. The
-        // `RoomMembers` and `DiscoveredPeers` sites both drop them, but the
+        // OUR OWN ids are filtered here rather than trusted to be absent: the
         // `PeerJoined` site inserts whatever id the relay named, and a room the
-        // socket joins twice makes the relay announce US to ourselves: the
-        // second join sees the first still listed, so the joiner is in its own
-        // "existing members" set. The room then reads as occupied by nobody but
-        // us, which is exactly the case this window exists for.
+        // socket joins twice makes the relay announce US to ourselves, so the room
+        // reads as occupied by nobody but us.
         let known_empty = ws_room_peers.get(&server_id).is_some_and(|peers| {
             peers.iter().all(|p| p == local_peer_str || p == local_device_id)
         });
@@ -3145,10 +2991,9 @@ async fn emit_crdt_apply_event(
                 }).await;
             }
             CrdtPayload::ServerDeleted { .. } => {
-                // Owner tombstoned the server. Shell retained (serve to our offline
-                // peers); UI drops the server. (MLS group teardown is handled by the
-                // plaintext CrdtOpBroadcast path / left to lazily orphan here — this
-                // MLS handler has no mls handle.)
+                // Owner tombstoned the server. The shell is retained to serve our
+                // offline peers; the UI drops the server. MLS group teardown is the
+                // plaintext path's job, since this handler has no mls handle.
                 let _ = event_tx.send(NetworkEvent::ServerDeleted {
                     server_id: sid.clone(),
                 }).await;
@@ -3356,16 +3201,13 @@ pub(crate) async fn handle_envelope_sync_resp(
     // op, never the whole batch.
     let incoming_ops = crate::crdt::operations::parse_ops_tolerant(&ops_json);
     if incoming_ops.is_empty() { return; }
-    // SECURITY: every op passes `admit_remote_op` inside `merge_ops` — the
-    // author's signature, the clock bound, then the permission matrix against
-    // OUR role map, never the relayer's word. That covers the destructive
-    // `ServerDeleted` tombstone (Owner-authored only) along with every other
-    // payload, so the ad hoc tombstone filter that used to sit here is gone
-    // rather than duplicated.
+    // SECURITY: every op passes `admit_remote_op` inside `merge_ops`: the author's
+    // signature, the clock bound, then the permission matrix against OUR role map,
+    // never the relayer's word. That covers the destructive `ServerDeleted`
+    // tombstone along with every other payload.
     //
-    // Persist ADMITTED ops as they merge — op_log is not serialized in the
-    // state JSON, so ops merged in RAM are lost on restart without this (a
-    // member then serves a near-empty op log to future joiners).
+    // Persist ADMITTED ops as they merge: op_log is not serialized in the state
+    // JSON, so ops merged in RAM are lost on restart without this.
     let Ok(report) = crate::crdt::sync::merge_ops_with(state, &incoming_ops, |op| {
         if op.server_id == sid {
             crdt_store.insert_op(op.clone());
@@ -3410,10 +3252,9 @@ pub(crate) async fn handle_envelope_channel_sync_req(
     db_path: &str,
     db_passphrase: &str,
 ) {
-    // Visibility gate, identical to the plaintext responder in swarm.rs: this
-    // is the MLS/Olm twin of the same request and shares `build_channel_sync_batch`,
-    // so gating one leg and not the other would leave the hole open on the leg a
-    // formed group actually uses.
+    // Visibility gate, identical to the plaintext responder in swarm.rs: this is the
+    // MLS/Olm twin of the same request and shares `build_channel_sync_batch`, so
+    // gating one leg and not the other leaves the hole open on the leg groups use.
     let visible = match server_states.get(&sid) {
         Some(state) => super::crypto_handler::channel_readable_by(state, sender_peer_id, &cid),
         None => return,
@@ -3547,11 +3388,10 @@ pub(crate) async fn handle_envelope_channel_sync_batch(
     let mut new_count = 0u32;
     for msg in &messages {
         let sig_check = verify_sync_item_sig(msg, &sid, &cid, &mut pk_cache);
-        // SECURITY: only a VERIFYING signature gets stored — drop the whole
-        // item (text, edit, file metadata, reactions and the hidden flag all
-        // ride it). Unsigned is refused too as of 0.8.5: the item names its own
-        // sender, so omitting the signature was an impersonation primitive. See
-        // `check_backfill_signature`.
+        // SECURITY: only a VERIFYING signature gets stored, and the whole item is
+        // dropped (text, edit, file metadata, reactions and the hidden flag all ride
+        // it). Unsigned is refused too as of 0.8.5: the item names its own sender,
+        // so omitting the signature was an impersonation primitive.
         if !sig_check.is_acceptable() {
             hollow_log!(
                 "[HOLLOW-SECURITY] REJECTED synced channel message in {sid}/{cid} claiming sender {} — {} (mid={:?}, ts={})",
@@ -3597,9 +3437,8 @@ pub(crate) async fn handle_envelope_channel_sync_batch(
 }
 
 /// Verify one synced item's signature (cached pubkey parse) under the backfill
-/// rule: `Valid` or the item is dropped (see `BackfillSig::is_acceptable`).
-/// An edited row is verified against its EDIT signature (`edited_at` + current
-/// text) rather than skipped.
+/// rule: `Valid` or the item is dropped. An edited row is verified against its EDIT
+/// signature rather than skipped.
 fn verify_sync_item_sig(
     msg: &SyncMessageItem,
     sid: &str,
@@ -3676,10 +3515,9 @@ fn upsert_synced_channel_message(
         repair_wedged_sender(store, msg, is_mine);
     }
 
-    // The card the item's signature covers. Deliberately runs on EVERY branch:
-    // a fresh insert, a row that reached us card-less by some other path, and
-    // an edited row alike should end up holding it. `sig_verified` because a
-    // card is author content — see `apply_synced_link_preview`.
+    // The card the item's signature covers. Deliberately runs on EVERY branch: a
+    // fresh insert, a row that reached us card-less by another path, and an edited
+    // row alike should end up holding it. `sig_verified` because a card is content.
     if sig_verified
         && let (Some(lp), Some(mid)) = (msg.lp.as_deref(), &msg.mid)
         && super::message_ops::apply_synced_link_preview(
@@ -3697,20 +3535,15 @@ fn upsert_synced_channel_message(
     (inserted, events)
 }
 
-/// Multi-device self-heal: the row already exists but may have been stored
-/// under a sender DEVICE id (pre device→master resolve fix) with signature
-/// material that no longer verifies on this device — the "12D3KooW… +
-/// unverified signature" bubble. THIS synced copy's signature verified
-/// (proving authentic sender + text), so if our stored row is attributed to a
-/// different sender, repair it to the verified one. INSERT OR IGNORE blocked
-/// re-inserting the good copy, so this UPDATE is the only path to converge.
-/// Safe: the verify also binds the PeerId to the pubkey, so this can only
-/// ever replace an attribution with a cryptographically authentic one.
+/// Multi-device self-heal: the row already exists but may have been stored under a
+/// sender DEVICE id with signature material that no longer verifies here. THIS
+/// synced copy's signature verified, proving sender and text, so a row attributed
+/// to a different sender is repaired to the verified one. INSERT OR IGNORE blocked
+/// re-inserting the good copy, so this UPDATE is the only path to converge, and it
+/// is safe because the verify also binds the PeerId to the pubkey.
 ///
-/// The repaired row is not announced with a fake edit event (that would mark
-/// it "(edited)" and wouldn't move the in-memory senderId anyway); the
-/// corrected sender renders on the next channel open / loadHistory, which is
-/// when this sync runs.
+/// Not announced with a fake edit event, which would mark the row "(edited)"; the
+/// corrected sender renders on the next channel open.
 fn repair_wedged_sender(
     store: &crate::storage::MessageStore,
     msg: &SyncMessageItem,
@@ -3785,9 +3618,8 @@ fn apply_sync_item_extras(
     }
     if let Some(mid) = &msg.mid {
         for r in &msg.reactions {
-            // Each reaction names its own reactor, so it needs its own
-            // signature check — the item-level backfill verdict covers the
-            // message, not the reactions attached to it.
+            // Each reaction names its own reactor, so it needs its own signature
+            // check: the item-level backfill verdict covers only the message.
             if !super::message_ops::sync_reaction_accepted(mid, r) {
                 continue;
             }

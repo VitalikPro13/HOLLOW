@@ -40,9 +40,8 @@ class HollowApp extends ConsumerWidget {
     if (bg.hasBackground && !reduceTransparency) {
       final hollow = themeData.extension<HollowTheme>()!;
       final base = bg.panelOpacity.clamp(0.3, 0.95);
-      // background = chat area, home dashboard → more transparent (see image through)
-      // surface = sidebars, member panel, channel header → more opaque (darker)
-      // elevated = cards, inputs → most opaque
+      // A ladder by role: background (chat, dashboard) shows most of the
+      // image, surface (sidebars, header) less, elevated (cards, inputs) least.
       final bgAlpha = (base * 0.65).clamp(0.15, 0.8);
       final surfaceAlpha = (base * 0.85).clamp(0.4, 0.92);
       final elevatedAlpha = (base * 0.95).clamp(0.5, 0.95);
@@ -70,20 +69,12 @@ class HollowApp extends ConsumerWidget {
       scrollBehavior: const HollowScrollBehavior(),
       home: const HollowShell(),
       builder: (context, child) {
-        // a11y 2.6: clear the keyboard focus ring as soon as the user reaches
-        // for the mouse/touch. Flutter keeps `traditional` highlight mode after
-        // a desktop mouse click, so a ring left on the last Tab-focused control
-        // would otherwise linger. Demote focus on any pointer-down WHILE rings
-        // are showing; text fields re-acquire focus on their own tap-up (which
-        // fires after this), so tapping into an input still works.
         final Widget body =
             _PointerFocusDismisser(child: child ?? const SizedBox.shrink());
 
         // Interface scale (issue #20) wraps everything the user thinks of as
-        // "the app" — text, icons and spacing zoom together. On desktop the
-        // 32px title bar deliberately stays at OS size, the way browser
-        // chrome does not zoom with the page: on macOS it is aligned to the
-        // native traffic lights, which the OS draws at a fixed offset.
+        // "the app". The 32px title bar deliberately stays at OS size: on macOS
+        // it aligns to native traffic lights drawn at a fixed offset.
         if (isDesktop) {
           return Material(
             type: MaterialType.transparency,
@@ -104,13 +95,9 @@ class HollowApp extends ConsumerWidget {
             ),
           );
         }
-        // a11y Phase 3 (Larger Text): honor OS text scaling up to 2.0×, the
-        // platform max on iOS/Android. Was clamped to 1.3× (which silently
-        // shrank a 200% OS setting to 130% — the dishonest state). The chat
-        // surfaces, chrome bars and tight rows were hardened to survive 2.0×
-        // (fixed-height bars → min-height, names → Flexible+ellipsis); a
-        // textScaler golden test guards against RenderFlex overflow at 2.0×.
-        // Desktop has no clamp (full OS scaling already flows through).
+        // Larger Text (a11y Phase 3): mobile honours OS text scaling to the
+        // 2.0× platform max, which the chrome is hardened for. Desktop has no
+        // clamp, since full OS scaling already flows through.
         return MediaQuery.withClampedTextScaling(
           minScaleFactor: 0.8,
           maxScaleFactor: 2.0,
@@ -119,9 +106,8 @@ class HollowApp extends ConsumerWidget {
               children: [
                 body,
                 const IncomingCallOverlay(),
-                // Global earpiece proximity (mobile): blanks the screen on
-                // ear-hold for any active call, not just while the call sheet
-                // is visible. Pure side-effect, renders nothing.
+                // Blanks the screen on ear-hold for any active call, not only
+                // while the call sheet is visible; renders nothing.
                 const CallProximityController(),
               ],
             ),
@@ -133,11 +119,8 @@ class HollowApp extends ConsumerWidget {
 }
 
 /// Clears a lingering keyboard focus ring when the user switches to the mouse
-/// (a11y 2.6). Wraps the app body in a translucent [Listener] (so it never eats
-/// taps) and, on any pointer-down WHILE the focus highlight is in keyboard mode,
-/// unfocuses the current node — which collapses every [HollowFocusRing] to its
-/// hidden state. A no-op during pure mouse use (highlight already non-keyboard),
-/// and text fields still focus because their own tap-up fires after this.
+/// (a11y 2.6). Translucent so it never eats taps, and text fields still focus
+/// because their own tap-up fires after this pointer-down.
 class _PointerFocusDismisser extends StatelessWidget {
   final Widget child;
   const _PointerFocusDismisser({required this.child});

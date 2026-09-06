@@ -4,10 +4,10 @@ import 'dart:ffi';
 import 'hotkey_backend.dart';
 import 'hotkey_binding.dart';
 
-/// System-wide hotkeys on Windows via a GetAsyncKeyState poll (25ms, only
-/// while in a call). Deliberately NOT RegisterHotKey: that CONSUMES the
-/// combo system-wide, which would make a PTT key dead inside games. Polling
-/// observes without stealing.
+/// System-wide hotkeys on Windows via a GetAsyncKeyState poll, 25ms and only
+/// while in a call. Deliberately NOT RegisterHotKey: that CONSUMES the combo
+/// system-wide, which would make a PTT key dead inside games. Polling observes
+/// without stealing.
 class Win32KeyPoller implements HotkeyBackend {
   static const _vkControl = 0x11;
   static const _vkShift = 0x10;
@@ -70,10 +70,9 @@ class Win32KeyPoller implements HotkeyBackend {
       final was = _pressed[action] ?? false;
       bool pressed;
       if (was) {
-        // A held action releases on the TRIGGER key alone: modifiers may
-        // be tapped or released first mid-hold (typing while transmitting,
-        // chord release order) and must not chop a PTT transmission —
-        // mirrors the in-app backend's KeyUp semantics.
+        // A held action releases on the TRIGGER key alone: modifiers may be
+        // tapped or released first mid-hold and must not chop a PTT
+        // transmission, mirroring the in-app backend's KeyUp semantics.
         pressed = _down(vk);
       } else {
         pressed = _down(vk) &&

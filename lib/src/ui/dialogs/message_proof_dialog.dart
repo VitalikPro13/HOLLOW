@@ -28,16 +28,14 @@ class MessageProofData {
   final String msgType; // "dm" or "ch"
   final FileAttachment? fileAttachment;
 
-  /// A verdict computed elsewhere, for messages this dialog cannot verify
-  /// itself: imported-archive rows, whose signature the Rust archive loader
-  /// already checked against the full v2 payload. Null = verify here via
-  /// `verifyMessageProofV2` (loads the row from the local DB).
+  /// A verdict computed elsewhere, for a row this dialog cannot verify itself
+  /// (an imported archive, already checked by the Rust loader). Null verifies
+  /// here against the local DB row.
   ///
-  /// There is deliberately NO Dart-side payload reconstruction any more. The
-  /// v1 grammar ("hollow-msg:...") covered the text only, so rebuilding and
-  /// verifying it here would display a message with a grafted file_id /
-  /// reply_to / link preview as VERIFIED. v1 verification was dropped in
-  /// 0.8.5; a message that cannot be v2-verified shows as unverified.
+  /// There is deliberately NO Dart-side payload reconstruction: the v1 grammar
+  /// covered the text only, so rebuilding it here would show a message with a
+  /// grafted file id, reply or link preview as VERIFIED. A message that cannot
+  /// be v2-verified shows as unverified.
   final bool? preverified;
 
   const MessageProofData({
@@ -54,13 +52,12 @@ class MessageProofData {
     this.preverified,
   });
 
-  /// Derive a short fingerprint from the public key for display.
+  /// A short display fingerprint derived from the public key.
   String? get publicKeyFingerprint {
     if (publicKey == null) return null;
     try {
       final bytes = base64.decode(publicKey!);
       final hex = bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
-      // Show as groups of 4 chars separated by spaces for readability.
       final fingerprint = hex.substring(0, 32).toUpperCase();
       return '${fingerprint.substring(0, 4)} ${fingerprint.substring(4, 8)} '
           '${fingerprint.substring(8, 12)} ${fingerprint.substring(12, 16)} '
@@ -90,18 +87,17 @@ class _MessageProofDialogContent extends StatefulWidget {
       _MessageProofDialogContentState();
 }
 
-/// Verification state: null = pending, true = valid, false = invalid.
 class _MessageProofDialogContentState
     extends State<_MessageProofDialogContent>
     with SingleTickerProviderStateMixin {
   bool? _verified;
 
-  /// v2 verification result, when the message has a message_id whose row is in
-  /// the local DB. Null = nothing exportable (archive row, or no row found).
+  /// The v2 verification result when the row is in the local DB; null means
+  /// there is nothing exportable.
   network_api.MessageProofV2? _v2;
 
-  /// A proof can only be copied/exported when Rust produced the canonical v2
-  /// payload for it. Everything else has no payload to put in the file.
+  /// A proof is copyable only once Rust has produced its canonical v2 payload;
+  /// everything else has no payload to put in the file.
   bool get _canExport => _v2 != null;
   late final AnimationController _staggerController;
   late final List<Animation<double>> _fadeAnims;
@@ -158,18 +154,16 @@ class _MessageProofDialogContentState
 
   Future<void> _verifySignature() async {
     if (proof.signature == null || proof.publicKey == null) return;
-    // Archive rows carry the loader's verdict — there is no local DB row to
-    // load, and Dart must not rebuild a payload of its own.
+    // Archive rows carry the loader's verdict: there is no local DB row, and
+    // Dart must not rebuild a payload of its own.
     final pre = proof.preverified;
     if (pre != null) {
       setState(() => _verified = pre);
       return;
     }
-    // Rust loads the row by message_id, builds the canonical v2 payload (binds
-    // mid/reply_to/file_id/order_us/link-preview digest) and verifies it — the
-    // grammar stays single-sourced in Rust. No v1 fallback since 0.8.5: a
-    // message with no verifiable v2 signature reports unverified, which is the
-    // truth about it.
+    // Rust builds and verifies the canonical v2 payload, so the grammar stays
+    // single-sourced there. NO v1 fallback: a message with no verifiable v2
+    // signature reports unverified, which is the truth about it.
     final mid = proof.messageId;
     if (mid == null || mid.isEmpty) {
       setState(() => _verified = false);
@@ -189,16 +183,14 @@ class _MessageProofDialogContentState
         });
       }
     } catch (_) {
-      // Row not found (e.g. a legacy list entry, or an archive edit-history
-      // sub-entry) — nothing verifiable.
+      // No row found, so there is nothing verifiable.
       if (mounted) setState(() => _verified = false);
     }
   }
 
-  /// Exported proof JSON — always the v2 envelope. Only reachable behind
-  /// [_canExport], so `_v2` is non-null here. The legacy v1 envelope is gone
-  /// (0.8.5): it advertised a canonical payload covering the text only, and
-  /// Hollow itself no longer accepts one.
+  /// The exported proof JSON, always the v2 envelope. Only reachable behind
+  /// [_canExport], so `_v2` is non-null. The v1 envelope is gone: it advertised
+  /// a canonical payload covering the text only.
   String _proofJsonString() {
     final v2 = _v2!;
     final body = <String, dynamic>{
@@ -206,7 +198,7 @@ class _MessageProofDialogContentState
         'protocol': 'hollow-proof-v2',
         'message': {
           'text': v2.text,
-          // The SIGNED timestamp: edited_at for an edited message.
+          // The SIGNED timestamp, which is edited_at for an edited message.
           'timestamp_ms': v2.timestampMs,
           'message_id': proof.messageId,
           if (v2.editedAt != null) 'edited_at': v2.editedAt,
@@ -370,7 +362,6 @@ class _MessageProofDialogContentState
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  // Header
                   _stagger(0, child: Row(
                     children: [
                       AnimatedSwitcher(
@@ -411,20 +402,18 @@ class _MessageProofDialogContentState
                   )),
                   const SizedBox(height: HollowSpacing.lg),
 
-                  // Preview + info rows scroll when the screen is short.
+                  // Preview and info rows scroll when the screen is short.
                   Flexible(
                     child: SingleChildScrollView(
                       child: Column(
                         mainAxisSize: MainAxisSize.min,
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          // Message preview
                           _stagger(1,
                               child: _MessagePreview(
                                   hollow: hollow, proof: proof)),
                           const SizedBox(height: HollowSpacing.lg),
 
-                          // Info rows
                           _stagger(2, child: _InfoRow(
                             hollow: hollow,
                             label: 'Sender Peer ID',
@@ -476,9 +465,8 @@ class _MessageProofDialogContentState
                   ),
                   const SizedBox(height: HollowSpacing.xl),
 
-                  // Actions — stacked full-width on phones, row on desktop.
-                  // Copy/Export need the canonical v2 payload from Rust, so
-                  // they key on `_canExport`, not merely "has a signature".
+                  // Copy and Export need Rust's canonical v2 payload, so they
+                  // key on `_canExport` and not on "has a signature".
                   _stagger(6, child: isCompact
                       ? Column(
                           crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -568,7 +556,7 @@ class _MessageProofDialogContentState
   }
 }
 
-/// Chat-style message preview with avatar, name, timestamp, and content.
+/// Chat-style message preview.
 class _MessagePreview extends StatelessWidget {
   final HollowTheme hollow;
   final MessageProofData proof;
@@ -605,7 +593,6 @@ class _MessagePreview extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                // Name + time
                 Row(
                   children: [
                     Flexible(
@@ -630,7 +617,6 @@ class _MessagePreview extends StatelessWidget {
                   ],
                 ),
                 const SizedBox(height: 2),
-                // Media thumbnail (if image or video)
                 if (hasMedia && (isImage || isVideo)) ...[
                   ClipRRect(
                     borderRadius: BorderRadius.circular(hollow.radiusSm),
@@ -655,7 +641,6 @@ class _MessagePreview extends StatelessWidget {
                       !proof.text.startsWith('[file:'))
                     const SizedBox(height: 4),
                 ],
-                // File indicator (non-image files)
                 if (file != null && !isImage && !isVideo) ...[
                   Row(
                     children: [
@@ -677,7 +662,6 @@ class _MessagePreview extends StatelessWidget {
                       !proof.text.startsWith('[file:'))
                     const SizedBox(height: 4),
                 ],
-                // Text content
                 if (proof.text.isNotEmpty && !proof.text.startsWith('[file:'))
                   Text(
                     proof.text.length > 200
@@ -697,7 +681,7 @@ class _MessagePreview extends StatelessWidget {
   }
 }
 
-/// A single info row with label, value, and optional copy button.
+/// A single info row, with an optional copy button.
 class _InfoRow extends StatelessWidget {
   final HollowTheme hollow;
   final String label;

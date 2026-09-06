@@ -9,24 +9,21 @@ import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-/// Top-center source switcher pill for mobile call surfaces — one tab per
-/// active video source (screen share or camera), tap to focus that source
-/// full-bleed. Port of the desktop switchers (voice_channel_pane
-/// `_buildSharerSwitcher` / chat_pane `_buildScreenShareSourcePill`) minus
-/// the hover machinery; horizontally scrollable so 3+ tabs fit a phone.
+/// Source switcher pill for mobile call surfaces: one tab per active video
+/// source, tapped to focus that source full-bleed.
 ///
-/// Local SCREEN shares are never offered on mobile — the phone can't preview
-/// its own share (infinite mirror), so callers exclude it from [sources].
+/// Local SCREEN shares are never offered here, because the phone cannot preview
+/// its own share without an infinite mirror; callers exclude it from [sources].
 class MobileSourceSwitchPill extends ConsumerWidget {
-  /// Active sources in display order (screens first, then cameras).
+  /// Active sources in display order: screens first, then cameras.
   final List<({String peerId, String type})> sources;
   final String? focusedPeerId;
   final String? focusedType;
   final String localPeerId;
   final void Function(String peerId, String type) onSelect;
 
-  /// Screen sources present but not opted into yet (issue #38) — rendered
-  /// with an eye affordance; the caller's [onSelect] starts watching them.
+  /// Screen sources not opted into yet (issue #38); the caller's [onSelect]
+  /// starts watching them.
   final Set<String> unwatchedPeerIds;
 
   const MobileSourceSwitchPill({
@@ -64,8 +61,8 @@ class MobileSourceSwitchPill extends ConsumerWidget {
                 source.type == focusedType;
             final isUnwatched =
                 isScreen && unwatchedPeerIds.contains(source.peerId);
-            // Routable device id → master for the name/avatar lookups;
-            // focus tracking stays keyed on the routable id.
+            // Names and avatars are master-keyed; focus tracking stays on the
+            // routable device id.
             final displayId =
                 ref.watch(deviceLinkProvider).identityOf(source.peerId);
             final name = displayNameFor(profiles, displayId);

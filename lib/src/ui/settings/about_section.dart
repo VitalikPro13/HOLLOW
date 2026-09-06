@@ -23,9 +23,8 @@ class AboutTab extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final hollow = HollowTheme.of(context);
-    // One source of truth for the app version, the same one mobile About
-    // reads: the Rust APP_VERSION through getCurrentVersion(), never a string
-    // typed in twice.
+    // One source of truth for the app version, shared with mobile About: the
+    // Rust APP_VERSION, never a string typed in twice.
     final appVersion = ref.watch(updaterProvider).currentVersion;
 
     return SingleChildScrollView(
@@ -33,7 +32,6 @@ class AboutTab extends ConsumerWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // App identity row
           Row(
             children: [
               ClipRRect(
@@ -89,7 +87,6 @@ class AboutTab extends ConsumerWidget {
           _aboutDivider(hollow),
           const SizedBox(height: HollowSpacing.lg),
 
-          // Contact
           _aboutSectionLabel('Contact', hollow),
           const SizedBox(height: HollowSpacing.sm),
           aboutLinkButton(
@@ -108,11 +105,9 @@ class AboutTab extends ConsumerWidget {
           _aboutDivider(hollow),
           const SizedBox(height: HollowSpacing.lg),
 
-          // Follow & Support — header with shimmer line
           _aboutShimmerLabel('Follow', 'Support', hollow),
           const SizedBox(height: HollowSpacing.md),
 
-          // Follow & Support — icons with shimmer separator
           Row(
             children: [
               const _BrandIcon(
@@ -173,7 +168,6 @@ class AboutTab extends ConsumerWidget {
           _aboutDivider(hollow),
           const SizedBox(height: HollowSpacing.lg),
 
-          // Legal
           _aboutSectionLabel('Legal', hollow),
           const SizedBox(height: HollowSpacing.sm),
           aboutLinkButton(
@@ -206,8 +200,7 @@ class AboutTab extends ConsumerWidget {
     );
   }
 
-  /// Label on the left, value on the right, the shape mobile About uses for
-  /// its Info rows.
+  /// Label left, value right: the shape mobile About uses for its Info rows.
   static Widget _aboutInfoRow(String label, String value, HollowTheme hollow) {
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: HollowSpacing.xs),
@@ -276,9 +269,8 @@ void _showLegalDocument(
     builder: (ctx) => Material(
       color: Colors.transparent,
       child: Center(
-        // The interface zoom shrinks the logical viewport, so this 640x520
-        // sheet can exceed the screen (1080p at 200% is ~960x504). Keep a
-        // margin so the clamped result still looks like a dialog.
+        // The interface zoom shrinks the logical viewport, so this sheet can
+        // exceed the screen; the margin keeps the clamped result a dialog.
         child: Padding(
           padding: const EdgeInsets.all(HollowSpacing.lg),
           child: Container(
@@ -291,7 +283,6 @@ void _showLegalDocument(
             ),
             child: Column(
               children: [
-                // Header
                 Padding(
                   padding: const EdgeInsets.fromLTRB(24, 20, 12, 0),
                   child: Row(
@@ -321,7 +312,6 @@ void _showLegalDocument(
                 Container(
                     height: 1,
                     color: hollow.border.withValues(alpha: 0.5)),
-                // Body — rendered markdown
                 Expanded(
                   child: legalMarkdownView(
                     hollow,
@@ -338,8 +328,7 @@ void _showLegalDocument(
   );
 }
 
-/// Hover shell shared by the icon-font and SVG brand icons: tooltip +
-/// hover-tinted AnimatedContainer + AnimatedScale around the icon.
+/// Hover shell shared by the icon-font and SVG brand icons.
 class _BrandHoverBox extends StatefulWidget {
   final String tooltip;
   final String url;
@@ -374,8 +363,8 @@ class _BrandHoverBoxState extends State<_BrandHoverBox> {
             duration: HollowDurations.fast,
             padding: const EdgeInsets.all(8),
             decoration: BoxDecoration(
-              // Zero-alpha rest color, not Colors.transparent (transparent
-              // BLACK — the lerp flashed dark on hover/unhover).
+              // Zero-alpha rest colour, not `Colors.transparent`: that is
+              // transparent BLACK, and the lerp flashes dark on hover.
               color: _hovering
                   ? hollow.elevated
                   : hollow.elevated.withValues(alpha: 0.0),

@@ -42,8 +42,8 @@ class AudioVideoSettingsView extends StatelessWidget {
         title: 'Devices',
         children: [_AudioDeviceSettings()],
       ),
-      // Voice input mode + hotkeys (issue #38) — desktop only (hotkeys need
-      // a keyboard; mobile transmits via voice activity).
+      // Hotkeys need a keyboard, so desktop only; mobile transmits on voice
+      // activity (issue #38).
       if (!Platform.isAndroid && !Platform.isIOS)
         const SettingsCard(
           title: 'Voice',
@@ -66,9 +66,8 @@ class _VoiceInputSettingsState extends ConsumerState<_VoiceInputSettings> {
   @override
   void initState() {
     super.initState();
-    // These providers may have loaded BEFORE storage was ready at app start
-    // and cached the defaults (the bootstrap-not-build settings trap) —
-    // re-read from disk whenever the card opens so the chips show truth.
+    // These providers may have cached defaults from before storage was ready,
+    // so re-read from disk whenever the card opens.
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       ref.invalidate(voiceInputModeProvider);
@@ -138,7 +137,7 @@ class _VoiceInputSettingsState extends ConsumerState<_VoiceInputSettings> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        // Input mode chips (selection state = chips, never filled buttons).
+        // Selection state = chips, never filled buttons.
         Row(
           children: [
             Text(
@@ -168,7 +167,6 @@ class _VoiceInputSettingsState extends ConsumerState<_VoiceInputSettings> {
           ],
         ),
         const SizedBox(height: HollowSpacing.sm),
-        // PTT-only rows — dimmed + inert in Voice Activity mode.
         AnimatedOpacity(
           duration: const Duration(milliseconds: 150),
           opacity: isPtt ? 1.0 : 0.4,
@@ -275,9 +273,8 @@ class _AudioDeviceSettings extends ConsumerStatefulWidget {
       _AudioDeviceSettingsState();
 }
 
-/// Cross-platform shape for audio device listings — wraps either a
-/// `win32audio.AudioDevice` on Windows or a `webrtc.MediaDeviceInfo` on
-/// macOS/Linux so the dropdowns can render either uniformly.
+/// Uniform shape for audio device listings, wrapping either a
+/// `win32audio.AudioDevice` or a `webrtc.MediaDeviceInfo`.
 typedef _AudioDeviceInfo = ({String id, String name, bool isActive});
 
 class _AudioDeviceSettingsState extends ConsumerState<_AudioDeviceSettings> {
@@ -287,33 +284,25 @@ class _AudioDeviceSettingsState extends ConsumerState<_AudioDeviceSettings> {
   bool _loading = true;
   bool _micTesting = false;
   AudioPlayer? _ringtonePreview;
-  // Mic test (issue #40, final design): record the RAW microphone (no
-  // WebRTC session at all — `record` package / LinuxPulseCapture at 48 kHz
-  // mono), then offline-render it through a FRESH instance of the real
-  // capture chain (hollowRenderVoiceWav — same C++ as live calls: AI-NS +
-  // EQ + gate/upward + compressor + de-esser + limiter, dynamic servo
-  // included), then A/B raw vs processed. Phases: idle → recording
-  // (_micTesting) → rendering (_micRendering) → review (_micTestReviewing).
   rec.AudioRecorder? _micRecorder;
   LinuxPulseCapture? _micPulse;
   StreamSubscription<Uint8List>? _micChunkSub;
   BytesBuilder? _micPcmBuf;
   static const int _micRecRate = 48000;
-  String? _micTestRawPath; // raw take (WAV)
-  String? _micTestRecPath; // processed render (WAV)
+  String? _micTestRawPath;
+  String? _micTestRecPath;
   bool _micRendering = false;
   bool _micTestReviewing = false;
   bool _micProcessedOk = false;
   AudioPlayer? _micTestPlayer;
-  String? _micPlayingPath; // which take is playing (raw/processed), if any
+  String? _micPlayingPath;
   Timer? _micTestCapTimer;
-  // Highest capture level seen while recording (dBFS; -100 = never) — the
-  // one number that discriminates "mic delivered nothing" from a recorder
-  // bug (the 2026-08-05 debugging lesson).
+  // Highest capture level seen while recording (dBFS; -100 = never), the one
+  // number that separates "the mic delivered nothing" from a recorder bug.
   double _micTestPeakDb = -100.0;
 
-  /// Mic-test diagnostics MUST reach hollow_debug.log (debugPrint is
-  /// invisible in installed/release builds — the hotkey lesson).
+  /// Mic-test diagnostics MUST reach hollow_debug.log: debugPrint alone is
+  /// invisible in installed and release builds.
   void _micLog(String msg) {
     debugPrint('[MIC-TEST] $msg');
     network_api.logFromDart(message: '[MIC-TEST] $msg').catchError((_) {});
@@ -370,9 +359,8 @@ class _AudioDeviceSettingsState extends ConsumerState<_AudioDeviceSettings> {
     showRingtoneClipEditor(context, filePath);
   }
 
-  /// Parse the `{input: [...], output: [...]}` map returned by the fork's
-  /// native audio enumeration handlers (`hollowMacAudioDevices` /
-  /// `hollowLinuxAudioDevices`) into the uniform record shape.
+  /// Parses the `{input: [...], output: [...]}` map the fork's native audio
+  /// enumeration handlers return into the uniform record shape.
   static (List<_AudioDeviceInfo>, List<_AudioDeviceInfo>) _parseNativeDevices(
       Map<dynamic, dynamic> res) {
     List<_AudioDeviceInfo> parse(List<dynamic> raw) => raw
@@ -389,9 +377,8 @@ class _AudioDeviceSettingsState extends ConsumerState<_AudioDeviceSettings> {
     return (parse(ins), parse(outs));
   }
 
-  /// Invoke one of the fork's native audio enumeration handlers and parse the
-  /// result. Used for macOS (CoreAudio via `hollowMacAudioDevices`) and Linux
-  /// (libpulse via `hollowLinuxAudioDevices`) — both share the result shape.
+  /// Invokes one of the fork's native audio enumeration handlers (CoreAudio on
+  /// macOS, libpulse on Linux) and parses the shared result shape.
   Future<(List<_AudioDeviceInfo>, List<_AudioDeviceInfo>)?>
       _invokeNativeAudioEnum(String method, String logLabel) async {
     try {
@@ -408,12 +395,9 @@ class _AudioDeviceSettingsState extends ConsumerState<_AudioDeviceSettings> {
     }
   }
 
-  /// macOS: the WebRTC-SDK pinned by flutter_webrtc returns an empty
-  /// audioDeviceModule.inputDevices/outputDevices list, so we enumerate
-  /// audio devices through CoreAudio directly via a native method channel
-  /// exposed by our fork (`hollowMacAudioDevices`). Microphone access
-  /// still needs to be granted; we probe it with a short getUserMedia to
-  /// trigger the system prompt before showing the picker.
+  /// macOS: the pinned WebRTC SDK returns empty input/output device lists, so
+  /// enumeration goes through CoreAudio via the fork's `hollowMacAudioDevices`.
+  /// A short getUserMedia first triggers the system microphone prompt.
   Future<(List<_AudioDeviceInfo>, List<_AudioDeviceInfo>)?>
       _enumerateMacAudio() async {
     try {
@@ -489,9 +473,8 @@ class _AudioDeviceSettingsState extends ConsumerState<_AudioDeviceSettings> {
         }
       }
 
-      // Camera always comes from flutter_webrtc's `enumerateDevices()` (the
-      // V4L2 video path works on Linux). Windows audio uses `win32audio`
-      // (block below); Linux audio uses a native libpulse enumeration below.
+      // Camera always comes from flutter_webrtc; only AUDIO needs the
+      // per-platform enumerators below.
       try {
         final devices = await webrtc.navigator.mediaDevices.enumerateDevices();
         cameras = devices.where((d) => d.kind == 'videoinput').toList();
@@ -499,11 +482,9 @@ class _AudioDeviceSettingsState extends ConsumerState<_AudioDeviceSettings> {
         debugPrint('[HOLLOW] Device enumeration (webrtc) failed: $e');
       }
 
-      // Linux: the prebuilt libwebrtc AudioDeviceModule reports 0 mic/speaker
-      // devices on pipewire-pulse systems (falls back to AudioDeviceDummy), so
-      // `enumerateDevices()` returns no audioinput/audiooutput entries even
-      // though the camera enumerates fine. Enumerate audio directly via
-      // libpulse through our fork's native handler.
+      // Linux: the prebuilt libwebrtc AudioDeviceModule reports 0 audio devices
+      // on pipewire-pulse (it falls back to AudioDeviceDummy) even though the
+      // camera enumerates fine, so audio comes from libpulse via our fork.
       if (Platform.isLinux) {
         final linux = await _invokeNativeAudioEnum(
             'hollowLinuxAudioDevices', 'libpulse');
@@ -536,23 +517,21 @@ class _AudioDeviceSettingsState extends ConsumerState<_AudioDeviceSettings> {
     }
   }
 
-  /// Record-raw / render-offline / A-B review mic test (issue #40, final
-  /// design). The raw microphone is captured at 48 kHz mono with NO WebRTC
-  /// involved (`record` package; LinuxPulseCapture on Linux), then the take
-  /// is rendered through a FRESH instance of the real native capture chain
-  /// (`hollowRenderVoiceWav` — same C++ as live calls: AI-NS, EQ, gate +
-  /// upward compression, compressor, de-esser, limiter, dynamic servo),
-  /// and the user can play raw vs processed side by side.
+  /// Record-raw / render-offline / A-B review mic test (issue #40).
+  ///
+  /// Deliberately NO WebRTC session: a loopback peer connection ran the APM at
+  /// session-dependent shapes that never matched a real call. The raw 48 kHz
+  /// mono take is rendered through a fresh instance of the same native chain
+  /// calls use (`hollowRenderVoiceWav`).
   Future<void> _startMicTest() async {
     if (_micTesting || _micRendering || !mounted) return;
 
-    // Re-record: drop any previous take before claiming the mic again.
     await _stopMicTestPlayback();
     _discardMicTestRecording();
     if (!mounted) return;
 
-    // The test claims the mic and the process-global capture chain — refuse
-    // while a call or voice channel is live rather than fight it for both.
+    // The test claims the mic and the process-global capture chain, so it
+    // refuses while a call or voice channel is live rather than fight for both.
     final inCall = ref.read(callProvider).status != CallStatus.idle;
     final inVoiceChannel =
         ref.read(voiceChannelProvider).currentChannelId != null;
@@ -569,12 +548,6 @@ class _AudioDeviceSettingsState extends ConsumerState<_AudioDeviceSettings> {
     final dynMode = ref.read(voiceEnhanceDynamicProvider).valueOrNull ?? true;
 
     try {
-      // RAW capture — deliberately NO WebRTC session (final design after
-      // the 2026-08-05 six-round field saga): the loopback-PC approach ran
-      // the APM at session-dependent shapes that never matched real calls.
-      // The raw mic is recorded at 48 kHz mono and the take is then
-      // offline-rendered through a fresh instance of the SAME native chain
-      // calls use (hollowRenderVoiceWav).
       final buf = BytesBuilder(copy: false);
       _micPcmBuf = buf;
       _micTestPeakDb = -100.0;
@@ -604,8 +577,8 @@ class _AudioDeviceSettingsState extends ConsumerState<_AudioDeviceSettings> {
                 : null,
           ));
         } catch (e) {
-          // The stored id may come from a different enumerator than
-          // `record`'s — fall back to the system default, visibly logged.
+          // The stored id may come from a different enumerator than `record`'s,
+          // so fall back to the system default and log it.
           _micLog('startStream with device failed ($e) — retrying default');
           chunks = await recorder.startStream(const rec.RecordConfig(
             encoder: rec.AudioEncoder.pcm16bits,
@@ -617,9 +590,8 @@ class _AudioDeviceSettingsState extends ConsumerState<_AudioDeviceSettings> {
 
       _micChunkSub = chunks.listen((chunk) {
         buf.add(chunk);
-        // Peak kept for the [MIC-TEST] log line only — the on-screen level
-        // meter was removed (it didn't track the record-package chunks
-        // reliably in the field; the A/B playback is the real feedback).
+        // Peak feeds the log line only; there is no on-screen meter, because it
+        // never tracked the record-package chunks reliably.
         final level = _levelFromPcm16(chunk);
         if (level.db > _micTestPeakDb) _micTestPeakDb = level.db;
       });
@@ -633,8 +605,8 @@ class _AudioDeviceSettingsState extends ConsumerState<_AudioDeviceSettings> {
       }
       setState(() => _micTesting = true);
 
-      // The dynamic servo needs a few seconds of speech to settle; cap the
-      // take at 10 s so an abandoned test can't record forever.
+      // The dynamic servo needs a few seconds of speech to settle, and the cap
+      // stops an abandoned test recording forever.
       _micTestCapTimer = Timer(const Duration(seconds: 10), () {
         _finishMicRecording();
       });
@@ -646,8 +618,7 @@ class _AudioDeviceSettingsState extends ConsumerState<_AudioDeviceSettings> {
     }
   }
 
-  /// RMS of a PCM16LE chunk → (dBFS, 0..1 bar) with the same -60..0 mapping
-  /// the old meter used.
+  /// RMS of a PCM16LE chunk as (dBFS, 0..1 bar) over a -60..0 mapping.
   static ({double db, double bar}) _levelFromPcm16(Uint8List chunk) {
     final samples =
         Int16List.view(chunk.buffer, chunk.offsetInBytes, chunk.length >> 1);
@@ -692,8 +663,8 @@ class _AudioDeviceSettingsState extends ConsumerState<_AudioDeviceSettings> {
         .takeBytes();
   }
 
-  /// Recording → rendering → review: stop capture, write the raw WAV, run
-  /// it through the native chain, surface both takes for A/B playback.
+  /// Stops capture, writes the raw WAV and renders it, then surfaces both takes
+  /// for A/B playback.
   Future<void> _finishMicRecording() async {
     if (!_micTesting) return;
     await _stopMicCapture();
@@ -704,8 +675,8 @@ class _AudioDeviceSettingsState extends ConsumerState<_AudioDeviceSettings> {
     _micLog('finish: rawBytes=${pcm.length} '
         'peakDb=${_micTestPeakDb.toStringAsFixed(1)}');
 
-    // Name the device we actually recorded from — a stale Settings pick is
-    // the failure users can't see otherwise (2026-08-05 field round).
+    // Name the device we actually recorded from: a stale Settings pick is the
+    // failure a user cannot see otherwise.
     final inputId = ref.read(audioInputDeviceProvider).valueOrNull;
     final matches = _audioInputs.where((d) => d.id == inputId).toList();
     final deviceLabel = matches.isEmpty
@@ -864,11 +835,10 @@ class _AudioDeviceSettingsState extends ConsumerState<_AudioDeviceSettings> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        // Microphone input (win32audio)
         _buildMicrophoneRow(hollow, selectedInput),
         const SizedBox(height: HollowSpacing.sm),
 
-        // Mic gain slider (locked while Dynamic mode auto-levels)
+        // Locked while Dynamic mode auto-levels.
         _buildMicGainSlider(hollow),
         Padding(
           padding: const EdgeInsets.only(left: 30, top: 4),
@@ -881,35 +851,29 @@ class _AudioDeviceSettingsState extends ConsumerState<_AudioDeviceSettings> {
         ),
         const SizedBox(height: HollowSpacing.md),
 
-        // Voice enhancement (EQ + compressor + limiter chain)
         _buildEnhanceToggle(),
         const SizedBox(height: HollowSpacing.sm),
 
-        // Dynamic mode (auto-level servo)
         _buildDynamicToggle(),
         const SizedBox(height: HollowSpacing.xs),
 
-        // Enhancement strength (compressor makeup gain; locked in Dynamic)
+        // Compressor makeup gain; locked in Dynamic.
         _buildStrengthSlider(hollow),
         const SizedBox(height: HollowSpacing.sm),
 
-        // AI noise suppression (DeepFilterNet3, head of the capture chain)
+        // Head of the capture chain.
         _buildNoiseSuppressAiToggle(),
         const SizedBox(height: HollowSpacing.md),
 
-        // Speaker output (win32audio)
         _buildSpeakerRow(hollow),
         const SizedBox(height: HollowSpacing.md),
 
-        // Camera (flutter_webrtc enumerateDevices)
         if (_cameras.isNotEmpty) _buildCameraRow(hollow),
         if (_cameras.isNotEmpty) const SizedBox(height: HollowSpacing.md),
 
-        // Audio quality preset
         _buildQualityRow(hollow),
         const SizedBox(height: HollowSpacing.md),
 
-        // Mic test button + volume meter
         _buildMicTestRow(hollow),
         if (_micTesting || _micTestReviewing)
           Padding(
@@ -928,7 +892,6 @@ class _AudioDeviceSettingsState extends ConsumerState<_AudioDeviceSettings> {
           ),
         const SizedBox(height: HollowSpacing.xs),
 
-        // Refresh devices
         Row(
           children: [
             Icon(LucideIcons.refreshCw, size: 14, color: hollow.textSecondary),
@@ -945,7 +908,6 @@ class _AudioDeviceSettingsState extends ConsumerState<_AudioDeviceSettings> {
         ),
         const SizedBox(height: HollowSpacing.lg),
 
-        // Ringtone selector
         Row(
           children: [
             Icon(LucideIcons.bellRing, size: 14, color: hollow.textSecondary),
@@ -964,11 +926,9 @@ class _AudioDeviceSettingsState extends ConsumerState<_AudioDeviceSettings> {
         _buildRingtoneFileRow(hollow),
         const SizedBox(height: HollowSpacing.sm),
 
-        // Ringtone volume slider
         _buildRingtoneVolumeRow(hollow),
         const SizedBox(height: HollowSpacing.xs),
 
-        // 30s info label
         Text(
           'Ringtone plays for up to 30 seconds during incoming calls, and '
           'while you wait for someone to pick up.',
@@ -1046,7 +1006,7 @@ class _AudioDeviceSettingsState extends ConsumerState<_AudioDeviceSettings> {
                     ? (v) =>
                         ref.read(soundEffectsVolumeProvider.notifier).setVolume(v)
                     : null,
-                // Preview on release only — a sound per drag frame would be a
+                // Preview on release only; a sound per drag frame is a
                 // machine-gun.
                 onChangeEnd: enabled
                     ? (_) => SoundService.instance.play(HollowSound.joinVoice)
@@ -1286,9 +1246,9 @@ class _AudioDeviceSettingsState extends ConsumerState<_AudioDeviceSettings> {
   }
 
   /// Advanced engine picker, shown only while AI NS is on. RNNoise is the
-  /// default that runs well everywhere; DeepFilterNet3 stays available for
-  /// desktop machines that can afford it (slow first load, ~10x the CPU).
-  /// Switching mid-call swaps the engine live — no renegotiation.
+  /// default that runs everywhere; DeepFilterNet3 costs a slow first load and
+  /// roughly 10x the CPU. Switching mid-call swaps the engine with no
+  /// renegotiation.
   Widget _buildNoiseSuppressEngineRow() {
     final hollow = HollowTheme.of(context);
     final engine = ref.watch(noiseSuppressEngineProvider).valueOrNull ??
@@ -1406,7 +1366,6 @@ class _AudioDeviceSettingsState extends ConsumerState<_AudioDeviceSettings> {
   }
 
   Widget _buildMicTestRow(HollowTheme hollow) {
-    // Rendering phase: the take is being run through the offline chain.
     if (_micRendering) {
       return Row(
         children: [
@@ -1421,7 +1380,6 @@ class _AudioDeviceSettingsState extends ConsumerState<_AudioDeviceSettings> {
         ],
       );
     }
-    // Review phase: A/B the processed take against the raw one.
     if (_micTestReviewing) {
       Widget playButton(String label, String? path) {
         final active = path != null && _micPlayingPath == path;
@@ -1477,9 +1435,6 @@ class _AudioDeviceSettingsState extends ConsumerState<_AudioDeviceSettings> {
         ),
         if (_micTesting) ...[
           const SizedBox(width: HollowSpacing.md),
-          // No level meter here — it didn't track the record-package
-          // chunks reliably in the field; the A/B playback afterwards is
-          // the real feedback.
           Text(
             'Recording…',
             style: HollowTypography.bodySmall.copyWith(
@@ -1500,10 +1455,9 @@ class _AudioDeviceSettingsState extends ConsumerState<_AudioDeviceSettings> {
     if (result != null && result.files.single.path != null) {
       final path = result.files.single.path!;
       ref.read(ringtonePathProvider.notifier).setPath(path);
-      // Reset clip range for new file.
       ref.read(ringtoneStartProvider.notifier).setStart(0.0);
       ref.read(ringtoneEndProvider.notifier).setEnd(30.0);
-      // Probe and cache duration now so trim dialog opens instantly.
+      // Cached now so the trim dialog opens instantly.
       final probe = AudioPlayer();
       probe.setSource(DeviceFileSource(path)).then((_) async {
         final dur = await probe.getDuration();
@@ -1625,7 +1579,6 @@ class _AudioDeviceSettingsState extends ConsumerState<_AudioDeviceSettings> {
 
   String? _resolveInputValue(String? savedId) {
     if (savedId == null || _audioInputs.isEmpty) return null;
-    // If the saved device exists, use it. Otherwise fall back to active device.
     if (_audioInputs.any((d) => d.id == savedId)) return savedId;
     final active = _audioInputs.where((d) => d.isActive);
     return active.isNotEmpty ? active.first.id : _audioInputs.first.id;
@@ -1697,8 +1650,8 @@ class _AudioDeviceSettingsState extends ConsumerState<_AudioDeviceSettings> {
   }
 }
 
-/// Selection chip for the AI-NS engine picker (selection state = chip fill,
-/// never a filled button — hover-state rules).
+/// Selection chip for the AI-NS engine picker: selection is a chip fill, never
+/// a filled button.
 class _EngineChip extends StatelessWidget {
   final String label;
   final String hint;

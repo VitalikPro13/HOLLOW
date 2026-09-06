@@ -23,10 +23,8 @@ import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_focus_ring.dart';
 import 'package:hollow/src/ui/components/support_glyph.dart';
 
-/// Flat message row for DMs — no bubbles.
-///
-/// [showHeader] controls whether avatar + name + timestamp are shown
-/// (first message in a group) or just indented text (continuation).
+/// Flat message row for DMs. [showHeader] is false for a grouped continuation,
+/// which drops the avatar, name and timestamp.
 class MessageBubble extends ConsumerWidget {
   final ChatMessage message;
   final String peerId;
@@ -39,10 +37,8 @@ class MessageBubble extends ConsumerWidget {
   final void Function(String emoji)? onToggleReaction;
 
   /// This message and its neighbour are BOTH sticker-only and grouped, so the
-  /// seam between them is drawn continuous: no row padding, no corner
-  /// rounding, no gap. Three stickers sent one after another become one tall
-  /// image — the whole point of a multi-part pack. See
-  /// [stickerTilingFor] for how the panes decide.
+  /// seam is drawn continuous and a run becomes one tall image (see
+  /// [stickerTilingFor]).
   final bool tileWithPrev;
   final bool tileWithNext;
 
@@ -160,7 +156,7 @@ class MessageBubble extends ConsumerWidget {
       );
     }
 
-    // Hide text when it's a file placeholder or empty with file attachment.
+    // A file placeholder carries no text of its own.
     final isFileOnly = message.fileAttachment != null &&
         (message.text.isEmpty || message.text.startsWith('[file:'));
     final messageTextWidget = isFileOnly
@@ -192,8 +188,8 @@ class MessageBubble extends ConsumerWidget {
           )
         : null;
 
-    // Cheap contains() gate + hoisted regex — no per-row RegExp compile or
-    // full-text scan for the overwhelmingly common no-link case.
+    // Cheap gate first: no per-row RegExp compile or full-text scan for the
+    // overwhelmingly common no-link message.
     final hollowLinks = mightContainHollowLinks(message.text)
         ? extractHollowLinks(message.text.replaceAll(codeBlockRegex, ''))
         : const <HollowLink>[];
@@ -229,8 +225,8 @@ class MessageBubble extends ConsumerWidget {
         : null;
 
 
-    // The row carries only the highlight wash now. Being YOURS is an
-    // [OwnMessageMarker] painted OVER the row, which costs it no layout.
+    // The row carries only the highlight wash; being YOURS is an
+    // [OwnMessageMarker] painted over it, which costs no layout.
     final highlightDecoration = isHighlighted
         ? BoxDecoration(color: hollow.accent.withValues(alpha: 0.08))
         : null;
@@ -243,8 +239,7 @@ class MessageBubble extends ConsumerWidget {
           curve: Curves.easeOut,
           padding: EdgeInsets.only(
             top: 4,
-            // A group header never tiles upward (the run starts here), but it
-            // can tile into the continuation below it.
+            // A group header starts the run, so it never tiles upward.
             bottom: tileWithNext ? 0 : 4,
             left: HollowSpacing.md,
             right: HollowSpacing.md,
@@ -284,8 +279,8 @@ class MessageBubble extends ConsumerWidget {
                               ),
                             ),
                           ),
-                          // Support glyph (design 5.6): opt-in by the holder,
-                          // a shrunk box for everyone else.
+                          // Opt-in by the holder, a shrunk box for everyone
+                          // else.
                           SupportNameGlyph(peerId: senderId),
                           const SizedBox(width: HollowSpacing.sm),
                           Text(
@@ -314,8 +309,8 @@ class MessageBubble extends ConsumerWidget {
     }
 
 
-    // Continuation message — indented, no avatar/name. A tiled seam drops the
-    // row padding on that side; the block asset drops its own to match.
+    // A tiled seam drops the row padding on that side, and the block asset
+    // drops its own to match.
     return markedAsOwn(
       isMe: isMe,
       row: AnimatedContainer(

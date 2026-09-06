@@ -4,26 +4,15 @@ import 'package:flutter_webrtc/flutter_webrtc.dart';
 
 /// Which desktop capture source types the CURRENT session can actually produce.
 ///
-/// Linux is the only platform where this varies. libwebrtc m144 picks a Linux
-/// capturer like this (`modules/desktop_capture/{screen,window}_capturer_linux.cc`):
-///
-///   allow_pipewire + wayland session -> PipeWire / xdg-desktop-portal
-///   NOT a wayland session            -> X11 capturer
-///   otherwise                        -> nullptr
-///
-/// On Wayland there is no window ENUMERATION at all — building a media list
-/// that touches the portal pops an xdg-desktop-portal dialog just to
-/// enumerate, and asking for a window list used to kill the app with a
-/// SIGSEGV inside libwebrtc.so (issue #30). Wayland instead uses a
-/// PORTAL-FIRST picker: the share dialog shows a single entry, and starting
-/// the capture opens the ONE portal prompt where the user picks a screen OR a
-/// window themselves (webrtc's generic PipeWire capturer, wired through the
-/// `wayland-portal:<generation>` deviceId sentinel — `flutter_screen_capture.cc`
-/// and `third_party/libwebrtc/hollow-screencast.patch`).
+/// Wayland is the only case that differs: windows cannot be enumerated there
+/// at all (a media list pops a portal dialog, and a window list used to
+/// SIGSEGV inside libwebrtc, issue #30), so shares ride the
+/// `wayland-portal:<gen>` sentinel and the portal's own picker
+/// (`flutter_screen_capture.cc`).
 class DesktopCaptureSupport {
-  /// A Wayland session. Mirrors libwebrtc's
-  /// `DesktopCapturer::IsRunningUnderWayland()` exactly, so our answer and its
-  /// capturer choice can't disagree.
+  /// A Wayland session, decided exactly as libwebrtc's
+  /// `DesktopCapturer::IsRunningUnderWayland()`, so our answer and its
+  /// capturer choice cannot disagree.
   static bool get isWaylandSession {
     if (!Platform.isLinux) return false;
     final env = Platform.environment;
@@ -31,49 +20,36 @@ class DesktopCaptureSupport {
     return (env['WAYLAND_DISPLAY'] ?? '').isNotEmpty;
   }
 
-  /// Whether individual windows can be ENUMERATED (thumbnail grid). False on
-  /// Wayland — windows are still shareable there, but only through the portal
-  /// picker ([usePortalPicker]).
+  /// Whether windows can be ENUMERATED. False on Wayland (portal picker only).
   static bool get canShareWindows => !isWaylandSession;
 
-  /// Whether the share picker should skip enumeration entirely and delegate
-  /// the choice to the desktop's own xdg-desktop-portal dialog.
+  /// Whether the picker delegates the choice to xdg-desktop-portal.
   static bool get usePortalPicker => isWaylandSession;
 
-  /// The source types worth enumerating on this session. Passing a type that
-  /// can't be produced is harmless (the plugin skips it) but pointless.
-  /// Empty under the portal picker: enumeration itself prompts there.
+  /// Source types worth enumerating. Empty under the portal picker, where
+  /// enumeration itself pops a prompt.
   static List<SourceType> get sourceTypes => usePortalPicker
       ? const []
       : const [SourceType.Screen, SourceType.Window];
 
-  // --- Portal-first restore-token generation -------------------------------
-  //
-  // The native side banks the xdg-desktop-portal restore token under the
-  // generation number inside the sentinel id. Reusing the SAME generation
-  // restores the previous pick without a portal prompt (for the rest of this
-  // process); bumping it forces a fresh prompt. RAM-only by design — tokens
-  // die with the process, matching webrtc's in-memory RestoreTokenManager.
+  // Reusing the SAME portal generation restores the previous pick without a
+  // prompt; bumping it forces a fresh one. RAM-only by design: the native
+  // side's restore tokens die with the process.
 
   static int _portalGeneration = 0;
 
-  /// True once a portal share succeeded this run — the next share can reuse
-  /// the banked portal grant ("share the same thing again") instead of
-  /// re-prompting.
+  /// True once a portal share succeeded this run, so the next can reuse it.
   static bool portalGrantLikely = false;
 
-  /// The deviceId sentinel `getDisplayMedia` understands
-  /// (`flutter_screen_capture.cc`).
+  /// The deviceId sentinel `getDisplayMedia` understands.
   static String get portalSourceId => 'wayland-portal:$_portalGeneration';
 
-  /// Whether [sourceId] is a portal-first sentinel rather than an enumerated
-  /// desktop source id. Such shares must NEVER re-enumerate sources before
-  /// capturing (enumeration pops a portal dialog of its own).
+  /// Whether [sourceId] is a portal-first sentinel. Such a share must NEVER
+  /// re-enumerate sources first: enumeration pops a portal dialog of its own.
   static bool isPortalSourceId(String sourceId) =>
       sourceId.startsWith('wayland-portal:');
 
-  /// Forget the current portal grant so the NEXT share prompts afresh — the
-  /// picker's "choose something else" entry.
+  /// Forgets the current portal grant so the NEXT share prompts afresh.
   static void bumpPortalGeneration() {
     _portalGeneration++;
     portalGrantLikely = false;

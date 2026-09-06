@@ -19,43 +19,34 @@ bool isStickerPackFile(String fileName) =>
     fileName.toLowerCase().endsWith('.$kStickerPackExtension');
 
 /// A received `.hollow-pack`, rendered as an "add this pack" card instead of a
-/// generic file row.
+/// generic file row. Only a nicer face on an ordinary attachment: transfer,
+/// encryption and storage are the plain file path, untouched.
 ///
-/// Sharing a pack IS sending a file — Hollow has nowhere to host bytes, so
-/// there is no pack link and no directory to browse. This card is only a nicer
-/// face on the attachment that already arrived; the transfer, the encryption
-/// and the storage are the ordinary file path, untouched.
-///
-/// Nothing here trusts the file. The name and count are read from its
-/// manifest purely to label the button, the byline appears only when a
-/// signature actually verifies against the author it names, and no image is
-/// previewed before import — a thumbnail would mean pointing a decoder at
-/// un-validated bytes. Every real check lives in `import_sticker_pack`, which
-/// re-hashes and re-decodes each blob.
+/// NOTHING HERE TRUSTS THE FILE. Name and count label the button only, the
+/// byline appears only for a signature that verifies against the author it
+/// names, and no image is previewed before import, because a thumbnail means
+/// pointing a decoder at un-validated bytes. Every real check lives in
+/// `import_sticker_pack`, which re-hashes and re-decodes each blob.
 class StickerPackCard extends ConsumerStatefulWidget {
-  /// Local path of the downloaded pack file. Null until the bytes are here,
-  /// which renders either the in-flight state or the "fetch it" one.
+  /// Local path of the pack file, null until the bytes are here.
   final String? diskPath;
 
-  /// Name as it arrived, used as the label until the manifest is read.
+  /// Name as it arrived, the label until the manifest is read.
   final String fileName;
 
-  /// True only while bytes are actually moving. A pack whose transfer never
-  /// started (or was declined by the auto-download gate, issue #41) is NOT
-  /// downloading — saying "Downloading…" under it forever is the bug this
-  /// separates out (issue #54).
+  /// True only while bytes are actually moving. A pack the auto-download gate
+  /// declined (issue #41) is NOT downloading, and saying so under it forever is
+  /// what this separates out (issue #54).
   final bool isDownloading;
 
   /// 0..1 while [isDownloading].
   final double progress;
 
-  /// Starts the ordinary manual download for this attachment. Null in
-  /// contexts that cannot fetch (an archive viewer).
+  /// Null in a context that cannot fetch, such as an archive viewer.
   final VoidCallback? onDownload;
 
-  /// Why the bytes are not here yet (tmp.txt item 1): the subtitle to show
-  /// instead of "Sticker pack", and whether the Download button is offered at
-  /// all. Defaults to the plain Download button.
+  /// Why the bytes are not here yet: the subtitle shown instead of "Sticker
+  /// pack", and whether the Download button is offered at all.
   final FileCardStatus status;
 
   const StickerPackCard({
@@ -87,7 +78,6 @@ class _StickerPackCardState extends ConsumerState<StickerPackCard> {
   @override
   void didUpdateWidget(StickerPackCard old) {
     super.didUpdateWidget(old);
-    // The file finished downloading after the row first built.
     if (old.diskPath != widget.diskPath) _loadPreview();
   }
 
@@ -129,8 +119,8 @@ class _StickerPackCardState extends ConsumerState<StickerPackCard> {
     }
   }
 
-  /// Partial imports are normal — a pack can run into the vault caps — so
-  /// this reports what actually landed rather than claiming success.
+  /// Partial imports are normal (the vault caps), so this reports what landed
+  /// rather than claiming success.
   String _summary(stickers_api.StickerPackImportResult r) {
     final where = r.pack.isEmpty ? 'your stickers' : '“${r.pack}”';
     if (r.added == 0 && r.skipped > 0 && r.rejected == 0) {
@@ -152,7 +142,7 @@ class _StickerPackCardState extends ConsumerState<StickerPackCard> {
             '');
   }
 
-  /// True when the bytes are not here and nothing is fetching them.
+  /// True when the bytes are absent and nothing is fetching them.
   bool get _needsDownload => widget.diskPath == null && !widget.isDownloading;
 
   String get _subtitle {
@@ -164,15 +154,14 @@ class _StickerPackCardState extends ConsumerState<StickerPackCard> {
         final pct = (widget.progress.clamp(0.0, 1.0) * 100).round();
         return pct > 0 ? 'Downloading… $pct%' : 'Downloading…';
       }
-      // Why the bytes are missing beats the generic label: this is the row
-      // that used to offer a Download button that could do nothing.
+      // Why the bytes are missing beats the generic label.
       return widget.status.caption ?? 'Sticker pack';
     }
     final count = preview.count;
     final label = '$count sticker${count == 1 ? '' : 's'}';
-    // The byline is shown ONLY for a signature that verifies against the
-    // author it claims. Anything else is simply unattributed — anyone may
-    // author a pack, so an unsigned one is not suspicious, just anonymous.
+    // The byline shows ONLY for a signature that verifies against the author it
+    // claims. Anyone may author a pack, so an unsigned one is anonymous rather
+    // than suspicious.
     if (preview.authorVerified && preview.author.isNotEmpty) {
       final short = preview.author.length > 10
           ? preview.author.substring(preview.author.length - 6)
@@ -254,8 +243,7 @@ class _StickerPackCardState extends ConsumerState<StickerPackCard> {
               ),
             ] else if (_needsDownload &&
                 widget.status.control == FileCardControl.busy) ...[
-              // Slow FFI behind a button is a busy state, never a second tap:
-              // the button keeps its footprint and stops taking them.
+              // Slow FFI behind a button is a busy state, never a second tap.
               const SizedBox(height: HollowSpacing.sm),
               SizedBox(
                 width: double.infinity,
@@ -283,8 +271,7 @@ class _StickerPackCardState extends ConsumerState<StickerPackCard> {
                     _done ? LucideIcons.check : LucideIcons.packagePlus,
                     size: 14,
                   ),
-                  // Slow FFI behind a button needs a busy state, not a
-                  // second tap that silently queues another import.
+                  // A second tap would silently queue another import.
                   onPressed: _busy || _done ? null : _add,
                   semanticLabel: 'Add this sticker pack to your stickers',
                   child: Text(_done

@@ -33,17 +33,15 @@ class CategoryBulkAccess {
   });
 }
 
-/// Shows the bulk-access dialog for [channelIds] and applies the result to
-/// every one of them.
+/// Shows the bulk-access dialog for [channelIds] and applies the result to all
+/// of them.
 ///
 /// Shared by the Channels settings editor and the sidebar's category
-/// right-click menu (issue #61) so the two cannot drift on what "apply to the
+/// right-click menu (issue #61), so the two cannot drift on what "apply to the
 /// category" means. The caller resolves the channel set, because each surface
-/// reads the layout from a different place; everything after that is here.
-///
-/// Each channel is updated optimistically and rolled back individually if its
-/// write throws, so one failure never leaves the list showing a change that
-/// did not happen.
+/// reads the layout from a different place. Each channel is updated
+/// optimistically and rolled back individually, so one failure never leaves the
+/// list showing a change that did not happen.
 Future<void> runCategoryBulkAccess({
   required BuildContext context,
   required WidgetRef ref,
@@ -139,9 +137,8 @@ Future<void> runCategoryBulkAccess({
   }
 }
 
-/// Pick access settings to stamp onto every channel of a category. Pure
-/// UI — the caller resolves the channel set (forward-scan of the layout)
-/// and executes the per-channel writes. Returns null on cancel.
+/// Picks access settings to stamp onto every channel of a category. Pure UI:
+/// the caller resolves the channel set and does the writes. Null on cancel.
 Future<CategoryBulkAccess?> showCategoryBulkAccessDialog(
   BuildContext context, {
   required String serverId,
@@ -275,9 +272,8 @@ class _CategoryBulkAccessDialogState extends State<_CategoryBulkAccessDialog> {
     });
   }
 
-  /// One grouped section card: title + faded subtitle on the left, the
-  /// enable toggle on the right, and the tier chips revealed inside the same
-  /// card when enabled — so nothing floats at an arbitrary x-position.
+  /// One grouped section card, with the tier chips revealed inside the same card
+  /// when enabled so nothing floats at an arbitrary x-position.
   Widget _section({
     required HollowTheme hollow,
     required String title,

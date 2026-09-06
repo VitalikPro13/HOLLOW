@@ -20,9 +20,9 @@ import 'package:hollow/src/ui/settings/verify_proof_section.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'dart:io' show Platform;
 
-/// Passphrase prompt shared by App Lock (Security category) and Identity
-/// Backup (Backup category). Returns the entered passphrase, or null if
-/// cancelled. When [confirm] is true a second field must match.
+/// Passphrase prompt shared by App Lock and Identity Backup. Returns the
+/// passphrase, or null if cancelled; [confirm] adds a second field that must
+/// match.
 Future<String?> askPassphraseDialog(BuildContext context, String title,
     {bool confirm = false, String buttonLabel = 'Encrypt'}) async {
   final controller = TextEditingController();
@@ -99,11 +99,10 @@ Future<String?> askPassphraseDialog(BuildContext context, String title,
   );
 }
 
-/// "Always relay calls" — force every real-time connection through the relay
+/// "Always relay calls": forces every real-time connection through the relay,
 /// so co-participants never see this device's IP address.
 ///
-/// Its own ConsumerWidget because [SecurityTab] is a plain StatefulWidget with
-/// no `ref`; converting the whole tab for one row isn't worth the churn.
+/// Its own ConsumerWidget because [SecurityTab] has no `ref`.
 class AlwaysRelayCallsToggle extends ConsumerWidget {
   const AlwaysRelayCallsToggle({super.key});
 
@@ -160,10 +159,9 @@ class AlwaysRelayCallsToggle extends ConsumerWidget {
   }
 }
 
-/// "Peer media forwarding" — while watching a screen share, this desktop may
-/// serve as a blind packet forwarder carrying the (still end-to-end
-/// encrypted) stream to viewers who can't connect directly (media forwarding
-/// step 3 phase 2). ON by default; desktop only.
+/// "Peer media forwarding": while watching a screen share, this desktop may
+/// serve as a blind packet forwarder carrying the still end-to-end encrypted
+/// stream to viewers who cannot connect directly. On by default, desktop only.
 class PeerForwardingToggle extends ConsumerWidget {
   const PeerForwardingToggle({super.key});
 
@@ -220,8 +218,8 @@ class PeerForwardingToggle extends ConsumerWidget {
   }
 }
 
-/// Security category — App Lock + Device Protection + Recovery Phrase,
-/// plus proof verification and the blocked users list.
+/// Security category: App Lock, Device Protection, Recovery Phrase, proof
+/// verification and the blocked users list.
 class SecurityTab extends StatefulWidget {
   const SecurityTab({super.key});
   @override
@@ -261,9 +259,9 @@ class _SecurityTabState extends State<SecurityTab> {
     }
   }
 
-  /// Which protection action is running an Argon2id/keychain FFI right now
-  /// (null = idle). One field for all five buttons — they mutate the same
-  /// identity file and must not overlap; the active button shows a spinner.
+  /// Which protection action is running an Argon2id or keychain FFI, or null.
+  /// One field for all five buttons, because they mutate the same identity file
+  /// and must not overlap.
   String? _busyAction;
 
   Future<void> _runProtectionAction(
@@ -411,7 +409,6 @@ class _SecurityTabState extends State<SecurityTab> {
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // ── Call Privacy ──
           const SettingsSectionLabel(label: 'CALL PRIVACY'),
           const SizedBox(height: HollowSpacing.sm),
           const AlwaysRelayCallsToggle(),
@@ -420,7 +417,6 @@ class _SecurityTabState extends State<SecurityTab> {
 
           const SizedBox(height: HollowSpacing.xl),
 
-          // ── App Lock ──
           const SettingsSectionLabel(label: 'APP LOCK'),
           const SizedBox(height: HollowSpacing.sm),
 
@@ -437,7 +433,6 @@ class _SecurityTabState extends State<SecurityTab> {
 
           const SizedBox(height: HollowSpacing.xl),
 
-          // ── Recovery Phrase ──
           const SettingsSectionLabel(label: 'RECOVERY PHRASE'),
           const SizedBox(height: HollowSpacing.sm),
 
@@ -445,21 +440,18 @@ class _SecurityTabState extends State<SecurityTab> {
 
           const SizedBox(height: HollowSpacing.xl),
 
-          // ── Verify a Proof ──
           const SettingsSectionLabel(label: 'VERIFY A PROOF'),
           const SizedBox(height: HollowSpacing.sm),
           const VerifyProofSection(),
 
           const SizedBox(height: HollowSpacing.xl),
 
-          // ── Verified Contacts ──
           // Every verified badge the app shows is a claim made on the user's
-          // behalf; this is where they can review and withdraw them.
+          // behalf; this is where they review and withdraw them.
           const VerifiedContactsCard(),
 
           const SizedBox(height: HollowSpacing.xl),
 
-          // ── Blocked Users ──
           const BlockedUsersCard(),
         ],
       ),
@@ -746,7 +738,6 @@ class _SecurityTabState extends State<SecurityTab> {
 
   List<Widget> _mnemonicPresentChildren(HollowTheme hollow) {
     return [
-      // Mnemonic container
       Container(
         width: double.infinity,
         padding: const EdgeInsets.all(HollowSpacing.md),
@@ -776,7 +767,6 @@ class _SecurityTabState extends State<SecurityTab> {
 
       const SizedBox(height: HollowSpacing.sm),
 
-      // Reveal / Hide button + Copy button
       Row(
         children: [
           HollowButton.ghost(
@@ -807,7 +797,6 @@ class _SecurityTabState extends State<SecurityTab> {
 
       const SizedBox(height: HollowSpacing.sm),
 
-      // Warning text
       Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -836,7 +825,6 @@ class _SecurityTabState extends State<SecurityTab> {
 
   Widget _buildWordGrid(HollowTheme hollow) {
     final words = _mnemonic!.split(' ');
-    // 6 rows x 4 columns (easier to read, less cramped)
     const cols = 4;
     final rows = (words.length / cols).ceil();
     return Column(

@@ -5,8 +5,7 @@ import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_focus_ring.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-/// Canonical preset palette for label colors (desktop and mobile share it —
-/// they used to carry two divergent 9-color lists).
+/// Canonical preset palette for label colours, shared by desktop and mobile.
 const kLabelPresetColors = <Color>[
   Color(0xFFEF4444), Color(0xFFF97316), Color(0xFFEAB308),
   Color(0xFF22C55E), Color(0xFF06B6D4), Color(0xFF3B82F6),
@@ -21,15 +20,13 @@ Color parseLabelColor(String hex) {
   return const Color(0xFF78909C);
 }
 
-/// Short peer-id suffix ("…T7iS4F") for disambiguating members who share a
-/// display name (and possibly an avatar) in member pickers. Ellipsis + the
-/// last 6 characters; ids too short to truncate pass through unchanged.
+/// Short peer-id suffix ("…T7iS4F") that tells apart members sharing a display
+/// name. An id too short to truncate passes through unchanged.
 String shortPeerIdSuffix(String peerId) =>
     peerId.length > 10 ? '…${peerId.substring(peerId.length - 6)}' : peerId;
 
-/// Cosmetic-vs-Access selector chip for the label create/edit dialog
-/// (selection state is a chip, never a filled button). Shared by the
-/// desktop Labels tab and the mobile Labels route.
+/// Cosmetic-vs-Access selector for the label create and edit dialog. Selection
+/// state is a chip, never a filled button.
 class LabelTypeChip extends StatelessWidget {
   final IconData icon;
   final String text;
@@ -83,10 +80,8 @@ class LabelTypeChip extends StatelessWidget {
   }
 }
 
-/// A selectable label chip (the self-assign picker visual). Access labels
-/// carry a shield glyph; `locked` renders the dimmed non-self-service look —
-/// still focusable, and activation fires [onTap] so the caller can ANNOUNCE
-/// why it is locked (tooltip/toast) instead of silently no-oping.
+/// A selectable label chip. `locked` dims it but keeps it focusable and still
+/// fires [onTap], so the caller can ANNOUNCE why rather than silently no-op.
 class LabelChip extends StatelessWidget {
   final crdt_api.LabelFfi label;
   final bool selected;
@@ -127,8 +122,8 @@ class LabelChip extends StatelessWidget {
             Icon(LucideIcons.shieldCheck, size: 12, color: c),
             const SizedBox(width: 4),
           ],
-          // Label names are free-form user content — ellipsize so a long
-          // name can't overflow the chip Row at high text scale.
+          // Label names are free-form user content, so a long one must not
+          // overflow the chip at high text scale.
           Flexible(
             child: Text(
               label.name,

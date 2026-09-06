@@ -8,9 +8,7 @@ import '../../rust/api/emotes.dart' as emotes_api;
 /// user's personal (global) set.
 ///
 /// Bytes are content-addressed and pulled on demand: a missing hash triggers
-/// ONE `requestEmotes` per session (Rust throttles per-connection too), and
-/// `EmoteAssetsReceived` invalidates [emoteBytesProvider] so pending tokens
-/// re-render. Receivers never fetch emote images over HTTP.
+/// ONE `requestEmotes` per session. Receivers never fetch emote images over HTTP.
 
 /// Cached emote bytes for a content hash. `null` = not cached locally (yet).
 final emoteBytesProvider =
@@ -44,9 +42,8 @@ final personalEmotesProvider =
   }
 });
 
-/// Hashes already requested from the network this session (Dart-side
-/// debounce — every rendered unknown token would otherwise cross FFI on
-/// each rebuild).
+/// Hashes already requested this session: every rendered unknown token would
+/// otherwise cross the FFI on each rebuild.
 final _requestedHashes = <String>{};
 
 /// Pull emote bytes for [hash] from the network, once per session.
@@ -64,10 +61,9 @@ void requestEmoteOnce(String hash, {String? serverId, String? peerHint}) {
   } catch (_) {}
 }
 
-/// Pull asset bytes (sticker/GIF/banner) for [hash] from the network, once
-/// per session. [kind] is the db kind string (`sticker` | `gif` | `banner`)
-/// — it sizes the per-blob cap Rust enforces on receipt. Same rail and same
-/// [emoteBytesProvider] cache as emotes (blobs are content-addressed).
+/// Pull asset bytes (sticker/GIF/banner) for [hash] once per session. [kind] is
+/// the db kind string, which sizes the per-blob cap Rust enforces. Same rail
+/// and same [emoteBytesProvider] cache as emotes.
 void requestAssetOnce(String hash,
     {required String kind, String? serverId, String? peerHint}) {
   if (_requestedHashes.contains(hash)) return;
@@ -81,9 +77,8 @@ void requestAssetOnce(String hash,
   } catch (_) {}
 }
 
-/// Allow a re-pull after new bytes arrive elsewhere or on reconnect-driven
-/// invalidation (called from the event stream when assets land, so a hash
-/// that failed once isn't locked out forever).
+/// Allow a re-pull after new bytes arrive elsewhere, so a hash that failed
+/// once isn't locked out forever.
 void clearRequestedEmotes(Iterable<String> hashes) {
   for (final h in hashes) {
     _requestedHashes.remove(h);

@@ -20,8 +20,7 @@ class VideoThumbnailResult {
   /// Original video duration in milliseconds.
   final int durationMs;
 
-  /// Original video width in pixels (NOT thumbnail width — thumbnail is scaled
-  /// down to a fixed target height while preserving aspect ratio).
+  /// Original video width in pixels, not the thumbnail's.
   final int sourceWidth;
 
   /// Original video height in pixels.
@@ -35,25 +34,19 @@ class VideoThumbnailResult {
   });
 }
 
-/// Extracts a single first-frame thumbnail from a video file using a bundled
-/// ffmpeg binary, encoded as lossless WebP.
+/// Extracts a single first-frame thumbnail from a video file as lossless WebP,
+/// using the ffmpeg binary bundled next to the running executable by
+/// `scripts/fetch_ffmpeg.{ps1,sh}` and the per-platform build.
 ///
-/// The bundled binary is located via [findFfmpegBinary] which checks the
-/// directory containing the running executable. The binary is shipped via
-/// `scripts/fetch_ffmpeg.{ps1,sh}` and bundled into the Flutter build by the
-/// per-platform CMakeLists.txt / Xcode build phase.
-///
-/// All errors are swallowed and surfaced as `null` — never throws. Callers
-/// should handle the null case by falling back to a degraded UI (e.g. send
-/// the video to vault without a companion thumbnail message).
+/// All errors surface as `null` and none escape, so a caller falls back to a
+/// degraded UI rather than failing the send.
 class VideoThumbnailService {
   static String? _cachedFfmpegPath;
   static bool _searchedForFfmpeg = false;
 
-  /// Returns the absolute path to the bundled ffmpeg binary if found, or null.
-  ///
-  /// Looks next to the running executable (where CMake / Xcode bundles it).
-  /// Result is cached after the first call.
+  /// Absolute path to the bundled ffmpeg binary, or null. Looks next to the
+  /// running executable, where CMake and Xcode put it. Cached after the first
+  /// call.
   static String? findFfmpegBinary() {
     if (_searchedForFfmpeg) return _cachedFfmpegPath;
     _searchedForFfmpeg = true;
@@ -101,16 +94,12 @@ class VideoThumbnailService {
     }
   }
 
-  /// Whether thumbnail extraction is available on this install.
-  /// Returns true if the bundled ffmpeg binary was found.
+  /// Whether thumbnail extraction is available, meaning ffmpeg was found.
   static bool get isAvailable => findFfmpegBinary() != null;
 
-  /// Returns the canonical local thumbnail cache path for a video file.
-  ///
-  /// Always places thumbnails in `~/.hollow/files/` so they don't leak
-  /// into the user's documents/downloads folders.
-  ///
-  /// Returns null if [videoPath] is not a recognized video file path.
+  /// Canonical local thumbnail cache path for a video file, always under
+  /// `~/.hollow/files/` so thumbnails do not leak into the user's documents or
+  /// downloads. Null when [videoPath] is not a recognized video file path.
   static String? thumbCachePathFor(String videoPath) {
     try {
       final base = p.basenameWithoutExtension(videoPath);
@@ -136,12 +125,9 @@ class VideoThumbnailService {
     return File(cachePath).existsSync() ? cachePath : null;
   }
 
-  /// Extract a thumbnail for [videoPath] and persist it to the local cache
-  /// at `{video}.thumb.webp`. If the cache file already exists, returns its
-  /// path immediately without re-extracting.
-  ///
-  /// Returns the cache path on success, null on any failure (no ffmpeg, no
-  /// permissions, extraction crashed, etc.).
+  /// Extracts a thumbnail for [videoPath] and persists it at
+  /// `{video}.thumb.webp`, returning an existing cache file immediately.
+  /// Null on any failure: no ffmpeg, no permissions, a crashed extraction.
   static Future<String?> ensureCachedThumb(String videoPath) async {
     final cachePath = thumbCachePathFor(videoPath);
     if (cachePath == null) return null;
@@ -160,16 +146,11 @@ class VideoThumbnailService {
     }
   }
 
-  /// Extracts a first-frame thumbnail from [videoPath] as a lossless WebP.
+  /// Extracts a first-frame thumbnail from [videoPath] as lossless WebP,
+  /// scaled to [targetHeight] pixels tall with the width rounded to an even
+  /// number for codec compatibility.
   ///
-  /// The thumbnail is scaled to [targetHeight] pixels tall (default 480),
-  /// preserving aspect ratio (width is computed automatically and rounded
-  /// to the nearest even number for codec compatibility).
-  ///
-  /// Returns null on any failure (binary missing, ffmpeg crash, timeout,
-  /// unsupported format, corrupt video). Never throws.
-  ///
-  /// Times out after 10 seconds.
+  /// Null on any failure, never throws. Times out after 10 seconds.
   static Future<VideoThumbnailResult?> extractVideoThumbnail({
     required String videoPath,
     int targetHeight = 480,
@@ -190,25 +171,16 @@ class VideoThumbnailService {
       tempDir = await Directory.systemTemp.createTemp('hollow_thumb_');
       final outPath = p.join(tempDir.path, 'thumb.webp');
 
-      // -y                       overwrite output without asking
-      // -ss 00:00:00.5           seek 0.5s in (avoids fully-black first frame)
-      // -i <video>               input
-      // -vf scale=-2:H           scale to height H, width auto (even)
-      // -frames:v 1              output one frame
-      // -update 1                single-image output (no %d pattern needed)
-      // -c:v libwebp             use libwebp encoder
-      // -lossless 1              lossless mode (matches Hollow image pipeline)
-      // -compression_level 6     max compression effort
-      // -f image2                explicit muxer — the bundled MINIMAL ffmpeg
-      //                          (vendor/ffmpeg, --disable-everything) has no
-      //                          `webp` muxer, so the .webp extension can't
-      //                          drive the format guess
+      // -ss 00:00:00.5 avoids a fully-black first frame, and `-f image2` is
+      // explicit because the bundled MINIMAL ffmpeg (vendor/ffmpeg,
+      // --disable-everything) has no `webp` muxer for the extension to
+      // drive the format guess.
       //
-      // CRITICAL — flags must exist in the MINIMAL build: `-pred mixed` was
-      // rejected with "Unrecognized option" by the n7.1 minimal build, which
-      // silently killed EVERY thumbnail extraction (and with it video
-      // dimensions + posters). Test any new flag against the bundled binary,
-      // not a system ffmpeg.
+      // CRITICAL: every flag must exist in the MINIMAL build. `-pred mixed`
+      // was rejected as "Unrecognized option" by the n7.1 minimal build and
+      // silently killed EVERY thumbnail extraction, taking video dimensions
+      // and posters with it. Test a new flag against the bundled binary,
+      // never a system ffmpeg.
       final result = await Process.run(
         ffmpeg,
         [
@@ -230,9 +202,8 @@ class VideoThumbnailService {
 
       if (result.exitCode != 0) {
         final stderrStr = _bytesToString(result.stderr);
-        // Log the TAIL of stderr — ffmpeg prints its version banner + build
-        // config first, so a head-truncated log shows only the banner and
-        // hides the actual error (exactly how the -pred failure went unseen).
+        // Log the TAIL of stderr: ffmpeg prints its version banner and build
+        // config first, so a head-truncated log hides the actual error.
         _log('[VideoThumbnail] ffmpeg exit ${result.exitCode}: ${_tail(stderrStr, 500)}');
         return null;
       }
@@ -248,8 +219,8 @@ class VideoThumbnailService {
         return null;
       }
 
-      // ffmpeg writes its probe info (Duration, Stream details) to stderr even
-      // on success. Parse it to recover source dimensions + duration.
+      // ffmpeg writes its probe info (Duration, Stream details) to stderr
+      // even on success, so parse it for the source dimensions and duration.
       final stderrStr = _bytesToString(result.stderr);
       final parsed = _parseFfmpegStderr(stderrStr);
 
@@ -279,8 +250,6 @@ class VideoThumbnailService {
     }
   }
 
-  // ---- helpers ----
-
   static String _bytesToString(dynamic bytes) {
     if (bytes is List<int>) {
       try {
@@ -296,11 +265,8 @@ class VideoThumbnailService {
   static String _tail(String s, int max) =>
       s.length <= max ? s : '...${s.substring(s.length - max)}';
 
-  /// Parses ffmpeg's stderr probe output for duration + source video dimensions.
-  ///
-  /// Example lines:
-  ///   `  Duration: 00:01:23.45, start: 0.000000, bitrate: 1234 kb/s`
-  ///   `    Stream #0:0[0x1](und): Video: h264 (...), yuv420p, 1920x1080, ...`
+  /// Parses ffmpeg's stderr probe output for the duration and the source
+  /// video dimensions.
   static _ParsedProbe _parseFfmpegStderr(String stderr) {
     int durationMs = 0;
     int width = 0;
@@ -321,8 +287,8 @@ class VideoThumbnailService {
       durationMs = ((h * 3600 + m * 60 + s) * 1000) + ms;
     }
 
-    // Source video dimensions — first WxH after a "Video:" stream line.
-    // Use the first stream's dimensions (the primary video track).
+    // Source dimensions: the first WxH after a "Video:" stream line, which
+    // is the primary video track.
     final videoStreamRe = RegExp(r'Stream #\d+:\d+.*?: Video:.*?(\d{2,5})x(\d{2,5})');
     final videoMatch = videoStreamRe.firstMatch(stderr);
     if (videoMatch != null) {

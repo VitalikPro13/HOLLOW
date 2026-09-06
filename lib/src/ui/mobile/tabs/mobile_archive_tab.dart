@@ -41,15 +41,14 @@ class MobileArchiveTab extends ConsumerWidget {
     final subTab = ref.watch(archiveSubTabProvider);
     final activeTab = ref.watch(mobileTabProvider);
 
-    // Defer data loading until the Archive tab is actually visible.
-    // The message store may not be open when the app first boots.
+    // Deferred until the tab is visible: the message store may not be open
+    // when the app first boots.
     if (activeTab != 2) {
       return const SizedBox.shrink();
     }
 
     return Column(
       children: [
-        // ── Top header + sub-tab pills ──
         Container(
           padding: const EdgeInsets.fromLTRB(
             HollowSpacing.lg,
@@ -95,7 +94,6 @@ class MobileArchiveTab extends ConsumerWidget {
           ),
         ),
 
-        // ── Body ──
         Expanded(
           child: AnimatedSwitcher(
             duration: const Duration(milliseconds: 200),
@@ -110,8 +108,6 @@ class MobileArchiveTab extends ConsumerWidget {
     );
   }
 }
-
-// ── Sub-tab pill ───────────────────────────────────────────────
 
 class _SubTabPill extends StatelessWidget {
   final String label;
@@ -160,8 +156,6 @@ class _SubTabPill extends StatelessWidget {
   }
 }
 
-// ── My Data view ───────────────────────────────────────────────
-
 class _MobileMyDataView extends ConsumerStatefulWidget {
   const _MobileMyDataView({super.key});
 
@@ -180,7 +174,6 @@ class _MobileMyDataViewState extends ConsumerState<_MobileMyDataView> {
 
     return Column(
       children: [
-        // Inner pill tabs: DMs | Channels | Vault
         Padding(
           padding: const EdgeInsets.fromLTRB(
             HollowSpacing.md,
@@ -224,7 +217,6 @@ class _MobileMyDataViewState extends ConsumerState<_MobileMyDataView> {
         ),
 
         if (innerTab != MyDataInnerTab.vaultFiles) ...[
-          // Search field
           Padding(
             padding: const EdgeInsets.symmetric(
               horizontal: HollowSpacing.md,
@@ -242,7 +234,6 @@ class _MobileMyDataViewState extends ConsumerState<_MobileMyDataView> {
           const SizedBox(height: HollowSpacing.xs),
         ],
 
-        // Content list
         Expanded(
           child: switch (innerTab) {
             MyDataInnerTab.dms => _MobileDmList(
@@ -304,8 +295,6 @@ class _InnerTabPill extends StatelessWidget {
   }
 }
 
-// ── DM list ────────────────────────────────────────────────────
-
 class _MobileDmList extends ConsumerWidget {
   final bool hiddenExpanded;
   final VoidCallback onToggleHidden;
@@ -330,8 +319,8 @@ class _MobileDmList extends ConsumerWidget {
             style: TextStyle(color: hollow.error)),
       ),
       data: (entries) {
-        // The self-DM renders as "Saved messages" — search should match that
-        // label, not your own profile name.
+        // The self-DM renders as "Saved messages", so search matches that label
+        // rather than your own profile name.
         final savedId = ref.watch(savedMessagesPeerIdProvider);
         final filtered = search.isEmpty
             ? entries
@@ -446,7 +435,7 @@ class _MobileDmList extends ConsumerWidget {
     bool isHidden,
   ) {
     final hollow = HollowTheme.of(context);
-    // Export dialog title: the self-DM is "Saved messages", not your own name.
+    // The self-DM is "Saved messages" here too, never your own name.
     final name = entry.peerId == ref.read(savedMessagesPeerIdProvider)
         ? 'Saved messages'
         : displayNameFor(profiles, entry.peerId);
@@ -563,8 +552,8 @@ class _MobileDmRow extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final hollow = HollowTheme.of(context);
-    // Self-DM = Saved messages: bookmark avatar + fixed label instead of your
-    // own profile name/picture. Row behavior (open/hide/export) is unchanged.
+    // The self-DM gets a bookmark avatar and fixed label instead of your own
+    // name and picture; the row's behaviour is unchanged.
     final isSaved = entry.peerId == ref.watch(savedMessagesPeerIdProvider);
     final peerProfile =
         ref.watch(profileProvider.select((p) => p[entry.peerId]));
@@ -697,8 +686,6 @@ class _HiddenHeader extends StatelessWidget {
     );
   }
 }
-
-// ── Channel list ───────────────────────────────────────────────
 
 class _MobileChannelList extends ConsumerWidget {
   const _MobileChannelList();
@@ -1076,8 +1063,6 @@ class _ChannelListItem {
         group = null;
 }
 
-// ── Vault Files view ─────────────────────────────────────────
-
 class _MobileVaultFilesView extends ConsumerWidget {
   const _MobileVaultFilesView({super.key});
 
@@ -1116,7 +1101,6 @@ class _MobileVaultFilesView extends ConsumerWidget {
 
     return Column(
       children: [
-        // Join Recovery Pool button
         Padding(
           padding: const EdgeInsets.fromLTRB(
             HollowSpacing.md, HollowSpacing.sm, HollowSpacing.md, HollowSpacing.xs,
@@ -1150,7 +1134,6 @@ class _MobileVaultFilesView extends ConsumerWidget {
             ),
           ),
         ),
-        // Server list
         Expanded(
           child: ListView.builder(
             padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.md),
@@ -1543,8 +1526,6 @@ class _VaultFileRow extends StatelessWidget {
   }
 }
 
-// ── Imported archives view ─────────────────────────────────────
-
 class _MobileImportedArchivesView extends ConsumerStatefulWidget {
   const _MobileImportedArchivesView({super.key});
 
@@ -1555,9 +1536,8 @@ class _MobileImportedArchivesView extends ConsumerStatefulWidget {
 
 class _MobileImportedArchivesViewState
     extends ConsumerState<_MobileImportedArchivesView> {
-  // Gates the Load button while verifyArchive runs (Ed25519 over the whole
-  // archive — seconds for a large one). Parity with desktop
-  // imported_archives_view.dart.
+  // Gates the Load button while verification runs: Ed25519 over the whole
+  // archive takes seconds for a large one.
   bool _loading = false;
 
   Future<void> _pickArchive() async {
@@ -1605,7 +1585,6 @@ class _MobileImportedArchivesViewState
 
     return Column(
       children: [
-        // Load button
         Padding(
           padding: const EdgeInsets.all(HollowSpacing.md),
           child: HollowPressable(
@@ -1650,7 +1629,6 @@ class _MobileImportedArchivesViewState
           ),
         ),
 
-        // Archive list
         Expanded(
           child: pathsAsync.when(
             loading: () =>

@@ -42,7 +42,6 @@ class _ArchiveMessageViewerState extends ConsumerState<ArchiveMessageViewer> {
     if (dm != _prevDm || channel != _prevChannel) {
       _prevDm = dm;
       _prevChannel = channel;
-      // Reset filter, search, and jump-to-date state.
       ref.read(archiveFilterSenderProvider.notifier).state = null;
       ref.read(archiveMessageSearchOpenProvider.notifier).state = false;
       ref.read(archiveMessageSearchQueryProvider.notifier).state = '';
@@ -96,8 +95,6 @@ class _ArchiveMessageViewerState extends ConsumerState<ArchiveMessageViewer> {
     );
   }
 }
-
-// ── DM Viewer ───────────────────────────────────────────────────
 
 class _ArchiveDmViewer extends ConsumerWidget {
   final String peerId;
@@ -213,7 +210,6 @@ class _DmMessageListState extends ConsumerState<_DmMessageList> {
       proofContextFor: (msg) => msg.isMe ? widget.peerId : localPeerId,
       proofMsgType: 'dm',
       desktopChrome: true,
-      // Hover actions (Save, Copy, Copy Image, Message Proof).
       actionWrapper: (context, msg, child) {
         final senderPeerId = msg.isMe ? localPeerId : widget.peerId;
         return MessageHoverWrapper(
@@ -338,8 +334,6 @@ class _DmMessageListState extends ConsumerState<_DmMessageList> {
   }
 }
 
-// ── Channel Viewer ──────────────────────────────────────────────
-
 class _ArchiveChannelViewer extends ConsumerWidget {
   final String serverId;
   final String channelId;
@@ -358,7 +352,6 @@ class _ArchiveChannelViewer extends ConsumerWidget {
     final filterSender = ref.watch(archiveFilterSenderProvider);
     final searchOpen = ref.watch(archiveMessageSearchOpenProvider);
 
-    // Get channel/server name from the channel list provider.
     final channelGroups = ref.watch(archiveChannelListProvider).valueOrNull;
     String channelName = channelId;
     String serverName = serverId;
@@ -410,7 +403,6 @@ class _ArchiveChannelViewer extends ConsumerWidget {
             senderAvatars: senderAvatars,
             onSenderFilterChanged: (sender) {
               ref.read(archiveFilterSenderProvider.notifier).state = sender;
-              // Reset search state when filter changes.
               ref.read(archiveMessageSearchQueryProvider.notifier).state = '';
               ref.read(archiveSearchMatchIndexProvider.notifier).state = 0;
             },
@@ -518,7 +510,6 @@ class _ChannelMessageListState extends ConsumerState<_ChannelMessageList> {
       proofContext: '${widget.serverId}:${widget.channelId}',
       proofMsgType: 'ch',
       desktopChrome: true,
-      // Hover actions (Save, Copy, Copy Image, Message Proof).
       actionWrapper: (context, msg, child) => MessageHoverWrapper(
         isMe: msg.isMe,
         messageId: msg.messageId,

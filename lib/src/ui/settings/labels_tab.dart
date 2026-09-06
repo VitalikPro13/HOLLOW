@@ -18,7 +18,7 @@ import 'package:hollow/src/ui/components/member_search_picker.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-/// Labels tab — everyone can self-assign labels, MANAGE_ROLES holders can create/delete/manage.
+/// Labels tab: everyone can self-assign, MANAGE_ROLES holders can manage.
 class LabelsTab extends ConsumerStatefulWidget {
   final String serverId;
 
@@ -83,9 +83,8 @@ class _LabelsTabState extends ConsumerState<LabelsTab> {
     }
   }
 
-  /// Create (existing == null) or edit a label. The Cosmetic/Access choice
-  /// is part of the same dialog: access labels gate channels and are only
-  /// assignable by staff.
+  /// Creates or edits a label. The Cosmetic/Access choice is part of the same
+  /// dialog: access labels gate channels and are staff-assignable only.
   void _showLabelDialog({crdt_api.LabelFfi? existing}) {
     var name = existing?.name ?? '';
     var selectedColor = existing != null
@@ -237,7 +236,7 @@ class _LabelsTabState extends ConsumerState<LabelsTab> {
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
 
-    // Reload when server state updates from remote peers (create/delete labels)
+    // Remote peers create and delete labels too.
     ref.listen(serverMembersProvider(widget.serverId), (_, _) => _loadLabels());
 
     final labels = _labels;
@@ -259,7 +258,6 @@ class _LabelsTabState extends ConsumerState<LabelsTab> {
     return ListView(
       padding: const EdgeInsets.all(HollowSpacing.xl),
       children: [
-        // Self-assign section — visible to everyone
         if (labels.isNotEmpty) ...[
           Text(
             'Pick your labels',
@@ -277,8 +275,8 @@ class _LabelsTabState extends ConsumerState<LabelsTab> {
             runSpacing: 8,
             children: labels.map((l) {
               final selected = _myLabelIds.contains(l.labelId);
-              // Access labels are staff-assigned: locked look, activation
-              // ANNOUNCES why instead of silently no-oping.
+              // Access labels are staff-assigned, so activation ANNOUNCES why
+              // instead of silently doing nothing.
               if (l.access) {
                 return HollowTooltip(
                   message: 'Access labels are assigned by staff',
@@ -301,7 +299,6 @@ class _LabelsTabState extends ConsumerState<LabelsTab> {
           const SizedBox(height: HollowSpacing.xl),
         ],
 
-        // Management section — MANAGE_ROLES only
         if (canManage) ...[
           Row(
             children: [
@@ -412,9 +409,9 @@ class _LabelsTabState extends ConsumerState<LabelsTab> {
   }
 }
 
-/// Opens the "Assign <label>" member picker. Public so widget tests and the
-/// screenshot harness can drive the dialog without pumping the full Labels
-/// tab (whose load path calls FFI directly).
+/// Opens the "Assign <label>" member picker. Public so the widget tests and the
+/// screenshot harness can drive it without pumping the whole Labels tab, whose
+/// load path calls FFI directly.
 Future<void> showLabelAssignDialog(
   BuildContext context, {
   required String serverId,
@@ -449,10 +446,9 @@ class _AssignDialog extends ConsumerStatefulWidget {
 class _AssignDialogState extends ConsumerState<_AssignDialog> {
   Set<String> _assignedPeerIds = {};
 
-  /// Seed the checkmarks ONCE from the first member data we see. Never
-  /// re-derived after that: _toggle invalidates serverMembersProvider and the
-  /// refetch can race the queued CRDT write (read-after-write returns the
-  /// PREVIOUS value), which would visually revert an optimistic toggle.
+  /// Seeded ONCE from the first member data and never re-derived: the refetch
+  /// after a toggle races the queued CRDT write and returns the PREVIOUS value,
+  /// which would visually revert the optimistic toggle.
   bool _seeded = false;
 
   @override
@@ -509,8 +505,8 @@ class _AssignDialogState extends ConsumerState<_AssignDialog> {
     final profiles = ref.watch(profileProvider);
     final color = parseLabelColor(widget.label.color);
 
-    // Members may still be loading when the dialog opens — seed the
-    // checkmarks from the first data that arrives (once; see _seeded).
+    // Members may still be loading when the dialog opens, so the first data to
+    // arrive is what seeds the checkmarks.
     ref.listen(serverMembersProvider(widget.serverId), (_, next) {
       next.whenData(_seedAssignments);
     });

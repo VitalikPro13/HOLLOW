@@ -7,11 +7,8 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
 
-/// Show a Hollow-styled dialog with custom entrance/exit animation.
-///
-/// Entrance: scale 0.95→1.0 + fade in, 200ms easeOutCubic.
-/// Full-screen BackdropFilter blurs everything behind the dialog.
-/// Blur animates 0→8 alongside the dialog entrance.
+/// Shows a Hollow-styled dialog: scale and fade in, with a full-screen blur
+/// behind it that comes up alongside the entrance.
 Future<T?> showHollowDialog<T>({
   required BuildContext context,
   required WidgetBuilder builder,
@@ -35,8 +32,7 @@ Future<T?> showHollowDialog<T>({
         builder: (context, dialogChild) {
           return Stack(
             children: [
-              // Blur layer — fades with dialog. Reduce Transparency drops the
-              // sigma to 0 (no glassmorphism) and reacts live.
+              // Reduce Transparency drops the sigma to 0, live.
               ValueListenableBuilder<bool>(
                 valueListenable: reduceTransparencyFlag,
                 builder: (context, reduce, _) {
@@ -52,7 +48,6 @@ Future<T?> showHollowDialog<T>({
                   );
                 },
               ),
-              // Dialog content — scale + fade.
               FadeTransition(
                 opacity: curvedAnimation,
                 child: ScaleTransition(
@@ -68,9 +63,8 @@ Future<T?> showHollowDialog<T>({
       );
     },
     pageBuilder: (context, _, _) {
-      // Keyboard avoidance for every dialog (mirrors Flutter's Dialog):
-      // pad by the keyboard inset so centered content shifts up instead of
-      // being covered, and strip viewInsets so inner layouts don't double-pad.
+      // Keyboard avoidance for EVERY dialog: pad by the inset so centred
+      // content shifts up, and strip viewInsets so a builder cannot double-pad.
       return AnimatedPadding(
         padding: MediaQuery.viewInsetsOf(context),
         duration: const Duration(milliseconds: 100),
@@ -88,9 +82,8 @@ Future<T?> showHollowDialog<T>({
   );
 }
 
-/// Hollow-styled dialog widget — dark, integrated feel.
-///
-/// Use with [showHollowDialog] for proper entrance/exit animation.
+/// Hollow-styled dialog widget. Use it with [showHollowDialog], which owns the
+/// entrance and exit animation.
 class HollowDialog extends StatelessWidget {
   final String title;
   final Widget content;
@@ -110,15 +103,14 @@ class HollowDialog extends StatelessWidget {
     final screenSize = MediaQuery.sizeOf(context);
     final screenWidth = screenSize.width;
     final isCompact = screenWidth < 600;
-    // Phones: span the available width (minus outer padding) so dialogs feel
-    // native. Desktop: shrink-wrap between 300 and 600 as before.
+    // Phones span the available width so dialogs feel native; desktop
+    // shrink-wraps between 300 and 600.
     final minWidth = isCompact
         ? (screenWidth - HollowSpacing.xl * 2).clamp(0.0, 600.0)
         : 300.0;
-    // Cap the dialog height to the available screen (minus outer padding) so
-    // the Flexible scroll region actually clamps and the sticky action bar
-    // never gets pushed off-screen on short displays (e.g. small iPhones with
-    // the keyboard up). Without this the Column grows unbounded.
+    // Capped to the available screen so the Flexible scroll region clamps and
+    // the sticky action bar is never pushed off a short display; without it the
+    // Column grows unbounded.
     final maxHeight =
         (screenSize.height - HollowSpacing.xl * 2).clamp(0.0, double.infinity);
 
@@ -160,8 +152,6 @@ class HollowDialog extends StatelessWidget {
                     ),
                     const SizedBox(height: HollowSpacing.lg),
                   ],
-                  // Scrolls when content exceeds the space left by the
-                  // keyboard/screen instead of overflowing.
                   Flexible(
                     child: SingleChildScrollView(
                       child: content,

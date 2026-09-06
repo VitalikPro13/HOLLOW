@@ -14,14 +14,8 @@ use crate::identity::data_dir;
 
 pub(crate) const APP_VERSION: &str = "0.11.0";
 
-/// Ed25519 public keys (hex) allowed to sign the update manifest. The private
-/// half lives with the release engineer, never in the repo: `hollow-manifest
-/// sign` (rust/hollow_manifest) writes `manifest.json.sig` next to
-/// `manifest.json`, and `fetch_version_manifest` refuses a manifest whose
-/// signature does not verify against one of these. That is what makes a
-/// rewritten manifest on the download host worthless: the host can serve
-/// bytes, it cannot mint a signature. More than one entry only while a key
-/// is being rotated.
+/// Keys allowed to sign `manifest.json`; the private half never enters the repo.
+/// More than one entry only during a key rotation.
 const MANIFEST_SIGNING_PUBKEYS: &[&str] = &[
     "b6fcb5b64cd5317b470b31ac08892528b0d5c9e82c6cdaa13654a7c9e7f8b09c",
 ];
@@ -40,10 +34,10 @@ pub fn get_current_version() -> String {
     APP_VERSION.to_string()
 }
 
-/// How this Linux copy of Hollow was installed: `"flatpak"` or `"tarball"`.
-/// Empty on every other platform. Dart branches its update UI on this (a
-/// flatpak has a read-only `/app`, so the "can I write to the app dir" probe
-/// is meaningless there), and every Linux path below reads the SAME detection.
+/// How this Linux copy of Hollow was installed: `"flatpak"` or `"tarball"`, empty
+/// elsewhere. Dart branches its update UI on it (a flatpak's `/app` is read-only, so
+/// the "can I write to the app dir" probe is meaningless there) and every Linux path
+/// below reads the SAME detection.
 #[frb(sync)]
 pub fn linux_install_kind() -> String {
     install_kind_impl()
@@ -59,10 +53,10 @@ fn install_kind_impl() -> String {
     String::new()
 }
 
-/// Fetches `manifest.json` AND its `manifest.json.sig` sidecar, and returns
-/// the manifest text only when the signature verifies against
-/// [`MANIFEST_SIGNING_PUBKEYS`]. The signature covers the manifest's exact
-/// bytes, so the text handed to Dart is byte for byte what was signed.
+/// Fetches `manifest.json` AND its `manifest.json.sig` sidecar, returning the manifest
+/// text only when the signature verifies against [`MANIFEST_SIGNING_PUBKEYS`]. The
+/// signature covers the exact bytes, so what Dart gets is byte for byte what was
+/// signed.
 #[frb]
 pub fn fetch_version_manifest(manifest_url: String) -> Result<String, String> {
     let rt = get_runtime();
@@ -82,10 +76,9 @@ pub fn fetch_version_manifest(manifest_url: String) -> Result<String, String> {
     })
 }
 
-/// Plain fetch for the OTHER release-folder feeds (news.json, status.json):
-/// display-only text with no signature sidecar. Nothing downloaded through
-/// here is ever executed or installed; the update manifest itself must go
-/// through [`fetch_version_manifest`].
+/// Plain fetch for the OTHER release-folder feeds, display-only text with no signature
+/// sidecar. Nothing fetched here is ever executed or installed; the update manifest
+/// goes through [`fetch_version_manifest`].
 #[frb]
 pub fn fetch_release_feed(url: String) -> Result<String, String> {
     let rt = get_runtime();
@@ -123,10 +116,9 @@ fn signature_url(manifest_url: &str) -> String {
     }
 }
 
-/// The app's manifest check: base64 Ed25519 signature text over the exact
-/// manifest bytes, accepted when ANY listed key verifies it (strict
-/// verification, so a malleable or weak-key signature is refused too).
-/// Mirrors `verify_bytes` in rust/hollow_manifest.
+/// The app's manifest check: base64 Ed25519 over the exact manifest bytes, accepted
+/// when ANY listed key verifies it under strict verification, so a malleable or
+/// weak-key signature is refused too. Mirrors `verify_bytes` in rust/hollow_manifest.
 pub(crate) fn verify_manifest_signature(manifest: &[u8], sig_text: &str) -> Result<(), String> {
     verify_manifest_signature_with(manifest, sig_text, MANIFEST_SIGNING_PUBKEYS)
 }
@@ -165,10 +157,9 @@ fn normalise_expected_sha256(expected: &str) -> Result<String, String> {
     Ok(e)
 }
 
-/// Downloads `url` to `dest_path` and keeps the file ONLY if its SHA-256 is
-/// `expected_sha256` (the value from the signed manifest). Any failure,
-/// including a checksum mismatch or a cancelled stream, deletes the partial
-/// file and ends the stream with `DownloadProgress::error` set.
+/// Downloads `url` to `dest_path` and keeps the file ONLY if its SHA-256 matches the
+/// value from the signed manifest. Any failure, a mismatch included, deletes the
+/// partial file and ends the stream with `DownloadProgress::error` set.
 #[frb]
 pub fn download_update(
     url: String,
@@ -357,9 +348,8 @@ fn apply_update_impl(
     fs::create_dir_all(&staging_dir)
         .map_err(|e| format!("Failed to create staging dir: {e}"))?;
 
-    // macOS: extract with `ditto`, which natively preserves the `.app` bundle's
-    // executable permissions, symlinks (frameworks!), and code signature. The
-    // Rust `zip` crate drops all of those, which would corrupt the bundle.
+    // macOS: `ditto` preserves the `.app` bundle's executable permissions, symlinks and
+    // code signature, all of which the Rust `zip` crate drops.
     #[cfg(target_os = "macos")]
     {
         let staging_str = staging_dir
@@ -444,12 +434,10 @@ fn apply_update_impl(
 
 /// Builds the `.app`-swap shell script used on macOS.
 ///
-/// The downloaded zip is expected to contain a single `*.app` bundle (e.g.
-/// `Hollow.app`). `app_dir` is the directory that currently holds the running
-/// bundle (e.g. `/Applications`). The script waits for the running process to
-/// exit, replaces the old bundle with the staged one via `ditto` (which
-/// preserves bundle structure and any signature), clears the quarantine
-/// attribute, then relaunches with `open`.
+/// The zip holds a single `*.app` bundle and `app_dir` is where the running one lives.
+/// The script waits for this process to exit, replaces the bundle via `ditto` (which
+/// preserves structure and signature), clears the quarantine attribute, then
+/// relaunches with `open`.
 #[cfg(target_os = "macos")]
 fn write_macos_update_script(
     data: &std::path::Path,
@@ -531,12 +519,11 @@ fn write_macos_update_script(
 
 // ── Linux updates ───────────────────────────────────────────────────────────
 //
-// Two install kinds, one detection. The portable tarball owns its own
-// directory, so an update is a rename swap performed by a detached script once
-// this process is gone. A flatpak cannot touch its own deployment at all: the
-// install has to run on the HOST through `flatpak-spawn`, and the relaunch has
-// to run there too, because the sandbox's PID namespace dies with the app and
-// would take any in-sandbox waiter with it.
+// Two install kinds, one detection. The portable tarball owns its own directory, so
+// an update is a rename swap by a detached script once this process is gone. A
+// flatpak cannot touch its own deployment at all: the install runs on the HOST
+// through `flatpak-spawn`, and so does the relaunch, because the sandbox's PID
+// namespace dies with the app and would take any in-sandbox waiter with it.
 
 /// `/.flatpak-info` exists only inside a Flatpak sandbox. This is the ONE
 /// source of truth for the install kind; `apply_update`,
@@ -558,10 +545,9 @@ fn sh_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
-/// This process's argv (without argv[0]), single-quoted for a shell script.
-/// A relaunch that drops `--portable` or `--data-dir` comes back up on a
-/// DIFFERENT profile than the one the user was running (issue #47), so every
-/// generated relaunch forwards the original arguments byte for byte.
+/// This process's argv (without argv[0]), single-quoted for a shell script. A relaunch
+/// that drops `--portable` or `--data-dir` comes back up on a DIFFERENT profile than
+/// the user was running, so every generated relaunch forwards the original arguments.
 #[cfg(target_os = "linux")]
 fn current_args_quoted() -> String {
     std::env::args()
@@ -608,8 +594,8 @@ fn write_shell_script(path: &Path, body: &str) -> Result<String, String> {
 /// `tar`, never the `zip` crate: the Linux bundle carries executables and
 /// symlinked library names, and the crate silently drops both.
 ///
-/// `pid` is the process the script waits for. It is a parameter rather than
-/// `std::process::id()` so the mechanics can be tested against a real child.
+/// `pid` is a parameter rather than `std::process::id()` so the mechanics can be
+/// tested against a real child.
 #[cfg(target_os = "linux")]
 fn apply_update_tarball(
     data: &Path,
@@ -646,9 +632,8 @@ fn apply_update_tarball(
         ));
     }
 
-    // The release tarball packs `bundle/hollow`; a tarball someone repacked
-    // from inside the folder has `hollow` at the top. Anything else is not a
-    // Hollow build and must not be swapped in.
+    // The release tarball packs `bundle/hollow`, a repack from inside the folder has
+    // `hollow` at the top, and anything else is not a Hollow build.
     let bundle = if staging.join("bundle").join("hollow").is_file() {
         staging.join("bundle")
     } else if staging.join("hollow").is_file() {
@@ -695,13 +680,11 @@ fn apply_update_tarball(
 
 /// The swap script itself.
 ///
-/// The relaunch uses `nohup`, not `setsid`: `setsid` FORKS when the calling
-/// shell is already a process group leader (which this script's shell is, it
-/// was started under `setsid`), so `$!` would be the pid of a helper that
-/// exits immediately and the liveness check below would roll back a perfectly
-/// good update. `nohup` execs in place, so `$!` really is the new Hollow. The
-/// script already runs in its own session with no controlling terminal, so
-/// nothing can SIGHUP the child when the script exits.
+/// The relaunch uses `nohup`, not `setsid`: `setsid` FORKS when the calling shell is
+/// already a process group leader, which this one is, so `$!` would be a helper that
+/// exits immediately and the liveness check would roll back a good update. `nohup`
+/// execs in place. The script already runs in its own session, so nothing can SIGHUP
+/// the child when it exits.
 #[cfg(target_os = "linux")]
 #[allow(clippy::too_many_arguments)]
 fn tarball_update_script(
@@ -795,9 +778,9 @@ struct FlatpakInfo {
 
 #[cfg(target_os = "linux")]
 impl FlatpakInfo {
-    /// A system install deploys under `/var/lib/flatpak`; anything else is a
-    /// per-user install. Installing into the wrong scope fails, so the scope is
-    /// read off the running deployment rather than guessed.
+    /// A system install deploys under `/var/lib/flatpak`, anything else is per-user.
+    /// Installing into the wrong scope fails, so the scope is read off the running
+    /// deployment rather than guessed.
     fn scope(&self) -> &'static str {
         if self.app_path.starts_with("/var/lib/flatpak") {
             "--system"
@@ -807,10 +790,9 @@ impl FlatpakInfo {
     }
 }
 
-/// Pure parser for `/.flatpak-info`, an INI file. Only the `[Instance]`
-/// section counts: `app-path` decides the install scope, and `instance-id` is
-/// what `flatpak ps` prints, which is how the host-side relaunch knows the old
-/// instance is really gone.
+/// Pure parser for `/.flatpak-info`. Only the `[Instance]` section counts: `app-path`
+/// decides the install scope, and `instance-id` is what `flatpak ps` prints, which is
+/// how the host-side relaunch knows the old instance is gone.
 #[cfg(target_os = "linux")]
 fn parse_flatpak_info(text: &str) -> Result<FlatpakInfo, String> {
     let mut section = String::new();
@@ -846,9 +828,9 @@ fn parse_flatpak_info(text: &str) -> Result<FlatpakInfo, String> {
 /// Installs the downloaded `.flatpak` bundle ON THE HOST and returns the path
 /// of the relaunch script.
 ///
-/// The running deployment stays exactly where it is while this runs, which is
-/// why the app can keep working and then restart into the new build. The
-/// install is synchronous and can take a minute; the caller shows progress.
+/// The running deployment stays where it is while this runs, which is why the app can
+/// keep working and restart into the new build. The install is synchronous and can
+/// take a minute.
 #[cfg(target_os = "linux")]
 fn apply_update_flatpak(
     data: &Path,
@@ -889,11 +871,9 @@ fn apply_update_flatpak(
         "[updater] flatpak install exit {:?}; stdout: {stdout}; stderr: {stderr}",
         out.status.code()
     );
-    // Installing a bundle whose commit is ALREADY deployed fails with
-    // "already installed" (verified on the VM: `--or-update` does not apply to
-    // bundles, it fails the same way). That is the state we wanted, so it is a
-    // success as far as the user is concerned: a retry after an install that
-    // worked but whose relaunch did not must still relaunch.
+    // Installing a bundle whose commit is ALREADY deployed fails with "already
+    // installed", which is the state we wanted: a retry after an install that worked
+    // but whose relaunch did not must still relaunch.
     let already_there =
         stderr.contains("already installed") || stdout.contains("already installed");
     if !out.status.success() && !already_there {
@@ -909,8 +889,7 @@ fn apply_update_flatpak(
         ));
     }
 
-    // The bundle is deployed now, so the downloaded file is dead weight. The
-    // script deletes it: this process cannot, it is about to exit.
+    // The script deletes the downloaded bundle: this process cannot, it is about to exit.
     let script_path = data.join("updates").join("relaunch.sh");
     let body = format!(
         "#!/bin/sh\n\
@@ -926,12 +905,11 @@ fn apply_update_flatpak(
 /// by the self-restart waiter (profile switch, relay apply, device link,
 /// revocation self-nuke).
 ///
-/// It waits for our instance id to leave `flatpak ps` rather than for a pid:
-/// the sandbox pid means nothing on the host. The session bus address is
-/// restored because a command started through `flatpak-spawn --host` inherits
-/// the sandbox environment, and `flatpak run` needs a session bus to reach the
-/// user's session; the export is conditional so a machine without that socket
-/// still gets a launch attempt instead of a broken address.
+/// It waits for our instance id to leave `flatpak ps` rather than for a pid, since a
+/// sandbox pid means nothing on the host. The session bus address is restored because
+/// a command started through `flatpak-spawn --host` inherits the sandbox environment
+/// and `flatpak run` needs a bus to reach the session; the export is conditional so a
+/// machine without that socket still gets a launch attempt.
 #[cfg(target_os = "linux")]
 fn flatpak_relaunch_recipe(instance_id: &str, args_quoted: &str) -> String {
     format!(
@@ -999,10 +977,9 @@ fn launch_detached_shell_script(script_path: &str) -> Result<(), String> {
     }
 }
 
-/// Flatpak: the script has to run on the HOST, because everything inside the
-/// sandbox dies with the app. This waits for `flatpak-spawn` to return, which
-/// is what guarantees the host has already forked the script by the time the
-/// caller exits.
+/// Flatpak: the script has to run on the HOST, because everything inside the sandbox
+/// dies with the app. Waiting for `flatpak-spawn` to return is what guarantees the
+/// host has forked the script before the caller exits.
 #[cfg(target_os = "linux")]
 fn launch_host_shell_script(script_path: &str) -> Result<(), String> {
     let command = format!("setsid nohup sh {} >/dev/null 2>&1 &", sh_quote(script_path));
@@ -1037,10 +1014,9 @@ fn launch_host_shell_script(script_path: &str) -> Result<(), String> {
 /// Extracts an update zip into `staging_dir`, flattening a single common
 /// top-level directory (e.g. "Release/") when present.
 ///
-/// Entry names are normalized `\` → `/` first: PowerShell's Compress-Archive
-/// (which builds the release zips) writes backslash-separated names and marks
-/// directory entries with a TRAILING backslash — treating those as files made
-/// `File::create` fail with os error 267/123 on every empty dir (issue #52).
+/// Entry names are normalized `\` to `/` first: Compress-Archive writes
+/// backslash-separated names and marks directory entries with a TRAILING backslash,
+/// and treating those as files made `File::create` fail on every empty dir.
 #[allow(dead_code)] // only reachable on Windows outside of tests
 fn extract_zip_to(zip_path: &str, staging_dir: &std::path::Path) -> Result<(), String> {
     let zip_file = fs::File::open(zip_path)
@@ -1164,10 +1140,9 @@ mod extract_zip_tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    /// Minimal single-entry STORED zip with an arbitrary (unsanitized) entry
-    /// name. ZipWriter refuses to write traversal names, so the hostile
-    /// fixture must be built by hand. CRC stays 0 — rejection happens on the
-    /// NAME before any data is read.
+    /// Minimal single-entry STORED zip with an unsanitized entry name. ZipWriter refuses
+    /// to write traversal names, so the hostile fixture is built by hand; the CRC stays
+    /// 0 because rejection happens on the NAME before any data is read.
     fn raw_zip_single_entry(name: &[u8], data: &[u8]) -> Vec<u8> {
         let name_len = (name.len() as u16).to_le_bytes();
         let size = (data.len() as u32).to_le_bytes();
@@ -1225,9 +1200,8 @@ mod extract_zip_tests {
 
         let staging = tmp.join("staging");
         std::fs::create_dir_all(&staging).expect("create staging");
-        // The zip crate sanitizes traversal names on read ("..\x" → "x"), and
-        // our own guard rejects any ".." that slips through — either way the
-        // entry must NOT materialize outside the staging dir.
+        // The zip crate sanitizes traversal names on read and our own guard rejects any
+        // ".." that slips through, so the entry must NOT materialize outside staging.
         let _ = super::extract_zip_to(zip_path.to_str().unwrap(), &staging);
         assert!(
             !tmp.join("outside.txt").exists(),
@@ -1241,22 +1215,19 @@ mod extract_zip_tests {
 // ── Self-restart waiter (issue #47 profile switch, relay apply, device link,
 // revocation self-nuke) ─────────────────────────────────────────────────────
 //
-// Dart cannot restart the app by spawning a fresh copy before exiting: on
-// Windows the runner's SendAppLinkToInstance() runs pre-Flutter in the child,
-// finds the still-alive old window (same exe path), forwards, and the child
-// exits. So a detached waiter must idle until THIS process is gone, then
-// start the exe. The waiter can't be spawned from Dart either — its detached
-// mode kills powershell instantly (no console, no CREATE_NO_WINDOW), and a
-// detached cmd batch wedges its tasklist|find pipeline in a half-alive
-// console. Rust CAN pass CREATE_NO_WINDOW, so the spawn lives here.
+// Dart cannot restart the app by spawning a fresh copy before exiting: on Windows the
+// runner's SendAppLinkToInstance() runs pre-Flutter in the child, finds the still-alive
+// old window, forwards and exits. So a detached waiter idles until THIS process is
+// gone, then starts the exe. It cannot be spawned from Dart either, whose detached
+// mode kills powershell instantly and wedges a detached cmd batch; Rust can pass
+// CREATE_NO_WINDOW, so the spawn lives here.
 
 /// Spawn a detached, windowless waiter that idles until this process exits,
 /// then relaunches the app. Call right before a self-restart `exit(0)`.
 #[frb]
 pub fn spawn_relaunch_waiter() -> Result<(), String> {
-    // Inside a flatpak the sandbox PID namespace dies with the app and takes
-    // any in-sandbox waiter with it, so the wait and the relaunch both belong
-    // on the host, through the same recipe the update path uses.
+    // Inside a flatpak the sandbox PID namespace dies with the app, so the wait and the
+    // relaunch both belong on the host, through the update path's recipe.
     #[cfg(target_os = "linux")]
     {
         if linux_install_kind_inner() == "flatpak" {
@@ -1274,10 +1245,8 @@ pub fn spawn_relaunch_waiter() -> Result<(), String> {
 
 /// The platform snippet the waiter runs once the watched pid is gone.
 ///
-/// The original argv is forwarded: a relaunch that drops `--portable` (or any
-/// other data-root flag) comes back up on a DIFFERENT profile than the one
-/// the user was running — alternating identities between the relaunch and
-/// the next manual launch (issue #47 fallout).
+/// The original argv is forwarded: a relaunch that drops `--portable` or any other
+/// data-root flag comes back up on a DIFFERENT profile than the user was running.
 fn relaunch_snippet(exe: &str) -> String {
     let args: Vec<String> = std::env::args().skip(1).collect();
     #[cfg(windows)]
@@ -1392,10 +1361,9 @@ fn spawn_waiter(pid: u32, launch: &str) -> Result<(), String> {
 
 #[cfg(all(test, windows))]
 mod relaunch_waiter_tests {
-    /// End-to-end mechanics: waiter watches a short-lived pid, outlives it,
-    /// and runs the launch snippet. Guards the CREATE_NO_WINDOW PowerShell
-    /// spawn — the Dart-side detached spawn silently killed powershell, so
-    /// this MUST stay an empirical test, not a code-review assumption.
+    /// End-to-end mechanics: the waiter watches a short-lived pid, outlives it and runs
+    /// the launch snippet. This MUST stay an empirical test of the CREATE_NO_WINDOW
+    /// spawn, because the Dart-side detached spawn silently killed powershell.
     #[test]
     fn waiter_fires_after_watched_pid_exits() {
         use std::os::windows::process::CommandExt;
@@ -1439,9 +1407,8 @@ mod linux_updater_tests {
     use std::os::unix::fs::PermissionsExt;
     use std::process::Command;
 
-    /// The real `/.flatpak-info` of the installed 0.x flatpak, read out of a
-    /// live sandbox on the Linux VM. Trimmed of the long `[Environment]` tail
-    /// only; every section this parser walks past is intact.
+    /// The real `/.flatpak-info` of an installed flatpak, read out of a live sandbox and
+    /// trimmed only of the long `[Environment]` tail.
     const REAL_FLATPAK_INFO: &str = r#"[Application]
 name=com.anonlisten.Hollow
 runtime=runtime/org.freedesktop.Platform/x86_64/24.08
@@ -1582,10 +1549,8 @@ org.freedesktop.portal.Desktop=talk
         assert!(status.success(), "generated recipe is not valid sh:\n{quoted}");
     }
 
-    /// End-to-end mechanics of the tarball swap, modelled on the Windows
-    /// `waiter_fires_after_watched_pid_exits`: a real child to outwait, a real
-    /// tarball, the real generated script, started through the real
-    /// `launch_update_script`.
+    /// End-to-end mechanics of the tarball swap: a real child to outwait, a real tarball,
+    /// the real generated script, started through the real `launch_update_script`.
     #[test]
     fn tarball_update_script_swaps_bundle_and_relaunches() {
         let tmp = unique_tmp("swap");
@@ -1633,8 +1598,8 @@ org.freedesktop.portal.Desktop=talk
         .expect("generate the update script");
         launch_update_script(script).expect("start the update script");
 
-        // Our own child, started three lines up. Reaped so the pid is really
-        // gone: `kill -0` succeeds on a zombie and the script would wait forever.
+        // Reaped so the pid is really gone: `kill -0` succeeds on a zombie and the script
+        // would wait forever.
         let _ = child.kill();
         let _ = child.wait();
 

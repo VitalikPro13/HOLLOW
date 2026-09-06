@@ -1,36 +1,23 @@
-//! `.hollowpack` — the artist shop's art container (see
-//! `reports/ARTIST_SHOP_DESIGN.md` §6.3).
+//! `.hollowpack`, the artist shop's art container.
 //!
-//! A pack is a ZIP holding `pack.json` plus processed WebP files. The files
-//! are the SAME bytes the app itself would produce for that art, because
-//! Hollow identifies art by the SHA-256 of the PROCESSED bytes: frames,
-//! avatar animations and banner animations are content-addressed on the asset
-//! rail, and phase 2 binds a signed support credential to that hash.
+//! A pack is a ZIP holding `pack.json` plus processed WebP files, and the files are
+//! the SAME bytes the app itself would produce, because Hollow identifies art by the
+//! SHA-256 of the PROCESSED bytes and a support credential binds to that hash.
 //!
-//! Two rules follow from that and neither is negotiable:
+//! Two rules follow and neither is negotiable: the pack TOOL runs the app's own
+//! encoders, never a lookalike, and the app's IMPORTER never re-encodes, because a
+//! lossy WebP through the encoder twice is a different file with a different hash and
+//! would orphan the credential naming the first. So this module owns the format, the
+//! encode step and the verification step, and the `hollowpack` CLI and
+//! `api::network::import_hollowpack` both call the same `verify_pack`.
 //!
-//!   * the pack TOOL runs the app's own encoders
-//!     (`image_convert::process_avatar_frame`, `process_avatar_image`,
-//!     `process_banner_image`, `process_user_avatar_anim`,
-//!     `process_user_banner_anim`), never a lookalike;
-//!   * the app's IMPORTER never re-encodes. A lossy WebP put through the
-//!     encoder a second time is a different file with a different hash, which
-//!     would orphan the credential that names the first one.
+//! Everything in a pack is attacker-controlled, so nothing in the manifest is trusted:
+//! the hash is RECOMPUTED, the dimensions are re-derived from the decoded image, the
+//! entry read is the one the recomputed hash names (a manifest path is never joined
+//! onto a directory), and the frame authoring gate is re-applied so a hand-built pack
+//! cannot smuggle an opaque frame past the picker.
 //!
-//! So this module owns the format, the encode step and the verification step,
-//! and both sides — the `hollowpack` CLI and `api::network::import_hollowpack`
-//! — go through it. `inspect` and the importer literally call the same
-//! `verify_pack`.
-//!
-//! Everything in a pack that reaches the importer is attacker-controlled, so
-//! nothing in the manifest is trusted for anything load-bearing: the hash is
-//! RECOMPUTED, the dimensions are re-derived from the decoded image, the
-//! entry read is the one the recomputed hash names (a manifest path is never
-//! joined onto a directory), and the frame authoring gate is re-applied so a
-//! hand-built pack cannot smuggle an opaque frame past the picker.
-//!
-//! `ext` is reserved for phase 2 (issuing key, catalog signature). No keys and
-//! no signatures live here yet, on purpose.
+//! `ext` is reserved for a later phase: no keys and no signatures live here yet.
 
 use std::io::Read;
 
@@ -49,10 +36,9 @@ pub const MANIFEST_NAME: &str = "pack.json";
 
 // ── Untrusted-input caps ──────────────────────────────────────────────
 //
-// An import is a file the user was handed by a website, so every one of
-// these is a refusal bound rather than a warning. They are deliberately far
-// above what a real pack needs (the biggest legal single asset is a 2 MB
-// animated avatar or banner) and far below what would hurt.
+// An import is a file the user was handed by a website, so every one of these is a
+// refusal bound rather than a warning: far above what a real pack needs (2 MB for the
+// biggest legal asset) and far below what would hurt.
 
 /// Most files one pack may carry. A listing is at most an avatar pair, a
 /// banner pair and a frame; 8 leaves room without leaving room for a dump.
@@ -71,10 +57,9 @@ pub const MAX_MANIFEST_BYTES: usize = 64 * 1024;
 /// What one file in a pack IS, which decides its encoder, its ceiling and
 /// where it lands in the app.
 ///
-/// The animated profile kinds ship as a PAIR: the animation rides the asset
-/// rail (`AssetKind::Profile`) and the still rides the pushed profile blob,
-/// so a pack that carried only the animation would leave old clients and the
-/// guest thumb with no face at all.
+/// The animated profile kinds ship as a PAIR: the animation rides the asset rail and
+/// the still rides the pushed profile blob, so a pack carrying only the animation
+/// would leave old clients and the guest thumb with no face.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Role {
     /// Still avatar, `process_avatar_image` (512 square ceiling).
@@ -108,9 +93,8 @@ impl Role {
         }
     }
 
-    /// Parse a wire role. An unknown role is a refusal rather than a skip:
-    /// a pack whose files we do not understand is not a pack we can promise
-    /// anything about.
+    /// Parse a wire role. An unknown role is a refusal, not a skip: a pack whose files
+    /// we do not understand is not a pack we can promise anything about.
     pub fn parse(s: &str) -> Result<Role, String> {
         match s {
             "avatar" => Ok(Role::Avatar),
@@ -124,9 +108,7 @@ impl Role {
         }
     }
 
-    /// The `emote_blobs.kind` the bytes are cached under. Frames and profile
-    /// media are the two rails that already exist; a pack never invents a
-    /// third.
+    /// The `emote_blobs.kind` the bytes are cached under; a pack never invents a rail.
     pub fn asset_kind(self) -> &'static str {
         match self {
             Role::Frame => "frame",
@@ -145,10 +127,9 @@ impl Role {
     }
 }
 
-/// What the artist tells the tool their source is. The tool decides still
-/// versus animated from the BYTES, never from this and never from the file
-/// extension (a `GIF8`/extension branch silently flattens APNG, which is what
-/// Steam serves animated art as).
+/// What the artist tells the tool their source is. The tool decides still versus
+/// animated from the BYTES, never from this and never from the file extension: an
+/// extension branch silently flattens the APNG that Steam serves animated art as.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RoleHint {
     Frame,
@@ -267,14 +248,12 @@ pub fn hash_hex(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 
-/// Run the app's encoder for `hint` over a raw source and return every file
-/// the app would have produced.
+/// Run the app's encoder for `hint` over a raw source and return every file the app
+/// would have produced.
 ///
-/// Animation is decided from the BYTES (`is_animated_image`), so an APNG or
-/// an animated WebP takes the animated path exactly as a GIF does. An
-/// animated avatar or banner yields the `(animated, still)` PAIR, because
-/// both halves are needed for the art to render everywhere the app renders
-/// profile media.
+/// Animation is decided from the BYTES, so an APNG or animated WebP takes the
+/// animated path exactly as a GIF does, and an animated avatar or banner yields the
+/// `(animated, still)` PAIR both halves of the rendering need.
 pub fn process_source(hint: RoleHint, raw: &[u8]) -> Result<Vec<ProcessedFile>, String> {
     let animated = image_convert::is_animated_image(raw);
     let out = match (hint, animated) {
@@ -315,17 +294,13 @@ pub fn process_source(hint: RoleHint, raw: &[u8]) -> Result<Vec<ProcessedFile>, 
         .collect()
 }
 
-/// An already-processed file, taken AS-IS: verified against its role's ceiling,
-/// its animation expectation and (for a frame) the see-through-centre gate,
-/// hashed, and never re-encoded. This is what a bundle of existing art is built
-/// from.
+/// An already-processed file, taken AS-IS: checked against its role's ceiling, its
+/// animation expectation and (for a frame) the see-through-centre gate, hashed, and
+/// never re-encoded.
 ///
-/// A bundle is a pack whose files were processed for OTHER packs, and the buyer
-/// of the bundle has to own the same hash as the buyer of the single item. A
-/// lossy WebP put through the encoder a second time is a different file with a
-/// different hash, so the bytes are carried through untouched and only checked.
-/// Those are exactly the checks [`verify_pack`] runs, which is why it runs
-/// them by calling this.
+/// A bundle is a pack whose files were processed for OTHER packs, and its buyer has to
+/// own the same hash as the buyer of the single item, so the bytes are carried through
+/// untouched. These are exactly the checks [`verify_pack`] runs, by calling this.
 pub fn processed_from_bytes(role: Role, bytes: Vec<u8>) -> Result<ProcessedFile, String> {
     // Bounded before anything decodes it: the caller may be handing us a file
     // off disk that nothing in this process produced.
@@ -351,12 +326,9 @@ pub fn processed_from_bytes(role: Role, bytes: Vec<u8>) -> Result<ProcessedFile,
     })
 }
 
-/// The default `item.id`: the first 16 hex characters of the SHA-256 over
-/// every file hash, sorted and joined by a newline.
-///
-/// Content-addressed on purpose. The same art re-packed on another machine
-/// gets the same item id, so a re-issue is recognisably the same listing and
-/// the catalog cannot drift from the bytes.
+/// The default `item.id`: the first 16 hex characters of the SHA-256 over every file
+/// hash, sorted and newline-joined. Content-addressed on purpose, so the same art
+/// re-packed on another machine is recognisably the same listing.
 pub fn default_item_id(files: &[ProcessedFile]) -> String {
     let mut hashes: Vec<&str> = files.iter().map(|f| f.hash.as_str()).collect();
     hashes.sort_unstable();
@@ -412,10 +384,9 @@ pub fn build_pack(input: &PackInput) -> Result<(Vec<u8>, PackManifest), String> 
         }
     }
 
-    // An authoring rule, deliberately NOT a verification rule: packs already in
-    // the world keep verifying. A role is a SLOT in the app (one avatar, one
-    // frame), so two files in one slot would leave the importer picking, and a
-    // bundle of existing art is the case that would hit it first.
+    // An authoring rule, deliberately NOT a verification rule, so packs already in the
+    // world keep verifying. A role is a SLOT in the app, so two files in one slot would
+    // leave the importer picking.
     for pair in files.windows(2) {
         if pair[0].role == pair[1].role {
             return Err(format!(
@@ -578,17 +549,14 @@ pub fn verify_pack_file(path: &str) -> Result<VerifiedPack, String> {
     verify_pack(&bytes)
 }
 
-/// THE trust boundary for pack bytes. Both `hollowpack inspect` and the app's
-/// importer call this and nothing else, so the tool checks exactly what the
-/// app checks.
+/// THE trust boundary for pack bytes: `hollowpack inspect` and the app's importer both
+/// call this and nothing else, so the tool checks exactly what the app checks.
 ///
-/// For every file: the entry is the one the manifest's hash NAMES (never a
-/// path from the manifest), it is read under the per-file and total caps, the
-/// SHA-256 is RECOMPUTED and has to match, the WebP is decoded so the
-/// dimensions and the animation flag come from the pixels, the role's ceiling
-/// is enforced, and a frame has the see-through-centre gate re-applied.
-///
-/// Nothing is written anywhere. The caller decides what to do with the bytes.
+/// For every file the entry is the one the manifest's hash NAMES (never a path from
+/// the manifest), it is read under the per-file and total caps, the SHA-256 is
+/// RECOMPUTED and must match, the WebP is decoded so dimensions and the animation
+/// flag come from the pixels, the role's ceiling is enforced, and a frame has the
+/// see-through-centre gate re-applied. Nothing is written anywhere.
 pub fn verify_pack(zip_bytes: &[u8]) -> Result<VerifiedPack, String> {
     if zip_bytes.len() as u64 > MAX_PACK_BYTES {
         return Err(format!(
@@ -619,9 +587,8 @@ pub fn verify_pack(zip_bytes: &[u8]) -> Result<VerifiedPack, String> {
         if !is_hash_hex(&entry.sha256) {
             return Err("The pack names a file with a malformed hash".into());
         }
-        // The hash names the entry. An attacker-supplied path is never used
-        // for anything, so there is no traversal surface at all, and a
-        // manifest that points its path somewhere else is refused outright.
+        // The hash names the entry, so an attacker-supplied path is never used for
+        // anything and there is no traversal surface at all.
         let name = format!("files/{}.webp", entry.sha256);
         if !entry.path.is_empty() && entry.path != name {
             return Err(format!(
@@ -681,9 +648,8 @@ pub fn verify_pack(zip_bytes: &[u8]) -> Result<VerifiedPack, String> {
             ));
         }
 
-        // The decode, the ceiling and the frame gate are ONE body, shared with
-        // the bundle maker: art that arrives already processed is checked here
-        // exactly as art that arrives inside a pack is.
+        // The decode, the ceiling and the frame gate are ONE body shared with the bundle
+        // maker, so already-processed art is checked exactly as art inside a pack is.
         let file = processed_from_bytes(role, bytes)?;
         if (entry.w != 0 || entry.h != 0) && (entry.w != file.w || entry.h != file.h) {
             return Err(format!(
@@ -717,19 +683,16 @@ fn is_hash_hex(s: &str) -> bool {
     s.len() == 64 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
-/// `(width, height, animated)` of an encoded blob, read from the PIXELS.
-///
-/// Everything a pack may carry is a WebP, and everything animated Hollow
-/// emits is an animated WebP, so a GIF or an APNG smuggled in under a WebP
-/// role is refused here rather than decoded.
+/// `(width, height, animated)` of an encoded blob, read from the PIXELS. Everything a
+/// pack may carry is a WebP, so a GIF or APNG smuggled in under a WebP role is refused
+/// here rather than decoded.
 fn blob_shape(data: &[u8]) -> Result<(u32, u32, bool), String> {
     if data.len() < 16 || &data[0..4] != b"RIFF" || &data[8..12] != b"WEBP" {
         return Err("A file in this pack is not a WebP image".into());
     }
-    // SECURITY (SHOP-2): the ceiling used to be checked on the DECODED image,
-    // so a pack under the byte cap that declared a 16384x16384 canvas cost
-    // about a gigabyte of RGBA before anyone got to say no. Read the canvas
-    // out of the header first, and refuse an absurd one without decoding.
+    // SHOP-2: the ceiling used to be checked on the DECODED image, so a file under the
+    // byte cap declaring a 16384x16384 canvas cost about a gigabyte of RGBA before
+    // anyone said no. Read the canvas out of the header and refuse it undecoded.
     let (hdr_w, hdr_h) = image_convert::webp_header_dimensions(data)
         .ok_or("A file in this pack has an unreadable WebP header")?;
     if hdr_w > image_convert::MAX_DECODE_DIM || hdr_h > image_convert::MAX_DECODE_DIM {
@@ -756,11 +719,9 @@ fn blob_shape(data: &[u8]) -> Result<(u32, u32, bool), String> {
     Ok((w, h, false))
 }
 
-/// The role's ceiling and its animation expectation, re-checked against what
-/// the pixels actually are.
-///
-/// These are the same bounds the encoders produce, so a pack built by the
-/// tool always passes; anything that does not pass was not built by the tool.
+/// The role's ceiling and animation expectation, re-checked against what the pixels
+/// actually are. These are the bounds the encoders produce, so anything that fails
+/// was not built by the tool.
 fn check_role_shape(role: Role, w: u32, h: u32, animated: bool) -> Result<(), String> {
     if let Some(expected) = role.must_animate()
         && animated != expected
@@ -772,9 +733,8 @@ fn check_role_shape(role: Role, w: u32, h: u32, animated: bool) -> Result<(), St
         });
     }
     match role {
-        // A ceiling, not an exact size, exactly as the avatar branch below.
-        // That is what keeps every 128x128 frame and every pack built before
-        // the ceiling moved valid by construction.
+        // A ceiling, not an exact size, which is what keeps every 128x128 frame and every
+        // pack built before the ceiling moved valid by construction.
         Role::Frame => {
             if w != h {
                 return Err("The frame file has to be square".into());
@@ -818,9 +778,8 @@ mod tests {
 
     // ── Fixtures, built in memory ─────────────────────────────────────
     //
-    // Never committed binaries: a fixture that cannot animate cannot catch an
-    // encoder that silently flattens animation, and a fixture nobody can read
-    // cannot be adjusted when a ceiling moves.
+    // Never committed binaries: a fixture that cannot animate cannot catch an encoder
+    // that flattens animation, and one nobody can read cannot be adjusted.
 
     /// A ring: opaque at the edges, fully transparent through the middle.
     /// This is what a legal avatar frame looks like.
@@ -895,11 +854,9 @@ mod tests {
     fn webp_header_dimensions_reads_vp8_vp8l_vp8x() {
         use crate::node::webp_anim::{self, AnimParams};
 
-        // VP8 (lossy still) and VP8L (lossless still), through the crate's
-        // own still encoder — a non-square size so a width/height swap shows.
-        // Fully OPAQUE on purpose: libwebp wraps anything with alpha in a
-        // VP8X container, and the point here is to exercise the two simple
-        // chunk shapes as well.
+        // VP8 and VP8L stills through the crate's own encoder, at a non-square size so a
+        // width/height swap shows. Fully OPAQUE on purpose: libwebp wraps anything with
+        // alpha in a VP8X container, and these are the two simple chunk shapes.
         let (w, h) = (200u32, 120u32);
         let rgba: Vec<u8> = (0..(w * h))
             .flat_map(|_| [180u8, 140, 90, 255])
@@ -952,15 +909,13 @@ mod tests {
         assert_eq!(image_convert::webp_header_dimensions(&junk), None);
     }
 
-    /// SHOP-2 regression: the ceiling used to be checked on the DECODED
-    /// image, so a small file declaring a huge canvas cost about a gigabyte
-    /// of RGBA before anyone said no. The refusal now happens on the header,
-    /// which means it also has to be fast.
+    /// SHOP-2 regression: the ceiling used to be checked on the DECODED image, so a small
+    /// file declaring a huge canvas cost about a gigabyte of RGBA. The refusal now happens
+    /// on the header, which means it also has to be fast.
     #[test]
     fn blob_shape_rejects_oversized_canvas_before_decode() {
-        // A hand-built VP8X header claiming 16384x16384, followed by nothing
-        // a decoder could use. Reaching the decoder at all would either
-        // allocate a gigabyte or fail slowly; the header check does neither.
+        // A hand-built VP8X header claiming 16384x16384 followed by nothing usable:
+        // reaching the decoder would allocate a gigabyte or fail slowly.
         let mut bomb = Vec::with_capacity(4096);
         bomb.extend_from_slice(b"RIFF");
         bomb.extend_from_slice(&0u32.to_le_bytes()); // size, unread by us
@@ -1065,10 +1020,8 @@ mod tests {
 
     #[test]
     fn passthrough_keeps_the_hash_and_the_bytes() {
-        // A bundle is built from files that were processed for OTHER listings.
-        // The buyer of the bundle has to end up owning the same hash as the
-        // buyer of the single item, so passthrough may check anything it likes
-        // and may change nothing at all.
+        // A bundle is built from files processed for OTHER listings, and its buyer must end
+        // up owning the same hash, so passthrough may check anything and change nothing.
         let mut original = process_source(RoleHint::Avatar, &anim_gif(200, 200)).expect("pair");
         original.extend(process_source(RoleHint::Frame, &ring_png(224)).expect("frame"));
         assert_eq!(original.len(), 3, "an animated avatar pair plus a frame");
@@ -1342,11 +1295,9 @@ mod tests {
         );
     }
 
-    /// The frame ceiling moved from "exactly 128x128" to "square, at most
-    /// 512x512", and the whole point of making it a CEILING is that every
-    /// frame and every pack already in the world stays valid. A 128x128 source
-    /// still encodes to 128x128, and a pack whose manifest claims 128x128 for
-    /// a frame still verifies.
+    /// The frame ceiling is "square, at most 512x512" rather than exactly 128x128, and
+    /// the point of a ceiling is that every frame and pack already in the world stays
+    /// valid.
     #[test]
     fn a_128_frame_still_encodes_and_verifies_at_128() {
         let files = process_source(RoleHint::Frame, &ring_png(128)).expect("frame");
@@ -1555,9 +1506,8 @@ mod tests {
 
     // -- (f) the importer, end to end --------------------------------
     //
-    // These drive `api::network::import_hollowpack` against a real in-memory
-    // SQLCipher store, so they cover the rail write and the provenance row,
-    // not just the verification in front of them. No node runs.
+    // These drive `api::network::import_hollowpack` against a real in-memory SQLCipher
+    // store, so they cover the rail write and the provenance row too. No node runs.
 
     /// Install a fresh in-memory store and hold the lock that serializes
     /// every test which swaps the process-global slot.

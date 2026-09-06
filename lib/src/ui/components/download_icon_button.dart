@@ -9,9 +9,8 @@ import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_tooltip.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-/// Download manager icon button with activity badge.
-/// Shared between [UserBar] (classic layout, iconSize 16) and
-/// [BottomBar] (dock layout, iconSize 18).
+/// Download manager icon button with an activity badge, shared by [UserBar] and
+/// [BottomBar].
 class DownloadIconButton extends ConsumerWidget {
   final double iconSize;
 

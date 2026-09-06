@@ -3,17 +3,11 @@ import 'package:flutter/material.dart';
 /// Coordinate helpers for widgets that anchor an [OverlayEntry] to something
 /// on screen.
 ///
-/// `UiScale` (interface zoom, `ui_scale.dart`) puts a [Transform] between the
-/// window and the Navigator, so window coordinates — what `localToGlobal()`
-/// and `details.globalPosition` return — are NOT the coordinate space an
-/// `Overlay` child is positioned in. They differ by the zoom factor, so at
-/// 150% a popup anchored with raw global coordinates lands half a screen away
-/// from its button.
-///
-/// Every anchor therefore goes through the overlay. Both helpers resolve the
-/// same overlay the popup helpers insert into (`Overlay.of(context)`), so the
-/// anchor and the entry always share one space — and at 100% zoom they return
-/// exactly what the old code did.
+/// `UiScale` (interface zoom) puts a [Transform] between the window and the
+/// Navigator, so window coordinates (`localToGlobal()`,
+/// `details.globalPosition`) are not overlay space: at 150% zoom a popup
+/// anchored with raw globals lands half a screen from its button. Both helpers
+/// resolve the same `Overlay.of(context)` the popup helpers insert into.
 
 /// The position of [context]'s own render box, in the coordinate space of the
 /// [Overlay] it would insert into. [localOffset] picks a different corner

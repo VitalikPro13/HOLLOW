@@ -22,7 +22,6 @@ class RoomNotifier extends Notifier<String?> {
     if (nodeState.status != NodeStatus.connected) return;
 
     try {
-      // Clear peers when switching rooms.
       if (state != null && state != roomCode) {
         ref.read(peersProvider.notifier).clearAll();
         ref.read(selectedPeerProvider.notifier).state = null;

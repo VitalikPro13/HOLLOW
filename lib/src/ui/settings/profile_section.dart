@@ -24,17 +24,15 @@ import 'package:hollow/src/ui/settings/settings_shared.dart';
 import 'package:hollow/src/ui/shop/owned_art_panel.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-/// Profile category of the desktop Settings dialog: live preview card,
-/// avatar/banner management, edit fields, Twitch connection, and the explicit
-/// Save button (Profile is the one category with deferred commit — everything
-/// else auto-saves). The edit state (pending images, dirty flag, live text)
-/// stays on the dialog state so it survives switching categories; this widget
-/// renders it and reports interactions back through callbacks.
+/// Profile category of the desktop Settings dialog, the one category with a
+/// deferred commit rather than auto-save. The edit state lives on the dialog so
+/// it survives switching categories; this widget renders it and reports
+/// interactions back through callbacks.
 
 /// Deterministic banner color from peer ID (shifted hue from avatar).
 Color _bannerColorFromId(String id) {
   final hash = id.hashCode;
-  final hue = ((hash % 360).abs() + 40) % 360; // Shift hue from avatar
+  final hue = ((hash % 360).abs() + 40) % 360;
   return HSLColor.fromAHSL(1.0, hue.toDouble(), 0.45, 0.35).toColor();
 }
 
@@ -108,14 +106,12 @@ class ProfileSection extends ConsumerWidget {
           Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              // Profile preview card + image buttons
               SizedBox(
                 width: 200,
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
                     _buildPreviewCard(hollow, ref),
-                    // Image management (below card)
                     const SizedBox(height: HollowSpacing.md),
                     _buildAvatarRow(hollow, ref),
                     const SizedBox(height: HollowSpacing.xs),
@@ -126,7 +122,6 @@ class ProfileSection extends ConsumerWidget {
                 ),
               ),
               const SizedBox(width: HollowSpacing.lg),
-              // Edit fields
               Expanded(child: _buildEditFields()),
             ],
           ),
@@ -135,14 +130,12 @@ class ProfileSection extends ConsumerWidget {
           Container(height: 1, color: hollow.border),
           const SizedBox(height: HollowSpacing.xl),
 
-          // ── Connections ──
           const SettingsSectionLabel(label: 'CONNECTIONS'),
           const SizedBox(height: HollowSpacing.sm),
           TwitchConnectionRow(hollow: hollow),
 
-          // Profile keeps an explicit Save button — text fields and cropped
-          // images benefit from a single commit, unlike the auto-saving toggles
-          // in the other categories.
+          // Text fields and cropped images benefit from a single commit, unlike
+          // the auto-saving toggles in the other categories.
           const SizedBox(height: HollowSpacing.xl),
           Align(
             alignment: Alignment.centerRight,
@@ -155,17 +148,15 @@ class ProfileSection extends ConsumerWidget {
             ),
           ),
 
-          // ── Profiles on this computer (issue #47) ── below the Save commit
-          // so it can't read as part of the deferred profile-edit form: switch
-          // and erase are immediate, confirmed actions. Desktop-only.
+          // Below the Save commit (issue #47) so it cannot read as part of the
+          // deferred edit form: switch and erase are immediate. Desktop-only.
           const SizedBox(height: HollowSpacing.xl),
           Container(height: 1, color: hollow.border),
           const SizedBox(height: HollowSpacing.xl),
           const ProfileLocationsCard(),
 
-          // Art you own (Hollow Shop). Last, below the profile switcher: it
-          // is a library, not part of the deferred profile-edit form, and
-          // wearing something from it saves immediately.
+          // Last, below the profile switcher: a library rather than part of the
+          // deferred edit form, and wearing something saves immediately.
           const SizedBox(height: HollowSpacing.xl),
           Container(height: 1, color: hollow.border),
           const SizedBox(height: HollowSpacing.lg),
@@ -187,7 +178,6 @@ class ProfileSection extends ConsumerWidget {
         mainAxisSize: MainAxisSize.min,
         children: [
           _buildPreviewBanner(hollow, ref),
-          // Avatar overlapping banner
           Transform.translate(
             offset: const Offset(0, -28),
             child: Padding(
@@ -204,8 +194,8 @@ class ProfileSection extends ConsumerWidget {
 
   Widget _buildPreviewBanner(HollowTheme hollow, WidgetRef ref) {
     final bannerColor = _bannerColorFromId(localPeerId);
-    // 80 is this preview column's 200 width / 2.5, the one ratio every user
-    // banner surface, the banner cropper and Rust's 1200x480 storage share.
+    // The preview column's 200 width over 2.5, the one ratio every user banner
+    // surface, the cropper and Rust's 1200x480 storage share.
     const bannerHeight = 80.0;
     final fallback = Container(
       height: bannerHeight,
@@ -247,8 +237,8 @@ class ProfileSection extends ConsumerWidget {
     );
   }
 
-  /// Small non-blocking spinner shown on a preview while the picked image is
-  /// being WebP-encoded in Rust (the preview already shows the cropped bytes).
+  /// Non-blocking spinner shown while Rust WebP-encodes the picked image; the
+  /// preview already shows the cropped bytes.
   Widget _processingSpinner(HollowTheme hollow) {
     return SizedBox(
       width: 14,
@@ -270,7 +260,6 @@ class ProfileSection extends ConsumerWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.center,
       children: [
-        // Avatar with border
         Stack(
           children: [
             Container(
@@ -300,7 +289,6 @@ class ProfileSection extends ConsumerWidget {
 
         const SizedBox(height: HollowSpacing.xs),
 
-        // Display name
         Text(
           previewName,
           style: HollowTypography.subheading.copyWith(
@@ -313,7 +301,6 @@ class ProfileSection extends ConsumerWidget {
           textAlign: TextAlign.center,
         ),
 
-        // Status
         if (liveStatus.trim().isNotEmpty) ...[
           const SizedBox(height: HollowSpacing.xxs),
           Text(
@@ -332,7 +319,6 @@ class ProfileSection extends ConsumerWidget {
         const SizedBox(height: HollowSpacing.sm),
         Container(height: 1, color: hollow.border),
 
-        // About Me preview
         if (aboutMeController.text.trim().isNotEmpty) ...[
           const SizedBox(height: HollowSpacing.sm),
           Text(
@@ -357,7 +343,6 @@ class ProfileSection extends ConsumerWidget {
           ),
         ],
 
-        // Peer ID footer
         const SizedBox(height: HollowSpacing.sm),
         Row(
           mainAxisAlignment: MainAxisAlignment.center,
@@ -387,7 +372,7 @@ class ProfileSection extends ConsumerWidget {
     final savedAvatar = ref.watch(avatarProvider)[localPeerId];
     // An ANIMATED avatar counts even when the still cache is cold: HollowAvatar
     // paints the rail blob and never asks for the still, so `avatarProvider`
-    // stays empty for exactly the people who most obviously have an avatar.
+    // stays empty for the people who most obviously have one.
     final savedAnimated = isProfileAnimHash(ref.watch(
         profileProvider.select((p) => p[localPeerId]?.avatarAnim ?? '')));
     final hasAvatar = avatarChanged
@@ -416,7 +401,7 @@ class ProfileSection extends ConsumerWidget {
   }
 
   /// Avatar frame (issue #54). Reads the SAVED frame when nothing is pending,
-  /// so Clear only offers itself when there is a frame to clear.
+  /// so Clear only appears when there is a frame to clear.
   Widget _buildFrameRow(HollowTheme hollow, WidgetRef ref) {
     final saved = ref.watch(
         profileProvider.select((p) => p[localPeerId]?.avatarFrame ?? ''));
@@ -541,13 +526,10 @@ class _ImageRow extends StatelessWidget {
   }
 }
 
-// ── Twitch Connection Widget ──────────────────────────────────────
-
 /// Connect, verify and disconnect a Twitch account.
 ///
-/// Public because it is what the widget test drives: every state it can be in
-/// (busy, verified, connected but not verified, disconnected) is one this row
-/// paints, and the rest of Settings > Profile needs a running node to pump.
+/// Public because the widget test drives it: every state it can be in is one
+/// this row paints, and the rest of Settings > Profile needs a running node.
 class TwitchConnectionRow extends ConsumerStatefulWidget {
   final HollowTheme hollow;
 
@@ -563,12 +545,10 @@ class _TwitchConnectionRowState extends ConsumerState<TwitchConnectionRow> {
   String? _userId;
   String? _username;
   bool _loading = true;
-  /// A verify or a disconnect is in flight: both talk to the shop, so the
-  /// buttons say so rather than looking dead.
+  /// A verify or a disconnect is in flight; both talk to the shop.
   bool _busy = false;
-  /// The login on our verified credential, or null when we hold none. This is
-  /// what the purple chip draws, so the row says which of the two states we
-  /// are in rather than only whether a token exists.
+  /// The login on our verified credential, or null when we hold none: what the
+  /// purple chip draws, rather than merely whether a token exists.
   String? _verifiedLogin;
 
   @override
@@ -597,18 +577,17 @@ class _TwitchConnectionRowState extends ConsumerState<TwitchConnectionRow> {
     }
   }
 
-  /// The verified login on OUR profile row, read the same way every viewer
-  /// reads it.
+  /// The verified login on OUR profile row, read the way every viewer reads it.
   String? _myVerifiedLogin() {
     final me = ref.read(identityProvider).peerId;
     if (me == null) return null;
     return ref.read(twitchLoginProvider(me));
   }
 
-  /// Ask the shop to verify the connected account and wear the credential.
+  /// Asks the shop to verify the connected account and wear the credential.
   ///
-  /// Every outcome is visible: a spinner while it runs, a toast on a refusal
-  /// with the shop's own sentence, and the login on the row when it lands.
+  /// Every outcome is visible: a spinner, a toast carrying the shop's own
+  /// sentence on a refusal, and the login on the row when it lands.
   Future<void> _verifyAccount() async {
     if (_busy) return;
     setState(() => _busy = true);
@@ -635,10 +614,9 @@ class _TwitchConnectionRowState extends ConsumerState<TwitchConnectionRow> {
 
   /// Connect, then verify.
   ///
-  /// The connection alone proves nothing to anybody else: what a viewer sees
-  /// is the CREDENTIAL, so the sign in runs straight into the verify rather
-  /// than leaving the account connected and unverified. The old per-server
-  /// `setTwitchUsername` writes are gone with it; a self-declared handle is
+  /// The connection alone proves nothing to anybody else: a viewer sees the
+  /// CREDENTIAL, so the sign in runs straight into the verify rather than
+  /// leaving the account connected and unverified. A self-declared handle is
   /// not rendered by any new client.
   Future<void> _connect() async {
     if (!mounted) return;
@@ -652,9 +630,9 @@ class _TwitchConnectionRowState extends ConsumerState<TwitchConnectionRow> {
     if (_busy) return;
     setState(() => _busy = true);
     try {
-      // Rust drops the account credential and republishes BEFORE it wipes the
-      // token: the credential is a 90-day fact everyone verifies offline, so
-      // the token alone going away would leave a verified chip behind.
+      // Rust drops the credential and republishes BEFORE wiping the token: the
+      // credential is a 90-day fact everyone verifies offline, so losing the
+      // token alone would leave a verified chip behind.
       await ref.read(twitchFfiProvider).disconnect();
       if (mounted) {
         setState(() {
@@ -736,9 +714,8 @@ class _TwitchConnectionRowState extends ConsumerState<TwitchConnectionRow> {
             ),
           )
         else if (_connected) ...[
-          // Connected but not verified: the account is signed in and the mark
-          // is one press away, so offer it rather than making them disconnect
-          // and start again.
+          // Connected but not verified: the mark is one press away, so offer it
+          // rather than making them disconnect and start again.
           if (_verifiedLogin == null)
             HollowButton.outline(
               onPressed: _verifyAccount,

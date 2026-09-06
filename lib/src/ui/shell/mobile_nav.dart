@@ -5,8 +5,7 @@ import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-/// Which tab is active on mobile.
-/// 0 = Home (server/channel list), 1 = Chat, 2 = Members, 3 = Settings.
+/// Which tab is active on mobile: Home, Chat, Members, Settings.
 final mobileTabProvider = StateProvider<int>((ref) => 0);
 
 /// Bottom navigation bar for mobile layout.
@@ -93,9 +92,8 @@ class _NavTab extends StatelessWidget {
               color: isActive ? hollow.accent : hollow.textSecondary,
             ),
             const SizedBox(height: 2),
-            // a11y Phase 3: bottom-nav labels cap their scale (like iOS/Android
-            // tab bars) so the fixed-height bar stays intact; content areas
-            // still honor the full 2.0× OS scale.
+            // Bottom-nav labels cap their scale so the fixed-height bar stays
+            // intact; content areas still honour the full OS scale.
             MediaQuery.withClampedTextScaling(
               maxScaleFactor: 1.3,
               child: Text(

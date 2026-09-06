@@ -313,8 +313,8 @@ class _RoomInviteCard extends ConsumerWidget {
   }
 }
 
-/// A Hollow Shop support code someone pasted into chat. Renders nothing at
-/// all on a store build: no shop surface means no redeem surface either.
+/// A Hollow Shop support code pasted into chat. Renders nothing on a store
+/// build, because no shop surface means no redeem surface.
 class _RedeemCodeCard extends ConsumerWidget {
   final HollowLink link;
   const _RedeemCodeCard({required this.link});
@@ -414,12 +414,11 @@ class _ConferenceInviteCard extends ConsumerWidget {
 
   void _handleJoin(BuildContext context, WidgetRef ref) {
     if (Platform.isAndroid || Platform.isIOS) {
-      // Mobile: the lobby lives in the Conferences screen — push it first.
+      // On mobile the lobby lives in the Conferences screen.
       Navigator.of(context, rootNavigator: true).push(hollowMobileRoute(
         builder: (_) => const MobileConferencesRoute(),
       ));
     } else {
-      // Desktop: show the lobby in the Conferences center tab.
       ref.read(conferenceProvider.notifier).openTab();
     }
     unawaited(ref

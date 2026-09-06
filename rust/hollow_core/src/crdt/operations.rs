@@ -6,11 +6,9 @@ use crate::identity::native_identity::NativeKeypair;
 
 /// The author's proof that it really wrote this op.
 ///
-/// `sig` is the base64 Ed25519 signature over [`CrdtOp::signing_payload`];
-/// `pk` is the base64 36-byte protobuf public key the signature verifies
-/// against, and whose derived peer_id must equal the op's `author`. Same
-/// shape as the v2 message signature (`hollow-msg2`), boxed on the op
-/// because a `CrdtOp` rides async frames whose stack budget is tight.
+/// `sig` is the base64 Ed25519 signature over [`CrdtOp::signing_payload`] and `pk` the
+/// base64 protobuf public key it verifies against, whose derived peer_id must equal
+/// the op's `author`. Boxed because a `CrdtOp` rides async frames with a tight stack.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CrdtAuth {
     pub sig: String,
@@ -50,25 +48,21 @@ impl std::fmt::Display for OpReject {
 
 /// A single CRDT operation — the unit of replication.
 ///
-/// Each op is self-contained: server_id, author, timestamp, and payload.
-/// Ops are idempotent (safe to apply multiple times) and commutative
-/// (order doesn't matter for final state).
+/// Each op is self-contained and both idempotent and commutative.
 ///
-/// SECURITY: `author` is a claim until `auth` proves it. Every remote ingest
-/// path runs `ServerState::admit_remote_op`, which rejects an op with no
-/// `auth`, an `auth` whose key derives a different peer_id, or a signature
-/// that does not verify. There is no tolerance branch for unsigned ops: an
-/// `if auth.is_some()` gate would be the bypass.
+/// SECURITY: `author` is a claim until `auth` proves it. Every remote ingest path runs
+/// `ServerState::admit_remote_op`, which rejects an op with no `auth`, an `auth` whose
+/// key derives a different peer_id, or a signature that does not verify. There is no
+/// tolerance branch: an `if auth.is_some()` gate would be the bypass.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CrdtOp {
     pub server_id: String,
     pub hlc: HlcTimestamp,
     pub author: String,
     pub payload: CrdtPayload,
-    /// Author proof. `Option` for wire tolerance only (an op that arrives
-    /// without it parses, then gets rejected with `MissingSignature` — a
-    /// parse failure would be indistinguishable from an unknown payload
-    /// variant, which `parse_ops_tolerant` deliberately skips silently).
+    /// Author proof. `Option` for wire tolerance only: an op arriving without it parses
+    /// and is then rejected with `MissingSignature`, where a parse failure would be
+    /// indistinguishable from the unknown payload variants the tolerant parse skips.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth: Option<Box<CrdtAuth>>,
 }
@@ -77,11 +71,9 @@ impl CrdtOp {
     /// Canonical signing payload:
     ///   `hollow-crdt1:{server_id}:{physical_ms}:{counter}:{actor}:{author}:{payload_json}`
     ///
-    /// Every field before the payload is colon-free (hex id, two numbers, two
-    /// peer_ids), so the free-form JSON stays LAST and the layout is
-    /// unambiguous — the same rule as `hollow-msg2`. Deterministic because no
-    /// `CrdtPayload` variant carries a map or a set: serde emits struct fields
-    /// in declaration order, so the same op always serializes identically.
+    /// Every field before the payload is colon-free, so the free-form JSON stays LAST and
+    /// the layout is unambiguous, the same rule as `hollow-msg2`. Deterministic because
+    /// no `CrdtPayload` variant carries a map or a set.
     pub fn signing_payload(&self) -> String {
         let payload_json = serde_json::to_string(&self.payload).unwrap_or_default();
         format!(
@@ -95,9 +87,8 @@ impl CrdtOp {
         )
     }
 
-    /// Sign this op with the MASTER keypair (`author` and the state's
-    /// `members`/`roles` maps are master-keyed, so the device key would never
-    /// derive the author id). `pk_b64` is the base64 protobuf public key.
+    /// Sign this op with the MASTER keypair: `author` and the state's maps are
+    /// master-keyed, so a device key would never derive the author id.
     pub fn sign(&mut self, keypair: &NativeKeypair, pk_b64: &str) {
         let sig = keypair.sign(self.signing_payload().as_bytes());
         self.auth = Some(Box::new(CrdtAuth {
@@ -106,9 +97,8 @@ impl CrdtOp {
         }));
     }
 
-    /// Bind this op to its claimed `author`: the key must derive that peer_id
-    /// AND the signature must verify over the signing payload. REJECTS — it
-    /// never logs and continues.
+    /// Bind this op to its claimed `author`: the key must derive that peer_id AND the
+    /// signature must verify over the signing payload. REJECTS, never logs and continues.
     pub fn verify_author(&self) -> Result<(), OpReject> {
         let auth = self.auth.as_ref().ok_or(OpReject::MissingSignature)?;
         let b64 = base64::engine::general_purpose::STANDARD;
@@ -145,10 +135,9 @@ pub enum CrdtPayload {
         key: String,
         value: String,
     },
-    /// Server deletion tombstone. Owner-authored only (validated at ingest). Marks
-    /// the ServerState `deleted` and drains membership, but the op survives in the
-    /// op_log so reconnecting members reconcile the deletion via normal grow-only
-    /// sync. `deleted_at` is informational (ordering uses `op.hlc`).
+    /// Server deletion tombstone, owner-authored only (validated at ingest). Marks the
+    /// state `deleted` and drains membership, but survives in the op_log so reconnecting
+    /// members reconcile through ordinary grow-only sync.
     ServerDeleted {
         deleted_at: i64,
     },
@@ -268,10 +257,9 @@ pub enum CrdtPayload {
         channel_id: String,
         is_public: bool,
     },
-    /// Label-gated visibility (issue #32). Non-empty = only holders of ANY
-    /// listed label (plus Admin+/Owner) see the channel; empty = back to the
-    /// tier ladder. Authored paired with a ChannelVisibilityChanged{"admin"}
-    /// stamp so clients that predate this op still hide the channel.
+    /// Label-gated visibility (issue #32): non-empty means only holders of a listed
+    /// label (plus Admin+/Owner) see the channel, empty is back to the tier ladder.
+    /// Authored paired with an admin visibility stamp so older clients still hide it.
     ChannelVisibilityLabelsChanged {
         channel_id: String,
         labels: Vec<String>,
@@ -324,10 +312,9 @@ pub enum CrdtPayload {
     },
 
     // Custom emotes (server emote set)
-    /// Add (or replace, same name) a custom emote. `hash` is the SHA-256 hex
-    /// of the processed WebP bytes — the CRDT carries METADATA ONLY; bytes
-    /// replicate on demand via EmoteRequest/EmoteResponse (content-addressed,
-    /// receiver-verified). Mirrors the showcase asset playbook.
+    /// Add (or replace, same name) a custom emote. The CRDT carries METADATA ONLY:
+    /// `hash` addresses the processed WebP and the bytes replicate on demand,
+    /// content-addressed and receiver-verified.
     EmojiAdded {
         name: String,
         hash: String,
@@ -338,15 +325,12 @@ pub enum CrdtPayload {
     },
 
     // Sticker packs (server sticker set)
-    /// Add (or replace, same hash) a sticker in the server's set. Same
-    /// METADATA-ONLY rule as emotes — `hash` addresses the processed WebP and
-    /// the bytes replicate on demand over the asset rail at
-    /// `AssetKind::Sticker`.
+    /// Add (or replace, same hash) a sticker in the server's set, METADATA ONLY like
+    /// emotes.
     ///
-    /// Keyed by HASH, not by name: a sticker is picked visually and never
-    /// typed, so its name is a label two stickers may share. `pack` groups
-    /// them in the picker (`""` = the server's default pack) and `w`/`h` let
-    /// the picker reserve the right cell before any bytes arrive.
+    /// Keyed by HASH, not name: a sticker is picked visually, so its name is a label two
+    /// stickers may share. `pack` groups them in the picker and `w`/`h` let it reserve
+    /// the right cell before any bytes arrive.
     StickerAdded {
         hash: String,
         name: String,
@@ -360,10 +344,9 @@ pub enum CrdtPayload {
     },
 }
 
-/// Tolerant sync-batch parse: each op deserializes INDIVIDUALLY, so a batch
-/// containing a NEWER client's payload variant skips just that op instead of
-/// poisoning the whole Vec (which permanently wedged older clients' server
-/// sync whenever any member used a feature they didn't know yet).
+/// Tolerant sync-batch parse: each op deserializes INDIVIDUALLY, so a batch carrying a
+/// NEWER client's payload variant skips just that op instead of poisoning the whole
+/// Vec, which permanently wedged older clients' server sync.
 pub fn parse_ops_tolerant(json: &str) -> Vec<CrdtOp> {
     match serde_json::from_str::<Vec<serde_json::Value>>(json) {
         Ok(vals) => vals
@@ -385,9 +368,8 @@ pub enum MemberRole {
 }
 
 impl MemberRole {
-    /// Numeric role rank. Higher = more authority. Used for rank comparisons
-    /// (outranking checks) and carried on RoleChanged ops as wire-compat
-    /// metadata for old clients — AdminLwwReg::merge no longer consults it.
+    /// Numeric role rank, higher = more authority. Used for outranking checks and
+    /// carried on RoleChanged as wire-compat metadata the merge no longer consults.
     pub fn priority(&self) -> u8 {
         match self {
             Self::Owner => 3,

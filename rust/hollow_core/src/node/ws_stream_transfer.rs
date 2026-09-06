@@ -1,14 +1,11 @@
 //! Chunked file/shard streaming over WebSocket binary frames.
 //!
-//! Mirrors the functionality of `stream_transfer.rs` (libp2p streaming) but uses
-//! WS `SendBinaryDirect` frames instead of Yamux/QUIC substreams.
-//!
-//! Chunk payload format (inside WS binary frame):
+//! Chunk payload format (inside a WS binary frame):
 //!   First chunk:        [type:1][id:64][total_size:8][shard_index:2 (shard only)][data...]
 //!   Continuation chunk: [0xFF:1][id:64][data...]
 //!
-//! Each WS frame carries one chunk. Chunks arrive in order (WS = TCP = ordered).
-//! The receiver reassembles into a temp file, then returns a `StreamRequest` on completion.
+//! One chunk per frame, in order (WS = TCP). The receiver reassembles into a temp
+//! file, then returns a `StreamRequest` on completion.
 
 use std::collections::HashMap;
 use std::io::Write;
@@ -468,14 +465,13 @@ fn pad_id(id: &str) -> [u8; 64] {
     buf
 }
 
-/// Parse an ID from a 64-byte padded buffer (strip trailing zeroes).
+/// Parse an ID from a 64-byte padded buffer (trailing zeroes stripped).
 ///
-/// The id becomes part of a temp file name (`.ws_recv_{id}.tmp`), so this is
-/// the gate: only the characters our own ids use pass (hex, `:` for the
-/// share-chunk and shard suffix, `_` for link snapshots, `-`). A `..` or a
-/// separator in the field would walk out of the files directory on Windows,
-/// where `..` is collapsed lexically before the filesystem is consulted.
-/// Mirrors `parseWireTransferId` in Dart. `None` = drop the frame.
+/// The id becomes part of a temp file name (`.ws_recv_{id}.tmp`), so this is the
+/// gate: only the characters our own ids use pass (hex, `:` for the share-chunk
+/// and shard suffix, `_` for link snapshots, `-`). A `..` or a separator would
+/// walk out of the files directory on Windows, where `..` is collapsed lexically
+/// before the filesystem is consulted. Mirrors `parseWireTransferId` in Dart.
 fn parse_id(buf: &[u8]) -> Option<String> {
     let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
     let id = std::str::from_utf8(&buf[..end]).ok()?;

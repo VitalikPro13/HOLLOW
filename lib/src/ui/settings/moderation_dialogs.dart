@@ -1,17 +1,10 @@
-/// The four member-moderation confirms — change role, kick, mute, ban — in ONE
-/// place (issue #61, phase 3).
-///
-/// Before this they existed twice: private widgets in
-/// `settings/members_tab.dart` and a second copy in
-/// `mobile/mobile_members_route.dart`. The desktop user context menu would
-/// have made a third. Three copies of a destructive confirm is three chances
-/// for one of them to skip a check, word the warning differently, or forget to
-/// invalidate the member list afterwards.
+/// The four member-moderation confirms (change role, kick, mute, ban) in ONE
+/// place (issue #61, phase 3): three copies of a destructive confirm is three
+/// chances to skip a check or word a warning differently.
 ///
 /// Every function here does the whole job: confirm, call the FFI, invalidate
-/// the providers the result changes, and report the outcome. Call sites await
-/// nothing and handle nothing. Rust re-checks `op_allowed` on every one of
-/// these ops regardless of what the UI allowed.
+/// the providers the result changes, and report the outcome. Rust re-checks
+/// `op_allowed` on every one of these ops regardless of what the UI allowed.
 library;
 
 import 'package:flutter/material.dart';
@@ -35,11 +28,9 @@ const kMuteDurationOptions = <(String, int)>[
   ('Permanent', 0),
 ];
 
-/// Refreshes everything a moderation op can change.
-///
-/// The member list carries role AND mute state, and the muted-members section
-/// reads its own provider, so both have to go or a settings tab that is
-/// already open keeps showing the pre-op state.
+/// Refreshes everything a moderation op can change: the member list carries
+/// role AND mute state and the muted-members section reads its own provider, so
+/// an open settings tab keeps showing the pre-op state unless both go.
 void _refresh(WidgetRef ref, String serverId) {
   ref.invalidate(serverMembersProvider(serverId));
   ref.invalidate(mutedMembersProvider(serverId));
@@ -192,9 +183,8 @@ Future<void> showBanMemberDialog(
 
 /// Pick a duration, then mute [peerId] for it.
 ///
-/// The duration IS the confirmation — no second "are you sure", the same as
-/// the mobile sheet: picking a length is already a deliberate act and a mute
-/// is reversible from the Members tab.
+/// The duration IS the confirmation: picking a length is already deliberate and
+/// a mute is reversible from the Members tab.
 Future<void> showMuteMemberDialog(
   BuildContext context,
   WidgetRef ref, {
@@ -258,11 +248,10 @@ Future<void> showMuteMemberDialog(
   );
 }
 
-/// Applies a mute that the caller has already had confirmed.
+/// Applies a mute the caller has already had confirmed.
 ///
-/// Mobile picks the duration in a bottom sheet rather than the dialog above,
-/// because a sheet is what every other action list on that platform is. The
-/// PICKER differs; the write, the invalidations and the wording must not, so
+/// Mobile picks the duration in a bottom sheet instead of the dialog above. The
+/// PICKER may differ; the write, the invalidations and the wording must not, so
 /// both funnel through here.
 Future<void> muteMemberFor(
   BuildContext context,

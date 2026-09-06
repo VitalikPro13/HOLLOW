@@ -14,24 +14,22 @@ import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/shop/hollowpack_import.dart';
 
-/// Redeeming a Hollow Shop code (design 5.3, 12.6, 13.23).
+/// Redeeming a Hollow Shop code.
 ///
-/// Two steps, both in Rust: a lookup that says what the code buys and whether
-/// this identity already supports it, then the redeem itself, which blinds a
-/// message binding OUR master identity to the item, has the shop sign it
-/// without seeing it, keeps the credential, announces it on the profile, and
+/// Two steps, both in Rust: a lookup that says what the code buys, then the
+/// redeem, which blinds a message binding OUR master identity to the item, has
+/// the shop sign it without seeing it, keeps the credential, announces it and
 /// fetches the pack through the one import door. The dialog only sequences
 /// those and says what happened.
 
-/// A `hollow://redeem/<code>` link landed. The code is KEPT first, so closing
-/// the dialog never loses what the person paid for, then the dialog opens on
-/// it.
+/// A `hollow://redeem/<code>` link landed. The code is KEPT before the dialog
+/// opens, so closing it never loses what the person paid for.
 Future<void> showRedeemCodeDialog(BuildContext context, String code) async {
   try {
     await shop.keepRedeemCode(code: code);
   } catch (_) {
-    // A malformed code is refused by the lookup with a sentence; keeping it
-    // was only ever a courtesy.
+    // A malformed code is refused by the lookup anyway; keeping it is a
+    // courtesy.
   }
   if (!context.mounted) return;
   await showHollowDialog<void>(
@@ -95,9 +93,8 @@ class _RedeemCodeDialogState extends ConsumerState<RedeemCodeDialog> {
       final looked = await shop.redeemLookup(code: code);
       if (!mounted) return;
       if (looked.status != 'ok') {
-        // A burned, refunded or unknown code was just forgotten by the
-        // lookup; the kept list on the profile panel says so on its next
-        // read.
+        // The lookup just forgot a burned, refunded or unknown code, and the
+        // kept list says so on its next read.
         ref.invalidate(shop.keptRedeemCodesProvider);
         setState(() {
           _step = _Step.entering;
@@ -137,8 +134,8 @@ class _RedeemCodeDialogState extends ConsumerState<RedeemCodeDialog> {
     }
     if (!mounted) return;
 
-    // The credential is on the profile now; every surface that reads it
-    // converges on ProfileUpdated, and the library on the reload.
+    // The credential is on the profile now: readers converge on ProfileUpdated
+    // and the library on the reload.
     final me = ref.read(identityProvider).peerId;
     if (me != null && me.isNotEmpty) {
       await ref.read(profileProvider.notifier).reloadProfile(me);

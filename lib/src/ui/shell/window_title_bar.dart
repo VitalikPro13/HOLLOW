@@ -13,16 +13,12 @@ import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:window_manager/window_manager.dart';
 
-/// Custom 32px title bar replacing the native window chrome.
-///
-/// Windows/Linux layout: [Hollow branding] [drag area ──] [✎] [─] [□] [✕]
-/// macOS layout (native traffic lights stay top-left, drawn by the OS):
-///   [○○○ gap] [✎ Annotate] [drag area ── Hollow ── drag area]
+/// Custom 32px title bar replacing the native window chrome. On macOS the
+/// native traffic lights stay top-left and the layout works around them.
 class WindowTitleBar extends StatelessWidget {
   const WindowTitleBar({super.key});
 
-  /// Width reserved on the left for the macOS native traffic-light buttons so
-  /// nothing we draw overlaps them.
+  /// Reserved on the left so nothing we draw overlaps the macOS traffic lights.
   static const double _macTrafficLightGap = 78;
 
   @override
@@ -38,10 +34,8 @@ class WindowTitleBar extends StatelessWidget {
     final brandReveal = StartupRevealScope.interval(context, 0.0, 0.15);
     final buttonsReveal = StartupRevealScope.interval(context, 0.08, 0.20);
 
-    // Centered title.
-    // Larger Text (a11y P3): the 32px OS title bar is fixed chrome (traffic-
-    // light alignment depends on it), so cap the brand label's scale rather
-    // than let it clip — the iOS/Android tab-bar norm.
+    // The title bar is fixed chrome that traffic-light alignment depends on, so
+    // the brand label's scale is capped rather than allowed to clip.
     Widget title = MediaQuery.withClampedTextScaling(
       maxScaleFactor: 1.3,
       child: Text(
@@ -57,7 +51,6 @@ class WindowTitleBar extends StatelessWidget {
       title = FadeTransition(opacity: brandReveal, child: title);
     }
 
-    // Annotate button sits just to the right of the traffic lights.
     Widget annotate = const Row(
       mainAxisSize: MainAxisSize.min,
       children: [AnnotationToggleButton(), ZoomIndicator()],
@@ -71,14 +64,13 @@ class WindowTitleBar extends StatelessWidget {
       color: hollow.opaqueBackground,
       child: Stack(
         children: [
-          // Full-width drag area underneath everything so the whole bar moves
-          // the window (the traffic lights + button capture their own taps).
+          // Underneath everything, so the whole bar moves the window; the
+          // traffic lights and the button capture their own taps.
           const Positioned.fill(child: DragToMoveArea(child: SizedBox.expand())),
-          // Centered title (ignores pointer so the drag area still works).
+          // Ignores the pointer, so the drag area underneath still works.
           Center(
             child: IgnorePointer(child: title),
           ),
-          // Traffic-light gap + Annotate button on the left.
           Padding(
             padding: const EdgeInsets.only(left: _macTrafficLightGap),
             child: Align(
@@ -98,8 +90,7 @@ class WindowTitleBar extends StatelessWidget {
 
     Widget branding = Padding(
       padding: const EdgeInsets.only(left: HollowSpacing.lg),
-      // Larger Text (a11y P3): fixed 32px title-bar chrome — cap the brand
-      // label scale so it can't clip the band.
+      // Fixed-height chrome, so the brand label's scale is capped.
       child: MediaQuery.withClampedTextScaling(
         maxScaleFactor: 1.3,
         child: Text(
@@ -153,11 +144,11 @@ class WindowTitleBar extends StatelessWidget {
   }
 }
 
-/// Browser-style zoom readout, shown only while the interface scale is not
-/// 100%. It lives in the title bar because the title bar is the one surface
-/// OUTSIDE the scale transform: whatever the user has done to the interface,
-/// this stays legible, on screen, and one click from 100%. Without it the
-/// only way back is a shortcut you have to already know.
+/// Zoom readout, shown only while the interface scale is not 100%.
+///
+/// It lives in the title bar because that is the one surface OUTSIDE the scale
+/// transform: whatever the user has done, this stays legible and one click from
+/// 100%. Without it the only way back is a shortcut you must already know.
 class ZoomIndicator extends ConsumerWidget {
   const ZoomIndicator({super.key});
 
@@ -166,8 +157,8 @@ class ZoomIndicator extends ConsumerWidget {
     final scale = ref.watch(uiScaleProvider);
     if ((scale - kUiScaleDefault).abs() < 0.001) return const SizedBox.shrink();
     final hollow = HollowTheme.of(context);
-    // No HollowTooltip here: the title bar sits ABOVE the Navigator, so it
-    // has no Overlay ancestor to host one. The label carries the meaning.
+    // No HollowTooltip here: the title bar sits ABOVE the Navigator and has no
+    // Overlay ancestor to host one.
     return Padding(
       padding: const EdgeInsets.only(right: HollowSpacing.xs),
       child: HollowPressable(
@@ -184,8 +175,7 @@ class ZoomIndicator extends ConsumerWidget {
           children: [
             Icon(LucideIcons.scaling, size: 12, color: hollow.textSecondary),
             const SizedBox(width: 4),
-            // Fixed chrome band: cap the label so a large OS text scale
-            // can't grow the 32px bar (the a11y P3 label-cap pattern).
+            // Fixed chrome band, so a large OS text scale cannot grow it.
             MediaQuery.withClampedTextScaling(
               maxScaleFactor: 1.3,
               child: Text(
@@ -204,7 +194,7 @@ class ZoomIndicator extends ConsumerWidget {
   }
 }
 
-/// Base for window control buttons — no Material ripple, just instant color.
+/// Base for window control buttons: no Material ripple, just instant colour.
 class _WindowButton extends StatefulWidget {
   final VoidCallback onTap;
   final Color? hoverColor;
@@ -228,10 +218,9 @@ class _WindowButtonState extends State<_WindowButton> {
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
-    // Rest color = hover color at zero alpha, NOT Colors.transparent
-    // (transparent BLACK — the animated lerp passed through semi-opaque dark,
-    // flashing dark on hover/unhover; the close button muddied through
-    // dark-red). Same-RGB endpoints make the transition a pure fade.
+    // Rest colour is the hover colour at zero alpha, NEVER Colors.transparent:
+    // that is transparent BLACK, and the lerp flashes through semi-opaque dark.
+    // Same-RGB endpoints make the transition a pure fade.
     final hoverColor = widget.hoverColor ?? hollow.elevated;
     final bgColor =
         _hovering ? hoverColor : hoverColor.withValues(alpha: 0.0);

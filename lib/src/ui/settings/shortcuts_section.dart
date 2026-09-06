@@ -13,11 +13,10 @@ import 'package:hollow/src/ui/settings/keybind_capture_field.dart';
 import 'package:hollow/src/ui/settings/settings_shared.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-/// Shortcuts category of the desktop Settings dialog — every row is
-/// rebindable in place (tap the badge, press the new combo). The Voice rows
-/// edit the same providers as Audio & Video > Voice (one source of truth);
-/// the rest live in [appShortcutsProvider]. Enter/Shift+Enter are
-/// structural, not shortcuts, and stay fixed.
+/// Shortcuts category of the desktop Settings dialog; every row is rebindable
+/// in place. The Voice rows edit the same providers as Audio & Video > Voice,
+/// the rest live in [appShortcutsProvider], and Enter and Shift+Enter are
+/// structural rather than shortcuts.
 class ShortcutsSettingsView extends ConsumerStatefulWidget {
   const ShortcutsSettingsView({super.key});
 
@@ -30,9 +29,8 @@ class _ShortcutsSettingsViewState extends ConsumerState<ShortcutsSettingsView> {
   @override
   void initState() {
     super.initState();
-    // These providers may have loaded BEFORE storage was ready at app start
-    // and cached the defaults (the bootstrap-not-build settings trap) —
-    // re-read from disk whenever the page opens so the rows show truth.
+    // These providers may have cached defaults from before storage was ready,
+    // so re-read from disk whenever the page opens.
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       ref.invalidate(appShortcutsProvider);
@@ -45,8 +43,8 @@ class _ShortcutsSettingsViewState extends ConsumerState<ShortcutsSettingsView> {
   void _setAppShortcut(AppShortcut shortcut, String serialized) {
     final binding = HotkeyBinding.parse(serialized);
     if (binding == null) return;
-    // A bare typable key (plain B, plain 7…) as an always-on shortcut would
-    // fire while typing messages — refuse; F-keys and friends stay allowed.
+    // A bare typable key as an always-on shortcut would fire while typing a
+    // message; F-keys and friends stay allowed.
     if (binding.isBare && binding.isTypableTrigger) {
       HollowToast.show(
           context,
@@ -97,8 +95,8 @@ class _ShortcutsSettingsViewState extends ConsumerState<ShortcutsSettingsView> {
       label: label,
       serialized: serialized,
       isOverridden: serialized != fallback,
-      // Voice bindings intentionally skip the bare-typable guard: they are
-      // live only in calls and bare keys are suppressed while typing.
+      // Voice bindings skip the bare-typable guard: they are live only in
+      // calls, where bare keys are suppressed while typing.
       onChanged: (v) =>
           ref.read(provider.notifier).setBinding(v).catchError((_) {
         if (mounted) {
@@ -168,8 +166,8 @@ class _ShortcutsSettingsViewState extends ConsumerState<ShortcutsSettingsView> {
   }
 }
 
-/// Rebindable shortcut row: label, reset affordance (only when the binding
-/// differs from its default), press-to-set capture field.
+/// Rebindable shortcut row. The reset affordance appears only when the binding
+/// differs from its default.
 class _EditableRow extends StatelessWidget {
   final HollowTheme hollow;
   final String label;
@@ -230,7 +228,7 @@ class _EditableRow extends StatelessWidget {
   }
 }
 
-/// Non-rebindable row (structural keys): label + static badge.
+/// Non-rebindable row, for the structural keys.
 class _FixedRow extends StatelessWidget {
   final String label;
   final String shortcut;
@@ -260,7 +258,7 @@ class _FixedRow extends StatelessWidget {
   }
 }
 
-/// Styled keyboard shortcut badge (e.g. "Shift + Enter").
+/// Styled keyboard shortcut badge, e.g. "Shift + Enter".
 class _KeyBadge extends StatelessWidget {
   final String shortcut;
 
@@ -270,7 +268,6 @@ class _KeyBadge extends StatelessWidget {
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
 
-    // Split on " + " to render each key individually.
     final keys = shortcut.split(' + ');
 
     return Row(

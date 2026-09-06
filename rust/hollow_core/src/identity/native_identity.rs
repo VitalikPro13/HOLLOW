@@ -1,7 +1,5 @@
-//! Native Ed25519 identity module — replaces libp2p::identity.
-//!
-//! Produces identical PeerId strings (`12D3KooW...`) and Ed25519 signatures
-//! as libp2p, using ed25519-dalek directly.
+//! Native Ed25519 identity: produces the same PeerId strings (`12D3KooW...`) and
+//! signatures libp2p does, using ed25519-dalek directly.
 
 use bip39::Mnemonic;
 use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
@@ -29,9 +27,8 @@ fn compute_peer_id(signing_key: &SigningKey) -> String {
 impl NativeKeypair {
     /// Derive a keypair from a BIP-39 mnemonic (first 32 bytes of seed).
     ///
-    /// The BIP-39 seed and the 32-byte secret cut from it are both wiped when
-    /// this returns; `SigningKey` zeroizes itself on drop, but the buffers we
-    /// build on the way in would otherwise stay in freed stack memory.
+    /// The BIP-39 seed and the secret cut from it are wiped on return: `SigningKey`
+    /// zeroizes itself, but the buffers built on the way in would stay in freed stack.
     pub fn from_mnemonic(mnemonic: &Mnemonic) -> Result<Self, String> {
         let seed = Zeroizing::new(mnemonic.to_seed(""));
         let mut secret_bytes = Zeroizing::new([0u8; 32]);
@@ -54,10 +51,8 @@ impl NativeKeypair {
 
     /// Decode from libp2p's protobuf keypair encoding.
     ///
-    /// Format: `[0x08, 0x01, 0x12, 0x40, secret(32), public(32)]` (68 bytes total).
+    /// Format: `[0x08, 0x01, 0x12, 0x40, secret(32), public(32)]`, 68 bytes.
     pub fn from_protobuf_encoding(bytes: &[u8]) -> Result<Self, String> {
-        // libp2p Ed25519 protobuf: field 1 (type) = 1, field 2 (data) = 64 bytes
-        // Wire: 0x08 0x01 0x12 0x40 [secret_key(32) || public_key(32)]
         if bytes.len() < 68 {
             return Err(format!(
                 "Protobuf too short: expected >=68 bytes, got {}",
@@ -74,7 +69,6 @@ impl NativeKeypair {
             cached_peer_id: compute_peer_id(&signing_key),
             signing_key,
         };
-        // Verify the public key matches.
         let expected_pub = &bytes[36..68];
         let actual_pub = keypair.signing_key.verifying_key().to_bytes();
         if actual_pub != expected_pub {
@@ -85,12 +79,9 @@ impl NativeKeypair {
 
     /// Encode to libp2p-compatible protobuf format (for backward-compatible storage).
     ///
-    /// Returns `Result` for API compatibility with callsites that expect `Result`
-    /// (carried over from `libp2p::identity::Keypair::to_protobuf_encoding`).
-    /// This never fails in practice.
+    /// Returns `Result` only for call-site compatibility; it never fails in practice.
     pub fn to_protobuf_encoding(&self) -> Result<Vec<u8>, String> {
-        // The returned Vec is the caller's to protect (it goes straight into
-        // the encrypted identity file); the copy we cut it from is not.
+        // The returned Vec is the caller's to protect; the copy it was cut from is not.
         let secret = Zeroizing::new(self.signing_key.to_bytes());
         let public = self.signing_key.verifying_key().to_bytes();
         let mut buf = Vec::with_capacity(68);
@@ -102,11 +93,9 @@ impl NativeKeypair {
 
     /// Derive the PeerId string, identical to libp2p's `12D3KooW...` format.
     ///
-    /// libp2p uses an **identity** multihash for Ed25519 keys because the protobuf-encoded
-    /// public key (36 bytes) is <= 42 bytes (the inline threshold). The identity multihash
-    /// simply wraps the raw bytes: `[0x00, length, ...raw_protobuf_pubkey]`.
-    ///
-    /// For keys > 42 bytes, SHA-256 would be used instead (code 0x12).
+    /// libp2p uses an IDENTITY multihash for Ed25519 because the 36-byte protobuf public
+    /// key is under the 42-byte inline threshold: `[0x00, length, ...raw_pubkey]`. A
+    /// larger key would be SHA-256 hashed instead.
     pub fn peer_id(&self) -> String {
         self.cached_peer_id.clone()
     }
@@ -141,9 +130,8 @@ impl NativeKeypair {
     /// Derive a libp2p-style PeerId string (`12D3KooW…`) from a protobuf-encoded
     /// public key (the 36-byte `[0x08,0x01,0x12,0x20,...pubkey]` format).
     ///
-    /// Mirrors `compute_peer_id` but works from a PUBLIC key alone — used to bind
-    /// a signature's pubkey to a claimed peer_id (message + device-list verify).
-    /// Returns `None` if the protobuf header is malformed.
+    /// Mirrors `compute_peer_id` from a PUBLIC key alone, to bind a signature's pubkey
+    /// to a claimed peer_id. `None` if the protobuf header is malformed.
     pub fn peer_id_from_pubkey_protobuf(pubkey_protobuf: &[u8]) -> Option<String> {
         if pubkey_protobuf.len() < 36
             || pubkey_protobuf[0] != 0x08
@@ -244,12 +232,10 @@ mod tests {
 
     /// KNOWN-ANSWER VECTOR for peer_id derivation.
     ///
-    /// The relay reimplements this derivation in C++ (`derive_peer_id` in
-    /// `relay-uws/src/crypto.cpp`) to bind an auth frame's claimed peer_id to
-    /// its public key. If this derivation ever changes without the relay
-    /// changing in lockstep, EVERY client fails auth. The same vector is pinned
-    /// on the relay side in `relay-uws/test/test_derive_peer_id.cpp` — change
-    /// both or neither.
+    /// The relay reimplements this derivation in C++ to bind an auth frame's claimed
+    /// peer_id to its public key, so a change here without the relay changing in
+    /// lockstep fails auth for EVERY client. The same vector is pinned relay-side in
+    /// `relay-uws/test/test_derive_peer_id.cpp`: change both or neither.
     #[test]
     fn peer_id_derivation_known_answer() {
         let kp = NativeKeypair::from_secret_bytes(&[1u8; 32]);

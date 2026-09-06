@@ -14,12 +14,11 @@ typedef _XQueryKeymapDart = int Function(Pointer<Void>, Pointer<Uint8>);
 typedef _XKeysymToKeycodeC = Uint8 Function(Pointer<Void>, UnsignedLong);
 typedef _XKeysymToKeycodeDart = int Function(Pointer<Void>, int);
 
-/// System-wide hotkeys on Linux X11 via an XQueryKeymap poll (25ms, only
-/// while in a call) on a PRIVATE Display connection (never GTK's). Under a
-/// Wayland session this backend is not created — XWayland only sees keys
-/// while X11 apps have focus, and native-Wayland focus would silently miss;
-/// Wayland uses the GlobalShortcuts portal backend instead (in-app backend
-/// on compositors without the portal).
+/// System-wide hotkeys on Linux X11 via an XQueryKeymap poll, 25ms and only
+/// while in a call, on a PRIVATE Display connection rather than GTK's. Never
+/// created under a Wayland session: XWayland only sees keys while X11 apps
+/// have focus, so Wayland uses the GlobalShortcuts portal backend instead,
+/// falling back to the in-app one on compositors without the portal.
 class X11KeyPoller implements HotkeyBackend {
   // X11 keysyms for modifiers.
   static const _xkShiftL = 0xFFE1, _xkShiftR = 0xFFE2;
@@ -123,9 +122,9 @@ class X11KeyPoller implements HotkeyBackend {
       final was = _pressed[action] ?? false;
       bool pressed;
       if (was) {
-        // Held actions release on the TRIGGER key alone — mid-hold modifier
-        // changes must not chop a PTT transmission (mirrors the in-app
-        // backend and the Win32 poller).
+        // Held actions release on the TRIGGER key alone: mid-hold modifier
+        // changes must not chop a PTT transmission, mirroring the in-app
+        // backend and the Win32 poller.
         pressed = _keycodeDown(kc);
       } else {
         pressed = _keycodeDown(kc) &&

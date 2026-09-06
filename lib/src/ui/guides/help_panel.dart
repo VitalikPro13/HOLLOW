@@ -17,8 +17,7 @@ import 'guides_models.dart';
 /// Width of the desktop Help slide-out panel.
 const double kHelpPanelWidth = 340;
 
-/// Animates the Help panel sliding in/out from the RIGHT edge.
-/// Mirrors `_MemberPanelSlider` / `_DockSidebarSlider` in hollow_shell.dart.
+/// Animates the Help panel sliding in and out from the RIGHT edge.
 class HelpPanelSlider extends StatefulWidget {
   final bool visible;
   const HelpPanelSlider({super.key, required this.visible});
@@ -82,7 +81,7 @@ class _HelpPanelSliderState extends State<HelpPanelSlider>
   }
 }
 
-/// Desktop panel chrome — fixed width, left border, holds the resource center.
+/// Desktop panel chrome: fixed width, left border, holds the resource center.
 class _HelpPanelChrome extends ConsumerWidget {
   const _HelpPanelChrome();
 
@@ -103,12 +102,11 @@ class _HelpPanelChrome extends ConsumerWidget {
   }
 }
 
-/// The resource-center body: header + search + collapsed category sections,
-/// swapping to an in-place lesson view. Shared by the desktop slide-out panel
-/// and the mobile full-screen route.
+/// The resource-center body, shared by the desktop slide-out panel and the
+/// mobile full-screen route.
 class HelpResourceCenter extends ConsumerStatefulWidget {
-  /// Optional close handler — shown as an X in the header (desktop panel).
-  /// Null on mobile (the route has its own back chrome).
+  /// Shown as an X in the header; null on mobile, where the route has its own
+  /// back chrome.
   final VoidCallback? onClose;
   const HelpResourceCenter({super.key, this.onClose});
 
@@ -166,7 +164,6 @@ class _HelpResourceCenterState extends ConsumerState<HelpResourceCenter> {
             _seededExpansion = true;
           }
 
-          // Lesson view takes over the whole body when a lesson is open.
           if (_openLesson != null) {
             return HelpLessonView(
               lesson: _openLesson!,
@@ -180,7 +177,6 @@ class _HelpResourceCenterState extends ConsumerState<HelpResourceCenter> {
           return Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              // Header.
               Padding(
                 padding: const EdgeInsets.fromLTRB(
                   HollowSpacing.lg,
@@ -214,7 +210,6 @@ class _HelpResourceCenterState extends ConsumerState<HelpResourceCenter> {
                 ),
               ),
 
-              // Search.
               Padding(
                 padding: const EdgeInsets.fromLTRB(
                   HollowSpacing.lg,
@@ -234,7 +229,6 @@ class _HelpResourceCenterState extends ConsumerState<HelpResourceCenter> {
 
               Divider(color: hollow.border, height: 1),
 
-              // Body: search results OR collapsed category sections.
               Expanded(
                 child: searching
                     ? _SearchResults(
@@ -268,7 +262,7 @@ class _HelpResourceCenterState extends ConsumerState<HelpResourceCenter> {
   }
 }
 
-/// Error state — honest, with a retry.
+/// Error state, with a retry.
 class _HelpError extends ConsumerWidget {
   final VoidCallback? onClose;
   const _HelpError({this.onClose});
@@ -310,7 +304,6 @@ class _HelpError extends ConsumerWidget {
   }
 }
 
-/// Flat search-results list.
 class _SearchResults extends StatelessWidget {
   final List<GuidesLesson> results;
   final ValueChanged<GuidesLesson> onTap;
@@ -342,7 +335,6 @@ class _SearchResults extends StatelessWidget {
   }
 }
 
-/// A collapsible module section (category).
 class _CategorySection extends StatelessWidget {
   final GuidesModule module;
   final bool expanded;
@@ -414,7 +406,6 @@ class _CategorySection extends StatelessWidget {
   }
 }
 
-/// A single lesson row.
 class _LessonRow extends StatelessWidget {
   final GuidesLesson lesson;
   final ValueChanged<GuidesLesson> onTap;
@@ -463,11 +454,8 @@ class _LessonRow extends StatelessWidget {
   }
 }
 
-// ───────────────────────── Lesson view (one scroll) ─────────────────────────
-
-/// A lesson rendered as ONE scrollable page of stacked sections. No paging,
-/// no dots, no arrows. Back arrow in the header returns to the list. Shared by
-/// the desktop panel and the mobile route.
+/// A lesson rendered as ONE scrollable page of stacked sections, with no paging
+/// and no arrows. Shared by the desktop panel and the mobile route.
 class HelpLessonView extends StatelessWidget {
   final GuidesLesson lesson;
   final VoidCallback onBack;
@@ -484,7 +472,6 @@ class HelpLessonView extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        // Header: back + title.
         Padding(
           padding: const EdgeInsets.fromLTRB(
             HollowSpacing.sm,
@@ -517,7 +504,6 @@ class HelpLessonView extends StatelessWidget {
         ),
         Divider(color: hollow.border, height: 1),
 
-        // All sections, stacked on one scroll.
         Expanded(
           child: ListView.separated(
             padding: const EdgeInsets.all(HollowSpacing.lg),
@@ -552,7 +538,6 @@ class _SectionView extends StatelessWidget {
   }
 }
 
-/// A small inline image (e.g. an icon screenshot), bordered and rounded.
 class _InlineImage extends StatelessWidget {
   final String asset;
   const _InlineImage({required this.asset});
@@ -589,7 +574,7 @@ class _InlineImage extends StatelessWidget {
   }
 }
 
-/// Markdown body — reuses the news-post markdown styling.
+/// Markdown body, on the news-post markdown styling.
 class HelpMarkdown extends StatelessWidget {
   final String text;
   const HelpMarkdown({super.key, required this.text});

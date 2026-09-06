@@ -12,11 +12,11 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:hollow/src/core/brand_icons.dart';
 import 'package:url_launcher/url_launcher.dart';
 
-/// Active dialog callback — event_provider routes results here instead of opening a new dialog.
+/// event_provider routes results here rather than opening a second dialog.
 void Function(bool success, String? error)? _activeTwitchJoinCallback;
 
-/// Called by event_provider when a TwitchJoinRejected event arrives.
-/// Returns true if an active dialog handled it (so event_provider should NOT open a new dialog).
+/// Called by event_provider on a TwitchJoinRejected event. Returns true when an
+/// open dialog handled it, so the caller opens no new one.
 bool handleTwitchJoinResult({required bool success, String? error}) {
   if (_activeTwitchJoinCallback != null) {
     _activeTwitchJoinCallback!(success, error);
@@ -49,9 +49,8 @@ void showTwitchJoinDialog(
   );
 }
 
-/// Generic "you can't join this server" dialog with a specific reason.
-/// Used for private servers and member-cap rejections so the user gets a clear
-/// explanation instead of a vague failure (which reads like a network problem).
+/// The "you cannot join this server" dialog, with the specific reason: a vague
+/// failure here reads as a network problem.
 void showJoinRejectedDialog(
   BuildContext context, {
   required String title,
@@ -92,10 +91,9 @@ void showJoinRejectedDialog(
   );
 }
 
-/// NSFW join-consent gate. Shown when an NSFW-flagged server rejects a join
-/// with the `nsfw_confirm:` reason. On "Proceed" the caller re-joins with
-/// `nsfwConfirmed: true`. Works for every join entry point because the gate is
-/// server-side reject-then-retry (mirrors the Twitch/private gates).
+/// NSFW join-consent gate, shown when a server rejects a join with the
+/// `nsfw_confirm:` reason. It covers every join entry point because the gate is
+/// server-side reject-then-retry.
 void showNsfwConfirmDialog(
   BuildContext context, {
   required String serverName,
@@ -296,12 +294,11 @@ class _TwitchJoinDialogState extends State<_TwitchJoinDialog> {
     setState(() => _step = _JoinStep.verifying);
     try {
       await twitch_api.twitchEnsureToken();
-      // A blind-signed FOLLOW credential, not our own word for it. The shop
-      // asks Twitch and signs what Twitch said onto our master; the server
-      // owner verifies it offline against the root pinned in the app. It
-      // names the channel, an age bucket and a subscription tier and nothing
-      // that could identify our Twitch account, which is why it can also ride
-      // the join ring when the server is empty.
+      // A blind-signed FOLLOW credential, never our own word for it: the shop
+      // signs what Twitch said onto our master and the owner verifies it
+      // offline against the pinned root. It names a channel, an age bucket and
+      // a tier and nothing that identifies the Twitch account, which is why it
+      // may also ride the join ring.
       final proof = await twitch_api.twitchVerifyFollow(
         broadcasterId: widget.channelId,
       );
@@ -310,8 +307,8 @@ class _TwitchJoinDialogState extends State<_TwitchJoinDialog> {
         twitchProofJson: proof,
         nsfwConfirmed: false,
       );
-      // Stay on verifying — _onJoinResult will be called by event_provider
-      // with either ServerJoined or TwitchJoinRejected.
+      // Stays on verifying until event_provider calls back with the join
+      // result.
     } catch (e) {
       if (mounted) {
         setState(() {

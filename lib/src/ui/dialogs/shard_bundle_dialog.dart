@@ -12,8 +12,6 @@ import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-// ── Export shards dialog ───────────────────────────────────────
-
 /// Show the export shards dialog for a server.
 void showExportShardsDialog(
   BuildContext context, {
@@ -183,9 +181,7 @@ class _ExportShardsDialogState extends State<_ExportShardsDialog> {
   }
 }
 
-// ── Import shards dialog ───────────────────────────────────────
-
-/// Show the import shards dialog. Lets user pick a `.hollow-shards` file.
+/// Shows the import shards dialog, which picks a `.hollow-shards` file.
 void showImportShardsDialog(
   BuildContext context, {
   VoidCallback? onImported,

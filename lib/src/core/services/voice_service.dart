@@ -22,11 +22,10 @@ void _log(String msg) {
 
 /// Manages a dedicated voice/video RTCPeerConnection for 1:1 calls.
 ///
-/// Separate from [WebRtcService] which handles data channel file transfers.
-/// Voice has a different lifecycle: no idle timeout, no keepalive, no chunked
-/// binary protocol. Created when a call starts, destroyed when it ends.
-/// Each call gets its own ICE negotiation — this is critical for cross-internet
-/// connectivity where the data channel's ICE path may not carry media.
+/// Separate from [WebRtcService], which owns data-channel file transfers:
+/// voice has no idle timeout, no keepalive, and its own ICE negotiation per
+/// call, which is what makes media work across the internet where the data
+/// channel's path does not carry it.
 class VoiceService {
   final String localPeerId;
 
@@ -44,49 +43,38 @@ class VoiceService {
   late final PendingIceQueue _pendingCandidates = PendingIceQueue(log: _log);
   bool _remoteDescriptionSet = false;
 
-  // -- Video state --
   MediaStream? _localVideoStream;
   bool _isVideoEnabled = false;
   bool _useFrontCamera = true;
-  /// Serializes [toggleVideo] so rapid on/off (or two concurrent toggles)
-  /// can't overlap two `getUserMedia` calls on the same V4L2 device — that
-  /// races the old capturer's teardown against the new one's start, which
-  /// libwebrtc's RaceChecker aborts on Linux ("video_capture_v4l2.cc:417
-  /// RaceDetected") and leaks the orphaned capture thread elsewhere. Each
-  /// toggle awaits the previous one's full completion before touching the
-  /// camera.
+  /// Serializes [toggleVideo] so two `getUserMedia` calls cannot overlap on
+  /// the same V4L2 device: that races the old capturer's teardown against the
+  /// new one's start, which libwebrtc's RaceChecker aborts on Linux and which
+  /// leaks the orphaned capture thread elsewhere.
   Future<void> _videoToggleLock = Future<void>.value();
   RTCVideoRenderer? _localRenderer;
   RTCVideoRenderer? _remoteRenderer;
   MediaStream? _remoteStream;
-  /// True if `_remoteStream` was created locally via `createLocalMediaStream`
-  /// (and we own it). False if it came from `event.streams.first` in onTrack
-  /// (libwebrtc owns it — disposing it from Dart throws "stream not found").
+  /// True when `_remoteStream` is ours (createLocalMediaStream). A stream
+  /// from `event.streams.first` belongs to libwebrtc and disposing it throws.
   bool _remoteStreamIsSynthetic = false;
 
-  // Callbacks
   void Function(String peerId)? onConnected;
 
   /// Raw transport-state changes for the call's peer connection.
   ///
-  /// Deliberately raw. This service used to collapse `disconnected`, `failed`
-  /// and `closed` into a single "the call is over" callback, and the provider
-  /// answered it by signalling `end` to the peer and cleaning up. Since
-  /// `disconnected` only means ICE consent has gone unanswered for a couple of
-  /// seconds, which is the ordinary signature of a Wi-Fi stutter, one side's
-  /// blip hung the call up on both machines.
-  ///
-  /// The hold-open policy now lives in CallNotifier (see [LinkResilience]),
-  /// because only it knows the peer, the call id and when an `end` is
-  /// warranted. NOTHING in this service may end a call on its own.
+  /// Deliberately raw. Collapsing `disconnected`, `failed` and `closed` into
+  /// one "the call is over" callback meant one side's Wi-Fi blip hung the call
+  /// up on both machines, since `disconnected` only means ICE consent has gone
+  /// unanswered for a couple of seconds. The hold-open policy lives in
+  /// CallNotifier (see [LinkResilience]), and NOTHING in this service may end
+  /// a call on its own.
   void Function(RTCPeerConnectionState state)? onTransportState;
 
   void Function(String peerId)? onRemoteVideoTrack;
 
   /// Set for the duration of our own teardown. `closed` is reported both when
-  /// the remote end goes away and when we call `pc.close()` ourselves, and the
-  /// policy owner reads it as terminal; forwarding our own teardown back to it
-  /// would race the cleanup that is already running.
+  /// the remote end goes away and when we call `pc.close()`, and the policy
+  /// owner reads it as terminal.
   bool _tearingDown = false;
 
   /// Preferred device IDs (set by CallNotifier from settings providers).
@@ -108,29 +96,25 @@ class VoiceService {
   /// Dynamic mode: the native auto-level servo (ignores micGain/makeup).
   bool enhanceDynamic = true;
 
-  /// AI noise suppression — user preference, seeded from
-  /// noiseSuppressAiProvider. The engine runs at the HEAD of the native
-  /// capture chain (post-AEC); while it's on, WebRTC's legacy NS is dropped
-  /// from the capture constraints (double suppression = artifacts).
+  /// AI noise suppression preference. The engine runs at the HEAD of the
+  /// native capture chain, post-AEC; while it is on, WebRTC's legacy NS is
+  /// dropped from the constraints, since double suppression means artifacts.
   bool noiseSuppressAi = false;
 
-  /// Which engine (Helper.nsEngineRnnoise default / nsEngineDfn3), seeded
-  /// from noiseSuppressEngineProvider.
+  /// Which engine: RNNoise by default, or DFN3.
   int noiseSuppressEngine = Helper.nsEngineRnnoise;
 
-  /// TRUE when DFN can't actually run here (symbols unbound, unsupported
-  /// capture shape, realtime bail) and WebRTC's legacy NS was re-enabled as
-  /// the fallback — a call must never end up with NO noise suppression.
+  /// TRUE when DFN cannot run here (symbols unbound, unsupported capture
+  /// shape, realtime bail) and WebRTC's legacy NS was re-enabled: a call must
+  /// never end up with NO noise suppression.
   bool _dfnFallbackNsOn = false;
 
   /// WebRTC's own NS is wanted whenever DFN isn't (or can't be) doing the job.
   bool get _wantWebrtcNs => !noiseSuppressAi || _dfnFallbackNsOn;
 
-  /// SFrame encryption service for DM call E2EE.
   FrameCryptorService? _frameCryptor;
   FrameCryptorService? get frameCryptor => _frameCryptor;
 
-  // -- VAD (voice activity detection) for DM calls --
   Timer? _vadTimer;
   final Map<String, double> _prevEnergy = {};
   bool _localSpeaking = false;
@@ -151,25 +135,20 @@ class VoiceService {
   RTCVideoRenderer? get remoteRenderer => _remoteRenderer;
   RTCPeerConnection? get peerConnection => _pc;
 
-  /// Audio quality preset — set by CallNotifier before creating offer/answer.
-  /// Controls Opus bitrate and stereo via SDP munging.
+  /// Audio quality preset; controls Opus bitrate and stereo via SDP munging.
   int opusBitrate = 96000;     // default: 96 kbps (voice)
   bool opusStereo = false;     // default: mono
 
-  // ---------------------------------------------------------------------------
   // SDP: offer / answer / ICE
-  // ---------------------------------------------------------------------------
 
-  /// Create the initial SDP offer for a DM call. Audio is always captured.
-  /// Camera is captured only if [withVideo] is true — for audio-only calls
-  /// we do NOT pre-add a video transceiver, matching the voice channel
-  /// pattern. When the user later enables video, [toggleVideo] uses
-  /// `pc.addTrack` to create a fresh transceiver and renegotiate, which
-  /// fires `onTrack` reliably on the remote peer.
+  /// Creates the initial SDP offer for a DM call. Audio is always captured,
+  /// the camera only when [withVideo]: an audio-only call deliberately does
+  /// NOT pre-add a video transceiver, so a later [toggleVideo] creates a fresh
+  /// one and the remote `onTrack` fires reliably.
   ///
-  /// Media is captured BEFORE the peer connection is created so that ICE
-  /// gathering starts only when tracks are already available — keeping the
-  /// PC→offer window under ~15 ms (same pattern as VoiceChannelService).
+  /// Media is captured BEFORE the peer connection exists, so ICE gathering
+  /// starts with tracks already available and the PC-to-offer window stays
+  /// under about 15 ms.
   Future<String> createOffer(
     String peerId,
     String callId, {
@@ -177,17 +156,15 @@ class VoiceService {
   }) async {
     _log('[HOLLOW-VOICE] Creating offer for $peerId call=$callId withVideo=$withVideo');
 
-    // Tear down any prior session's media BEFORE capturing new media — capture
-    // overwrites _localStream/_localVideoStream, so without this a re-entrant
-    // call (or a leftover session) would orphan the previous streams + their
-    // mic/V4L2 capturers. _initPeerConnection's PC guard alone is not enough.
+    // Tear down any prior session's media BEFORE capturing new media: capture
+    // overwrites the stream fields, so a re-entrant call would orphan the
+    // previous streams and their mic/V4L2 capturers.
     await _teardownMedia(keepCandidatesForCallId: callId);
 
     _activePeerId = peerId;
     _activeCallId = callId;
 
     try {
-      // Pre-capture media BEFORE creating the PC.
       await _captureLocalAudio();
       CallSetupTrace.markCurrent(CallSetupTrace.kGumAudio);
       if (withVideo) {
@@ -217,23 +194,21 @@ class VoiceService {
       _dumpSdp('OFFER-OUT', mungedOffer);
       return mungedOffer;
     } catch (e) {
-      // A throw mid-setup (bad SDP, getUserMedia/createOffer failure) leaves a
-      // partially-built PC + capturers stranded. Tear them down before
-      // propagating so their thread-sets can't leak.
+      // A throw mid-setup leaves a partially-built PC and capturers
+      // stranded. Tear them down before propagating, or their thread-sets
+      // leak.
       _log('[HOLLOW-VOICE] createOffer failed, tearing down: $e');
       await endCall();
       rethrow;
     }
   }
 
-  /// Handle an incoming SDP offer (answerer side). Creates PC, starts mic,
-  /// optionally captures the camera, sets remote description, creates answer.
-  /// Camera is only captured when [withVideo] is true (the local user accepted
-  /// a video call). If the remote offer has a video m-line but we have no
-  /// camera, libwebrtc will produce an `a=recvonly` answer for the video
-  /// m-line — that's fine, RTP still flows from sender to receiver.
+  /// Handles an incoming SDP offer (answerer side) and returns the answer.
+  /// The camera is captured only when [withVideo]; with a video m-line and no
+  /// camera libwebrtc answers `a=recvonly`, which still carries RTP one way.
   ///
-  /// Media is captured BEFORE the peer connection is created (see createOffer).
+  /// Media is captured BEFORE the peer connection is created (see
+  /// createOffer).
   Future<String> handleOffer(
     String peerId,
     String callId,
@@ -243,8 +218,8 @@ class VoiceService {
     _log('[HOLLOW-VOICE] Handling offer from $peerId call=$callId');
 
     // Tear down any prior session's media BEFORE capturing new media (see
-    // createOffer) so a second inbound offer during the capture window can't
-    // orphan the first session's streams/PC.
+    // createOffer), or a second inbound offer during the capture window
+    // orphans the first session.
     await _teardownMedia(keepCandidatesForCallId: callId);
 
     _activePeerId = peerId;
@@ -253,7 +228,6 @@ class VoiceService {
     _dumpSdp('OFFER-IN', sdp);
 
     try {
-      // Pre-capture media BEFORE creating the PC.
       await _captureLocalAudio();
       CallSetupTrace.markCurrent(CallSetupTrace.kGumAudio);
       if (withVideo) {
@@ -271,17 +245,11 @@ class VoiceService {
         await _initLocalRenderer();
       }
 
-      // Record the BASELINE ICE credentials, even though this is not a
-      // restart. Without it the callee starts the call with no remembered
-      // ufrag, so its FIRST renegotiation reads as "nothing changed" and the
-      // ICE-restart detection misses it entirely.
-      //
-      // Field-caught 2026-08-27: the callee's SFrame was therefore never
-      // re-asserted after a recovery. Its sender cryptor stayed bound to a
-      // transport that no longer existed while the caller re-created its
-      // receiver, so the callee's microphone went silent to the other side and
-      // the caller's audio failed to decrypt. Both directions, one missing
-      // baseline.
+      // Record the BASELINE ICE credentials even though this is not a
+      // restart: without one the callee has no remembered ufrag, its FIRST
+      // renegotiation reads as "nothing changed", and restart detection
+      // misses it. The callee's SFrame was then never re-asserted after a
+      // recovery: silent in one direction, undecryptable in the other.
       _noteRemoteIceCredentials(sdp);
       await _pc!.setRemoteDescription(RTCSessionDescription(sdp, 'offer'));
       _remoteDescriptionSet = true;
@@ -300,24 +268,23 @@ class VoiceService {
       return mungedAnswer;
     } catch (e) {
       // setRemoteDescription on an unsupported-codec SDP is a classic throw
-      // point — dispose the partial PC + capturers before propagating.
+      // point; dispose the partial PC and capturers before propagating.
       _log('[HOLLOW-VOICE] handleOffer failed, tearing down: $e');
       await endCall();
       rethrow;
     }
   }
 
-  /// Create a renegotiation offer on an existing voice PC (e.g., adding/removing video).
-  /// Returns the SDP offer string, or null if no PC exists.
+  /// Creates a renegotiation offer on an existing voice PC; null with no PC.
   Future<String?> createRenegotiationOffer() async {
     if (_pc == null) {
       _log('[HOLLOW-VOICE] createRenegotiationOffer: no PC');
       return null;
     }
 
-    // Defensive: a previously failed inbound renegotiation can leave the PC
-    // in have-remote-offer, where createOffer errors out ("Error (null)")
-    // forever. Roll the stale remote offer back to stable first.
+    // A previously failed inbound renegotiation can leave the PC in
+    // have-remote-offer, where createOffer errors out forever. Roll the
+    // stale remote offer back to stable first.
     final ss = _pc!.signalingState;
     if (ss == RTCSignalingState.RTCSignalingStateHaveRemoteOffer ||
         ss == RTCSignalingState.RTCSignalingStateHaveRemotePrAnswer) {
@@ -342,8 +309,7 @@ class VoiceService {
     return offer.sdp!;
   }
 
-  /// Handle a renegotiation offer on an existing voice PC (e.g., remote added video).
-  /// Returns the SDP answer string, or null if no PC exists.
+  /// Handles a renegotiation offer on an existing voice PC; null with no PC.
   Future<String?> handleRenegotiationOffer(String sdp) async {
     if (_pc == null) {
       _log('[HOLLOW-VOICE] handleRenegotiationOffer: no PC');
@@ -368,19 +334,15 @@ class VoiceService {
       _dumpSdp('RENEG-ANSWER-OUT', answer.sdp!);
 
       // Defer the safety net by a frame so onTrack has a chance to fire and
-      // build the renderer. With H4 it should always fire — the safety net
-      // only does work if the renderer is still null after the delay (and
-      // even then, _checkRemoteVideoTrack is a no-op when a renderer exists).
+      // build the renderer; it does nothing once a renderer exists.
       Future.delayed(const Duration(milliseconds: 150), _checkRemoteVideoTrack);
 
       return answer.sdp!;
     } catch (e) {
       // A failed renegotiation must NOT leave the PC stuck in
-      // have-remote-offer — createOffer then errors out forever and this
-      // call can never add video in EITHER direction again (seen when the
-      // offer carries H.265/AV1 payload types the local decoder factory
-      // can't apply). Roll back to stable, then rethrow so the caller's
-      // queue/retry logic still observes the failure.
+      // have-remote-offer: createOffer then errors out forever and this call
+      // can never add video in EITHER direction again. Roll back to stable,
+      // then rethrow so the caller's retry logic still sees the failure.
       _log('[HOLLOW-VOICE] Renegotiation answer failed: $e — rolling back to stable');
       try {
         await _pc!.setLocalDescription(RTCSessionDescription('', 'rollback'));
@@ -397,24 +359,21 @@ class VoiceService {
     }
   }
 
-  /// Safety net for when [pc.onTrack] doesn't fire after a renegotiation.
-  /// Walks the PC's receivers, and if a video track exists without a
-  /// corresponding `_remoteRenderer`, creates one and notifies the UI.
+  /// Safety net for when [pc.onTrack] does not fire after a renegotiation:
+  /// walks the receivers and builds a renderer for a video track that has
+  /// none.
   ///
-  /// This is needed because on Windows/libwebrtc, calling `replaceTrack()`
-  /// to swap a null sender track for a real camera track on an existing
-  /// transceiver does NOT fire `onTrack` on the remote peer — even after
-  /// a full SDP renegotiation cycle. Without this safety net, the remote
-  /// peer would never create a renderer and the UI would stay audio-only.
+  /// On Windows/libwebrtc, `replaceTrack()` swapping a null sender track for
+  /// a real camera track does NOT fire `onTrack` on the remote peer, even
+  /// after a full renegotiation, and the remote would stay audio-only.
   Future<void> _checkRemoteVideoTrack() async {
     final pc = _pc;
     if (pc == null) return;
-    // With the H4 addTrack/removeTrack pattern, onTrack fires reliably for
-    // every fresh video transceiver. If we already have a remote renderer,
-    // trust that the onTrack handler built it correctly — running the
-    // safety net here would walk pc.getReceivers() and pick up STALE
-    // inactive transceivers from previous toggles, then trash the working
-    // renderer trying to rebind to a dead track.
+    // With the addTrack/removeTrack pattern onTrack fires reliably for every
+    // fresh video transceiver, so an existing renderer is the right one.
+    // Running the safety net anyway would walk pc.getReceivers(), pick up
+    // STALE inactive transceivers from previous toggles, and trash the
+    // working renderer trying to rebind to a dead track.
     if (_remoteRenderer != null) return;
     try {
       final receivers = await pc.getReceivers();
@@ -426,29 +385,25 @@ class VoiceService {
     }
   }
 
-  /// Per-receiver body of [_checkRemoteVideoTrack]: if [receiver] carries a
-  /// video track with no renderer, build one manually. Returns true when a
-  /// renderer was committed (the caller stops scanning receivers).
+  /// Per-receiver body of [_checkRemoteVideoTrack]. True when a renderer was
+  /// committed, which stops the caller scanning further receivers.
   Future<bool> _adoptOrphanRemoteVideoReceiver(RTCRtpReceiver receiver) async {
     final track = receiver.track;
     if (track == null || track.kind != 'video') return false;
-    // Capture the id once so a later null on the native side doesn't
-    // crash logging or string interpolation.
+    // Capture the id once: a later null on the native side breaks logging.
     final trackId = track.id;
     if (trackId == null) return false;
 
     _log('[HOLLOW-VOICE] _checkRemoteVideoTrack: found video track '
         '$trackId without renderer — creating manually');
 
-    // Stash old state for post-build dispose (same pattern as
-    // _handleRemoteVideoTrack — never dispose the old stream BEFORE
-    // the new renderer is committed).
+    // Stash old state for post-build dispose; never dispose the old stream
+    // BEFORE the new renderer is committed.
     final oldRenderer = _remoteRenderer;
     final oldStream = _remoteStream;
     final oldWasSynthetic = _remoteStreamIsSynthetic;
 
-    // Re-fetch the track right before addTrack — between awaits the
-    // native track may have been GC'd / detached.
+    // Re-fetch the track: between awaits the native one may be detached.
     final liveTrack = receiver.track;
     if (liveTrack == null) {
       _log('[HOLLOW-VOICE] _checkRemoteVideoTrack: track went away '
@@ -472,12 +427,10 @@ class VoiceService {
     await newRenderer.initialize();
     newRenderer.srcObject = newStream;
 
-    // Commit new state first.
     _remoteRenderer = newRenderer;
     _remoteStream = newStream;
     _remoteStreamIsSynthetic = true;
 
-    // Best-effort dispose of the old.
     await _disposeStaleRemoteMedia(oldRenderer, oldStream, oldWasSynthetic);
 
     _log('[HOLLOW-VOICE] _checkRemoteVideoTrack: renderer created for '
@@ -486,7 +439,6 @@ class VoiceService {
     // Give the renderer a moment to settle before notifying UI.
     await Future.delayed(const Duration(milliseconds: 100));
 
-    // Notify UI via the same callback that _handleRemoteVideoTrack uses.
     final activePeerId = _activePeerId;
     if (activePeerId != null) {
       onRemoteVideoTrack?.call(activePeerId);
@@ -494,9 +446,8 @@ class VoiceService {
     return true;
   }
 
-  /// Silent best-effort dispose of a superseded remote renderer/stream
-  /// (safety-net path — failures here are expected and stay unlogged, same
-  /// as the original inline code).
+  /// Silent best-effort dispose of a superseded remote renderer and stream;
+  /// failures on this path are expected and stay unlogged.
   Future<void> _disposeStaleRemoteMedia(RTCVideoRenderer? oldRenderer,
       MediaStream? oldStream, bool oldWasSynthetic) async {
     if (oldRenderer != null) {
@@ -525,18 +476,17 @@ class VoiceService {
     _remoteDescriptionSet = true;
     await _flushPendingCandidates();
 
-    // Answering an ICE restart obliges the far end to produce fresh
-    // credentials too, so this fires on the offering side as well.
+    // Answering an ICE restart obliges fresh credentials on this side too,
+    // so this fires on the offering side as well.
     if (iceRestarted) await healSframeAfterTransportRebuild();
 
     // Defer the safety net by a frame so onTrack has a chance to fire first.
     Future.delayed(const Duration(milliseconds: 150), _checkRemoteVideoTrack);
   }
 
-  /// Handle incoming ICE candidate.
-  /// Candidates are queued until setRemoteDescription has been called — adding
-  /// them before that causes silent rejection by libwebrtc (the native layer
-  /// returns an error if there's no remote description yet).
+  /// Handles an incoming ICE candidate. Candidates are queued until
+  /// setRemoteDescription: added before that, libwebrtc rejects them
+  /// silently.
   Future<void> handleIceCandidate(String callId, String candidate,
       String? sdpMid, int? sdpMLineIndex) async {
     final iceCandidate = RTCIceCandidate(candidate, sdpMid, sdpMLineIndex);
@@ -554,21 +504,17 @@ class VoiceService {
     }
   }
 
-  // ---------------------------------------------------------------------------
   // Media controls
-  // ---------------------------------------------------------------------------
 
-  /// Set microphone mute (idempotent — the PTT gate calls this on every key
-  /// edge, so repeats must be harmless).
-  /// [force] re-applies the state to the CURRENT capture track even when the
+  /// Sets microphone mute. Idempotent, since the PTT gate calls it on every
+  /// key edge. [force] re-applies to the CURRENT capture track even when the
   /// cached flag already agrees.
   ///
   /// The flag describes the track it was last applied to, and a media rebuild
-  /// replaces that track underneath it. `createOffer` tears media down without
-  /// clearing `_isMuted`, so after a rebuild the flag says "muted" while the
-  /// freshly captured track is live, and the ordinary early-return below turns
-  /// the re-apply into a no-op. Field-caught 2026-08-27: the call recovered,
-  /// the mute button still showed muted, and the microphone was open.
+  /// replaces that track: `createOffer` tears media down without clearing
+  /// `_isMuted`, so afterwards the flag says "muted" while the freshly
+  /// captured track is live and the ordinary early return makes the re-apply
+  /// a no-op.
   void setMuted(bool muted, {bool force = false}) {
     if (_localStream == null) return;
     final audioTracks = _localStream!.getAudioTracks();
@@ -576,19 +522,17 @@ class VoiceService {
     if (_isMuted == muted && !force) return;
     _isMuted = muted;
     audioTracks.first.enabled = !_isMuted;
-    // Freeze the capture processor's dynamic servo while muted — the APM
-    // keeps processing real mic input with the track disabled, and adapting
-    // to room bleed (e.g. shared music on speakers) buries the voice on
-    // unmute.
+    // Freeze the capture processor's dynamic servo while muted: the APM keeps
+    // processing real mic input with the track disabled, and adapting to room
+    // bleed buries the voice on unmute.
     Helper.setCaptureMuted(_isMuted).catchError((_) {});
     _log('[HOLLOW-VOICE] Mute set: $_isMuted');
   }
 
-  /// Toggle microphone mute.
   void toggleMute() => setMuted(!_isMuted);
 
-  /// Set the volume of the remote peer's audio (how loud you hear them).
-  /// volume: 0.0 = silent, 1.0 = normal, 2.0 = 2x.
+  /// Sets how loud the remote peer is heard: 0.0 silent, 1.0 normal, 2.0
+  /// double.
   Future<void> setRemoteAudioVolume(double volume) async {
     if (_pc == null) return;
     final receivers = await _pc!.getReceivers();
@@ -602,9 +546,9 @@ class VoiceService {
     }
   }
 
-  /// Track ids of the remote peer's inbound audio (the call voices). Used by the
-  /// Windows entire-screen-share anti-echo path to redirect these tracks to an
-  /// out-of-process renderer. Empty if no PC / no remote audio yet.
+  /// Track ids of the remote peer's inbound audio, used by the Windows
+  /// entire-screen anti-echo path to redirect them to an out-of-process
+  /// renderer. Empty with no PC or no remote audio yet.
   Future<List<String>> getRemoteAudioTrackIds() async {
     if (_pc == null) return const [];
     final ids = <String>[];
@@ -618,22 +562,16 @@ class VoiceService {
     return ids;
   }
 
-  /// Toggle camera on/off. Returns the new state.
+  /// Toggles the camera and returns the new state.
   ///
-  /// Uses the same `addTrack` / `removeTrack` pattern as
-  /// [VoiceChannelService.startCamera] / [VoiceChannelService.stopCamera]
-  /// — every camera enable creates a fresh transceiver, every disable
-  /// removes it. This ensures the remote peer's `onTrack` fires reliably
-  /// (the receiver-side `replaceTrack` reuse pattern silently fails on
-  /// libwebrtc Windows: the receiver renderer stays bound to a stale
-  /// muted track and never recovers when sender RTP resumes).
+  /// Every enable creates a fresh transceiver and every disable removes it:
+  /// the receiver-side `replaceTrack` reuse pattern fails silently on
+  /// libwebrtc Windows, where the renderer stays bound to a stale muted track
+  /// and never recovers when sender RTP resumes. The caller must trigger an
+  /// SDP renegotiation after a successful return.
   ///
-  /// The caller must trigger an SDP renegotiation after toggleVideo
-  /// returns successfully — see `CallNotifier.toggleVideo`.
-  /// Public entry point — serialized so concurrent/rapid toggles can't open two
-  /// V4L2 capturers at once (see [_videoToggleLock]). Each call awaits the
-  /// previous toggle's full completion (old capturer fully stopped+disposed)
-  /// before its own getUserMedia runs.
+  /// Serialized so concurrent toggles cannot open two V4L2 capturers at once
+  /// (see [_videoToggleLock]).
   Future<bool> toggleVideo() async {
     final prev = _videoToggleLock;
     final completer = Completer<void>();
@@ -652,16 +590,13 @@ class VoiceService {
   Future<bool> _toggleVideoInner() async {
     if (_pc == null) return false;
 
-    // LINUX: the prebuilt libwebrtc V4L2 capturer's StopCapture() does NOT join
-    // its CaptureThread, so any close-then-reopen of /dev/video* races the
-    // RaceChecker and ABORTS the process (video_capture_v4l2.cc:417). A timed
-    // settle proved insufficient on real hardware. The robust fix: NEVER close
-    // the camera device mid-call — open it ONCE on the first enable, then toggle
-    // purely via `track.enabled` (pauses/resumes frames; the device + its single
-    // CaptureThread stay alive for the whole call and are torn down once at
-    // endCall, where nothing reopens after). Tradeoff: on Linux the camera LED
-    // may stay lit while "off" (frames are suppressed, nothing is transmitted).
-    // Windows/macOS keep the addTrack/removeTrack behavior (no V4L2, no race).
+    // LINUX: the prebuilt V4L2 capturer's StopCapture() does NOT join its
+    // CaptureThread, so any close-then-reopen of /dev/video* races the
+    // RaceChecker and ABORTS the process, and a timed settle proved
+    // insufficient on real hardware. So the device is opened ONCE on the
+    // first enable and toggled purely via `track.enabled`, torn down at
+    // endCall where nothing reopens. The tradeoff is a camera LED that may
+    // stay lit while "off"; Windows and macOS keep addTrack/removeTrack.
     if (Platform.isLinux) {
       return await _toggleVideoLinux();
     }
@@ -674,13 +609,11 @@ class VoiceService {
     return _isVideoEnabled;
   }
 
-  /// Desktop (Windows/macOS) video disable branch of [toggleVideo]:
-  /// remove the video sender, release the camera, drop the self-preview.
+  /// Desktop video-disable branch of [toggleVideo].
   Future<void> _disableVideoDesktop() async {
-    // Turn off: remove video sender from the PC entirely (not just
-    // replaceTrack(null)). removeTrack causes the next renegotiation
-    // to drop the video m-line, which the remote peer interprets as
-    // "no more video" and tears down the receive side cleanly.
+    // removeTrack, not replaceTrack(null): it drops the video m-line at the
+    // next renegotiation, which the remote reads as "no more video" and
+    // tears down its receive side cleanly.
     try {
       final senders = await _pc!.getSenders();
       for (final s in senders) {
@@ -700,7 +633,6 @@ class VoiceService {
       _localVideoStream = null;
     }
 
-    // Dispose local self-preview renderer.
     if (_localRenderer != null) {
       _localRenderer!.srcObject = null;
       await _localRenderer!.dispose();
@@ -711,17 +643,15 @@ class VoiceService {
     _log('[HOLLOW-VOICE] Video disabled, camera released');
   }
 
-  /// Desktop (Windows/macOS) video enable branch of [toggleVideo]. Returns
-  /// false when capture fails or no camera is available.
+  /// Desktop video-enable branch of [toggleVideo]. False when capture fails
+  /// or no camera is available.
   Future<bool> _enableVideoDesktop() async {
-    // Turn on: capture camera and addTrack a brand new sender. This
-    // creates a fresh transceiver with a fresh ssrc — the remote peer
-    // gets a new onTrack event and builds a new renderer.
+    // addTrack a brand new sender: a fresh transceiver with a fresh ssrc, so
+    // the remote gets a new onTrack event and builds a new renderer.
     _log('[HOLLOW-VOICE] Capturing camera for video enable');
     try {
       final constraints = _videoCaptureConstraints(preferredCameraDeviceId);
-      // Belt-and-suspenders cleanup of any leaked stream from a
-      // previous failed enable.
+      // Clean up any stream leaked by a previous failed enable.
       if (_localVideoStream != null) {
         await _stopTracksAndDispose(_localVideoStream!);
         _localVideoStream = null;
@@ -741,18 +671,16 @@ class VoiceService {
       await _pc!.addTrack(videoTrack, _localVideoStream!);
       _log('[HOLLOW-VOICE] toggleVideo: added new video track via addTrack');
 
-      // All platforms: constrain the offer to universal codecs (VP8 first).
-      // Desktop builds otherwise advertise H.265/AV1 payload types that
-      // break the iOS answerer; macOS additionally needs VP8-first because
-      // its H.264 hw profile doesn't decode on Windows libwebrtc.
+      // Constrain the offer to universal codecs (VP8 first): desktop builds
+      // otherwise advertise H.265/AV1 payload types that break the iOS
+      // answerer, and Apple's H.264 profile does not decode on Windows.
       if (videoTrack.id != null) {
         await _constrainCameraCodecs(videoTrack.id!);
       }
 
-      // Hold the fresh sender to whatever rung this call has already fallen
-      // to. Best-effort here (the sender is not negotiated yet, and a
-      // pre-negotiation setParameters is dropped on the native path); the
-      // quality sampler re-asserts it until it takes.
+      // Hold the fresh sender to whatever rung this call has fallen to.
+      // Best-effort: the sender is not negotiated yet and a pre-negotiation
+      // setParameters is dropped natively, so the sampler re-asserts it.
       await applyVideoRung(_videoRung);
 
       _isVideoEnabled = true;
@@ -766,19 +694,19 @@ class VoiceService {
     }
   }
 
-  /// Linux video toggle that NEVER closes/reopens the V4L2 device (which would
-  /// race the libwebrtc CaptureThread → abort). The camera is opened ONCE on the
-  /// first enable and the same track is paused/resumed via `enabled` thereafter;
-  /// the device is released only at endCall.
+  /// Linux video toggle that NEVER closes the V4L2 device, which would race
+  /// the libwebrtc CaptureThread into an abort. The camera opens ONCE on the
+  /// first enable and is paused via `enabled` thereafter; the device is
+  /// released only at endCall.
   Future<bool> _toggleVideoLinux() async {
     if (_isVideoEnabled) {
-      // Pause: stop frames flowing WITHOUT stopping the track / closing the
-      // device. The remote sees frames cease. Keep the sender + m-line in place.
+      // Pause frames WITHOUT stopping the track or closing the device; keep
+      // the sender and the m-line in place.
       final track = _localVideoStream?.getVideoTracks().firstOrNull;
       if (track != null) track.enabled = false;
       _isVideoEnabled = false;
-      // Drop the local self-preview so the UI doesn't show a frozen last frame.
-      // (The capture stream stays alive — only the renderer is torn down.)
+      // Drop the self-preview so the UI shows no frozen last frame. The
+      // capture stream stays alive.
       if (_localRenderer != null) {
         _localRenderer!.srcObject = null;
         await _localRenderer!.dispose();
@@ -788,7 +716,6 @@ class VoiceService {
       return false;
     }
 
-    // Enable.
     try {
       if (_localVideoStream != null) {
         // Camera already open from a prior enable this call — just resume frames.
@@ -796,8 +723,7 @@ class VoiceService {
         if (track != null) {
           track.enabled = true;
           _isVideoEnabled = true;
-          // Ensure the sender still exists (it does — we never removed it); make
-          // sure the local preview is showing again.
+          // Make sure the local preview is showing again.
           await _initLocalRenderer();
           _log('[HOLLOW-VOICE] Video resumed (Linux: reused open device)');
           _scheduleVideoStatsProbes('send');
@@ -839,9 +765,8 @@ class VoiceService {
     }
   }
 
-  /// Stop every track on [stream], then dispose it. Shared teardown shape
-  /// for mic/camera streams — callers wrap the call in their own try/catch
-  /// where failures must be swallowed or logged.
+  /// Stops every track on [stream], then disposes it. Callers wrap this in
+  /// their own try/catch where failures must be swallowed or logged.
   Future<void> _stopTracksAndDispose(MediaStream stream) async {
     for (final t in stream.getTracks()) {
       await t.stop();
@@ -849,11 +774,10 @@ class VoiceService {
     await stream.dispose();
   }
 
-  /// Build getUserMedia constraints for a camera capture. flutter_webrtc
-  /// native (Windows/macOS/Linux) uses 'sourceId' in the optional array —
-  /// 'deviceId' is ignored by GetUserVideo(). When [useFacingFallback] is
-  /// true and no device id is given, facingMode picks front/back (mobile);
-  /// the Linux toggle path omits it entirely.
+  /// Builds getUserMedia constraints for a camera capture. flutter_webrtc
+  /// native uses 'sourceId' in the optional array; 'deviceId' is ignored by
+  /// GetUserVideo(). With [useFacingFallback] and no device id, facingMode
+  /// picks front or back; the Linux toggle path omits it entirely.
   Map<String, dynamic> _videoCaptureConstraints(String? deviceId,
       {bool useFacingFallback = true}) {
     final videoConstraints = <String, dynamic>{
@@ -872,13 +796,11 @@ class VoiceService {
     return {'audio': false, 'video': videoConstraints};
   }
 
-  /// Local camera facing (true = front). UI reads this to mirror the local
-  /// preview only for the front camera.
+  /// Local camera facing (true = front); the UI mirrors only the front one.
   bool get useFrontCamera => _useFrontCamera;
 
-  /// Switch front/back camera (mobile). Returns the new facing (true =
-  /// front) from the native side — devices with >2 cameras make a blind
-  /// toggle drift out of sync.
+  /// Switches front/back camera and returns the new facing from the NATIVE
+  /// side: with more than two cameras a blind toggle drifts out of sync.
   Future<bool> switchCamera() async {
     if (!_isVideoEnabled || _localVideoStream == null) return _useFrontCamera;
     final videoTracks = _localVideoStream!.getVideoTracks();
@@ -888,22 +810,19 @@ class VoiceService {
     return _useFrontCamera;
   }
 
-  // ---------------------------------------------------------------------------
   // Live device switching (Settings picker changed mid-call)
-  // ---------------------------------------------------------------------------
 
-  /// Device id the live audio stream was actually captured from (dedup guard
-  /// for duplicate provider listeners firing the same switch twice).
+  /// Device id the live audio stream was captured from; dedup guard against
+  /// duplicate provider listeners firing the same switch twice.
   String? _capturedAudioInputDeviceId;
   /// Device id the live camera stream was actually captured from.
   String? _capturedCameraDeviceId;
 
-  /// Live mid-call microphone switch. Captures a fresh stream from
-  /// [deviceId], swaps the PC's audio sender via removeTrack + addTrack
-  /// (NEVER replaceTrack — silently fails on Windows libwebrtc), re-binds
-  /// SFrame to the new sender, and releases the old mic. Returns true when a
-  /// swap happened — the caller MUST send a renegotiation offer afterwards
-  /// (same contract as [toggleVideo]).
+  /// Live mid-call microphone switch: captures from [deviceId], swaps the
+  /// PC's audio sender via removeTrack + addTrack (NEVER replaceTrack, which
+  /// fails silently on Windows libwebrtc), re-binds SFrame, releases the old
+  /// mic. True when a swap happened, and the caller MUST then send a
+  /// renegotiation offer.
   Future<bool> setAudioInputDevice(String? deviceId) async {
     preferredAudioInputDeviceId = deviceId;
     if (_pc == null || _localStream == null) return false; // next call uses it
@@ -911,9 +830,8 @@ class VoiceService {
     return _recaptureMic(deviceId);
   }
 
-  /// Shared live mic re-capture — device switch OR an NS-constraint flip
-  /// (the AI-noise-suppression toggle changes what getUserMedia must ask
-  /// for). Same renegotiation contract as [setAudioInputDevice].
+  /// Shared live mic re-capture, for a device switch OR an NS-constraint
+  /// flip. Same renegotiation contract as [setAudioInputDevice].
   Future<bool> _recaptureMic(String? deviceId) async {
     // Capture the NEW mic first — if it fails, keep the old one working.
     final newStream = await _captureSwitchMicStream(deviceId);
@@ -921,7 +839,6 @@ class VoiceService {
     final newTrack = newStream.getAudioTracks().first;
     newTrack.enabled = !_isMuted; // preserve mute state across the swap
 
-    // Swap the PC's audio sender.
     if (!await _swapAudioSender(newTrack, newStream)) return false;
 
     final oldStream = _localStream;
@@ -937,7 +854,6 @@ class VoiceService {
 
     await _rebindSframeSenderTo(newTrack);
 
-    // Release the old mic.
     if (oldStream != null) {
       try {
         for (final t in oldStream.getAudioTracks()) {
@@ -950,9 +866,9 @@ class VoiceService {
     return true;
   }
 
-  /// Capture a fresh mic stream for a live device switch. Returns null
-  /// (after cleanup) when getUserMedia fails or yields no audio track —
-  /// the caller keeps the old mic working.
+  /// Captures a fresh mic stream for a live device switch. Null, after
+  /// cleanup, when getUserMedia fails or yields no audio track, so the caller
+  /// keeps the old mic working.
   Future<MediaStream?> _captureSwitchMicStream(String? deviceId) async {
     final audioConstraints = <String, dynamic>{
       'echoCancellation': true,
@@ -983,9 +899,9 @@ class VoiceService {
     return newStream;
   }
 
-  /// Swap the PC's audio sender to [newTrack] via removeTrack + addTrack
-  /// (NEVER replaceTrack — silently fails on Windows libwebrtc). On failure
-  /// the new capture is released and false is returned.
+  /// Swaps the PC's audio sender to [newTrack] via removeTrack + addTrack;
+  /// NEVER replaceTrack, which fails silently on Windows libwebrtc. On
+  /// failure the new capture is released and false is returned.
   Future<bool> _swapAudioSender(
       MediaStreamTrack newTrack, MediaStream newStream) async {
     try {
@@ -1008,7 +924,7 @@ class VoiceService {
     }
   }
 
-  /// Re-bind SFrame to the NEW audio sender — enableForSender is idempotent
+  /// Re-binds SFrame to the NEW audio sender. enableForSender is idempotent
   /// per (peer, kind), so the cryptor bound to the removed sender must be
   /// dropped first or the new track is never encrypted.
   Future<void> _rebindSframeSenderTo(MediaStreamTrack newTrack) async {
@@ -1031,10 +947,10 @@ class VoiceService {
     }
   }
 
-  /// Live mid-call camera device switch (desktop picker). NO-OP on Linux —
-  /// the V4L2 device must never be closed mid-call (_toggleVideoLinux);
-  /// there the new device applies on the next call. Returns true when a swap
-  /// happened — the caller MUST send a renegotiation offer afterwards.
+  /// Live mid-call camera device switch. NO-OP on Linux, where the V4L2
+  /// device must never be closed mid-call, so the new device applies on the
+  /// next call. True when a swap happened, and the caller MUST then send a
+  /// renegotiation offer.
   Future<bool> setCameraDevice(String? deviceId) async {
     preferredCameraDeviceId = deviceId;
     if (_pc == null || !_isVideoEnabled) return false; // next enable uses it
@@ -1080,7 +996,6 @@ class VoiceService {
     _localVideoStream = newStream;
     _capturedCameraDeviceId = deviceId;
 
-    // Rebind the self-preview to the new camera.
     await _initLocalRenderer();
 
     if (oldStream != null) {
@@ -1092,8 +1007,8 @@ class VoiceService {
     return true;
   }
 
-  /// Swap the PC's video sender to [newTrack] via removeTrack + addTrack,
-  /// then re-apply the codec constraint. On failure the new capture is
+  /// Swaps the PC's video sender to [newTrack] via removeTrack + addTrack,
+  /// then re-applies the codec constraint. On failure the new capture is
   /// released and false is returned.
   Future<bool> _swapVideoSender(
       MediaStreamTrack newTrack, MediaStream newStream) async {
@@ -1132,14 +1047,12 @@ class VoiceService {
     } catch (e) {
       _log('[HOLLOW-VOICE] Audio output switch failed: $e');
     }
-    // Defensive capture revive (device test 2026-07-17: after a mid-call
-    // output switch the REMOTE side stopped hearing this machine's mic —
-    // the ADM's playout restart appears to take the capture stream with it
-    // on Windows). Re-asserting the recording device forces a
-    // StopRecording -> InitRecording -> StartRecording cycle, which is
-    // harmless (~100 ms gap) when capture is healthy and revives it when
-    // the playout restart killed it. Only possible when a concrete input
-    // device is selected — the ADM API can't re-assert "system default".
+    // Defensive capture revive: after a mid-call output switch the REMOTE
+    // side stopped hearing this machine's mic, the ADM's playout restart
+    // apparently taking the capture stream with it on Windows. Re-asserting
+    // the recording device forces a Stop/Init/Start cycle, harmless when
+    // capture is healthy. Only possible with a concrete input device: the
+    // ADM cannot re-assert "system default".
     if (_localStream != null) {
       final inputId = _capturedAudioInputDeviceId;
       if (inputId != null) {
@@ -1156,11 +1069,6 @@ class VoiceService {
     }
   }
 
-  // ---------------------------------------------------------------------------
-  // Screen sharing
-  // ---------------------------------------------------------------------------
-
-  /// End the current call — close PC, stop streams, dispose renderers.
   void startVad() {
     _vadTimer?.cancel();
     _vadTimer = Timer.periodic(const Duration(milliseconds: 200), (_) {
@@ -1180,12 +1088,10 @@ class VoiceService {
     }
   }
 
-  /// One-shot diagnostic: issue #37 showed the LOCAL speaking indicator never
-  /// lighting on Windows even with a peer connected, which points at getStats
-  /// simply not carrying an outgoing audio level on this platform (the spec
-  /// puts `audioLevel` on media-source and inbound-rtp; outbound-rtp is NOT
-  /// required to have it). Logged once per call so a single test run settles
-  /// what is actually available instead of another round of inference.
+  /// One-shot diagnostic (issue #37): the LOCAL speaking indicator never lit
+  /// on Windows even with a peer connected, which points at getStats not
+  /// carrying an outgoing audio level there. Logged once per call so one test
+  /// run settles what is available instead of another round of inference.
   bool _vadStatsLogged = false;
 
   /// Our own speaking state, from the native capture meter (issue #37).
@@ -1214,7 +1120,7 @@ class VoiceService {
     if (_pc == null) return;
     bool newRemote = false;
 
-    // LOCAL: the native capture meter, never getStats — see
+    // LOCAL: the native capture meter, never getStats. See
     // [LocalSpeakingDetector] for why. Muting is handled inside it.
     bool newLocal = await _localSpeakingDetector.poll(muted: _isMuted);
 
@@ -1227,9 +1133,8 @@ class VoiceService {
             report.values['kind'] == 'audio') {
           newRemote = _detectSpeech(report.values, 'in-remote');
         }
-        // Fallback for a plugin build without the capture meter (an app
-        // updated ahead of its native side): the old getStats guess is
-        // better than an indicator that never lights.
+        // Fallback for a plugin build without the capture meter: the old
+        // getStats guess beats an indicator that never lights.
         if (!_localSpeakingDetector.hasMeter &&
             !newLocal &&
             !_isMuted &&
@@ -1261,17 +1166,15 @@ class VoiceService {
     return delta > 0.0001;
   }
 
-  /// Tear down ALL media resources of the current session: local mic/camera
-  /// streams, renderers, the remote stream, the PeerConnection (close+dispose),
-  /// and the SFrame cryptor. Every disposal is awaited and individually guarded
-  /// so one failure can't strand the rest (a stranded PC leaks its whole
-  /// libwebrtc thread-set). Used by [endCall] AND at the start of
-  /// [createOffer]/[handleOffer] so a re-entrant call (e.g. a second inbound
-  /// offer during the capture window) can't orphan the prior session's streams.
+  /// Tears down ALL media of the current session: local streams, renderers,
+  /// the remote stream, the PeerConnection and the SFrame cryptor. Every
+  /// disposal is individually guarded, since a stranded PC leaks its whole
+  /// libwebrtc thread-set. Also run at the START of
+  /// [createOffer]/[handleOffer], so a re-entrant call cannot orphan the
+  /// prior session's streams.
   ///
-  /// [keepCandidatesForCallId] survives the teardown: when this runs at the
-  /// START of a new call, the peer may already have trickled candidates for
-  /// that call and they must not be swept out with the previous session's.
+  /// [keepCandidatesForCallId] survives the teardown: the peer may already
+  /// have trickled candidates for the call being set up.
   Future<void> _teardownMedia({String? keepCandidatesForCallId}) async {
     await _teardownLocalStreams();
     await _teardownRenderersAndRemoteStream();
@@ -1284,10 +1187,9 @@ class VoiceService {
     _remoteDescriptionSet = false;
   }
 
-  /// Stop + dispose the local mic and camera streams (each individually
-  /// guarded so one failure can't strand the other).
+  /// Stops and disposes the local mic and camera streams, each individually
+  /// guarded so one failure cannot strand the other.
   Future<void> _teardownLocalStreams() async {
-    // Stop local audio.
     if (_localStream != null) {
       try {
         await _stopTracksAndDispose(_localStream!);
@@ -1297,7 +1199,6 @@ class VoiceService {
       _localStream = null;
     }
 
-    // Stop local video.
     if (_localVideoStream != null) {
       try {
         await _stopTracksAndDispose(_localVideoStream!);
@@ -1308,10 +1209,9 @@ class VoiceService {
     }
   }
 
-  /// Dispose both renderers (nulled BEFORE awaiting so a Linux "texture not
-  /// found!" throw can't leave a stale half-disposed renderer), then the
-  /// remote stream — but only if we synthesized it (libwebrtc owns the
-  /// event-provided ones).
+  /// Disposes both renderers (nulled BEFORE awaiting, so a Linux "texture not
+  /// found!" throw leaves nothing half-disposed), then the remote stream, but
+  /// only if we synthesized it: libwebrtc owns the event-provided ones.
   Future<void> _teardownRenderersAndRemoteStream() async {
     final localRenderer = _localRenderer;
     _localRenderer = null;
@@ -1346,8 +1246,8 @@ class VoiceService {
     }
   }
 
-  /// Close the dedicated voice peer connection. close() and dispose() get
-  /// SEPARATE guards so a close() throw can't skip the thread-set-freeing
+  /// Closes the dedicated voice peer connection. close() and dispose() get
+  /// SEPARATE guards, so a close() throw cannot skip the thread-set-freeing
   /// dispose().
   Future<void> _teardownPeerConnection() async {
     final pc = _pc;
@@ -1365,7 +1265,6 @@ class VoiceService {
     }
   }
 
-  /// Dispose SFrame encryption.
   Future<void> _teardownFrameCryptor() async {
     try {
       await _frameCryptor?.dispose();
@@ -1393,23 +1292,22 @@ class VoiceService {
     _useFrontCamera = true;
   }
 
-  /// Fired (throttled) when a cryptor reports a sustained failure state —
-  /// the provider re-applies the call key (heal-lite; the DM key is static,
-  /// so failures are almost always wedged bindings or a lost key apply).
+  /// Fired (throttled) when a cryptor reports a sustained failure state: the
+  /// provider re-applies the call key. The DM key is static, so a failure is
+  /// almost always a wedged binding or a lost key apply.
   void Function()? onSframeHealNeeded;
   DateTime? _lastSframeHealPing;
   bool _cryptorInited = false;
 
-  /// Public rebind for the heal path: re-bind the receiver cryptor to the
+  /// Public rebind for the heal path: re-binds the receiver cryptor to the
   /// newest inbound audio receiver.
   Future<void> rebindSframeReceivers() => _rebindSframeAudioReceiver(null);
 
-  /// Set the SFrame encryption key for this DM call.
-  /// Called by CallNotifier after key exchange via signaling.
+  /// Sets the SFrame encryption key for this DM call, called by CallNotifier
+  /// after key exchange via signaling.
   Future<void> setSframeKey(String peerId, Uint8List key) async {
     if (_pc == null) return;
 
-    // Initialize FrameCryptorService if not already done.
     _frameCryptor ??= FrameCryptorService();
     if (!_cryptorInited) {
       _cryptorInited = true;
@@ -1429,12 +1327,10 @@ class VoiceService {
         onSframeHealNeeded?.call();
       };
     }
-    // rotateKey, not setSharedKey: also updates the key index on any existing
-    // cryptors (DM keys are fixed at index 0, but a re-keyed call must never
-    // leave a live cryptor pointed at a stale index).
+    // rotateKey, not setSharedKey: it also updates the key index on existing
+    // cryptors, so a re-keyed call never leaves one pointed at a stale index.
     await _frameCryptor!.rotateKey(0, key);
 
-    // Enable on sender (outgoing audio).
     try {
       final senders = await _pc!.getSenders();
       for (final sender in senders) {
@@ -1447,7 +1343,6 @@ class VoiceService {
       _log('[HOLLOW-VOICE] Failed to enable SFrame sender: $e');
     }
 
-    // Enable on receiver (incoming audio).
     try {
       final receivers = await _pc!.getReceivers();
       for (final receiver in receivers) {
@@ -1463,19 +1358,11 @@ class VoiceService {
     _log('[HOLLOW-VOICE] SFrame E2EE enabled for DM call with $peerId');
   }
 
-  /// (Re)bind the SFrame receiver cryptor to the CURRENT inbound audio
-  /// receiver. Fired from onTrack: a remote mid-call mic switch arrives as
-  /// a NEW audio transceiver via renegotiation, and enableForReceiver is
-  /// idempotent per (peer, kind) — the old cryptor must be dropped first or
-  /// the new track is never decrypted. Harmless on the initial track (drop
-  /// is a no-op / re-binds the same receiver); skipped before key exchange
-  /// (setSframeKey binds the receiver itself once the key lands).
   /// The remote ICE username fragment from the last remote description.
   ///
-  /// A change in this is the signal that an ICE RESTART happened, and it is
-  /// the same signal on BOTH sides: the offerer restarts, and per spec the
-  /// answerer must generate fresh credentials to answer a restart offer. So
-  /// one check, applied wherever a remote description is set, catches both.
+  /// A change in it IS an ICE restart, and the same signal on BOTH sides: per
+  /// spec the answerer must generate fresh credentials to answer a restart
+  /// offer, so one check wherever a remote description is set catches both.
   String? _remoteIceUfrag;
 
   /// When the last SFrame re-assert ran, to collapse the two triggers that
@@ -1492,43 +1379,29 @@ class VoiceService {
     return changed;
   }
 
-  /// Re-assert SFrame after the ICE transport was rebuilt underneath us.
+  /// Re-asserts SFrame after the ICE transport was rebuilt underneath us.
   ///
-  /// ## The bug this exists for (field-caught 2026-08-27)
+  /// An ICE restart keeps the same SSRC and msid, so no new transceiver
+  /// appears, `onTrack` never fires and the ordinary rebind path is never
+  /// reached; the cryptor is detached rather than FAILING, so the heal ping
+  /// does not fire either, and a recovered call came back as pure noise.
+  /// Cryptors are idempotent per (peer, kind), so the binding has to be
+  /// DROPPED first, which is why this is a ladder and not a call.
   ///
-  /// After a long outage the call recovered, the audio came back, and it was
-  /// NOISE: the receiving cryptor was gone, so ciphertext went straight to the
-  /// decoder. An ICE restart keeps the same SSRC and the same msid, so no new
-  /// transceiver appears, `onTrack` never fires, and the one existing rebind
-  /// path (`_rebindSframeAudioReceiver`) is never reached. The cryptor was not
-  /// FAILING either, it was detached, so `onFrameCryptorStateChanged` reported
-  /// nothing and the heal ping never fired. The logs from that call contain
-  /// zero SFrame lines after recovery, which is exactly the signature.
-  ///
-  /// The cryptors are idempotent per (peer, kind), so a plain re-enable is a
-  /// no-op on a stale binding. The binding has to be dropped first, which is
-  /// why this is a ladder and not a call.
-  ///
-  /// ## Why this is NOT run on every renegotiation
-  ///
-  /// [FrameCryptorService.disableSender] disposes the cryptor, so between the
-  /// drop and the re-enable there is a window where outbound frames carry no
-  /// SFrame layer. For a DM call that window is still inside DTLS-SRTP, but on
-  /// the forwarder lane a terminating hop is exactly what SFrame defends
-  /// against. A camera toggle or a mic switch does not rebuild the transport
-  /// and does not need this, so it is spent only where the alternative is
-  /// audio that is already broken.
+  /// NOT run on every renegotiation: disableSender disposes the cryptor, and
+  /// between the drop and the re-enable outbound frames carry no SFrame
+  /// layer, which on the forwarder lane is exactly what SFrame defends
+  /// against. A camera toggle does not rebuild the transport and does not
+  /// need this.
   Future<void> healSframeAfterTransportRebuild() async {
     final peerId = _activePeerId;
     final fc = _frameCryptor;
     if (peerId == null || fc == null || !fc.isEnabled) return;
 
-    // Two independent triggers reach this (a changed remote ufrag, and a lapse
-    // that recovered after we tried restarts), and on a healthy recovery they
-    // fire within milliseconds of each other. Re-asserting twice would drop
-    // and re-create working cryptors for no reason, which is its own audible
-    // blip. Short window on purpose: a genuine SECOND rebuild seconds later
-    // still gets its own heal.
+    // Two independent triggers reach this (a changed remote ufrag, and a
+    // lapse that recovered after restarts) and on a healthy recovery they
+    // fire milliseconds apart. Short window on purpose: a genuine SECOND
+    // rebuild seconds later still gets its own heal.
     final now = DateTime.now();
     final last = _lastSframeHeal;
     if (last != null && now.difference(last) < const Duration(seconds: 2)) {
@@ -1557,11 +1430,11 @@ class VoiceService {
         if (r.track?.kind == 'audio') inbound = r;
       }
 
-      // WHICH objects we bound to, not just that we bound. A re-assert that
-      // reports success and still decrypts to noise is almost always bound to
-      // a stale transceiver, and without the ids that is unanswerable from a
-      // log. Counts included: more than one live audio receiver means the
-      // "newest wins" rule above is picking between real candidates.
+      // WHICH objects we bound to, not just that we bound: a re-assert that
+      // reports success and still decrypts to noise is almost always bound
+      // to a stale transceiver, and without the ids that is unanswerable
+      // from a log. More than one live audio receiver means the "newest
+      // wins" rule above is picking between real candidates.
       final audioSenders =
           senders.where((x) => x.track?.kind == 'audio').length;
       final audioReceivers =
@@ -1589,8 +1462,8 @@ class VoiceService {
       await fc.disableReceiver(peerId);
       var target = receiver;
       if (target == null) {
-        // Fallback: the NEWEST audio receiver on the PC (transceivers are
-        // in creation order; dead ones from prior switches come first).
+        // Fallback: the NEWEST audio receiver (transceivers are in creation
+        // order, and dead ones from prior switches come first).
         final receivers = await _pc?.getReceivers() ?? const <RTCRtpReceiver>[];
         for (final r in receivers) {
           if (r.track?.kind == 'audio') target = r;
@@ -1606,9 +1479,7 @@ class VoiceService {
 
   Future<void> dispose() async => endCall();
 
-  // ---------------------------------------------------------------------------
-  // Private — Peer connection
-  // ---------------------------------------------------------------------------
+  // Private: peer connection
 
   Future<void> _initPeerConnection(String peerId, String callId) async {
     _tearingDown = false;
@@ -1627,14 +1498,11 @@ class VoiceService {
     final pc = await createPeerConnection(iceServers);
     _pc = pc;
 
-    // ICE candidate handler — send to peer via call signaling.
     pc.onIceCandidate =
         (candidate) => _sendLocalIceCandidate(peerId, callId, candidate);
 
-    // Remote track handler — audio auto-plays, video needs renderer.
     pc.onTrack = (event) => _onRemoteTrack(peerId, event);
 
-    // ICE connection state handler (ICE layer — checking/connected/failed/disconnected).
     pc.onIceConnectionState = (iceState) {
       _log('[HOLLOW-VOICE] ICE connection state: $iceState');
       if (iceState == RTCIceConnectionState.RTCIceConnectionStateConnected ||
@@ -1643,7 +1511,6 @@ class VoiceService {
       }
     };
 
-    // ICE gathering state handler.
     pc.onIceGatheringState = (gatherState) {
       _log('[HOLLOW-VOICE] ICE gathering state: $gatherState');
       if (gatherState ==
@@ -1652,12 +1519,10 @@ class VoiceService {
       }
     };
 
-    // Connection state handler.
     pc.onConnectionState =
         (state) => _onConnectionStateChanged(pc, peerId, state);
   }
 
-  /// Log ICE config for diagnostics.
   void _logIceServerConfig() {
     final servers = (iceServers['iceServers'] as List?) ?? [];
     final hasTurn = servers.any((s) {
@@ -1669,12 +1534,11 @@ class VoiceService {
     _log('[HOLLOW-VOICE] Creating PC with ${servers.length} ICE server groups, TURN=$hasTurn');
   }
 
-  /// Body of pc.onIceCandidate — forward a freshly gathered local candidate
-  /// to the peer via call signaling.
+  /// Forwards a freshly gathered local candidate to the peer via call
+  /// signaling.
   void _sendLocalIceCandidate(
       String peerId, String callId, RTCIceCandidate candidate) {
     if (candidate.candidate == null || candidate.candidate!.isEmpty) return;
-    // Log candidate type for diagnostics (host/srflx/relay).
     final c = candidate.candidate!;
     final type = c.contains('typ host')
         ? 'host'
@@ -1684,8 +1548,8 @@ class VoiceService {
                 ? 'relay'
                 : 'unknown';
     _log('[HOLLOW-VOICE] ICE candidate: $type mid=${candidate.sdpMid}');
-    // First of each type only (the trace keeps the first write) — when the
-    // srflx arrives is what decides whether a direct pair could have raced.
+    // First of each type only: when the srflx arrives is what decides
+    // whether a direct pair could have raced.
     if (type != 'unknown') CallSetupTrace.markCurrent('cand-$type');
     final payload = jsonEncode({
       'call_id': callId,
@@ -1693,9 +1557,9 @@ class VoiceService {
       'sdpMid': candidate.sdpMid,
       'sdpMLineIndex': candidate.sdpMLineIndex,
     });
-    // .catchError, not try/catch: fire-and-forget — a sync try/catch around
-    // the un-awaited Future catches nothing. Safe to swallow: ICE candidates
-    // are best-effort (the connection retries/renegotiates without this one).
+      // .catchError, not try/catch: a sync try/catch around the un-awaited
+      // Future catches nothing. Safe to swallow, since candidates are
+      // best-effort and the connection renegotiates without this one.
     network_api.callSendSignal(
       peerId: peerId,
       signalType: 'ice',
@@ -1711,18 +1575,17 @@ class VoiceService {
     if (event.track.kind == 'video') {
       _handleRemoteVideoTrack(peerId, event);
     } else if (event.track.kind == 'audio') {
-      // Audio auto-plays (no renderer), but a remote mid-call mic switch
-      // lands as a NEW transceiver — the SFrame decryptor is still bound
-      // to the dead receiver, so without a rebind the fresh track plays
-      // as ciphertext gibberish. No-op before the key exchange.
+      // A remote mid-call mic switch lands as a NEW transceiver while the
+      // SFrame decryptor is still bound to the dead receiver, so without a
+      // rebind the fresh track plays as ciphertext. No-op before the key
+      // exchange.
       unawaited(_rebindSframeAudioReceiver(event.receiver));
     }
   }
 
-  /// Body of pc.onConnectionState.
-  ///
-  /// Reports what happened and decides nothing. Every state, `disconnected`
-  /// included, is forwarded to [onTransportState] untouched.
+  /// Body of pc.onConnectionState. Reports what happened and decides nothing:
+  /// every state, `disconnected` included, is forwarded to [onTransportState]
+  /// untouched.
   void _onConnectionStateChanged(RTCPeerConnection pc, String peerId,
       RTCPeerConnectionState state) {
     _log('[HOLLOW-VOICE] Connection state: $state');
@@ -1736,24 +1599,19 @@ class VoiceService {
     onTransportState?.call(state);
   }
 
-  /// Restart ICE on the live call, so the next renegotiation offer carries
+  /// Restarts ICE on the live call, so the next renegotiation offer carries
   /// fresh credentials and re-runs the connectivity checks.
   ///
   /// Make-before-break by construction: media keeps flowing on the existing
-  /// candidate pair until the new one connects, so a restart fired at a link
-  /// that was about to heal on its own costs nothing but one offer.
-  ///
-  /// The caller must follow this with a renegotiation offer; see
-  /// `restartIceOn` in `ice_repair.dart` for why it is `restartIce()` and not
-  /// an `iceRestart` constraint on `createOffer`.
+  /// pair until the new one connects. The caller must follow with a
+  /// renegotiation offer; `ice_repair.dart` says why it is `restartIce()`.
   Future<bool> restartIce() async {
     final pc = _pc;
     if (pc == null) return false;
     return restartIceOn(pc);
   }
 
-  /// Post-connect diagnostic: log which ICE route (TURN / STUN / LAN / P2P)
-  /// the succeeded candidate pair took.
+  /// Post-connect diagnostic: which ICE route the succeeded pair took.
   Future<void> _logIceRoute(RTCPeerConnection pc, String peerId) async {
     final route = await probeIceRoute(() => pc);
     _log(route == null
@@ -1761,38 +1619,34 @@ class VoiceService {
         : '[HOLLOW-VOICE] ICE route to $peerId: $route');
   }
 
-  // ---------------------------------------------------------------------------
-  // Private — Audio
-  // ---------------------------------------------------------------------------
+  // Private: audio
 
-  /// Capture microphone audio into [_localStream]. Called BEFORE creating the
-  /// peer connection so that getUserMedia latency (100-500 ms on Windows)
-  /// doesn't eat into the ICE gathering window.
+  /// Captures microphone audio into [_localStream], BEFORE the peer
+  /// connection exists so getUserMedia latency (100-500 ms on Windows) does
+  /// not eat into the ICE gathering window.
   Future<void> _captureLocalAudio() async {
-    // AI NS (DFN3): kick the engine (first enable = background model load)
-    // and decide the WebRTC-NS fallback BEFORE building constraints — the
-    // native bail/format flags are latched, so a device that already proved
-    // it can't run DFN keeps legacy NS from the very first frame.
+    // Kick the DFN3 engine (a first enable loads the model) and decide the
+    // WebRTC-NS fallback BEFORE building constraints: the native bail flags
+    // are latched, so a device that cannot run DFN keeps legacy NS from the
+    // very first frame.
     await _syncNoiseSuppressAiEngine();
     final audioConstraints = <String, dynamic>{
       'echoCancellation': true,
       // Legacy NS off while DFN3 owns suppression (unless fallback re-armed).
       'noiseSuppression': _wantWebrtcNs,
       'googNoiseSuppression': _wantWebrtcNs,
-      // AGC OFF: WebRTC's AGC targets a conservative ~-18 dBFS and, on desktop,
-      // rides the OS mic slider DOWN to hold it — fighting (and beating) our
-      // post-APM Voice Enhancement chain's makeup gain, which is why the mic is
-      // "quiet no matter what" and boosting distorts. We own loudness in the
-      // enhancement chain instead (keep AEC+NS). Reaches the native APM via the
-      // RTCAudioOptions plumbing in flutter_media_stream.cc (desktop) /
-      // GetUserMediaImpl (Android, under 'optional'); iOS already forces APM-AGC
-      // off and uses Apple VPIO — do NOT bypass that. See
+      // AGC OFF: WebRTC's AGC targets about -18 dBFS and on desktop rides
+      // the OS mic slider DOWN to hold it, beating our post-APM Voice
+      // Enhancement makeup gain, which is why the mic reads "quiet no matter
+      // what" and boosting distorts. We own loudness in the enhancement
+      // chain instead, keeping AEC and NS. iOS already forces APM-AGC off
+      // and uses Apple VPIO, which must NOT be bypassed. See
       // project_voice_agc_loudness_rvox.
       'autoGainControl': false,
       'googAutoGainControl': false,
     };
-    // flutter_webrtc on Windows uses 'sourceId' for input device selection
-    // (not 'deviceId' — that selects output devices in GetUserAudio).
+    // Windows selects the input by 'sourceId'; 'deviceId' would select an
+    // output device in GetUserAudio.
     if (preferredAudioInputDeviceId != null) {
       audioConstraints['optional'] = [
         {'sourceId': preferredAudioInputDeviceId}
@@ -1813,9 +1667,9 @@ class VoiceService {
           'tracks: ${audioTracks.length}'
           '${audioTracks.isNotEmpty ? ", label=${audioTracks.first.label}" : ""}');
 
-      // Apply mic gain via the native post-APM capture processor (makeup
-      // gain + -3 dBFS limiter). Process-global, so always set it — at 1.0
-      // it's transparent. NOT setVolume(): that only scales remote tracks.
+      // Mic gain rides the native post-APM capture processor (makeup gain
+      // plus a -3 dBFS limiter). Process-global, so always set it; at 1.0 it
+      // is transparent. NOT setVolume(), which only scales remote tracks.
       try {
         await Helper.setCaptureGain(micGain);
         await Helper.setVoiceEnhance(voiceEnhance,
@@ -1827,14 +1681,12 @@ class VoiceService {
         _log('[HOLLOW-VOICE] Failed to apply capture gain: $e');
       }
 
-      // NOTE: do NOT bypass Apple's Voice-Processing IO here (tried
-      // 2026-07-02 to recover its ~6-10 dB playback attenuation): the bypass
-      // kills Apple's hardware AEC → echo on every route, and on the
-      // loudspeaker a feedback howl (loud/distorted/bass-boosted mic) that
-      // persists after toggling back. The sender-side enhancement chain
-      // already delivers hot audio, so VPIO's attenuation is affordable.
+      // Do NOT bypass Apple's Voice-Processing IO to recover its playback
+      // attenuation: the bypass kills Apple's hardware AEC, giving echo on
+      // every route and a feedback howl on the loudspeaker that persists
+      // after toggling back. The sender-side chain already delivers hot
+      // audio, so VPIO's attenuation is affordable.
 
-      // Apply preferred output device if set.
       if (preferredAudioOutputDeviceId != null) {
         try {
           await Helper.selectAudioOutput(preferredAudioOutputDeviceId!);
@@ -1851,8 +1703,8 @@ class VoiceService {
 
   Future<void> updateMicGain(double gain) async {
     micGain = gain;
-    // Live mid-call update — native processor reads the new gain atomically.
-    // Process-global, so this works even before/without a local stream.
+    // Live mid-call update. Process-global and atomic, so it works even
+    // before or without a local stream.
     await Helper.setCaptureGain(gain);
     _log('[HOLLOW-VOICE] Updated capture gain: ${gain.toStringAsFixed(2)}');
   }
@@ -1880,10 +1732,9 @@ class VoiceService {
     _log('[HOLLOW-VOICE] Updated voice enhance dynamic: $enabled');
   }
 
-  /// Toggle AI noise suppression live. Returns true when the mic was
-  /// re-captured (the WebRTC-NS constraint flipped with it) — the caller
-  /// MUST send a renegotiation offer, same contract as
-  /// [setAudioInputDevice].
+  /// Toggles AI noise suppression live. True when the mic was re-captured
+  /// (the WebRTC-NS constraint flips with it), and the caller MUST then send
+  /// a renegotiation offer, same contract as [setAudioInputDevice].
   Future<bool> updateNoiseSuppressAi(bool enabled) async {
     noiseSuppressAi = enabled;
     _dfnFallbackNsOn = false;
@@ -1893,11 +1744,10 @@ class VoiceService {
     return _recaptureMic(_capturedAudioInputDeviceId);
   }
 
-  /// Switch the AI-NS engine (Helper.nsEngineRnnoise / nsEngineDfn3). The
-  /// native side swaps the engine handle in place — no constraint flip, no
-  /// re-capture, no renegotiation — so this is safe mid-call. Clears the
-  /// fallback latch (the new engine deserves a fresh verdict); the caller
-  /// should schedule [reconcileNoiseSuppressAi] like after an enable.
+  /// Switches the AI-NS engine. The native side swaps the engine handle in
+  /// place, with no constraint flip, re-capture or renegotiation, so this is
+  /// safe mid-call. Clears the fallback latch, and the caller should schedule
+  /// [reconcileNoiseSuppressAi] as after an enable.
   Future<void> updateNoiseSuppressEngine(int engine) async {
     noiseSuppressEngine = engine;
     if (!noiseSuppressAi) return;
@@ -1906,10 +1756,9 @@ class VoiceService {
     _log('[HOLLOW-VOICE] Updated AI-NS engine: $engine');
   }
 
-  /// Post-enable safety net (schedule a few seconds after enabling): if the
-  /// engine reports it cannot run here while legacy NS is off, re-arm
-  /// WebRTC NS and re-capture — a call must never sit with NO suppression.
-  /// Returns true when the caller must renegotiate.
+  /// Post-enable safety net: if the engine reports it cannot run here while
+  /// legacy NS is off, re-arm WebRTC NS and re-capture, since a call must
+  /// never sit with NO suppression. True when the caller must renegotiate.
   Future<bool> reconcileNoiseSuppressAi() async {
     if (!noiseSuppressAi || _dfnFallbackNsOn) return false;
     Map<String, dynamic> st;
@@ -1918,9 +1767,8 @@ class VoiceService {
     } catch (_) {
       return false;
     }
-    // ALWAYS log — "silently working" and "silently absent" must never
-    // look the same (2026-07-17 field-test lesson). frames > 0 is the
-    // proof the engine is denoising.
+    // ALWAYS log: "silently working" and "silently absent" must never look
+    // the same. frames > 0 is the proof the engine is denoising.
     _log('[HOLLOW-VOICE] AI-NS reconcile status: $st');
     if (st.isEmpty) return false;
     final cannotRun = st['available'] != true ||
@@ -1933,9 +1781,9 @@ class VoiceService {
     return _recaptureMic(_capturedAudioInputDeviceId);
   }
 
-  /// Push the AI-NS preference into the native engine and refresh the
-  /// fallback decision from the engine's latched status flags (a device
-  /// that already bailed keeps legacy NS from the first frame).
+  /// Pushes the AI-NS preference into the native engine and refreshes the
+  /// fallback decision from its latched status flags: a device that already
+  /// bailed keeps legacy NS from the first frame.
   Future<void> _syncNoiseSuppressAiEngine() async {
     try {
       await Helper.setNoiseSuppressAi(noiseSuppressAi,
@@ -1956,8 +1804,7 @@ class VoiceService {
     }
   }
 
-  /// Add pre-captured audio tracks to the peer connection (synchronous aside
-  /// from the addTrack FFI call). Called immediately after _initPeerConnection.
+  /// Adds pre-captured audio tracks, immediately after _initPeerConnection.
   void _addLocalAudioTracks() {
     if (_localStream == null || _pc == null) return;
     for (final track in _localStream!.getAudioTracks()) {
@@ -1965,13 +1812,11 @@ class VoiceService {
     }
   }
 
-  // ---------------------------------------------------------------------------
-  // Private — Video
-  // ---------------------------------------------------------------------------
+  // Private: video
 
-  /// Capture camera video into [_localVideoStream]. Called BEFORE creating the
-  /// peer connection (same pre-capture pattern as audio). Only used for the
-  /// initial call setup — mid-call camera enable goes through [toggleVideo].
+  /// Captures camera video into [_localVideoStream] BEFORE the peer
+  /// connection, the same pre-capture pattern as audio. Initial call setup
+  /// only; a mid-call enable goes through [toggleVideo].
   Future<void> _captureLocalVideo() async {
     _log('[HOLLOW-VOICE] Capturing camera (front=$_useFrontCamera, '
         'preferred=${preferredCameraDeviceId ?? "default"})');
@@ -1993,9 +1838,8 @@ class VoiceService {
     }
   }
 
-  /// Add pre-captured video tracks to the peer connection. Called immediately
-  /// after _initPeerConnection + _addLocalAudioTracks, BEFORE the offer is
-  /// created so the codec constraint shapes the initial m-line too.
+  /// Adds pre-captured video tracks BEFORE the offer is created, so the codec
+  /// constraint shapes the initial m-line too.
   Future<void> _addLocalVideoTracks() async {
     if (_localVideoStream == null || _pc == null) return;
     for (final track in _localVideoStream!.getVideoTracks()) {
@@ -2009,19 +1853,17 @@ class VoiceService {
 
   Future<void> _handleRemoteVideoTrack(
       String peerId, RTCTrackEvent event) async {
-    // Stash the OLD renderer/stream so we can dispose them AFTER the new
-    // renderer is built. This way a dispose failure on the old (e.g.
-    // libwebrtc already cleaned up the event-owned stream during the
-    // renegotiation that triggered this onTrack) doesn't trash the new
-    // renderer that we still need.
+      // Stash the OLD renderer and stream to dispose AFTER the new renderer
+      // is built, so a dispose failure on the old cannot trash the new one
+      // we still need.
     final oldRenderer = _remoteRenderer;
     final oldStream = _remoteStream;
     final oldWasSynthetic = _remoteStreamIsSynthetic;
 
     try {
-      // Pick the new stream — prefer the event-provided one (libwebrtc owns
-      // it, we must NOT dispose it), fall back to a synthetic one if the
-      // event came with streams=0 (Windows/libwebrtc renegotiation quirk).
+      // Prefer the event-provided stream (libwebrtc owns it, we must NOT
+      // dispose it); fall back to a synthetic one when the event came with
+      // streams=0, a Windows renegotiation quirk.
       MediaStream newStream;
       bool newIsSynthetic;
       if (event.streams.isNotEmpty) {
@@ -2038,25 +1880,22 @@ class VoiceService {
         newIsSynthetic = true;
       }
 
-      // Build the new renderer.
       final newRenderer = RTCVideoRenderer();
       await newRenderer.initialize();
       newRenderer.srcObject = newStream;
       _log('[HOLLOW-VOICE] Remote video renderer initialized, '
           'track=${event.track.id}, stream=${newStream.id}');
 
-      // Commit the new state BEFORE attempting to dispose the old, so even
-      // if the dispose throws we still have a working renderer.
+      // Commit the new state BEFORE disposing the old, so even a throw
+      // leaves us with a working renderer.
       _remoteRenderer = newRenderer;
       _remoteStream = newStream;
       _remoteStreamIsSynthetic = newIsSynthetic;
 
-      // Best-effort dispose of the old renderer/stream.
       await _disposeReplacedRemoteMedia(
           oldRenderer, oldStream, oldWasSynthetic);
 
-      // Slight delay to ensure renderer is ready for RTCVideoView, then
-      // notify the UI.
+      // Let the renderer settle before RTCVideoView sees it, then notify.
       await Future.delayed(const Duration(milliseconds: 100));
       onRemoteVideoTrack?.call(peerId);
       _scheduleVideoStatsProbes('recv');
@@ -2064,16 +1903,14 @@ class VoiceService {
       _scheduleRendererReassert(newRenderer, newStream);
     } catch (e) {
       _log('[HOLLOW-VOICE] ERROR handling remote video track: $e');
-      // Don't trash existing state on error — the previous renderer may
-      // still be usable. Just log and bail.
+      // Do not trash existing state on error; the previous renderer may
+      // still be usable.
     }
   }
 
-  /// Best-effort dispose of the previous remote renderer/stream AFTER the
-  /// new one is committed. Wrapped in try/catch because libwebrtc may have
-  /// already cleaned up the underlying MediaStream during renegotiation.
-  /// Only synthetic streams are disposed — streams from onTrack events are
-  /// owned by libwebrtc and disposing them throws "not found".
+  /// Best-effort dispose of the previous remote renderer and stream AFTER
+  /// the new one is committed. Only synthetic streams are disposed: streams
+  /// from onTrack belong to libwebrtc and disposing them throws "not found".
   Future<void> _disposeReplacedRemoteMedia(RTCVideoRenderer? oldRenderer,
       MediaStream? oldStream, bool oldWasSynthetic) async {
     if (oldRenderer != null) {
@@ -2094,14 +1931,12 @@ class VoiceService {
     }
   }
 
-  /// Re-assert the native track binding: on iOS the first srcObject bind
-  /// can race the native stream's track-list population — Dart-side
-  /// srcObject is set and frames decode, but videoRendererSetSrcObject
-  /// found videoTracks empty and the renderer silently stays trackless
-  /// (black) until a NEW renderer binds on the next toggle. Re-setting
-  /// srcObject re-runs the native lookup; it's idempotent when the first
-  /// bind worked. renderer.value tells us whether frames ever reached the
-  /// texture (width/height stay 0 + renderVideo=false when they didn't).
+  /// Re-asserts the native track binding: on iOS the first srcObject bind can
+  /// race the native stream's track-list population, leaving the renderer
+  /// silently trackless and black until a NEW renderer binds on the next
+  /// toggle. Re-setting srcObject re-runs the native lookup and is idempotent
+  /// when the first bind worked. renderer.value says whether frames ever
+  /// reached the texture.
   void _scheduleRendererReassert(
       RTCVideoRenderer newRenderer, MediaStream newStream) {
     for (final d in const [
@@ -2134,20 +1969,15 @@ class VoiceService {
     _log('[HOLLOW-VOICE] Local video renderer initialized');
   }
 
-  // _initRemoteRenderer is inlined into _handleRemoteVideoTrack above.
+  // Private: helpers
 
-  // ---------------------------------------------------------------------------
-  // Private — Helpers
-  // ---------------------------------------------------------------------------
-
-  /// Drop queued candidates that do NOT belong to [keepCallId], saying so
-  /// when there were any. A null [keepCallId] drops everything (call over).
+  /// Drops queued candidates that do NOT belong to [keepCallId], saying so
+  /// when there were any; a null [keepCallId] drops everything.
   ///
-  /// Dropping a candidate for the call currently being set up is a real loss,
-  /// not bookkeeping: the peer sends each candidate exactly once, so a
-  /// discarded one is gone for the lifetime of the call and the connection has
-  /// to survive on whatever travels the other way. That is why this is keyed
-  /// rather than a blanket clear, and why it marks the setup trace.
+  /// Keyed rather than a blanket clear because dropping a candidate for the
+  /// call being set up is a real loss: the peer sends each one exactly once,
+  /// so a discarded one is gone for the lifetime of the call and the
+  /// connection has to survive on whatever travels the other way.
   void _discardPendingCandidates(String where, {String? keepCallId}) {
     final dropped = _pendingCandidates.discardExcept(keepCallId);
     if (dropped == 0) return;
@@ -2155,10 +1985,9 @@ class VoiceService {
     CallSetupTrace.markCurrent(CallSetupTrace.kCandDropped);
   }
 
-  /// Hand the active call's queued candidates to the peer connection.
-  ///
-  /// Only the active call's: an entry for any other call is stale by
-  /// definition and libwebrtc would reject it against these ICE credentials.
+  /// Hands the active call's queued candidates to the peer connection. Only
+  /// that call's: an entry for any other is stale by definition and libwebrtc
+  /// would reject it against these ICE credentials.
   Future<void> _flushPendingCandidates() async {
     final callId = _activeCallId;
     if (_pc == null || callId == null) return;
@@ -2174,15 +2003,12 @@ class VoiceService {
     }
   }
 
-  /// Dump key SDP lines for debugging.
-  /// Munge the Opus fmtp line in the SDP to set bitrate and stereo params.
-  /// This controls the actual audio quality sent over the wire.
+  /// Munges the Opus fmtp line in the SDP to set bitrate and stereo, which is
+  /// what controls the audio quality actually sent over the wire.
   String _mungeOpusParams(String sdp) {
-    // Find the Opus payload type from a=rtpmap lines.
     final opusPt = _findOpusPayloadType(sdp);
     if (opusPt == null) return sdp; // No Opus found, return as-is.
 
-    // Build the desired fmtp params.
     final params = <String>[
       'minptime=10',
       'useinbandfec=1',
@@ -2194,7 +2020,6 @@ class VoiceService {
     _log('[HOLLOW-VOICE] Opus SDP munge: PT=$opusPt '
         'bitrate=$opusBitrate stereo=$opusStereo');
 
-    // Replace existing fmtp line for Opus, or add one.
     final fmtpPrefix = 'a=fmtp:$opusPt ';
     final lines = sdp.split('\r\n');
     final result = <String>[];
@@ -2207,7 +2032,6 @@ class VoiceService {
         result.add(line);
       }
     }
-    // If no existing fmtp line, insert after rtpmap.
     if (!replaced) {
       return _insertFmtpAfterRtpmap(
           result, opusPt, '$fmtpPrefix${params.join(';')}');
@@ -2215,7 +2039,6 @@ class VoiceService {
     return result.join('\r\n');
   }
 
-  /// Extract the Opus payload type from the SDP's a=rtpmap lines.
   String? _findOpusPayloadType(String sdp) {
     for (final line in sdp.split('\r\n')) {
       final match = RegExp(r'a=rtpmap:(\d+)\s+opus/48000', caseSensitive: false)
@@ -2227,8 +2050,8 @@ class VoiceService {
     return null;
   }
 
-  /// Insert [fmtpLine] directly after the Opus a=rtpmap line and rejoin the
-  /// SDP (used when the offer/answer had no fmtp line to replace).
+  /// Inserts [fmtpLine] directly after the Opus a=rtpmap line and rejoins the
+  /// SDP, for an offer or answer that had no fmtp line to replace.
   String _insertFmtpAfterRtpmap(
       List<String> lines, String opusPt, String fmtpLine) {
     final rtpmapLine = 'a=rtpmap:$opusPt ';
@@ -2242,10 +2065,9 @@ class VoiceService {
     return insertResult.join('\r\n');
   }
 
-  /// Dump video RTP stats — diagnostics for the remote-camera black screen
-  /// (desktop → iOS). The sender's outbound probe shows whether frames are
-  /// being encoded/sent at all; the receiver's inbound probe shows whether
-  /// they arrive and decode. Both land in hollow_debug.log.
+  /// Dumps video RTP stats, diagnostics for the remote-camera black screen.
+  /// The sender's outbound probe shows whether frames are encoded at all, the
+  /// receiver's inbound probe whether they arrive and decode.
   Future<void> _probeVideoStats(String label) async {
     final pc = _pc;
     if (pc == null) return;
@@ -2263,7 +2085,6 @@ class VoiceService {
     }
   }
 
-  /// Log a video codec stats report (skips non-video codecs).
   void _logVideoCodecStat(String label, StatsReport r) {
     final v = r.values;
     final mime = (v['mimeType'] ?? '').toString().toLowerCase();
@@ -2273,7 +2094,6 @@ class VoiceService {
         'fmtp=${v['sdpFmtpLine']}');
   }
 
-  /// Log an inbound-rtp / outbound-rtp video stats report (skips audio).
   void _logVideoRtpStat(String label, StatsReport r) {
     final v = r.values;
     final kind = (v['kind'] ?? v['mediaType'] ?? '').toString();
@@ -2302,9 +2122,8 @@ class VoiceService {
     }
   }
 
-  /// Probe a few times after a video track appears so the log shows whether
-  /// counters actually advance (one snapshot can't distinguish "never
-  /// started" from "stalled").
+  /// Probes a few times after a video track appears, since one snapshot
+  /// cannot distinguish "never started" from "stalled".
   void _scheduleVideoStatsProbes(String label) {
     for (final delay in const [
       Duration(seconds: 2),
@@ -2332,34 +2151,28 @@ class VoiceService {
     _log('[HOLLOW-SDP-DUMP] === END $label ===');
   }
 
-  /// Constrain the transceiver carrying [trackId] to VP8 only (plus
-  /// rtx/red/ulpfec infrastructure). VP8 is software (libvpx) on every
-  /// platform and is what negotiation picks anyway. Anything stronger in
-  /// the offer only exists to break receivers: H.265/AV1 payload types kill
-  /// the iOS answerer outright, and even H264/VP9 entries make iOS's FIRST
-  /// call fail applying its own answer ("Failed to set local video
-  /// description recv parameters") while its hardware codec path is still
-  /// cold — first call black, all later calls fine. Also covers the older
-  /// macOS issue (Apple H.264 hw profile not decoding on Windows).
+  /// Constrains the transceiver carrying [trackId] to VP8 only, plus
+  /// rtx/red/ulpfec. VP8 is software on every platform and is what
+  /// negotiation picks anyway; anything stronger in the offer only exists to
+  /// break receivers. H.265/AV1 payload types kill the iOS answerer outright,
+  /// and even H264/VP9 entries make iOS's FIRST call fail applying its own
+  /// answer while its hardware codec path is cold. Also covers Apple's H.264
+  /// profile not decoding on Windows.
   /// The rung the camera sender is currently held to. Kept so a sender built
-  /// later in the call (a camera toggle, a device switch, a renegotiation)
-  /// inherits the ladder position instead of springing back to full quality on
-  /// a link that has already proved it cannot carry it.
+  /// later in the call inherits the ladder position instead of springing back
+  /// to full quality on a link that has already proved it cannot carry it.
   VideoRung _videoRung = kCameraLadder.first;
 
   VideoRung get videoRung => _videoRung;
 
-  /// Hold the outbound camera to [rung].
-  ///
-  /// Returns whether the sender accepted it. A live `setParameters` on a
-  /// negotiated sender is the one path the spec guarantees, and it is what the
-  /// screen share lane has used since 2026-07; the DM camera had no cap at all
-  /// until now, which is why a congested uplink took the whole call with it.
+  /// Holds the outbound camera to [rung], returning whether the sender
+  /// accepted it. A live `setParameters` on a negotiated sender is the one
+  /// path the spec guarantees.
   ///
   /// [VideoRung.paused] deactivates the encoding rather than removing the
   /// track: the transceiver, its SFrame cryptor and the negotiated m-line all
-  /// stay in place, so coming back up is another `setParameters` rather than a
-  /// renegotiation on a link that is already struggling.
+  /// stay in place, so coming back up is another `setParameters` rather than
+  /// a renegotiation on a link that is already struggling.
   Future<bool> applyVideoRung(VideoRung rung) async {
     _videoRung = rung;
     final pc = _pc;
@@ -2371,7 +2184,7 @@ class VoiceService {
         final params = sender.parameters;
         final encodings = params.encodings;
         if (encodings == null || encodings.isEmpty) {
-          // Nothing negotiated yet. The rung is remembered above and applied
+          // Nothing negotiated yet; the rung is remembered above and applied
           // by the next call, once the sender has an encoding to hold.
           return false;
         }
@@ -2428,16 +2241,12 @@ class VoiceService {
 
 /// The ICE username fragment carried by [sdp], or null when there is none.
 ///
-/// A change in this value between two remote descriptions IS an ICE restart:
-/// the offerer generates fresh credentials, and per RFC 8445 the answerer must
-/// generate fresh ones to answer a restart offer, so the same check works on
-/// both sides. That is the signal SFrame has to be re-asserted on, because an
-/// ICE restart rebuilds the transport while keeping the SSRC and msid, which
-/// means nothing else in the stack announces it.
-///
-/// Deliberately takes the FIRST occurrence: with BUNDLE every media section
-/// carries the same credentials, and without BUNDLE the first section's
-/// restart is still a restart.
+/// A change between two remote descriptions IS an ICE restart, on both sides:
+/// per RFC 8445 the answerer must generate fresh credentials to answer one.
+/// That is the signal SFrame has to be re-asserted on, because an ICE restart
+/// rebuilds the transport while keeping the SSRC and msid, so nothing else in
+/// the stack announces it. Deliberately the FIRST occurrence: with BUNDLE
+/// every media section carries the same credentials.
 String? iceUfragOf(String sdp) =>
     RegExp(r'^a=ice-ufrag:(\S+)', multiLine: true).firstMatch(sdp)?.group(1);
 

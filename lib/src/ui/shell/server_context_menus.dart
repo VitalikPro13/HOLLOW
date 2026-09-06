@@ -1,15 +1,8 @@
-/// Right-click menus for the server strip and the Home button (issue #61,
-/// phase 4).
+/// Right-click menus for the server strip and the Home button (issue #61).
 ///
-/// The strip was the last surface with no menu at all: a server icon did
-/// nothing on right click, and a folder icon jumped straight into rename with
-/// no way back out. Folder membership was drag-only, which is precisely the
-/// interaction Vitalik asked to stop needing.
-///
-/// Both shells show the same strip — [ServerStrip] on the left in Classic
-/// layout, [BottomBar] along the bottom in Dock — so the menus live here and
-/// both call them. A row that existed in one and not the other would be a bug
-/// nobody notices until they switch layouts.
+/// Both shells show the same strip, [ServerStrip] in Classic layout and
+/// [BottomBar] in Dock, so the menus live here and both call them: a row in one
+/// and not the other is a bug nobody notices until they switch layouts.
 library;
 
 import 'dart:async';
@@ -37,15 +30,10 @@ import 'package:hollow/src/ui/components/server_folder_popup.dart';
 import 'package:hollow/src/ui/dialogs/invite_dialog.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-// ---------------------------------------------------------------------------
-// Server icon
-// ---------------------------------------------------------------------------
-
 /// The right-click menu for one server icon in the strip.
 ///
-/// [onOpenSettings] selects the server and shows its settings; the two shells
-/// reach that differently (a provider flag in Classic, a dialog when split),
-/// so the caller supplies it rather than this file guessing.
+/// [onOpenSettings] selects the server and shows its settings. The two shells
+/// reach that differently, so the caller supplies it.
 void showServerIconMenu({
   required BuildContext context,
   required WidgetRef ref,
@@ -57,7 +45,7 @@ void showServerIconMenu({
     context: context,
     anchor: anchor,
     // `menuRef` deliberately not named `ref`: it dies with the menu, and every
-    // row below runs after the menu closes.
+    // row below runs after the menu has closed.
     builder: (menuContext, menuRef) =>
         _serverIconEntries(context, menuContext, menuRef, ref, serverId,
             onOpenSettings),
@@ -87,9 +75,9 @@ List<HollowMenuEntry> _serverIconEntries(
     HollowMenuItem(
       icon: muted ? LucideIcons.bell : LucideIcons.bellOff,
       label: muted ? 'Unmute server' : 'Mute server',
-      // Un-awaited, so a failed settings write must be caught here: a sync
-      // try/catch around a dangling Future catches nothing and the rejection
-      // reaches the zone crash handler.
+      // Un-awaited, so the failure is caught here: a sync try/catch around a
+      // dangling Future catches nothing and the rejection reaches the zone
+      // crash handler.
       onTap: () => ref
           .read(notificationSettingsProvider.notifier)
           .setServerLevel(
@@ -209,15 +197,7 @@ void markServerRead(WidgetRef ref, String serverId) {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Folder icon
-// ---------------------------------------------------------------------------
-
 /// The right-click menu for a folder icon.
-///
-/// Right-clicking a folder used to open the rename dialog with no menu around
-/// it, so there was no way to dissolve a folder except by dragging every
-/// server out of it one at a time.
 void showFolderIconMenu({
   required BuildContext context,
   required WidgetRef ref,
@@ -228,7 +208,7 @@ void showFolderIconMenu({
     context: context,
     anchor: anchor,
     builder: (menuContext, menuRef) {
-      // Read live: a rename that lands while the menu is open should show.
+      // Read live, so a rename landing while the menu is open shows.
       final live = menuRef
               .watch(serverStripLayoutProvider)
               .whereType<FolderStripItem>()
@@ -264,15 +244,11 @@ void showFolderIconMenu({
   );
 }
 
-// ---------------------------------------------------------------------------
-// Home button
-// ---------------------------------------------------------------------------
-
-/// The right-click menu for the Home ("H") button.
+/// The right-click menu for the Home button.
 ///
-/// One row, and it earns its place: an unread badge on Home comes from the DM
-/// counts, and a conversation that is no longer reachable can leave one behind
-/// with no tile to click. This is the way out.
+/// One row, and it earns its place: Home's unread badge comes from the DM
+/// counts, and an unreachable conversation leaves one behind with no tile to
+/// click.
 void showHomeMenu({
   required BuildContext context,
   required WidgetRef ref,
@@ -307,14 +283,10 @@ Future<void> _markAllDmsRead(BuildContext context, WidgetRef ref) async {
   );
 }
 
-// ---------------------------------------------------------------------------
-// Shared
-// ---------------------------------------------------------------------------
-
-/// Confirm, then leave [serverId] and navigate away from it.
+/// Confirms, then leaves [serverId] and navigates away from it.
 ///
-/// The same flow the Danger Zone tab runs, reachable without opening settings
-/// first. Rust re-checks the op; this only handles the UI side of leaving.
+/// The same flow the Danger Zone tab runs. Rust re-checks the op; this handles
+/// only the UI side of leaving.
 Future<void> confirmAndLeaveServer(
   BuildContext context,
   WidgetRef ref, {
@@ -367,9 +339,8 @@ Future<void> confirmAndLeaveServer(
 
 /// One small "type a name" dialog, submitting on Enter as well as the button.
 ///
-/// The channel menus have their own private copy of this; this one is public
-/// because the strip menus and the folder flows both need it and neither can
-/// see into `channel_context_menus.dart`.
+/// Public because the strip menus and the folder flows both need it and neither
+/// can see into `channel_context_menus.dart`.
 void promptForName({
   required BuildContext context,
   required String title,

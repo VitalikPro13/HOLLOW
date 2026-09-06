@@ -187,7 +187,6 @@ class _ExportArchiveDialogContentState
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // ── Conversation info ──
           Container(
             padding: const EdgeInsets.all(HollowSpacing.md),
             decoration: BoxDecoration(
@@ -224,7 +223,6 @@ class _ExportArchiveDialogContentState
 
           const SizedBox(height: HollowSpacing.lg),
 
-          // ── File mode label ──
           Text(
             'File mode',
             style: HollowTypography.body.copyWith(
@@ -235,7 +233,6 @@ class _ExportArchiveDialogContentState
           ),
           const SizedBox(height: HollowSpacing.sm),
 
-          // ── File mode options ──
           _FileModeOption(
             icon: LucideIcons.hardDrive,
             label: 'Full',
@@ -262,7 +259,6 @@ class _ExportArchiveDialogContentState
 
           const SizedBox(height: HollowSpacing.sm),
 
-          // ── Signed note ──
           Row(
             children: [
               Icon(LucideIcons.shieldCheck,

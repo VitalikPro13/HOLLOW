@@ -8,13 +8,9 @@ import '../../rust/api/stickers.dart' as stickers_api;
 import '../../rust/api/storage.dart' as storage_api;
 import 'gif_provider.dart';
 
-/// Sticker state: the personal vault, a server's replicated set, and the
-/// KLIPY sticker catalog.
-///
-/// Bytes are NOT here — a sticker's image rides the same content-addressed
-/// rail as emotes and GIFs, so `emoteBytesProvider` +
-/// `requestAssetOnce(kind: 'sticker')` in `emote_provider.dart` serve every
-/// kind. Everything below is metadata.
+/// Sticker state: the personal vault, a server's replicated set, and the KLIPY
+/// sticker catalog. Bytes are NOT here: a sticker's image rides the same
+/// content-addressed rail as emotes and GIFs. Everything below is metadata.
 
 /// The user's personal sticker vault, pack-major and in upload order.
 final personalStickersProvider =
@@ -26,8 +22,7 @@ final personalStickersProvider =
   }
 });
 
-/// A server's sticker set (CRDT-replicated metadata).
-/// Invalidated on `ServerUpdated`, like [serverEmotesProvider].
+/// A server's sticker set (CRDT-replicated metadata), invalidated on `ServerUpdated`.
 final serverStickersProvider =
     FutureProvider.family<List<stickers_api.ServerSticker>, String>(
         (ref, serverId) async {
@@ -80,14 +75,10 @@ class StickerLimits {
   });
 }
 
-/// Session RAM cache over the KLIPY sticker FFI — the GIF catalog's twin,
-/// pointed at the sticker endpoints.
+/// Session RAM cache over the KLIPY sticker FFI, the GIF catalog's twin.
 ///
-/// Subclassing [GifCatalog] rather than copying it is deliberate: the class
-/// body is the cache/in-flight/timeout wrapper whose `whenComplete` block
-/// body is load-bearing (an arrow body there makes the future wait on
-/// ITSELF — the permanent-deadlock bug that made the GIF picker spin
-/// forever). One copy of that logic, two endpoints.
+/// Subclassing [GifCatalog] rather than copying is deliberate: its class body
+/// holds the wrapper whose `whenComplete` BLOCK body is load-bearing.
 class StickerCatalog extends GifCatalog {
   @override
   Future<gifs_api.GifPage> fetchPage(String query, int page, String rating) =>
@@ -103,16 +94,11 @@ class StickerCatalog extends GifCatalog {
 final stickerCatalogProvider =
     Provider<StickerCatalog>((ref) => StickerCatalog());
 
-// ── Recently used ─────────────────────────────────────────────────────
-
 const _kRecentsSettingKey = 'sticker_recents';
 const _kMaxStickerRecents = 48;
 
-/// One recently sent sticker. Just the wire token's three fields: a sticker's
-/// BYTES are already a local content-addressed blob, so unlike the GIF
-/// library there is no media URL to store, rebuild against a proxy base, or
-/// re-authorize when the source configuration changes. That whole class of
-/// problem does not exist here.
+/// One recently sent sticker: its BYTES are a local content-addressed blob, so
+/// unlike the GIF library there is no media URL to store or re-authorize.
 @immutable
 class RecentSticker {
   final String hash;
@@ -153,8 +139,7 @@ class StickerRecentsNotifier extends Notifier<List<RecentSticker>> {
   @override
   List<RecentSticker> build() => const [];
 
-  /// Called from the shell's post-unlock boot sequence — the settings store
-  /// is not open before that.
+  /// Called from the shell's post-unlock boot sequence (the store opens there).
   Future<void> loadCached() async {
     try {
       final raw = await storage_api.loadSetting(key: _kRecentsSettingKey);
@@ -193,9 +178,8 @@ class StickerRecentsNotifier extends Notifier<List<RecentSticker>> {
     _persist();
   }
 
-  /// Fire-and-forget: losing a recents write is not worth blocking a send,
-  /// and an un-awaited FFI future needs .catchError or it reaches the zone
-  /// crash handler.
+  /// Fire-and-forget: losing a recents write is not worth blocking a send, and an
+  /// un-awaited FFI future needs .catchError or it reaches the zone crash handler.
   void _persist() {
     try {
       storage_api
@@ -211,27 +195,17 @@ final stickerRecentsProvider =
     NotifierProvider<StickerRecentsNotifier, List<RecentSticker>>(
         StickerRecentsNotifier.new);
 
-// ── Last picker tab (issue #36) ───────────────────────────────────────
-
 const _kLastTabSettingKey = 'sticker_last_tab';
 
 /// The tab the sticker picker was last left on, so it reopens where the user
-/// left it instead of always landing on Server/Mine.
-///
-/// Stored as the enum's bare NAME rather than its index: an index silently
-/// re-points at a different tab the moment the enum gains or reorders a case,
-/// and the picker's tab set is not finished changing (the composer button row
-/// is still an open question). An unknown name reads back as null, which the
-/// picker resolves to its own default.
-///
-/// The enum itself lives with the picker in the UI layer — core has no
-/// business knowing what tabs exist, only how to remember one.
+/// left it. Stored as the enum's bare NAME rather than its index: an index
+/// silently re-points the moment the enum gains or reorders a case, and an
+/// unknown name reads back as null, which the picker resolves to its default.
 class StickerLastTabNotifier extends Notifier<String?> {
   @override
   String? build() => null;
 
-  /// Called from the shell's post-unlock boot sequence, alongside recents —
-  /// the settings store is not open before that.
+  /// Called from the shell's post-unlock boot sequence, alongside recents.
   Future<void> loadCached() async {
     try {
       final raw = await storage_api.loadSetting(key: _kLastTabSettingKey);
@@ -259,29 +233,19 @@ final stickerLastTabProvider =
     NotifierProvider<StickerLastTabNotifier, String?>(
         StickerLastTabNotifier.new);
 
-// ── Declared packs (issue #36) ────────────────────────────────────────
-
 const _kDeclaredPacksKey = 'sticker_packs';
 const _kMaxDeclaredPacks = 50; // matches MAX_PERSONAL_PACKS in Rust
 
-/// Pack names the user has CREATED, whether or not any sticker sits in one
-/// yet.
+/// Pack names the user has CREATED, whether or not any sticker sits in one yet.
 ///
-/// A pack is a column on `personal_stickers`, so Rust only knows the packs
-/// that currently have rows — which makes "create a pack, then fill it"
-/// impossible to express there: the empty pack would vanish the instant it
-/// was made. This is the local list of names, unioned with the packs derived
-/// from rows at render time. A pack that has rows does NOT need to be in here
-/// (imports and older data never were), so the union is the source of truth
-/// and this is only what keeps an EMPTY one alive.
-///
-/// Local-only, like the vault it labels. Never CRDT or wire state.
+/// A pack is a column on `personal_stickers`, so Rust only knows the packs with
+/// rows, making "create a pack, then fill it" impossible to express there. This
+/// is the local list, unioned with row-derived packs at render time.
 class StickerPacksNotifier extends Notifier<List<String>> {
   @override
   List<String> build() => const [];
 
-  /// Called from the shell's post-unlock boot sequence — the settings store
-  /// is not open before that.
+  /// Called from the shell's post-unlock boot sequence.
   Future<void> loadCached() async {
     try {
       final raw = await storage_api.loadSetting(key: _kDeclaredPacksKey);

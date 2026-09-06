@@ -25,32 +25,21 @@ import 'package:hollow/src/ui/components/ui_scale.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
 
-// ---------------------------------------------------------------------------
-// Shared building blocks for the chat panes — ChatPane (DMs) and
-// ChannelChatPane are structural twins; everything that is genuinely
-// identical between them lives here so the twins can't drift apart.
-// chat_pane.dart re-exports the public helpers for the other consumers
-// (mobile routes, archive viewers).
-// ---------------------------------------------------------------------------
+// Shared building blocks for the chat panes: ChatPane (DMs) and
+// ChannelChatPane are structural twins, so everything identical between them
+// lives here and cannot drift. chat_pane.dart re-exports the public helpers.
 
-/// Bookkeeping for a link preview whose fetch was still in flight when the
-/// user hit send (issue #45).
+/// Bookkeeping for a link preview whose fetch was still in flight when the user
+/// hit send (issue #45).
 ///
-/// The compose box debounces 600 ms after the last keystroke and then fetches
-/// OG metadata. Anyone who types a URL and sends immediately beat that fetch,
-/// and the result used to be discarded by the stale-guard in `_fetchPreview`
-/// — which is the whole "I never get link previews" complaint. The fetch was
-/// always still running; nothing was listening for it.
-///
-/// [arm] records which message the in-flight fetch belongs to, and [claim]
-/// hands that message id back exactly once when the fetch lands. All three
-/// compose panes share this so the behavior cannot drift between them.
+/// Sending inside the composer's 600 ms debounce used to leave the landing
+/// fetch with nobody listening. [claim] hands the message id back exactly once,
+/// and all three compose panes share this so the behaviour cannot drift.
 class LatePreviewAttacher {
   ({String url, String messageId})? _pending;
 
-  /// Remember that [messageId] was sent while [url]'s fetch was in flight.
-  /// Only one is tracked: a newer send supersedes an older pending one,
-  /// matching the single-staged-preview model the composer already has.
+  /// Remembers that [messageId] was sent while [url]'s fetch was in flight.
+  /// Only one is tracked, so a newer send supersedes an older pending one.
   void arm(String url, String messageId) {
     _pending = (url: url, messageId: messageId);
   }
@@ -58,8 +47,8 @@ class LatePreviewAttacher {
   /// Forget any pending attach (pane disposed, preview dismissed).
   void disarm() => _pending = null;
 
-  /// The message id waiting on [url], or null if nothing is. Consumes the
-  /// record, so a duplicate completion cannot attach twice.
+  /// The message id waiting on [url], or null. Consumes the record, so a
+  /// duplicate completion cannot attach twice.
   String? claim(String url) {
     final pending = _pending;
     if (pending == null || pending.url != url) return null;
@@ -67,25 +56,17 @@ class LatePreviewAttacher {
     return pending.messageId;
   }
 
-  /// Whether an attach is currently pending — exposed for tests.
+  /// Whether an attach is pending; exposed for tests.
   bool get isArmed => _pending != null;
 }
 
 /// The URL a just-sent message still owes a card for, or null if none.
 ///
-/// A send outruns its preview two ways, and the slower one is the rarer one:
-///
-///  1. the debounced fetch is in flight — `stagedLoading` is true;
-///  2. the fetch NEVER STARTED, because the user typed the URL and hit Enter
-///     inside the 600 ms debounce window, so `_handleSend` cancelled the
-///     timer before it fired.
-///
-/// (2) is what "I paste a link and send" actually looks like, so handling
-/// only (1) would leave the common case exactly as broken as before.
-///
-/// Returns null when a card is already staged (it rides the message), when
-/// previews are off, or for a Hollow deep link — those render from a locally
-/// parsed card and must never trigger a fetch.
+/// A send outruns its preview two ways: the debounced fetch is in flight, or it
+/// never started because Enter came inside the 600 ms window. The second is
+/// what "paste a link and send" looks like, so both have to be covered.
+/// Returns null when a card is already staged, when previews are off, and for a
+/// Hollow deep link, which renders locally and must never trigger a fetch.
 String? pendingPreviewUrl({
   required bool previewsEnabled,
   required bool alreadyStaged,
@@ -97,9 +78,8 @@ String? pendingPreviewUrl({
   if (!previewsEnabled || alreadyStaged) return null;
   final url = stagedLoading ? stagedUrl : urlRegex.firstMatch(text)?.group(0);
   if (url == null) return null;
-  // `hollow://` never goes near the network — the scheme check covers every
-  // link shape, including ones `extractHollowLinks` doesn't recognise, and
-  // the composer's URL regex matches the scheme on purpose.
+  // `hollow://` never goes near the network, and the scheme check covers link
+  // shapes `extractHollowLinks` does not recognise.
   if (url.startsWith('hollow://') || extractHollowLinks(url).isNotEmpty) {
     return null;
   }
@@ -115,8 +95,6 @@ bool shouldGroup({
   String? currentSenderId,
   String? previousSenderId,
 }) {
-  // For DMs: just check isMe flag.
-  // For channels: also check senderId.
   if (currentIsMe != previousIsMe) return false;
   if (currentSenderId != null &&
       previousSenderId != null &&
@@ -126,10 +104,9 @@ bool shouldGroup({
   return currentTime.difference(previousTime).inMinutes.abs() < 5;
 }
 
-/// Whether a message may tile into its neighbours: it is nothing but a
-/// sticker run, and nothing else is attached that would sit in the seam.
-/// A reply header, a reaction bar, an "(edited)" suffix or a file card all
-/// need the row's own padding back.
+/// Whether a message may tile into its neighbours: a bare sticker run with
+/// nothing else attached. A reply header, a reaction bar, an "(edited)" suffix
+/// or a file card all need the row's own padding back.
 bool stickerTileCandidate({
   required String text,
   required bool hasReply,
@@ -146,25 +123,19 @@ bool stickerTileCandidate({
 /// The one-block-asset-per-message rule (issue #36), shared by all three send
 /// paths so it cannot drift between them.
 ///
-/// Stickers and GIFs are the same visual class — a big block of media at a
-/// fixed box — so they share one budget rather than one each: a message
-/// carries at most ONE of either. Stacking them was the actual complaint, and
-/// a per-kind cap would still allow a sticker and a GIF to stack.
-///
-/// Both pickers can only ever emit one per send, so this exists for the path
-/// they do not own: a hand-typed or pasted `[a:s:…]` / `[a:g:…]`. Check it
-/// against the EXPANDED wire text, and fail the send visibly with the
-/// composer intact rather than silently trimming what the user wrote.
+/// Stickers and GIFs share ONE budget rather than one each, because a per-kind
+/// cap would still let a sticker and a GIF stack. The pickers emit one per
+/// send, so this covers the hand-typed or pasted `[a:s:…]` / `[a:g:…]`: check
+/// the EXPANDED wire text and fail the send visibly, never trim it silently.
 bool exceedsAssetLimit(String expandedText) =>
     countBlockAssetTokens(expandedText) > 1;
 
 /// User-facing reason for a refused send, so all three panes say it the same.
 const String kAssetLimitMessage = 'One sticker or GIF per message';
 
-/// Which seams of a message are continued by its neighbours. A run tiles
-/// only where BOTH rows are candidates and the rows are already grouped
-/// (same author, within the grouping window) — the same rule that decides
-/// whether the avatar repeats.
+/// Which seams of a message are continued by its neighbours. A run tiles only
+/// where BOTH rows are candidates and already grouped, the same rule that
+/// decides whether the avatar repeats.
 ({bool prev, bool next}) stickerTilingFor({
   required bool selfIsSticker,
   required bool prevIsSticker,
@@ -181,14 +152,14 @@ const String kAssetLimitMessage = 'One sticker or GIF per message';
 
 /// Whether a date separator should be shown between two timestamps.
 bool shouldShowDateSeparator(DateTime current, DateTime? previous) {
-  if (previous == null) return true; // First message always gets a date header.
+  if (previous == null) return true;
   return current.year != previous.year ||
       current.month != previous.month ||
       current.day != previous.day;
 }
 
-/// "Today", "Yesterday", or "February 16, 2026". Shared by the date separator
-/// and by the unread line when the two merge into one rule.
+/// "Today", "Yesterday", or "February 16, 2026", shared by the date separator
+/// and the unread line when the two merge.
 String chatDayLabel(DateTime date) {
   final now = DateTime.now();
   final today = DateTime(now.year, now.month, now.day);
@@ -205,13 +176,10 @@ String chatDayLabel(DateTime date) {
 
 /// ASOT-style date separator: ——— February 16, 2026 ———
 ///
-/// The only thing in a chat that draws all the way across, which makes its two
-/// ends the place an unbalanced gutter shows up. With the scroll rail holding
-/// [kChatRailWidth] of the pane's right edge, a symmetric [HollowSpacing.lg]
-/// padding put the rule 16px from the pane's LEFT edge and 34px from its
-/// right — measured on a real build, and the thing that read as "a gap on the
-/// side". [endInset] is how a list with a rail gives that back; lists without
-/// one (mobile, the pinned-message list) keep it symmetric.
+/// The only thing in a chat that draws all the way across, so an unbalanced
+/// gutter shows up at its two ends: with the rail holding [kChatRailWidth] of
+/// the right edge, symmetric padding leaves the rule visibly off-centre.
+/// [endInset] gives that width back; lists with no rail keep it symmetric.
 class DateSeparator extends StatelessWidget {
   final DateTime date;
 
@@ -268,22 +236,13 @@ class DateSeparator extends StatelessWidget {
 }
 
 /// Chronological index of the row the "new messages" line goes above, or null
-/// when this visit has no line to draw (issue #54, "jump to last red").
+/// when this visit has no line to draw (issue #54).
 ///
-/// [entrySeenId] is the pointer from `unreadMarkerProvider`: the last message
-/// read BEFORE this visit. Null means nothing was recorded and there is no
-/// line; the empty string means the conversation had never been read, so every
-/// row in the window is new.
-///
-/// Two rules earn their keep:
-///
-///  * **An unrecognised pointer means "everything loaded is new."** The window
-///    is the last 200 rows, so a pointer older than that is simply off the
-///    front of the list, and starting at 0 is the honest answer.
-///  * **Your own messages never open the unread run.** Sending is not
-///    arriving, and a line above your own reply is the noisiest way to get
-///    this wrong. So the line lands on the first message after the pointer
-///    that somebody ELSE sent, and a run of nothing but your own gets none.
+/// [entrySeenId] is `unreadMarkerProvider`'s pointer to the last message read
+/// before this visit: null means no line, the empty string means the
+/// conversation was never read. An unrecognised pointer is older than the
+/// 200-row window, so everything loaded counts as new. Your own messages never
+/// open the run, because sending is not arriving.
 int? unreadDividerIndex({
   required int count,
   required String? entrySeenId,
@@ -307,34 +266,22 @@ int? unreadDividerIndex({
 }
 
 /// The "new messages" line: a rule in [HollowTheme.error] with a badge at its
-/// right end, sitting directly above the first message that arrived while you
-/// were away.
+/// right end, above the first message that arrived while you were away.
 ///
-/// **The badge is the app's own unread pill**, not a word in red. The sidebar
-/// and the dock already say "unread" with a filled `error` pill and white bold
-/// text; bare red text beside a red rule read as a stray word rather than as
-/// the same thing those badges mean.
-///
-/// **[date] non-null MERGES the day separator into this rule.** The most
-/// ordinary way to see this line at all is to come back the next day, and that
-/// is exactly when the row also carries a date — which stacked two full-width
-/// rules about 30px apart with nothing between them, the same double-rule
-/// problem the own-message bar had against the scrollbar. Merged, the day
-/// reads in the unread colour and there is one rule, which is also what
-/// Discord does.
-///
-/// Deliberately NOT centred, merged or not. A centred label reads as another
-/// date; the right end is where a marker goes.
-///
-/// The label colour is lifted to 4.5:1 against the pane rather than using the
-/// raw error red, which fails as small text on the light theme.
+/// The badge is the app's own unread pill rather than a word in red, so it
+/// reads as the same thing the sidebar and dock badges mean. A non-null [date]
+/// MERGES the day separator into this rule: coming back the next day is the
+/// ordinary way to see the line at all, and two full-width rules 30px apart
+/// read as a mistake. Deliberately not centred, merged or not, because a
+/// centred label reads as another date. The label colour is lifted to 4.5:1
+/// against the pane; the raw error red fails as small text on the light theme.
 class UnreadDivider extends StatelessWidget {
-  /// Padding on the rule's right end, matching [DateSeparator.endInset] so
-  /// the two line up when they do not merge.
+  /// Matches [DateSeparator.endInset] so the two line up when they do not
+  /// merge.
   final double endInset;
 
-  /// The day this row starts, when the date separator merges into this line.
-  /// Null = the line stands alone.
+  /// The day this row starts when the date separator merges in; null leaves
+  /// the line standing alone.
   final DateTime? date;
 
   const UnreadDivider({super.key, this.endInset = HollowSpacing.lg, this.date});
@@ -349,7 +296,7 @@ class UnreadDivider extends StatelessWidget {
     return Padding(
       padding: EdgeInsets.only(
         // Merged, this rule is also the day separator, so it takes that
-        // separator's breathing room above rather than the line's own.
+        // separator's breathing room above.
         top: day == null ? HollowSpacing.sm : HollowSpacing.md + 2,
         bottom: HollowSpacing.xxs,
         left: HollowSpacing.lg,
@@ -407,8 +354,7 @@ class UnreadDivider extends StatelessWidget {
   }
 }
 
-/// A gif-or-static thumbnail for a file on disk (gifs animate via
-/// [GifFileImage], everything else through Image.file).
+/// A gif-or-static thumbnail for a file on disk.
 Widget gifAwareImage(String path, {double? width, double? height}) =>
     path.toLowerCase().endsWith('.gif')
         ? GifFileImage(
@@ -419,34 +365,23 @@ Widget gifAwareImage(String path, {double? width, double? height}) =>
 /// Whether a [SelectionArea] wrapped AROUND a scrolling message list would
 /// misbehave, so it must be scoped to the ROWS instead (issue #35).
 ///
-/// Upstream cause, not ours: `_ScrollableSelectionContainerDelegate` (Flutter
-/// 3.44 scrollable.dart) infers the selection edge by adding the scroll delta
-/// in LOCAL space — `box.localToGlobal(local.translate(deltaToOrigin))` — then
-/// subtracting the same delta in GLOBAL space. Our root `UiScale` transform
-/// sits between the two, so the round trip leaves an error of
-/// `scrollOffset * (scale - 1)`: exactly zero at 100%, and growing with how far
-/// back the conversation is scrolled. Once that phantom edge lands in the 100px
-/// auto-scroll zone, `EdgeDraggingAutoScroller` starts — and nothing in the
-/// framework stops it on pointer-up (only a `pending` child result or `dispose`
-/// calls `stopAutoScroll`), so it keeps running after the mouse is released.
-/// A plain left-click jumped the viewport; a drag toward the top edge never
-/// stopped. Long conversations full of stickers and GIFs scroll furthest,
-/// which is why the report singled them out.
-///
-/// Scoping selection to the row removes the Scrollable from between the
-/// `SelectableRegion` and the selectables, so that delegate never exists. The
-/// cost is cross-message drag-selection, so it is spent ONLY where the bug is
-/// real: at 100% the list keeps one SelectionArea and today's behaviour.
-/// Delete this and go back to the unconditional wrap once upstream fixes the
-/// transform math — guarded by test/widget/chat_selection_autoscroll_test.dart.
+/// Upstream, not ours: Flutter's scrollable selection delegate adds the scroll
+/// delta in LOCAL space and subtracts it in GLOBAL space, and the root
+/// `UiScale` transform between the two leaves an error of
+/// `scrollOffset * (scale - 1)`. The phantom edge lands in the auto-scroll zone
+/// and `EdgeDraggingAutoScroller` never stops on pointer-up. Scoping to the row
+/// removes the Scrollable from between the region and the selectables, at the
+/// cost of cross-message drag-selection, so it is spent only at scales where
+/// the bug is real. Delete once upstream fixes the transform math; guarded by
+/// test/widget/chat_selection_autoscroll_test.dart.
 bool selectionMustBeScopedToRows(BuildContext context) {
   final scale = UiScaleInfo.maybeOf(context)?.effective ?? 1.0;
   return (scale - 1.0).abs() >= 0.001;
 }
 
-/// The chat surfaces' [SelectionArea] — no context menu (message actions own
-/// that). [key] must forward the wrapped row's key when this is used per-row
-/// inside a list builder: the wrapper is the widget the sliver sees, and
+/// The chat surfaces' [SelectionArea], with no context menu because message
+/// actions own that. Per-row inside a list builder [key] MUST forward the
+/// wrapped row's key: the wrapper is the widget the sliver sees, and
 /// `findChildIndexCallback` reads that key.
 Widget chatSelectionArea({Key? key, required Widget child}) => SelectionArea(
       key: key,
@@ -454,18 +389,16 @@ Widget chatSelectionArea({Key? key, required Widget child}) => SelectionArea(
       child: child,
     );
 
-/// The reversed chat list shell — this is where the vendored-list iron rules
-/// live for BOTH panes (see feedback_reverse_chat_lists): `reverse: true`
-/// with the newest message at builder index 0 pinned to the bottom edge (no
-/// sentinel row, no index-based initial scroll, appends while following never
-/// move the viewport), and [findChildIndexCallback] so keyed rows MOVE across
-/// index slots instead of remounting when a new message shifts every revIndex
-/// by one (full-list blink otherwise — guarded by
+/// The reversed chat list shell, where the iron rules live for BOTH panes (see
+/// feedback_reverse_chat_lists): `reverse: true` with the newest message at
+/// builder index 0 pinned to the bottom, and [findChildIndexCallback] so keyed
+/// rows MOVE across index slots instead of remounting when a new message shifts
+/// every revIndex by one (guarded by
 /// test/widget/chat_list_element_reuse_test.dart).
 ///
-/// It is also the single chokepoint for the "chat text size" preference
-/// (issue #20): the whole list is wrapped in [ChatTextScale], so DM, channel
-/// and mobile message surfaces scale together and cannot drift apart.
+/// Also the one chokepoint for the chat text size preference (issue #20): the
+/// list is wrapped in [ChatTextScale], so DM, channel and mobile surfaces scale
+/// together.
 Widget reversedChatList({
   required BuildContext context,
   Key? listKey,
@@ -475,24 +408,21 @@ Widget reversedChatList({
   required int itemCount,
   required Map<String, int> indexByMessageId,
   required Widget Function(BuildContext context, int revIndex) itemBuilder,
-  // Mobile passes false: SelectionArea's touch long-press would fight the
-  // LongPressMessage action-sheet gesture on every bubble.
+  // Mobile passes false: the touch long-press would fight the action sheet's
+  // gesture on every bubble.
   bool selectionArea = true,
   EdgeInsets padding = const EdgeInsets.symmetric(vertical: HollowSpacing.sm),
-  // The scrollbar + jump controls (issue #54). Off for surfaces that are not
+  // The scrollbar and jump controls (issue #54), off for surfaces that are not
   // a live feed.
   bool scrollRail = true,
   VoidCallback? onJumpToNewest,
-  // REVERSED index of the row the "new messages" line sits above, so the rail
-  // can mark it and offer "jump to last red" (issue #54).
+  // REVERSED index of the row the "new messages" line sits above (issue #54).
   int? unreadRevIndex,
 }) {
-  // Issue #35: scoped to the rows when scaled — see
-  // [selectionMustBeScopedToRows].
+  // Issue #35: scoped to the rows when scaled.
   final perRowSelection = selectionArea && selectionMustBeScopedToRows(context);
-  // Desktop only: the rail is a real column beside the list, not an overlay
-  // on top of it. See [ChatScrollRail] for why that distinction is load
-  // bearing.
+  // Desktop only, and a real column beside the list rather than an overlay on
+  // top of it; see [chatListWithRail].
   final showRail = scrollRail && !_isTouchForm;
 
   final list = ScrollConfiguration(
@@ -518,10 +448,8 @@ Widget reversedChatList({
       itemBuilder: perRowSelection
           ? (context, revIndex) {
               final row = itemBuilder(context, revIndex);
-              // Forward the row's ValueKey: the wrapper is the widget the
-              // sliver sees, and findChildIndexCallback above reads that key
-              // to MOVE rows across index slots instead of remounting them
-              // (guarded by chat_list_element_reuse_test.dart).
+              // Forward the row's ValueKey: findChildIndexCallback above reads
+              // that key to move rows instead of remounting them.
               return chatSelectionArea(key: row.key, child: row);
             }
           : itemBuilder,
@@ -546,18 +474,14 @@ Widget reversedChatList({
 
 /// Puts the scrollbar [rail] in a column of its own to the right of [list].
 ///
-/// **Not a Stack overlay.** The obvious shape — `Stack([list,
-/// Positioned.fill(rail)])` — lays out and PAINTS correctly (the rail's box
-/// measured 584x171 at the right offset, the thumb and caps drew where they
-/// should) and then never receives a single pointer: no hover, no tap, not
-/// even a translucent `Listener` at its root firing. Every pointer over the
-/// rail went to the scrollable underneath instead. A column cannot have that
-/// argument with anything, and a reserved gutter is what the rest of the app
-/// does now anyway (`HollowScrollBehavior`), so the rail lives in one.
+/// NOT a Stack overlay: `Stack([list, Positioned.fill(rail)])` paints correctly
+/// and then never receives a pointer, because every pointer over the rail goes
+/// to the scrollable underneath. A column cannot have that argument, and a
+/// reserved gutter is what the rest of the app does (`HollowScrollBehavior`).
 Widget chatListWithRail({required Widget list, required Widget rail}) {
   return Row(
-    // The Row is always inside a bounded box (the pane's Expanded), which is
-    // what `stretch` needs — see feedback_dart_patterns.
+    // `stretch` needs a bounded box, which the pane's Expanded provides
+    // (feedback_dart_patterns).
     crossAxisAlignment: CrossAxisAlignment.stretch,
     children: [
       Expanded(child: list),
@@ -566,33 +490,21 @@ Widget chatListWithRail({required Widget list, required Widget rail}) {
   );
 }
 
-/// Width of the chat's scrollbar column. The message list ends where this
-/// begins, which buys the one strip of the pane the message hover ACTION BAR
-/// cannot reach — that bar right-aligns to `rowRight - HollowSpacing.md`, and
-/// it is an OverlayEntry, so anything floating INSIDE the list gets covered by
-/// it (issue #54 follow-up: the jump buttons started as round overlays over
-/// the bottom-right of the list and the last message's bar sat on top of
-/// them).
+/// Width of the chat's scrollbar column: the [kScrollGutter] every other
+/// scrollable reserves, plus the unusable [kWindowEdgeDeadStrip].
 ///
-/// 18 = [kWindowEdgeDeadStrip] (8, unusable) + a 10px live strip, which is
-/// [kScrollGutter] — the same gutter every other scrollable in the app
-/// reserves. That makes the chat's scrollbar sit where all the others sit:
-/// content, 4px, a 6px thumb, then the pane edge. It was 22 while the rail
-/// was painting its thumb centred in the LIVE strip, which left 12px of dead
-/// space to its right and pushed it up against the own-message accent bar;
-/// the thumb is flush right now, so the extra 4px bought nothing.
+/// The list ends where this begins, which buys the one strip of the pane the
+/// message hover action bar cannot reach: that bar is an OverlayEntry centred
+/// on whatever row the pointer is over, so anything floating INSIDE the list
+/// ends up under it (issue #54).
 const double kChatRailWidth = kWindowEdgeDeadStrip + kScrollGutter;
 
 /// Dead strip along the window's outer edge, kept clear of anything clickable.
 ///
-/// On Windows the frameless window's resize border lives INSIDE the client
-/// area: `window_manager` answers WM_NCHITTEST with HTRIGHT there, so those
-/// pixels never become a Flutter pointer event at all. Measured against a
-/// real build: a click 14px in works, 10px in works, 8px in does nothing.
-/// The chat is the rightmost pane whenever the member list is closed, so a
-/// rail that hugged the edge had its whole middle — thumb and both caps —
-/// inside that strip. It rendered perfectly and every widget test passed;
-/// clicking it simply did nothing.
+/// The frameless window's resize border lives INSIDE the client area, and
+/// `window_manager` answers WM_NCHITTEST there, so those pixels never become a
+/// Flutter pointer event: a control hugging the edge renders perfectly, passes
+/// every widget test and does nothing when clicked.
 const double kWindowEdgeDeadStrip = 8.0;
 
 /// Width of the accent pill that marks your own messages.
@@ -600,107 +512,72 @@ const double kOwnMessageBarWidth = 3.0;
 
 /// How far that pill floats inside the chat's left edge.
 ///
-/// Not zero: flush against the edge, the pill welds itself to the divider
-/// between the chat and the channel list and reads as a highlight on the
-/// PANEL rather than a mark on the message. Sitting inside the row's own
-/// [HollowSpacing.md] padding puts it in the chat's left margin, opposite the
-/// scroll rail's groove in the margin on the other side — two rounded pills
-/// in the two margins, which is what makes them read as one design instead of
-/// two widgets stuck to the frame.
+/// Not zero: flush against the edge it welds itself to the divider against the
+/// channel list and reads as a highlight on the PANEL rather than a mark on the
+/// message. Inside the row's padding it sits in the left margin, opposite the
+/// rail's groove in the right one.
 const double kOwnMessageBarInset = HollowSpacing.xs;
 
-/// Height of a jump cap. Taller than the strip is wide: the cap fills the
-/// rail's live width, which is [kScrollGutter], so height is the only
-/// dimension left to make it a comfortable target.
+/// Height of a jump cap: the cap already fills the rail's live width, so height
+/// is the only dimension left to make it a comfortable target.
 const double _kCapExtent = 22.0;
 
-/// Gap between a cap and the track.
-///
-/// Load bearing, not decoration: it is what proves the painted track stops
-/// where the thumb's travel stops. The old rail drew ONE groove across the
-/// whole rail with the caps inside its ends, so the track painted over the
-/// [_kCapExtent] the thumb cannot enter and showed scroll room that did not
-/// exist. Three separated segments cannot tell that lie.
+/// Gap between a cap and the track. Load bearing, not decoration: it is what
+/// proves the painted track stops where the thumb's travel stops, instead of
+/// showing scroll room that does not exist.
 const double kRailSegmentGap = HollowSpacing.xs;
 
-/// Resting fill shared by all three segments of the rail.
-///
-/// Roughly a third of the thumb's own contrast: enough that a cap and the
-/// track read as the same control, not so much that a grey stripe runs down
-/// the chat. 0.05 was tried first and vanished at 1x — it only read when
-/// magnified.
+/// Resting fill shared by all three segments of the rail: roughly a third of
+/// the thumb's contrast, so cap and track read as one control without running a
+/// grey stripe down the chat. Below this it vanishes at 1x.
 Color railSegmentFill(HollowTheme hollow, {required bool active}) =>
     hollow.textSecondary.withValues(alpha: active ? 0.18 : 0.10);
 
 /// Right-end padding for a full-width chat rule on a list that carries the
-/// rail.
-///
-/// [kChatRailWidth] already sits between the list and the pane edge, so the
-/// rule only needs a hair more to keep off the groove: 2 + 18 lands its right
-/// end 20px from the pane's edge against the 16px its left end sits at, near
-/// enough that the rule reads level. Symmetric padding put those ends 16px and
-/// 34px out.
+/// rail: [kChatRailWidth] already sits between the list and the pane edge, so
+/// the rule needs only a hair more to keep off the groove.
 const double kChatRuleEndInset = HollowSpacing.xxs;
 
-/// Height of the unread mark on the track: the thumb is 6px wide and this is
-/// a rule across the gutter, so 3 reads as a line rather than as a second,
-/// stubbier thumb.
+/// Height of the unread mark on the track. Any taller and it reads as a second,
+/// stubbier thumb rather than as a line.
 const double kRailUnreadMarkHeight = 3.0;
 
 /// How far from the unread mark a tap still counts as aiming at it.
 const double kRailUnreadSnap = 8.0;
 
-/// Clearance between the rail and the chrome above and below it.
-///
-/// Without it the caps BUTT against the header's bottom border and the
-/// composer's top border — measured on a real build, the top cap started at
-/// y=125 with the header's border at y=124, i.e. flush. Two controls jammed
-/// into the corners of the message area is what made the rail read as
-/// unfinished rather than as part of the chat.
+/// Clearance between the rail and the chrome above and below it. Without it the
+/// caps sit flush against the header's and composer's borders, which reads as
+/// two controls jammed into the corners of the message area.
 const double kRailEndInset = HollowSpacing.sm;
 
 /// True where a drag rail would fight the platform's own edge gestures.
 bool get _isTouchForm => Platform.isAndroid || Platform.isIOS;
 
-/// The chat feed's scrollbar and jump controls (issue #54: "the main feed
-/// doesn't have a scrollbar or jump to top, jump to bottom").
+/// The chat feed's scrollbar and jump controls (issue #54).
 ///
-/// [ScrollablePositionedList] has no pixel offset a normal [Scrollbar] could
-/// map onto: its position is "item N, aligned so far into the viewport",
-/// deliberately, because that is what keeps a list of variable-height messages
-/// still while it grows at both ends. So this is an INDEX scrollbar — the
-/// thumb spans the visible index range out of [itemCount] and a drag jumps to
-/// the index under the pointer. With rows of different heights the thumb is an
-/// estimate rather than a measurement; that is the honest trade for a list you
-/// can prepend to without the view moving.
+/// [ScrollablePositionedList] has no pixel offset a [Scrollbar] could map onto,
+/// so this is an INDEX scrollbar: the thumb spans the visible index range out
+/// of [itemCount] and a drag jumps to the index under the pointer. With rows of
+/// different heights the thumb is an estimate, which is the trade for a list
+/// you can prepend to without the view moving. Indexes are the REVERSED builder
+/// indexes (feedback_reverse_chat_lists), so a HIGHER index is further UP.
 ///
-/// Indexes here are the REVERSED builder indexes the list itself uses: 0 is
-/// the NEWEST message, pinned to the bottom (feedback_reverse_chat_lists), so
-/// a HIGHER index is further UP the track.
-///
-/// The jump-to-top / jump-to-present controls are CAPS at the two ends of the
-/// track, the way a native scrollbar puts its arrows there. They were round
-/// floating buttons over the bottom-right of the list at first, and the hover
-/// action bar of the last message sat on top of them: that bar is centred on
-/// whatever row the pointer is over, so there is no spot inside the list it
-/// cannot reach, and being an overlay it always wins the click.
-///
-/// Desktop only. On touch a 16px drag rail would sit under the platform's own
-/// edge-swipe gesture and its caps would be far below a comfortable tap
-/// target, so the mobile surfaces keep fling scrolling and the unread pill.
+/// The jump controls are CAPS at the ends of the track, where a native
+/// scrollbar puts its arrows, rather than buttons floating inside the list,
+/// which the message hover bar covers. Desktop only: on touch a drag rail would
+/// sit under the platform's edge-swipe gesture.
 class ChatScrollRail extends StatefulWidget {
   final int itemCount;
   final ItemScrollController controller;
   final ItemPositionsListener positions;
 
   /// Releases the "frozen while reading" display cap and snaps to the newest
-  /// message. The pane owns that state, so the rail cannot do it alone —
-  /// jumping to index 0 of a frozen list lands on the wrong message.
+  /// message. The pane owns that state, and jumping to index 0 of a frozen list
+  /// lands on the wrong message.
   final VoidCallback? onJumpToNewest;
 
-  /// REVERSED index of the row under the "new messages" line, or null when
-  /// this visit has no line. The rail marks it on the track and snaps a tap
-  /// near the mark straight onto it — that is the issue's "jump to last red".
+  /// REVERSED index of the row under the "new messages" line, or null when this
+  /// visit has no line. A tap near the mark snaps onto it.
   final int? unreadRevIndex;
 
   const ChatScrollRail({
@@ -721,8 +598,8 @@ class _ChatScrollRailState extends State<ChatScrollRail> {
   bool _dragging = false;
 
   /// Jumps so the message [fraction] down the track (0 = oldest) sits at the
-  /// bottom edge of the viewport. The list clamps an out-of-range jump, which
-  /// is what makes the two extremes land exactly on the first and last row.
+  /// viewport's bottom edge. The list clamps an out-of-range jump, which lands
+  /// the two extremes exactly on the first and last row.
   void _jumpToFraction(double fraction) {
     if (!widget.controller.isAttached || widget.itemCount == 0) return;
     final f = fraction.clamp(0.0, 1.0);
@@ -735,9 +612,8 @@ class _ChatScrollRailState extends State<ChatScrollRail> {
     widget.controller.jumpTo(index: widget.itemCount - 1);
   }
 
-  /// Lands the unread line in the upper-middle of the viewport, the same
-  /// alignment the reply-jump uses, so the first new message reads downward
-  /// from there rather than sitting on the bottom edge.
+  /// Lands the unread line in the upper-middle of the viewport, like the
+  /// reply-jump, so the first new message reads downward from there.
   void _jumpToUnread() {
     final index = widget.unreadRevIndex;
     if (index == null || !widget.controller.isAttached) return;
@@ -747,29 +623,19 @@ class _ChatScrollRailState extends State<ChatScrollRail> {
     );
   }
 
-  /// Where the unread mark sits on a track of [trackHeight], or null when
-  /// there is nothing to mark.
+  /// Where the unread mark sits on a track of [trackHeight], or null when there
+  /// is nothing to mark.
   ///
-  /// The mark is a LOCATOR — "the line is up there in the conversation" — so
-  /// it maps the message's position in the whole list onto the whole track,
-  /// not onto the thumb's travel the way the thumb itself does. The two agree
-  /// in a long conversation (a small thumb means travel is nearly the whole
-  /// track) and disagree exactly where the thumb mapping looks wrong: in a
-  /// barely-overflowing one, a thumb filling 85% of the track squeezes every
-  /// position into the middle 15%, so a run of new messages starting at the
-  /// very top of the conversation drew its mark halfway down. Measured on a
-  /// real build with 21 messages: mark at y=312 of a track running 130..545.
-  ///
-  /// Jumping stays exact either way — [_jumpToUnread] goes to the index, not
-  /// to a fraction — and a tap within [kRailUnreadSnap] of the PAINTED centre
-  /// snaps to it, so what you can see is what you can hit.
+  /// The mark is a LOCATOR, so it maps onto the WHOLE track rather than onto
+  /// the thumb's travel, which in a barely-overflowing list squeezes every
+  /// position into the remainder. Jumping stays exact either way.
   double? _unreadCentre(double trackHeight) {
     final index = widget.unreadRevIndex;
     if (index == null || widget.itemCount <= 1) return null;
     final fraction =
         (1.0 - index / (widget.itemCount - 1)).clamp(0.0, 1.0);
-    // Keep the whole target on the track: at either extreme half of it would
-    // otherwise hang off the end and clip.
+    // Keep the whole target on the track; at either extreme half of it would
+    // hang off the end.
     final limit = trackHeight - kRailUnreadSnap;
     if (limit <= kRailUnreadSnap) return trackHeight / 2;
     return (fraction * trackHeight).clamp(kRailUnreadSnap, limit);
@@ -799,27 +665,16 @@ class _ChatScrollRailState extends State<ChatScrollRail> {
     );
   }
 
-  /// Cap, track, cap — three segments of one width in one column, evenly
-  /// spaced.
-  ///
-  /// **The track is exactly as long as the thumb can travel.** It used to be
-  /// one continuous groove running the rail's whole height with the caps
-  /// drawn inside its ends, which painted track across the [_kCapExtent] the
-  /// thumb is not allowed into: pinned to the newest message the thumb
-  /// stopped 22px above the bottom of the groove, and that empty run read as
-  /// "there is more below" when there was nothing. A scrollbar that lies
-  /// about how much is left is worse than no scrollbar.
+  /// Cap, track, cap: three segments of one width in one column.
   ///
   /// The caps are ALWAYS drawn, dimmed and inert at the end they point to,
-  /// the way a native scrollbar greys its arrows. Showing and hiding them
-  /// resized the track underneath, so the thumb shifted every time you
-  /// reached an end. Inert means no `onTap` and no semantic label, so nothing
-  /// announces a button that would do nothing.
+  /// because showing and hiding them resizes the track and shifts the thumb.
+  /// Inert means no `onTap` and no semantic label, so nothing announces a dead
+  /// button.
   Widget _rail(HollowTheme hollow, _RailMetrics metrics) {
     return Padding(
       // Everything interactive stays [kWindowEdgeDeadStrip] clear of the
-      // window's outer edge, and [kRailEndInset] clear of the header above
-      // and the composer below.
+      // window's outer edge.
       padding: const EdgeInsets.only(
         right: kWindowEdgeDeadStrip,
         top: kRailEndInset,
@@ -867,11 +722,8 @@ class _ChatScrollRailState extends State<ChatScrollRail> {
           final trackHeight = constraints.maxHeight;
           final thumbHeight =
               (metrics.extent * trackHeight).clamp(28.0, trackHeight);
-          // The thumb travels over `trackHeight - thumbHeight`, so its top is
-          // scaled into that shorter run: otherwise the oldest page could
-          // never be reached. Both ends of that run are ends of the painted
-          // track now, so "thumb at the bottom" and "nothing below" are the
-          // same picture.
+          // The thumb's top is scaled into `trackHeight - thumbHeight`, its
+          // real travel, or the oldest page could never be reached.
           final top = metrics.offset * (trackHeight - thumbHeight);
           final unreadCentre = _unreadCentre(trackHeight);
           return GestureDetector(
@@ -890,13 +742,10 @@ class _ChatScrollRailState extends State<ChatScrollRail> {
               label: 'Message list scrollbar',
               child: Stack(
                 children: [
-                  // The mark is a real control, not paint: 3px of ink inside
-                  // a target [kRailUnreadSnap] tall either way, so it can be
-                  // hit, hovered and reached by a screen reader. Taps on the
-                  // track outside it snap to it too (see _jumpFromPointer);
-                  // a DRAG that starts here still drags, because the track's
-                  // drag recognizer beats a child's tap once the pointer
-                  // moves.
+                  // A real control, not paint, so it can be hit, hovered and
+                  // reached by a screen reader. A drag starting here still
+                  // drags: the track's recognizer beats a child's tap once the
+                  // pointer moves.
                   if (unreadCentre != null)
                     Positioned(
                       top: unreadCentre - kRailUnreadSnap,
@@ -924,10 +773,9 @@ class _ChatScrollRailState extends State<ChatScrollRail> {
                   Positioned(
                     top: top,
                     height: thumbHeight,
-                    // Centred in the track it rides in, which is itself flush
-                    // against the live edge of the gutter — so the thumb
-                    // still lands where every other scrollbar in the app
-                    // draws one.
+                    // Centred in its track, which is flush against the live
+                    // edge of the gutter, so the thumb lands where every other
+                    // scrollbar in the app draws one.
                     left: (constraints.maxWidth - 6) / 2,
                     width: 6,
                     child: AnimatedContainer(
@@ -951,19 +799,16 @@ class _ChatScrollRailState extends State<ChatScrollRail> {
   /// Maps a pointer on the track to a position, treating the pointer as the
   /// MIDDLE of the thumb so the list does not jump out from under the grab.
   ///
-  /// The top of the track is the OLDEST end — the same direction
-  /// [_RailMetrics.offset] measures — so the normalised pointer IS the
-  /// fraction, with no inversion. (There was one here; it sent every drag the
-  /// wrong way, which is what
-  /// test/widget/chat_scroll_rail_test.dart now pins down.)
+  /// The top of the track is the OLDEST end, the direction
+  /// [_RailMetrics.offset] measures, so the normalised pointer IS the fraction
+  /// and inverting it sends every drag the wrong way
+  /// (test/widget/chat_scroll_rail_test.dart).
   void _jumpFromPointer(double dy, double trackHeight, double thumbHeight) {
     final travel = trackHeight - thumbHeight;
     if (travel <= 0) return;
-    // The unread mark is 3px of a 10px gutter, which is not a target anybody
-    // can hit exactly. Anything landing within [kRailUnreadSnap] of it means
-    // it, so snap to the message instead of to the pointer's fraction —
-    // "near the red line" and "on the red line" are the same intent, and
-    // approximately-there is the one place this rail must not be approximate.
+    // The mark is 3px of a 10px gutter, too small to hit exactly, so anything
+    // within [kRailUnreadSnap] snaps to the message rather than to the
+    // pointer's fraction.
     final centre = _unreadCentre(trackHeight);
     if (centre != null && (dy - centre).abs() <= kRailUnreadSnap) {
       _jumpToUnread();
@@ -975,14 +820,11 @@ class _ChatScrollRailState extends State<ChatScrollRail> {
 }
 
 /// One end cap of the rail: a chevron on a pill the width of the gutter,
-/// matching the track's fill so cap and track read as one segmented control.
+/// matching the track's fill so the two read as one segmented control.
 ///
-/// [enabled] false is the "you are already there" state: the pill stays, the
-/// chevron dims, and it stops being a button — no `onTap`, no tooltip, and no
-/// semantic label, so a screen reader is never offered an action that would do
-/// nothing. Keeping the pill is what holds the track's length still; hiding
-/// the cap instead resized the track and shifted the thumb every time you
-/// reached an end.
+/// [enabled] false is the "you are already there" state: the pill stays (that
+/// is what holds the track's length still) and it stops being a button, with no
+/// `onTap`, tooltip or semantic label, so nothing offers a dead action.
 class _RailCap extends StatelessWidget {
   final HollowTheme hollow;
   final IconData icon;
@@ -1015,23 +857,16 @@ class _RailCap extends StatelessWidget {
           semanticLabel: enabled ? label : null,
           onTap: enabled ? onTap : null,
           disabled: !enabled,
-          // `backgroundColor: null` makes the rest state the hover colour at
-          // ZERO ALPHA rather than `Colors.transparent`, so the lift is a pure
-          // fade and never lerps through black — and the track's fill shows
-          // through underneath (feedback_hover_state_patterns).
+          // `backgroundColor: null` rests at the hover colour with ZERO ALPHA
+          // rather than `Colors.transparent`, so the lift never lerps through
+          // black (feedback_hover_state_patterns).
           borderRadius: radius,
           padding: EdgeInsets.zero,
           child: Center(
-            // EXACTLY the pill's width. At `size: 12` the icon's box is wider
-            // than the [kScrollGutter] pill and gets clamped to it, which
-            // throws off the glyph's own centring: measured on a real build,
-            // the pill spanned columns 1246-1255 and the ink landed on
-            // 1249-1254 — three columns of margin on the left, one on the
-            // right, and visibly off to the right at 1x. Matching the box to
-            // the pill removes the clamp, so the glyph centres by
-            // construction. Widget tests cannot catch this (the test font
-            // draws every glyph as a filled box), which is why the numbers
-            // are written down here.
+            // EXACTLY the pill's width: an icon box wider than the pill is
+            // clamped to it and the glyph ends up off-centre. Widget tests
+            // cannot catch that, because the test font draws every glyph as a
+            // filled box.
             child: Icon(icon, size: kScrollGutter, color: hollow.textSecondary),
           ),
         ),
@@ -1041,9 +876,8 @@ class _RailCap extends StatelessWidget {
   }
 }
 
-/// Where the thumb sits and how big it is, derived from the visible index
-/// range. Null when the whole conversation fits and there is nothing to
-/// scroll.
+/// Where the thumb sits and how big it is, from the visible index range. Null
+/// when the whole conversation fits.
 class _RailMetrics {
   /// 0 = thumb at the top of its travel (oldest), 1 = at the bottom (newest).
   final double offset;
@@ -1071,8 +905,8 @@ class _RailMetrics {
     if (maxIndex < 0) return null;
     final visible = (maxIndex - minIndex + 1).clamp(1, itemCount);
     if (visible >= itemCount) return null;
-    // Reversed indexes: the higher the top-most visible index, the closer to
-    // the OLDEST end, which is the TOP of the track.
+    // Reversed indexes: a higher top-most visible index is closer to the
+    // OLDEST end, which is the TOP of the track.
     final aboveViewport = itemCount - 1 - maxIndex;
     final scrollable = itemCount - visible;
     return _RailMetrics(
@@ -1086,21 +920,20 @@ class _RailMetrics {
 }
 
 /// One keyed chat-row shell: optional date separator above, extra top padding
-/// on group headers. ValueKey(messageId): rows hold per-item state (spoiler
-/// reveal, hover, decoded frames) that must not shift onto a different
-/// message on delete/trim.
+/// on group headers. Keyed by message id because rows hold per-item state
+/// (spoiler reveal, hover, decoded frames) that must not shift onto another
+/// message on a delete or trim.
 Widget dateSeparatedChatRow({
   required Object rowKey,
   required DateTime timestamp,
   required DateTime? prevTimestamp,
   required bool showHeader,
   required Widget child,
-  // True on the surfaces [reversedChatList] hangs a rail beside, so the date
-  // rule can give that width back out of its right end and stay level. Off by
-  // default: mobile and the pinned-message list have no rail.
+  // True where [reversedChatList] hangs a rail, so the date rule can give that
+  // width back out of its right end and stay level.
   bool railGutter = false,
-  // This row is the first one that arrived while the reader was away, so the
-  // "new messages" line goes above it (issue #54). See [unreadDividerIndex].
+  // The first row that arrived while the reader was away, so the "new
+  // messages" line goes above it (issue #54).
   bool unreadDivider = false,
 }) {
   final showDate = shouldShowDateSeparator(timestamp, prevTimestamp);
@@ -1112,21 +945,15 @@ Widget dateSeparatedChatRow({
       : child;
   final endInset =
       railGutter && !_isTouchForm ? kChatRuleEndInset : HollowSpacing.lg;
-  // A row carrying BOTH becomes one rule, not two: see [UnreadDivider.date].
+  // A row carrying BOTH becomes one rule, not two (see [UnreadDivider.date]).
   return KeyedSubtree(
     key: ValueKey<Object>(rowKey),
     child: showDate || unreadDivider
         ? Column(
             mainAxisSize: MainAxisSize.min,
-            // STRETCH, not the default centre. A message row that shrink-wraps
-            // — a grouped continuation, which is any reply in a run — gets
-            // CENTRED by a Column that only exists because this row carries a
-            // separator. Measured on a real build: "bulk 01" sat mid-pane
-            // under the unread line while every row above and below it was
-            // flush left. Latent since the date separator was written; it
-            // stayed hidden because a new DAY almost always starts a new
-            // group, so the row under a date rule almost always has a header
-            // and fills the width by itself.
+            // STRETCH, not the default centre: a grouped continuation
+            // shrink-wraps, and this Column exists only because the row
+            // carries a separator, so centring would push it mid-pane.
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               if (showDate && !unreadDivider)
@@ -1145,18 +972,10 @@ Widget dateSeparatedChatRow({
 
 /// Wraps a chat row with the accent pill that marks it as YOURS.
 ///
-/// The pill runs the row's FULL height on purpose: a grouped run of your
-/// messages is several rows whose boxes touch, and any vertical inset would
-/// break the run into a dashed line.
-///
-/// History worth keeping. This was a `Border(right:)` on the row's own
-/// Container until 2026-08-21, which left it 4px from the scroll rail's thumb
-/// reading as one confused double rule. Moved to `Border(left:)` the same day,
-/// where it welded itself to the divider against the channel list — and a
-/// [Border] also INSETS its own Container's child, so every own-message avatar
-/// sat 2px right of everyone else's until the row gave that back out of its
-/// padding. A positioned pill costs the row no layout at all, so that wobble
-/// cannot come back.
+/// The pill runs the row's FULL height on purpose: a grouped run is several
+/// rows whose boxes touch, and any vertical inset breaks the run into a dashed
+/// line. It is positioned rather than a [Border], which insets its Container's
+/// child and moved every own-message avatar off everyone else's alignment.
 class OwnMessageMarker extends StatelessWidget {
   final Widget child;
 
@@ -1168,7 +987,7 @@ class OwnMessageMarker extends StatelessWidget {
     return Stack(
       children: [
         // Non-positioned, so the Stack sizes to the row. Never let this become
-        // a conditional `SizedBox.shrink()` or the whole row collapses
+        // a conditional `SizedBox.shrink()` or the row collapses
         // (feedback_stack_nonpositioned_child_collapse).
         child,
         Positioned(
@@ -1188,7 +1007,7 @@ class OwnMessageMarker extends StatelessWidget {
   }
 }
 
-/// Yours gets the pill; everyone else's row comes back untouched — so
+/// Yours gets the pill and everyone else's row comes back untouched, so
 /// `find.byType(OwnMessageMarker)` is exactly the set of own-message rows.
 Widget markedAsOwn({required bool isMe, required Widget row}) =>
     isMe ? OwnMessageMarker(child: row) : row;
@@ -1343,9 +1162,8 @@ class StagedFilePreviewBar extends StatelessWidget {
   }
 }
 
-/// Staged link card area: a Hollow invite card when the composed URL is a
-/// hollow:// link, else the OG link-preview card while one is staged.
-/// Renders nothing when no URL is staged.
+/// Staged link card area: a Hollow invite card for a hollow:// link, else the
+/// OG preview card, and nothing when no URL is staged.
 class StagedLinkArea extends StatelessWidget {
   final HollowLink? hollowLink;
   final String? previewUrl;
@@ -1383,8 +1201,8 @@ class StagedLinkArea extends StatelessWidget {
   }
 }
 
-/// Input-bar container: flush against a preview/reply bar above (no double
-/// border), separated by the standard border otherwise.
+/// Input-bar container: flush against a preview or reply bar above so the two
+/// borders do not double, separated by the standard border otherwise.
 Widget chatInputBarShell(HollowTheme hollow,
     {required bool flushTop, required Widget child}) {
   return Container(
@@ -1402,10 +1220,8 @@ Widget chatInputBarShell(HollowTheme hollow,
   );
 }
 
-/// The composer text field shared by both panes (emote-aware controller,
-/// 5-line cap, 4000-char limit). Carries the chat text scale too — reading
-/// messages at 150% and typing the reply at 100% helps nobody. The mobile
-/// composer (`_MobileInputBar`) wraps itself the same way.
+/// The composer text field shared by both panes. Carries the chat text scale
+/// too, since reading at 150% and typing the reply at 100% helps nobody.
 Widget chatComposerField(
   HollowTheme hollow, {
   required EmoteComposerController controller,
@@ -1430,8 +1246,8 @@ Widget chatComposerField(
   );
 }
 
-/// Emoji-picker button for the composer row. [onOpen] receives the button's
-/// own BuildContext so the picker can anchor to it.
+/// Emoji-picker button. [onOpen] receives the button's own BuildContext so the
+/// picker can anchor to it.
 Widget composerEmojiButton(HollowTheme hollow,
     {required void Function(BuildContext btnCtx) onOpen}) {
   return Builder(
@@ -1449,9 +1265,8 @@ Widget composerEmojiButton(HollowTheme hollow,
   );
 }
 
-/// GIF-picker button for the composer row — a "GIF" text badge (no icon set
-/// carries a GIF glyph). [onOpen] receives the button's own BuildContext so
-/// the picker can anchor to it.
+/// GIF-picker button, a text badge because no icon set carries a GIF glyph.
+/// [onOpen] receives the button's own BuildContext so the picker can anchor.
 Widget composerGifButton(HollowTheme hollow,
     {required void Function(BuildContext btnCtx) onOpen}) {
   return Builder(
@@ -1483,13 +1298,11 @@ Widget composerGifButton(HollowTheme hollow,
   );
 }
 
-/// Sticker-picker button for the composer row. [onOpen] receives the button's
-/// own BuildContext so the picker can anchor to it.
+/// Sticker-picker button. [onOpen] receives the button's own BuildContext so
+/// the picker can anchor to it.
 ///
-/// A third composer button is PROVISIONAL — the row is getting crowded and
-/// Vitalik wants to rethink emoji/GIF/sticker placement as a whole. Until
-/// then this is the discoverable option, and `StickerPickerBody` is
-/// host-agnostic so moving the panel later touches only its host.
+/// A third composer button is PROVISIONAL; `StickerPickerBody` is host-agnostic
+/// so moving the panel later touches only its host.
 Widget composerStickerButton(HollowTheme hollow,
     {required void Function(BuildContext btnCtx) onOpen}) {
   return Builder(
@@ -1608,14 +1421,13 @@ class UnreadJumpPill extends StatelessWidget {
   }
 }
 
-/// Collapse a set of typing peer ids to MASTER identities, excluding every
-/// id that is "us". Robust self-filter (Step 9C/C1): a sibling device typing
-/// must never render as "you are typing" on our OTHER device. The typist id
-/// reaching here is collapsed to master in Rust ONLY IF the sibling's device
-/// id is warm in the resolver; if it isn't, it arrives as a raw DEVICE id and
-/// a bare `master != myMaster` check misses it. So exclude a typist that
-/// resolves to our master OR is one of OUR OWN known device ids OR is this
-/// running device — i.e. anything `sameIdentity` to us by any path.
+/// Collapses typing peer ids to MASTER identities, excluding every id that is
+/// "us".
+///
+/// Rust collapses a typist to master only while the sibling's device id is warm
+/// in the resolver, so a raw DEVICE id can arrive and a bare
+/// `master != myMaster` check would render a sibling as "you are typing". The
+/// filter therefore excludes anything `sameIdentity` to us by any path.
 Set<String> typingMastersFor(WidgetRef ref, Set<String> typingPeers) {
   final links = ref.watch(deviceLinkProvider);
   final myMaster = links.identityOf(ref.watch(identityProvider).peerId ?? '');
@@ -1633,8 +1445,8 @@ Set<String> typingMastersFor(WidgetRef ref, Set<String> typingPeers) {
       .toSet();
 }
 
-/// Typing indicator bar shown above the input area.
-/// Displays up to 3 names, or "Several people are typing..." for 4+.
+/// Typing indicator bar shown above the input area: up to 3 names, then
+/// "Several people are typing...".
 class TypingIndicatorBar extends StatelessWidget {
   final List<String> names;
 
@@ -1682,8 +1494,8 @@ class TypingIndicatorBar extends StatelessWidget {
   }
 }
 
-/// Animated bouncing dots for typing indicators.
-/// Uses [SharedTickers.typingDots] instead of per-instance controller.
+/// Animated bouncing dots for typing indicators, on the shared ticker rather
+/// than a controller per instance.
 class TypingDots extends StatelessWidget {
   final Color color;
 
@@ -1700,8 +1512,8 @@ class TypingDots extends StatelessWidget {
             final delay = i * 0.2;
             final t = (value - delay).clamp(0.0, 1.0);
             final bounce = t < 0.5
-                ? (t * 2) // 0→1
-                : (1 - (t - 0.5) * 2); // 1→0
+                ? (t * 2)
+                : (1 - (t - 0.5) * 2);
             return Container(
               margin: const EdgeInsets.symmetric(horizontal: 1),
               width: 4,

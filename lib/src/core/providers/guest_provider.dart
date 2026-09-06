@@ -6,8 +6,6 @@ import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 import 'package:hollow/src/core/providers/channel_chat_provider.dart';
 
-// ── Models ──
-
 enum GuestFetchMode {
   realtime,
   onLaunch,
@@ -94,8 +92,6 @@ class GuestSenderProfile {
   const GuestSenderProfile({required this.name, this.avatar});
 }
 
-// ── Providers ──
-
 /// Panel visibility — mirrors shareTabOpenProvider / archiveTabOpenProvider.
 final guestTabOpenProvider = StateProvider<bool>((ref) => false);
 
@@ -135,8 +131,6 @@ final savedGuestServersProvider = AsyncNotifierProvider<
     SavedGuestServersNotifier, List<SavedGuestServer>>(
   SavedGuestServersNotifier.new,
 );
-
-// ── Notifiers ──
 
 class GuestChannelMapNotifier
     extends StateNotifier<Map<String, List<GuestChannelEntry>>> {
@@ -248,7 +242,6 @@ class SavedGuestServersNotifier extends AsyncNotifier<List<SavedGuestServer>> {
     }
     final updated = List<SavedGuestServer>.from(current);
     updated[idx].fetchMode = newMode;
-    // Join or leave room based on mode change.
     if (newMode == GuestFetchMode.realtime ||
         newMode == GuestFetchMode.onLaunch ||
         newMode.interval != null) {
@@ -276,8 +269,6 @@ class SavedGuestServersNotifier extends AsyncNotifier<List<SavedGuestServer>> {
           .where((s) => s.fetchMode == GuestFetchMode.realtime)
           .length;
 }
-
-// ── Startup helper ──
 
 Future<void> autoJoinGuestRooms(Ref ref) async {
   final servers = await ref.read(savedGuestServersProvider.future);

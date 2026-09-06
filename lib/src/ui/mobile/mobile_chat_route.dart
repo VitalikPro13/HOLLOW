@@ -91,9 +91,9 @@ String _hhmm(DateTime t) =>
     '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}';
 
 class MobileChatRoute extends ConsumerStatefulWidget {
-  /// RouteSettings name every push site tags its route with. Notification
-  /// taps (in-app banner + push) popUntil past any chat route already on the
-  /// stack before pushing the new one, so chats never stack on each other.
+  /// The RouteSettings name every push site tags its route with. A notification
+  /// tap popUntils past any chat route already on the stack, so chats never
+  /// stack on each other.
   static const String routeName = 'mobile-chat';
 
   final String? peerId;
@@ -146,13 +146,11 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
   bool _isRecordingVoice = false;
   bool _searchOpen = false;
 
-  // @mention autocomplete (server channels only). Candidate list is shown as a
-  // compact panel ABOVE the input bar; tapping a candidate inserts the mention.
+  // @mention autocomplete, server channels only.
   List<_MobileMentionCandidate> _mentionCandidates = [];
   int _mentionAtPosition = -1;
 
-  // `:` emote shortcode autocomplete (emotes + Unicode emoji) — same panel
-  // pattern as mentions, works in DMs and channels.
+  // `:` shortcode autocomplete, in the same panel pattern as mentions.
   List<EmoteSuggestion> _emoteCandidates = [];
   int _emoteColonPos = -1;
 
@@ -162,12 +160,10 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
   List<storage_api.StoredChannelMessage> _searchResults = [];
   int? _highlightIndex;
 
-  /// True between deactivate() and activate()/unmount. A popped route's
-  /// ref.listen / positions callbacks can still fire during the pop frame
-  /// (a banner tap pops this route while its providers are notifying);
-  /// `mounted` stays true on a deactivated element, but `ref.read` there
-  /// walks ancestors and throws "Looking up a deactivated widget's ancestor
-  /// is unsafe" — so callbacks must bail on this flag instead.
+  /// True between deactivate() and activate() or unmount. A popped route's
+  /// callbacks still fire during the pop frame, and `mounted` stays true on a
+  /// deactivated element while `ref.read` there throws, so callbacks bail on
+  /// this flag instead.
   bool _routeDeactivated = false;
 
   @override
@@ -194,16 +190,14 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
   }
 
   void _initDmOpen() {
-    // Opening the chat: clear any stacked push-notification lines + dismiss the
-    // OS notification for this peer so the next message starts a fresh stack.
+    // Clear the stacked push lines so the next message starts a fresh stack.
     clearNotificationLines(widget.peerId!);
-    // Dismiss this peer's notification (and the group summary if it was the
-    // last one) — a bare cancel() would leave an empty "Hollow" group header.
+    // Takes the group summary with it when this was the last one; a bare
+    // cancel() would leave an empty "Hollow" group header.
     dismissPeerNotification(widget.peerId!);
-    // Also drop any pending in-app card for this DM — the user is here now;
-    // a lingering card would replay in the next chat they open. Post-frame:
-    // the card dismissal writes provider state, which is not allowed while
-    // the tree is building (this route is pushed during a tap-handler frame).
+    // A lingering in-app card would replay in the next chat opened. Post-frame,
+    // because dismissing it writes provider state and this route is pushed
+    // during a tap-handler frame.
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       ref.read(systemNotificationProvider.notifier).dismissDm(widget.peerId!);
@@ -215,43 +209,34 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
         _markSeen();
       }
     });
-    // Re-request any file whose bytes never arrived (failed live transfer) from
-    // the friend or an online sibling — mirrors the desktop chat_pane behavior.
+    // Re-request files whose bytes never arrived, from the friend or an online
+    // sibling.
     ref.read(eventStreamProvider.notifier)
         .requestMissingDmFilesOnOpen(widget.peerId!);
   }
 
   void _initChannelOpen() {
-    // Opening the channel: clear its accumulated push lines + dismiss the
-    // OS banner (and the channel group summary if it was the last one).
+    // Clear the accumulated push lines and the OS banner, group summary
+    // included when this was the last one.
     dismissChannelNotification(widget.serverId!, widget.channelId!);
-    // Also drop any pending in-app card for this channel (see DM branch —
-    // post-frame because it writes provider state during build).
+    // Post-frame, because dismissing the in-app card writes provider state.
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       ref
           .read(systemNotificationProvider.notifier)
           .dismissChannel(widget.serverId!, widget.channelId!);
     });
-    // Load FRESH channel + layout state for this server into the providers the
-    // chat UI reads. On mobile the Chats tab often has NO selected server, so
-    // `channelListProvider` can be empty/stale — without this, a re-opened chat
-    // reads a stale `posting`/visibility value (e.g. shows "locked" after the
-    // owner re-enabled posting while the phone sat on the Chats tab). Also
-    // invalidate role/permissions so `canPostInChannelProvider` recomputes.
-    // Desktop never hits this because its shell keeps these providers live.
-    // `loadForServer` is a notifier-method call (safe in initState); but
-    // `ref.invalidate` of a provider touches the ProviderScope inherited widget,
-    // which isn't available until AFTER initState — defer it one frame.
+    // The Chats tab often has NO selected server, so `channelListProvider` can
+    // be stale and a re-opened chat would read an old posting or visibility
+    // value. Desktop never hits this: its shell keeps these providers live.
+    // `ref.invalidate` touches the ProviderScope inherited widget, which is not
+    // available until AFTER initState, so it is deferred one frame.
     ref.read(channelListProvider.notifier).loadForServer(widget.serverId!);
     ref.read(channelLayoutProvider.notifier).loadForServer(widget.serverId!);
-    // Subscribe this channel's relay topic on EVERY open. The Chats tab
-    // path never subscribed (only the push-tap path did), so a channel
-    // opened from the tab received NO live topic broadcasts — messages
-    // only appeared on the next sync. Route-level = every entry point.
-    // Node-safe helper: a cold-start push tap opens this route before
-    // start_node() completes; a bare call rejected with "Node is not
-    // running" past the (ineffective, un-awaited) try/catch.
+    // On EVERY open, at route level, so no entry point is missed: without a
+    // subscription the channel receives no live topic broadcast and messages
+    // appear only on the next sync. The helper is node-safe, because a
+    // cold-start push tap opens this route before start_node() completes.
     subscribeChannelTopics(
         serverId: widget.serverId!, channelIds: [widget.channelId!]);
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -270,8 +255,8 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
         setState(() {});
         _jumpToBottom();
         _markSeen();
-        // Re-derive the slow-mode cooldown from the freshly loaded history
-        // (the route remounts per open — pill state is gone, history isn't).
+        // The route remounts per open, so the pill state is gone while the
+        // history the cooldown derives from is not.
         _recomputeSlowMode();
       }
     });
@@ -292,12 +277,11 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
   }
 
   void _checkAutoScroll() {
-    // Popped route: the positions notifier stays attached until dispose and
-    // can fire during the pop frame — the ref.reads below would crash on the
-    // deactivated element (see _routeDeactivated).
+    // The positions notifier stays attached until dispose and can fire during
+    // the pop frame, where the ref.reads below would crash.
     if (!mounted || _routeDeactivated) return;
-    // Reversed list: "at bottom" is simply "index 0 (the newest) visible" —
-    // length-independent, immune to burst growth.
+    // Reversed list: "at bottom" is "index 0 visible", which no burst of
+    // arrivals can change.
     final positions = _positionsListener.itemPositions.value;
     if (positions.isEmpty) return;
     final minIndex =
@@ -307,8 +291,8 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     if (wasInZone != _isInAutoScrollZone) {
       setState(() {});
       if (_isInAutoScrollZone) {
-        // Reached the bottom: release the freeze — snap to the true newest
-        // row if messages were held back while reading.
+        // Reached the bottom: release the freeze, and snap to the true newest
+        // row if anything was held back.
         final count = _conversationLength();
         if (_frozenLen != null && count > _frozenLen!) {
           _jumpToBottom();
@@ -317,14 +301,12 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
         }
         _markSeen();
       } else {
-        // Left the bottom: freeze the display so arrivals can't shift the
-        // reading position (unread pill takes over).
+        // Left the bottom: freeze the display so arrivals cannot shift the
+        // reading position.
         _frozenLen ??= _conversationLength();
       }
     }
   }
-
-  // ── Reversed-list scroll model — see chat_pane.dart for the rationale ──
 
   /// Non-null while the user is scrolled up: display list capped here.
   int? _frozenLen;
@@ -369,8 +351,8 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     });
   }
 
-  /// [index] is CHRONOLOGICAL (0 = oldest) — converted to the reversed
-  /// builder index here, in one place.
+  /// [index] is CHRONOLOGICAL (0 = oldest); the conversion to the reversed
+  /// builder index happens here, in one place.
   void _scrollToMessage(int index) {
     if (!_scrollController.isAttached) return;
     final count = _displayLength();
@@ -382,7 +364,6 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
           ? Duration.zero
           : const Duration(milliseconds: 300),
       curve: Curves.easeOutCubic,
-      // Reversed alignment measures from the BOTTOM edge.
       alignment: 0.6,
     );
     Future.delayed(const Duration(milliseconds: 1500), () {
@@ -412,9 +393,8 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     } catch (_) {}
   }
 
-  /// Bottom snap — INSTANT (jumpTo, never animated). The old animated scroll
-  /// rendered the new row first and then glided to it, a visible
-  /// jump-then-move; the instant jump is one clean motion.
+  /// Bottom snap, INSTANT: an animated scroll renders the new row and then
+  /// glides to it, which reads as a jump followed by a move.
   void _scrollToBottom() {
     _jumpToBottom();
     _markSeen();
@@ -422,8 +402,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
 
   void _startEditing(String messageId) {
     setState(() => _editingMessageId = messageId);
-    // Scroll the inline editor into view AFTER the keyboard has animated in,
-    // otherwise it can sit hidden behind the keyboard.
+    // After the keyboard has animated in, or the editor sits behind it.
     Future.delayed(const Duration(milliseconds: 300), () {
       if (!mounted || !_scrollController.isAttached) return;
       int index = -1;
@@ -439,7 +418,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
       }
       if (index >= 0) {
         _scrollController.scrollTo(
-          // Chronological → reversed builder index; alignment measures from
+          // Chronological to reversed builder index; alignment measures from
           // the BOTTOM edge under reverse:true.
           index: _displayLength() - 1 - index,
           alignment: 0.7,
@@ -454,9 +433,8 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     _urlDebounce?.cancel();
     _urlDebounce = Timer(const Duration(milliseconds: 600), _detectUrl);
 
-    // @mention autocomplete (channels only — DMs have a single recipient).
+    // Channels only: a DM has a single recipient.
     if (!widget.isDm) _updateMentionAutocomplete(text);
-    // `:` emote shortcode autocomplete (DMs and channels).
     _updateEmoteAutocomplete(text);
 
     if (text.isEmpty) return;
@@ -468,10 +446,8 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
           .sendTypingIndicator(serverId: '', channelId: widget.peerId!)
           .catchError((_) {});
     } else {
-      // Server channel typing: same path the desktop ChannelChatPane uses
-      // (mobile previously only sent DM typing, so a phone never showed as
-      // "typing…" in a server channel — desktop sibling did, which looked
-      // like a multi-device bug but was a mobile send-side gap).
+      // The same path the desktop pane uses, so a phone shows as typing in a
+      // server channel too.
       network_api.sendTypingIndicator(
         serverId: widget.serverId!,
         channelId: widget.channelId!,
@@ -479,9 +455,8 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     }
   }
 
-  /// Scan backward from the cursor for an '@' that starts a mention token, build
-  /// matching candidates from server members (+ @everyone), and update the panel.
-  /// Mirrors the desktop ChannelChatPane logic.
+  /// Rebuilds the mention panel from the token the cursor sits in: server
+  /// members plus @everyone, matching the desktop pane.
   void _updateMentionAutocomplete(String text) {
     final cursor = _controller.selection.baseOffset;
     if (cursor < 0 || widget.serverId == null) {
@@ -502,8 +477,8 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
   }
 
   /// Position of the '@' opening the mention token the cursor sits in, or -1.
-  /// The '@' must start the text or follow whitespace; the token itself may
-  /// not contain whitespace.
+  /// The '@' must start the text or follow whitespace, and the token itself may
+  /// not contain any.
   int _mentionAtPosFor(String text, int cursor) {
     for (int i = cursor - 1; i >= 0; i--) {
       final c = text[i];
@@ -645,8 +620,6 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     );
   }
 
-  // ── `:` emote shortcode autocomplete ──────────────────────────────────
-
   List<ComposerEmote> _composerEmotes() => [
         if (widget.serverId != null)
           for (final e in ref
@@ -691,7 +664,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     _dismissEmotePanel();
   }
 
-  /// Compact emote-candidate panel above the input bar (mention pattern).
+  /// Compact emote-candidate panel above the input bar.
   Widget _buildEmotePanel(HollowTheme hollow) {
     return Container(
       constraints: const BoxConstraints(maxHeight: 200),
@@ -756,7 +729,8 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     );
   }
 
-  /// The channel's slow-mode interval, or 0 when off / DM / Moderator+.
+  /// The channel's slow-mode interval, or 0 in a DM, when it is off, or for a
+  /// Moderator and above.
   int get _effectiveSlowModeSecs {
     if (widget.isDm) return 0;
     final slow = ref
@@ -771,9 +745,8 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
   bool get _channelMediaOnly => !widget.isDm &&
       (ref.read(channelListProvider)[widget.channelId!]?.mediaOnly ?? false);
 
-  /// The DERIVED slow-mode cooldown for this channel right now — my newest
-  /// message's timestamp + the interval, straight from the loaded list. Never
-  /// widget state: survives route re-opens and always matches the Rust gate.
+  /// The slow-mode cooldown DERIVED from the loaded list, never widget state,
+  /// so it survives a route re-open and always matches the Rust gate.
   DateTime? _derivedSlowModeReadyAt() {
     if (widget.isDm) return null;
     final msgs = ref.read(channelChatProvider)[_channelKey] ?? const [];
@@ -793,9 +766,8 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     return true;
   }
 
-  /// Re-derives the cooldown (pill state) and keeps a 1s ticker running while
-  /// it's active. Called on mount, on every message-list change (my optimistic
-  /// send lands there too), and by the ticker itself until expiry.
+  /// Re-derives the cooldown and keeps a 1s ticker running while it is active.
+  /// Called on mount, on every message-list change and by the ticker itself.
   void _recomputeSlowMode() {
     if (!mounted) return;
     final ready = _derivedSlowModeReadyAt();
@@ -811,7 +783,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
         }
         if (!DateTime.now().isBefore(_slowModeReadyAt ?? DateTime.now())) {
           t.cancel();
-          _recomputeSlowMode(); // derives null → clears the pill
+          _recomputeSlowMode();
         } else {
           setState(() {});
         }
@@ -827,9 +799,8 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     final fileName = _stagedFileName;
     final fileIsImage = _stagedFileIsImage;
     final preview = _stagedPreview;
-    // The card has to land after the send when the fetch is still running OR
-    // never started (issue #45). File sends have no preview slot on the wire,
-    // so they never arm it.
+    // The card has to land after the send when the fetch is still running or
+    // never started (issue #45); a file send has no preview slot on the wire.
     final wasLoading = _stagedPreviewLoading;
     final pendingUrl = filePath != null
         ? null
@@ -868,9 +839,8 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
         errorToast: 'Failed to send file',
       );
     } else {
-      // Text-only send: the provider only adds the bubble AFTER the network
-      // send, so a failure here would otherwise vanish silently (composer
-      // already cleared, no bubble).
+      // The provider adds the bubble only AFTER the network send, so a failure
+      // here would vanish silently: composer cleared, no bubble.
       try {
         final String sentMid;
         if (widget.isDm) {
@@ -891,26 +861,25 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
         }
         if (pendingUrl != null) {
           _latePreview.arm(pendingUrl, sentMid);
-          // Nothing is in flight when the debounce never fired — start it now.
+          // Nothing is in flight when the debounce never fired.
           if (!wasLoading) _fetchPreview(pendingUrl);
         }
       } catch (_) {
-        if (!mounted || _routeDeactivated) return; // popped route — see field doc
+        if (!mounted || _routeDeactivated) return;
         HollowToast.show(context, 'Failed to send message',
             type: HollowToastType.error);
         return;
       }
     }
-    // Instant post-frame jump, not an animated scrollTo: the sender is
-    // already at the bottom, and animating here races the chatProvider
-    // listener's auto-scroll + the input bar collapsing after clear() —
-    // that overlap is the iOS "jump for a second" after sending.
+    // Instant, not animated: the sender is already at the bottom, and animating
+    // races the auto-scroll and the input bar collapsing after clear(), which
+    // is the iOS "jump for a second" after sending.
     _jumpToBottom();
     _markSeen();
   }
 
-  /// Media-only channel gate: false (and toasts) when the staged send isn't
-  /// an accepted image/GIF/video attachment.
+  /// Media-only channel gate: false, and toasts, unless the staged send is an
+  /// accepted image, GIF or video.
   bool _passesMediaOnlyGate(String? filePath, String? fileName) {
     if (!_channelMediaOnly) return true;
     if (filePath == null) {
@@ -953,11 +922,10 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     });
   }
 
-  /// Optimistic insert + full send pipeline, shared by staged files and voice
-  /// messages. Insert happens BEFORE the network send (desktop parity): the
-  /// bubble renders instantly from the local path; the sender's FileCompleted
-  /// DB reload replaces it with the canonical row (dedup by message_id
-  /// prevents a double bubble).
+  /// The optimistic insert and send pipeline shared by staged files and voice
+  /// messages. The insert comes BEFORE the network send so the bubble renders
+  /// from the local path; the sender's FileCompleted reload then replaces it,
+  /// and dedup by message_id prevents a second bubble.
   Future<void> _sendFileMessage({
     required String filePath,
     required String fileName,
@@ -996,9 +964,8 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     }
     _jumpToBottom();
     try {
-      // Full send pipeline (not raw network_api.sendFile): transfer
-      // progress state, video thumbnail pre-extraction, and >34 MB
-      // share-backed routing — same path desktop uses.
+      // The full pipeline rather than raw sendFile: transfer progress, video
+      // thumbnail pre-extraction and >34 MB share-backed routing.
       final members = widget.isDm
           ? null
           : ref.read(serverMembersProvider(widget.serverId!)).valueOrNull;
@@ -1010,8 +977,8 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
             messageId: messageId,
             messageText: text,
             memberCount: members?.length ?? 0,
-            // The display name is the voice-recorder signal; the wire carries
-            // a dedicated flag (auto-download-gate exemption, issue #41).
+            // The display name is the voice-recorder signal; the wire carries a
+            // dedicated flag (auto-download gate exemption, issue #41).
             isVoice: fileName == _kVoiceMessageName,
           );
     } catch (e) {
@@ -1022,7 +989,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
   }
 
   Future<void> _pickFile({bool imagesOnly = false}) async {
-    // Media-only channels: restrict the picker to what the channel accepts.
+    // Restrict the picker to what a media-only channel accepts.
     final FileType pickerType;
     if (imagesOnly) {
       pickerType = FileType.image;
@@ -1041,8 +1008,8 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     final file = result.files.first;
     if (file.path == null) return;
 
-    // Over 34 MB (DM or channel): confirm hosting as a Hollow Share rather than
-    // rejecting (DMs) or silently auto-converting (channels).
+    // Over 34 MB: confirm hosting it as a Hollow Share rather than rejecting or
+    // converting silently.
     if (file.size > kLargeFileThresholdBytes) {
       final ok = mounted &&
           await confirmLargeFileShare(context,
@@ -1050,11 +1017,9 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
       if (!ok) return;
     }
 
-    // STAGE the file (don't auto-send) so the user can add a caption before
-    // sending — matches desktop (chat_pane.dart `_pickAndStageFile`). The staged
-    // preview (`_StagedFilePreview`) renders above the input bar and `_handleSend`
-    // bundles the caption + file. Re-focus after the OS returns window focus from
-    // the file dialog (a synchronous requestFocus races that restoration).
+    // STAGED rather than auto-sent, so a caption can be added and `_handleSend`
+    // bundles the two. The re-focus waits for the OS to return window focus from
+    // the file dialog, which a synchronous requestFocus would race.
     final ext = file.name.contains('.')
         ? file.name.split('.').last.toLowerCase()
         : '';
@@ -1070,8 +1035,8 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
   }
 
   void _showEmojiSheet() {
-    // Drop the composer focus first — the software keyboard otherwise stays
-    // up under the sheet and covers half the picker.
+    // The software keyboard otherwise stays up under the sheet and covers half
+    // the picker.
     _focusNode.unfocus();
     final hollow = HollowTheme.of(context);
     showModalBottomSheet<void>(
@@ -1088,7 +1053,8 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
             serverId: widget.serverId,
             onSelect: (emoji) {
               Navigator.pop(context);
-              // Emote tokens become 1-char placeholders rendered inline.
+              // Emote tokens become 1-char placeholders rendered inline as the
+              // image.
               _insertAtCursor(_controller.displayTextFor(emoji));
             },
           ),
@@ -1111,14 +1077,14 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
       ),
       builder: (_) => SafeArea(
         child: SizedBox(
-          // 0.62 rather than 0.55: the Popular/Favourites/Recent row costs a
-          // line of chrome, and the grid needs to keep ~2 full rows.
+          // Taller than the sticker sheet: the Popular row costs a line of
+          // chrome and the grid still needs two full rows.
           height: MediaQuery.sizeOf(context).height * 0.62,
           child: GifPickerBody(
             // Sends and stays open, mirroring the sticker sheet (issue #36).
             onSelect: _sendAsset,
-            // Null in a DM or a conference — the rating clamp only applies
-            // to real servers (see showGifPicker).
+            // Null in a DM or a conference: the rating clamp only applies to
+            // real servers.
             serverId: (widget.serverId?.startsWith('conf:') ?? true)
                 ? null
                 : widget.serverId,
@@ -1128,8 +1094,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     );
   }
 
-  /// Insert [text] (a Unicode emoji or an emote token) at the composer's
-  /// cursor, replacing any selection.
+  /// Inserts [text] at the composer's cursor, replacing any selection.
   void _insertAtCursor(String text, {bool refocus = true}) {
     final sel = _controller.selection;
     final base = sel.isValid ? sel.baseOffset : _controller.text.length;
@@ -1143,21 +1108,19 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     if (refocus) _focusNode.requestFocus();
   }
 
-  /// Send-on-click (issue #36) — see `chat_pane.dart:_sendAsset`. Focus
-  /// staying put matters most here: the sheet is already open over the
-  /// composer, and refocusing would raise the software keyboard on top of it
-  /// on every single pick.
+  /// Send-on-click (issue #36). Focus stays put: the sheet is open over the
+  /// composer, and refocusing would raise the keyboard on top of it on every
+  /// pick.
   Future<void> _sendAsset(String token) async {
     _insertAtCursor(_controller.displayTextFor(token), refocus: false);
     await _handleSend(refocus: false);
   }
 
-  /// Send an already-written file straight into this conversation with no
-  /// save dialog — the "Share pack to this chat" path (issue #36).
+  /// Sends an already-written file straight into this conversation with no save
+  /// dialog, the "Share pack to this chat" path (issue #36).
   ///
-  /// The file is NOT deleted afterwards: our own bubble keeps pointing at it
-  /// (the pack card reads its manifest from disk), so it lives out its life
-  /// in the temp directory the OS already sweeps.
+  /// The file is NOT deleted afterwards: our own bubble keeps pointing at it,
+  /// so it lives out its life in the temp directory the OS sweeps.
   Future<void> _shareFileToChat(String path, String fileName) async {
     if (!mounted) return;
     await _sendFileMessage(
@@ -1170,12 +1133,8 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     );
   }
 
-  /// Attach menu (Telegram-style): one [+] button opens this Photo / File sheet,
-  /// so the composer doesn't crowd two separate icons into the row on small
-  /// screens. Each row reuses the existing `_pickFile` flow.
   /// Sticker picker as a bottom sheet. A pick SENDS immediately and the sheet
-  /// stays OPEN (unlike the GIF sheet), so a vertical mosaic is just repeated
-  /// taps — the sheet closes on the scrim or a swipe.
+  /// stays OPEN, unlike the GIF sheet, so sending several is repeated taps.
   void _showStickerSheet() {
     _focusNode.unfocus();
     final hollow = HollowTheme.of(context);
@@ -1192,8 +1151,8 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
           child: StickerPickerBody(
             onSelect: _sendAsset,
             onSharePack: _shareFileToChat,
-            // Null in a DM or a conference — the rating clamp and the Server
-            // tab only apply to real servers.
+            // Null in a DM or a conference: the rating clamp and the Server tab
+            // only apply to real servers.
             serverId: (widget.serverId?.startsWith('conf:') ?? true)
                 ? null
                 : widget.serverId,
@@ -1297,9 +1256,8 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
         return;
       }
     }
-    // Optimistic insert first (desktop parity) — the voice bubble appears
-    // immediately; the FileCompleted reload repoints diskPath to the
-    // files/ copy before the temp file below is deleted.
+    // Optimistic insert first, so the FileCompleted reload repoints diskPath to
+    // the files/ copy before the temp file below is deleted.
     await _sendFileMessage(
       filePath: result.filePath,
       fileName: _kVoiceMessageName,
@@ -1366,8 +1324,8 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     // Manual pull: lift the auto-download-gate pin so real progress renders.
     ref.read(fileTransferProvider.notifier).clearDeclined(attachment.fileId);
     try {
-      // No toast: the card itself answers the tap now, saying "Requesting..."
-      // and then what came back (tmp.txt item 1). Failures still toast.
+      // No toast: the card itself answers the tap, saying "Requesting..." and
+      // then what came back. Failures still toast.
       await network_api.requestFileFromPeer(
         fileId: attachment.fileId,
         peerId: senderId,
@@ -1422,8 +1380,8 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     try {
       final preview = await network_api.fetchLinkPreview(url: url);
       if (!mounted) return;
-      // The send raced this fetch — land the card on the sent message rather
-      // than discarding the result (issue #45).
+      // The send raced this fetch, so the card lands on the message that
+      // already went out (issue #45).
       final lateMid = _latePreview.claim(url);
       if (lateMid != null) _attachPreview(lateMid, preview);
       if (_stagedPreviewUrl != url) return;
@@ -1433,7 +1391,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
       });
     } catch (_) {
       if (!mounted) return;
-      _latePreview.claim(url); // nothing fetched, nothing to attach
+      _latePreview.claim(url);
       if (_stagedPreviewUrl != url) return;
       setState(() {
         _stagedPreviewUrl = null;
@@ -1443,8 +1401,8 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     }
   }
 
-  /// Land a card on an already-sent message, DM or channel. Quiet on failure
-  /// — the send already succeeded on screen and a missing card is cosmetic.
+  /// Lands a card on an already-sent message. Quiet on failure: the send already
+  /// succeeded on screen and a missing card is cosmetic.
   void _attachPreview(String messageId, network_api.LinkPreviewRef? preview) {
     final future = widget.isDm
         ? ref
@@ -1457,8 +1415,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     });
   }
 
-  /// Keep the card honest after an edit (issue #45) — see the desktop twin
-  /// in chat_pane.dart.
+  /// Keeps the card honest after an edit (issue #45), like the desktop twin.
   Future<void> _resyncPreviewAfterEdit(String messageId, String newText) async {
     if (!ref.read(linkPreviewsEnabledProvider)) return;
     final String? oldUrl;
@@ -1488,7 +1445,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
       if (!mounted || _routeDeactivated) return;
       _attachPreview(messageId, preview);
     } catch (_) {
-      // Leave the existing card rather than blanking it on a transient fail.
+      // Leave the existing card rather than blanking it on a transient failure.
     }
   }
 
@@ -1501,8 +1458,8 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     Widget scaffold = Scaffold(
       backgroundColor:
           bg.hasBackground ? Colors.transparent : hollow.background,
-      // Custom-emote pull source for every token/reaction in this chat:
-      // DM asks the counterpart's devices, channel asks a room member.
+      // Custom-emote pull source for every token and reaction: a DM asks the
+      // counterpart's devices, a channel asks a room member.
       body: EmoteScope(
         serverId: widget.serverId,
         peerHint: widget.peerId,
@@ -1510,10 +1467,8 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
           child: Column(
             children: [
               _buildHeader(),
-              // Issue 1-C: pinned above the message list so the warning
-              // survives scrollback and restarts. Self-hides when clear —
-              // including for Saved messages, since Rust never records an
-              // alert against our own master identity.
+              // Pinned above the message list so the warning survives
+              // scrollback and restarts, and self-hiding when clear.
               if (widget.isDm) SecurityAlertBanner(peerId: widget.peerId!),
               if (widget.isDm) MobileCallStatusStrip(peerId: widget.peerId!),
               const _VoiceChannelStatusStrip(),
@@ -1523,9 +1478,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
                 _buildNoReadPermission(hollow)
               else
                 _buildMessageArea(),
-              // System-status notice, just above the input cluster (typing bar /
-              // reply preview / composer) — the spot the user's thumb already
-              // rests on. Self-hides when there's nothing to announce.
+              // Just above the input cluster, where the thumb already rests.
               const SystemStatusBanner(anchor: StatusBannerAnchor.bottom),
               _TypingBar(
                 contextKey: widget.isDm ? widget.peerId! : _channelKey,
@@ -1570,10 +1523,8 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     return Stack(
       children: [
         scaffold,
-        // Compact in-app banner for messages arriving in OTHER conversations
-        // while the user is reading this one. Offset below the status bar +
-        // chat header (~56px header + top padding) so it doesn't cover the
-        // header controls.
+        // For messages arriving in OTHER conversations. Offset below the status
+        // bar and chat header so it cannot cover the header controls.
         MobileInChatBanner(
           currentPeerId: widget.peerId,
           currentServerId: widget.serverId,
@@ -1586,16 +1537,12 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     );
   }
 
-  /// ref.listen registrations, called unconditionally from build() —
-  /// registration during build is all Riverpod requires. The message-list
-  /// growth listeners deliberately stay inside the list builders so they are
-  /// only registered while a list actually shows (not, say, while read
-  /// permission is denied).
+  /// ref.listen registrations, called unconditionally from build(), which is all
+  /// Riverpod requires. The message-list growth listeners stay inside the list
+  /// builders so they register only while a list actually shows.
   void _registerBuildListeners() {
-    // Channel-visibility eviction (server channels only): if the channel you're
-    // viewing stops being visible to you in real-time (visibility tier raised or
-    // you were demoted), the CRDT state already propagated — pop this route back
-    // to the Chats tab so the now-hidden channel simply disappears.
+    // The channel being viewed can stop being visible in real time (tier raised,
+    // or a demotion); the CRDT already propagated, so this only pops the route.
     if (!widget.isDm && widget.serverId != null && widget.channelId != null) {
       ref.listen(visibleChannelsProvider, _onVisibleChannelsChanged);
     }
@@ -1603,13 +1550,13 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
 
   void _onVisibleChannelsChanged(
       Map<String, ChannelInfo>? prev, Map<String, ChannelInfo> next) {
-    // _routeDeactivated: a popped route's listener can still fire during
-    // the pop frame; ref.read on the deactivated element crashes.
+    // A popped route's listener still fires during the pop frame, where ref.read
+    // on the deactivated element crashes.
     if (!mounted || _routeDeactivated) return;
-    // Only act when THIS route's server is the selected one (visibleChannels
-    // tracks the selected server); otherwise the map isn't about us.
+    // visibleChannels tracks the SELECTED server, so any other one is not about
+    // this route.
     if (ref.read(selectedServerProvider) != widget.serverId) return;
-    if (next.containsKey(widget.channelId)) return; // still visible — fine
+    if (next.containsKey(widget.channelId)) return;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted && !_routeDeactivated && Navigator.of(context).canPop()) {
         Navigator.of(context).pop();
@@ -1738,7 +1685,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     });
   }
 
-  /// Slow-mode countdown pill (mirrors the desktop pill by the send button).
+  /// Slow-mode countdown pill.
   Widget _buildSlowModePill(HollowTheme hollow) {
     return Container(
       padding: const EdgeInsets.symmetric(
@@ -1763,16 +1710,15 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     );
   }
 
-  /// The input bar — or, in a channel where posting is currently blocked
-  /// (no permission / muted), the explanatory banner instead.
+  /// The input bar, or the explanatory banner where posting is blocked.
   Widget _buildComposerOrBanner(HollowTheme hollow) {
     if (!widget.isDm) {
       final canPost = ref.watch(canPostInChannelProvider((
         serverId: widget.serverId!,
         channelId: widget.channelId!,
       )));
-      // Keeps the grant-expiry timer alive while this channel is open (a
-      // lapsed temporary grant emits no network event).
+      // Keeps the grant-expiry timer alive while this channel is open: a lapsed
+      // temporary grant emits no network event.
       ref.watch(myChannelGrantProvider((
         serverId: widget.serverId!,
         channelId: widget.channelId!,
@@ -1819,8 +1765,8 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
         ),
       );
     }
-    // Chat text scale rides the composer too (parity with the desktop
-    // `chatComposerField`) — reading at 150% and typing at 100% helps nobody.
+    // The chat text scale rides the composer too: reading at 150% and typing at
+    // 100% helps nobody.
     return ChatTextScale(
       child: _MobileInputBar(
         controller: _controller,
@@ -1836,8 +1782,8 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
   }
 
   void _startVoiceRecording() {
-    // Voice notes are audio, not media — blocked in media-only channels
-    // (toast, don't record).
+    // A voice note is audio, not media, so a media-only channel refuses it
+    // before recording rather than after.
     if (_channelMediaOnly) {
       HollowToast.show(
         context,
@@ -1949,14 +1895,13 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     }
   }
 
-  /// Shared shell for both message lists: freeze-aware display slice, the
-  /// reversed-list plumbing (chat_pane_shared owns the iron rules), and the
-  /// empty state.
+  /// Shared shell for both message lists: the freeze-aware display slice, the
+  /// reversed-list plumbing and the empty state.
   Widget _buildMessageListShell<T>({
     required List<T> messages,
     required String? Function(T msg) messageIdOf,
-    // The conversation's key in `unreadMarkerProvider`, so mobile draws the
-    // same "new messages" line the desktop panes do (issue #54).
+    // The conversation's key in `unreadMarkerProvider`, so mobile draws the same
+    // "new messages" line the desktop panes do (issue #54).
     required String markerKey,
     required bool Function(T msg) isMine,
     required Widget Function(List<T> messages, int revIndex,
@@ -1971,7 +1916,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
       );
     }
 
-    // messageId → chronological index, for findChildIndexCallback.
+    // Message id to chronological index, for findChildIndexCallback.
     final indexById = <String, int>{
       for (var i = 0; i < messages.length; i++)
         if (messageIdOf(messages[i]) != null) messageIdOf(messages[i])!: i,
@@ -1990,7 +1935,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
       itemPositionsListener: _positionsListener,
       itemCount: messages.length,
       indexByMessageId: indexById,
-      // No SelectionArea on mobile — it would fight LongPressMessage.
+      // No SelectionArea on mobile: it would fight LongPressMessage.
       selectionArea: false,
       padding: const EdgeInsets.symmetric(
         horizontal: HollowSpacing.sm,
@@ -2004,16 +1949,13 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
   }
 
   Widget _buildDmMessages() {
-    // Per-conversation select — messages in other conversations must not
-    // rebuild this list (the provider map is replaced wholesale per insert).
+    // Per-conversation select: the map is replaced wholesale on every insert, so
+    // watching it rebuilds this list for activity in any conversation.
     final allMessages =
         ref.watch(chatProvider.select((m) => m[widget.peerId!])) ?? [];
-    // While the user reads history the display is frozen (see the
-    // reversed-list scroll model near _checkAutoScroll).
     final messages = _displayMessages(allMessages);
 
-    // New-message handling under the reversed list: following (at bottom) →
-    // instant re-pin; reading history → freeze (unread pill takes over).
+    // Following re-pins to the newest row; reading history freezes the display.
     ref.listen<Map<String, List<ChatMessage>>>(
         chatProvider, _onDmMessagesChanged);
 
@@ -2028,24 +1970,23 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
 
   void _onDmMessagesChanged(
       Map<String, List<ChatMessage>>? prev, Map<String, List<ChatMessage>> next) {
-    if (!mounted || _routeDeactivated) return; // popped route — see field doc
+    if (!mounted || _routeDeactivated) return;
     final prevLen = (prev?[widget.peerId!] ?? const []).length;
     final nextLen = (next[widget.peerId!] ?? const []).length;
     if (nextLen <= prevLen) return;
-    if (_frozenLen != null) return; // frozen — held back + pill
+    if (_frozenLen != null) return;
     if (!_isInAutoScrollZone) {
       _frozenLen = prevLen;
       return;
     }
-    // _scrollToBottom (not the bare jump): it also marks the arrival seen —
-    // the user is following at the bottom, so it must not count as unread.
+    // Not the bare jump: this also marks the arrival seen, which is right
+    // because the user is following at the bottom.
     _scrollToBottom();
   }
 
-  /// Sticker-run tiling candidates (see `stickerTileCandidate`). The two
-  /// message types carry the same fields under different classes, so this is
-  /// one predicate written twice rather than one generic that would need a
-  /// shared interface neither model has.
+  /// Sticker-run tiling candidates. The two message types carry the same fields
+  /// under different classes, so the predicate is written twice rather than made
+  /// generic over an interface neither model has.
   bool _dmTileCandidate(ChatMessage m) => stickerTileCandidate(
         text: m.text,
         hasReply: m.replyToMid != null,
@@ -2064,8 +2005,8 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
 
   Widget _buildDmRow(List<ChatMessage> messages, int revIndex,
       Map<String, int> indexById, int? unreadIndex) {
-    // Reversed builder index → chronological; all row logic below stays
-    // chronological.
+    // Map the reversed builder index back to chronological order; all row logic
+    // below stays in chronological terms.
     final index = messages.length - 1 - revIndex;
     final msg = messages[index];
     final prev = index > 0 ? messages[index - 1] : null;
@@ -2096,9 +2037,8 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
       );
     }
 
-    // Look up reply target for this message. (Linear scan is acceptable
-    // here — it only runs for rows that ARE replies, and only when the
-    // per-conversation list itself changed thanks to the select above.)
+    // The linear scan runs only for rows that ARE replies, and only when the
+    // per-conversation list itself changed.
     String? replySender;
     String? replyText;
     if (msg.replyToMid != null) {
@@ -2173,7 +2113,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
         : editWidget;
   }
 
-  /// Preview line for a reply target: file token or the raw text.
+  /// Preview line for a reply target: a file token, or the raw text.
   String _attachmentPreviewText(FileAttachment? att, String text) {
     if (att == null) return text;
     return att.isImage ? '📷 Image' : '📎 ${att.fileName}';
@@ -2190,7 +2130,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
         await notifier.addReaction(widget.peerId!, msg.messageId!, emoji);
       }
     } catch (_) {
-      if (!mounted || _routeDeactivated) return; // popped route — see field doc
+      if (!mounted || _routeDeactivated) return;
       HollowToast.show(context, 'Failed to update reaction',
           type: HollowToastType.error);
     }
@@ -2209,22 +2149,19 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
             widget.serverId!, widget.channelId!, msg.messageId!, emoji);
       }
     } catch (_) {
-      if (!mounted || _routeDeactivated) return; // popped route — see field doc
+      if (!mounted || _routeDeactivated) return;
       HollowToast.show(context, 'Failed to update reaction',
           type: HollowToastType.error);
     }
   }
 
   Widget _buildChannelMessages() {
-    // Per-channel select — messages in other channels must not rebuild this
-    // list (the provider map is replaced wholesale per insert).
+    // Per-channel select: the map is replaced wholesale on every insert, so
+    // watching it rebuilds this list for activity in any channel.
     final allMessages =
         ref.watch(channelChatProvider.select((m) => m[_channelKey])) ?? [];
-    // While the user reads history the display is frozen (see the
-    // reversed-list scroll model near _checkAutoScroll).
     final messages = _displayMessages(allMessages);
 
-    // New-message handling under the reversed list — see _buildDmMessages.
     ref.listen(channelChatProvider, _onChannelMessagesChanged);
 
     return _buildMessageListShell<ChannelChatMessage>(
@@ -2239,33 +2176,32 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
   void _onChannelMessagesChanged(
       Map<String, List<ChannelChatMessage>>? prev,
       Map<String, List<ChannelChatMessage>> next) {
-    if (!mounted || _routeDeactivated) return; // popped route — see field doc
+    if (!mounted || _routeDeactivated) return;
     final prevLen = (prev?[_channelKey] ?? const []).length;
     final nextLen = (next[_channelKey] ?? const []).length;
     if (nextLen <= prevLen) return;
-    // Slow mode: my optimistic send (and sibling-device sends) land here —
-    // re-derive the cooldown pill from the list, never from send-time state.
+    // My optimistic send and a sibling's both land here, so the cooldown pill is
+    // re-derived from the list rather than from send-time state.
     _recomputeSlowMode();
-    if (_frozenLen != null) return; // frozen — held back + pill
+    if (_frozenLen != null) return;
     if (!_isInAutoScrollZone) {
       _frozenLen = prevLen;
       return;
     }
-    // _scrollToBottom (not the bare jump): it also marks the arrival seen.
+    // Not the bare jump: this also marks the arrival seen.
     _scrollToBottom();
   }
 
   Widget _buildChannelRow(List<ChannelChatMessage> messages, int revIndex,
       Map<String, int> indexById, int? unreadIndex) {
-    // Reversed builder index → chronological.
+    // Map the reversed builder index back to chronological order.
     final index = messages.length - 1 - revIndex;
     final msg = messages[index];
     final prev = index > 0 ? messages[index - 1] : null;
     final profiles = ref.watch(profileProvider);
 
-    // Multi-device: collapse each sender device→master so a person's messages
-    // group as ONE sender and the header shows their name (not a raw device id).
-    // Single-device → identityOf is a no-op.
+    // Grouping collapses each sender to its MASTER, or a person writing from two
+    // devices reads as two people under a raw device id.
     final links = ref.watch(deviceLinkProvider);
     final curSender = links.identityOf(msg.senderId);
 
@@ -2353,10 +2289,6 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     );
   }
 
-  // ─────────────────────────────────────────────────
-  // Action sheet triggers
-  // ─────────────────────────────────────────────────
-
   void _showDmActions(ChatMessage msg, String senderName, String localPeerId) {
     showMobileMessageActions(
       context: context,
@@ -2437,9 +2369,8 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     showMessageProofDialog(
       context,
       MessageProofData(
-        // The channel signature is computed over the sender's MASTER id,
-        // so the proof must verify against the master — resolve device→
-        // master or a multi-device sender's signature reads as invalid.
+        // The send side signs with the MASTER id, so the proof must verify
+        // against the master or a multi-device sender reads as invalid.
         senderPeerId: ref.read(deviceLinkProvider).identityOf(msg.senderId),
         senderDisplayName: senderName,
         text: msg.text,
@@ -2454,7 +2385,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     );
   }
 
-  // ── Action-sheet callback factories (null hides the affordance) ──
+  // Action-sheet callback factories; null hides the affordance.
 
   VoidCallback? _replyActionFor(String? messageId, String senderName,
       String text) =>
@@ -2475,8 +2406,8 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
             }
           : null;
 
-  /// What the sheet's file row offers, mirroring the card (tmp.txt item 1).
-  /// Read as the sheet opens: the sheet is a snapshot, not a live surface.
+  /// What the sheet's file row offers, mirroring the card. Read as the sheet
+  /// opens, because the sheet is a snapshot rather than a live surface.
   FileBarAction _fileActionFor(FileAttachment? attachment) {
     if (attachment == null) return FileBarAction.download;
     return fileBarAction(
@@ -2485,7 +2416,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     );
   }
 
-  /// Cancel the outstanding ask, then let the card fall back to its plain
+  /// Cancels the outstanding ask and lets the card fall back to its plain
   /// Download button without waiting for the next event.
   VoidCallback? _stopWaitingActionFor(FileAttachment? attachment) {
     if (attachment == null) return null;
@@ -2516,9 +2447,9 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
         _saveFile(attachment);
       } else if (attachment.shareRootHash != null &&
           attachment.shareKeyHex != null) {
-        // Share-backed (>34 MB): rejoin the share swarm via the persisted
-        // ref — a direct FileRequest response carries no share_ref and our
-        // own size cap rejects it (issue #41).
+        // Share-backed (>34 MB): rejoin the swarm through the persisted ref,
+        // because a direct FileRequest response carries no share_ref and our own
+        // size cap rejects it (issue #41).
         ref.read(eventStreamProvider.notifier).startManualShareDownload(
               fileId: attachment.fileId,
               rootHash: attachment.shareRootHash!,
@@ -2538,7 +2469,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
   }
 
   VoidCallback? _pinActionFor(String? messageId) {
-    // Gate order preserved: messageId first, THEN the permission read.
+    // messageId first, THEN the permission read.
     if (messageId == null) return null;
     final canPin = ref.read(myPermissionsProvider(widget.serverId!)).whenOrNull(
             data: (perms) => (perms & Permission.manageChannels) != 0) ??
@@ -2565,7 +2496,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
         );
       }
     } catch (_) {
-      if (!mounted || _routeDeactivated) return; // popped route — see field doc
+      if (!mounted || _routeDeactivated) return;
       HollowToast.show(
           context,
           isPinned ? 'Failed to unpin message' : 'Failed to pin message',
@@ -2573,9 +2504,8 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     }
   }
 
-  /// Deletes a message (DM or channel) and toasts on failure — the action
-  /// sheet is already popped by the time the await completes, so the toast
-  /// uses this State's own context.
+  /// Deletes a message and toasts on failure. The action sheet is already popped
+  /// by the time the await completes, so the toast uses this State's context.
   Future<void> _deleteMessage(String messageId) async {
     try {
       if (widget.isDm) {
@@ -2587,13 +2517,13 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
             widget.serverId!, widget.channelId!, messageId);
       }
     } catch (_) {
-      if (!mounted || _routeDeactivated) return; // popped route — see field doc
+      if (!mounted || _routeDeactivated) return;
       HollowToast.show(context, 'Failed to delete message',
           type: HollowToastType.error);
     }
   }
 
-  /// Saves an edit (DM or channel) and toasts on failure.
+  /// Saves an edit and toasts on failure.
   Future<void> _submitEdit(String messageId, String newText) async {
     try {
       if (widget.isDm) {
@@ -2605,7 +2535,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
             widget.serverId!, widget.channelId!, messageId, newText);
       }
     } catch (_) {
-      if (!mounted || _routeDeactivated) return; // popped route — see field doc
+      if (!mounted || _routeDeactivated) return;
       HollowToast.show(context, 'Failed to save changes',
           type: HollowToastType.error);
       return;
@@ -2613,10 +2543,6 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     if (!mounted || _routeDeactivated) return;
     _resyncPreviewAfterEdit(messageId, newText);
   }
-
-  // ─────────────────────────────────────────────────
-  // Search bar (channel only)
-  // ─────────────────────────────────────────────────
 
   Widget _buildSearchBar(HollowTheme hollow) {
     return Container(
@@ -2663,8 +2589,8 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
           ),
           if (_searchResults.isNotEmpty)
             ConstrainedBox(
-              // Size to the space actually left above the keyboard so more
-              // than ~2 results are visible while typing on small phones.
+              // Sized to the space left above the keyboard, or a small phone
+              // shows two results while typing.
               constraints: BoxConstraints(
                 maxHeight: ((MediaQuery.sizeOf(context).height -
                             MediaQuery.viewInsetsOf(context).bottom) *
@@ -2677,7 +2603,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
                 itemBuilder: (_, index) {
                   final msg = _searchResults[index];
                   final profiles = ref.watch(profileProvider);
-                  // Collapse device→master so search results show the person's name.
+                  // Collapse device to master so a result shows the person.
                   final name = displayNameFor(profiles,
                       ref.watch(deviceLinkProvider).identityOf(msg.senderId));
                   final time = DateTime.fromMillisecondsSinceEpoch(
@@ -2688,7 +2614,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
                     child: HollowPressable(
                       subtle: true,
                       onTap: () {
-                        // Index against the DISPLAY (possibly frozen) list —
+                        // Against the DISPLAY list, possibly frozen;
                         // _scrollToMessage converts to the reversed index.
                         final messages = _displayMessages(
                             ref.read(channelChatProvider)[_channelKey] ??
@@ -2752,10 +2678,6 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
       ),
     );
   }
-
-  // ─────────────────────────────────────────────────
-  // Inline edit view
-  // ─────────────────────────────────────────────────
 
   Widget _buildEditView({
     required String originalText,
@@ -2856,10 +2778,6 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
 
 }
 
-// ─────────────────────────────────────────────────
-// Chat header with back button + name (tappable for profile sheet)
-// ─────────────────────────────────────────────────
-
 class _MobileChatHeader extends ConsumerWidget {
   final String? peerId;
   final String? serverId;
@@ -2880,13 +2798,13 @@ class _MobileChatHeader extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final hollow = HollowTheme.of(context);
-    // Watch local nicknames so the DM title rebuilds the moment one is set/cleared
-    // (displayNameFor reads a static cache that doesn't trigger a rebuild on its own).
+    // Watched because displayNameFor reads a static cache that triggers no
+    // rebuild of its own.
     ref.watch(localNicknameProvider);
     final isDm = peerId != null;
 
-    // Saved messages: a DM with our OWN master identity — bookmark header, no
-    // presence line, no call buttons (can't call yourself).
+    // Saved messages is a DM with our OWN master identity: a bookmark header, no
+    // presence line and no call buttons.
     final savedId = ref.watch(savedMessagesPeerIdProvider);
     final isSaved = isDm &&
         savedId != null &&
@@ -2922,7 +2840,8 @@ class _MobileChatHeader extends ConsumerWidget {
     );
   }
 
-  /// Saved-messages bookmark / DM avatar with presence dot; empty for channels.
+  /// The saved-messages bookmark or the DM avatar with its presence dot; empty
+  /// for a channel.
   List<Widget> _leadingAvatar(HollowTheme hollow,
       {required bool isDm, required bool isSaved, required bool isOnline}) {
     if (isSaved) {
@@ -2961,7 +2880,7 @@ class _MobileChatHeader extends ConsumerWidget {
     ];
   }
 
-  /// Title + subtitle column (tappable for the DM profile sheet).
+  /// Title and subtitle column, tappable for the DM profile sheet.
   Widget _titleBlock(BuildContext context, WidgetRef ref, HollowTheme hollow,
       {required bool isDm, required bool isSaved, required bool isOnline}) {
     final profiles = ref.watch(profileProvider);
@@ -2998,7 +2917,6 @@ class _MobileChatHeader extends ConsumerWidget {
                   overflow: TextOverflow.ellipsis,
                 ),
               ),
-              // NSFW badge (channels only), left of the status.
               if (!isDm &&
                   serverId != null &&
                   (ref.watch(serverIsNsfwProvider(serverId!)).valueOrNull ??
@@ -3014,8 +2932,8 @@ class _MobileChatHeader extends ConsumerWidget {
     );
   }
 
-  /// Header subtitle: DM presence line, or the channel's server name (so the
-  /// user knows which server the channel belongs to). Null when neither.
+  /// Header subtitle: the DM presence line, or the channel's server name so it
+  /// is clear which server it belongs to. Null when neither applies.
   Widget? _subtitleText(WidgetRef ref, HollowTheme hollow,
       {required bool isDm, required bool isSaved, required bool isOnline}) {
     if (isDm && !isSaved) {
@@ -3040,20 +2958,19 @@ class _MobileChatHeader extends ConsumerWidget {
     );
   }
 
-  /// Right-edge header actions: DM call/mute buttons, or the channel
-  /// status/members/pins/search cluster.
+  /// Right-edge header actions: the DM call and mute buttons, or the channel
+  /// cluster.
   List<Widget> _trailingActions(
       BuildContext context, WidgetRef ref, HollowTheme hollow,
       {required bool isDm, required bool isSaved}) {
     if (isDm) {
       return [
-        // Can't call yourself — Saved messages hides the call buttons.
+        // Saved messages hides the call buttons: you cannot call yourself.
         if (!isSaved) _DmCallButtons(peerId: peerId!),
         _DmMuteButton(peerId: peerId!),
       ];
     }
     return [
-      // Channel encryption/connection status (Encrypted / Offline).
       if (serverId != null) ...[
         _MobileChannelStatus(serverId: serverId!),
         const SizedBox(width: HollowSpacing.xs),
@@ -3188,7 +3105,8 @@ class _MobileChatHeader extends ConsumerWidget {
                       Divider(color: hollow.border, height: 1),
                   itemBuilder: (_, index) {
                     final msg = pinnedMessages[index]!;
-                    // Collapse device→master so pinned rows show the person's name.
+                    // Collapse device to master so a pinned row shows the
+                    // person.
                     final pinnedMaster = ref
                         .read(deviceLinkProvider)
                         .identityOf(msg.senderId);
@@ -3250,8 +3168,7 @@ class _MobileChatHeader extends ConsumerWidget {
   }
 }
 
-/// Small "NSFW" pill shown in the mobile channel header (mirrors the desktop
-/// channel-header badge).
+/// Small "NSFW" pill for the mobile channel header.
 class _MobileNsfwBadge extends StatelessWidget {
   const _MobileNsfwBadge();
 
@@ -3277,10 +3194,9 @@ class _MobileNsfwBadge extends StatelessWidget {
   }
 }
 
-/// Encrypted / Offline status for the mobile channel header. Mirrors the desktop
-/// `_ChannelConnectionStatus`: a server channel is "Encrypted" when any other
-/// member is online (MLS group broadcast), else Offline (or Custom Network on a
-/// self-hosted relay). Members are master-keyed, so collapse devices→master.
+/// Encrypted or Offline status for the mobile channel header: a server channel
+/// is Encrypted once any other member is online, since they are already inside
+/// the MLS group. Members are master-keyed, so devices collapse to their master.
 class _MobileChannelStatus extends ConsumerWidget {
   final String serverId;
 
@@ -3291,7 +3207,7 @@ class _MobileChannelStatus extends ConsumerWidget {
     final online = ref.watch(onlineIdentitiesProvider);
     final membersAsync = ref.watch(serverMembersProvider(serverId));
     final localPeerId = ref.watch(identityProvider).peerId;
-    // Same rule as desktop: "Offline" describes OUR link, never an empty room.
+    // "Offline" describes OUR link, never an empty room.
     final amOnline = ref.watch(overallConnectionProvider).isOnline;
 
     return membersAsync.when(
@@ -3320,10 +3236,6 @@ class _MobileChannelStatus extends ConsumerWidget {
     );
   }
 }
-
-// ─────────────────────────────────────────────────
-// Input bar (attach + text field + send)
-// ─────────────────────────────────────────────────
 
 class _MobileInputBar extends StatelessWidget {
   final TextEditingController controller;
@@ -3361,8 +3273,8 @@ class _MobileInputBar extends StatelessWidget {
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.end,
         children: [
-          // Single attach button → Photo / File sheet (keeps the row uncrowded
-          // on small screens like the iPhone 13 mini).
+          // One attach button rather than two icons, which crowd the row on a
+          // small phone.
           HollowPressable(
             onTap: onAttach,
             semanticLabel: 'Attach photo or file',
@@ -3391,8 +3303,8 @@ class _MobileInputBar extends StatelessWidget {
                     horizontal: HollowSpacing.md,
                     vertical: HollowSpacing.md,
                   ),
-                  // Emoji lives INSIDE the field (iMessage-style) so the row has
-                  // room for the text field to breathe.
+                  // Inside the field, so the row has room for the text field to
+                  // breathe.
                   suffixIcon: HollowPressable(
                     onTap: onEmoji,
                     semanticLabel: 'Emoji',
@@ -3443,10 +3355,6 @@ class _MobileInputBar extends StatelessWidget {
   }
 }
 
-// ─────────────────────────────────────────────────
-// DM mute toggle button (in header)
-// ─────────────────────────────────────────────────
-
 class _DmMuteButton extends ConsumerWidget {
   final String peerId;
   const _DmMuteButton({required this.peerId});
@@ -3480,10 +3388,6 @@ class _DmMuteButton extends ConsumerWidget {
   }
 }
 
-// ─────────────────────────────────────────────────
-// DM call buttons (voice + video) in header
-// ─────────────────────────────────────────────────
-
 class _DmCallButtons extends ConsumerWidget {
   final String peerId;
   const _DmCallButtons({required this.peerId});
@@ -3498,8 +3402,8 @@ class _DmCallButtons extends ConsumerWidget {
     final canCall = isOnline && !isInCall;
 
     Future<void> startAndOpen({bool withVideo = false}) async {
-      // Starting a DM call while in a server voice channel disconnects the
-      // channel (issue #49) — confirm before doing so.
+      // Starting a DM call disconnects a server voice channel, so it is
+      // confirmed first (issue #49).
       final vc = ref.read(voiceChannelProvider);
       if (vc.isInVoiceChannel) {
         final channelName = vc.currentChannelName ?? 'voice';
@@ -3590,10 +3494,6 @@ class _DmCallButtons extends ConsumerWidget {
   }
 }
 
-// ─────────────────────────────────────────────────
-// Typing indicator bar
-// ─────────────────────────────────────────────────
-
 class _TypingBar extends ConsumerWidget {
   final String contextKey;
 
@@ -3604,8 +3504,8 @@ class _TypingBar extends ConsumerWidget {
     final typingPeers = ref.watch(typingProvider)[contextKey] ?? {};
     if (typingPeers.isEmpty) return const SizedBox.shrink();
 
-    // Collapse device→master + exclude ourselves (sibling devices included) —
-    // see [typingMastersFor] for the Step 9C/C1 self-filter rationale.
+    // Collapses devices to their master and excludes every device of ours; see
+    // [typingMastersFor].
     final masters = typingMastersFor(ref, typingPeers);
     final profiles = ref.watch(profileProvider);
     final names = masters
@@ -3618,9 +3518,7 @@ class _TypingBar extends ConsumerWidget {
   }
 }
 
-// ─────────────────────────────────────────────────
-// Green strip shown cross-server when in a voice channel
-// ─────────────────────────────────────────────────
+// The green strip shown cross-server while in a voice channel.
 
 class _VoiceChannelStatusStrip extends ConsumerWidget {
   const _VoiceChannelStatusStrip();

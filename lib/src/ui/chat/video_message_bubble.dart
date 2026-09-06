@@ -29,40 +29,22 @@ import 'package:hollow/src/ui/components/hollow_pressable.dart';
 
 /// Renders a video attachment inline in a message bubble.
 ///
-/// **Sources of the playable video file:**
-///   - **Vault video** (`attachment.videoThumb != null`) — `attachment.diskPath`
-///     is the local `.webp` thumbnail file (always full-replicated via the image
-///     P2P path). The video bytes live in the vault and are reconstructed on
-///     first play via `vault_download_file`.
-///   - **Direct P2P video** (DM or <6 member server, `videoThumb == null`) —
-///     `attachment.diskPath` is the local video file itself. Each peer also
-///     extracts a local thumbnail to `{file_id}.thumb.webp` next to the video,
-///     so the inline bubble has something to show before play.
+/// Two sources, told apart by `attachment.videoThumb`: a VAULT video whose
+/// `diskPath` is the `.webp` poster and whose bytes are reconstructed on first
+/// play, or a DIRECT P2P video whose `diskPath` is the video itself, with a
+/// thumbnail extracted next to it so the bubble has something to show.
 ///
-/// **States:**
-///   - `_State.thumbnail` — show thumbnail image with center play button + size
-///     badge. Click anywhere → start preparing/playing. Click the fullscreen
-///     button → preparing/playing in a fullscreen overlay.
-///   - `_State.preparing` — vault download / player initialization in flight.
-///     Renders the thumbnail with a centered spinner overlay.
-///   - `_State.playing` — inline `VideoPlayer` at the same dimensions as the
-///     thumbnail (preview-in-place). Auto-fading thin control bar at the bottom
-///     (play/pause + scrub + current/total time + fullscreen + close X).
-///
-/// Single-video-at-a-time enforced via [currentlyPlayingVideoProvider]: when
-/// another bubble starts playing, this one observes the change and pauses.
+/// One video plays at a time, enforced through [currentlyPlayingVideoProvider].
 class VideoMessageBubble extends ConsumerStatefulWidget {
   final FileAttachment attachment;
 
-  /// Manual-download hook (issue #41 carry-over): while the video bytes are
-  /// not local, the center control is a download button that triggers this
-  /// callback — the bubble is the single face for every state (poster →
-  /// download → progress → play), never a separate placeholder widget.
+  /// Manual-download hook (issue #41). The bubble is the single face for every
+  /// state, poster through download and progress to play, never a separate
+  /// placeholder widget.
   final VoidCallback? onDownload;
 
-  /// Why the bytes are not here yet (tmp.txt item 1): the caption under the
-  /// poster, and what the center control does. Defaults to the plain Download
-  /// button, which is what "nothing known" has always meant.
+  /// Why the bytes are not here yet: the caption under the poster and what the
+  /// center control does. Defaults to the plain Download button.
   final FileCardStatus status;
 
   const VideoMessageBubble({
@@ -88,41 +70,33 @@ class _VideoMessageBubbleState extends ConsumerState<VideoMessageBubble> {
   ProviderSubscription<Map<String, FileTransferState>>? _vaultListener;
   bool _isVisible = true;
 
-  /// Disk path of the currently-loaded video (set when entering preparing/
-  /// playing). Stashed so the fullscreen handoff can hand the same path to
-  /// the fullscreen viewer without re-parsing the controller's URI (which
-  /// uses Uri.file() on Windows and would need toFilePath() to round-trip).
+  /// Disk path of the currently-loaded video, stashed so the fullscreen handoff
+  /// need not round-trip the controller's `Uri.file()` back to a path.
   String? _activeVideoPath;
 
-  /// Local thumbnail cache path for direct P2P videos. Lazily populated
-  /// after async extraction completes; null when no extraction has run yet,
-  /// or when the file is a vault thumbnail (already an image on disk).
+  /// Local thumbnail cache path for direct P2P videos. Null until extraction
+  /// completes, and for a vault thumbnail, which is already an image on disk.
   String? _localThumbPath;
   bool _thumbExtractStarted = false;
 
-  /// Envelope-borne poster frame (FileHeader `thumb`, issue #41 carry-over):
-  /// decoded once so the bubble shows a real preview before any video bytes
-  /// are local. The locally-extracted thumbnail (once the file lands on
-  /// disk) supersedes it — that one is full 480p.
+  /// Envelope-borne poster frame (FileHeader `thumb`, issue #41), so the bubble
+  /// shows a real preview before any video bytes are local. The locally
+  /// extracted 480p thumbnail supersedes it.
   Uint8List? _posterBytes;
 
-  /// Intrinsic poster dimensions — the display-aspect fallback when the
-  /// header carried no width/height (pre-0.9.4 sender or failed ffmpeg
-  /// probe). Decoded async from [_posterBytes].
+  /// Intrinsic poster dimensions: the display-aspect fallback when the header
+  /// carried no width or height (old sender, or a failed ffmpeg probe).
   Size? _posterDims;
 
   network_api.VideoThumbRef? get _vthumb => widget.attachment.videoThumb;
 
-  /// Unique key for this bubble in the "currently playing" provider —
-  /// the file_id of the thumbnail message (unique per chat message).
+  /// This bubble's key in the "currently playing" provider.
   String get _playKey => widget.attachment.fileId;
 
   @override
   void initState() {
     super.initState();
-    // Kick off thumbnail extraction for direct P2P videos in the background.
-    // Vault videos already have a thumbnail image at attachment.diskPath, so
-    // we skip them.
+    // Vault videos already have a thumbnail image at attachment.diskPath.
     _maybeExtractLocalThumb();
     _decodePoster();
   }
@@ -130,9 +104,8 @@ class _VideoMessageBubbleState extends ConsumerState<VideoMessageBubble> {
   @override
   void didUpdateWidget(covariant VideoMessageBubble old) {
     super.didUpdateWidget(old);
-    // The diskPath may arrive after a P2P transfer completes (FileCompleted
-    // event causes a reload). Re-attempt extraction if we don't have a
-    // cached thumbnail yet.
+    // The diskPath may arrive only once the transfer completes, so extraction
+    // is retried here.
     if (_localThumbPath == null) {
       _maybeExtractLocalThumb();
     }
@@ -143,8 +116,8 @@ class _VideoMessageBubbleState extends ConsumerState<VideoMessageBubble> {
     }
   }
 
-  /// Decode the header poster: bytes synchronously (tiny base64), intrinsic
-  /// dimensions async — only needed when the attachment carries no w/h.
+  /// Decodes the header poster. The bytes are a tiny base64 blob, so only the
+  /// intrinsic dimensions go async, and only when the attachment has no w/h.
   void _decodePoster() {
     final b64 = widget.attachment.thumbB64;
     if (b64 == null || b64.isEmpty) return;
@@ -192,32 +165,27 @@ class _VideoMessageBubbleState extends ConsumerState<VideoMessageBubble> {
 
     _thumbExtractStarted = true;
 
-    // Sync cache hit?
     final cached = VideoThumbnailService.cachedThumbFor(videoPath);
     if (cached != null) {
       if (mounted) setState(() => _localThumbPath = cached);
       return;
     }
 
-    // Async extraction (file is small, ffmpeg is fast — usually <500ms).
     final extracted = await VideoThumbnailService.ensureCachedThumb(videoPath);
     if (extracted != null && mounted) {
       setState(() => _localThumbPath = extracted);
     }
   }
 
-  // ─── Playback control ────────────────────────────────────────────
-
-  /// Returns the path to a thumbnail image to display, or null if none is
-  /// available (in which case the bubble shows a black placeholder).
+  /// The thumbnail image to display, or null when the bubble must fall back to
+  /// its placeholder.
   String? _resolveThumbnailImagePath() {
-    // Vault video: attachment.diskPath IS the thumbnail .webp.
+    // For a vault video attachment.diskPath IS the thumbnail .webp.
     if (_vthumb != null) {
       final p = widget.attachment.diskPath;
       if (p != null && File(p).existsSync()) return p;
       return null;
     }
-    // Direct P2P video: locally-extracted .thumb.webp sibling.
     return _localThumbPath;
   }
 
@@ -266,9 +234,8 @@ class _VideoMessageBubbleState extends ConsumerState<VideoMessageBubble> {
     await _initController(videoPath);
   }
 
-  /// Returns the disk path of the vault video, fetching from the vault if
-  /// the cache is cold. Blocks (via the file transfer event stream) until
-  /// the reconstruction completes; returns null on failure.
+  /// The disk path of the vault video, fetching it when the cache is cold.
+  /// Waits on the file transfer event stream, and returns null on failure.
   Future<String?> _resolveVaultVideoPath(network_api.VideoThumbRef vthumb) async {
     final serverId = ref.read(selectedServerProvider);
     if (serverId == null) return null;
@@ -285,7 +252,6 @@ class _VideoMessageBubbleState extends ConsumerState<VideoMessageBubble> {
     }
     if (diskPath.isNotEmpty) return diskPath;
 
-    // Async reconstruction in flight — wait for VaultDownloadComplete.
     final completer = Completer<String?>();
     _vaultListener?.close();
     final completeKey = 'vault:${vthumb.cid}';
@@ -315,8 +281,7 @@ class _VideoMessageBubbleState extends ConsumerState<VideoMessageBubble> {
     return result;
   }
 
-  /// Find the share root hash for a file by matching its disk path against
-  /// the share tab entries.
+  /// The share root hash for a file, matched on its disk path.
   String? _findShareRootHash(String diskPath) {
     final shares = ref.read(shareTabProvider);
     for (final s in shares) {
@@ -354,13 +319,10 @@ class _VideoMessageBubbleState extends ConsumerState<VideoMessageBubble> {
     }
   }
 
-  // ─── Build ────────────────────────────────────────────────────────
-
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
 
-    // Pause when another bubble takes the playback slot.
     ref.listen<String?>(currentlyPlayingVideoProvider, (prev, next) {
       if (next != _playKey && _state == _PlaybackState.playing) {
         _disposeController();
@@ -368,7 +330,7 @@ class _VideoMessageBubbleState extends ConsumerState<VideoMessageBubble> {
       }
     });
 
-    // Pause when an audio bubble starts playing.
+    // Audio and video share one playback slot.
     ref.listen<String?>(currentlyPlayingAudioProvider, (prev, next) {
       if (next != null && _state == _PlaybackState.playing) {
         _disposeController();
@@ -411,19 +373,11 @@ class _VideoMessageBubbleState extends ConsumerState<VideoMessageBubble> {
     );
   }
 
-  /// Compute the bubble's display dimensions from the source video's
-  /// pixel dimensions stored in the FileHeader (`attachment.width`/`height`).
+  /// The bubble's display dimensions, from the FileHeader's pixel dimensions so
+  /// image and video bubbles share one source of truth.
   ///
-  /// For images, Rust populates these via `image::load_from_memory` during
-  /// the upload pipeline. For videos (Phase 6.75), Dart pre-extracts the
-  /// dimensions via `VideoThumbnailService.extractVideoThumbnail` and passes
-  /// them through `network_api.sendFile(overrideWidth, overrideHeight)`,
-  /// which lands in the same FileHeader fields. So both image and video
-  /// bubbles can use one source of truth.
-  ///
-  /// Falls back to the header poster's intrinsic aspect (scaled frame,
-  /// aspect-true to the source video), then 16:9, when the attachment
-  /// carries no dimensions (old client / failed ffmpeg probe).
+  /// Falls back to the poster's intrinsic aspect and then to 16:9, for an old
+  /// client or a failed ffmpeg probe that left no dimensions.
   Size _resolveDisplaySize() {
     const maxWidth = 320.0;
     const maxHeight = 260.0;
@@ -448,10 +402,9 @@ class _VideoMessageBubbleState extends ConsumerState<VideoMessageBubble> {
     return const Size(maxWidth, maxWidth * 9 / 16);
   }
 
-  /// Poster/background layer stack shared by the thumbnail and preparing
-  /// states: local extracted thumbnail (full 480p once the bytes are on
-  /// disk) > header poster (≤400 px, arrives with the FileHeader) > a dark
-  /// gradient — never a flat black slab.
+  /// Poster layer shared by the thumbnail and preparing states, in precedence
+  /// order: local extracted thumbnail, header poster, dark gradient. Never a
+  /// flat black slab.
   Widget _posterLayer(String? thumbPath) {
     if (thumbPath != null) {
       return Image.file(
@@ -477,15 +430,12 @@ class _VideoMessageBubbleState extends ConsumerState<VideoMessageBubble> {
     return const _VideoBackdrop();
   }
 
-  // ─── Thumbnail mode ───────────────────────────────────────────────
-
   Widget _buildThumbnail(HollowTheme hollow) {
     final thumbPath = _resolveThumbnailImagePath();
     final canPlay = _canPlay();
 
     // Per-file select: fileTransferProvider replaces its whole map on EVERY
-    // chunk event — an unrelated download used to rebuild every visible
-    // video thumbnail continuously.
+    // chunk event, so an unrelated download rebuilds every visible thumbnail.
     final transfer = ref.watch(
         fileTransferProvider.select((t) => t[widget.attachment.fileId]));
     final isDownloading = transfer != null &&
@@ -495,21 +445,19 @@ class _VideoMessageBubbleState extends ConsumerState<VideoMessageBubble> {
     final progress = isDownloading ? transfer.progress : 0.0;
     final control = widget.status.control;
     // Why the bytes are missing, said over the poster instead of behind an
-    // inert button (tmp.txt item 1). "No seeders" folds into it: a share with
-    // an empty swarm is one more peer we are waiting for.
+    // inert button. A share with an empty swarm is one more peer to wait for.
     final blocked = !canPlay &&
         !isDownloading &&
         widget.status.caption != null &&
         control != FileCardControl.download;
-    // No local bytes, nothing in flight → the center control is a download
-    // button (issue #41 carry-over: undownloaded videos used to render an
-    // inert play button over a black slab).
+    // No local bytes and nothing in flight makes the center control a download
+    // button rather than an inert play button (issue #41).
     final showDownload = !canPlay &&
         !isDownloading &&
         widget.onDownload != null &&
         (control == FileCardControl.download ||
             control == FileCardControl.retry);
-    // Show "Keep & Seed" if the file lives in vault_cache/ (cached channel download).
+    // "Keep & Seed" only applies to a cached channel download in vault_cache/.
     final resolvedDiskPath = transfer?.diskPath ?? widget.attachment.diskPath;
     final isInVaultCache = resolvedDiskPath != null &&
         resolvedDiskPath.contains('vault_cache');
@@ -520,8 +468,8 @@ class _VideoMessageBubbleState extends ConsumerState<VideoMessageBubble> {
     final tapAction = canPlay
         ? _onPlayTapped
         : (showDownload ? () => widget.onDownload!() : null);
-    // A surface that takes no taps must not be announced as a button, and
-    // must not offer "Download" to a screen reader either.
+    // A surface that takes no taps must not be announced as a button, nor offer
+    // "Download" to a screen reader.
     final semanticLabel = canPlay
         ? 'Play ${widget.attachment.fileName}'
         : (showDownload ? 'Download ${widget.attachment.fileName}' : null);
@@ -576,10 +524,8 @@ class _VideoMessageBubbleState extends ConsumerState<VideoMessageBubble> {
                 ),
               )
             else if (isDownloading && !canPlay)
-              // Bytes in flight and not yet streamable — progress ring in the
-              // same circle the play/download button occupies. (Sequential
-              // share downloads become playable mid-flight and show the play
-              // button + bottom progress bar instead.)
+              // The progress ring takes the same circle the play and download
+              // buttons occupy, so the swap never reads as a different widget.
               Center(
                 child: _CenterCircle(
                   child: Padding(
@@ -594,7 +540,6 @@ class _VideoMessageBubbleState extends ConsumerState<VideoMessageBubble> {
                 ),
               )
             else
-              // Play when the bytes are local/streamable, download otherwise.
               Center(
                 child: _CenterCircle(
                   child: Icon(
@@ -604,7 +549,6 @@ class _VideoMessageBubbleState extends ConsumerState<VideoMessageBubble> {
                   ),
                 ),
               ),
-            // Thin progress bar at bottom during share download.
             if (isDownloading)
               Positioned(
                 left: 0,
@@ -644,7 +588,6 @@ class _VideoMessageBubbleState extends ConsumerState<VideoMessageBubble> {
                 hollow: hollow,
               ),
             ),
-            // "Keep & Seed" button for completed share-backed videos in vault_cache.
             if (showKeepAndSeed && _state == _PlaybackState.thumbnail)
               Positioned(
                 right: HollowSpacing.sm,
@@ -662,13 +605,11 @@ class _VideoMessageBubbleState extends ConsumerState<VideoMessageBubble> {
     );
   }
 
-  // ─── Preparing mode ───────────────────────────────────────────────
-
   Widget _buildPreparing(HollowTheme hollow) {
     final thumbPath = _resolveThumbnailImagePath();
 
-    // Watch ONLY the derived phase string — per-chunk map replacements in
-    // fileTransferProvider then no-op unless the phase text itself changes.
+    // Watch ONLY the derived phase string, so a per-chunk map replacement in
+    // fileTransferProvider no-ops unless the text itself changes.
     final vthumb = _vthumb;
     final phase = ref.watch(fileTransferProvider.select((t) {
       if (vthumb == null) return 'Loading...';
@@ -710,8 +651,6 @@ class _VideoMessageBubbleState extends ConsumerState<VideoMessageBubble> {
     );
   }
 
-  // ─── Fullscreen launcher ──────────────────────────────────────────
-
   void _showFullscreenPlayer(BuildContext context, String videoPath) {
     showHollowDialog(
       context: context,
@@ -720,23 +659,17 @@ class _VideoMessageBubbleState extends ConsumerState<VideoMessageBubble> {
   }
 }
 
-// ════ Inline player widget (preview-in-place) ════════════════════════════
-
-/// Stateful inline player wrapper. Owns the auto-fade timer for the control
-/// bar, and rebuilds when the controller's value changes (so the scrub bar
-/// and timestamp stay in sync).
+/// Inline player wrapper owning the control bar's auto-fade timer.
 ///
-/// The [controller] is owned by the PARENT — this widget never disposes it.
-/// Shared with [LinkPreviewCard], whose social-post cards play a direct
-/// mp4/webm the same way a file video plays (issue #45), so both surfaces
-/// get the same controls and the same auto-fade behaviour instead of a
-/// second half-built player.
+/// The [controller] belongs to the PARENT: this widget never disposes it.
+/// Shared with [LinkPreviewCard] (issue #45) so both surfaces get the same
+/// controls rather than a second half-built player.
 class InlineVideoPlayer extends StatefulWidget {
   final VideoPlayerController controller;
   final HollowTheme hollow;
 
-  /// Fullscreen handoff. Cards pass null: their source is a remote URL, and
-  /// the fullscreen viewer takes a disk path.
+  /// Fullscreen handoff. Cards pass null, because their source is a remote URL
+  /// and the fullscreen viewer takes a disk path.
   final VoidCallback? onFullscreen;
 
   const InlineVideoPlayer({
@@ -823,7 +756,6 @@ class InlineVideoPlayerState extends State<InlineVideoPlayer> {
         child: Stack(
           fit: StackFit.expand,
           children: [
-            // The actual video, fit-contained inside the bubble area.
             Container(
               color: Colors.black,
               child: Center(
@@ -833,7 +765,6 @@ class InlineVideoPlayerState extends State<InlineVideoPlayer> {
                 ),
               ),
             ),
-            // Auto-fading control bar at the bottom.
             Positioned(
               left: 0,
               right: 0,
@@ -848,8 +779,8 @@ class InlineVideoPlayerState extends State<InlineVideoPlayer> {
                     hollow: hollow,
                     onPlayPause: _togglePlayPause,
                     onFullscreen: widget.onFullscreen,
-                    // No close button inline — the user can just leave the
-                    // video paused or scroll away. Close X is fullscreen-only.
+                    // Close is fullscreen-only: inline, scrolling away is the
+                    // same thing.
                   ),
                 ),
               ),
@@ -861,14 +792,12 @@ class InlineVideoPlayerState extends State<InlineVideoPlayer> {
   }
 }
 
-// ════ Shared control bar (used by inline + fullscreen players) ═══════════
-
 class _ControlBar extends StatelessWidget {
   final VideoPlayerController controller;
   final HollowTheme hollow;
   final VoidCallback onPlayPause;
-  /// Null hides the button entirely — a link-preview card has no disk path
-  /// to hand the fullscreen viewer.
+  /// Null hides the button: a link-preview card has no disk path to hand the
+  /// fullscreen viewer.
   final VoidCallback? onFullscreen;
   final bool isFullscreen;
 
@@ -907,7 +836,6 @@ class _ControlBar extends StatelessWidget {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          // Scrub bar.
           SliderTheme(
             data: SliderTheme.of(context).copyWith(
               trackHeight: 3,
@@ -932,7 +860,6 @@ class _ControlBar extends StatelessWidget {
               },
             ),
           ),
-          // Bottom row: play/pause, time, spacer, fullscreen, close.
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.xs),
             child: Row(
@@ -1003,11 +930,7 @@ class _IconBtn extends StatelessWidget {
   }
 }
 
-// ════ Fullscreen video viewer ═════════════════════════════════════════════
-
-/// Fullscreen video viewer launched via showHollowDialog. Owns its own
-/// VideoPlayerController initialized from the supplied videoPath. Click
-/// outside the player area or the close button to dismiss.
+/// Fullscreen video viewer. Owns its own controller, unlike [InlineVideoPlayer].
 class _FullscreenVideoView extends StatefulWidget {
   final String videoPath;
 
@@ -1095,13 +1018,12 @@ class _FullscreenVideoViewState extends State<_FullscreenVideoView> {
     final hollow = HollowTheme.of(context);
     final c = _controller;
 
-    // Wrap in Material so Text widgets (timer, etc.) inherit a proper
-    // DefaultTextStyle and don't render with the debug yellow underline.
+    // Material so Text widgets inherit a DefaultTextStyle and skip the debug
+    // yellow underline.
     return Material(
       type: MaterialType.transparency,
       child: GestureDetector(
         behavior: HitTestBehavior.opaque,
-        // Click on the dim background to dismiss.
         onTap: () => Navigator.of(context).pop(),
         child: Center(
         child: c == null || !c.value.isInitialized
@@ -1121,7 +1043,7 @@ class _FullscreenVideoViewState extends State<_FullscreenVideoView> {
                 },
                 onHover: (_) => _showControlsAndReschedule(),
                 child: GestureDetector(
-                  // Clicks INSIDE the player area should NOT dismiss.
+                  // Clicks INSIDE the player area must not dismiss.
                   behavior: HitTestBehavior.opaque,
                   onTap: _togglePlayPause,
                   child: Padding(
@@ -1137,7 +1059,6 @@ class _FullscreenVideoViewState extends State<_FullscreenVideoView> {
                               color: Colors.black,
                               child: VideoPlayer(c),
                             ),
-                            // Auto-fading control bar.
                             Positioned(
                               left: 0,
                               right: 0,
@@ -1169,8 +1090,6 @@ class _FullscreenVideoViewState extends State<_FullscreenVideoView> {
     );
   }
 }
-
-// ════ Keep & Seed toggle ═════════════════════════════════════════════════
 
 class _KeepAndSeedButton extends ConsumerStatefulWidget {
   final String rootHash;
@@ -1273,11 +1192,8 @@ class _KeepAndSeedButtonState extends ConsumerState<_KeepAndSeedButton> {
   }
 }
 
-// ════ Helpers ═════════════════════════════════════════════════════════════
-
-/// The single 64 px scrim circle every center control (play / download /
-/// progress ring) lives in — one shape across all bubble states, so the
-/// control swap never reads as a different widget.
+/// The single 64 px scrim circle every center control lives in, so a control
+/// swap never reads as a different widget.
 class _CenterCircle extends StatelessWidget {
   final Widget child;
 
@@ -1301,9 +1217,8 @@ class _CenterCircle extends StatelessWidget {
   }
 }
 
-/// Background for a video bubble with no poster available (old sender, no
-/// ffmpeg): a subtle dark gradient instead of a flat black slab. Kept dark
-/// in both themes — the white-on-scrim center controls need the contrast.
+/// Background for a video bubble with no poster. Dark in both themes, because
+/// the white-on-scrim center controls need the contrast.
 class _VideoBackdrop extends StatelessWidget {
   const _VideoBackdrop();
 

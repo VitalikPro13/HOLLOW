@@ -1,10 +1,10 @@
 //! Conference FFI — Zoom-style rooms with an MLS-gated waiting room.
 //! Design doc: `reports/CONFERENCES_PLAN.md`; node logic in `node/conference.rs`.
 //!
-//! Room CRUD talks to the long-lived MessageStore (rooms are host-local
-//! objects); meeting lifecycle rides NodeCommands into the swarm loop. The
-//! media path is the existing voice-channel FFI called with the virtual
-//! server id `conf:{conf_id}` and channel `"main"` — no new media plumbing.
+//! Room CRUD talks to the long-lived MessageStore, since rooms are host-local objects,
+//! while meeting lifecycle rides NodeCommands into the swarm loop. The media path is
+//! the existing voice-channel FFI under the virtual server id `conf:{conf_id}`, so
+//! there is no new media plumbing.
 
 use flutter_rust_bridge::frb;
 
@@ -41,8 +41,8 @@ fn send_command(cmd: node::NodeCommand) -> Result<(), String> {
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
-    // Release the global node mutex BEFORE the (possibly waiting) send —
-    // holding it across block_on(send) serializes all other FFI calls.
+    // Drop the mutex before the send: holding it across block_on(send) serializes
+    // every other FFI call.
     drop(guard);
     get_runtime()
         .block_on(cmd_tx.send(cmd))
@@ -51,10 +51,9 @@ fn send_command(cmd: node::NodeCommand) -> Result<(), String> {
 
 /// Create or update a conference room.
 ///
-/// `conf_id: None` creates a new room with a random unguessable id (the link
-/// capability). `access_code` follows the profile COALESCE convention:
-/// `None` = keep the existing code, `Some("")` = clear it, `Some(code)` = set
-/// (stored as a conf-scoped hash, never plaintext).
+/// `conf_id: None` creates a room with a random unguessable id, which IS the link
+/// capability. `access_code` follows the profile convention: `None` keeps the current
+/// code, `Some("")` clears it, `Some(code)` sets it (stored as a conf-scoped hash).
 #[frb]
 pub fn conference_upsert(
     conf_id: Option<String>,

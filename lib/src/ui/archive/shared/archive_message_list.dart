@@ -83,9 +83,8 @@ Widget _archiveSearchRow(WidgetRef ref, List<int> matchIndices, int matchIdx,
   );
 }
 
-/// Search bar rendered OUTSIDE the list (mobile viewers keep it above the
-/// loading/empty states). Computes matches over [texts] and scrolls the bound
-/// list via [controller].
+/// Search bar rendered OUTSIDE the list, so mobile viewers can keep it above
+/// the loading and empty states.
 class ArchiveListSearchBar extends ConsumerWidget {
   final List<String> texts;
   final ArchiveMessageListController controller;
@@ -107,8 +106,6 @@ class ArchiveListSearchBar extends ConsumerWidget {
   }
 }
 
-// ── Public DM / channel lists ───────────────────────────────────
-
 /// Read-only DM archive message list (MessageBubble rows, isMe grouping).
 class ArchiveDmMessageList extends ConsumerWidget {
   final List<ChatMessage> messages;
@@ -116,8 +113,7 @@ class ArchiveDmMessageList extends ConsumerWidget {
   final String localPeerId;
   final Map<String, List<ArchiveEditEntry>> editsMap;
   /// Proof context for the edit-history indicator. Direction- and
-  /// source-dependent (live: isMe ? peerId : localPeerId; imported:
-  /// exporter-relative) — always computed at call sites.
+  /// source-dependent, so it is always computed at the call site.
   final String Function(ChatMessage msg) proofContextFor;
   final String proofMsgType;
   final ArchiveActionWrapper<ChatMessage> actionWrapper;
@@ -280,8 +276,6 @@ class ArchiveChannelMessageList extends ConsumerWidget {
   }
 }
 
-// ── Shared core ─────────────────────────────────────────────────
-
 class _ArchiveMessageListCore<T> extends ConsumerStatefulWidget {
   final List<T> messages;
   final DateTime Function(T msg) timestampOf;
@@ -414,10 +408,8 @@ class _ArchiveMessageListCoreState<T>
       );
     }
 
-    // Issue #35: the same scaled-viewport selection bug the live panes hit —
-    // wrapping the SelectionArea around a scrolling list makes a click jump
-    // the viewport and an edge drag never stop. See
-    // [selectionMustBeScopedToRows].
+    // Issue #35: the same scaled-viewport selection bug the live panes hit,
+    // where a click jumps the viewport and an edge drag never stops.
     final perRowSelection =
         widget.desktopChrome && selectionMustBeScopedToRows(context);
 
@@ -451,13 +443,11 @@ class _ArchiveMessageListCoreState<T>
           Widget bubble = widget.bubbleBuilder(msg, showHeader, reply?.$1,
               reply?.$2, _highlightIndex == index || isCurrentMatch);
 
-          // Deleted message overlay.
           final hiddenAt = widget.hiddenAtOf(msg);
           if (hiddenAt != null) {
             bubble = ArchiveDeletedOverlay(hiddenAt: hiddenAt, child: bubble);
           }
 
-          // Edit history indicator.
           final messageId = widget.messageIdOf(msg);
           final msgEdits = messageId != null ? widget.editsMap[messageId] : null;
           if (msgEdits != null && msgEdits.isNotEmpty) {
@@ -476,7 +466,6 @@ class _ArchiveMessageListCoreState<T>
             );
           }
 
-          // Platform action wrapper (hover actions / long-press).
           bubble = widget.actionWrapper(context, msg, bubble);
 
           final row = Column(

@@ -8,16 +8,15 @@ import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 
 /// Writes a tiny shared "push hints" cache into the iOS App Group container so
-/// the Notification Service Extension can show a friend's real name + avatar on
-/// a push banner (the extension runs in a separate sandbox and cannot read the
-/// app's private encrypted DB).
+/// the Notification Service Extension can show a friend's real name and avatar
+/// on a push banner: the extension runs in a separate sandbox and cannot read
+/// the app's private encrypted DB.
 ///
-/// The cache is `{ peerId: {name, avatar} }` in `push_hints/hints.json` plus one
-/// `push_hints/<peerId>.img` per friend with an avatar. Plaintext names/avatars
-/// the user already displays — contained to the app-private group container,
-/// never iCloud-synced, never sent to Apple. iOS-only; a no-op everywhere else.
-///
-/// Tier B (decrypted message text/image in the banner) is deliberately NOT here.
+/// `{ peerId: {name, avatar} }` in `push_hints/hints.json`, plus one
+/// `push_hints/<peerId>.img` per friend with an avatar. Plaintext the user
+/// already displays, contained to the app-private group container, never
+/// iCloud-synced. iOS-only, a no-op everywhere else. Tier B, decrypted message
+/// text or images in the banner, is deliberately NOT here.
 class PushHintsCache {
   PushHintsCache._();
 
@@ -26,8 +25,8 @@ class PushHintsCache {
   /// Coalesce bursts of profile/friend events into one cache write.
   static Timer? _debounce;
 
-  /// Resolve the iOS App Group container path via the native MethodChannel.
-  /// Returns null on non-iOS or if the App Group isn't configured.
+  /// Resolves the iOS App Group container path via the native MethodChannel.
+  /// Null on non-iOS or when the App Group is not configured.
   static Future<String?> _appGroupDir() async {
     if (!Platform.isIOS) return null;
     try {
@@ -38,9 +37,9 @@ class PushHintsCache {
     }
   }
 
-  /// Schedule a debounced rewrite of the hints cache from the given friend ids.
-  /// Safe to call frequently (profile updates, friend-list changes); the actual
-  /// disk write happens at most once per ~1.5s.
+  /// Schedules a debounced rewrite of the hints cache from the given friend
+  /// ids. Safe to call frequently; the disk write happens at most once per
+  /// ~1.5s.
   static void scheduleWrite(Iterable<String> friendPeerIds) {
     if (!Platform.isIOS) return;
     final ids = friendPeerIds.toList(growable: false);
@@ -61,12 +60,10 @@ class PushHintsCache {
     if (!base.existsSync()) base.createSync(recursive: true);
 
     // The friend ids are MASTER ids, but a push `sender` is the relay-attested
-    // DEVICE id of the sending device (a keystone-rotated / multi-device friend
-    // sends from a device id ≠ its master). The NSE does a raw `map[sender]`
-    // lookup (it has no resolver), so we must additionally key each friend's hint
-    // under EVERY device id that resolves to that friend's master — otherwise a
-    // device-id sender misses and the banner degrades to a content-free
-    // "New message" with no name/avatar/fetch. Build master → all device ids.
+    // DEVICE id of the sending device. The NSE does a raw `map[sender]` lookup
+    // and has no resolver, so each friend's hint is additionally keyed under
+    // EVERY device id resolving to that master; otherwise a device-id sender
+    // misses and the banner degrades to a content-free "New message".
     final aliasesFor = <String, List<String>>{};
     try {
       for (final link in await network_api.getDeviceLinks()) {
@@ -90,8 +87,8 @@ class PushHintsCache {
         String? avatarPath;
         final bytes = await storage_api.getAvatar(peerId: peerId);
         if (bytes != null && bytes.isNotEmpty) {
-          // Avatar file is keyed by the MASTER id (one per person); every alias
-          // entry below points at this same file.
+          // The avatar file is keyed by the MASTER id, one per person, and
+          // every alias entry below points at this same file.
           final f = File('${base.path}/$peerId.img');
           await f.writeAsBytes(bytes, flush: true);
           avatarPath = f.path;
@@ -103,8 +100,8 @@ class PushHintsCache {
             'name': ?name,
             'avatar': ?avatarPath,
           };
-          // Key under the master AND every known device id of this friend, so
-          // `map[sender]` in the NSE hits regardless of which device sent it.
+          // Keyed under the master AND every known device id of this friend,
+          // so `map[sender]` in the NSE hits whichever device sent it.
           map[peerId] = entry;
           for (final deviceId in aliasesFor[peerId] ?? const <String>[]) {
             map[deviceId] = entry;

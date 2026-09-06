@@ -5,14 +5,11 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/ui/components/hollow_tooltip.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-/// The support glyph next to a name (design 5.6): a fixed 14 px box after
-/// the display name on chat rows and member lists, the way a sub badge sits
-/// next to a chatter. On by default, the holder can switch it off (`badge`
-/// on their credential).
+/// The support glyph after a display name on chat rows and member lists. On by
+/// default; the holder can switch it off through `badge` on their credential.
 ///
-/// Zero layout cost: when nothing is lit this is a shrunk box, and when
-/// something is it is one icon in a fixed box, no per-row work beyond
-/// painting it. Never on voice or call surfaces (the frame rules).
+/// Zero layout cost either way, and never on voice or call surfaces, which is
+/// the same rule the avatar frames follow.
 class SupportNameGlyph extends ConsumerWidget {
   final String peerId;
 
@@ -45,12 +42,10 @@ class SupportNameGlyph extends ConsumerWidget {
   }
 }
 
-/// The ONE support badge on a profile card, in the band under the banner
-/// before the integration chips. Every credential the profile carries is
-/// folded into it: the compact card shows the icon alone (a count after it
-/// when there is more than one), the full profile spells the artist out, and
-/// the tooltip lists every piece on both. Monochrome in the accent text
-/// colour so it never competes with a role colour.
+/// The ONE support badge on a profile card, folding in every credential the
+/// profile carries: the compact card shows the icon and a count, the full one
+/// spells the artist out, and the tooltip lists every piece on both. Monochrome
+/// so it never competes with a role colour.
 class SupportMarksChip extends ConsumerWidget {
   final String peerId;
   final bool compact;
@@ -73,9 +68,8 @@ class SupportMarksChip extends ConsumerWidget {
         if (info.artist != null) info.artist!,
     };
 
-    // The label the full card carries. The compact card carries only the
-    // count, because a 300 px card has no room for a sentence beside the
-    // avatar's overhang.
+    // The compact card carries only the count: 300 px has no room for a
+    // sentence beside the avatar's overhang.
     final String label;
     if (compact) {
       label = n > 1 ? '×$n' : '';

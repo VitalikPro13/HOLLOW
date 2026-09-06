@@ -2,11 +2,8 @@ import 'dart:async';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-/// Tracks who is typing where. Ephemeral — no persistence.
-///
-/// State: Map of context key to Set of peer IDs where key is:
-/// - For DMs: the peer ID
-/// - For channels: "serverId:channelId"
+/// Tracks who is typing where. Ephemeral, no persistence. Keyed by the DM
+/// peer id, or "serverId:channelId" for a channel.
 class TypingNotifier extends Notifier<Map<String, Set<String>>> {
   final Map<String, Map<String, Timer>> _timers = {};
 
@@ -28,15 +25,12 @@ class TypingNotifier extends Notifier<Map<String, Set<String>>> {
   /// Mark a peer as typing in a context (DM peer ID or "serverId:channelId").
   /// Auto-expires after 5 seconds.
   void setTyping(String key, String peerId) {
-    // Cancel existing timer for this peer in this context.
     _timers[key]?[peerId]?.cancel();
 
-    // Add to state.
     final updated = Map<String, Set<String>>.from(state);
     updated[key] = {...(updated[key] ?? {}), peerId};
     state = updated;
 
-    // Set expiry timer (5 seconds).
     _timers.putIfAbsent(key, () => {});
     _timers[key]![peerId] = Timer(const Duration(seconds: 5), () {
       clearTyping(key, peerId);

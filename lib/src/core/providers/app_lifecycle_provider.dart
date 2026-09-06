@@ -1,15 +1,11 @@
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-/// Current app lifecycle state (mobile). Fed from the shell's
-/// `didChangeAppLifecycleState`. Used to decide where a freshly-received message
-/// should surface:
-/// - **resumed** → the in-app banner (the user is looking at the app).
-/// - **paused / inactive / hidden** → a real OS notification, because in-app
-///   banners can't show while the app is backgrounded (the live WS node is still
-///   connected, so we DO receive the message — we just can't draw on screen).
-///
-/// Defaults to `resumed` so desktop and pre-init mobile behave as "foreground".
+/// Current app lifecycle state (mobile), fed from the shell's
+/// `didChangeAppLifecycleState`. It decides where a freshly-received message
+/// surfaces: the in-app banner when resumed, a real OS notification otherwise,
+/// because in-app banners can't draw while backgrounded even though the WS
+/// node is still connected. Defaults to `resumed`.
 final appLifecycleProvider =
     StateProvider<AppLifecycleState>((ref) => AppLifecycleState.resumed);
 

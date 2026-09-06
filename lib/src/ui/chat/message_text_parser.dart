@@ -4,33 +4,17 @@ import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/chat/emote_image.dart';
 import 'package:url_launcher/url_launcher.dart';
 
-/// Parses message text with lightweight markup into styled spans.
+/// Parses message text with lightweight markup (bold, italic, strikethrough,
+/// inline code, code blocks, spoilers, mentions, links) into styled spans. No
+/// headings, images or HTML.
 ///
-/// Supported:
-/// - **bold** or __bold__
-/// - *italic* or _italic_
-/// - ~~strikethrough~~
-/// - `inline code`
-/// - ```code blocks``` (multi-line)
-/// - ||spoiler|| (tap to reveal)
-/// - http(s):// and hollow:// URLs — clickable, accent-colored, underlined
-///
-/// URL matching happens BEFORE marker parsing so that URLs containing
-/// underscores or asterisks (e.g. `https://en.wikipedia.org/wiki/Rick_Astley`)
-/// don't get mis-parsed as italic/bold markers.
-///
-/// No headings, images, or HTML.
-
-// ---------------------------------------------------------------------------
-// Static compiled regexes (avoid re-creation per build)
-// ---------------------------------------------------------------------------
+/// URLs match BEFORE markers, so a URL carrying `_` or `*` is not mis-parsed as
+/// italic or bold.
 
 final _inlineUrlRegex = RegExp(r'(?:https?|hollow)://[^\s<>"' "'" r')\]}]+');
 final _codeBlockPattern = RegExp(r'```(\w*)\n?([\s\S]*?)```');
 
-// ---------------------------------------------------------------------------
-// Intermediate token representation — safe to cache (no widgets / closures)
-// ---------------------------------------------------------------------------
+// Safe to cache: no widgets and no closures.
 
 enum _TokenKind {
   plain,
@@ -49,12 +33,11 @@ enum _TokenKind {
 class _Token {
   final _TokenKind kind;
   final String text;
-  final List<_Token>? children; // for nested markup (bold > italic, etc.)
+  final List<_Token>? children;
   final String? extra; // customEmote: the content hash
 
-  /// asset: the token already starts / ends its own line (ignoring horizontal
-  /// whitespace), so the block render needs no synthetic break on that side.
-  /// Always true for every other kind — they never insert breaks.
+  /// asset: the token already starts or ends its own line, so the block render
+  /// needs no synthetic break on that side. Always true for other kinds.
   final bool atLineStart;
   final bool atLineEnd;
 
@@ -62,22 +45,18 @@ class _Token {
       [this.children, this.extra, this.atLineStart = true, this.atLineEnd = true]);
 }
 
-// ---------------------------------------------------------------------------
-// LRU token cache — avoids re-parsing identical message text every rebuild
-// ---------------------------------------------------------------------------
+// LRU cache, so identical message text is not re-parsed every rebuild.
 
 const _cacheMaxSize = 200;
 
-/// Cache key: combines the raw text with the memberNames hash so that the
-/// same message rendered in two different servers (different member lists)
-/// gets separate entries.
+/// Keyed on the text plus the memberNames hash, so the same message in two
+/// servers with different member lists gets separate entries.
 final _tokenCache = <int, List<_Token>>{};
 
 int _cacheKey(String text, Set<String>? memberNames) {
-  // Use a quick hash combining text identity + memberNames content.
   var h = text.hashCode;
   if (memberNames != null && memberNames.isNotEmpty) {
-    // Sort-independent: XOR of individual hashes.
+    // Sort-independent, so member order cannot change the key.
     var mh = memberNames.length;
     for (final n in memberNames) {
       mh ^= n.hashCode;
@@ -91,7 +70,6 @@ List<_Token> _cachedTokenize(String text, {Set<String>? memberNames}) {
   final key = _cacheKey(text, memberNames);
   final existing = _tokenCache[key];
   if (existing != null) {
-    // Move to end (most-recently-used).
     _tokenCache.remove(key);
     _tokenCache[key] = existing;
     return existing;
@@ -103,10 +81,6 @@ List<_Token> _cachedTokenize(String text, {Set<String>? memberNames}) {
   }
   return tokens;
 }
-
-// ---------------------------------------------------------------------------
-// Tokenizer — pure string parsing, produces _Token tree
-// ---------------------------------------------------------------------------
 
 /// One successfully matched token plus the index just past its markup.
 class _TokenMatch {
@@ -163,9 +137,7 @@ _TokenMatch? _matchTokenAt(
       _matchCustomEmote(text, i) ??
       _matchAssetToken(text, i) ??
       _matchMention(text, i, memberNames) ??
-      // --- **bold** ---
       _matchDoubleMarker(text, i, '**', _TokenKind.bold, depth) ??
-      // --- ~~strikethrough~~ ---
       _matchDoubleMarker(text, i, '~~', _TokenKind.strikethrough, depth) ??
       _matchSpoiler(text, i) ??
       _matchInlineCode(text, i) ??
@@ -173,7 +145,6 @@ _TokenMatch? _matchTokenAt(
       _matchUnderscoreItalic(text, i, depth);
 }
 
-// --- URL ---
 _TokenMatch? _matchUrl(String text, int i) {
   if ((text[i] == 'h' || text[i] == 'H') && _looksLikeUrlStart(text, i)) {
     final match = _inlineUrlRegex.matchAsPrefix(text, i);
@@ -184,7 +155,7 @@ _TokenMatch? _matchUrl(String text, int i) {
   return null;
 }
 
-// --- [e:name:hash] custom emote ---
+// Token form: [e:name:hash].
 _TokenMatch? _matchCustomEmote(String text, int i) {
   if (text[i] == '[') {
     final match = emoteTokenRegex.matchAsPrefix(text, i);
@@ -203,22 +174,16 @@ _TokenMatch? _matchCustomEmote(String text, int i) {
   return null;
 }
 
-/// `[a:kind:hash:w:h]` — sticker/GIF token. ALWAYS renders as a block at the
-/// chat media box (see [assetChatBox]); text sharing the line becomes a
-/// caption above/below it rather than shrinking the media to two
-/// line-heights, matching how image/video attachments carry a caption.
-/// Horizontal whitespace on either side does not count as "sharing the line".
-/// Tokens with out-of-bound dims fail [parseAssetToken] and fall through to
-/// plain text (same as an old client would render).
+/// `[a:kind:hash:w:h]`, the sticker/GIF token. ALWAYS renders as a block at the
+/// chat media box, so text sharing the line becomes a caption above or below it
+/// rather than shrinking the media. A token with out-of-bound dims fails
+/// [parseAssetToken] and falls through to plain text, as an old client renders
+/// it.
 ///
-/// ONE STICKER PER MESSAGE (issue #36): stickers no longer absorb their
-/// horizontal neighbours into a shared-height run. Every asset token is its
-/// own full-size block, so several in one message stack at natural size
-/// instead of shrinking to fit — which is all a pre-0.9.3 client's mosaic
-/// degrades to, and nothing sent since is capable of producing one. Mosaics
-/// live on VERTICALLY, across consecutive sticker-only messages
-/// ([isStickerOnlyMessage] + `stickerTilingFor`), which is the form people
-/// actually use.
+/// One block asset per message (issue #36): each token is its own full-size
+/// block, never a shared-height run. Mosaics live on VERTICALLY, across
+/// consecutive sticker-only messages ([isStickerOnlyMessage] +
+/// `stickerTilingFor`).
 _TokenMatch? _matchAssetToken(String text, int i) {
   if (text[i] != '[') return null;
   final match = assetTokenRegex.matchAsPrefix(text, i);
@@ -257,25 +222,18 @@ List<ChatAsset> parseAssetTokens(String source) {
   return out;
 }
 
-/// How many well-formed BLOCK ASSET tokens [source] carries — stickers and
-/// GIFs together, since both draw as a block and the send guard caps their
-/// combined count at one (issue #36). Counted over the expanded wire text, so
-/// a hand-pasted raw token is caught the same as a picked one.
+/// How many well-formed BLOCK ASSET tokens [source] carries, stickers and GIFs
+/// together, since the send guard caps their combined count at one (issue #36).
+/// Count over the EXPANDED wire text, so a hand-pasted token is caught too.
 int countBlockAssetTokens(String source) => parseAssetTokens(source).length;
 
-/// The block assets of a message that is NOTHING BUT block assets, or null if
-/// there is any real text alongside them.
+/// The block assets of a message that is NOTHING BUT block assets, or null when
+/// real text sits alongside them.
 ///
-/// This is the render fast-path, and it is what makes a vertical mosaic
-/// seamless: `Text.rich` gives the line holding a WidgetSpan the font's own
-/// ascent and descent, so a 160px sticker sits inside a ~165px line box
-/// (measured: 3.6px above, 1.4px below). Two tiled messages then land a
-/// hairline apart no matter how much padding is zeroed. A message with no
-/// text has no reason to be a paragraph at all.
-///
-/// Broader than [isStickerOnlyMessage] on purpose: that one decides TILING,
-/// which GIFs must never join, while this only decides how to lay a message
-/// out.
+/// The render fast-path, and what makes a vertical mosaic seamless: `Text.rich`
+/// gives the line holding a WidgetSpan the font's own ascent and descent, so
+/// two tiled messages land a hairline apart however much padding is zeroed.
+/// Broader than [isStickerOnlyMessage], which decides TILING and excludes GIFs.
 List<ChatAsset>? blockAssetsOnlyMessage(String text) {
   final trimmed = text.trim();
   if (trimmed.isEmpty) return null;
@@ -285,16 +243,14 @@ List<ChatAsset>? blockAssetsOnlyMessage(String text) {
   return assets;
 }
 
-/// Whether [text] is nothing but stickers — the condition for tiling this
-/// message into its neighbours. Shared by both chat panes and the mobile
-/// route so their grouping rules cannot drift.
+/// Whether [text] is nothing but stickers, the condition for tiling this
+/// message into its neighbours. Shared by both chat panes and the mobile route
+/// so their grouping rules cannot drift.
 bool isStickerOnlyMessage(String text) {
   final trimmed = text.trim();
   if (trimmed.isEmpty) return false;
   final assets = parseAssetTokens(trimmed);
   if (assets.isEmpty || assets.any((a) => a.kind != 's')) return false;
-  // Nothing but tokens and horizontal whitespace: strip the tokens and see
-  // if anything is left.
   return trimmed.replaceAll(assetTokenRegex, '').trim().isEmpty;
 }
 
@@ -315,7 +271,6 @@ bool _isHSpace(String c) => c == ' ' || c == '\t';
 
 final _leadingHSpaces = RegExp(r'^[ \t]+');
 
-// --- @mention ---
 _TokenMatch? _matchMention(String text, int i, Set<String>? memberNames) {
   if (text[i] == '@') {
     final rest = text.substring(i + 1);
@@ -345,8 +300,8 @@ String? _longestMentionName(String rest, Set<String>? memberNames) {
   return matched;
 }
 
-/// Shared **bold** / ~~strikethrough~~ handling: a two-char [marker] pair
-/// whose inner text is recursively tokenized.
+/// Shared **bold** / ~~strikethrough~~ handling: a two-char [marker] pair whose
+/// inner text is recursively tokenized.
 _TokenMatch? _matchDoubleMarker(
   String text,
   int i,
@@ -373,7 +328,6 @@ _TokenMatch? _matchDoubleMarker(
   return null;
 }
 
-// --- ||spoiler|| ---
 _TokenMatch? _matchSpoiler(String text, int i) {
   if (i + 1 < text.length && text[i] == '|' && text[i + 1] == '|') {
     final end = text.indexOf('||', i + 2);
@@ -387,7 +341,6 @@ _TokenMatch? _matchSpoiler(String text, int i) {
   return null;
 }
 
-// --- `inline code` ---
 _TokenMatch? _matchInlineCode(String text, int i) {
   if (text[i] == '`') {
     final end = text.indexOf('`', i + 1);
@@ -401,7 +354,6 @@ _TokenMatch? _matchInlineCode(String text, int i) {
   return null;
 }
 
-// --- *italic* ---
 _TokenMatch? _matchStarItalic(String text, int i, int depth) {
   if (text[i] == '*' && (i + 1 >= text.length || text[i + 1] != '*')) {
     final end = _findClosing(text, '*', i + 1);
@@ -420,7 +372,7 @@ _TokenMatch? _matchStarItalic(String text, int i, int depth) {
   return null;
 }
 
-// --- _italic_ (word-boundary) ---
+// Word-boundary only, so snake_case words stay plain.
 _TokenMatch? _matchUnderscoreItalic(String text, int i, int depth) {
   if (text[i] == '_' &&
       (i + 1 >= text.length || text[i + 1] != '_') &&
@@ -441,14 +393,10 @@ _TokenMatch? _matchUnderscoreItalic(String text, int i, int depth) {
   return null;
 }
 
-// ---------------------------------------------------------------------------
-// Token → Widget span conversion (cheap, uses live theme + callbacks)
-// ---------------------------------------------------------------------------
-
-/// [scaler] is the ambient text scaler (OS setting x the chat text size
-/// preference). Plain spans get it for free from the enclosing `Text.rich`,
-/// but a [WidgetSpan] is laid out as an opaque box — a custom emote sized off
-/// the raw `style.fontSize` would stay 21px while the words around it grew.
+/// [scaler] is the ambient text scaler. Plain spans inherit it from the
+/// enclosing `Text.rich`, but a [WidgetSpan] is laid out as an opaque box, so a
+/// custom emote sized off the raw `style.fontSize` would never grow with the
+/// words around it.
 List<InlineSpan> _tokensToSpans(
   List<_Token> tokens,
   TextStyle style,
@@ -457,9 +405,8 @@ List<InlineSpan> _tokensToSpans(
   AssetTiling tiling,
 ) {
   final spans = <InlineSpan>[];
-  // Set when a block asset just emitted a synthetic trailing newline: the
-  // caption that follows must not start with the space that separated it
-  // from the token.
+  // Set by a block asset's synthetic trailing newline: the caption that follows
+  // must not keep the space that separated it from the token.
   var trimLeadingSpaces = false;
   for (final tok in tokens) {
     final trimNow = trimLeadingSpaces;
@@ -558,26 +505,17 @@ List<InlineSpan> _tokensToSpans(
       case _TokenKind.asset:
         final asset = parseAssetToken(tok.text);
         if (asset == null) {
-          // Can't happen (the matcher validates) — degrade like an old client.
+          // Unreachable (the matcher validates); degrade like an old client.
           spans.add(TextSpan(text: tok.text, style: style));
           break;
         }
-        // Assets ALWAYS render as a block at the image-attachment box, never
-        // shrunk to the line: text sharing the line is a CAPTION, so break
-        // the line around the media instead. Media follows the interface
-        // scale (root UiScale transform), not the chat TEXT scale — same
-        // rule as avatars and file cards.
-        //
-        // When the neighbouring MESSAGE continues a vertical sticker run, the
-        // padding on that side goes to zero so the seam survives the message
-        // boundary.
+        // Media follows the interface scale, not the chat TEXT scale, the same
+        // rule as avatars and file cards. Padding goes to zero on a side a
+        // neighbouring message continues, so the seam survives the boundary.
         final tileTop = tiling.top && tok.atLineStart;
         final tileBottom = tiling.bottom && tok.atLineEnd;
-        // Two ADJACENT block assets each want a break on the side they share,
-        // which would open a blank line between them. Only the first one is
-        // needed. Reachable solely through pre-0.9.3 messages that carry a
-        // sticker run (or a hand-pasted pair) — nothing sent since can, but
-        // those messages still have to read cleanly.
+        // Two adjacent block assets each want a break on the side they share,
+        // which would open a blank line; only the first is needed.
         if (!tok.atLineStart && !_endsWithNewline(spans)) {
           spans.add(TextSpan(text: '\n', style: style));
         }
@@ -625,21 +563,15 @@ List<InlineSpan> _tokensToSpans(
   return spans;
 }
 
-// ---------------------------------------------------------------------------
-// Public widgets
-// ---------------------------------------------------------------------------
-
 class MessageText extends StatelessWidget {
   final String text;
   final TextStyle? baseStyle;
   final List<InlineSpan>? suffixSpans;
   final Set<String>? memberNames;
 
-  /// Seams continued by the previous/next MESSAGE. Set by the bubbles when
-  /// this and its neighbour are both sticker-only messages from the same
-  /// author in the same group — the block asset then drops its padding and
-  /// squares its corners on that side, so three stickers sent in a row tile
-  /// into one image.
+  /// Seams continued by the previous or next MESSAGE, so the block asset drops
+  /// its padding and squares its corners on that side and a run of stickers
+  /// tiles into one image.
   final AssetTiling tiling;
 
   const MessageText(
@@ -663,18 +595,14 @@ class MessageText extends StatelessWidget {
       return _buildWithCodeBlocks(text, style, hollow, suffixSpans, scaler);
     }
 
-    // No text at all → no paragraph. Wrapping a bare sticker in Text.rich
-    // pads it with the font's ascent and descent, which is exactly the
-    // hairline that used to show between two tiled halves of one drawing.
-    // Only when there is no suffix either: "(edited)" is real text, and an
-    // edited message never tiles anyway (stickerTileCandidate excludes it).
+    // No text, no paragraph: Text.rich pads a bare sticker with the font's
+    // ascent and descent, which is the hairline between two tiled halves of one
+    // drawing. A suffix like "(edited)" is real text and never tiles.
     if (suffixSpans == null) {
       final assets = blockAssetsOnlyMessage(text);
-      // Exactly ONE asset — which is everything any client can send now, and
-      // the only shape that tiles. A pre-0.9.3 multi-asset message stays on
-      // the paragraph: it renders correctly there already, and stacking those
-      // in a Column would report an overflow inside any height-constrained
-      // box, which the paragraph simply does not do.
+      // Exactly one asset is the only shape that tiles. A legacy multi-asset
+      // message stays on the paragraph, because stacking those in a Column
+      // overflows inside a height-constrained box.
       if (assets != null && assets.length == 1) {
         return _assetOnlyBody(assets.first);
       }
@@ -687,10 +615,8 @@ class MessageText extends StatelessWidget {
   }
 
   /// A message that is one block asset and nothing else, laid out as a bare
-  /// widget so the media touches its own bounds exactly.
-  ///
-  /// The outer padding is the seam: zero on a side a neighbouring message
-  /// continues, 4px otherwise.
+  /// widget so the media touches its own bounds exactly. The outer padding is
+  /// the seam: zero on a side a neighbouring message continues.
   Widget _assetOnlyBody(ChatAsset asset) {
     final body = ChatAssetBlock(
       asset: asset,
@@ -702,13 +628,10 @@ class MessageText extends StatelessWidget {
         top: tiling.top ? 0 : 4,
         bottom: tiling.bottom ? 0 : 4,
       ),
-      // Align, not a bare child: a message row hands down a TIGHT width, and
-      // the media must keep its own box inside it rather than being stretched
-      // across the pane. Text.rich used to absorb that on the asset's behalf.
-      //
-      // `heightFactor: 1` is load-bearing — without it Align fills whatever
-      // height it is offered and CENTRES the media in it, which silently ate
-      // the 4px padding difference that tiling is supposed to remove.
+      // Align, not a bare child: a message row hands down a TIGHT width and the
+      // media must keep its own box inside it. `heightFactor: 1` is load
+      // bearing, or Align fills the offered height and centres the media in it,
+      // eating the padding difference tiling exists to remove.
       child: Align(
         alignment: AlignmentDirectional.centerStart,
         heightFactor: 1,
@@ -803,8 +726,8 @@ class MessageText extends StatelessWidget {
     );
   }
 
-  /// Adds the text after the last code block; returns the suffixSpans that
-  /// were NOT consumed (null once they were appended to the trailing segment).
+  /// Adds the text after the last code block. Returns the suffixSpans that were
+  /// NOT consumed, null once they were appended to the trailing segment.
   List<InlineSpan>? _addSegmentAfterBlocks(
     List<Widget> children,
     String raw,
@@ -847,10 +770,6 @@ Future<void> _openUrl(String url) async {
     await launchUrl(uri, mode: LaunchMode.externalApplication);
   } catch (_) {}
 }
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
 
 bool _looksLikeUrlStart(String text, int start) {
   if (start + 7 > text.length) return false;

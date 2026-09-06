@@ -9,15 +9,11 @@ void _fwdLog(String msg) {
 
 /// The relay's advertised media forwarder (media forwarding step 3).
 ///
-/// `peerId` is static relay config; `online` is the relay's live
-/// `peer_sockets` lookup at request time. Both arrive over the AUTHENTICATED
-/// relay WebSocket (`NetworkEvent.mediaForwarderInfo`, routed here by the
-/// event dispatcher) — Rust re-requests on every relay (re)connect, which is
-/// the only refresh a static id needs. Staleness of `online` is tolerated by
-/// design: the sharer only uses it to decide whether assigning a viewer to
-/// the forwarder is worth attempting, and the viewer-side fallback ladder
-/// (attach timeout / fwd_error → re-watch with route "direct_failed")
-/// corrects any wrong decision.
+/// `peerId` is static relay config; `online` is the relay's live lookup at
+/// request time. Both arrive over the AUTHENTICATED relay WebSocket, re-requested
+/// on every reconnect. Staleness of `online` is tolerated by design: the sharer
+/// only uses it to decide whether an assignment is worth attempting, and the
+/// viewer-side fallback ladder corrects a wrong decision.
 class ForwarderInfo {
   final String peerId;
   final bool online;
@@ -28,9 +24,8 @@ class ForwarderInfo {
   bool get usable => peerId.isNotEmpty && online;
 }
 
-/// Cache of the last MediaForwarderInfo event. NOT autoDispose — the cache
-/// must survive UI churn (the iceConfigProvider rule: a rebuild wiping cached
-/// relay state silently degrades every later call).
+/// Cache of the last MediaForwarderInfo event. NOT autoDispose: the cache must
+/// survive UI churn, or a rebuild silently degrades every later call.
 class ForwarderInfoNotifier extends Notifier<ForwarderInfo> {
   @override
   ForwarderInfo build() => const ForwarderInfo(peerId: '', online: false);

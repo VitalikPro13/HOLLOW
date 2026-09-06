@@ -12,9 +12,8 @@ import 'package:hollow/src/rust/api/network.dart' as network_api;
 
 /// Shop art this identity has imported, grouped into the ITEM it was sold as.
 ///
-/// The rail stores one row per file (an animated avatar is two: the animation
-/// and its still), because that is what the asset rail replicates. A person
-/// bought an ITEM, so that is what the UI lists and what "Wear" acts on.
+/// The rail stores one row per file (an animated avatar is two), because that
+/// is what it replicates. A person bought an ITEM, so that is what "Wear" acts on.
 class OwnedItem {
   final String itemId;
   final String title;
@@ -109,9 +108,8 @@ class OwnedArtNotifier extends Notifier<List<OwnedItem>> {
 
   @override
   List<OwnedItem> build() {
-    // One deferred load per container. Guarded rather than unconditional: a
-    // Notifier's build runs again on every dependency change, and this list
-    // is only ever refreshed explicitly (after an import).
+    // One deferred load per container: a Notifier's build runs again on every
+    // dependency change, and this list is only refreshed explicitly.
     if (!_scheduled) {
       _scheduled = true;
       Future.microtask(reload);
@@ -153,13 +151,10 @@ class OwnedArtNotifier extends Notifier<List<OwnedItem>> {
 
   /// Put [kinds] of [item] on my profile.
   ///
-  /// Rethrows so the call site can toast a real failure; a silent catch here
-  /// would leave a button that looks like it worked.
+  /// Rethrows so the call site can toast a real failure.
   ///
-  /// The still rides the profile push and the animation rides the asset rail,
-  /// so a still-only pick sends `''` for the animation hash rather than null:
-  /// null means PRESERVE, and the old animation would keep playing over the
-  /// new still.
+  /// The still rides the profile push and the animation rides the asset rail, so
+  /// a still-only pick sends `''` for the animation hash: null means PRESERVE.
   Future<void> wear(OwnedItem item, Set<String> kinds) async {
     final me = ref.read(identityProvider).peerId ?? '';
     if (me.isEmpty) {
@@ -237,9 +232,8 @@ class OwnedArtNotifier extends Notifier<List<OwnedItem>> {
           bannerAnim: bannerAnim,
         );
 
-    // Optimistic: the save is fire-and-forget through the node command
-    // channel, so reading the DB back now would return the PREVIOUS value.
-    // The ProfileUpdated event converges the banner cache afterwards.
+    // Optimistic: the save is fire-and-forget through the node command channel,
+    // so reading the DB back now would return the PREVIOUS value.
     if (avatarBytes != null) {
       ref.read(avatarProvider.notifier).setAvatar(me, avatarBytes);
     }
@@ -275,9 +269,8 @@ final railBytesProvider =
 final _kHex64 = RegExp(r'^[0-9a-f]{64}$');
 
 /// sha256 per BYTES INSTANCE (shared with the support marks), so a rebuild
-/// never re-hashes a megabyte of
-/// banner. The providers hand back the SAME instance when nothing changed
-/// (see [reuseIfUnchanged]), which is exactly what makes this sound.
+/// never re-hashes a megabyte of banner. The providers hand back the SAME
+/// instance when nothing changed, which is what makes this sound.
 final Expando<String> _digestOfInstance = Expando<String>('sha256');
 
 String digestOfBytes(Uint8List bytes) {
@@ -288,10 +281,9 @@ String digestOfBytes(Uint8List bytes) {
   return value;
 }
 
-/// The hashes MY profile is currently wearing, so a row can read "Worn"
-/// instead of offering to put on what is already on.
+/// The hashes MY profile is currently wearing, so a row can read "Worn".
 ///
-/// Frame and animation hashes are named directly by the profile. A still is
+/// Frame and animation hashes are named directly by the profile; a still is
 /// carried as bytes, so it has to be hashed to be recognised.
 final myWornHashesProvider = Provider<Set<String>>((ref) {
   final me = ref.watch(identityProvider.select((s) => s.peerId)) ?? '';

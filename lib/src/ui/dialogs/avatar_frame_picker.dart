@@ -19,8 +19,8 @@ import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_tooltip.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-/// A frame the user picked but has not committed yet. [bytes] is set only for
-/// a fresh upload, so the preview can render before the profile save lands.
+/// A frame picked but not yet committed. [bytes] is set only for a fresh
+/// upload, so the preview renders before the profile save lands.
 class AvatarFramePick {
   final String id;
   final Uint8List? bytes;
@@ -28,11 +28,9 @@ class AvatarFramePick {
   const AvatarFramePick(this.id, [this.bytes]);
 }
 
-/// The built-in palette (issue #54). No bundled art: Vitalik has none to ship
-/// and a solo-authored set would all look like the same ring, so the
-/// built-ins are procedural colours drawn from the same palette as the app
-/// accent. Zero bytes on the wire, and something the widget tests can render
-/// with no network.
+/// The built-in palette (issue #54). Procedural colours rather than bundled
+/// art: zero bytes on the wire, and something the widget tests can render with
+/// no network.
 const List<({int hue, String name})> kBuiltinFrames = [
   (hue: 0, name: 'Red'),
   (hue: 20, name: 'Orange'),
@@ -48,8 +46,7 @@ const List<({int hue, String name})> kBuiltinFrames = [
   (hue: 340, name: 'Rose'),
 ];
 
-/// Pick an avatar frame. Returns null if cancelled, `AvatarFramePick('')` to
-/// clear.
+/// Picks an avatar frame. Null is a cancel and an empty id is a clear.
 Future<AvatarFramePick?> showAvatarFramePicker({
   required BuildContext context,
   required String peerId,
@@ -76,8 +73,7 @@ class _AvatarFramePickerDialogState
     extends ConsumerState<_AvatarFramePickerDialog> {
   late String _selected = widget.initial;
 
-  /// The upload staged this session, kept so switching to a built-in and back
-  /// does not lose it.
+  /// Kept so switching to a built-in and back does not lose the upload.
   String? _uploadedId;
   Uint8List? _uploadedBytes;
   bool _busy = false;
@@ -95,8 +91,8 @@ class _AvatarFramePickerDialogState
         rawBytes: raw,
       );
       if (!mounted) return;
-      // Seed the shared cache so the preview paints immediately, without a
-      // round trip back out through the blob store.
+      // Seeded so the preview paints immediately, with no round trip back out
+      // through the blob store.
       ref
           .read(avatarFrameProvider.notifier)
           .seed(processed.hash, processed.bytes);
@@ -108,7 +104,7 @@ class _AvatarFramePickerDialogState
     } catch (e) {
       if (!mounted) return;
       // The processing errors are the user's business: over the cap, or the
-      // authoring gate that a frame's middle has to be see-through.
+      // gate that a frame's middle has to be see-through.
       setState(() => _busy = false);
       final message = e.toString().replaceFirst(RegExp(r'^[A-Za-z]+: '), '');
       showHollowDialog<void>(
@@ -193,8 +189,8 @@ class _AvatarFramePickerDialogState
                   isSelected: _selected == widget.initial,
                   onTap: () => setState(() => _selected = widget.initial),
                 ),
-              // Your own accent first when it is not already one of the
-              // twelve, so the frame can match the app you are looking at.
+              // Your own accent first when it is not already a built-in, so
+              // the frame can match the app you are looking at.
               if (!kBuiltinFrames.any((f) => f.hue == accentHue))
                 _FrameChoice(
                   id: 'b:$accentHue',
@@ -252,8 +248,8 @@ class _AvatarFramePickerDialogState
   }
 }
 
-/// One choice in the picker: the frame drawn around a real avatar, because a
-/// frame is only legible against the thing it decorates.
+/// One choice in the picker, drawn around a real avatar because a frame is only
+/// legible against the thing it decorates.
 class _FrameChoice extends StatelessWidget {
   final String id;
   final String peerId;
@@ -272,8 +268,8 @@ class _FrameChoice extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
-    // The tile is the frame's own box plus a little breathing room, so
-    // neighbouring choices never overlap each other's art.
+    // The frame's own box plus breathing room, so neighbouring choices never
+    // overlap each other's art.
     final box = 40 * kFrameScale + 8;
     return HollowFocusRing(
       onActivate: onTap,
@@ -286,12 +282,9 @@ class _FrameChoice extends StatelessWidget {
           label: label,
           child: HollowPressable(
             onTap: onTap,
-            // Selection is a chip (an accent-muted wash), never a filled
-            // button. It deliberately does NOT tint the tile's BORDER: a
-            // coloured ring is the frame's own language, so an accent border
-            // reads as another frame - and picking the accent-hued frame
-            // would make the selection invisible against it. A check badge
-            // says "chosen" in a language nothing else here speaks.
+            // Selection is a chip, never a filled button, and deliberately does
+            // NOT tint the BORDER: a coloured ring is the frame's own language,
+            // and against the accent-hued frame it would vanish.
             backgroundColor: isSelected ? hollow.accentMuted : null,
             borderRadius: BorderRadius.circular(hollow.radiusMd),
             padding: EdgeInsets.zero,

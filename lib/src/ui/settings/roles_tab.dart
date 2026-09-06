@@ -10,7 +10,7 @@ import 'package:hollow/src/ui/components/hollow_toggle.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-/// Permission descriptions for toggle display.
+/// The permission bits, with the wording each toggle shows.
 const _permissionEntries = <({String label, String desc, int bit})>[
   (label: 'Manage Server', desc: 'Server settings, profile, and deletion', bit: Permission.manageServer),
   (label: 'Manage Channels', desc: 'Create, edit, and delete channels', bit: Permission.manageChannels),
@@ -21,14 +21,14 @@ const _permissionEntries = <({String label, String desc, int bit})>[
   (label: 'Manage Emotes', desc: 'Add and remove custom server emotes', bit: Permission.manageEmotes),
 ];
 
-/// Role colors matching the member panel.
+/// Role colours, matching the member panel.
 const _roleColors = <String, ({Color color, IconData icon})>{
   'admin': (color: Color(0xFFAB47BC), icon: LucideIcons.shieldCheck),
   'moderator': (color: Color(0xFFFF9800), icon: LucideIcons.shield),
   'member': (color: Color(0xFF78909C), icon: LucideIcons.user),
 };
 
-/// Roles tab — Owner-only. Toggle permissions for Admin, Moderator, Member.
+/// Roles tab, owner-only: the permission toggles for each role.
 class RolesTab extends ConsumerStatefulWidget {
   final String serverId;
 
@@ -40,9 +40,9 @@ class RolesTab extends ConsumerStatefulWidget {
 
 class _RolesTabState extends ConsumerState<RolesTab> {
   final Map<String, int> _perms = {};
-  // Rust MemberRole::default_permissions via FFI — never a hand-written
-  // mirror: a stale copy here once froze Admin without MANAGE_SERVER into
-  // servers' role_permissions overrides via Reset.
+  // Rust's MemberRole::default_permissions through the FFI, never a
+  // hand-written mirror: a stale copy froze Admin without MANAGE_SERVER into
+  // servers' role_permissions overrides on Reset.
   final Map<String, int> _defaults = {};
   bool _loading = true;
 
@@ -65,7 +65,6 @@ class _RolesTabState extends ConsumerState<RolesTab> {
         _perms[role] = p;
       }
     } catch (e) {
-      // Fall back to defaults
       for (final role in ['admin', 'moderator', 'member']) {
         _perms[role] = _defaults[role]!;
       }
@@ -160,7 +159,6 @@ class _RolesTabState extends ConsumerState<RolesTab> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // Header
           Row(
             children: [
               Icon(info.icon, size: 18, color: info.color),
@@ -187,7 +185,6 @@ class _RolesTabState extends ConsumerState<RolesTab> {
           ),
           const SizedBox(height: HollowSpacing.md),
 
-          // Permission toggles
           for (final entry in _permissionEntries) ...[
             _PermissionRow(
               label: entry.label,

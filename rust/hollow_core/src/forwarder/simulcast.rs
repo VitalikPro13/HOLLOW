@@ -1,29 +1,17 @@
-//! Simulcast layer selection + RTP rewrite for ONE egress leg (phase 3).
+//! Simulcast layer selection + RTP rewrite for ONE egress leg.
 //!
-//! The ingest leg may carry 2 rid-keyed simulcast layers (contract rids:
-//! `f` = full, `q` = quarter — chosen by OUR sharer, see
-//! `ScreenShareService`). Each egress leg forwards exactly ONE layer, chosen
-//! by the sharer's `low_viewers` set at attach time, with packet-level
-//! selection — no re-encode anywhere.
-//!
-//! Because the layers are independent RTP sources (own SSRC / sequence /
-//! timestamp / PictureID spaces), an egress leg that ever SWITCHES layers
-//! must rewrite the forwarded packets into one continuous outgoing stream:
-//! seq/ts offsets plus VP8 PictureID / TL0PICIDX / KEYIDX continuity (str0m's
-//! `Vp8Patch` applies the descriptor rewrite at serialization; the payload
-//! itself is SFrame ciphertext and is never touched — the descriptor rides in
-//! the clear BEFORE the encrypted frame data by construction).
+//! The ingest leg may carry two rid-keyed layers and each egress leg forwards exactly
+//! one, chosen at attach time by packet selection with no re-encode. The layers are
+//! independent RTP sources, so a leg that SWITCHES rewrites seq/ts offsets and VP8
+//! PictureID / TL0PICIDX / KEYIDX continuity into one stream; the payload stays SFrame
+//! ciphertext because the descriptor rides in the clear before the encrypted frame.
 //!
 //! Iron rules:
-//! - A NON-simulcast source (no rids — every old sharer) is passthrough:
-//!   seq/ts/payload byte-identical to phases 1/2. Zero regression by
-//!   construction.
+//! - A NON-simulcast source (every old sharer) is passthrough, byte-identical.
 //! - Switches happen ONLY on the target layer's keyframe start (VP8 S-bit,
-//!   partition 0, P-bit 0) — anything else decodes garbage. Non-VP8 layered
-//!   streams lock to their first layer and never switch (the descriptor
-//!   rewrite is VP8-only; the sharer constrains simulcast ingests to VP8).
-//! - The OLD layer keeps flowing while a switch waits for its keyframe —
-//!   make-before-break at packet granularity.
+//!   partition 0, P-bit 0); anything else decodes garbage. Non-VP8 layered streams
+//!   lock to their first layer, since the descriptor rewrite is VP8-only.
+//! - The OLD layer keeps flowing while a switch waits for its keyframe.
 
 use std::time::{Duration, Instant};
 
@@ -34,9 +22,8 @@ use str0m::rtp::{Vp8Descriptor, Vp8Patch};
 pub(crate) const RID_FULL: &str = "f";
 pub(crate) const RID_LOW: &str = "q";
 
-/// Nominal 90 kHz timestamp step inserted across a layer switch (one frame at
-/// 30 fps). Only playout pacing at the single switch instant depends on it —
-/// jitter buffers absorb the estimate error.
+/// Nominal 90 kHz timestamp step across a layer switch; only playout pacing at the
+/// switch instant depends on it.
 const TS_STEP: u32 = 3000;
 
 /// What to do with one fanned-out packet.
@@ -46,8 +33,7 @@ pub(crate) enum Verdict {
     Forward {
         seq: u64,
         ts: u32,
-        /// VP8 descriptor rewrite to apply at serialization (`None` =
-        /// descriptor already continuous, e.g. before any switch).
+        /// VP8 descriptor rewrite to apply at serialization; `None` = already continuous.
         patch: Option<Vp8Patch>,
     },
     Drop,
@@ -57,16 +43,13 @@ pub(crate) enum Verdict {
 enum Mode {
     /// Nothing forwarded yet.
     Idle,
-    /// Non-rid single stream: byte-identical passthrough (the shipped
-    /// phase-1/2 behavior).
+    /// Non-rid single stream: byte-identical passthrough.
     Passthrough,
     /// Rid-keyed source; exactly one layer forwarded at a time.
     Layered { current: Rid },
 }
 
-/// Per-egress-leg selection + rewrite state. Pure (no I/O, no clock) — the
-/// pump owns timers (dry-layer fallback, keyframe re-requests) and feeds
-/// desired-layer changes in via [`LayerSelect::set_desired`].
+/// Per-egress-leg selection and rewrite state. Pure: the pump owns the timers.
 pub(crate) struct LayerSelect {
     desired: Option<Rid>,
     mode: Mode,
@@ -122,8 +105,7 @@ impl LayerSelect {
         }
     }
 
-    /// True while a switch is pending (desired != current on a layered
-    /// stream) — the pump keeps requesting keyframes for `desired`.
+    /// True while a switch is pending, so the pump keeps requesting keyframes.
     pub(crate) fn switch_pending(&self) -> bool {
         match self.mode {
             Mode::Layered { current } => {
@@ -149,14 +131,13 @@ impl LayerSelect {
                 self.forward(seq, ts, payload, is_vp8)
             }
             (Mode::Passthrough, None) => self.forward(seq, ts, payload, is_vp8),
-            // Source turned out layered after all (late rid resolution):
-            // adopt the first rid'd packet's layer; the desired-layer switch
-            // machinery corrects the choice afterwards if needed.
+            // Source turned out layered after all (late rid resolution): adopt the first
+            // rid'd packet's layer, and the switch machinery corrects it afterwards.
             (Mode::Idle | Mode::Passthrough, Some(r)) => {
                 if let Some(d) = self.desired {
                     if d != r && self.mode == Mode::Idle {
-                        // Wait for the layer we actually want — the pump's
-                        // dry-layer fallback re-desires if it never flows.
+                        // Wait for the layer we want; the pump's dry-layer fallback
+                        // re-desires if it never flows.
                         return Verdict::Drop;
                     }
                 }
@@ -238,11 +219,9 @@ impl LayerSelect {
                     if let Some(key) = self.last_out_key {
                         b = b.key_idx(key);
                     }
-                    // A build failure (field absent / value doesn't fit the
-                    // 7-bit representation) forwards unpatched — the fields
-                    // the receiver can see are then the source's own, which
-                    // only matters across a switch on descriptors that carry
-                    // them (in which case build succeeds).
+                    // A build failure (field absent, or a value that will not fit) forwards
+                    // unpatched, which only matters across a switch on descriptors carrying
+                    // those fields, where the build succeeds.
                     patch = b.build().ok();
                 }
             }
@@ -253,17 +232,12 @@ impl LayerSelect {
 
 /// Adaptive hysteresis for returning to the ideal (high) layer.
 ///
-/// The pump falls back to a lower layer when the wanted one goes dry, and
-/// climbs back once the ideal layer has been flowing for a while. With a FIXED
-/// climb-back delay that is an oscillator on any link that cannot sustain the
-/// high layer: it flows briefly (libwebrtc probes upward), we upgrade, the
-/// allocator starves it again — forever. Field 2026-08-15 measured a viewer
-/// flapping 826p <-> 413p every 6-15 s, which reads as "the quality keeps
-/// jumping" and is worse to watch than simply staying low.
-///
-/// So each upgrade that fails to STICK makes the next one wait longer, while a
-/// genuinely recovered link still climbs back promptly and then resets the
-/// penalty. Pure (the caller supplies `now`) so it is unit-testable.
+/// A FIXED climb-back delay is an oscillator on any link that cannot sustain the
+/// high layer: it flows briefly while libwebrtc probes upward, we upgrade, the
+/// allocator starves it again, forever, and a viewer flapping between resolutions
+/// every few seconds is worse to watch than simply staying low. So each upgrade
+/// that fails to STICK makes the next one wait longer, while a recovered link
+/// still climbs back promptly and resets the penalty. Pure, so it is testable.
 #[derive(Debug)]
 pub(crate) struct UpgradeGate {
     required: Duration,
@@ -316,10 +290,8 @@ mod tests {
         Rid::from(s)
     }
 
-    /// VP8 payload: X|S set, I (15-bit pid) + L (tl0) + T + K (keyidx)
-    /// present (str0m's parser requires T whenever L is set, matching
-    /// libwebrtc's real descriptors), then the payload header byte (P bit
-    /// 0 = keyframe start).
+    /// VP8 payload: X|S set, I (15-bit pid) + L (tl0) + T + K (keyidx) present (str0m's
+    /// parser requires T whenever L is set), then the payload header byte.
     fn vp8_key(pid: u16, tl0: u8, key: u8) -> Vec<u8> {
         vec![
             0x90,                          // X | S, partition 0
@@ -356,8 +328,7 @@ mod tests {
     #[test]
     fn non_rid_source_is_pure_passthrough() {
         let mut s = LayerSelect::new(Some(rid(RID_LOW)));
-        // Even with a desired layer set, a rid-less source passes through
-        // untouched — old sharers must see phase-1/2 behavior byte for byte.
+        // Even with a desired layer set, a rid-less source passes through untouched.
         let (seq, ts, patch) = fwd(s.on_packet(None, 1000, 90_000, &vp8_key(5, 1, 0), true));
         assert_eq!((seq, ts), (1000, 90_000));
         assert!(patch.is_none());
@@ -369,17 +340,14 @@ mod tests {
     #[test]
     fn waits_for_desired_layer_then_forwards_identity() {
         let mut s = LayerSelect::new(Some(rid(RID_LOW)));
-        // Full-layer packets before the low layer flows are dropped.
         assert_eq!(
             s.on_packet(Some(rid(RID_FULL)), 10, 1000, &vp8_key(1, 1, 0), true),
             Verdict::Drop
         );
-        // First low-layer packet forwards with identity values.
         let (seq, ts, patch) = fwd(s.on_packet(Some(rid(RID_LOW)), 500, 7000, &vp8_key(9, 2, 1), true));
         assert_eq!((seq, ts), (500, 7000));
         assert!(patch.is_none());
         assert_eq!(s.current(), Some(rid(RID_LOW)));
-        // Other-layer packets keep dropping.
         assert_eq!(
             s.on_packet(Some(rid(RID_FULL)), 11, 1030, &vp8_delta(2, 1, 0), true),
             Verdict::Drop
@@ -389,11 +357,9 @@ mod tests {
     #[test]
     fn switch_waits_for_keyframe_and_rewrites_continuously() {
         let mut s = LayerSelect::new(Some(rid(RID_FULL)));
-        // Forward the full layer for a while.
         fwd(s.on_packet(Some(rid(RID_FULL)), 100, 3000, &vp8_key(50, 4, 2), true));
         let (seq, ts, _) = fwd(s.on_packet(Some(rid(RID_FULL)), 101, 6000, &vp8_delta(51, 4, 2), true));
         assert_eq!((seq, ts), (101, 6000));
-        // Policy moves this leg to the low layer.
         s.set_desired(Some(rid(RID_LOW)));
         assert!(s.switch_pending());
         // Low-layer DELTA frames must not switch (would decode garbage)...
@@ -412,13 +378,11 @@ mod tests {
         assert!(patch.is_some(), "descriptor continuity patch after a switch");
         assert!(!s.switch_pending());
         assert_eq!(s.current(), Some(rid(RID_LOW)));
-        // Following low-layer packets stay continuous.
         let (seq, ts, patch) =
             fwd(s.on_packet(Some(rid(RID_LOW)), 902, 515_000, &vp8_delta(9, 2, 1), true));
         assert_eq!(seq, 104);
         assert_eq!(ts, 12_000 + 3000);
         assert!(patch.is_some());
-        // Old-layer packets now drop.
         assert_eq!(
             s.on_packet(Some(rid(RID_FULL)), 103, 12_000, &vp8_delta(53, 4, 2), true),
             Verdict::Drop
@@ -430,8 +394,7 @@ mod tests {
         let mut s = LayerSelect::new(Some(rid(RID_FULL)));
         fwd(s.on_packet(Some(rid(RID_FULL)), 1, 0, &vp8_key(1, 1, 0), true));
         s.set_desired(Some(rid(RID_LOW)));
-        // A continuation packet (S clear) of a low-layer keyframe cannot be
-        // the switch point — starts_keyframe requires the S bit.
+        // A continuation packet (S clear) of a keyframe cannot be the switch point.
         assert_eq!(
             s.on_packet(Some(rid(RID_LOW)), 40, 999, &vp8_cont(2, 1, 0), true),
             Verdict::Drop
@@ -444,8 +407,8 @@ mod tests {
         let payload = [0x12, 0x34, 0x56];
         fwd(s.on_packet(Some(rid(RID_FULL)), 1, 0, &payload, false));
         s.set_desired(Some(rid(RID_LOW)));
-        // Non-VP8: the switch machinery refuses (no keyframe detection, no
-        // descriptor patch) — the leg stays on its locked layer.
+        // Non-VP8: no keyframe detection and no descriptor patch, so the leg stays
+        // on its locked layer.
         assert_eq!(s.on_packet(Some(rid(RID_LOW)), 2, 30, &payload, false), Verdict::Drop);
         let (seq, _, patch) = fwd(s.on_packet(Some(rid(RID_FULL)), 2, 30, &payload, false));
         assert_eq!(seq, 2);
@@ -455,12 +418,10 @@ mod tests {
     #[test]
     fn picture_id_wraps_across_switch() {
         let mut s = LayerSelect::new(Some(rid(RID_FULL)));
-        // Last full-layer pid near the 15-bit wrap.
         fwd(s.on_packet(Some(rid(RID_FULL)), 10, 0, &vp8_key(0x7FFE, 250, 30), true));
         s.set_desired(Some(rid(RID_LOW)));
         let (_, _, patch) = fwd(s.on_packet(Some(rid(RID_LOW)), 90, 100, &vp8_key(3, 9, 4), true));
         assert!(patch.is_some());
-        // last_out_pid advanced with wrap: 0x7FFE + 1 = 0x7FFF.
         assert_eq!(s.last_out_pid, Some(0x7FFF));
         // Next low frame gets 0x0000 (wrapped).
         fwd(s.on_packet(Some(rid(RID_LOW)), 91, 200, &vp8_delta(4, 9, 4), true));
@@ -473,12 +434,11 @@ mod tests {
         let mut g = UpgradeGate::new();
         assert_eq!(g.required(), UpgradeGate::BASE);
 
-        // Upgrade that dies almost immediately => the link can't hold it.
+        // An upgrade that dies almost immediately means the link cannot hold it.
         g.on_upgrade(t0);
         g.on_fallback(t0 + Duration::from_secs(3));
         assert_eq!(g.required(), UpgradeGate::BASE * 3);
 
-        // Again => longer still.
         g.on_upgrade(t0 + Duration::from_secs(10));
         g.on_fallback(t0 + Duration::from_secs(13));
         assert_eq!(g.required(), UpgradeGate::BASE * 9);
@@ -491,8 +451,8 @@ mod tests {
         }
         assert_eq!(g.required(), UpgradeGate::MAX);
 
-        // An upgrade that HELD for a long time is a fresh dip, not a flap —
-        // the next climb-back must be prompt again.
+        // An upgrade that HELD is a fresh dip, not a flap, so the next climb-back
+        // must be prompt again.
         let t = t0 + Duration::from_secs(1000);
         g.on_upgrade(t);
         g.on_fallback(t + UpgradeGate::STUCK_AFTER + Duration::from_secs(1));
@@ -501,8 +461,8 @@ mod tests {
 
     #[test]
     fn upgrade_gate_first_fallback_without_upgrade_is_not_a_flap() {
-        // Falling off the ideal layer before we ever climbed to it (the very
-        // first dry period) must not penalise the first climb-back.
+        // Falling off the ideal layer before ever climbing to it must not penalise
+        // the first climb-back.
         let mut g = UpgradeGate::new();
         g.on_fallback(Instant::now());
         assert_eq!(g.required(), UpgradeGate::BASE);
@@ -511,7 +471,6 @@ mod tests {
     #[test]
     fn late_rid_resolution_adopts_first_layer() {
         let mut s = LayerSelect::new(None);
-        // Passthrough begins rid-less...
         fwd(s.on_packet(None, 5, 0, &vp8_key(1, 1, 0), true));
         // ...then rids resolve: adopt the first tagged layer, keep identity.
         let (seq, _, _) = fwd(s.on_packet(Some(rid(RID_FULL)), 6, 3000, &vp8_delta(2, 1, 0), true));

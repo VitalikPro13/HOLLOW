@@ -12,30 +12,23 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// The shared right-click / context menu surface (issue #61).
 ///
-/// One primitive behind every context menu in the app: messages, channels,
-/// categories, members, server icons, the Home button. Each caller supplies a
-/// list of [HollowMenuEntry] and an anchor; this file owns presentation,
+/// One primitive behind every context menu in the app. Callers supply
+/// [HollowMenuEntry] rows and an anchor; this file owns presentation,
 /// positioning, dismissal and keyboard operation.
 ///
-/// ## Why a dialog route and not a raw OverlayEntry
-/// Chat surfaces sit inside `chatSelectionArea`, and a raw [OverlayEntry] under
-/// a [SelectionArea] has its taps eaten by the selection gesture arena (see the
-/// "Never use raw OverlayEntry inside SelectionArea" rule). Rather than run two
-/// hosts and make every call site pick correctly, every menu goes through
-/// [showGeneralDialog] with a transparent barrier. That also buys outside-click
-/// dismissal, Escape, and a focus scope for arrow-key traversal for free.
+/// A dialog route, never a raw [OverlayEntry]: chat surfaces sit inside
+/// `chatSelectionArea`, and a raw overlay under a [SelectionArea] has its taps
+/// eaten by the selection gesture arena. [showGeneralDialog] also brings
+/// outside-click dismissal, Escape and a focus scope for free.
 ///
-/// ## Coordinates
-/// `UiScale` wraps the Navigator, so the dialog route and the widget that was
-/// right-clicked share one coordinate space, but window coordinates (what
-/// `details.globalPosition` returns) are NOT that space. Call sites MUST pass
-/// an anchor resolved through `overlayPositionOf` / `overlayAnchorOf`.
+/// `UiScale` wraps the Navigator, so window coordinates (what
+/// `details.globalPosition` returns) are NOT this route's space: call sites
+/// MUST pass an anchor resolved through `overlayPositionOf` /
+/// `overlayAnchorOf`.
 ///
-/// ## Submenus
-/// Submenus drill in and replace the menu body behind a back row, rather than
-/// flying out sideways. This mirrors the mobile action sheets, which already
-/// drill in, keeps one keyboard model, and avoids a second layer of flip and
-/// clamp positioning against the screen edge.
+/// Submenus drill in behind a back row rather than flying out sideways, which
+/// mirrors the mobile action sheets and avoids a second layer of flip-and-clamp
+/// positioning against the screen edge.
 sealed class HollowMenuEntry {
   const HollowMenuEntry();
 }
@@ -84,13 +77,11 @@ class HollowMenuSection extends HollowMenuEntry {
   const HollowMenuSection(this.label);
 }
 
-/// A non-interactive sentence at the top of a menu, for the case where the
-/// menu has to SAY something before it offers anything.
+/// A non-interactive sentence at the top of a menu, for when the menu has to
+/// SAY something before it offers anything.
 ///
-/// Distinct from [HollowMenuSection], which is a shouty little category label:
-/// this wraps, reads as prose, and never highlights on hover, because there is
-/// nothing here to press. The parked-join menu is the first user — a tile with
-/// no name and no icon has to explain itself somewhere.
+/// Unlike [HollowMenuSection] it wraps, reads as prose and never highlights on
+/// hover, because there is nothing here to press.
 class HollowMenuNote extends HollowMenuEntry {
   final String text;
   const HollowMenuNote(this.text);
@@ -128,22 +119,14 @@ class HollowMenuScope extends InheritedWidget {
   bool updateShouldNotify(HollowMenuScope oldWidget) => false;
 }
 
-/// Wraps anything that has a context menu, so the menu has more than one way
-/// in (issue #61, cross-cutting).
+/// Wraps anything that has a context menu, so the menu has more than one way in
+/// (issue #61).
 ///
-/// Right click is the obvious route and the only one most people use, but it
-/// is a POINTER route. Everything reachable only by right-clicking is
-/// unreachable without a mouse, and several of these menus own actions that
-/// live nowhere else. This adds the two standard alternatives:
-///
-/// * **Menu key / Shift+F10** while the wrapped control has keyboard focus,
-///   the platform convention on Windows and Linux. It only fires when focus is
-///   inside this subtree, so it never collides with the app shortcuts.
-/// * **A "Show menu" screen-reader action**, which is how VoiceOver, TalkBack
-///   and Narrator expose a secondary action; the focus mechanics above do not
-///   have to line up for it to work.
-///
-/// The child still has to be focusable for the keyboard route to reach it —
+/// Right click is a POINTER route, and several of these menus own actions that
+/// live nowhere else, so this adds the two standard alternatives: Menu key /
+/// Shift+F10 while the wrapped control has focus (scoped to this subtree, so it
+/// never collides with the app shortcuts), and a "Show menu" screen-reader
+/// action. The child must be focusable for the keyboard route to reach it;
 /// [HollowPressable] and [HollowButton] both are.
 class ContextMenuTarget extends StatelessWidget {
   final Widget child;
@@ -171,13 +154,13 @@ class ContextMenuTarget extends StatelessWidget {
     this.behavior = HitTestBehavior.deferToChild,
   });
 
-  /// Opens the menu hanging off the control itself, for the routes that have
-  /// no pointer position: keyboard and assistive tech.
+  /// Opens the menu hanging off the control itself, for the keyboard and
+  /// assistive-tech routes, which have no pointer position.
   void _openAtWidget(BuildContext context) {
     final box = context.findRenderObject() as RenderBox?;
     final size = box?.hasSize == true ? box!.size : Size.zero;
-    // Bottom-left of the control, the same place a menu-key press opens a
-    // menu everywhere else on the platform.
+    // Bottom-left of the control, where a menu-key press opens a menu
+    // everywhere else on the platform.
     onOpen(overlayAnchorOf(context, localOffset: Offset(0, size.height)));
   }
 
@@ -225,8 +208,7 @@ class _ShowContextMenuIntent extends Intent {
 const double _kMenuMinWidth = 210;
 const double _kMenuMaxWidth = 320;
 
-/// Builds a menu's rows. Called on every rebuild, inside a [Consumer], so a
-/// menu that stays open while its underlying state changes redraws instead of
+/// Builds a menu's rows inside a [Consumer], so an open menu redraws instead of
 /// showing what was true when it opened.
 typedef HollowMenuBuilder = List<HollowMenuEntry> Function(
     BuildContext context, WidgetRef ref);
@@ -237,7 +219,7 @@ typedef HollowMenuBuilder = List<HollowMenuEntry> Function(
 /// `overlayPositionOf(context, details.globalPosition)` for a pointer position,
 /// or `overlayAnchorOf(context)` to hang the menu off a widget.
 ///
-/// [builder] is re-run whenever anything it watches changes, so rows must read
+/// [builder] re-runs whenever anything it watches changes, so rows must read
 /// live state through its `ref` rather than closing over a snapshot.
 Future<void> showHollowMenu({
   required BuildContext context,
@@ -254,8 +236,8 @@ Future<void> showHollowMenu({
     transitionDuration: HollowDurations.animationsDisabled
         ? Duration.zero
         : const Duration(milliseconds: 120),
-    // The menu is built ONCE in pageBuilder, not in transitionBuilder: the
-    // latter reruns every animation frame, and the host owns drill-in state.
+    // Built ONCE in pageBuilder: transitionBuilder reruns every animation
+    // frame, and the host owns the drill-in state.
     pageBuilder: (_, _, _) => _HollowMenuHost(
       anchor: anchor,
       entriesBuilder: builder,
@@ -299,17 +281,13 @@ class _HollowMenuHost extends StatefulWidget {
 }
 
 class _HollowMenuHostState extends State<_HollowMenuHost> {
-  /// Drill-in position as a PATH of row indices into the freshly built
-  /// entries, not as captured submenu lists. The rows are rebuilt whenever the
-  /// state behind them changes, so a captured list would go stale the moment
-  /// the thing it describes is edited — which is the whole point of rebuilding.
+  /// Drill-in position as a PATH of row indices into the freshly built entries.
+  /// A captured submenu list would go stale the moment the state behind it is
+  /// edited, which is the whole point of rebuilding.
   final List<int> _path = [];
 
-  /// Pops THIS route by identity rather than "whatever is on top".
-  ///
-  /// A plain `Navigator.pop()` is a guess about what the topmost route is, and
-  /// an action that opens its own dialog makes that guess wrong. Removing the
-  /// route we actually own is unambiguous.
+  /// Pops THIS route by identity: `Navigator.pop()` guesses at the topmost
+  /// route, and an action that opens its own dialog makes that guess wrong.
   void _dismiss() {
     if (!mounted) return;
     final route = ModalRoute.of(context);
@@ -322,12 +300,9 @@ class _HollowMenuHostState extends State<_HollowMenuHost> {
     }
   }
 
-  /// Closes the menu, THEN runs the action on the next frame.
-  ///
-  /// Actions routinely open a dialog of their own. Running one synchronously
-  /// races the pop we just requested, and the menu can end up sitting behind
-  /// the dialog it opened — visible, inert, and still showing pre-edit values.
-  /// Deferring by a frame makes the ordering deterministic.
+  /// Closes the menu, THEN runs the action on the next frame. An action that
+  /// opens its own dialog would otherwise race the pop and leave the menu
+  /// sitting behind that dialog, visible and inert.
   void _activate(VoidCallback action) {
     _dismiss();
     WidgetsBinding.instance.addPostFrameCallback((_) => action());
@@ -340,11 +315,8 @@ class _HollowMenuHostState extends State<_HollowMenuHost> {
     setState(() => _path.removeLast());
   }
 
-  /// Walks [_path] through [root] to the entries currently on screen.
-  ///
-  /// Falls back to the root when the path no longer resolves — a submenu whose
-  /// parent row disappeared after an edit, for instance. Showing the top of the
-  /// menu beats showing a frame that describes something that is gone.
+  /// Walks [_path] through [root] to the entries currently on screen, falling
+  /// back to the root when a submenu's parent row has disappeared.
   ({List<HollowMenuEntry> entries, String? title}) _resolve(
       List<HollowMenuEntry> root) {
     var current = root;
@@ -400,8 +372,6 @@ class _HollowMenuHostState extends State<_HollowMenuHost> {
                 duration: HollowDurations.fast,
                 curve: HollowCurves.enter,
                 alignment: Alignment.topCenter,
-                // Consumer, so anything the builder watches redraws the open
-                // menu instead of leaving it showing what was true on open.
                 child: Consumer(
                   builder: (context, ref, _) {
                     final frame =
@@ -559,8 +529,8 @@ class _MenuRow extends StatelessWidget {
       onTap: enabled ? onActivate : null,
       disabled: !enabled,
       subtle: true,
-      // Rows sit on `elevated`, so the hover state has to move AWAY from it or
-      // it reads as dead. Never animate from Colors.transparent here.
+      // Rows sit on `elevated`, so hover has to move AWAY from it or it reads
+      // as dead; never animate from Colors.transparent here.
       hoverColor: item.isDanger
           ? hollow.error.withValues(alpha: 0.12)
           : hollow.surface,
@@ -626,8 +596,8 @@ class _MenuLayoutDelegate extends SingleChildLayoutDelegate {
 
   @override
   Offset getPositionForChild(Size size, Size childSize) {
-    // Open down-right of the cursor; flip to the other side when that would
-    // overflow, then clamp so the menu is never partly off screen.
+    // Down-right of the cursor, flipped when that would overflow and clamped so
+    // the menu is never partly off screen.
     var x = anchor.dx;
     if (x + childSize.width > size.width - _margin) {
       x = anchor.dx - childSize.width;

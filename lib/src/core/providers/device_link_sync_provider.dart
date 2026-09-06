@@ -136,9 +136,8 @@ class DeviceLinkSyncNotifier extends Notifier<DeviceLinkState> {
     return List.generate(6, (_) => _codeAlphabet[rng.nextInt(_codeAlphabet.length)]).join();
   }
 
-  /// (Populated device) Generate + claim a link code and show it. The relay
-  /// echoes back `LinkCodeClaimed` (→ [onCodeClaimed]); on collision it echoes
-  /// `LinkCodeError` (→ [onCodeError]) and we regenerate.
+  /// (Populated device) Generate + claim a link code and show it. The relay echoes
+  /// `LinkCodeClaimed`, or `LinkCodeError` on collision, and we regenerate.
   Future<void> startShowingCode() async {
     final code = _generateCode();
     state = DeviceLinkState(
@@ -194,8 +193,6 @@ class DeviceLinkSyncNotifier extends Notifier<DeviceLinkState> {
 
   void reset() => state = const DeviceLinkState();
 
-  // ── Event handlers (driven from event_provider) ──────────────────────────
-
   void onCodeClaimed(String code) {
     if (state.phase == LinkPhase.showingCode) {
       state = state.copyWith(code: code);
@@ -229,9 +226,8 @@ class DeviceLinkSyncNotifier extends Notifier<DeviceLinkState> {
 
   /// (Populated device) An empty sibling is requesting data → show Confirm.
   void onSiblingLinkAvailable(String peerId, int theirMsgCount, int theirFriendCount, bool theirHasProfile) {
-    // If WE initiated a pull (empty side) this is our own offer to pull — ignore
-    // the populated-side prompt. Only surface Confirm when we're showing a code
-    // or idle (i.e. we're the populated device being asked).
+    // If WE initiated a pull (empty side) this is our own offer to pull: only
+    // surface Confirm when we're showing a code or idle.
     if (state.phase == LinkPhase.waiting || state.phase == LinkPhase.receiving) return;
     state = state.copyWith(
       phase: LinkPhase.confirmPush,
@@ -274,14 +270,10 @@ class DeviceLinkSyncNotifier extends Notifier<DeviceLinkState> {
     if (state.phase == LinkPhase.idle) return;
     // Keep a completed/failed terminal state visible.
     if (state.phase == LinkPhase.done || state.phase == LinkPhase.failed) return;
-    // Do NOT tear down an in-flight transfer on a transient relay blip. The link
-    // handshake churns the connection (key exchange, WebRTC, the receiver's
-    // snapshot-triggered restart), so a brief RelayDisconnected is expected mid-link
-    // — and the populated device proceeds with the push regardless. Clearing here was
-    // the "after entering the code the 'Linking this device' dialog vanished and
-    // reverted to the enter-code screen even though the other device kept going" bug.
-    // These phases survive a reconnect; only the pre-transfer showingCode/confirmPush
-    // states (which depend on a live relay code claim) reset.
+    // Do NOT tear down an in-flight transfer on a transient relay blip: the link
+    // handshake churns the connection, so a brief RelayDisconnected is expected
+    // mid-link and the populated device pushes regardless. Only the pre-transfer
+    // showingCode/confirmPush states, which depend on a live code claim, reset.
     switch (state.phase) {
       case LinkPhase.waiting:
       case LinkPhase.receiving:

@@ -9,23 +9,18 @@ import 'package:hollow/src/core/providers/unread_marker_provider.dart';
 
 /// Tracks unread message state per channel and per DM.
 ///
-/// "Seen" = the channel/DM was selected while the app was focused.
-/// Stored in app_settings as:
-/// - `seen:ch:{serverId}:{channelId}` → last seen message ID
-/// - `seen:dm:{peerId}` → last seen message ID
-///
-/// Unread count is computed by comparing the stored last-seen ID
-/// against the latest message ID from in-memory state.
+/// "Seen" = the channel/DM was selected while the app was focused, stored in
+/// app_settings under `seen:ch:{serverId}:{channelId}` / `seen:dm:{peerId}`.
+/// The count compares that pointer with the latest in-memory message id.
 class UnreadNotifier extends Notifier<UnreadState> {
   @override
   UnreadState build() => const UnreadState();
 
-  /// Load last-seen state from DB on startup and compute actual unread counts.
-  /// Respects notification settings (All/Mentions/Nothing) from the start.
+  /// Load last-seen state from DB on startup and compute actual unread counts,
+  /// respecting notification settings (All/Mentions/Nothing).
   ///
-  /// The seen-pointers come from ONE batched `seen:` prefix read — this used
-  /// to issue a serial FFI `loadSetting` per channel and per DM on top of the
-  /// per-channel count queries.
+  /// The seen-pointers come from ONE batched `seen:` prefix read, not a serial
+  /// `loadSetting` per channel and per DM.
   Future<void> loadAll(
       Map<String, List<String>> serverChannels,
       List<String> dmPeerIds) async {
@@ -143,10 +138,9 @@ class UnreadNotifier extends Notifier<UnreadState> {
         final dbCount = level == NotificationLevel.mentions
             ? result.mentions
             : result.total;
-        // Keep the higher of DB vs in-memory. In-memory may include
-        // hint-based increments for channels whose messages haven't
-        // been synced to DB yet (only the viewed channel syncs).
-        // Message-ID dedup prevents double-counting from hints.
+        // Keep the higher of DB vs in-memory: in-memory may include hint-based
+        // increments for channels whose messages haven't synced yet. Message-ID
+        // dedup prevents double-counting.
         final existingCount = updatedCounts[key] ?? 0;
         final existingMentions = updatedMentions[key] ?? 0;
         final finalCount = dbCount > existingCount ? dbCount : existingCount;
@@ -202,9 +196,8 @@ class UnreadNotifier extends Notifier<UnreadState> {
       String serverId, String channelId, String? latestMessageId) async {
     if (latestMessageId == null) return;
     final key = '$serverId:$channelId';
-    // Record where this visit STARTED before the pointer moves, so the chat
-    // can draw a "new messages" line where reading left off (issue #54). The
-    // marker notifier ignores everything but the first call of a visit.
+    // Record where this visit STARTED before the pointer moves, so the chat can
+    // draw a "new messages" line where reading left off (issue #54).
     ref.read(unreadMarkerProvider.notifier).noteSeen(
         channelMarkerKey(serverId, channelId), state.channelLastSeen[key]);
     // No-op guard: already seen up to this message and nothing pending —
@@ -215,12 +208,10 @@ class UnreadNotifier extends Notifier<UnreadState> {
       return;
     }
 
-    // Update in-memory.
     final updatedSeen =
         Map<String, String>.from(state.channelLastSeen);
     updatedSeen[key] = latestMessageId;
 
-    // Clear unread + mention counts.
     final updatedCounts =
         Map<String, int>.from(state.channelUnreadCounts);
     updatedCounts.remove(key);
@@ -234,7 +225,6 @@ class UnreadNotifier extends Notifier<UnreadState> {
       channelMentionCounts: updatedMentions,
     );
 
-    // Persist.
     await storage_api.saveSetting(
       key: 'seen:ch:$serverId:$channelId',
       value: latestMessageId,
@@ -273,13 +263,10 @@ class UnreadNotifier extends Notifier<UnreadState> {
 
   /// Marks the DM with [peerId] read up to its newest message.
   ///
-  /// A caller that already holds the newest message should use [markDmSeen];
-  /// this is for surfaces that only know the peer — a sidebar tile's context
-  /// menu, or the Home button's "mark everything". The newest id comes from
-  /// the live map first and from the DB only when it is not there, because a
-  /// conversation that was never opened this session has no live entry.
-  ///
-  /// Returns true when the badge is now clear.
+  /// A caller that already holds the newest message should use [markDmSeen]; this
+  /// is for surfaces that only know the peer. The newest id comes from the live
+  /// map first and the DB only when absent, because a conversation never opened
+  /// this session has no live entry. Returns true when the badge is now clear.
   Future<bool> markDmSeenLatest(String peerId) async {
     var latest = state.dmLatestId[peerId];
     if (latest == null) {
@@ -292,9 +279,8 @@ class UnreadNotifier extends Notifier<UnreadState> {
       await markDmSeen(peerId, latest);
       return true;
     }
-    // A count with no message behind it at all: the conversation is gone but
-    // the badge outlived it. Drop the count — there is no watermark to move,
-    // and leaving it means a number the user can never clear.
+    // A count with no message behind it: the conversation is gone but the badge
+    // outlived it. There is no watermark to move, so drop the count.
     if (!state.dmUnreadCounts.containsKey(peerId)) return true;
     final counts = Map<String, int>.from(state.dmUnreadCounts);
     counts.remove(peerId);
@@ -302,9 +288,8 @@ class UnreadNotifier extends Notifier<UnreadState> {
     return true;
   }
 
-  /// Clears the unread badge on every DM that carries one.
-  ///
-  /// Returns how many conversations were cleared, so the caller can say so.
+  /// Clears the unread badge on every DM that carries one. Returns how many
+  /// conversations were cleared, so the caller can say so.
   Future<int> markAllDmsSeen() async {
     final peerIds = state.dmUnreadCounts.keys.toList();
     for (final peerId in peerIds) {
@@ -512,7 +497,6 @@ final unreadProvider =
     NotifierProvider<UnreadNotifier, UnreadState>(UnreadNotifier.new);
 
 /// Pre-computed DM unread total, filtered by notification settings.
-/// Replaces manual O(n) loops in bottom_bar.dart and server_strip.dart.
 final dmUnreadBadgeProvider = Provider<int>((ref) {
   final unread = ref.watch(unreadProvider);
   final notifSettings = ref.watch(notificationSettingsProvider);

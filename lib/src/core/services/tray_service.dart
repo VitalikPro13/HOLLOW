@@ -17,9 +17,9 @@ import 'package:hollow/src/core/shared_tickers.dart';
 import 'package:hollow/src/ui/app.dart' show hollowNavigatorKey;
 import 'package:hollow/src/ui/dialogs/user_settings_dialog.dart';
 
-/// Anything unread anywhere — drives the tray icon's red-dot variant. DM
-/// counts go through the notification-settings-filtered badge (muted
-/// conversations must not light the tray), matching the server strip.
+/// Anything unread anywhere, driving the tray icon's red-dot variant. DM
+/// counts go through the notification-settings-filtered badge, so a muted
+/// conversation never lights the tray.
 final _trayUnreadProvider = Provider<bool>((ref) =>
     ref.watch(dmUnreadBadgeProvider) > 0 ||
     ref.watch(unreadProvider
@@ -27,24 +27,19 @@ final _trayUnreadProvider = Provider<bool>((ref) =>
 
 /// Always-visible Windows system tray icon (issue #50).
 ///
-/// The icon lives in the tray for the whole app lifetime — not just while
-/// hidden — so users can see Hollow is running and reach quick actions from
-/// the right-click menu: open, mute/deafen/leave while in a call or voice
-/// channel, settings, quit. The tooltip mirrors the connection status and the
-/// icon swaps to a red-dot variant while anything is unread.
-///
-/// Windows-only by design: macOS keeps the native Dock idiom (active dot +
-/// applicationShouldHandleReopen) and Linux skips the tray entirely because
-/// AppIndicator needs a shell extension most distros don't ship —
-/// [restoreWindow] is still shared by all desktop platforms (deep links).
+/// The icon stays for the whole app lifetime, not just while hidden, so users
+/// can see Hollow is running and reach the quick actions. Windows-only by
+/// design: macOS keeps the native Dock idiom and Linux skips the tray, since
+/// AppIndicator needs a shell extension most distros do not ship.
+/// [restoreWindow] is still shared by every desktop platform.
 class TrayService with TrayListener {
   TrayService._();
   static final TrayService instance = TrayService._();
 
   late ProviderContainer _container;
 
-  /// Quit callback from main.dart — owns WebRTC disposal, Rust shutdown,
-  /// single-instance lock release, and the final window destroy.
+  /// Quit callback from main.dart, which owns WebRTC disposal, Rust shutdown,
+  /// the single-instance lock release and the final window destroy.
   late Future<void> Function() _quitApp;
 
   bool _iconVisible = false;
@@ -65,9 +60,8 @@ class TrayService with TrayListener {
     trayManager.addListener(this);
     await ensureIcon();
 
-    // Tooltip + unread badge track app state. Attached after the first frame
-    // so these provider chains initialize alongside the widget tree, not
-    // before runApp.
+    // Attached after the first frame so these provider chains initialize
+    // alongside the widget tree rather than before runApp.
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _container.listen<OverallConnection>(
         overallConnectionProvider,
@@ -98,8 +92,8 @@ class TrayService with TrayListener {
     await trayManager.destroy();
   }
 
-  /// Shared desktop restore: bring the window back from tray/minimized/hidden
-  /// and resume animations. Used by tray clicks and deep-link foregrounding.
+  /// Shared desktop restore: bring the window back from tray, minimized or
+  /// hidden and resume animations. Used by tray clicks and deep links.
   Future<void> restoreWindow() async {
     if (Platform.isLinux && await windowManager.isMinimized()) {
       await windowManager.restore();
@@ -109,8 +103,6 @@ class TrayService with TrayListener {
     _container.read(windowVisibleProvider.notifier).state = true;
     SharedTickers.instance.resume();
   }
-
-  // ---- Tray state → icon/tooltip ----
 
   void _updateTooltip(OverallConnection status) {
     if (!_iconVisible) return;
@@ -134,7 +126,7 @@ class TrayService with TrayListener {
         .catchError((_) {}));
   }
 
-  /// Locate the .ico on disk (release layout, debug layout) or extract it
+  /// Locates the .ico on disk (release layout, then debug) or extracts it
   /// from the asset bundle as a last resort. Cached per variant.
   Future<String?> _resolveIconPath({required bool unread}) async {
     final cached = _iconPaths[unread];
@@ -164,12 +156,10 @@ class TrayService with TrayListener {
     }
   }
 
-  // ---- Menu ----
-
   Menu _buildMenu() {
-    // Voice items only render while actually in a call/VC — and never before
-    // login (reading the call providers pre-identity would spin up their
-    // dependency chains too early).
+    // Voice items only render while actually in a call or VC, and never
+    // before login: reading the call providers pre-identity would spin up
+    // their dependency chains too early.
     var inVoice = false;
     var muted = false;
     var deafened = false;
@@ -205,8 +195,6 @@ class TrayService with TrayListener {
     ]);
   }
 
-  // ---- TrayListener ----
-
   @override
   void onTrayIconMouseDown() {
     unawaited(restoreWindow());
@@ -216,7 +204,7 @@ class TrayService with TrayListener {
   void onTrayIconRightMouseDown() {
     unawaited(() async {
       // Rebuild right before showing so checkmarks and the voice section
-      // reflect the state at this instant — no listeners needed.
+      // reflect the state at this instant, with no listeners needed.
       await trayManager.setContextMenu(_buildMenu());
       await trayManager.popUpContextMenu();
     }()
@@ -243,9 +231,7 @@ class TrayService with TrayListener {
     }
   }
 
-  // ---- Actions ----
-
-  /// Route to whichever call surface is live — same dispatch as the voice
+  /// Routes to whichever call surface is live, the same dispatch as the voice
   /// hotkeys (issue #38): VC wins, else an active DM call.
   void _toggleVoice(
     void Function(VoiceChannelNotifier) onVc,
@@ -279,8 +265,8 @@ class TrayService with TrayListener {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       final context = hollowNavigatorKey.currentContext;
       if (context == null) return;
-      // toggle: false — if settings is already open (window was hidden with
-      // the dialog up), just come back to it instead of closing it.
+      // toggle: false, so a settings dialog left open behind a hidden window
+      // is returned to rather than closed.
       showUserSettingsDialog(context, toggle: false);
     });
   }

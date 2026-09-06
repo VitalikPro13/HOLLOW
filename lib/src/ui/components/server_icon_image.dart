@@ -7,19 +7,16 @@ import 'package:hollow/src/core/providers/server_avatar_anim_provider.dart';
 import 'package:hollow/src/core/providers/server_avatar_provider.dart';
 import 'animated_gif_image.dart';
 
-/// A server's icon image: renders the ANIMATED variant when the server has
-/// one (asset-rail blob, `settings["server_avatar_anim"]`), otherwise the
-/// still from the CRDT setting, otherwise [fallback].
+/// A server's icon: the ANIMATED variant off the asset rail when there is one,
+/// else the still from the CRDT setting, else [fallback].
 ///
-/// Animation is gated the same way as server banners — only while actually
-/// watched: hovered or [isSelected], window focused, and not reduce-motion
-/// (enforced inside [AnimatedGifImage]). Otherwise the animated blob holds
-/// its first frame, which matches the still.
+/// Animation is gated like the server banners, to hovered or selected, focused
+/// and not reduce-motion; otherwise the blob holds its first frame.
 class ServerIconImage extends ConsumerStatefulWidget {
   final String serverId;
   final double size;
 
-  /// Selection un-gates animation too (a selected server is being watched).
+  /// Selection un-gates animation: a selected server is being watched.
   final bool isSelected;
 
   /// Shown when neither icon variant is loaded (usually initials).

@@ -17,27 +17,25 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Entry mode for the device-link dialog.
 enum DeviceLinkMode {
-  /// This device HAS the data — show a code for an empty device to enter.
+  /// This device HAS the data, so it shows a code for an empty one to enter.
   showCode,
 
-  /// This device is EMPTY — enter a code from the populated device, or it will
-  /// pull from an auto-detected online sibling.
+  /// This device is EMPTY, so it takes a code from the populated device or
+  /// pulls from an auto-detected online sibling.
   enterCode,
 }
 
-/// True while a device-link dialog is mounted anywhere. The shell's global
-/// confirm-push listener checks this so an inbound request doesn't stack a SECOND
-/// dialog on top of one already open (e.g. the Settings show-code dialog) — the
-/// already-open dialog re-renders into the confirm view on the phase change.
+/// True while a device-link dialog is mounted anywhere, so the shell's global
+/// confirm-push listener does not stack a SECOND dialog on an open one: the
+/// open dialog re-renders into the confirm view on the phase change.
 bool deviceLinkDialogIsOpen = false;
 
-// Tracks the transient "Connecting…" placeholder so it can be dismissed exactly
-// once when the real link dialog is ready.
+// Tracks the transient placeholder so it is dismissed exactly once, when the
+// real link dialog is ready.
 bool _connectingDialogOpen = false;
 
-/// Shows a lightweight non-dismissible "Connecting…" dialog. Used to fill the
-/// ~few-second gap between picking "Link a device" on the welcome screen and the
-/// node finishing startup, so the screen isn't blank.
+/// Fills the gap between picking "Link a device" and the node finishing
+/// startup, so the screen is not blank. Not dismissible.
 void showConnectingDialog(BuildContext context, {required String message}) {
   if (_connectingDialogOpen) return;
   _connectingDialogOpen = true;
@@ -96,9 +94,8 @@ class _ConnectingContent extends StatelessWidget {
   }
 }
 
-/// Returns `true` if the user cancelled the enter-code flow and wants to go BACK
-/// (used by the first-run "Link a device" path to re-show the Welcome dialog).
-/// Returns `false`/`null` in every other case (completed, declined, closed).
+/// Returns true only when the user cancelled the enter-code flow and wants to
+/// go BACK, which the first-run path uses to re-show the Welcome dialog.
 Future<bool?> showDeviceLinkDialog(
   BuildContext context, {
   required DeviceLinkMode mode,
@@ -132,11 +129,9 @@ class _DeviceLinkContentState extends ConsumerState<_DeviceLinkContent> {
     deviceLinkDialogIsOpen = true;
     // Defer provider mutation until after the first frame.
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      // Only mint a fresh code when we're actually idle. If the dialog was opened
-      // BECAUSE an inbound link request arrived (phase already confirmPush — the
-      // global listener in the shell pops us in showCode mode to render the
-      // confirm), do NOT claim a new code: that's the "entering the code spawns a
-      // new code on the other device" bug.
+      // Only mint a fresh code when actually idle: a dialog opened BECAUSE an
+      // inbound request arrived is already past that phase, and claiming a new
+      // code there spawns a second code on the other device.
       if (widget.mode == DeviceLinkMode.showCode &&
           ref.read(deviceLinkSyncProvider).phase == LinkPhase.idle) {
         ref.read(deviceLinkSyncProvider.notifier).startShowingCode();
@@ -174,8 +169,8 @@ class _DeviceLinkContentState extends ConsumerState<_DeviceLinkContent> {
     final phase = ref.read(deviceLinkSyncProvider).phase;
     if (phase == LinkPhase.showingCode) notifier.cancelShowingCode();
     notifier.reset();
-    // Pop with `true` so the first-run link flow re-shows the Welcome dialog
-    // ("Cancel goes back"). Other callers (Settings) ignore the result.
+    // Pops true so the first-run link flow re-shows the Welcome dialog; other
+    // callers ignore the result.
     Navigator.of(context).maybePop(true);
   }
 
@@ -276,7 +271,6 @@ class _DeviceLinkContentState extends ConsumerState<_DeviceLinkContent> {
     );
   }
 
-  // ── Show code (populated device) ───────────────────────────────────────────
   Widget _showCode(HollowTheme hollow, DeviceLinkState state) {
     final code = state.code ?? '······';
     return Column(
@@ -285,7 +279,6 @@ class _DeviceLinkContentState extends ConsumerState<_DeviceLinkContent> {
         _header(hollow, LucideIcons.smartphone, 'Link a device',
             'On your other (empty) device, choose "Link a device" and enter this code.'),
         const SizedBox(height: HollowSpacing.xl),
-        // Big code.
         Container(
           padding: const EdgeInsets.symmetric(
               horizontal: HollowSpacing.lg, vertical: HollowSpacing.md),
@@ -334,7 +327,6 @@ class _DeviceLinkContentState extends ConsumerState<_DeviceLinkContent> {
     );
   }
 
-  // ── Enter code (empty device) ──────────────────────────────────────────────
   Widget _enterCode(HollowTheme hollow) {
     return Column(
       mainAxisSize: MainAxisSize.min,
@@ -359,9 +351,8 @@ class _DeviceLinkContentState extends ConsumerState<_DeviceLinkContent> {
           ),
         ),
         const SizedBox(height: HollowSpacing.sm),
-        // NOTE: no files/vault toggles here — the POPULATED device chooses scope
-        // when it confirms the push (it's the one building the snapshot). Showing
-        // them here too was duplicated + misleading.
+        // No scope toggles here: the POPULATED device chooses scope when it
+        // confirms the push, because it is the one building the snapshot.
         Text(
           'Your messages, friends and profile transfer automatically.',
           style: HollowTypography.caption.copyWith(color: hollow.textSecondary, fontSize: 11),
@@ -376,7 +367,7 @@ class _DeviceLinkContentState extends ConsumerState<_DeviceLinkContent> {
               onPressed: () {
                 final code = _codeController.text.trim();
                 if (code.length == 6) {
-                  // Scope is decided by the populated device; pass false here.
+                  // Scope is decided by the populated device.
                   ref.read(deviceLinkSyncProvider.notifier).enterCode(
                         code,
                         includeVault: false,
@@ -444,7 +435,6 @@ class _DeviceLinkContentState extends ConsumerState<_DeviceLinkContent> {
     );
   }
 
-  // ── Confirm push (populated device got a request) ──────────────────────────
   Widget _confirmPush(HollowTheme hollow, DeviceLinkState state) {
     return Column(
       mainAxisSize: MainAxisSize.min,
@@ -487,7 +477,6 @@ class _DeviceLinkContentState extends ConsumerState<_DeviceLinkContent> {
     );
   }
 
-  // ── Progress (waiting / receiving / importing) ─────────────────────────────
   Widget _progress(HollowTheme hollow, DeviceLinkState state) {
     final waiting = state.phase == LinkPhase.waiting;
     final receiving = state.phase == LinkPhase.receiving;
@@ -506,7 +495,7 @@ class _DeviceLinkContentState extends ConsumerState<_DeviceLinkContent> {
       children: [
         _header(hollow, LucideIcons.refreshCw, 'Linking this device', label),
         const SizedBox(height: HollowSpacing.xl),
-        // The ONE real progress bar — actual bytes, no fabrication.
+        // The ONE real progress bar: actual bytes, never a fabricated ramp.
         ClipRRect(
           borderRadius: BorderRadius.circular(99),
           child: LinearProgressIndicator(
@@ -536,11 +525,9 @@ class _DeviceLinkContentState extends ConsumerState<_DeviceLinkContent> {
     );
   }
 
-  // ── Sending (populated device pushing) ─────────────────────────────────────
-  // The sender streams chunks into the WS channel with no per-byte feedback, so this
-  // is an indeterminate spinner, not a bar. It stays up until the RECEIVER sends back
-  // a LinkSnapshotAck (→ LinkPushComplete → pushDone), so "Data sent" only appears
-  // once the other device truly has everything — not when our bytes merely left.
+  // The sender streams chunks with no per-byte feedback, so this is a spinner
+  // rather than a bar. It stays up until the RECEIVER acks, so "Data sent"
+  // means the other device has everything, not that our bytes left.
   Widget _sending(HollowTheme hollow) {
     return Column(
       mainAxisSize: MainAxisSize.min,
@@ -566,7 +553,6 @@ class _DeviceLinkContentState extends ConsumerState<_DeviceLinkContent> {
     );
   }
 
-  // ── Push done (populated device, sender-only — no restart) ─────────────────
   Widget _pushDone(HollowTheme hollow, DeviceLinkState state) {
     return Column(
       mainAxisSize: MainAxisSize.min,
@@ -587,15 +573,11 @@ class _DeviceLinkContentState extends ConsumerState<_DeviceLinkContent> {
     );
   }
 
-  // ── Done ───────────────────────────────────────────────────────────────────
-  // The snapshot replaced identity.key + messages.db, and the import already closed
-  // the live (throwaway) DB connection. The running process loaded the throwaway
-  // identity at startup, so it CANNOT read the imported DB (real passphrase). We
-  // therefore restart automatically — the relaunched process loads the real identity
-  // and opens the real DB with the real data. Counts aren't shown here (they'd be 0
-  // pre-restart); the populated UI appears after the relaunch.
+  // The snapshot replaced the identity and the database, and this process still
+  // holds the throwaway identity it started with, so it CANNOT read the imported
+  // DB. Hence the automatic restart; counts would read 0 until it happens.
   Widget _done(HollowTheme hollow, DeviceLinkState state) {
-    // Auto-restart once, shortly after the done view appears.
+    // Once only, shortly after the done view appears.
     if (!_restartScheduled) {
       _restartScheduled = true;
       Future.delayed(const Duration(milliseconds: 1500), _restartApp);
@@ -633,18 +615,15 @@ class _DeviceLinkContentState extends ConsumerState<_DeviceLinkContent> {
   }
 
   Future<void> _restartApp() async {
-    // Shared waiter-script relaunch (app_relaunch.dart) — a directly-spawned
-    // copy dies against the native single-instance forwarder while we're
-    // still shutting down. On mobile it just exits and the user re-opens.
+    // Only via the shared waiter: a directly-spawned copy dies against the
+    // native single-instance forwarder while this one is still shutting down.
     await relaunchApp();
   }
 
-  // ── Failed ─────────────────────────────────────────────────────────────────
   Widget _failed(HollowTheme hollow, DeviceLinkState state) {
-    // A wrong/expired code is recoverable — don't drop the user into a dead screen.
-    // On the enter-code flow, "Try again" resets to idle so the dialog re-renders the
-    // enter-code view in place (no pop, no app restart). "Back" still goes to Welcome
-    // (pops `true` → shell discards the throwaway identity and relaunches).
+    // A wrong or expired code is recoverable, so "Try again" resets to idle and
+    // re-renders the enter-code view in place. "Back" still goes to Welcome,
+    // where the shell discards the throwaway identity and relaunches.
     final isEnterCode = widget.mode == DeviceLinkMode.enterCode;
     return Column(
       mainAxisSize: MainAxisSize.min,
@@ -656,7 +635,7 @@ class _DeviceLinkContentState extends ConsumerState<_DeviceLinkContent> {
         if (isEnterCode) ...[
           HollowButton.filled(
             onPressed: () {
-              // Back to the enter-code view in place (clears the typed code too).
+              // Back to the enter-code view in place.
               _codeController.clear();
               ref.read(deviceLinkSyncProvider.notifier).reset();
             },
@@ -683,7 +662,7 @@ class _DeviceLinkContentState extends ConsumerState<_DeviceLinkContent> {
   }
 }
 
-/// Uppercases typed link-code input as it's entered.
+/// Uppercases typed link-code input as it is entered.
 class UpperCaseTextFormatter extends TextInputFormatter {
   @override
   TextEditingValue formatEditUpdate(TextEditingValue oldValue, TextEditingValue newValue) {

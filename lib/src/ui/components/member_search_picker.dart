@@ -9,27 +9,24 @@ import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/label_visuals.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-/// Searchable member list shared by every member picker (the label Assign
-/// dialogs and the temporary-access grants picker). A live search bar
-/// filters case-insensitively on the resolved display name, the server
-/// nickname AND the raw peer id (so a pasted id works); empty query shows
-/// everyone. Rows are avatar + name with the short peer-id suffix beneath
-/// so two members sharing a name stay distinguishable.
+/// Searchable member list shared by every member picker. Search matches the
+/// display name, the server nickname AND the raw peer id, so a pasted id works,
+/// and each row carries the short id suffix so two members sharing a name stay
+/// distinguishable.
 ///
-/// Pure UI: the caller owns the member set, the resolved-name lookup, the
-/// trailing widget (selection icon / chevron) and the tap behavior — no
-/// FFI or provider access in here.
+/// Pure UI: the caller owns the member set, the name lookup, the trailing
+/// widget and the tap behaviour. No FFI or provider access in here.
 class MemberSearchPicker extends StatefulWidget {
   final List<crdt_api.MemberFfi> members;
 
-  /// Resolved display name for a member (nickname/profile precedence is the
-  /// caller's business — desktop and mobile resolve differently).
+  /// Resolved display name; the nickname and profile precedence is the
+  /// caller's business, and desktop and mobile resolve differently.
   final String Function(crdt_api.MemberFfi member) nameOf;
 
   /// Trailing widget per row (check square, chevron, …).
   final Widget Function(crdt_api.MemberFfi member) trailingOf;
 
-  /// Row tap. Null disables every row (busy state).
+  /// Row tap; null disables every row.
   final void Function(crdt_api.MemberFfi member)? onTapMember;
 
   /// The list hugs short content and scrolls past this height.
@@ -110,12 +107,12 @@ class _MemberSearchPickerState extends State<MemberSearchPicker> {
                   onTap: widget.onTapMember == null
                       ? null
                       : () => widget.onTapMember!(m),
-                  // List rows, not buttons: the row's own text (name + id
-                  // suffix) names it; trailing icons carry any state label.
+                  // List rows, not buttons: the row's own text names it and
+                  // trailing icons carry any state label.
                   semanticButton: false,
                   subtle: true,
-                  // No horizontal padding: rows stay flush with the card
-                  // caption / search field above them.
+                  // No horizontal padding, so rows stay flush with the caption
+                  // and search field above them.
                   padding:
                       const EdgeInsets.symmetric(vertical: HollowSpacing.sm),
                   child: Row(

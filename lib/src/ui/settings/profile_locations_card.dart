@@ -17,16 +17,14 @@ import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/settings/settings_shared.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-/// Profiles block (issue #47) — switch between / erase separate identities,
-/// each living in its own data folder. Rendered at the bottom of the desktop
-/// Settings > Profile category. Desktop-only: mobile data roots are sandboxed
-/// and the iOS push extension opens one fixed App Group DB path.
+/// Profiles block (issue #47): switch between or erase separate identities,
+/// each in its own data folder. Desktop-only, because mobile data roots are
+/// sandboxed and the iOS push extension opens one fixed App Group DB path.
 ///
-/// Rows: the OS-default root, the portable `hollow_data` folder next to the
-/// exe (when present), and user-added folders from profiles.json. Switching
-/// pins the chosen root in the registry and restarts Hollow; erasing the
-/// running profile reuses the pending-wipe flow (marker + restart — in-process
-/// DB deletes fail on Windows while the node holds SQLCipher handles).
+/// Switching pins the chosen root in the registry and restarts Hollow; erasing
+/// the running profile goes through the pending-wipe marker, because
+/// in-process DB deletes fail on Windows while the node holds SQLCipher
+/// handles.
 class ProfileLocationsCard extends StatefulWidget {
   const ProfileLocationsCard({super.key});
 
@@ -55,11 +53,8 @@ class _ProfileLocationsCardState extends State<ProfileLocationsCard> {
     return row.builtin ? LucideIcons.hardDrive : LucideIcons.folder;
   }
 
-  // ── Shared helpers ─────────────────────────────────────────────────
-
-  /// Empty folders and recognizable Hollow data roots qualify; anything else
-  /// (a Documents folder, a project dir) is refused so we never onboard into —
-  /// or worse, erase — a folder full of unrelated files.
+  /// Empty folders and recognizable Hollow data roots qualify; anything else is
+  /// refused, so we never onboard into (or erase) a folder of unrelated files.
   bool _isEmptyOrHollowData(String path) {
     final dir = Directory(path);
     if (!dir.existsSync()) return true; // will be created
@@ -74,8 +69,8 @@ class _ProfileLocationsCardState extends State<ProfileLocationsCard> {
     return markers.any((m) => File('$path$sep$m').existsSync());
   }
 
-  /// True if another live Hollow instance holds this profile's lock (same
-  /// PID + process-name check as the boot single-instance guard).
+  /// True if another live Hollow instance holds this profile's lock, by the
+  /// same PID and process-name check as the boot single-instance guard.
   bool _profileInUse(String path) {
     try {
       final lock = File('$path${Platform.pathSeparator}hollow.lock');
@@ -99,8 +94,6 @@ class _ProfileLocationsCardState extends State<ProfileLocationsCard> {
     await saveProfileRegistry(next);
     if (mounted) setState(() => _registry = next);
   }
-
-  // ── Switch ─────────────────────────────────────────────────────────
 
   Future<void> _confirmSwitch(ProfileRow row) async {
     final proceed = await showHollowDialog<bool>(
@@ -141,9 +134,8 @@ class _ProfileLocationsCardState extends State<ProfileLocationsCard> {
 
     setState(() => _busy = true);
     try {
-      // Pin explicitly even for the Default row — the pin must beat the
-      // portable auto-detection (an existing hollow_data folder) on the way
-      // back to the OS root.
+      // Pin explicitly even for the Default row: the pin must beat portable
+      // auto-detection on the way back to the OS root.
       await saveProfileRegistry(_registry.copyWith(activePath: row.path));
       await relaunchApp();
     } catch (e) {
@@ -154,8 +146,6 @@ class _ProfileLocationsCardState extends State<ProfileLocationsCard> {
       }
     }
   }
-
-  // ── Add / rename / remove ──────────────────────────────────────────
 
   Future<String?> _promptName({required String initial}) async {
     final controller = TextEditingController(text: initial);
@@ -193,8 +183,7 @@ class _ProfileLocationsCardState extends State<ProfileLocationsCard> {
 
     final portable = portableCandidatePath();
     if (portable != null && sameProfilePath(picked, portable)) {
-      // Refresh so the row is visibly there even if the folder appeared
-      // after this card was last built.
+      // The folder may have appeared after this card was last built.
       setState(() {});
       HollowToast.show(
           context, 'That is the portable folder: use its row in the list',
@@ -275,14 +264,11 @@ class _ProfileLocationsCardState extends State<ProfileLocationsCard> {
     }
   }
 
-  // ── Erase ──────────────────────────────────────────────────────────
-
   /// What this profile's own identity file demands before it may be deleted.
   ///
-  /// Erasing an offline profile is a plain recursive delete of somebody's
-  /// identity, and until now it asked for nothing: anyone at an unlocked
-  /// Hollow could wipe a DIFFERENT, password-protected profile without ever
-  /// knowing its password. The check reads that profile's `identity.key`
+  /// Erasing an offline profile is a recursive delete of somebody's identity,
+  /// so without this anyone at an unlocked Hollow could wipe a DIFFERENT,
+  /// password-protected profile. The check reads that profile's `identity.key`
   /// directly, because the running process has only ever unlocked its own.
   Future<_EraseChallenge> _eraseChallengeFor(ProfileRow row) async {
     try {
@@ -290,16 +276,14 @@ class _ProfileLocationsCardState extends State<ProfileLocationsCard> {
           await identity_api.identityProtectionStatusAt(dataDir: row.path);
       if (!status.isEncrypted) return _EraseChallenge.none;
       if (status.hasPassword) return _EraseChallenge.password;
-      // Keychain-only protection unlocks silently at launch on this machine,
-      // so a machine that can still unwrap the file has already proved as much
-      // as a prompt would. One that cannot (a folder copied from another
-      // computer) falls back to typing the name.
+      // Keychain-only protection unlocks silently at launch, so a machine that
+      // can still unwrap the file has proved as much as a prompt would. One
+      // that cannot falls back to typing the name.
       final unwrappable =
           await identity_api.verifyIdentityPasswordAt(dataDir: row.path);
       return unwrappable ? _EraseChallenge.none : _EraseChallenge.name;
     } catch (_) {
-      // An identity file we cannot read is one we cannot clear, so fail closed
-      // rather than open.
+      // An identity file we cannot read is one we cannot clear: fail closed.
       return _EraseChallenge.name;
     }
   }
@@ -324,9 +308,9 @@ class _ProfileLocationsCardState extends State<ProfileLocationsCard> {
     if (proceed != true || !mounted) return;
 
     if (isRunning) {
-      // The live node holds open SQLCipher handles — in-process deletes fail
-      // on Windows. Reuse the revocation self-nuke mechanic: mark a pending
-      // wipe and relaunch; the next launch wipes pre-node-start.
+      // The live node holds open SQLCipher handles and in-process deletes fail
+      // on Windows, so a pending-wipe marker plus a relaunch does it
+      // pre-node-start.
       setState(() => _busy = true);
       try {
         await storage_api.stashPendingWipe();
@@ -341,9 +325,8 @@ class _ProfileLocationsCardState extends State<ProfileLocationsCard> {
       return;
     }
 
-    // Offline profile — no open handles, delete directly. Still guarded:
-    // never touch a folder another instance is using or that doesn't look
-    // like Hollow data.
+    // No open handles, so this deletes directly. Still guarded: never touch a
+    // folder another instance is using or that does not look like Hollow data.
     if (_profileInUse(row.path)) {
       HollowToast.show(
           context, 'That profile is open in another Hollow instance',
@@ -363,8 +346,7 @@ class _ProfileLocationsCardState extends State<ProfileLocationsCard> {
         await for (final entity in dir.list(followLinks: false)) {
           final name = entity.path.split(Platform.pathSeparator).last;
           // Same keep-list as Rust's perform_pending_wipe: the registry is
-          // app-level config (only present when this row is the default
-          // root), and stale locks are harmless.
+          // app-level config and stale locks are harmless.
           if (name == 'profiles.json' || name.endsWith('.lock')) continue;
           await entity.delete(recursive: true);
         }
@@ -382,8 +364,6 @@ class _ProfileLocationsCardState extends State<ProfileLocationsCard> {
       }
     }
   }
-
-  // ── Build ──────────────────────────────────────────────────────────
 
   @override
   Widget build(BuildContext context) {
@@ -571,15 +551,14 @@ enum _EraseChallenge {
   /// Password-protected: the password must actually unwrap its identity file.
   password,
 
-  /// Protected but not unwrappable here. There is no secret to check against,
-  /// so the profile name is typed instead. Not authentication, just a wall
-  /// high enough that nobody clears it by accident.
+  /// Protected but not unwrappable here, so the profile name is typed instead.
+  /// Not authentication, just a wall nobody clears by accident.
   name,
 }
 
 /// The erase confirmation. Stateful because the challenge is verified INSIDE
-/// the dialog: a wrong password reports itself in the field the user is
-/// looking at, instead of closing the dialog and firing a toast.
+/// the dialog, so a wrong password reports itself in the field rather than
+/// closing the dialog and firing a toast.
 class _EraseProfileDialog extends StatefulWidget {
   final String name;
   final String path;

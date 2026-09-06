@@ -15,7 +15,6 @@ import 'package:hollow/src/ui/components/status_dot.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Floating pill shown during an active 1:1 call on mobile.
-/// Mute, camera toggle, hangup, and duration timer.
 class MobileActiveCallPill extends ConsumerStatefulWidget {
   const MobileActiveCallPill({super.key});
 
@@ -91,8 +90,8 @@ class _MobileActiveCallPillState extends ConsumerState<MobileActiveCallPill> {
         child: Center(
           child: GestureDetector(
             onPanUpdate: (details) {
-              // Clamp so the pill can't be dragged below its anchor (into
-              // the bottom nav) or off-screen.
+              // Clamped so the pill cannot be dragged into the bottom nav or
+              // off-screen.
               final size = MediaQuery.sizeOf(context);
               final topInset = MediaQuery.viewPaddingOf(context).top;
               final next = _dragOffset + details.delta;
@@ -137,8 +136,8 @@ class _MobileActiveCallPillState extends ConsumerState<MobileActiveCallPill> {
                     size: 8,
                   ),
                   const SizedBox(width: HollowSpacing.sm),
-                  // Icon only: the pill is already tight, and the label still
-                  // reaches the tooltip and assistive tech.
+                  // Icon only, the pill being tight; the label still reaches
+                  // the tooltip and assistive tech.
                   if (linkHealth.hasFlair) ...[
                     LinkHealthChip(snapshot: linkHealth, compact: true),
                     const SizedBox(width: HollowSpacing.sm),
@@ -175,7 +174,6 @@ class _MobileActiveCallPillState extends ConsumerState<MobileActiveCallPill> {
                     ),
                   ],
                   const SizedBox(width: HollowSpacing.md),
-                  // Mute
                   HollowPressable(
                     semanticLabel: call.isMuted ? 'Unmute' : 'Mute',
                     onTap: () =>
@@ -190,7 +188,6 @@ class _MobileActiveCallPillState extends ConsumerState<MobileActiveCallPill> {
                     ),
                   ),
                   const SizedBox(width: HollowSpacing.xs),
-                  // Camera
                   HollowPressable(
                     semanticLabel: call.isVideoEnabled
                         ? 'Turn off camera'
@@ -212,7 +209,6 @@ class _MobileActiveCallPillState extends ConsumerState<MobileActiveCallPill> {
                     ),
                   ),
                   const SizedBox(width: HollowSpacing.xs),
-                  // Hangup
                   HollowPressable(
                     semanticLabel: 'End call',
                     onTap: () =>

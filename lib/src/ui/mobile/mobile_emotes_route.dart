@@ -13,11 +13,9 @@ import 'package:hollow/src/ui/settings/emotes_tab.dart' show ServerStickersSecti
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-/// Mobile server settings → Emotes: the server's custom emote set.
-/// Port of the desktop `EmotesTab` (settings/emotes_tab.dart) — everyone can
-/// view; add/remove needs MANAGE_EMOTES (Admin+ by default). Images are
-/// processed locally (≤64px WebP) and replicate content-addressed; the CRDT
-/// carries only (name, hash).
+/// The server's custom emote set. Everyone can view; add and remove need
+/// MANAGE_EMOTES. Images replicate content-addressed and the CRDT carries only
+/// the name and hash.
 class MobileEmotesRoute extends ConsumerWidget {
   final String serverId;
 
@@ -35,8 +33,8 @@ class MobileEmotesRoute extends ConsumerWidget {
         hash: named.processed.hash,
         animated: named.processed.animated,
       );
-      // CrdtStore persists fire-and-forget; give the write a beat, then the
-      // ServerUpdated event also invalidates serverEmotesProvider.
+      // CrdtStore persists fire-and-forget, so the write needs a beat; the
+      // ServerUpdated event invalidates the provider as well.
       await Future.delayed(const Duration(milliseconds: 150));
       ref.invalidate(serverEmotesProvider(serverId));
     } catch (e) {
@@ -71,7 +69,6 @@ class MobileEmotesRoute extends ConsumerWidget {
       body: SafeArea(
         child: Column(
           children: [
-            // Header
             Container(
               padding: const EdgeInsets.symmetric(
                 horizontal: HollowSpacing.sm,
@@ -127,7 +124,6 @@ class MobileEmotesRoute extends ConsumerWidget {
               ),
             ),
 
-            // Content
             Expanded(
               child: ListView(
                 padding: const EdgeInsets.all(HollowSpacing.md),
@@ -165,8 +161,8 @@ class MobileEmotesRoute extends ConsumerWidget {
                   const SizedBox(height: HollowSpacing.xl),
                   Divider(height: 1, color: hollow.border),
                   const SizedBox(height: HollowSpacing.lg),
-                  // The SAME widget the desktop tab renders — mobile parity
-                  // by construction rather than by a second copy.
+                  // The SAME widget the desktop tab renders, so parity holds by
+                  // construction rather than by a second copy.
                   ServerStickersSection(
                       serverId: serverId, canManage: canManage),
                 ],

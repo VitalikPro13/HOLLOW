@@ -342,26 +342,22 @@ pub(crate) async fn generate_proof(
 
 /// What a new owner build says to a joiner still sending the old JSON.
 ///
-/// The old shape was the joiner's own word for what Twitch told it: an
-/// unsigned JSON body carrying a user id, a follow date and a sub flag, which
-/// any modified client could write by hand. There is no way to salvage one,
-/// so it is refused outright rather than half-trusted.
+/// The old shape was the joiner's own word for what Twitch told it: an unsigned
+/// body any modified client could write by hand, so it is refused outright.
 pub(crate) const OLD_PROOF_SENTENCE: &str =
     "This server needs a verified Twitch follow. Update Hollow and try again.";
 
 /// Verify a joiner's follow credential against this server's Twitch settings.
 ///
 /// OFFLINE, and that is the point: the owner contacts nobody. The credential
-/// carries its whole chain up to the root pinned in `support_creds.rs`, the
-/// blind signature inside it binds the JOINER's master peer id, and the claim
-/// itself is drawn from a fixed grid (a channel id, one of ten age buckets,
-/// one of four tiers) so it says what the gate needs and nothing more. A
-/// modified client cannot write one, and the credential never names the
-/// joiner's Twitch account, which is why it can also ride the join ring.
+/// carries its whole chain up to the root pinned in `support_creds.rs`, its blind
+/// signature binds the JOINER's master peer id, and the claim comes off a fixed
+/// grid (a channel id, one of ten age buckets, one of four tiers), so it says what
+/// the gate needs and nothing more. A modified client cannot write one, and it
+/// never names the joiner's Twitch account, which is why it can ride the join ring.
 ///
-/// `min_follow_days` is compared against the BUCKET, so a setting rounds UP
-/// to the next bucket: "at least 10 days" is satisfied by the 14-day bucket,
-/// not by the 7-day one. The owner settings say so.
+/// `min_follow_days` is compared against the BUCKET, so a setting rounds UP: "at
+/// least 10 days" is satisfied by the 14-day bucket, not the 7-day one.
 pub(crate) fn validate_follow_credential(
     entry_json: &str,
     joiner_master: &str,

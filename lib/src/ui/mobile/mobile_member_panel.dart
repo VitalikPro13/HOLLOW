@@ -79,7 +79,6 @@ class _MemberPanelContent extends ConsumerWidget {
 
     return Column(
       children: [
-        // Drag handle
         Padding(
           padding: const EdgeInsets.only(top: HollowSpacing.sm, bottom: HollowSpacing.sm),
           child: Container(
@@ -91,7 +90,6 @@ class _MemberPanelContent extends ConsumerWidget {
           ),
         ),
 
-        // Header
         Padding(
           padding: const EdgeInsets.symmetric(
             horizontal: HollowSpacing.lg, vertical: HollowSpacing.sm,
@@ -110,7 +108,6 @@ class _MemberPanelContent extends ConsumerWidget {
 
         Divider(height: 1, color: hollow.border),
 
-        // Member list
         Expanded(
           child: membersAsync.when(
             loading: () => const Center(child: CircularProgressIndicator()),
@@ -158,7 +155,7 @@ class _MemberPanelContent extends ConsumerWidget {
     final online = <crdt_api.MemberFfi>[];
     final offline = <crdt_api.MemberFfi>[];
 
-    // Multi-device: a member is online if ANY of their devices is visible.
+    // A member is online if ANY of their devices is visible.
     for (final m in members) {
       if (onlineIdentities.contains(m.peerId) || m.peerId == myPeerId) {
         online.add(m);
@@ -167,7 +164,6 @@ class _MemberPanelContent extends ConsumerWidget {
       }
     }
 
-    // Sort by role priority then name
     int rolePriority(String role) => _roleOrder.indexOf(role).clamp(0, 3);
     online.sort((a, b) {
       final rp = rolePriority(a.role).compareTo(rolePriority(b.role));
@@ -178,7 +174,6 @@ class _MemberPanelContent extends ConsumerWidget {
 
     final entries = <_MemberEntry>[];
 
-    // Group online by role
     final allSameRole = online.isNotEmpty &&
         online.every((m) => m.role == online.first.role) &&
         online.first.role == 'member';
@@ -200,7 +195,6 @@ class _MemberPanelContent extends ConsumerWidget {
       }
     }
 
-    // Offline section
     if (offline.isNotEmpty) {
       entries.add(_MemberEntry.divider('Offline', offline.length, false));
       for (final m in offline) {
@@ -284,14 +278,13 @@ class _MemberTile extends ConsumerWidget {
     final profiles = ref.watch(profileProvider);
     final isSyncing = ref.watch(isPeerSyncingProvider(member.peerId));
 
-    // Name resolution: local nickname → server nickname → profile name → short ID
+    // Local nickname, then server nickname, then profile name, then short id.
     final localNick = localNicknames[member.peerId];
     final serverNick = member.nickname.isNotEmpty ? member.nickname : null;
     final profileName = displayNameFor(profiles, member.peerId);
     final displayName = localNick ?? serverNick ?? profileName;
     // The purple chip draws ONLY from a verified account credential; the
-    // member-level handle and the profile field are self-declarations and no
-    // new client renders either (`twitchLoginProvider`).
+    // member-level handle and the profile field are self-declarations.
     final verifiedTwitch = ref.watch(twitchLoginProvider(member.peerId));
 
     return AnimatedOpacity(
@@ -310,7 +303,6 @@ class _MemberTile extends ConsumerWidget {
         ),
         child: Row(
           children: [
-            // Avatar with status
             SizedBox(
               width: 36, height: 36,
               child: Stack(
@@ -343,7 +335,6 @@ class _MemberTile extends ConsumerWidget {
             ),
             const SizedBox(width: HollowSpacing.md),
 
-            // Name + role + twitch
             Expanded(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,

@@ -6,21 +6,18 @@ import 'screen_audio_renderer.dart';
 
 /// Common interface for the platform receivers of screen-share audio.
 ///
-/// Desktop ([ScreenAudioRenderer]) decodes + plays via an out-of-process exe;
-/// mobile ([MobileScreenAudioRenderer]) decodes Opus in Rust and plays via a
-/// native media-path audio sink. Both consume the same data-channel payload
-/// (`[seq:4 LE][opus_bytes...]`) and share the start/push/stop lifecycle, so
-/// the call/voice-channel providers hold this interface and stay
-/// platform-agnostic.
+/// Desktop decodes and plays via an out-of-process exe; mobile decodes Opus in
+/// Rust and plays via a native media-path sink. Both consume the same
+/// data-channel payload (`[seq:4 LE][opus_bytes...]`) and share the
+/// start/push/stop lifecycle, so the providers stay platform-agnostic.
 abstract class ScreenAudioReceiver {
   Future<bool> start();
   void pushPacket(Uint8List packet);
   Future<void> stop();
 
-  /// Set the playback gain target (0.0..=1.0). The sink ramps toward it
-  /// (fast down / slow up) so changes are click-free; driven by
-  /// [ShareAudioLevel] (share-volume slider + voice-activity ducking +
-  /// deafen), never called with raw UI values directly.
+  /// Sets the playback gain target (0.0..=1.0). The sink ramps toward it so
+  /// changes are click-free. Driven by [ShareAudioLevel], never called with
+  /// raw UI values directly.
   void setGain(double gain);
 
   /// Pick the receiver for the current platform.

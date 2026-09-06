@@ -18,29 +18,22 @@ use base64::Engine;
 use crate::hollow_log;
 
 /// Max time with NO inbound traffic from the relay (any frame: text, binary,
-/// ping, or pong) before we declare the socket a zombie and force a reconnect.
+/// ping or pong) before the socket is declared a zombie and force-reconnected.
 ///
-/// A silently-dropped network path (NAT/router/WiFi/ISP blip) lets local
-/// socket writes succeed into the OS buffer with no error, so a
-/// write-failure check alone never fires — the connection looks "alive" while
-/// nothing reaches the relay and nothing comes back. The relay sends WS pings
-/// automatically (`sendPingsAutomatically=true`, see relay-uws ws_handler.cpp)
-/// and drops us at its own 120s idleTimeout, so a HEALTHY connection always
-/// refreshes `last_recv` well within this window; only a truly dead path lets
-/// it lapse. 70s = tolerate one lost 30s keepalive cycle, react on the next.
+/// A silently-dropped network path lets local writes succeed into the OS buffer
+/// with no error, so a write-failure check alone never fires. The relay pings
+/// automatically, so a HEALTHY connection always refreshes `last_recv` well
+/// inside this window; 70s tolerates one lost 30s keepalive cycle.
 const LIVENESS_TIMEOUT: Duration = Duration::from_secs(70);
 
-/// Max time for ONE socket write to complete before the connection is
-/// declared wedged. The liveness deadline above cannot catch everything: a
-/// peer whose KERNEL stays alive but whose application stops reading keeps
-/// ACKing with a zero TCP window, so an in-flight `SinkExt::send` pends
-/// FOREVER with no error — and while that await is pending, `tokio::select!`
-/// polls no other arm, so the ping tick that runs the liveness check can
-/// never fire. Observed 2026-07-20: desktop sat 2h11m frozen mid-write —
-/// stale presence, every call invite silently vanished — until the relay
-/// finally reset the socket. 30s: the largest relay frame is a 256 KB
-/// stream chunk, which hands off to the OS buffer well inside 30s even on a
-/// dreadful-but-alive uplink; only a genuinely wedged connection lapses.
+/// Max time for ONE socket write before the connection is declared wedged.
+///
+/// The liveness deadline cannot catch a peer whose KERNEL stays alive but whose
+/// application stops reading: it ACKs with a zero TCP window, an in-flight
+/// `SinkExt::send` pends FOREVER with no error, and while that await is pending
+/// `tokio::select!` polls no other arm, so the liveness check can never run.
+/// 30s because the largest frame, a 256 KB stream chunk, reaches the OS buffer
+/// well inside it even on a dreadful uplink.
 const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 
 // -- Public types --
@@ -50,25 +43,21 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 pub enum WsCommand {
     JoinRoom { room_code: String },
     /// Join OUR OWN `inbox:{master}` room carrying an ownership PROOF, so the
-    /// relay also replays the master-keyed mailbox (async friending). A friend
-    /// request for an offline stranger is addressed to their MASTER, which no
-    /// socket authenticates as, so the relay buffers it under a key nobody would
-    /// ever replay. `proof` is our master-signed device list: the relay checks
-    /// the signature, that the pubkey derives to the claimed master, that OUR
-    /// authenticated device is a live (un-revoked) member of it, and that the
-    /// room really is `inbox:{that master}` — then, and only then, replays.
-    /// Never used for someone ELSE's inbox: delivering a request there is a
-    /// plain `JoinRoom`.
+    /// relay also replays the master-keyed mailbox (async friending): a request
+    /// for an offline stranger is addressed to their MASTER, which no socket
+    /// authenticates as. `proof` is our master-signed device list, and the relay
+    /// checks the signature, the pubkey-to-master derivation, that OUR device is
+    /// an un-revoked member of it, and that the room really is that master's.
+    /// Someone ELSE's inbox is a plain `JoinRoom`.
     JoinInbox { room_code: String, proof: super::types::SignedDeviceList },
     LeaveRoom { room_code: String },
     /// Broadcast an encrypted message to all peers in a room.
     SendToRoom { room_code: String, data: Vec<u8> },
     /// Send directly to a specific peer in a room (for shard transfers).
     SendDirect { room_code: String, target_peer: String, data: Vec<u8> },
-    /// Send directly to a specific peer, flagged as carrying an inlined image
-    /// (Olm-encrypted FileHeader + inline bytes). Identical to SendDirect except
-    /// it emits a 0x08 frame, so the relay applies the separate image cap
-    /// (3 images/peer) to its offline buffer instead of the text cap.
+    /// Send directly to a peer, flagged as carrying an inlined image. Identical
+    /// to SendDirect except for a 0x08 frame, so the relay applies the image cap
+    /// (3 per peer) to its offline buffer instead of the text cap.
     SendDirectImage { room_code: String, target_peer: String, data: Vec<u8> },
     /// Send binary data directly to a specific peer (for file/shard streaming).
     SendBinaryDirect { room_code: String, target_peer: String, data: Vec<u8> },
@@ -81,18 +70,15 @@ pub enum WsCommand {
     /// Ask the relay for the peers currently connected to a room, over the live
     /// WS connection (replaces the HTTP /bootstrap poll — no fresh TLS handshake).
     DiscoverPeers { room_code: String },
-    /// Ask the relay for time-limited TURN credentials over the authenticated
-    /// WS connection (replaces the open HTTP /turn-credentials endpoint —
-    /// retries ride the normal reconnect machinery instead of dead-chaining).
+    /// Ask the relay for time-limited TURN credentials over the authenticated WS
+    /// connection, so retries ride the normal reconnect machinery.
     GetTurnCredentials,
-    /// Ask the relay which media forwarder it advertises (media forwarding
-    /// step 3). Mirrors GetTurnCredentials: authed WS only, re-sent on every
-    /// reconnect (the id is static config; no refresh timer needed).
+    /// Ask the relay which media forwarder it advertises. Authed WS only, re-sent
+    /// on every reconnect; the id is static config, so no refresh timer.
     GetMediaForwarder,
-    /// Claim a temporary nickname on the relay (RAM only). `master` is our
-    /// MASTER identity — the relay hands it back on resolve so a stranger's
-    /// friend request targets `inbox:{master}` (which we actually listen on)
-    /// instead of our WS-auth DEVICE id (whose inbox nobody joins).
+    /// Claim a temporary nickname on the relay (RAM only). `master` is our MASTER
+    /// identity, handed back on resolve so a stranger's friend request targets
+    /// `inbox:{master}`, not our WS-auth DEVICE id whose inbox nobody joins.
     ClaimNickname { nickname: String, master: String },
     /// Release the currently claimed nickname.
     ReleaseNickname,
@@ -108,15 +94,13 @@ pub enum WsCommand {
     RegisterPushToken { token: String, platform: String },
     /// Register per-server channel push preferences with the relay (RAM only).
     /// `prefs_json` = {"<server_room>": {"level": "all|mentions|nothing",
-    /// "channels": {"<channel_id>": "all|mentions|nothing"}}}. The relay checks
-    /// these BEFORE firing a channel push (iOS alert pushes can't be suppressed
-    /// after delivery, so filtering must happen relay-side).
+    /// "channels": {"<channel_id>": ...}}}. The relay checks these BEFORE firing
+    /// a push, because an iOS alert push cannot be suppressed after delivery.
     SetPushPrefs { prefs_json: String },
-    /// Targeted channel-message frame for an OFFLINE server member (0x09).
-    /// The relay buffers `data` (the same MLS-group/public wire bytes the room
-    /// broadcast carried) for replay to the member's background fetch node, and
-    /// fires a channel push filtered by the member's registered prefs +
-    /// `mention`. Empty `data` = push trigger only, nothing to buffer.
+    /// Targeted channel-message frame for an OFFLINE server member (0x09). The
+    /// relay buffers `data` for replay to the member's background fetch node and
+    /// fires a channel push filtered by that member's prefs and `mention`. Empty
+    /// `data` = push trigger only, nothing to buffer.
     SendChannelDirect {
         room_code: String,
         target_peer: String,
@@ -124,21 +108,19 @@ pub enum WsCommand {
         mention: bool,
         data: Vec<u8>,
     },
-    /// Register the opt-in offline-delivery setting ("offline inbox") with the
-    /// relay. RAM-side registry like push prefs — the latest value is replayed
-    /// automatically on every reconnect. Enabled = the relay keeps a bigger
-    /// DM text/FileHeader window for this peer at the given retention.
+    /// Register the opt-in offline-delivery setting with the relay. A RAM-side
+    /// registry like push prefs, replayed automatically on every reconnect.
+    /// Enabled = a bigger DM text/FileHeader window at the given retention.
     SetOfflineBuffer { enabled: bool, retention_secs: i64 },
     /// Register/refresh per-channel topic ring buffers for a server room whose
     /// owner enabled relay catch-up (`clear` = owner turned it off). Must be
     /// sent AFTER joining the room; re-sent once per connection by the swarm.
     SetTopicBuffer { room_code: String, channels: Vec<String>, retention_secs: i64, clear: bool },
-    /// Ask the relay to replay one channel's buffered ring. Frames arrive as
+    /// Ask the relay to replay one channel's buffered ring; the frames arrive as
     /// normal topic messages and ride the standard verify/dedup/merge path.
-    /// `max_age_secs` > 0 = only frames younger than that (the client passes
-    /// its channel watermark age + lookback so already-delivered frames aren't
-    /// re-replayed every session — MLS can't decrypt consumed generations and
-    /// the retries were pure noise). 0 = replay everything in retention.
+    /// `max_age_secs` > 0 replays only frames younger than that (the client
+    /// passes its watermark age plus lookback, because MLS cannot decrypt
+    /// consumed generations). 0 = everything still in retention.
     TopicCatchup { room_code: String, channel_id: String, max_age_secs: i64 },
     /// File a user report with the relay. One-shot — deliberately NOT cached
     /// in `track_room_change`, so it is never re-sent on reconnect (the relay
@@ -156,16 +138,11 @@ pub enum WsEvent {
     Connecting { reconnecting: bool },
     PeerJoined { room: String, peer_id: String },
     PeerLeft { room: String, peer_id: String },
-    /// WE left a room — client-side confirmation emitted locally when the
-    /// Leave frame goes out (the relay never echoes our own leave). The swarm
-    /// MUST purge its `ws_room_peers` snapshot for the room on this event: a
-    /// self-left room otherwise keeps its frozen member list forever (no more
-    /// PeerLeft/RoomMembers arrive for a room we're not in), and the flexible
-    /// `ws_room_for_peer` first-match can then route targeted sends into it —
-    /// which the relay drops (sender not in room). Field-hit 2026-08-07: after
-    /// a viewer detached from a `fwd:` room, EVERY subsequent VC signal to the
-    /// sharer silently vanished until app restart ("Connecting to screen
-    /// share..." forever).
+    /// WE left a room, emitted locally when the Leave frame goes out (the relay
+    /// never echoes our own leave). The swarm MUST purge its `ws_room_peers` for
+    /// the room: no more PeerLeft/RoomMembers arrive for a room we are not in, so
+    /// the frozen list stays forever and `ws_room_for_peer`'s first match can
+    /// route targeted sends into it, which the relay then drops.
     LeftRoom { room: String },
     RoomMembers { room: String, peers: Vec<String> },
     /// Encrypted message from another peer, routed through a room.
@@ -280,9 +257,8 @@ enum ServerMsg {
     PeerLeft { room: String, peer_id: String },
     Members { room: String, peers: Vec<String> },
     // `active_rooms` is always empty now: the relay's room-activity probe was
-    // removed (it let anyone holding two peer_ids ask whether their
-    // deterministic DM room was live). Defaulted so a relay that drops the
-    // field entirely still deserializes here.
+    // removed (it let anyone holding two peer_ids ask whether their deterministic
+    // DM room was live). Defaulted so a relay dropping the field deserializes.
     PeerStatus { online: Vec<String>, #[serde(default)] active_rooms: Vec<String> },
     DiscoveredPeers { room: String, peers: Vec<String> },
     TurnCredentials {
@@ -317,23 +293,18 @@ struct WsClientState {
     joined_rooms: Arc<RwLock<HashSet<String>>>,
     /// Last room we attempted to join (for error rollback).
     last_join_attempt: Arc<RwLock<Option<String>>>,
-    /// Channel-topic subscriptions per room (for re-subscribe on reconnect).
-    /// The relay keeps subscriptions as PER-SOCKET state, so a silent
-    /// reconnect (doze blip, relay restart) wiped them — the client kept
-    /// receiving room traffic (typing, presence) but ZERO topic-routed
-    /// channel messages until the user re-opened a channel (re-subscribing
-    /// as a side effect). Mirrors `joined_rooms`: the latest Subscribe per
-    /// room wins (the relay replaces the topic set), replayed right after
-    /// the room re-joins.
+    /// Channel-topic subscriptions per room, for re-subscribe on reconnect. The
+    /// relay keeps them as PER-SOCKET state, so a silent reconnect leaves the
+    /// client receiving room traffic but ZERO topic-routed channel messages. The
+    /// latest Subscribe per room wins, replayed right after the room re-joins.
     subscriptions: Arc<RwLock<std::collections::HashMap<String, Vec<String>>>>,
     /// Latest opt-in offline-delivery setting (enabled, retention_secs) — the
     /// relay registry is RAM-per-relay-lifetime, so replay it on every
     /// reconnect like subscriptions. None = never set this session.
     offline_optin: Arc<RwLock<Option<(bool, i64)>>>,
     /// Ownership proofs for `inbox:` rooms joined via [`WsCommand::JoinInbox`],
-    /// keyed by room. The reconnect replay below re-sends every joined room as a
-    /// plain `Join`, which on a NEW socket would silently drop the mailbox
-    /// replay — the proof has to ride the re-join too.
+    /// keyed by room. The reconnect replay re-sends every joined room as a plain
+    /// `Join`, which on a NEW socket would silently drop the mailbox replay.
     inbox_proofs: Arc<RwLock<std::collections::HashMap<String, super::types::SignedDeviceList>>>,
 }
 
@@ -357,35 +328,22 @@ pub fn spawn_ws_client(
 }
 
 /// Whether a real-time session (a DM call, a voice channel, a conference) is
-/// live right now. Set from Dart the moment one starts and cleared when the
-/// last one ends.
+/// live right now. Set from Dart when one starts, cleared when the last ends.
 ///
-/// ## Why the reconnect policy has to know
-///
-/// The exponential backoff below exists so a fleet of clients does not hammer a
-/// relay that is down: with no rate limits by design, an unbacked-off retry
-/// storm is the relay's problem, not the client's. That reasoning is sound
-/// while the app is idle, where nobody notices a thirty second gap.
-///
-/// It is exactly wrong during a call, because a call has a DEADLINE. Recovering
-/// a lapsed media link needs an ICE restart, the offer carrying it rides this
-/// socket, and the hold-open window is measured in tens of seconds. Field-caught
-/// 2026-08-27: a VM lost its network for 25 seconds, the ladder had already
-/// climbed to a 30 second sleep, and the socket did not even TRY to reconnect
-/// until eleven seconds after the call had been given up on. The network had
-/// been back for over twenty of those seconds.
-///
-/// So the policy is conditional rather than capped: back off normally when
-/// idle, and retry at a steady [REALTIME_RETRY_SECS] while a call is live. Only
-/// clients actually in a call retry fast, which is a tiny fraction of them and
-/// only for as long as their call is in trouble.
+/// The reconnect policy has to know. Exponential backoff exists so a fleet does
+/// not hammer a relay that is down, which is sound while the app is idle. It is
+/// exactly wrong during a call, because a call has a DEADLINE: recovering a
+/// lapsed media link needs an ICE restart, the offer carrying it rides this
+/// socket, and the hold-open window is tens of seconds, so a ladder already at
+/// 30 seconds leaves the socket asleep long after the network is back. The
+/// policy is conditional rather than capped: normal backoff when idle, a steady
+/// [REALTIME_RETRY_SECS] while a call is live.
 static REALTIME_ACTIVE: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
-/// Retry interval while a real-time session is live. Fast enough that the
-/// socket is back within a second of the network returning, which is the whole
-/// point: a user whose internet is working again must not sit watching
-/// "Reconnecting" because we are asleep.
+/// Retry interval while a real-time session is live. Fast enough that the socket
+/// is back within a second of the network returning, so a user whose internet is
+/// working again does not sit watching "Reconnecting".
 const REALTIME_RETRY_SECS: u64 = 1;
 
 /// Set from the FFI when a call / voice channel / conference starts or ends.
@@ -430,7 +388,6 @@ async fn ws_client_loop(
                 let _ = event_tx.send(WsEvent::Connected);
                 hollow_log!("[HOLLOW-WS] Connected and authenticated");
 
-                // Re-join all previously joined rooms.
                 let (mut ws_write, mut ws_read) = ws_stream.split();
                 {
                     let rooms = state.joined_rooms.read().await;
@@ -446,11 +403,8 @@ async fn ws_client_loop(
                     let _ = event_tx.send(WsEvent::RoomBudgetUpdate { joined: rooms.len() as u32, limit: ROOM_BUDGET_LIMIT });
                 }
 
-                // Re-subscribe channel topics — the relay's subscription
-                // state is per-socket and died with the old connection.
-                // Without this a silent reconnect left the client receiving
-                // room traffic (typing) but no topic-routed channel messages
-                // until the user re-opened a channel.
+                // Re-subscribe channel topics: the relay's subscription state is
+                // per-socket and died with the old connection.
                 {
                     let subs = state.subscriptions.read().await;
                     for (room, topics) in subs.iter() {
@@ -486,7 +440,6 @@ async fn ws_client_loop(
                     }
                 }
 
-                // Send any commands that arrived while disconnected.
                 {
                     let cmds: Vec<WsCommand> = pending_commands.drain(..).collect();
                     for cmd in cmds {
@@ -499,7 +452,6 @@ async fn ws_client_loop(
                     }
                 }
 
-                // Main message loop with periodic keepalive ping.
                 let mut ping_timer = tokio::time::interval(Duration::from_secs(30));
                 ping_timer.tick().await; // consume immediate first tick
                 // Liveness: last time ANY inbound relay frame arrived. A healthy
@@ -510,10 +462,9 @@ async fn ws_client_loop(
                     tokio::select! {
                         // Keepalive ping — prevents Nginx/proxy/relay from closing idle connections.
                         _ = ping_timer.tick() => {
-                            // Zombie-socket detection: if the relay has gone
-                            // completely silent past the deadline, the write
-                            // below would still "succeed" into a dead OS buffer,
-                            // so check liveness FIRST and force a reconnect.
+                            // Zombie-socket detection: past the deadline the
+                            // write below would still "succeed" into a dead OS
+                            // buffer, so check liveness FIRST and reconnect.
                             if last_recv.elapsed() > LIVENESS_TIMEOUT {
                                 hollow_log!(
                                     "[HOLLOW-WS] Liveness timeout — no relay traffic in {}s, reconnecting",
@@ -526,11 +477,9 @@ async fn ws_client_loop(
                                 break; // Connection dead, trigger reconnect.
                             }
                         }
-                        // Incoming from relay.
                         msg = ws_read.next() => {
-                            // Any successfully-read frame (text, binary, ping, or
-                            // pong) proves the socket is alive in BOTH directions
-                            // — refresh the liveness deadline. The relay's own
+                            // Any successfully-read frame proves the socket is
+                            // alive in BOTH directions, and the relay's own
                             // automatic pings keep this fresh even when idle.
                             if matches!(msg, Some(Ok(_))) {
                                 last_recv = tokio::time::Instant::now();
@@ -598,13 +547,12 @@ async fn ws_client_loop(
                                     }
                                 }
                                 Some(Ok(Message::Pong(_))) => {
-                                    // Reply to our keepalive ping. Liveness is
-                                    // already refreshed above; nothing else to do.
+                                    // Reply to our keepalive ping; liveness is
+                                    // already refreshed above.
                                 }
                                 Some(Ok(Message::Close(frame))) => {
-                                    // Log the relay's close reason (it never
-                                    // closes silently: bad_license, auth
-                                    // timeout, superseded ...).
+                                    // Log the relay's close reason: it never
+                                    // closes silently (bad_license, auth timeout).
                                     let reason = frame
                                         .as_ref()
                                         .map(|f| f.reason.to_string())
@@ -623,15 +571,11 @@ async fn ws_client_loop(
                                 _ => {}
                             }
                         }
-                        // Commands from the swarm.
                         maybe_cmd = cmd_rx.recv() => {
-                            // None = the swarm dropped the command sender, i.e.
-                            // the node is shutting down. Exit BOTH loops so this
-                            // task ends and its WS socket closes — otherwise the
-                            // `select!` would just disable this arm and keep the
-                            // socket alive, pinging + reconnecting forever (a
-                            // per-restart task + socket leak: stop_node only
-                            // aborted the event loop, not this task).
+                            // None = the swarm dropped the command sender, so the
+                            // node is shutting down. Exit BOTH loops, or `select!`
+                            // just disables this arm and keeps the socket alive,
+                            // pinging and reconnecting forever (a per-restart leak).
                             let Some(cmd) = maybe_cmd else {
                                 hollow_log!("[HOLLOW-WS] Command channel closed — shutting down WS client task");
                                 break 'reconnect;
@@ -656,7 +600,6 @@ async fn ws_client_loop(
             }
         }
 
-        // Disconnected — notify swarm and drain commands into pending buffer.
         let _ = event_tx.send(WsEvent::Disconnected);
 
         // Drain any commands that arrived during the failed connection attempt.
@@ -676,13 +619,10 @@ async fn ws_client_loop(
             }
         }
 
-        // Backoff, unless a call is riding on this socket.
-        //
-        // A live session retries at a steady short interval and does NOT let
-        // the ladder climb, so the moment the network is back the socket is
-        // back, and an ICE restart can actually be delivered inside the call's
-        // hold-open window. See REALTIME_ACTIVE for why this is conditional
-        // rather than a lower cap for everyone.
+        // Backoff, unless a call is riding on this socket: a live session retries
+        // at a steady short interval and does NOT let the ladder climb, so an ICE
+        // restart can be delivered inside the call's hold-open window. See
+        // REALTIME_ACTIVE for why this is conditional rather than a lower cap.
         if realtime_active() {
             hollow_log!(
                 "[HOLLOW-WS] Reconnecting in {REALTIME_RETRY_SECS}s (call in progress)..."
@@ -711,11 +651,10 @@ pub(crate) async fn connect_and_auth(
     license_key: Option<&str>,
     fetch: bool,
 ) -> Result<WsStream, String> {
-    // Connect. When anti-censorship proxy mode is on, a local `shoes` REALITY
-    // tunnel exposes a SOCKS5 listener on 127.0.0.1; route the whole WSS
-    // connection through it so the relay traffic rides the REALITY tunnel and
-    // looks like ordinary HTTPS to a censor. Otherwise connect directly.
-    // Read fresh each call so a reconnect after the tunnel comes up picks it up.
+    // With anti-censorship proxy mode on, a local `shoes` REALITY tunnel exposes
+    // a SOCKS5 listener; route the whole WSS connection through it so the traffic
+    // looks like ordinary HTTPS. Read fresh each call, so a reconnect after the
+    // tunnel comes up picks it up.
     let ws_stream = match crate::api::network::get_proxy_socks_addr() {
         Some(socks_addr) => connect_via_socks(url, &socks_addr).await?,
         None => {
@@ -728,7 +667,6 @@ pub(crate) async fn connect_and_auth(
 
     let (mut write, mut read) = ws_stream.split();
 
-    // Build auth message.
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -736,7 +674,6 @@ pub(crate) async fn connect_and_auth(
 
     let sign_payload = format!("hollow-ws-auth:{}:{}", peer_id, timestamp);
 
-    // Sign with Ed25519 keypair.
     let keypair = crate::identity::native_identity::NativeKeypair::from_protobuf_encoding(keypair_proto)
         .map_err(|e| format!("Failed to decode keypair: {e}"))?;
     let sig_bytes = keypair.sign(sign_payload.as_bytes());
@@ -755,7 +692,6 @@ pub(crate) async fn connect_and_auth(
         .await
         .map_err(|e| format!("Failed to send auth: {e}"))?;
 
-    // Wait for auth response (5 second timeout).
     let response = tokio::time::timeout(Duration::from_secs(5), read.next())
         .await
         .map_err(|_| "Auth timeout".to_string())?
@@ -779,11 +715,9 @@ pub(crate) async fn connect_and_auth(
 }
 
 /// Open the relay WSS connection through a local SOCKS5 proxy (the `shoes`
-/// REALITY tunnel). We dial the SOCKS5 listener, ask it to reach the relay's
-/// host:port (DNS resolves proxy-side — no local leak), then run the WS + TLS
-/// handshake over that tunnelled TCP stream. The resulting stream type is
-/// identical to `connect_async`'s (`MaybeTlsStream<TcpStream>`) so callers are
-/// unaffected.
+/// REALITY tunnel): dial the listener, ask it to reach the relay's host:port
+/// (DNS resolves proxy-side, no local leak), then run WS + TLS over that stream.
+/// The stream type matches `connect_async`'s, so callers are unaffected.
 async fn connect_via_socks(url: &str, socks_addr: &str) -> Result<WsStream, String> {
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
@@ -804,9 +738,8 @@ async fn connect_via_socks(url: &str, socks_addr: &str) -> Result<WsStream, Stri
 
     hollow_log!("[HOLLOW-WS] Dialing relay {host}:{port} via SOCKS5 tunnel {socks_addr}");
 
-    // Connect through SOCKS5. The target is sent as a domain so the tunnel
-    // (and ultimately the Xray server) resolves it — keeps DNS off the local
-    // censored network. tokio-socks takes (proxy, (host, port)).
+    // Connect through SOCKS5. The target is sent as a domain so the tunnel (and
+    // ultimately the Xray server) resolves it, keeping DNS off the local network.
     let socks = tokio_socks::tcp::Socks5Stream::connect(socks_addr, (host.as_str(), port))
         .await
         .map_err(|e| format!("SOCKS5 connect via tunnel failed: {e}"))?;
@@ -825,11 +758,10 @@ async fn connect_via_socks(url: &str, socks_addr: &str) -> Result<WsStream, Stri
 
 type WsSink = futures_util::stream::SplitSink<WsStream, Message>;
 
-/// Bounded socket write — the ONLY way this module writes to the sink.
-/// See WRITE_TIMEOUT for why an unbounded `send` can freeze the entire
-/// client loop (zero-window zombie peer) with the liveness watchdog unable
-/// to run. A timeout is reported as an error string so every existing
-/// `Err → reconnect` path handles the wedge exactly like a dead socket.
+/// Bounded socket write, the ONLY way this module writes to the sink. See
+/// WRITE_TIMEOUT for why an unbounded `send` can freeze the entire client loop
+/// with the liveness watchdog unable to run. A timeout is reported as an error
+/// string, so every `Err -> reconnect` path handles it exactly like a dead socket.
 async fn bounded_send(write: &mut WsSink, msg: Message) -> Result<(), String> {
     match tokio::time::timeout(WRITE_TIMEOUT, write.send(msg)).await {
         Ok(Ok(())) => Ok(()),
@@ -1113,8 +1045,7 @@ async fn send_command(write: &mut WsSink, cmd: &WsCommand) -> bool {
         }
         WsCommand::SendDirectImage { room_code, target_peer, data } => {
             // Same layout as 0x04 SendDirect, but a 0x08 type byte tells the relay
-            // this direct carries an inlined image so its offline buffer applies
-            // the image cap (3/peer) rather than the text cap (100/peer).
+            // this direct carries an inlined image, so the image cap applies.
             let room = room_code.as_bytes();
             let target = target_peer.as_bytes();
             let mut frame = Vec::with_capacity(1 + room.len() + 1 + target.len() + 1 + data.len());

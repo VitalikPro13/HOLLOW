@@ -14,11 +14,9 @@ import 'package:hollow/src/ui/mobile/mobile_profile_sheet.dart';
 
 /// Opens the FULL profile view for [peerId].
 ///
-/// Desktop: the center profile card flanked by SEPARATE showcase board
-/// panels — the card stays a self-contained column and the boards read as
-/// its continuation to the left/right. The adaptive rule: no boards →
-/// center card only; right only → two panels; both → three.
-/// Mobile: routes to the existing bottom sheet for parity.
+/// On desktop the centre card is flanked by SEPARATE showcase panels, one per
+/// filled side, so the card stays a self-contained column. Mobile routes to the
+/// bottom sheet.
 Future<void> showProfileDialog(
   BuildContext context, {
   required String peerId,
@@ -51,15 +49,14 @@ Future<void> showProfileDialog(
 /// Width of the center profile card.
 const double kProfileDialogCenterWidth = 560.0;
 
-/// Width of one flanking showcase board panel — sized for real content:
-/// game covers and artwork, not just text scraps.
+/// Width of one flanking showcase panel, sized for game covers and artwork
+/// rather than text scraps.
 const double kShowcasePanelWidth = 340.0;
 
-/// Minimum height of the board ensemble — a sparse board still reads as a
-/// full profile page, not a floating scrap.
+/// Minimum height of the ensemble, so a sparse board still reads as a full
+/// profile page rather than a floating scrap.
 const double _kEnsembleMinHeight = 560.0;
 
-/// Gap between the card and its board panels.
 const double _kPanelGap = HollowSpacing.md;
 
 class ProfileDialog extends ConsumerWidget {
@@ -110,15 +107,14 @@ class ProfileDialog extends ConsumerWidget {
     final maxHeight = (screenSize.height - HollowSpacing.xl * 2)
         .clamp(0.0, double.infinity);
 
-    // Watch the board so a save from the composer updates this view live.
+    // Watched so a save from the composer updates this view live.
     final encoded = ref.watch(
         profileProvider.select((p) => p[peerId]?.showcaseBoard));
     final board = ShowcaseBoard.decode(encoded);
 
-    // Each filled side adds one flanking panel. When the window can't fit
-    // the full-size ensemble, SCALE the columns down proportionally so the
-    // three-panel shape survives window resizes; only genuinely tiny
-    // windows fall back to stacking below the card.
+    // Each filled side adds one panel. A window too small for the full-size
+    // ensemble SCALES the columns down proportionally, so the shape survives a
+    // resize; only a genuinely tiny window stacks them below the card.
     final sides = (board.hasLeft ? 1 : 0) + (board.hasRight ? 1 : 0);
     final columnsWidth =
         kProfileDialogCenterWidth + kShowcasePanelWidth * sides;
@@ -171,8 +167,8 @@ class ProfileDialog extends ConsumerWidget {
         ],
       );
     } else {
-      // Panels stretch to the card's height so they read as its wings;
-      // a panel with more content than the card grows the row instead.
+      // Panels stretch to the card's height so they read as its wings, and a
+      // panel with more content grows the row instead.
       content = IntrinsicHeight(
         child: ConstrainedBox(
           constraints: const BoxConstraints(minHeight: _kEnsembleMinHeight),

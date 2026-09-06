@@ -56,8 +56,8 @@ class _MobileVoiceChannelRouteState
     super.dispose();
   }
 
-  // Earpiece proximity (blank-on-ear-hold) is handled globally by
-  // CallProximityController so it works from any screen, not just here.
+  // Earpiece proximity is global, in CallProximityController, so it works from
+  // any screen.
 
   /// Keep the screen awake while video/screen share is displayed.
   void _syncWakelock(bool videoShown) {
@@ -66,15 +66,13 @@ class _MobileVoiceChannelRouteState
     unawaited(WakelockPlus.toggle(enable: videoShown).catchError((_) {}));
   }
 
-  // Session duration is rendered by CallDurationText (self-ticking leaf) —
-  // the old per-second setState rebuilt this ENTIRE Scaffold every second.
+  // Session duration is a self-ticking leaf: a per-second setState here would
+  // rebuild the entire Scaffold every second.
 
   bool _hasVideo(VoiceChannelState vcState) {
-    // A SELF share doesn't count — mobile never previews its own share
-    // (mirror recursion; see _buildVideoView), so it must not force an empty
-    // video view over the avatars. Only WATCHED remote shares count (opt-in,
-    // issue #38): an unwatched share is just a badge + Watch chip over the
-    // avatar view, never a forced video surface.
+    // A SELF share does not count: mobile never previews its own share, so it
+    // must not force an empty video view over the avatars. Only WATCHED remote
+    // shares count (opt-in, issue #38).
     final localPeerId = ref.read(identityProvider).peerId ?? '';
     for (final entry in vcState.peerScreenSharing.entries) {
       if (entry.value &&
@@ -96,7 +94,7 @@ class _MobileVoiceChannelRouteState
     final vcState = ref.watch(voiceChannelProvider);
     final localPeerId = ref.read(identityProvider).peerId ?? '';
 
-    // Auto-pop when leaving the voice channel or switching to a different one.
+    // Pops when leaving this voice channel or switching to another.
     ref.listen<VoiceChannelState>(voiceChannelProvider, (prev, next) {
       if (prev == null) return;
       final wasIn = prev.currentServerId == widget.serverId &&
@@ -131,7 +129,7 @@ class _MobileVoiceChannelRouteState
     final hasVideo = _hasVideo(vcState);
     _syncWakelock(hasVideo);
 
-    // The watched share currently displayed full-bleed (for Stop watching).
+    // The watched share displayed full-bleed, for Stop watching.
     final watchedSharers = <String>[
       for (final e in vcState.peerScreenSharing.entries)
         if (e.value &&
@@ -153,8 +151,7 @@ class _MobileVoiceChannelRouteState
               _buildTopBar(hollow, vcState.joinedAt,
                   remoteSharing: vcState.isWatchingAnyShare,
                   watchedSharerId: displayedSharer),
-              // System-status notice, at the top under the channel name (divider
-              // below) — surfaces maintenance/outage while you're in a call.
+              // Surfaces maintenance and outages while you are in a call.
               const SystemStatusBanner(),
               Expanded(
                 child: hasVideo
@@ -211,7 +208,7 @@ class _MobileVoiceChannelRouteState
               ],
             ),
           ),
-          // Stop watching the displayed share (opt-in watching, issue #38).
+          // Opt-in watching, issue #38.
           if (watchedSharerId != null)
             HollowPressable(
               semanticLabel: 'Stop watching screen share',
@@ -223,8 +220,7 @@ class _MobileVoiceChannelRouteState
               child: Icon(LucideIcons.eyeOff,
                   size: 22, color: hollow.textPrimary),
             ),
-          // Received share audio: volume + duck controls (opens the sheet).
-          // Top bar, not the controls row — that one is already crowded.
+          // In the top bar, because the controls row is already crowded.
           if (remoteSharing)
             const ShareVolumeButton(
               iconSize: 22,
@@ -237,11 +233,9 @@ class _MobileVoiceChannelRouteState
 
   Widget _buildAudioView(
       HollowTheme hollow, VoiceChannelState vcState, String localPeerId) {
-    // Self lives in this set under the ROUTABLE DEVICE id, never the master —
-    // a plain `contains(localPeerId)` is false on every multi-device install
-    // (and every fresh one, since device != master there), so the old
-    // unconditional insert put a SECOND self entry beside the device entry and
-    // the pane rendered "You" twice. Insert only when we're really absent.
+    // Self lives in this set under the ROUTABLE DEVICE id, never the master, so
+    // `contains(localPeerId)` is false on every install where device != master
+    // and an unconditional insert renders "You" twice.
     final myDevice = ref.watch(localDevicePeerIdProvider).valueOrNull;
     final participants =
         vcState.getParticipants(widget.serverId, widget.channelId).toList();
@@ -254,7 +248,7 @@ class _MobileVoiceChannelRouteState
     if (selfInList == null) {
       participants.insert(0, localPeerId);
     }
-    // The id form the rows below are keyed by for US.
+    // The id form the rows below key US by.
     final selfId = selfInList ?? localPeerId;
 
     final mutedSet = <String>{};
@@ -270,20 +264,17 @@ class _MobileVoiceChannelRouteState
       }
     }
 
-    // Unwatched shares surface as tappable "Watch" chips over the avatar
-    // view (opt-in, issue #38) — never a forced video surface.
+    // Unwatched shares are "Watch" chips over the avatar view, never a forced
+    // video surface (opt-in, issue #38).
     final unwatched = [
       for (final p in vcState.unwatchedRemoteShares)
         if (p != localPeerId) p,
     ];
 
-    // Speaking state via a scoped Consumer: VAD flips rebuild ONLY the avatar
-    // cluster, never this whole voice-channel Scaffold.
+    // Scoped so a VAD flip rebuilds only the avatar cluster, not the Scaffold.
     final avatars = Center(
       child: Consumer(builder: (context, ref, _) {
-        // Self comes from the dedicated local flag and is re-keyed under the
-        // id THIS list uses ([selfId]) — the device id when we're in the set,
-        // the master only in the fallback case where we aren't.
+        // Self comes from the local flag, re-keyed under the id THIS list uses.
         final speakingSet = {
           ...ref.watch(vcSpeakingProvider),
           if (ref.watch(vcLocalSpeakingProvider)) selfId,
@@ -347,12 +338,9 @@ class _MobileVoiceChannelRouteState
       HollowTheme hollow, VoiceChannelState vcState, String localPeerId) {
     final vcNotifier = ref.read(voiceChannelProvider.notifier);
 
-    // A SELF share is deliberately not previewed on mobile: the phone shares
-    // its own screen, so a preview would show the app showing itself
-    // (infinite mirror) — the avatar view + the accent share button convey
-    // the sharing state instead.
-    // Only WATCHED shares render (opt-in, issue #38); unwatched sharers
-    // still get a pill tab with an eye affordance that starts watching.
+    // A SELF share is deliberately not previewed: the phone shares its own
+    // screen, so the preview would be an infinite mirror. Only WATCHED shares
+    // render (opt-in, issue #38).
     final allRemoteSharers = <String>[
       for (final e in vcState.peerScreenSharing.entries)
         if (e.value && e.key != localPeerId) e.key,
@@ -366,10 +354,8 @@ class _MobileVoiceChannelRouteState
         if (!vcState.watchingScreenShares.contains(p)) p,
     };
 
-    // Source switcher pill tabs: remote screens first, then all cameras.
-    // Same setFocusedSource flow as desktop's _buildSharerSwitcher; only
-    // shown in mixed mode (a screen share is up) — a camera-only grid
-    // already shows every camera at once.
+    // Only shown in mixed mode: a camera-only grid already shows every camera
+    // at once.
     final sources = <({String peerId, String type})>[
       for (final p in allRemoteSharers) (peerId: p, type: 'screen'),
       if (vcState.isCameraOn) (peerId: localPeerId, type: 'camera'),
@@ -386,7 +372,7 @@ class _MobileVoiceChannelRouteState
     String? effectivePeer;
     String? effectiveType;
 
-    // 1) Explicit camera focus (mixed mode) — that camera full-bleed.
+    // Explicit camera focus in mixed mode: that camera full-bleed.
     if (remoteSharers.isNotEmpty &&
         focusedType == 'camera' &&
         focusedPeer != null) {
@@ -419,7 +405,7 @@ class _MobileVoiceChannelRouteState
       }
     }
 
-    // 2) Remote screen share full-bleed (prior behavior).
+    // Remote screen share, full-bleed.
     if (content == null && remoteSharers.isNotEmpty) {
       final screenPeer = remoteSharers.contains(focusedPeer)
           ? focusedPeer!
@@ -429,7 +415,7 @@ class _MobileVoiceChannelRouteState
         content = Stack(
           children: [
             Positioned.fill(
-              // Pinch-zoom + pan for reading a desktop screen on a phone.
+              // Pinch-zoom and pan, for reading a desktop screen on a phone.
               child: InteractiveViewer(
                 maxScale: 6,
                 child: RepaintBoundary(
@@ -441,7 +427,6 @@ class _MobileVoiceChannelRouteState
                 ),
               ),
             ),
-            // Local camera PiP if on.
             if (vcState.isCameraOn)
               _buildLocalPip(
                   hollow, vcNotifier.getCameraRenderer(localPeerId)),
@@ -472,7 +457,7 @@ class _MobileVoiceChannelRouteState
                   localPeerId: localPeerId,
                   unwatchedPeerIds: unwatchedSharers,
                   onSelect: (peerId, type) {
-                    // Tapping an unwatched share tab opts in (issue #38).
+                    // Tapping an unwatched tab opts in (issue #38).
                     if (type == 'screen' &&
                         unwatchedSharers.contains(peerId)) {
                       vcNotifier.watchScreenShare(peerId);
@@ -488,7 +473,6 @@ class _MobileVoiceChannelRouteState
       );
     }
 
-    // Camera grid.
     final cameraPeers = <String>[];
     if (vcState.isCameraOn) cameraPeers.add(localPeerId);
     for (final entry in vcState.peerCameraOn.entries) {
@@ -498,7 +482,6 @@ class _MobileVoiceChannelRouteState
     }
 
     if (cameraPeers.length == 1 && cameraPeers.first == localPeerId) {
-      // Only local camera — full self-view.
       final localRenderer = vcNotifier.getCameraRenderer(localPeerId);
       if (localRenderer != null) {
         return RepaintBoundary(
@@ -512,7 +495,6 @@ class _MobileVoiceChannelRouteState
     }
 
     if (cameraPeers.length == 1) {
-      // Only one remote camera.
       final renderer = vcNotifier.getCameraRenderer(cameraPeers.first);
       if (renderer != null) {
         return Stack(
@@ -534,7 +516,6 @@ class _MobileVoiceChannelRouteState
       }
     }
 
-    // Multi-camera grid.
     return Padding(
       padding: const EdgeInsets.all(HollowSpacing.sm),
       child: LayoutBuilder(
@@ -568,9 +549,8 @@ class _MobileVoiceChannelRouteState
                               ),
                             )
                           : Container(color: hollow.surface),
-                      // Parity with the desktop VC grid: the tile rim lights
-                      // while that participant talks. Self reads the local
-                      // flag; see [vcLocalSpeakingProvider].
+                      // Self reads the local flag, never the participant set;
+                      // see [vcLocalSpeakingProvider].
                       Consumer(builder: (context, ref, _) {
                         final speaking = isLocal
                             ? ref.watch(vcLocalSpeakingProvider)
@@ -648,8 +628,7 @@ class _MobileVoiceChannelRouteState
     }
     final choice = await showMobileScreenShareSheet(context);
     if (choice == null || !mounted) return;
-    // Portrait phone capture: cap the long edge at 1920 (1080p-class).
-    // Android ignores the constraints and captures at native display size;
+    // Android ignores these constraints and captures at native display size;
     // the per-peer encoder cap does the actual downscaling.
     await vcNotifier.startScreenShare(
       'screen',
@@ -660,11 +639,9 @@ class _MobileVoiceChannelRouteState
     );
   }
 
-  /// Speaker button that doubles as the audio-device picker: a plain
-  /// speaker/earpiece toggle while only the built-in routes exist, and the
-  /// route sheet as soon as a headset is attached (long-press always opens
-  /// it). The icon shows where audio ACTUALLY is, so a headset user can see
-  /// at a glance that the channel isn't stuck on the phone.
+  /// Speaker button that doubles as the audio-device picker once a headset is
+  /// attached. The icon shows where audio ACTUALLY is, so a headset user can
+  /// see the channel is not stuck on the phone.
   Widget _buildAudioRouteButton(
     HollowTheme hollow, {
     required double iconSize,
@@ -700,8 +677,7 @@ class _MobileVoiceChannelRouteState
   Widget _buildControls(HollowTheme hollow, VoiceChannelState vcState) {
     final vcNotifier = ref.read(voiceChannelProvider.notifier);
     final isMobile = Platform.isAndroid || Platform.isIOS;
-    // 6+ buttons (speaker + share + flip camera visible) overflow narrow
-    // phones at 56px — shrink when crowded.
+    // Six buttons overflow a narrow phone at 56px.
     final buttonCount =
         4 + (isMobile ? 2 : 0) + (isMobile && vcState.isCameraOn ? 1 : 0);
     final buttonSize = buttonCount >= 6 ? 46.0 : 56.0;
@@ -712,7 +688,6 @@ class _MobileVoiceChannelRouteState
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceEvenly,
         children: [
-          // Mute
           MobileControlButton(
             icon: vcState.isMuted ? LucideIcons.micOff : LucideIcons.mic,
             iconSize: iconSize,
@@ -724,7 +699,6 @@ class _MobileVoiceChannelRouteState
             semanticLabel: vcState.isMuted ? 'Unmute' : 'Mute',
             onTap: () => vcNotifier.toggleMute(),
           ),
-          // Deafen
           MobileControlButton(
             icon: LucideIcons.headphones,
             iconSize: iconSize,
@@ -736,7 +710,6 @@ class _MobileVoiceChannelRouteState
             semanticLabel: vcState.isDeafened ? 'Undeafen' : 'Deafen',
             onTap: () => vcNotifier.toggleDeafen(),
           ),
-          // Audio device / speakerphone (mobile only)
           if (isMobile)
             _buildAudioRouteButton(
               hollow,
@@ -744,7 +717,6 @@ class _MobileVoiceChannelRouteState
               buttonSize: buttonSize,
               handsFree: vcState.isSpeakerOn,
             ),
-          // Camera
           MobileControlButton(
             icon: vcState.isCameraOn
                 ? LucideIcons.video
@@ -760,7 +732,6 @@ class _MobileVoiceChannelRouteState
                 : 'Turn on camera',
             onTap: () => vcNotifier.toggleCamera(),
           ),
-          // Share screen (mobile only)
           if (isMobile)
             MobileControlButton(
               icon: vcState.isScreenSharing
@@ -779,7 +750,6 @@ class _MobileVoiceChannelRouteState
                   : 'Share screen',
               onTap: () => _handleScreenShareToggle(vcState),
             ),
-          // Flip camera (mobile only, when camera is on)
           if (isMobile && vcState.isCameraOn)
             MobileControlButton(
               icon: LucideIcons.switchCamera,
@@ -790,7 +760,6 @@ class _MobileVoiceChannelRouteState
               semanticLabel: 'Flip camera',
               onTap: () => vcNotifier.switchCamera(),
             ),
-          // Leave (red)
           MobileControlButton(
             icon: LucideIcons.phoneOff,
             iconSize: iconSize,

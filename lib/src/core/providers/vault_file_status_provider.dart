@@ -26,10 +26,8 @@ class VaultFileStatus {
   });
 }
 
-/// Vault file statuses for a given server. Shows which erasure-coded files
-/// exist locally, how many shards are held, and whether each is reconstructable.
-///
-/// Keyed by server_id. Used by the Archive tab's Vault Files view.
+/// Vault file statuses for a server, keyed by server_id: which erasure-coded
+/// files exist locally, how many shards are held, and whether each rebuilds.
 final vaultFileStatusProvider = FutureProvider.autoDispose
     .family<List<VaultFileStatus>, String>((ref, serverId) async {
   final ffiList = await crdt_api.getVaultFileStatuses(serverId: serverId);

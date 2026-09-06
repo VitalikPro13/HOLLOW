@@ -3,29 +3,26 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
-/// iOS-only: migrates the Hollow data dir from the app's PRIVATE sandbox
-/// (`<Documents>/hollow`) into the shared App Group container
-/// (`<AppGroup>/hollow_data`) so the Notification Service Extension can open the
-/// SAME SQLCipher DB + identity to fetch & decrypt push messages on-device.
+/// iOS-only: migrates the Hollow data dir from the app's PRIVATE sandbox into
+/// the shared App Group container, so the Notification Service Extension can
+/// open the SAME SQLCipher DB and identity to decrypt push messages on-device.
 ///
-/// Why a move, not a copy: the NSE's fetch path PERSISTS the advanced Olm session
-/// and inserts message rows. If it wrote to a copy, the app's canonical DB would
-/// drift. Sharing one DB in the App Group (single file, app and NSE both point at
-/// it) is the correct end-state. The App Group container path is also STABLE
-/// across reinstalls (unlike the app sandbox UUID — see the iOS file-path
-/// instability note), which is a bonus.
+/// A move, not a copy: the NSE's fetch path PERSISTS the advanced Olm session
+/// and inserts message rows, so writing to a copy would let the app's
+/// canonical DB drift. The App Group path is also STABLE across reinstalls,
+/// unlike the app sandbox UUID.
 ///
-/// Safety: runs at launch BEFORE Rust opens the DB (quiescent, no WAL race).
-/// Idempotent — once the App Group target has `messages.db`, it's used as-is.
+/// Runs at launch BEFORE Rust opens the DB, so there is no WAL race, and is
+/// idempotent once the App Group target has `messages.db`.
 class IosDataDirMigration {
   IosDataDirMigration._();
 
   static const _channel = MethodChannel('hollow/app_group');
 
-  /// Resolve the App Group data dir, migrating the private-sandbox dir into it
-  /// on first run. Returns the path the app + NSE should both use, or null on
-  /// non-iOS / if the App Group is unavailable (caller falls back to the old
-  /// private path).
+  /// Resolves the App Group data dir, migrating the private-sandbox dir into
+  /// it on first run. Returns the path the app and NSE should both use, or
+  /// null off iOS or when the App Group is unavailable, where the caller falls
+  /// back to the old private path.
   static Future<String?> resolveAndMigrate(String privateHollowDir) async {
     if (!Platform.isIOS) return null;
 
@@ -70,14 +67,14 @@ class IosDataDirMigration {
     return target;
   }
 
-  /// Touch the app-active heartbeat the NSE checks before fetching. Called on
-  /// app resume; the NSE skips its own fetch if this is fresh (<12s), because the
-  /// live node already receives the message.
+  /// Touches the app-active heartbeat the NSE checks before fetching, on app
+  /// resume: the NSE skips its own fetch while this is fresh (<12s), because
+  /// the live node already receives the message.
   static Future<void> touchHeartbeat(String appGroupDataParent) async {
     if (!Platform.isIOS) return;
     try {
-      // appGroupDataParent is the App Group container; heartbeat lives beside the
-      // NSE metrics log under push_diag/ (matches NotificationService.swift).
+      // The heartbeat lives beside the NSE metrics log under push_diag/,
+      // matching NotificationService.swift.
       final dir = Directory('$appGroupDataParent/push_diag');
       if (!dir.existsSync()) dir.createSync(recursive: true);
       final hb = File('${dir.path}/app_active.txt');
@@ -88,8 +85,8 @@ class IosDataDirMigration {
     }
   }
 
-  /// Mark the app inactive by aging out the heartbeat (write a stale timestamp).
-  /// Called on pause so the NSE will run its own fetch while the app is gone.
+  /// Ages the heartbeat out on pause, so the NSE runs its own fetch while the
+  /// app is gone.
   static Future<void> clearHeartbeat(String appGroupDataParent) async {
     if (!Platform.isIOS) return;
     try {
@@ -102,8 +99,8 @@ class IosDataDirMigration {
     if (!d.existsSync()) d.createSync(recursive: true);
   }
 
-  /// Copy-then-delete every entry from [src] into [dst], recursively. Verifies
-  /// each file copied before removing the original.
+  /// Copies then deletes every entry from [src] into [dst], recursively,
+  /// verifying each file copied before removing the original.
   static void _moveDirContents(Directory src, Directory dst) {
     for (final entity in src.listSync()) {
       final name = entity.uri.pathSegments.where((s) => s.isNotEmpty).last;

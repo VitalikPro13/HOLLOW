@@ -16,16 +16,13 @@ void _dbg(String msg) {
   } catch (_) {}
 }
 
-/// Disk + RAM cache for GIF picker thumbnails (the proxy's `still`/`sm`
-/// variants), so a restarted app still shows the grid instantly.
+/// Disk and RAM cache for GIF picker thumbnails, so a restarted app still
+/// shows the grid instantly.
 ///
-/// - Disk: ~200 MB LRU by mtime in `<app cache dir>/gif_thumbs` — the OS is
-///   free to wipe it; everything here is refetchable public thumbnail data
-///   (never message content, which stays in the encrypted store).
-/// - RAM: small insertion-ordered tier for the currently visible grid.
-///
-/// Only ever fed URLs from [gifs_api.GifItem], which Rust already
-/// origin-checked against the configured proxy base.
+/// Disk is a ~200 MB LRU by mtime that the OS is free to wipe: everything here
+/// is refetchable public thumbnail data, never message content. RAM is a small
+/// insertion-ordered tier for the visible grid. Only ever fed URLs from
+/// [gifs_api.GifItem], which Rust already origin-checked against the proxy.
 class GifThumbCache {
   GifThumbCache._();
   static final GifThumbCache instance = GifThumbCache._();
@@ -36,9 +33,9 @@ class GifThumbCache {
   static const _maxItemBytes = 6 * 1024 * 1024 + 65536;
   static const _sweepEveryWrites = 25;
   // Cold thumbnails burst 30+ at once when a grid page lands. Unbounded
-  // parallel downloads (each its own TLS handshake) saturate the user's
-  // connection AND the shared host's PHP workers — and the search POST then
-  // starves behind them ("search never loads"). Keep a small FIFO window.
+  // parallel downloads each open their own TLS handshake and saturate both
+  // the user's connection and the shared host's PHP workers, and the search
+  // POST then starves behind them. Keep a small FIFO window.
   static const _maxConcurrentDownloads = 4;
 
   Future<Directory>? _dirFuture;
@@ -92,8 +89,8 @@ class GifThumbCache {
 
   String _key(String url) => sha256.convert(utf8.encode(url)).toString();
 
-  /// Bytes for a thumbnail URL: RAM → disk → network. Null on any failure
-  /// (callers render a placeholder; the grid never hard-errors).
+  /// Bytes for a thumbnail URL: RAM, then disk, then network. Null on any
+  /// failure, where callers render a placeholder.
   Future<Uint8List?> load(String url) {
     final ram = _ram.remove(url);
     if (ram != null) {
@@ -101,10 +98,10 @@ class GifThumbCache {
       return Future.value(ram);
     }
     // BLOCK BODY, NEVER `() => _inflight.remove(url)`: Map.remove returns the
-    // removed value — this very future — and whenComplete waits for an
+    // removed value, this very future, and whenComplete waits for an
     // action-returned Future before completing. The arrow form deadlocks the
-    // future on itself, so `_load` warms `_ram` but the caller's `.then` never
-    // runs and the cell never paints. Same bug as GifCatalog.page().
+    // future on itself, so the caller's `.then` never runs and the cell never
+    // paints. Same bug as GifCatalog.page().
     return _inflight[url] ??= _load(url).whenComplete(() {
       _inflight.remove(url);
     });
@@ -177,9 +174,9 @@ class GifThumbCache {
       _dbg('download ${e.runtimeType} in '
           '${DateTime.now().difference(t0).inMilliseconds}ms '
           '(ok=$_dlOk fail=$_dlFail)');
-      // A response abandoned mid-body (timeout) can wedge one of the shared
-      // client's keep-alive connections — recreate the client so 4 wedged
-      // sockets can never brick all future thumbnail downloads.
+      // A response abandoned mid-body can wedge one of the shared client's
+      // keep-alive connections, so recreate the client rather than let four
+      // wedged sockets brick all future thumbnail downloads.
       _sharedClient?.close(force: true);
       _sharedClient = null;
       return null;
@@ -239,7 +236,7 @@ class GifThumbCache {
     }
     if (total <= _maxDiskBytes) return;
     files.sort((a, b) => a.$2.compareTo(b.$2)); // oldest first
-    // Hysteresis to 90% so consecutive writes don't each trigger a sweep.
+    // Hysteresis to 90% so consecutive writes do not each trigger a sweep.
     final target = (_maxDiskBytes * 0.9).round();
     for (final (file, _, size) in files) {
       if (total <= target) break;

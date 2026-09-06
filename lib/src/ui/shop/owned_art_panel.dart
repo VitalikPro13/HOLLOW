@@ -35,8 +35,7 @@ import 'package:url_launcher/url_launcher.dart';
 /// Lives inside the profile settings on both shells, because that is where a
 /// person goes to change how they look. Absent entirely on store builds.
 class OwnedArtPanel extends ConsumerStatefulWidget {
-  /// Mobile spacing and typography (the desktop settings dialog is wider and
-  /// uses the settings section labels).
+  /// Mobile spacing and typography; the desktop dialog is wider.
   final bool compact;
 
   const OwnedArtPanel({super.key, this.compact = false});
@@ -65,8 +64,8 @@ class _OwnedArtPanelState extends ConsumerState<OwnedArtPanel> {
       ));
       return;
     }
-    // Desktop: the panel lives inside the settings dialog, which has to close
-    // before the centre tab underneath it can be seen.
+    // The panel lives inside the settings dialog, which has to close before the
+    // centre tab underneath it can be seen.
     Navigator.of(context).maybePop();
     openShopTab(ref.read);
   }
@@ -205,8 +204,6 @@ class _EmptyState extends StatelessWidget {
     );
   }
 }
-
-// ── One owned item ──────────────────────────────────────────────────────────
 
 class _OwnedItemRow extends ConsumerStatefulWidget {
   final OwnedItem item;
@@ -418,8 +415,8 @@ class _OwnedThumb extends ConsumerWidget {
         final frames = ref.read(avatarFrameProvider.notifier);
         Future.microtask(() => frames.seed(hash, bytes));
       }
-      // The frame is decoration painted in front of an avatar, so it needs a
-      // real face under it to be judged.
+      // A frame is decoration painted in front of an avatar, so it needs a real
+      // face under it to be judged.
       return HollowAvatar(peerId: me, size: 56, frameId: hash);
     }
 
@@ -428,8 +425,8 @@ class _OwnedThumb extends ConsumerWidget {
       if (hash == null) return placeholder();
       final bytes = ref.watch(railBytesProvider(hash)).valueOrNull;
       if (bytes == null || bytes.isEmpty) return placeholder();
-      // An explicit override, not the lazy self-fetch: these bytes are the
-      // PACK's, which is what the row is showing off.
+      // An explicit override rather than the lazy self-fetch: these bytes are
+      // the PACK's, which is what the row is showing off.
       return HollowAvatar(
           peerId: me, size: 56, imageBytes: bytes, frameId: '');
     }
@@ -464,8 +461,6 @@ class _OwnedThumb extends ConsumerWidget {
     return placeholder();
   }
 }
-
-// ── Kept support codes ──────────────────────────────────────────────────────
 
 class _KeptCodesSection extends ConsumerWidget {
   const _KeptCodesSection();
@@ -512,8 +507,8 @@ class _KeptCodeRow extends ConsumerStatefulWidget {
 }
 
 class _KeptCodeRowState extends ConsumerState<_KeptCodeRow> {
-  /// Hidden by default, the way the recovery phrase is: a code is a bearer
-  /// token, and a screen share should not hand it to the room.
+  /// Hidden by default like the recovery phrase: a code is a bearer token, and
+  /// a screen share should not hand it to the room.
   bool _revealed = false;
 
   String get code => widget.code;
@@ -613,13 +608,8 @@ class _KeptCodeRowState extends ConsumerState<_KeptCodeRow> {
   }
 }
 
-// ── Support marks ───────────────────────────────────────────────────────────
-
-/// What to call a credential in a sentence.
-///
-/// The redeem record is what names a mark, and an old one may carry no title
-/// (or nothing at all), so every case has to end in a phrase that reads: the
-/// dialog that asks to remove one must never say "The mark for  by ".
+/// What to call a credential in a sentence. An old redeem record may carry no
+/// title at all, so every case has to end in a phrase that still reads.
 String supportCredLabel(shop.OwnSupportCred cred) {
   final title = cred.title.trim();
   final artist = cred.artistName.trim();
@@ -628,9 +618,8 @@ String supportCredLabel(shop.OwnSupportCred cred) {
   return 'a piece';
 }
 
-/// The credentials this identity holds (design 5.5) and the two choices the
-/// holder makes about them: whether the mark also sits next to their name
-/// (5.6), and whether it shows at all.
+/// The credentials this identity holds and the two choices the holder makes
+/// about them: whether the mark sits next to their name, and whether it shows.
 class _SupportMarksSection extends ConsumerStatefulWidget {
   const _SupportMarksSection();
 
@@ -642,8 +631,8 @@ class _SupportMarksSection extends ConsumerStatefulWidget {
 class _SupportMarksSectionState extends ConsumerState<_SupportMarksSection> {
   bool _saving = false;
 
-  /// Our own profile card reads the row the republish just rewrote, so it has
-  /// to be re-read for the chip to appear or go.
+  /// Our profile card reads the row the republish just rewrote, so it has to be
+  /// re-read for the chip to appear or go.
   Future<void> _reloadMyProfile() async {
     final me = ref.read(identityProvider).peerId;
     if (me != null && me.isNotEmpty) {
@@ -705,9 +694,8 @@ class _SupportMarksSectionState extends ConsumerState<_SupportMarksSection> {
           style: HollowTypography.caption.copyWith(color: hollow.textSecondary),
         ),
         const SizedBox(height: HollowSpacing.sm),
-        // Dimmed while hidden, because nothing it says is on screen for
-        // anyone then. Still usable, so the choice is ready for the moment the
-        // marks come back.
+        // Dimmed while hidden, because nothing it says is on screen then. Still
+        // usable, so the choice is ready when the marks come back.
         AnimatedOpacity(
           opacity: hidden ? 0.45 : 1.0,
           duration: const Duration(milliseconds: 150),
@@ -783,8 +771,7 @@ class _SupportMarksSectionState extends ConsumerState<_SupportMarksSection> {
   }
 }
 
-/// One held credential, with the one irreversible thing that can be done to
-/// it.
+/// One held credential, with the one irreversible thing that can be done to it.
 class _CredentialRow extends ConsumerStatefulWidget {
   final shop.OwnSupportCred cred;
 
@@ -800,8 +787,7 @@ class _CredentialRowState extends ConsumerState<_CredentialRow> {
   shop.OwnSupportCred get cred => widget.cred;
 
   /// `Redeemed 2026-09-02`, plus the item's first eight hex when nothing else
-  /// names this mark: an unnamed row still has to be tellable from the next
-  /// unnamed row.
+  /// names the mark, so one unnamed row is tellable from the next.
   String get _meta {
     final ms = cred.redeemedAt.toInt();
     final parts = <String>[];

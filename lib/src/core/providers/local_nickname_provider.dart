@@ -35,8 +35,7 @@ class LocalNicknameNotifier extends Notifier<Map<String, String>> {
     }
     state = updated;
     // Keep the static cache `displayNameFor()` reads in sync immediately, so
-    // names refresh live everywhere (chat title, lists) on both platforms — not
-    // only after a tab switch re-triggers the shell's listener.
+    // names refresh live everywhere, not only after a tab switch.
     setLocalNicknamesRef(state);
     await _save();
   }
@@ -50,9 +49,8 @@ class LocalNicknameNotifier extends Notifier<Map<String, String>> {
     await _save();
   }
 
-  // Rethrows so call sites can toast a failed persist — the in-memory update
-  // above still applied, but a swallowed write here silently loses the
-  // nickname on the next launch.
+  // Rethrows so call sites can toast a failed persist: the in-memory update
+  // applied, but a swallowed write silently loses the nickname next launch.
   Future<void> _save() async {
     try {
       await storage_api.saveSetting(

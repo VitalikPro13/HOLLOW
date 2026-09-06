@@ -112,8 +112,7 @@ void showCreateServerDialog(BuildContext context) {
         ],
       );
 
-      // Phones: stacked sections with a horizontal divider.
-      // Desktop: the original side-by-side two-column layout.
+      // Stacked on a phone, two columns on desktop.
       final body = isCompact
           ? Column(
               mainAxisSize: MainAxisSize.min,
@@ -169,7 +168,6 @@ void showCreateServerDialog(BuildContext context) {
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    // Close button row
                     Align(
                       alignment: Alignment.centerRight,
                       child: HollowPressable(
@@ -199,18 +197,17 @@ void _handleJoin(BuildContext context, TextEditingController controller) {
   final input = controller.text.trim();
   if (input.isEmpty) return;
 
-  // Parse invite link (hollow:// or web /join#server=) or raw server ID.
+  // Accepts a hollow:// link, a web /join# link or a raw server id.
   final serverId = inviteIdFromInput(input, HollowLinkType.serverInvite);
 
   Navigator.of(context).pop();
-  // Fire-and-forget FFI: a bare un-awaited Future's rejection hits the zone
-  // crash handler (feedback_ffi_fire_and_forget_catcherror).
+  // Fire-and-forget FFI: an un-awaited Future's rejection hits the zone crash
+  // handler (feedback_ffi_fire_and_forget_catcherror).
   crdt_api.joinServer(serverId: serverId, nsfwConfirmed: false)
       .catchError((_) {});
-  // The dialog is popped — its contexts may have no Overlay above them, and
-  // Overlay.of on a dead context null-crashes (field-hit 2026-08-06: the
-  // join-failure path crashed instead of toasting). Ride the root
-  // navigator's overlay (feedback_toast_from_nonwidget_overlaystate).
+  // The dialog is popped, so its contexts may have no Overlay above them and
+  // Overlay.of on a dead one crashes. Ride the root navigator's overlay
+  // instead (feedback_toast_from_nonwidget_overlaystate).
   final overlay = hollowNavigatorKey.currentState?.overlay;
   final overlayContext = overlay?.context;
   if (overlay != null && overlayContext != null && overlayContext.mounted) {

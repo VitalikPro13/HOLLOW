@@ -1,10 +1,8 @@
 //! Minimal background fetch node for FCM/APNs push notification Tier 2.
 //!
-//! Connects invisibly (fetch mode) and joins ONE room:
-//! - DM wake: the DM room for the sender — decrypts buffered DMs via Olm.
-//! - Channel wake: the SERVER room — decrypts buffered channel messages via
-//!   MLS (group ciphertext fanned out per-offline-member as 0x09 frames by the
-//!   sender) or reads signed public-channel plaintext. No CRDT, no gossip.
+//! Connects invisibly and joins ONE room: the DM room for the sender (Olm), or
+//! the SERVER room for a channel wake (MLS group ciphertext fanned out per
+//! offline member, or signed public-channel plaintext). No CRDT, no gossip.
 
 use std::time::Duration;
 
@@ -40,19 +38,13 @@ pub(crate) struct FetchedDm {
     pub channel_id: Option<String>,
 }
 
-/// Run a one-shot fetch: connect invisibly, join one room, collect messages, return.
+/// Run a one-shot fetch: connect invisibly, join one room, collect messages.
 ///
-/// `server_room`: when Some, this is a CHANNEL wake — join the server room and
-/// decrypt channel messages (MLS via `mls` when available, public plaintext
-/// otherwise). When None, this is a DM wake — join the DM room for
-/// `sender_peer_id` and decrypt via Olm.
-/// `peer_id`: the DEVICE peer_id the socket AUTHENTICATES as (multi-device:
-/// the relay keyed this device's push token + offline buffer by it, so the fetch
-/// MUST auth as the device, not the master, to receive its buffered ciphertext).
-/// `local_master`: this identity's MASTER peer_id — DM rooms are MASTER-paired
-/// (`dm_room_code` is pure; the live node always computes it from masters), so
-/// the room is derived from `local_master` + the sender's master, NOT the device
-/// id, or the fetch joins the wrong room and finds nothing.
+/// `server_room` Some = a CHANNEL wake (MLS, or public plaintext), None = a DM
+/// wake. `peer_id` is the DEVICE the socket AUTHENTICATES as: the relay keyed
+/// this device's push token and offline buffer by it. `local_master` is this
+/// identity's MASTER, and the DM room is derived from it plus the sender's
+/// master, never the device id, or the fetch joins the wrong room.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_fetch(
     relay_domain: &str,
@@ -73,11 +65,10 @@ pub(crate) async fn run_fetch(
     let relay_url = format!("wss://{relay_domain}/ws");
     let room = fetch_room_code(server_room, local_master, sender_peer_id);
 
-    // AUTO-DOWNLOAD GATE (issue #41 carry-over): this headless process never
-    // receives the Dart `set_auto_download_config` push (the FCM isolate runs
-    // in a fresh process), so load the persisted settings from the SQLCipher
-    // settings table directly — otherwise the process-global default (169 MB
-    // permissive) writes inline images the live node would have gated.
+    // AUTO-DOWNLOAD GATE (#41): this headless process never receives Dart's
+    // `set_auto_download_config` (the FCM isolate is a fresh process), so the
+    // persisted settings are loaded directly; the process-global default is
+    // permissive and would write inline images the live node would have gated.
     load_auto_download_conf_from_settings(db_path, db_passphrase);
 
     hollow_log!(
@@ -92,7 +83,6 @@ pub(crate) async fn run_fetch(
 
     let (mut write, mut read) = ws_stream.split();
 
-    // Join the single room (DM or server).
     let join_msg = serde_json::json!({"type": "join", "room": room});
     write
         .send(Message::Text(join_msg.to_string().into()))
@@ -136,7 +126,6 @@ pub(crate) async fn run_fetch(
         }
     }
 
-    // Close WebSocket gracefully.
     let _ = write.close().await;
 
     // Persist advanced MLS ratchet state (channel wake). Single-writer-safe:
@@ -160,39 +149,26 @@ fn fetch_room_code(server_room: Option<&str>, local_master: &str, sender_peer_id
     match server_room {
         Some(s) => s.to_string(),
         None => {
-            // MASTER-paired DM room: resolve both ends to their master identity
-            // (resolver warmed from DB links before this call). A single-device
-            // install resolves each to itself → identical to the pre-multi-device
-            // room. The socket still AUTHS as the device (`peer_id`) above.
+            // MASTER-paired DM room: resolve both ends to their master (the
+            // resolver is warmed from DB links before this call). The socket
+            // still AUTHS as the device.
             let sender_master = crate::node::resolver::resolve(sender_peer_id);
             crate::node::types::dm_room_code(local_master, &sender_master)
         }
     }
 }
 
-// After the first message arrives, the relay replays its whole buffer
-// back-to-back. Switch to a short idle window so we drain the burst then
-// return PROMPTLY — the notification can't render content until run_fetch
-// returns, so this idle directly gates how fast the user sees the message.
-// 1.2s is enough to catch a back-to-back buffer replay over a mobile link
-// while keeping perceived latency low. The larger inlined-image FileHeader
-// case does NOT rely on this: when a text DM references a file but its image
-// bytes haven't arrived, `outstanding_image` below holds the connection open
-// to the full deadline instead, so images are never cut off.
+// After the first message the relay replays its whole buffer back-to-back, so a
+// short idle window drains the burst and returns PROMPTLY: the notification
+// cannot render until run_fetch returns. An outstanding inlined image holds the
+// connection to the full deadline instead, so images are never cut off.
 const IDLE_AFTER_FIRST: Duration = Duration::from_millis(1200);
 
-/// How long to wait for the next WS frame, or `None` once the overall
-/// deadline has been reached (done collecting).
+/// How long to wait for the next WS frame, or `None` once the overall deadline
+/// has been reached.
 ///
-/// Overall deadline caps the wait for the FIRST message; once we have
-/// messages we only wait IDLE_AFTER_FIRST between subsequent frames —
-/// UNLESS we're still expecting a companion image (a text DM with a
-/// file_id arrived but its image marker hasn't), in which case we hold
-/// out to the full deadline so the image isn't cut off.
-/// Outstanding image = a DM references a file (caption "[file:...]" or a
-/// file_id) but no entry has delivered the image bytes (image_path) yet.
-/// Hold the connection open to the full deadline so the larger FileHeader
-/// frame isn't cut off by the short idle window.
+/// The deadline caps the wait for the FIRST message; after that only
+/// IDLE_AFTER_FIRST, unless a companion image is still outstanding.
 fn next_wait(messages: &[FetchedDm], deadline: tokio::time::Instant) -> Option<Duration> {
     let outstanding_image = {
         let have_image = messages.iter().any(|m| m.image_path.is_some());
@@ -228,7 +204,6 @@ where
             None
         }
         Err(_) => {
-            // Idle/overall timeout — done collecting.
             hollow_log!("[HOLLOW-FETCH] Wait elapsed, returning {} messages", collected);
             None
         }
@@ -258,8 +233,7 @@ fn handle_text_frame(
                 // Sender came online in the room — messages may follow.
             }
             "direct" | "msg" => {
-                // Legacy text-direct path (kept as a fallback; real DMs
-                // arrive as binary 0x06 frames below).
+                // Legacy text-direct fallback; real DMs arrive as 0x06 below.
                 let from = server_msg
                     .get("from")
                     .and_then(|v| v.as_str())
@@ -300,11 +274,9 @@ fn handle_binary_frame(
     //   0x06 [room\0][sender\0][payload]          — direct (live or offline-buffer replay)
     //   0x05 [room\0][sender\0][payload]          — room broadcast (live)
     //   0x08 [room\0][topic\0][sender\0][payload] — topic broadcast (live)
-    // A DM wake only cares about 0x06 (Olm ciphertext, mirrors
-    // ws_client.rs parse_binary_relay_frame). A channel wake reads
-    // channel payloads from any of the three — the buffered 0x09
-    // fan-out replays as 0x06, while messages sent live during the
-    // fetch window arrive as 0x05/0x08.
+    // A DM wake only cares about 0x06 (Olm ciphertext). A channel wake reads
+    // channel payloads from all three: the buffered 0x09 fan-out replays as
+    // 0x06, while messages sent live during the window arrive as 0x05/0x08.
     let parsed: Option<(String, String)> = if data.len() > 3 {
         match data[0] {
             0x06 | 0x05 => parse_direct_frame(&data[1..]),
@@ -333,11 +305,9 @@ fn handle_binary_frame(
     // Other binary frames (file transfers) — ignore.
 }
 
-/// A FileHeader and its companion text DM can arrive as TWO entries sharing
-/// one message_id: the FileHeader entry has text "[file:<id>]" + image_path,
-/// and (for a CAPTIONED image) the text DM has the real caption. Dedup by mid:
-/// keep ONE entry per mid, preferring the real caption text but always carrying
-/// the image_path. The FileHeader entry alone (captionless image) is kept as-is.
+/// A FileHeader and its companion text DM can arrive as TWO entries sharing one
+/// message_id. Keep ONE entry per mid, preferring the real caption text but
+/// always carrying the image_path; a captionless image keeps its own entry.
 fn merge_fetched_messages(messages: Vec<FetchedDm>) -> Vec<FetchedDm> {
     let image_paths = collect_image_paths(&messages);
     let mut order: Vec<String> = Vec::new();
@@ -387,9 +357,8 @@ fn collect_image_paths(messages: &[FetchedDm]) -> std::collections::HashMap<Stri
     image_paths
 }
 
-/// Merge a second entry sharing the same mid into the existing one.
-/// Prefer the real caption over the "[file:...]" sentinel; keep
-/// the image_path from whichever had it.
+/// Merge a second entry sharing the same mid: prefer the real caption over the
+/// "[file:...]" sentinel and keep the image_path from whichever had it.
 fn merge_duplicate_entry(existing: &mut FetchedDm, m: FetchedDm) {
     let img = existing.image_path.clone().or_else(|| m.image_path.clone());
     if existing.text.starts_with("[file:") && !m.text.starts_with("[file:") {
@@ -400,8 +369,7 @@ fn merge_duplicate_entry(existing: &mut FetchedDm, m: FetchedDm) {
 
 /// Parse the body of a relay direct/broadcast frame (after the type byte):
 ///   [room\0][sender\0][payload]
-/// Returns (sender_peer_id, payload_as_utf8_string). The room code is not
-/// needed here — the fetch node only joined one room.
+/// Returns (sender_peer_id, payload). The room code is not needed: one room.
 fn parse_direct_frame(body: &[u8]) -> Option<(String, String)> {
     let room_end = body.iter().position(|&b| b == 0)?;
     let after_room = &body[room_end + 1..];
@@ -432,11 +400,9 @@ fn parse_direct_frame_tail(body: &[u8]) -> Option<(String, String)> {
 
 /// Process a channel-wake payload: an MLS-encrypted or public channel message.
 ///
-/// MLS: decrypts on the loaded group state and persists the row — exactly what
-/// the live node would do. A stale-epoch decrypt failure (member missed a
-/// commit while offline) is logged and skipped: the banner falls back to a
-/// content-free line and the app self-heals via channel sync + MLS recovery on
-/// next open. Public channels: signed plaintext, inserted directly.
+/// A stale-epoch decrypt failure (a member missed a commit while offline) is
+/// logged and skipped: the banner falls back to a content-free line and the app
+/// self-heals on next open. Public channels are signed plaintext.
 fn try_process_channel_msg(
     from: &str,
     data: &str,
@@ -481,9 +447,8 @@ fn try_process_channel_msg(
                         return None;
                     }
                     // The MLS leaf credential is the sender's DEVICE id, but the
-                    // message is signed by — and attributed to — the MASTER. Resolve
-                    // so the fetched row is master-keyed, mirroring the live MLS
-                    // handler (swarm.rs sender_master). Single-device → no-op.
+                    // message is signed by and attributed to the MASTER, so the
+                    // fetched row is master-keyed like the live handler's.
                     let sender_master = crate::node::resolver::resolve(&sender);
                     // Reject a present-but-invalid signature (defence in depth
                     // behind MLS group membership) — see fetch_channel_sig_rejected.
@@ -530,17 +495,13 @@ fn try_process_channel_msg(
             // (members store metadata from the MLS FileHeader instead).
             file_meta: _,
         } => {
-            // Public channels: signed plaintext. The relay-attested frame author
-            // (`from`) is the sender's DEVICE id, but the message is signed by — and
-            // attributed to — the sender's MASTER. Resolve so the fetched row lands
-            // master-keyed (matching the live handler) and renders the sender's name
-            // instead of a raw device id. The resolver is warmed from DB links before
-            // run_fetch; a single-device sender resolves to itself (no-op).
+            // Public channels: signed plaintext. The frame author is the sender's
+            // DEVICE id but the message is attributed to their MASTER, so resolve
+            // and the fetched row lands master-keyed like the live handler's.
             let sender_master = crate::node::resolver::resolve(from);
-            // Public channels are PLAINTEXT — a hostile relay can tamper with the
-            // frame in flight, exactly the disclosure threat model. The live path
-            // rejects a present-but-invalid signature; the push path must too, or
-            // the tampered row is stored and never re-verified (dedup by mid).
+            // Public channels are PLAINTEXT, so a hostile relay can tamper in
+            // flight. The push path must reject a present-but-invalid signature
+            // too, or the tampered row is stored and never re-verified.
             let lp_digest = link_preview.as_ref()
                 .map(crate::node::crypto_handler::link_preview_digest);
             let extras = crate::node::crypto_handler::SignedExtras {
@@ -576,20 +537,12 @@ fn try_process_channel_msg(
     }
 }
 
-/// A push-fetched channel message signed by `sender_master` over the canonical
-/// `ch:{sid}:{cid}` payload must not be stored with a signature that does not
-/// verify. The live channel handlers reject present-but-invalid signatures
-/// (`message_ops::channel_sig_rejected`, `swarm.rs` public + Olm-fallback
-/// paths); the push path used to store the row unchecked, and because both
-/// sync and the app dedup by `message_id`, that bad row was NEVER re-verified.
-/// A hostile relay can tamper with a plaintext public-channel frame in flight,
-/// so the gap was real for public channels; for MLS it is defence in depth
-/// behind group membership.
+/// True when a push-fetched channel message must NOT be stored: only a VERIFYING
+/// signature is accepted, absent included (the 0.8.5 backfill rule).
 ///
-/// Backfill rule (same as the four sync sites): only a VERIFYING signature is
-/// stored — absent is refused too as of 0.8.5. `true` = reject (do not store,
-/// do not surface a notification for tampered content); the full app re-syncs
-/// the authentic copy later.
+/// Both sync and the app dedup by `message_id`, so an unchecked row would never
+/// be re-verified. A hostile relay can tamper with a plaintext public-channel
+/// frame; for MLS this is defence in depth behind group membership.
 #[allow(clippy::too_many_arguments)]
 fn fetch_channel_sig_rejected(
     sender_master: &str,
@@ -616,12 +569,10 @@ fn fetch_channel_sig_rejected(
     false
 }
 
-/// Insert a fetched channel message row, deduplicated by message_id — the same
+/// Insert a fetched channel message row, deduplicated by message_id: the same
 /// message may arrive again via channel sync when the full app opens.
-///
-/// `order_us` is the SENDER's Lamport stamp from the wire frame — persisted
-/// faithfully because the v2 signature binds it; a local `ts*1000` default
-/// would store a row whose signature fails when re-served through sync.
+/// `order_us` is the SENDER's Lamport stamp, persisted faithfully because the v2
+/// signature binds it; a local default would store a row that fails re-serving.
 #[allow(clippy::too_many_arguments)]
 fn insert_channel_row(
     db_path: &str,
@@ -650,9 +601,8 @@ fn insert_channel_row(
                 server_id, channel_id, sender, text, false, ts, sig, pk, mid,
                 reply_to, file_id, order_us,
             );
-            // Persist the preview alongside (the wire carried it; without this
-            // the fetched row rendered without its preview forever — dedup by
-            // mid means the full app never re-ingests it).
+            // Persist the preview too: dedup by mid means the full app never
+            // re-ingests this row, so a dropped card is lost forever.
             if let (Ok(n), Some(lp), Some(message_id)) = (inserted, link_preview, mid) {
                 if n > 0 {
                     if let Ok(lp_json) = serde_json::to_string(lp) {
@@ -689,26 +639,20 @@ fn try_decrypt_dm(
 
     // DEFENSE: never process an envelope from OUR OWN identity (a sibling
     // self-echo). This inserter hardcodes `is_mine=false` and files under
-    // `resolve(from)` — for a sibling sender that's OUR OWN master, so the row
-    // would land in a wrong/own thread on the wrong side, and the mid-keyed
-    // dedup would then block the correctly-oriented copy from ever landing.
-    // Today sibling echoes are queue-only (never room-sent/buffered), so this
-    // shouldn't fire — it's a guard against that upstream invariant changing.
+    // `resolve(from)`, so the row would land in the wrong thread and the
+    // mid-keyed dedup would then block the correct copy from ever landing.
     if crate::node::resolver::same_identity(from, local_peer_id) {
         hollow_log!("[HOLLOW-FETCH] Skipping own-sibling envelope from {from}");
         return None;
     }
 
-    // Olm decrypt is keyed by the SENDER DEVICE id (`from`) — sessions are
-    // per-device. But DB rows + the surfaced conversation key on the MASTER, so a
-    // multi-device sender's messages land in the one thread (matching the live
-    // node's `convo_peer = resolve(peer_id)`). The resolver is warmed from DB
-    // links before run_fetch; a single-device sender resolves to itself.
+    // Olm decrypt is keyed by the SENDER DEVICE id, since sessions are
+    // per-device, but rows and the surfaced conversation key on the MASTER, so a
+    // multi-device sender's messages land in the one thread.
     let convo = crate::node::resolver::resolve(from);
 
     // BLOCK GUARD: relay-buffered replays from a blocked identity are dropped
-    // exactly like live traffic (covers both the DirectMessage and FileHeader
-    // offline branches below).
+    // exactly like live traffic.
     if crate::node::blocklist::is_blocked(from) {
         return None;
     }
@@ -822,15 +766,12 @@ fn create_inbound_prekey_session(
     }
 }
 
-/// Reject an unverified signature on a push-fetched DM (or DM edit), mirroring
-/// the channel fetch paths and the four sync sites: `Valid` or the row is not
-/// stored (absent included, as of 0.8.5).
+/// True when an unverified signature on a push-fetched DM (or edit) must be
+/// rejected: `Valid` or the row is not stored, absent included (0.8.5).
 ///
-/// This path is inbound-only — own-sibling echoes are dropped upstream in
-/// `try_decrypt_dm` — so the signer is always the friend's MASTER (`convo`) and
-/// the recipient is our master (`local_master`), matching the live DM handler's
-/// `!is_own_device` branch. The DM is Olm-authenticated already; this is
-/// defence in depth (and keeps push consistent with live, which enforces).
+/// Inbound-only, since own-sibling echoes are dropped in `try_decrypt_dm`, so
+/// the signer is always the friend's MASTER. The DM is Olm-authenticated
+/// already; this is defence in depth and keeps push consistent with live.
 #[allow(clippy::too_many_arguments)]
 fn fetch_dm_sig_rejected(
     convo: &str,
@@ -880,9 +821,8 @@ fn handle_direct_message(
         ..
     } = inner;
 
-    // Verify against the RAW text, before the length clamp — the sender signed
-    // what they sent (see the live DM handler's ordering note). The v2 extras
-    // come from the same wire fields persisted below.
+    // Verify against the RAW text, before the length clamp: the sender signed
+    // what they sent. The v2 extras come from the wire fields persisted below.
     let lp_digest = link_preview.as_ref()
         .map(crate::node::crypto_handler::link_preview_digest);
     let extras = crate::node::crypto_handler::SignedExtras {
@@ -914,10 +854,9 @@ fn handle_direct_message(
     })
 }
 
-/// Persist to DB so the full node doesn't re-fetch.
-/// Dedup by message_id: a replayed buffered message may also be
-/// pulled later by full-node DM-sync. Skip the INSERT if it
-/// already exists, but still surface it for the notification.
+/// Persist to DB so the full node does not re-fetch. Dedup by message_id (a
+/// replayed buffered message may also be pulled later by DM-sync): skip the
+/// INSERT if it already exists, but still surface it for the notification.
 #[allow(clippy::too_many_arguments)]
 fn persist_direct_message(
     from: &str,
@@ -965,14 +904,10 @@ fn persist_direct_message(
                 }
             }
         } else if !msg_text.starts_with("[file:") {
-            // Row already exists — likely the inlined-image
-            // FileHeader for this same mid won the INSERT OR
-            // IGNORE and stored a "[file:<id>]" sentinel (with no
-            // signature). This is the real CAPTION (shares the
-            // mid): promote the sentinel to the caption text AND
-            // its sig/pk so the captioned image renders correctly
-            // and verifies (otherwise it shows "Unsigned"). No-op
-            // if the row already has real text.
+            // Row already exists: the inlined-image FileHeader for this mid won
+            // the INSERT OR IGNORE and stored an unsigned "[file:<id>]" sentinel.
+            // This is the real CAPTION, so promote the sentinel text AND its
+            // sig/pk, or the captioned image renders as "Unsigned".
             if let Some(message_id) = mid {
                 let _ = store.promote_file_sentinel_to_caption(
                     message_id,
@@ -985,12 +920,11 @@ fn persist_direct_message(
     }
 }
 
-/// Apply a late link preview (issue #45) while the app is backgrounded.
+/// Apply a late link preview (#45) while the app is backgrounded.
 ///
-/// The fetch node has to handle this or the card is lost for good: preview
-/// bytes never ride sync backfill (only `lp_digest` does), so a `lp_set` this
-/// node consumed and dropped would never come back. Returns `None` — a card
-/// landing on a message the user already has is not a new notification.
+/// The fetch node has to handle this or the card is lost for good: preview bytes
+/// never ride sync backfill, only `lp_digest` does. Returns `None`, because a
+/// card landing on a message the user already has is not a new notification.
 #[allow(clippy::too_many_arguments)]
 fn handle_link_preview_set(
     convo: &str,
@@ -1035,11 +969,9 @@ fn handle_link_preview_set(
     None
 }
 
-/// Handle a decrypted EditMessage envelope.
-/// An edit to an offline peer is buffered + pushed too. Apply it
-/// to the existing row (by message_id) so the DB stays consistent
-/// with the sender — preventing the "edit appears as a second
-/// message" duplication when the full node later DM-syncs.
+/// Handle a decrypted EditMessage envelope. An edit to an offline peer is
+/// buffered and pushed too; applying it by message_id keeps the DB consistent
+/// with the sender and stops the edit appearing as a second message later.
 #[allow(clippy::too_many_arguments)]
 fn handle_edit_message(
     convo: &str,
@@ -1052,12 +984,10 @@ fn handle_edit_message(
     db_path: &str,
     db_passphrase: &str,
 ) -> Option<FetchedDm> {
-    // Reject a tampered edit before it overwrites the stored row (raw text).
-    // The v2 edit signature binds the ORIGINAL row's structural fields —
-    // reconstruct them from our stored row (edit-before-original leaves no row:
-    // extras degrade to mid-only, v2+v1 fail for a v2 edit, and the edit is
-    // deferred to DM-sync — matching the live handler, which also requires the
-    // row before applying an edit).
+    // Reject a tampered edit before it overwrites the stored row (raw text). The
+    // v2 edit signature binds the ORIGINAL row's structural fields, so they are
+    // reconstructed from our stored row; an edit that arrives before the
+    // original is deferred to DM-sync, matching the live handler.
     let row_extras = crate::storage::MessageStore::open(db_path, db_passphrase)
         .ok()
         .and_then(|store| store.get_dm_message_sig_row(&mid));
@@ -1086,10 +1016,8 @@ fn handle_edit_message(
             new_text.len()
         );
         if !applied {
-            // Original not present yet (edit arrived before the
-            // message). Stamp edited_at if the row exists; otherwise
-            // the later DM-sync will carry the edited text with this
-            // mid and insert it once.
+            // Original not present yet: stamp edited_at if the row exists,
+            // otherwise DM-sync later carries the edited text under this mid.
             let _ = store.set_dm_message_edited_at(&mid, ts);
         }
     }
@@ -1104,14 +1032,11 @@ fn handle_edit_message(
     })
 }
 
-/// Handle a decrypted FileHeader envelope.
-/// An offline image DM inlines its AES-encrypted bytes in the
-/// FileHeader (file_handler.rs send_encrypted_image_to_peer).
-/// Decrypt + write the file to disk and record COMPLETE metadata
-/// so the message renders as a real image (and the notification
-/// can show a preview) — no live stream needed. Returns None: the
-/// FileHeader is not itself a notifiable message; its companion
-/// text DM (same mid) is what gets surfaced.
+/// Handle a decrypted FileHeader envelope. An offline image DM inlines its
+/// AES-encrypted bytes here, so decrypting and writing them with COMPLETE
+/// metadata is what makes the message render as a real image with no live
+/// stream. Returns None: the FileHeader is not itself notifiable, its companion
+/// text DM under the same mid is.
 fn handle_file_header(
     convo: &str,
     local_master: &str,
@@ -1120,10 +1045,9 @@ fn handle_file_header(
     db_passphrase: &str,
 ) -> Option<FetchedDm> {
     if p.inline_bytes.is_some() && p.aes_key.is_some() && p.aes_nonce.is_some() {
-        // AUTO-DOWNLOAD GATE (issue #41 carry-over): honor the same config as
-        // the live node (loaded from the settings table at fetch start).
-        // Gated: keep the sentinel MESSAGE row + metadata so the card renders
-        // with a manual Download button, but never write the bytes.
+        // AUTO-DOWNLOAD GATE (#41): honour the same config as the live node.
+        // Gated keeps the sentinel row and metadata, so the card renders with a
+        // manual Download button, but never writes the bytes.
         let auto_ok = crate::node::file_handler::auto_download_allows(
             p.size, &p.name, &p.ext, &format!("dm:{convo}"), p.voice,
         );
@@ -1149,10 +1073,9 @@ fn handle_file_header(
         (p.inline_bytes.as_ref(), p.aes_key.as_ref(), p.aes_nonce.as_ref())
     {
         let decoded = decrypt_inline_image(b64, key_hex, nonce_hex);
-        // SECURITY (FILE-1): the disk path below is built from two raw wire
-        // strings, and an absolute `fid` makes `Path::join` discard the base
-        // directory entirely. A header whose id or extension is not the shape
-        // we mint writes nothing at all — see file_transfer::is_wire_file_id.
+        // SECURITY (FILE-1): the path below is built from two raw wire strings,
+        // and an absolute `fid` makes `Path::join` discard the base directory. A
+        // header whose id or extension is not the shape we mint writes nothing.
         if !crate::node::file_transfer::is_wire_file_id(&p.fid)
             || !crate::node::file_transfer::is_wire_ext(&p.ext)
         {
@@ -1167,24 +1090,18 @@ fn handle_file_header(
             let disk_path = crate::node::file_transfer::final_file_path(&p.fid, &p.ext);
             if std::fs::write(&disk_path, &plaintext).is_ok() {
                 let disk_str = disk_path.to_string_lossy().to_string();
-                // The companion text DM ("[file:...]") is sent via a
-                // path that drops to OFFLINE peers (file_handler uses
-                // a room lookup that fails when the peer isn't in a
-                // room), so the fetch often gets ONLY this FileHeader.
-                // Insert the MESSAGE row ourselves (INSERT OR IGNORE,
-                // so a later DM-sync / companion DM won't duplicate it)
-                // — otherwise the image file lands on disk with no
-                // message referencing it and renders as nothing.
+                // The companion text DM is sent through a room lookup that fails
+                // for an OFFLINE peer, so the fetch often gets ONLY this
+                // FileHeader. Insert the MESSAGE row here (INSERT OR IGNORE) or
+                // the image lands on disk with nothing referencing it.
                 let msg_text = format!("[file:{}]", p.fid);
                 persist_inline_image(convo, local_master, &p, &msg_text, Some(&disk_str), db_path, db_passphrase);
                 hollow_log!(
                     "[HOLLOW-FETCH] wrote inline image {} ({} bytes) -> {}",
                     p.fid, plaintext.len(), disk_str
                 );
-                // Return a REAL image message (text "[file:...]",
-                // image_path set). run_fetch keeps it (non-empty
-                // text) and, if the companion text DM also arrived,
-                // merges this image_path onto it by mid.
+                // A REAL image message: run_fetch keeps it and merges the
+                // image_path onto the companion text DM by mid.
                 return Some(FetchedDm {
                     from_peer: convo.to_string(),
                     text: msg_text,
@@ -1200,10 +1117,9 @@ fn handle_file_header(
     None
 }
 
-/// Load the auto-download config from the persisted settings table so the
-/// fetch node's gate matches the live node's (issue #41 carry-over). Absent /
-/// malformed settings fall back to the same defaults the Dart providers use
-/// (169 MB permissive, no overrides).
+/// Load the auto-download config from the persisted settings table so the fetch
+/// node's gate matches the live node's (#41). Absent or malformed settings fall
+/// back to the same defaults the Dart providers use.
 fn load_auto_download_conf_from_settings(db_path: &str, db_passphrase: &str) {
     let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) else {
         return;
@@ -1263,11 +1179,9 @@ fn persist_inline_image(
         crate::storage::MessageStore::open(db_path, db_passphrase)
     {
         // SECURITY (backfill rule, 0.8.5): the header's sig is the MESSAGE
-        // signature over the sentinel text — the row is stored ONLY when it
-        // VERIFIES. A CAPTIONED image's header legitimately fails here (the
-        // sender signed the caption); its companion caption DM creates the row.
-        // Mirrors the full-node sentinel path in swarm.rs. `order_us` from the
-        // header — the v2 signature binds the sender's Lamport stamp.
+        // signature over the sentinel text, so the row is stored ONLY when it
+        // VERIFIES. A CAPTIONED image's header legitimately fails here and its
+        // companion caption DM creates the row. `order_us` from the header.
         let extras = crate::node::crypto_handler::SignedExtras {
             mid: p.mid.as_deref(),
             reply_to: None,
@@ -1290,10 +1204,9 @@ fn persist_inline_image(
                 p.mid.as_deref(), None, Some(&p.fid), p.order_us,
             );
         }
-        // context_id + sender_id key on the MASTER so the
-        // file lands under the same thread as its message
-        // row (Step 5.1 DM-file context rule).
-        // Owner guard (0.8.5) — see `file_handler::file_meta_write_allowed`.
+        // context_id + sender_id key on the MASTER so the file lands under the
+        // same thread as its message row. Owner guard (0.8.5), see
+        // `file_handler::file_meta_write_allowed`.
         if crate::node::file_handler::file_meta_write_allowed(&store, &p.fid, convo) {
             let thumb =
                 crate::node::file_handler::accept_header_thumb(p.thumb.clone(), p.img, &p.mime);

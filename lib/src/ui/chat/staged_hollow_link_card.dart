@@ -67,9 +67,8 @@ class _StagedHollowLinkCardState extends ConsumerState<StagedHollowLinkCard> {
 
   @override
   Widget build(BuildContext context) {
-    // With no shop surface (a store build, or an install where the shop is
-    // still put away) a pasted redeem link stays plain text in the box: the
-    // composer must not name a shop it is not showing.
+    // With no shop surface a pasted redeem link stays plain text: the composer
+    // must not name a shop it is not showing.
     if (widget.link.type == HollowLinkType.redeem &&
         !ref.watch(shopAvailableProvider)) {
       return const SizedBox.shrink();

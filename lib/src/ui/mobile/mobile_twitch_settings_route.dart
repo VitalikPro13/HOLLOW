@@ -146,7 +146,6 @@ class _MobileTwitchSettingsRouteState
       body: SafeArea(
         child: Column(
           children: [
-            // Header
             Container(
               padding: const EdgeInsets.symmetric(
                 horizontal: HollowSpacing.sm, vertical: HollowSpacing.sm,
@@ -178,7 +177,6 @@ class _MobileTwitchSettingsRouteState
                   : ListView(
                       padding: const EdgeInsets.all(HollowSpacing.lg),
                       children: [
-                        // Enable toggle
                         _ToggleRow(
                           label: 'Enable Twitch Verification',
                           subtitle: 'Require Twitch follow/sub to join',
@@ -192,7 +190,6 @@ class _MobileTwitchSettingsRouteState
                         if (_enabled) ...[
                           const SizedBox(height: HollowSpacing.xl),
 
-                          // Fill from account
                           Align(
                             alignment: Alignment.centerRight,
                             child: HollowButton.ghost(
@@ -204,7 +201,6 @@ class _MobileTwitchSettingsRouteState
                           ),
                           const SizedBox(height: HollowSpacing.sm),
 
-                          // Channel name
                           Text('Channel Display Name', style: HollowTypography.caption.copyWith(
                             color: hollow.textSecondary,
                           )),
@@ -218,7 +214,6 @@ class _MobileTwitchSettingsRouteState
 
                           const SizedBox(height: HollowSpacing.lg),
 
-                          // Channel ID
                           Text('Channel ID', style: HollowTypography.caption.copyWith(
                             color: hollow.textSecondary,
                           )),
@@ -231,7 +226,6 @@ class _MobileTwitchSettingsRouteState
 
                           const SizedBox(height: HollowSpacing.lg),
 
-                          // Min follow days
                           Text('Minimum follow days', style: HollowTypography.caption.copyWith(
                             color: hollow.textSecondary,
                           )),
@@ -251,7 +245,6 @@ class _MobileTwitchSettingsRouteState
 
                           const SizedBox(height: HollowSpacing.lg),
 
-                          // Toggles
                           _ToggleRow(
                             label: 'Require Subscription',
                             subtitle: 'Must be subscribed, not just following',
@@ -276,8 +269,8 @@ class _MobileTwitchSettingsRouteState
 
                         const SizedBox(height: HollowSpacing.xl),
 
-                        // Save button — OUTSIDE the if(_enabled) block, else
-                        // toggling verification OFF hides it and the OFF state
+                        // OUTSIDE the `_enabled` block: inside it, toggling
+                        // verification off hides the button and the off state
                         // can never be persisted.
                         if (canManage)
                           HollowButton.filled(

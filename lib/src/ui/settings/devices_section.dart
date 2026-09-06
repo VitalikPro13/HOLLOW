@@ -11,8 +11,7 @@ import 'package:hollow/src/ui/settings/device_management_shared.dart';
 import 'package:hollow/src/ui/settings/settings_shared.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-/// Devices category — the "Your Devices" list + multi-device link/reset tools.
-/// Split out of the old Security tab so device management has its own home.
+/// Devices category: the "Your Devices" list and the link and reset tools.
 class DevicesCategoryView extends StatelessWidget {
   const DevicesCategoryView({super.key});
 
@@ -80,7 +79,7 @@ class DevicesCategoryView extends StatelessWidget {
   }
 }
 
-/// Desktop device row — the shared shell plus ghost-button actions.
+/// Desktop device row: the shared shell plus ghost-button actions.
 class _DeviceRow extends ConsumerWidget {
   final MyDevice device;
   const _DeviceRow({required this.device});
@@ -91,7 +90,7 @@ class _DeviceRow extends ConsumerWidget {
     return DeviceRowShell(
       device: device,
       actions: [
-        // Sync FROM this device (pull servers + friends). Other devices only.
+        // Pulls servers and friends FROM this device, so never from ourselves.
         if (!device.isThisDevice)
           HollowTooltip(
             message: 'Sync servers & friends from this device',
@@ -104,7 +103,6 @@ class _DeviceRow extends ConsumerWidget {
               child: const SizedBox.shrink(),
             ),
           ),
-        // Rename (any device).
         HollowButton.ghost(
           compact: true,
           onPressed: () => renameDeviceFlow(context, ref, device),
@@ -112,7 +110,7 @@ class _DeviceRow extends ConsumerWidget {
           icon: const Icon(LucideIcons.pencil, size: 15),
           child: const SizedBox.shrink(),
         ),
-        // Remove — hidden for the device we're running on (can't revoke self).
+        // Hidden for the device we are running on: it cannot revoke itself.
         if (!device.isThisDevice)
           HollowButton.ghost(
             compact: true,

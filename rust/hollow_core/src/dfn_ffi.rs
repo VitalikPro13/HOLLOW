@@ -1,40 +1,18 @@
-//! C-ABI (and Android JNI) surface for AI noise suppression (RNNoise by
-//! default, DeepFilterNet3 optional — both engines live in `hollow_dfn`).
+//! C-ABI (and Android JNI) surface for AI noise suppression (RNNoise by default,
+//! DeepFilterNet3 optional; both engines live in `hollow_dfn`).
 //!
-//! Raw `extern "C"`, intentionally OUTSIDE `api` so flutter_rust_bridge
-//! codegen never scans it (same pattern as `push_enrich`). The forked
-//! flutter_webrtc capture-processor ports bind these symbols at RUNTIME:
-//!   - Windows: `GetProcAddress(GetModuleHandleW(L"hollow_core.dll"))`
-//!   - Linux:   `dlopen("libhollow_core.so")` + `dlsym` (Dart's own dlopen
-//!              is RTLD_LOCAL — RTLD_DEFAULT will NOT find these)
-//!   - darwin:  `dlsym(RTLD_DEFAULT, ...)` (hollow_core is a dynamic
-//!              framework; exported symbols are strip roots)
-//!   - Android: the JNI exports below, bound to
-//!              `com.cloudwebrtc.webrtc.audio.DfnBridge` — if that Java
-//!              class is ever renamed/moved, these symbol names MUST move
-//!              with it (runtime bypass, not a build error, if they drift).
+//! Raw `extern "C"`, outside `api` so flutter_rust_bridge codegen never scans it.
+//! The forked flutter_webrtc capture processors bind these symbols at RUNTIME, so
+//! the names are a contract: Linux needs `dlopen` + `dlsym` (Dart's own dlopen is
+//! RTLD_LOCAL, RTLD_DEFAULT will NOT find them), and the Android exports are bound
+//! to `com.cloudwebrtc.webrtc.audio.DfnBridge`, which drifts silently at runtime
+//! rather than failing the build if that Java class ever moves.
 //!
-//! ABI v2 (2026-07-18): `hollow_dfn_process_ex` takes the RAW capture shape
-//! (total floats, bands, rate, channels) and the Rust adapter does the
-//! conversion (16 kHz resample on Windows, 3-band merge/split on
-//! Android/Linux) — v1's "48 kHz fullband mono only" gate is why no engine
-//! ever denoised a live frame. `hollow_dfn_create_engine` picks the engine
-//! (0 = RNNoise, 1 = DFN3).
-//!
-//! Threading contract (lifecycle rule from the DFN3 plan):
-//!   - `hollow_dfn_create*` may block (DFN3's tract model load is 100–500 ms
-//!     desktop, ~15 s mobile; RNNoise is instant) — background threads only.
-//!   - `hollow_dfn_process*` is called from EXACTLY ONE thread at a time
-//!     (the APM capture thread) — the handle has no internal locking.
-//!   - `set_atten_lim`/`set_post_filter_beta` may be called from any
-//!     thread: they stage the value in an atomic; the audio thread applies
-//!     it at the next frame boundary (lock-free, no race with process).
-//!     Both are DFN3-only tuning; RNNoise ignores them.
-//!   - The handle lives for the process lifetime once published; `free`
-//!     exists for tests/teardown-before-publish only. NEVER free a handle
-//!     the audio thread might still enter. (An engine SWAP publishes a new
-//!     handle and deliberately leaks the old one — bounded by the number of
-//!     user-initiated switches per session.)
+//! Threading: `create*` may block (DFN3's model load is up to ~15 s on mobile) so
+//! background threads only; `process*` runs on exactly one thread at a time and the
+//! handle has no internal locking; the setters stage into an atomic the audio thread
+//! reads at a frame boundary. A published handle lives for the process lifetime, so
+//! an engine swap leaks the old one rather than free one the audio thread may enter.
 
 use std::ffi::c_void;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -43,12 +21,10 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use hollow_dfn::{AdaptStatus, Adapter, EngineKind, FRAME};
 
 /// Bump on ANY signature/semantic change; ports refuse to bind on mismatch.
-/// v3 (2026-07-18): added `hollow_dfn_last_vad` — RNNoise's per-frame voice
-/// probability for the chain's speech-presence gating.
 pub const HOLLOW_DFN_ABI_VERSION: u32 = 3;
 
-/// Sentinel bit-pattern meaning "no pending value" (a quiet NaN we never
-/// pass as a real parameter).
+/// Sentinel bit-pattern for "no pending value", a quiet NaN never passed as a real
+/// parameter.
 const PENDING_NONE: u32 = 0x7FC0_DEAD;
 
 struct DfnHandle {
@@ -75,9 +51,8 @@ pub extern "C" fn hollow_dfn_abi_version() -> u32 {
     HOLLOW_DFN_ABI_VERSION
 }
 
-/// Create the given engine (0 = RNNoise, 1 = DFN3) behind the format
-/// adapter; NULL on failure. May block (see the threading contract) —
-/// background threads only.
+/// Create the given engine (0 = RNNoise, 1 = DFN3) behind the format adapter, NULL
+/// on failure. May block, so background threads only.
 #[unsafe(no_mangle)]
 pub extern "C" fn hollow_dfn_create_engine(engine: i32) -> *mut c_void {
     let Some(kind) = EngineKind::from_i32(engine) else {
@@ -88,9 +63,8 @@ pub extern "C" fn hollow_dfn_create_engine(engine: i32) -> *mut c_void {
     let created = catch_unwind(|| Adapter::new(kind));
     match created {
         Ok(Ok(adapter)) => {
-            // Success is LOGGED on purpose: "engine silently working" and
-            // "engine silently absent" must never look the same in
-            // hollow_debug.log (the 2026-07-17 field-test lesson).
+            // Success is LOGGED on purpose: "engine silently working" and "engine
+            // silently absent" must never look the same in hollow_debug.log.
             crate::hollow_log!(
                 "[dfn] engine {kind:?} ready in {} ms",
                 t0.elapsed().as_millis()
@@ -112,17 +86,17 @@ pub extern "C" fn hollow_dfn_create_engine(engine: i32) -> *mut c_void {
     }
 }
 
-/// Create the DEFAULT engine (RNNoise). Kept alongside `create_engine` so a
-/// caller that doesn't care about engines never passes a magic number.
+/// Create the DEFAULT engine (RNNoise), so a caller that does not care about
+/// engines never passes a magic number.
 #[unsafe(no_mangle)]
 pub extern "C" fn hollow_dfn_create() -> *mut c_void {
     hollow_dfn_create_engine(EngineKind::Rnnoise as i32)
 }
 
-/// Shared body for both process entry points. Returns the C return code:
-/// 0 = processed in place, 1 = bad args, 2 = engine error, 3 = panic,
-/// 4 = unsupported capture shape (frame untouched; the ports latch their
-/// formatOk flag on it so Dart falls back to WebRTC NS — NOT a bail).
+/// Shared body for both process entry points. Returns the C return code: 0 =
+/// processed in place, 1 = bad args, 2 = engine error, 3 = panic, 4 = unsupported
+/// capture shape (frame untouched, and the ports latch formatOk on it so Dart
+/// falls back to WebRTC NS rather than bailing).
 fn process_impl(
     handle: *mut c_void,
     buf: *mut f32,
@@ -143,9 +117,9 @@ fn process_impl(
     let h = unsafe { &mut *(handle as *mut DfnHandle) };
     let buf = unsafe { std::slice::from_raw_parts_mut(buf, len as usize) };
     h.apply_pending();
-    // A panic must NEVER unwind across the C boundary into the audio
-    // thread. On engine error the frame content is whatever was left
-    // mid-write — ports treat rc 2/3 as "disable for this session".
+    // A panic must NEVER unwind across the C boundary into the audio thread. On
+    // engine error the frame is whatever was left mid-write, so ports treat rc 2
+    // and 3 as "disable for this session".
     let res = catch_unwind(AssertUnwindSafe(|| {
         h.adapter.process(
             buf,
@@ -168,14 +142,13 @@ fn process_impl(
     }
 }
 
-/// ABI v2 entry point: denoise one 10 ms capture frame IN PLACE, whatever
-/// shape the APM delivered. `buf`/`len` cover the ENTIRE buffer (all bands
-/// and channels, planar, int16-scale floats); `num_bands`, `rate` and
-/// `channels` describe it. Return codes: see [`process_impl`].
+/// ABI v2 entry point: denoise one 10 ms capture frame IN PLACE in whatever shape
+/// the APM delivered. `buf`/`len` cover the ENTIRE buffer (all bands and channels,
+/// planar, int16-scale floats). Return codes: see [`process_impl`].
 ///
 /// # Safety
-/// `handle` must be a live pointer from a `hollow_dfn_create*` call; `buf`
-/// must point to at least `len` valid floats. Single-threaded per handle.
+/// `handle` must come from a `hollow_dfn_create*` call and `buf` must point to at
+/// least `len` valid floats. Single-threaded per handle.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hollow_dfn_process_ex(
     handle: *mut c_void,
@@ -188,8 +161,8 @@ pub unsafe extern "C" fn hollow_dfn_process_ex(
     process_impl(handle, buf, len, num_bands, rate, channels)
 }
 
-/// Legacy v1 shape (exactly 480 floats, 48 kHz fullband mono). Kept for the
-/// offline harness; the ports call [`hollow_dfn_process_ex`].
+/// Legacy v1 shape (exactly 480 floats, 48 kHz fullband mono), kept for the offline
+/// harness; the ports call [`hollow_dfn_process_ex`].
 ///
 /// # Safety
 /// Same contract as [`hollow_dfn_process_ex`].
@@ -205,15 +178,12 @@ pub unsafe extern "C" fn hollow_dfn_process(
     process_impl(handle, frame, len, 1, 48000, 1)
 }
 
-/// Voice probability of the LAST successfully processed frame (0..1), or
-/// -1.0 when unavailable (DFN3 engine, no frame yet, bad handle). RNNoise
-/// computes it as a free byproduct; the capture chain uses it as the
-/// speech-presence signal for the gate/upward-compression stage (breath
-/// discrimination), falling back to its own SNR+modulation gating on -1.
+/// Voice probability of the LAST successfully processed frame (0..1), or -1.0 when
+/// unavailable (DFN3, no frame yet, bad handle). RNNoise computes it free and the
+/// capture chain uses it for speech presence, falling back to its own gating on -1.
 ///
 /// # Safety
-/// Same contract as the process calls: audio thread only, right after a
-/// 0-return from process — there is no cross-thread synchronization.
+/// Same contract as the process calls: audio thread only, right after a 0-return.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hollow_dfn_last_vad(handle: *mut c_void) -> f32 {
     if handle.is_null() {
@@ -224,8 +194,7 @@ pub unsafe extern "C" fn hollow_dfn_last_vad(handle: *mut c_void) -> f32 {
 }
 
 /// Cap the maximum suppression in dB (100 = effectively uncapped). Staged
-/// atomically; applied by the audio thread at the next frame. DFN3-only —
-/// RNNoise has no such knob and ignores it.
+/// atomically, applied at the next frame. DFN3-only, RNNoise ignores it.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hollow_dfn_set_atten_lim(handle: *mut c_void, db: f32) {
     if handle.is_null() {
@@ -235,8 +204,7 @@ pub unsafe extern "C" fn hollow_dfn_set_atten_lim(handle: *mut c_void, db: f32) 
     h.pending_atten_lim.store(db.to_bits(), Ordering::Release);
 }
 
-/// Post-filter beta (0 disables). Staged atomically like the atten limit.
-/// DFN3-only — RNNoise ignores it.
+/// Post-filter beta (0 disables). Staged like the atten limit, DFN3-only.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hollow_dfn_set_post_filter_beta(
     handle: *mut c_void,
@@ -259,21 +227,9 @@ pub unsafe extern "C" fn hollow_dfn_free(handle: *mut c_void) {
     drop(unsafe { Box::from_raw(handle as *mut DfnHandle) });
 }
 
-// ---------------------------------------------------------------------------
-// Android JNI bridge — com.cloudwebrtc.webrtc.audio.DfnBridge
-//
-// The fork's Java class declares:
-//   static native int  nativeAbiVersion();
-//   static native long nativeCreateEngine(int engine);
-//   static native int  nativeProcessDirectEx(long handle, ByteBuffer buf,
-//       int totalFloats, int numBands, int rate, int channels);
-//   static native float nativeLastVad(long handle);
-//   static native void nativeSetAttenLim(long handle, float db);
-//   static native void nativeSetPostFilterBeta(long handle, float beta);
-//   static native void nativeFree(long handle);
-// and calls System.loadLibrary("hollow_core") in its static initializer
-// (FRB's Dart-side dlopen does NOT register the .so with ART).
-// ---------------------------------------------------------------------------
+// Android JNI bridge for com.cloudwebrtc.webrtc.audio.DfnBridge. That Java class
+// calls System.loadLibrary("hollow_core") in its static initializer, because FRB's
+// Dart-side dlopen does NOT register the .so with ART.
 #[cfg(target_os = "android")]
 mod android {
     use super::*;
@@ -298,9 +254,8 @@ mod android {
         hollow_dfn_create_engine(engine) as jlong
     }
 
-    /// Processes the ENTIRE frame (all bands/channels, `total_floats`
-    /// floats from offset 0) inside the DIRECT ByteBuffer the WebRTC AAR
-    /// hands the Java capture processor. Zero-copy.
+    /// Processes the ENTIRE frame inside the DIRECT ByteBuffer the WebRTC AAR hands
+    /// the Java capture processor. Zero-copy.
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_com_cloudwebrtc_webrtc_audio_DfnBridge_nativeProcessDirectEx(
         env: JNIEnv,
@@ -326,8 +281,7 @@ mod android {
         if total_floats as usize * 4 > cap {
             return 1;
         }
-        // The AAR's ByteBuffer is native-order float PCM (the Java port
-        // already reinterprets it as FloatBuffer the same way).
+        // The AAR's ByteBuffer is native-order float PCM.
         process_impl(
             handle as *mut c_void,
             addr as *mut f32,
@@ -385,14 +339,12 @@ mod tests {
     fn abi_create_process_roundtrip() {
         assert_eq!(hollow_dfn_abi_version(), HOLLOW_DFN_ABI_VERSION);
 
-        // Default engine is RNNoise — instant create.
         let h = hollow_dfn_create();
         assert!(!h.is_null(), "rnnoise create");
 
         // Length guard on the legacy entry: wrong len leaves nonzero.
         let mut short = [0.0f32; 128];
         assert_ne!(unsafe { hollow_dfn_process(h, short.as_mut_ptr(), 128) }, 0);
-        // Null guards.
         assert_ne!(
             unsafe { hollow_dfn_process(std::ptr::null_mut(), short.as_mut_ptr(), 128) },
             0
@@ -404,8 +356,7 @@ mod tests {
             0
         );
 
-        // Stage parameter changes from "another thread" (same thread is
-        // fine — the point is the staging path executes; RNNoise no-ops).
+        // Stage parameter changes from another thread; RNNoise no-ops on them.
         unsafe {
             hollow_dfn_set_atten_lim(h, 24.0);
             hollow_dfn_set_post_filter_beta(h, 0.0);
@@ -423,11 +374,9 @@ mod tests {
             }
         };
 
-        // VAD: -1 before any frame (and on a null handle).
         assert_eq!(unsafe { hollow_dfn_last_vad(std::ptr::null_mut()) }, -1.0);
         assert_eq!(unsafe { hollow_dfn_last_vad(h) }, -1.0);
 
-        // v1 shape: 48 kHz mono 480.
         let mut frame = [0.0f32; FRAME];
         for n in 0..50u32 {
             fill(&mut frame, n);
@@ -436,7 +385,6 @@ mod tests {
                 0
             );
             assert!(frame.iter().all(|s| s.is_finite() && s.abs() <= 65536.0));
-            // RNNoise's free VAD is a probability once frames flow.
             let vad = unsafe { hollow_dfn_last_vad(h) };
             assert!((0.0..=1.0).contains(&vad), "vad {vad} out of range");
         }
@@ -475,8 +423,7 @@ mod tests {
         // Unknown engine id refuses to create.
         assert!(hollow_dfn_create_engine(7).is_null());
 
-        // DFN3 stays available behind engine id 1 (slow create — this is
-        // the one expensive line in the test).
+        // DFN3's slow create is the one expensive line in this test.
         let dfn = hollow_dfn_create_engine(1);
         assert!(!dfn.is_null(), "dfn3 create");
         fill(&mut frame, 0);

@@ -10,12 +10,11 @@ import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/settings/settings_shared.dart';
 
-/// Blocked-users pieces shared by the desktop Security category and the
-/// mobile Blocked Users tab. Block list is master-keyed and purely local;
-/// Rust drops their DMs/requests/calls at ingest and the channel panes hide
-/// their messages.
+/// Blocked-users pieces shared by the desktop Security category and the mobile
+/// Blocked Users tab. The list is master-keyed and purely local: Rust drops
+/// their DMs, requests and calls at ingest.
 
-/// Explainer shown above the blocked list (both surfaces).
+/// Explainer shown above the blocked list on both surfaces.
 Widget blockedUsersIntro(HollowTheme hollow) {
   return Text(
     'Blocked users can\'t send you friend requests, direct messages, '
@@ -26,8 +25,8 @@ Widget blockedUsersIntro(HollowTheme hollow) {
   );
 }
 
-/// One blocked-user row: avatar + display name + shortened master id +
-/// Unblock. Avatar size and id formatting differ per surface — passed in.
+/// One blocked-user row. Avatar size and id formatting differ per surface, so
+/// they are passed in.
 class BlockedUserRow extends ConsumerWidget {
   final String id;
   final double avatarSize;
@@ -104,7 +103,7 @@ class BlockedUserRow extends ConsumerWidget {
   }
 }
 
-/// Desktop card: blocked list inside a [SettingsCard] (Security category).
+/// The blocked list inside a [SettingsCard], for the desktop Security category.
 class BlockedUsersCard extends ConsumerWidget {
   const BlockedUsersCard({super.key});
 

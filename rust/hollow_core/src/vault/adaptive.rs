@@ -14,10 +14,9 @@ pub enum VaultMode {
 
 /// Compute the vault mode and erasure coding parameters for a server.
 ///
-/// Below 6 members: full replication (everyone gets every file).
-/// 6+ members: erasure coding with k/m scaling logarithmically.
-/// k scales with log(member_count), m = ceil(k/2), overhead converges to 1.5x.
-/// Total shards n = k + m never exceeds 30.
+/// Below 6 members every member stores every file. From 6 up, k scales with
+/// log(member_count) and m = ceil(k/2), so overhead converges to 1.5x and the total
+/// shard count never exceeds 30.
 pub fn compute_adaptive_params(member_count: usize) -> VaultMode {
     match member_count {
         0..6 => VaultMode::FullReplication,
@@ -33,19 +32,16 @@ pub fn compute_adaptive_params(member_count: usize) -> VaultMode {
 
 /// Apply a storage tier multiplier to the parity shard count.
 ///
-/// All tiers now use the same multiplier (1.0x — no change).
-/// `StorageTier::Low` is kept for backward compatibility with existing DB rows
-/// but behaves identically to Standard.
-///
-/// k is never modified — only m changes.
+/// Every tier uses the same multiplier today. `StorageTier::Low` is kept for existing
+/// DB rows and behaves like Standard, and k is never modified, only m.
 pub fn apply_tier_multiplier(k: usize, m: usize, _tier: StorageTier) -> (usize, usize) {
     (k, m)
 }
 
 /// Determine the storage tier from a MIME type.
 ///
-/// All files use Standard tier. `StorageTier::Low` is kept in the enum for
-/// backward compatibility with existing DB rows but is no longer produced.
+/// All files use Standard today; `StorageTier::Low` is kept in the enum for existing
+/// DB rows and is no longer produced.
 pub fn determine_tier(_mime_type: &str) -> StorageTier {
     StorageTier::Standard
 }
@@ -67,8 +63,8 @@ pub fn parse_retention_days(policy: &str) -> Option<u32> {
 
 /// Get the retention policy string from server settings.
 ///
-/// All tiers use `retention_files` (default "365d"). The `tier` parameter is
-/// accepted for backward compatibility but ignored — Low is treated as Standard.
+/// All tiers read `retention_files`; the `tier` parameter is accepted for backward
+/// compatibility and ignored.
 pub fn retention_for_tier(
     _tier: StorageTier,
     settings: &HashMap<String, AdminLwwReg<String>>,

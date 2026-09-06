@@ -66,13 +66,11 @@ class _GuestChatPaneState extends ConsumerState<GuestChatPane> {
   @override
   void initState() {
     super.initState();
-    // Jump to bottom after first messages arrive.
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _jumpToBottom();
     });
-    // Auto-fetch IMAGES near the viewport (guest policy: images auto, other
-    // file types on demand via the Download action) — mirrors the member
-    // pane's viewport sweep, but through the gated public-file request path.
+    // Guest policy: images auto-fetch near the viewport, other types only on
+    // demand, and always through the gated public-file request path.
     _itemPositionsListener.itemPositions.addListener(_onViewportChanged);
   }
 
@@ -91,8 +89,8 @@ class _GuestChatPaneState extends ConsumerState<GuestChatPane> {
       final positions = _itemPositionsListener.itemPositions.value;
       final list = _lastVisibleList;
       if (positions.isEmpty || list.isEmpty) return;
-      // Builder indices are REVERSED (newest = 0); map to chronological and
-      // widen by 15 rows each side like the member sweep.
+      // Builder indices are REVERSED (newest = 0), and the window widens by 15
+      // rows each side like the member sweep.
       var lo = list.length, hi = -1;
       for (final p in positions) {
         final msgIndex = list.length - 1 - p.index;
@@ -101,8 +99,8 @@ class _GuestChatPaneState extends ConsumerState<GuestChatPane> {
         if (msgIndex > hi) hi = msgIndex;
       }
       if (hi < 0) return;
-      // Auto-download off for this server (#41): the guest viewport sweep is
-      // an auto-download too — skip it; cards offer a manual Download button.
+      // Auto-download off for this server (#41): the viewport sweep is an
+      // auto-download too, so cards fall back to the Download button.
       if (effectiveAutoDownloadMb(ref, 'server:${widget.serverId}') == 0) {
         return;
       }
@@ -194,7 +192,7 @@ class _GuestChatPaneState extends ConsumerState<GuestChatPane> {
   }
 
   void _jumpToBottom() {
-    // reverse:true — the newest message is index 0 pinned to the bottom.
+    // reverse:true, so the newest message is index 0 pinned to the bottom.
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted || !_itemScrollController.isAttached) return;
       _itemScrollController.jumpTo(index: 0, alignment: 0.0);
@@ -204,8 +202,7 @@ class _GuestChatPaneState extends ConsumerState<GuestChatPane> {
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
-    // Issue #35: scale the selection scope with the interface scale — see
-    // [selectionMustBeScopedToRows].
+    // Issue #35: the selection scope follows the interface scale.
     final perRowSelection = selectionMustBeScopedToRows(context);
     final key = '${widget.serverId}:${widget.channelId}';
     final messages =
@@ -213,7 +210,6 @@ class _GuestChatPaneState extends ConsumerState<GuestChatPane> {
     final hasMore = ref.watch(
         guestHasMoreProvider.select((m) => m[key] ?? false));
 
-    // Auto-scroll to bottom when new messages arrive.
     final currentCount = messages.where((m) => m.hiddenAt == null).length;
     if (currentCount > _prevMessageCount && _prevMessageCount > 0) {
       _jumpToBottom();
@@ -227,10 +223,7 @@ class _GuestChatPaneState extends ConsumerState<GuestChatPane> {
         widget.channelId));
 
     // Attachments render as file cards for guests too: metadata rides the
-    // guest sync / live public message, and bytes come through the gated
-    // public-file request path (images auto-fetch near the viewport, other
-    // types via the Download hover action). Owner preview (member rows with
-    // a diskPath) now matches what guests can actually obtain.
+    // guest sync, and bytes come only through the gated public-file path.
     final visible = messages.where((m) => m.hiddenAt == null).toList();
     final filtered = _searchQuery.isEmpty
         ? visible
@@ -239,12 +232,11 @@ class _GuestChatPaneState extends ConsumerState<GuestChatPane> {
                 (m) => m.text.toLowerCase().contains(_searchQuery.toLowerCase()))
             .toList();
     // The viewport sweep maps builder indices over the list the builder
-    // renders — keep them in lockstep (search narrows both).
+    // renders, so the two must stay in lockstep (search narrows both).
     _lastVisibleList = filtered;
 
     return Column(
       children: [
-        // Channel header
         Container(
           height: 48,
           padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.lg),
@@ -303,7 +295,6 @@ class _GuestChatPaneState extends ConsumerState<GuestChatPane> {
           ),
         ),
 
-        // Search field (slide down)
         AnimatedSize(
           duration: HollowDurations.fast,
           curve: HollowCurves.enter,
@@ -324,7 +315,6 @@ class _GuestChatPaneState extends ConsumerState<GuestChatPane> {
               : const SizedBox.shrink(),
         ),
 
-        // Message list
         Expanded(
           child: filtered.isEmpty
               ? Center(
@@ -354,9 +344,8 @@ class _GuestChatPaneState extends ConsumerState<GuestChatPane> {
                             return false;
                           },
                           child: ChatTextScale(
-                            // Issue #35: when the interface scale is not 100% the
-                            // SelectionArea moves to the ROWS below — see
-                            // [selectionMustBeScopedToRows].
+                            // Issue #35: off 100% the SelectionArea moves to
+                            // the ROWS below.
                             child: _listSelectionWrap(
                               perRowSelection,
                               ScrollConfiguration(
@@ -367,10 +356,10 @@ class _GuestChatPaneState extends ConsumerState<GuestChatPane> {
                                       'guest-list-${widget.serverId}-${widget.channelId}'),
                                   itemScrollController: _itemScrollController,
                                   itemPositionsListener: _itemPositionsListener,
-                                  // reverse:true — newest message at builder index
-                                  // 0, pinned to the bottom edge; the "Load more"
-                                  // button becomes the LAST reversed index (the
-                                  // oldest end = visual top). No sentinel row.
+                                  // reverse:true, so the newest message is
+                                  // builder index 0 pinned to the bottom edge
+                                  // and "Load more" is the LAST reversed index.
+                                  // No sentinel row.
                                   reverse: true,
                                   initialScrollIndex: 0,
                                   initialAlignment: 0.0,
@@ -379,7 +368,6 @@ class _GuestChatPaneState extends ConsumerState<GuestChatPane> {
                                   ),
                                   itemCount: filtered.length + (hasMore ? 1 : 0),
                                   itemBuilder: (context, revIndex) {
-                                    // "Load more" button at the visual top.
                                     if (hasMore && revIndex == filtered.length) {
                                       return Center(
                                         child: Padding(
@@ -402,7 +390,6 @@ class _GuestChatPaneState extends ConsumerState<GuestChatPane> {
                                       );
                                     }
 
-                                    // Reversed builder index → chronological.
                                     final msgIndex =
                                         filtered.length - 1 - revIndex;
 
@@ -475,7 +462,6 @@ class _GuestChatPaneState extends ConsumerState<GuestChatPane> {
                 ),
         ),
 
-        // Guest footer
         Container(
           padding: const EdgeInsets.symmetric(
             horizontal: HollowSpacing.lg,
@@ -512,12 +498,10 @@ class _GuestChatPaneState extends ConsumerState<GuestChatPane> {
       perRowSelection ? list : chatSelectionArea(child: list);
 
   String _senderName(String senderId) {
-    // Check guest sender profiles first (populated from sync responses)
     final guestProfile = ref.read(guestSenderProfilesProvider)[senderId];
     if (guestProfile != null && guestProfile.name.isNotEmpty) {
       return guestProfile.name;
     }
-    // Fall back to regular profiles (for member servers)
     final profiles = ref.read(profileProvider);
     final profile = profiles[senderId];
     return displayNameForPeer(profile, senderId);

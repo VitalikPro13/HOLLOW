@@ -1,16 +1,10 @@
 //! Headless multi-node integration test harness (Step 9B-i).
 //!
 //! Spins up several real `spawn_node` event loops IN ONE PROCESS, each with its
-//! own in-memory keypairs and its own temp SQLCipher DBs, all wired through an
-//! in-process [`MockRelay`] that mimics the production relay's load-bearing
-//! behavior (room routing + offline buffering — the relay is a dumb pipe; all
-//! crypto/sync/ordering logic lives in the nodes). No sockets, no TLS, no
-//! network. This lets us drive a true multi-device scenario and assert on each
-//! node's real DB / events — the automated version of the manual Pixel↔VM↔AL
-//! live test.
-//!
-//! See `reports/MULTI_DEVICE_IMPLEMENTATION_TRACKER.md` §9B-i and the
-//! `project_multinode_test_harness` memory for the design.
+//! own keypairs and temp SQLCipher DBs, wired through an in-process
+//! [`MockRelay`] that mimics only the relay's load-bearing behaviour (room
+//! routing plus offline buffering; all crypto, sync and ordering live in the
+//! nodes). No sockets, no TLS, no network. Design: `project_multinode_test_harness`.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -24,12 +18,10 @@ use super::crdt_store::CrdtStore;
 use super::types::{NetworkEvent, NodeCommand};
 use super::ws_client::{WsCommand, WsEvent};
 
-/// Process-wide guard: the resolver (and other `OnceLock`/global statics the
-/// nodes touch) is process-global, so harness tests must run serially and start
-/// from a clean resolver. Each test takes this guard via [`test_guard`]. The
-/// guard IS the shared `resolver::test_lock()` — the same lock the resolver /
-/// crypto_handler / server_state unit tests take — so no unit test's links can
-/// be wiped mid-assert by a harness test's `clear_for_test` (or vice versa).
+/// Process-wide guard: the resolver and the other global statics the nodes touch
+/// are process-global, so harness tests run serially from a clean resolver. The
+/// guard IS `resolver::test_lock()`, shared with the unit tests, so neither can
+/// wipe the other's links mid-assert.
 pub(crate) fn test_guard() -> std::sync::MutexGuard<'static, ()> {
     let g = super::resolver::test_lock();
     super::resolver::clear_for_test();
@@ -56,30 +48,23 @@ struct RelayInner {
     /// replay when the target next joins that room. Mirrors the relay's
     /// offline buffer (the load-bearing peer-fallback path).
     offline: HashMap<String, Vec<BufferedMsg>>,
-    /// (room_code, channel/topic) -> ring of (sender_device, frame data).
-    /// Mirrors the real relay's per-channel topic buffers (relay offline
-    /// catch-up): key presence = registered via SetTopicBuffer, inbound
-    /// SendToRoomTopic frames tee in, TopicCatchup replays them to the
-    /// requester (skipping the requester's own frames). Caps/TTL not modeled.
+    /// (room_code, channel/topic) -> ring of (sender_device, frame data), mirroring
+    /// the relay's per-channel topic buffers: key presence means registered, inbound
+    /// topic frames tee in, catch-up replays them. Caps and TTL are not modelled.
     topic_buffers: HashMap<(String, String), Vec<(String, Vec<u8>)>>,
     /// nickname -> (claimer device_peer_id, claimer's self-reported master).
     /// Mirrors the relay's temporary-nickname registry. TTL not modeled;
     /// an offline holder resolves as not_found like the real staleness check.
     nicknames: HashMap<String, (String, String)>,
-    /// Devices that silently DON'T receive 0x03 room broadcasts (SendToRoom)
-    /// while still present in the room. Models the real relay's backpressure
-    /// drop on a long-lived socket (uWS returns DROPPED past maxBackpressure
-    /// with no error to the sender) — the exact loss mode behind the
-    /// join-order MLS epoch race. Presence events and direct frames still
-    /// flow, so the victim looks perfectly healthy to everyone.
+    /// Devices that silently DON'T receive 0x03 room broadcasts while still present
+    /// in the room. Models the relay's backpressure drop on a long-lived socket (uWS
+    /// returns DROPPED with no error to the sender), the loss mode behind the
+    /// join-order MLS epoch race: the victim looks perfectly healthy to everyone.
     broadcast_deaf: HashSet<String>,
-    /// Devices whose outgoing `profile_update` frames get their
-    /// `support_creds` rewritten to `""` and their `support_creds_sig`
-    /// removed, IN FLIGHT. This is the attack `support_creds_sig` exists for
-    /// (HOLLOW_PLAN.md, 2026-09-03): the plaintext profile fallback is a JSON
-    /// body the relay can edit, the profile signature does not cover this
-    /// field, and `Some("")` is the holder's explicit clear on every
-    /// receiver. Off for every device unless a test switches it on.
+    /// Devices whose outgoing `profile_update` frames get their `support_creds`
+    /// rewritten to `""` and their signature removed, IN FLIGHT. This is the attack
+    /// `support_creds_sig` exists for: the plaintext fallback is a JSON body the relay
+    /// can edit, and `Some("")` is an explicit clear on every receiver.
     strip_support_creds: HashSet<String>,
     /// Devices whose outgoing `profile_update` frames lose their
     /// `support_creds_sig` and keep the field. What every client that
@@ -97,11 +82,10 @@ struct RelayInner {
     meter: Option<RelayMeter>,
 }
 
-/// Frame accounting for the scaling benchmark. Counts are cumulative from the
-/// last [`MockRelay::reset_meter`]. The distinction that matters:
-///   * `*_cmds`  = inbound commands a NODE issued (coordinator/sender-side work).
-///   * `deliveries` = outbound frames the RELAY copied to a socket (relay egress
-///                    — the O(N) fan-out and the true bandwidth bottleneck).
+/// Frame accounting for the scaling benchmark, cumulative from the last
+/// [`MockRelay::reset_meter`]. `*_cmds` are inbound commands a NODE issued;
+/// `deliveries` are outbound frames the RELAY copied to a socket, which is the
+/// O(N) fan-out and the true bandwidth bottleneck.
 #[derive(Default, Clone, Debug)]
 pub(crate) struct RelayMeter {
     /// SendDirect / SendDirectImage commands issued (the per-device targeted
@@ -157,7 +141,6 @@ impl MockRelay {
             let mut inner = self.inner.lock().unwrap();
             inner.conns.insert(peer_id.clone(), Conn { event_tx: event_tx.clone(), online: true });
         }
-        // Drive this node's outbound commands.
         let relay = self.clone();
         let pid = peer_id.clone();
         tokio::spawn(async move {
@@ -181,11 +164,9 @@ impl MockRelay {
         self.inner.lock().unwrap().meter.clone()
     }
 
-    /// The set of DEVICE peer_ids the relay currently considers online (a live
-    /// socket). This is the relay's authoritative presence view — the same thing
-    /// the real relay reports via `RoomMembers`, which the UI's online dots
-    /// ultimately derive from. Inspectors read presence from HERE (the relay),
-    /// not from a node's internal state, because the relay is the source of truth.
+    /// The DEVICE peer_ids the relay considers online. This is the relay's
+    /// authoritative presence view, the same thing the real relay reports via
+    /// `RoomMembers`, so inspectors read presence from here and never from a node.
     pub(crate) fn online_devices(&self) -> std::collections::HashSet<String> {
         let inner = self.inner.lock().unwrap();
         inner
@@ -205,11 +186,9 @@ impl MockRelay {
         inner.rooms.get(room).cloned().unwrap_or_default()
     }
 
-    /// Number of frames currently buffered for `peer` in the offline queue. The
-    /// relay buffers a direct frame under the TARGET device id when that device
-    /// isn't in the room — and (on the real relay) fires a push to that device's
-    /// token. So `buffered_count(device) > 0` is the proxy for "this device would
-    /// have been woken by a push" (Step 9A: a quit phone must be a buffer target).
+    /// Frames currently buffered for `peer`. The relay buffers a direct frame under
+    /// the TARGET device id when that device is not in the room and (on the real
+    /// relay) pushes to it, so a non-zero count is the proxy for "would be woken".
     #[allow(dead_code)]
     pub(crate) fn buffered_count(&self, peer: &str) -> usize {
         let inner = self.inner.lock().unwrap();
@@ -265,13 +244,10 @@ impl MockRelay {
 
     /// A socket that dies WITHOUT the other members being told.
     ///
-    /// The real relay only broadcasts `PeerLeft` for a clean leave. A pulled
-    /// adapter or a DNS failure closes the socket with nobody informed, and
-    /// the peers keep the dead node in `synced_peers` — so when it comes back
-    /// their `is_new` guard reads false and the whole reconnect cascade is
-    /// skipped. `set_online(false)` is the POLITE version and cannot reproduce
-    /// that. Verified against `hollow_debug.log` 2026-08-27: ZERO `PeerLeft`
-    /// lines for a peer that was gone for 26 seconds.
+    /// The real relay only broadcasts `PeerLeft` for a clean leave, so a pulled
+    /// adapter leaves peers holding the dead node in `synced_peers`: on its return
+    /// their `is_new` guard reads false and the whole reconnect cascade is skipped.
+    /// `set_online(false)` is the polite version and cannot reproduce that.
     fn drop_socket_silently(&self, peer_id: &str) {
         self.set_online_inner(peer_id, false, false)
     }
@@ -282,7 +258,6 @@ impl MockRelay {
             conn.online = online;
         }
         if !online {
-            // Remove from all rooms + broadcast peer_left to remaining members.
             let rooms: Vec<String> = inner.rooms.keys().cloned().collect();
             for room in rooms {
                 let was_present = inner
@@ -297,13 +272,10 @@ impl MockRelay {
                     });
                 }
             }
-            // Tell the offline node its OWN socket died. The real WS client emits
-            // `WsEvent::Disconnected` when the TCP/TLS socket drops; the event loop
-            // relies on that to clear sync-gating state (`synced_peers`,
-            // `key_request_in_flight`, `key_bundle_sent_to`, …). Without it the
-            // node keeps every peer marked already-synced, so on reconnect the
-            // `is_new` guard suppresses the proactive DmSyncRequest/key exchange
-            // and the reconnect flow silently does nothing.
+            // Tell the offline node its OWN socket died. Without `WsEvent::Disconnected` the
+            // node never clears sync-gating state (`synced_peers`, `key_request_in_flight`,
+            // ...), so on reconnect the `is_new` guard suppresses the proactive sync and key
+            // exchange and the reconnect flow silently does nothing.
             if let Some(conn) = inner.conns.get(peer_id) {
                 let _ = conn.event_tx.send(WsEvent::Disconnected);
             }
@@ -347,14 +319,11 @@ impl MockRelay {
         inner.topic_buffers.contains_key(&(room.to_string(), topic.to_string()))
     }
 
-    /// Test-only: write a frame straight into a (room, topic) ring as if `from`
-    /// had published it, creating the ring if the room never registered one.
+    /// Test-only: write a frame straight into a (room, topic) ring as if `from` had
+    /// published it, creating the ring if the room never registered one.
     ///
-    /// Registration is deliberately bypassed: this models a HOSTILE publisher,
-    /// and the point of the tests that use it is that the RECEIVER refuses the
-    /// frame on its own merits (a tampered carried device list, a forged
-    /// resolution from a non-member), never because the transport happened not
-    /// to carry it.
+    /// Registration is deliberately bypassed, because this models a HOSTILE
+    /// publisher: the RECEIVER must refuse the frame on its own merits.
     #[allow(dead_code)]
     pub(crate) fn inject_topic(&self, room: &str, topic: &str, from: &str, data: Vec<u8>) {
         let mut inner = self.inner.lock().unwrap();
@@ -442,7 +411,6 @@ impl MockRelay {
         }
         match cmd {
             WsCommand::JoinRoom { room_code } => {
-                // Existing members (snapshot) BEFORE adding the joiner.
                 let existing: Vec<String> = inner
                     .rooms
                     .get(&room_code)
@@ -459,7 +427,6 @@ impl MockRelay {
                         peers: members,
                     });
                 }
-                // peer_joined to existing members.
                 for m in &existing {
                     if let Some(conn) = inner.conns.get(m) {
                         let _ = conn.event_tx.send(WsEvent::PeerJoined {
@@ -468,7 +435,6 @@ impl MockRelay {
                         });
                     }
                 }
-                // Replay this peer's buffered offline messages for this room.
                 inner.replay_offline(from, &room_code);
             }
             WsCommand::JoinInbox { room_code, proof } => {
@@ -498,14 +464,11 @@ impl MockRelay {
                 }
                 inner.replay_offline(from, &room_code);
 
-                // OWNERSHIP CHECK — every clause, exactly as the real relay must:
-                //   a. the device list verifies under its own master pubkey;
-                //   b. that pubkey derives to the claimed master peer_id
-                //      (`verify_device_list` folds a + b together);
-                //   c. THIS authenticated socket is a live, un-revoked member of it;
-                //   d. the room really is this master's inbox.
-                // Any failure replays NOTHING and returns no error, so a stranger
-                // learns nothing about whether a mailbox exists.
+                // OWNERSHIP CHECK, every clause exactly as the real relay must: the device list
+                // verifies under its own master pubkey, that pubkey derives to the claimed master
+                // (`verify_device_list` folds both), THIS authenticated socket is a live
+                // un-revoked member of it, and the room really is that master's inbox. Any
+                // failure replays NOTHING and returns no error, so a stranger learns nothing.
                 let owner_ok = super::crypto_handler::verify_device_list(&proof)
                     && proof.devices.iter().any(|d| d == from)
                     && !proof.revoked.iter().any(|r| r == from)
@@ -564,11 +527,9 @@ impl MockRelay {
                 }
             }
             WsCommand::SendBinaryDirect { room_code, target_peer, data } => {
-                // Delivered as BinaryDirect when present; not buffered (matches
-                // the file/shard streaming path — irrelevant to current tests).
-                // Both ends must be in the room: the relay drops a 0x02 whose
-                // SENDER never joined, so senders that skip the join must fail
-                // here too rather than passing only under the mock.
+                // Delivered as BinaryDirect when present, not buffered. Both ends must be in the
+                // room: the relay drops a 0x02 whose SENDER never joined, so a sender that skips
+                // the join must fail here too rather than passing only under the mock.
                 let sender_in_room = inner.peer_in_room(&room_code, from);
                 let in_room = inner.peer_in_room(&room_code, &target_peer);
                 if !sender_in_room { return; }
@@ -702,10 +663,8 @@ impl MockRelay {
 impl RelayInner {
     /// Record and, when a test has armed it, TAMPER with one outgoing frame.
     ///
-    /// The only rewrite modelled is the `support_creds` strip, because that is
-    /// the one the field signature defends against: a relay reading a
-    /// plaintext `profile_update` and replacing the credentials field with the
-    /// empty string, which every receiver honours as an explicit clear.
+    /// The only rewrite modelled is the `support_creds` strip, the one the field
+    /// signature defends against: every receiver honours `""` as an explicit clear.
     fn on_the_wire(&mut self, from: &str, data: Vec<u8>) -> Vec<u8> {
         if self.recording.contains(from) {
             self.recorded.push((from.to_string(), data.clone()));
@@ -807,13 +766,11 @@ impl RelayInner {
 
     /// Replay a MASTER's mailbox to a socket that has PROVEN it owns that inbox.
     ///
-    /// TTL-only, NOT delete-on-replay — the one real difference from
-    /// [`Self::replay_offline`]. Every sibling device of the master must be able
-    /// to collect the same request on its own next boot, so consuming it for the
-    /// first device to ask would silently hide it from the rest. The receiver is
-    /// idempotent (it dedups on its friends row), which is what makes re-delivery
-    /// to the SAME socket on every rejoin harmless. Do not add per-socket
-    /// "already delivered" tracking: that is delete-on-replay wearing a hat.
+    /// TTL-only, NOT delete-on-replay: every sibling device must be able to collect
+    /// the same request on its own next boot, so consuming it for the first device to
+    /// ask would hide it from the rest. The receiver dedups on its friends row, which
+    /// is what makes re-delivery harmless. Per-socket "already delivered" tracking is
+    /// delete-on-replay wearing a hat.
     fn replay_mailbox(&mut self, peer: &str, master: &str) {
         let Some(buf) = self.offline.get(master) else { return };
         let frames: Vec<(String, String, Vec<u8>, bool)> = buf
@@ -882,39 +839,23 @@ impl TestNode {
             .expect("open node store")
     }
 
-    /// End this node's life and hand back the storage a RESTART needs: the DB
-    /// path and the tempdir that owns it.
+    /// End this node's life and hand back the storage a RESTART needs: the DB path
+    /// and the tempdir that owns it.
     ///
-    /// Aborting the join handle is what a process exit does to the event loop.
-    /// The store actors it owns die with it (their handles are locals of the
-    /// aborted task, so dropping them closes the actor channels and the
-    /// SQLCipher connections behind them), which is what lets the same file be
-    /// reopened by the replacement node.
+    /// Aborting the join handle is what a process exit does to the event loop, and
+    /// the store actors die with it, which is what lets the file be reopened.
     fn into_storage(self) -> (String, tempfile::TempDir) {
         self._join.abort();
         (self.db_path, self._tmp)
     }
 }
 
-// ---------------------------------------------------------------------------
-// Inspectors — read a node's REAL state the way the UI does.
-//
-// Two layers, on purpose (the gap between them is where multi-device bugs hide):
-//   * UI layer  — master-collapsed, the projection a person sees (member panel,
-//                 online identities, a DM thread). Reads through the SAME
-//                 resolver/CRDT accessors the Dart providers use, so a green
-//                 inspector == a green UI for that state.
-//   * Raw layer — device-keyed underlying truth (room device sets, raw CRDT
-//                 member keys). Lets a test assert the invariant beneath the UI
-//                 (e.g. CRDT members are master-keyed while transport is
-//                 device-keyed) and catch a divergence the UI would hide.
-//
-// DB-backed state (DMs, channels, friends, servers, CRDT members/roles) is read
-// from the node's own SQLCipher store. Presence is read from the MockRelay (the
-// authoritative source, exactly as the real relay's RoomMembers drives the UI's
-// online dots). Live MLS/Olm in-memory state is owned by the running event loop
-// and is added as a debug-snapshot query when the server/channel scenarios land.
-// ---------------------------------------------------------------------------
+// Inspectors: read a node's REAL state the way the UI does, in two layers,
+// because the gap between them is where multi-device bugs hide. The UI layer is
+// master-collapsed and reads through the same accessors the Dart providers use;
+// the raw layer is device-keyed underlying truth, so a test can assert the
+// invariant beneath the UI. DB-backed state comes from the node's own SQLCipher
+// store; presence comes from the MockRelay, which is authoritative.
 
 /// One DM bubble as the chat UI would render it.
 #[derive(Debug, Clone, PartialEq)]
@@ -979,11 +920,9 @@ impl TestNode {
 
     // --- Servers / channels / members (UI layer) ---------------------------
 
-    /// Server ids this node is a member of (what the server strip shows). Mirrors
-    /// `get_joined_servers`: tombstoned (deleted) servers are HIDDEN — the node keeps
-    /// the shell to serve the deletion op, but the UI list excludes it — and so is a
-    /// non-empty-membership shell we're no longer a member of (left/kicked; a legacy
-    /// pre-teardown DB may still hold one).
+    /// Server ids this node is a member of (what the server strip shows), mirroring
+    /// `get_joined_servers`: a tombstoned server is HIDDEN (the shell is kept only to
+    /// serve the deletion op), and so is a shell we are no longer a member of.
     pub(crate) fn servers(&self) -> Vec<String> {
         self.store()
             .load_all_servers()
@@ -1019,15 +958,12 @@ impl TestNode {
         serde_json::from_str::<ServerState>(&json).ok()
     }
 
-    /// A LIVE clone of the event loop's in-memory `ServerState` — the copy
-    /// that ENFORCES, round-tripped over `GetServerStateSnapshot` exactly as
-    /// `api::crdt::live_server_state` does for the UI.
+    /// A LIVE clone of the event loop's in-memory `ServerState`, the copy that
+    /// ENFORCES, round-tripped exactly as `api::crdt::live_server_state` does.
     ///
-    /// Prefer this over `server_state` whenever a test is asserting that a
-    /// hostile op did NOT land: the DB snapshot is written by a fire-and-
-    /// forget actor, so reading it says nothing about what the loop currently
-    /// believes, and opening SQLCipher in a poll loop starves that writer.
-    /// `None` means the loop never answered — never "no change".
+    /// Prefer this over `server_state` when asserting that a hostile op did NOT land:
+    /// the DB snapshot is written by a fire-and-forget actor, and polling SQLCipher
+    /// starves that writer. `None` means the loop never answered, never "no change".
     pub(crate) async fn live_server_state(&self, server_id: &str) -> Option<ServerState> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.cmd_tx
@@ -1243,12 +1179,10 @@ impl TestNode {
         keys
     }
 
-    /// The RAW `sender_id` a channel message row is stored under (NOT collapsed
-    /// device→master like `channel_messages`). In a correct multi-device world a
-    /// channel message's stored sender is the sender's MASTER (the bubble keys on
-    /// it); if a sender DEVICE id leaks in here, the receive path stored it
-    /// unresolved — a bug the master-collapsed `channel_messages` inspector hides
-    /// (it resolves on read). None if no such message id is stored.
+    /// The RAW `sender_id` a channel message row is stored under, NOT collapsed
+    /// device to master. A stored sender must be the sender's MASTER; a leaked DEVICE
+    /// id means the receive path stored it unresolved, which the collapsed
+    /// `channel_messages` inspector hides by resolving on read.
     pub(crate) fn raw_channel_message_sender(&self, message_id: &str) -> Option<String> {
         self.store().get_channel_message_sender(message_id)
     }
@@ -1273,13 +1207,10 @@ impl TestNode {
             .ok()
     }
 
-    /// The MLS group's leaf DEVICE ids for `server_id` (raw, device-keyed — the
-    /// truth under the master-keyed member panel). Empty if no group / no reply.
-    /// `mls_members`, but telling "the loop did not reply" (None) apart from
-    /// "the group holds no such leaf" (Some). An EVICTION wait must use this: a
-    /// timed-out snapshot yields an empty list, which reads exactly like a
-    /// successful removal and would pass the test without the eviction ever
-    /// having happened.
+    /// The MLS group's leaf DEVICE ids for `group_id`, telling "the loop did not
+    /// reply" (None) apart from "the group holds no such leaf" (empty). An EVICTION
+    /// wait MUST use this: a timed-out snapshot yields an empty list, which reads
+    /// exactly like a successful removal.
     pub(crate) async fn mls_members_checked(&self, group_id: &str) -> Option<Vec<String>> {
         let mut v = self.debug_snapshot().await?.mls_members.get(group_id).cloned().unwrap_or_default();
         v.sort();
@@ -1412,11 +1343,8 @@ fn seed_bytes(tag: u8) -> [u8; 32] {
 }
 
 /// Spawn one node with the given master + device secret tags, wired into the
-/// relay. `master_tag` shared across nodes => same identity (siblings); distinct
-/// `device_tag` per node => distinct transport id.
-///
-/// Convenience for friendless single-node scenarios (future tests); the current
-/// test uses [`spawn_node_with_friends`].
+/// relay. A shared `master_tag` makes siblings; a distinct `device_tag` gives each
+/// its own transport id. Friendless scenarios only.
 #[allow(dead_code)]
 async fn spawn_node_on(relay: &MockRelay, master_tag: u8, device_tag: u8) -> TestNode {
     spawn_node_with_friends(relay, master_tag, device_tag, &[]).await
@@ -1522,12 +1450,10 @@ async fn spawn_node_full(
     }
 }
 
-/// Spawn a node on a db_path the CALLER already created and pre-seeded (and owns
-/// the backing `tmp`). Unlike `spawn_node_full`, this does NOT create or seed the
-/// DB — it boots `spawn_node_mock` directly on the given path, so the test can
-/// stage arbitrary on-disk state (e.g. a device-keyed friend row + a friend's
-/// device list) and exercise the real startup code against it. The caller must
-/// have already run `migrate_auto_vacuum_once` and saved an Olm account.
+/// Spawn a node on a db_path the CALLER already created, pre-seeded and owns.
+/// Unlike `spawn_node_full` this neither creates nor seeds the DB, so a test can
+/// stage arbitrary on-disk state and run the real startup code against it. The
+/// caller must already have run `migrate_auto_vacuum_once` and saved an account.
 async fn spawn_node_on_db(
     relay: &MockRelay,
     master_tag: u8,
@@ -1540,12 +1466,10 @@ async fn spawn_node_on_db(
     let passphrase = passphrase_for(&master);
     let db_path = db_path.to_string();
 
-    // LOAD the Olm account the way production does (`api::network::start_node`):
-    // the pickled account plus every stored session. Minting a fresh account on
-    // a DB that already has one hands the node a NEW identity key, so every
-    // peer's session with it silently stops decrypting — a restart test built on
-    // that would be measuring the harness rather than the code. Only a genuinely
-    // empty DB gets a new account.
+    // LOAD the Olm account the way production does: the pickled account plus every
+    // stored session. Minting a fresh account on a DB that already has one hands the
+    // node a NEW identity key, so every peer's session silently stops decrypting and
+    // a restart test would be measuring the harness rather than the code.
     let olm = {
         let store = crate::storage::MessageStore::open(&db_path, &passphrase).expect("open store");
         match store.load_olm_account().expect("load olm account") {
@@ -1603,14 +1527,9 @@ async fn spawn_node_on_db(
 /// Restart one node: take it off the relay, kill its event loop, and boot a new
 /// one on the SAME encrypted DB with the same master/device keys.
 ///
-/// This is the only way to test what survives a process exit, and MLS state is
-/// the interesting half: the storage blob (which carries the private half of
-/// every KeyPackage this node has minted) is restored inside `run_event_loop`
-/// from the crypto store, so anything the node minted but did not persist is
-/// simply gone on the other side of this call.
-///
-/// The returned node's `event_rx` is fresh: events the old one had queued are
-/// dropped with it, exactly as a real restart loses them.
+/// MLS state is the interesting half: the storage blob carrying the private half
+/// of every minted KeyPackage is restored from the crypto store, so anything
+/// minted but not persisted is gone. The returned `event_rx` is fresh.
 async fn restart_node(
     relay: &MockRelay,
     node: TestNode,
@@ -1667,29 +1586,17 @@ async fn sleep_ms(ms: u64) {
 
 /// Poll `cond` until it holds, or `secs` elapse. Returns whether it held.
 ///
-/// **This is the default settle primitive, not `sleep_ms`.** A fixed sleep has
-/// to be long enough for the slowest machine that will ever run it, so it is
-/// dead time on every other machine AND a silent flake on the one where it
-/// turned out not to be long enough: the assert that follows just fails, with
-/// no hint that time was the problem. Polling finishes the moment the thing has
-/// actually happened, usually two orders of magnitude sooner, and when it does
-/// not happen it says so.
-///
-/// Reach for `sleep_ms` ONLY to prove an ABSENCE ("wait a window, then assert
-/// nothing arrived"). There is no state to poll for something that must never
-/// happen, so that window has to be real time. Everything else has a condition,
-/// and `TestNode` exposes it.
+/// **This is the default settle primitive, not `sleep_ms`.** A fixed sleep must be
+/// long enough for the slowest machine that will ever run it, so it is dead time
+/// everywhere else and a silent flake where it turned out too short. Reach for
+/// `sleep_ms` ONLY to prove an ABSENCE, which has no state to poll.
 ///
 /// POLL LIVE STATE, NEVER A RUNNING NODE'S DB. `olm_status`, `mls_members` and
-/// `mls_epoch` round-trip a `DebugSnapshot` over the node's own channel and are
-/// free to ask repeatedly. Everything else here (`servers`, `server_state` and
-/// so everything built on it: `channel_visibility`, `can_see_channel`,
-/// `has_grant_now`, `known_devices`) calls `store()`, which opens a NEW
-/// SQLCipher connection each time. Asking on a loop starves the node's own
-/// writer, which waits `busy_timeout = 4000`ms for locks the test keeps taking:
-/// a 250ms poll for a channel-row heal stopped it landing inside 15s where a
-/// plain sleep saw it in under 4. If the only settle signal is on disk, use a
-/// sleep and say why.
+/// `mls_epoch` round-trip a `DebugSnapshot` and are free to ask repeatedly.
+/// Everything else here calls `store()`, which opens a NEW SQLCipher connection
+/// and starves the node's own writer (busy_timeout 4000ms): a 250ms poll for a
+/// channel-row heal stopped it landing inside 15s where a sleep saw it in under 4.
+/// If the only settle signal is on disk, use a sleep and say why.
 async fn wait_until(secs: u64, mut cond: impl AsyncFnMut() -> bool) -> bool {
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(secs);
     // Backs off 25ms -> 250ms. Some predicates here open SQLCipher, whose key
@@ -1710,13 +1617,9 @@ async fn wait_until(secs: u64, mut cond: impl AsyncFnMut() -> bool) -> bool {
 
 /// Sleep until a wall-clock DEADLINE (plus `grace_ms`), not for a duration.
 ///
-/// Use this wherever a test has to outlast a real timestamp: a grant expiry, a
-/// TTL, a sweep window. The duration form silently depends on how long the steps
-/// ABOVE happened to take, which is fine right up until those steps stop
-/// sleeping a fixed amount and start finishing as soon as their condition holds.
-/// `channel_grant_expiry_sweep` failed exactly that way: its "now ~= 11s after
-/// the grant" sleep was sized against 6s of fixed sleeps that had just become
-/// 1.5s of polling, so it woke up BEFORE the grant it was waiting to expire.
+/// Use this wherever a test must outlast a real timestamp: a grant expiry, a TTL,
+/// a sweep window. The duration form silently depends on how long the steps above
+/// took, which breaks the moment those steps start polling instead of sleeping.
 async fn sleep_until_ms(deadline_ms: u64, grace_ms: u64) {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1725,13 +1628,10 @@ async fn sleep_until_ms(deadline_ms: u64, grace_ms: u64) {
     sleep_ms(deadline_ms.saturating_sub(now) + grace_ms).await;
 }
 
-/// Wait until `a` and `b` hold a CONFIRMED Olm session with each other, and
-/// panic with both directions' status if they do not.
-///
-/// Replaces the `sleep_ms(4000)` that stood at the top of every test whose
-/// payloads ride Olm. Bidirectional on purpose: an outbound-only session is not
-/// usable yet and deliberately does not count (see the comment at swarm.rs:92),
-/// which is exactly the half-built state a too-short fixed sleep left behind.
+/// Wait until `a` and `b` hold a CONFIRMED Olm session with each other, and panic
+/// with both directions' status if they do not. Bidirectional on purpose: an
+/// outbound-only session is not usable yet, which is exactly the half-built state
+/// a too-short fixed sleep left behind.
 async fn expect_olm_confirmed(a: &TestNode, b: &TestNode, secs: u64) {
     let ok = wait_until(secs, async || {
         a.olm_status(&b.device_id).await == "confirmed"
@@ -1751,18 +1651,12 @@ async fn expect_olm_confirmed(a: &TestNode, b: &TestNode, secs: u64) {
     );
 }
 
-/// Wait until a freshly spawned friend PAIR is actually usable: confirmed Olm
-/// both ways, AND both devices present in the DM room their traffic rides.
+/// Wait until a freshly spawned friend PAIR is actually usable: confirmed Olm both
+/// ways, AND both devices present in the DM room their traffic rides.
 ///
-/// This is what the `sleep_ms(4000)` after a friend-pair spawn was really
-/// covering, and waiting only for the Olm session is not enough. The session
-/// confirms well before both nodes have finished joining their rooms, so tests
-/// converted to Olm-only started sending into a room the recipient had not
-/// joined yet: `dm_file_transfer_completes_and_decrypts` and
-/// `dm_relay_buffer_delivers_after_sender_goes_offline_and_clears` both went
-/// intermittent, once hard-failing twice in a row. A sleep that "waits for Olm"
-/// is rarely waiting only for Olm, which is the whole hazard in replacing one
-/// with a narrower condition.
+/// Waiting only for Olm is not enough: the session confirms well before both nodes
+/// finish joining their rooms, and tests converted to Olm-only went intermittent
+/// by sending into a room the recipient had not joined yet.
 async fn expect_dm_pair_ready(relay: &MockRelay, a: &TestNode, b: &TestNode, secs: u64) {
     expect_olm_confirmed(a, b, secs).await;
     let room = super::types::dm_room_code(&a.master_id, &b.master_id);
@@ -1783,10 +1677,8 @@ async fn expect_dm_pair_ready(relay: &MockRelay, a: &TestNode, b: &TestNode, sec
 }
 
 /// Wait until `holder`'s MLS group for `group_id` carries `leaf`'s device, and
-/// panic with the leaf list if it never does. `group_id` is a `server_id` for
-/// the server-wide group, or `subgroup_id(server, channel)` for a per-channel
-/// one. Replaces "let the MLS leaf form" sleeps: KeyPackage -> add -> Welcome is
-/// a round trip whose duration is a property of the machine, not of the code.
+/// panic with the leaf list if it never does. `group_id` is a `server_id`, or
+/// `subgroup_id(server, channel)` for a per-channel group.
 async fn expect_mls_leaf(holder: &TestNode, group_id: &str, leaf: &str, secs: u64) {
     let ok = wait_until(secs, async || {
         holder.mls_members(group_id).await.iter().any(|m| m == leaf)
@@ -1803,13 +1695,9 @@ async fn expect_mls_leaf(holder: &TestNode, group_id: &str, leaf: &str, secs: u6
     );
 }
 
-/// Wait until EVERY node in `nodes` sees EVERY node's leaf in `group_id`, which
-/// is what "the server-wide group has formed" actually means: one member's view
-/// converging says nothing about the others'.
-/// Wait until `holder`'s MLS group for `group_id` no longer carries `leaf`.
-/// An eviction is a convergence like any other, not an absence: the leaf is gone
-/// once the commit that removed it has been applied, and that is observable, so
-/// it gets polled rather than slept on.
+/// Wait until `holder`'s MLS group for `group_id` no longer carries `leaf`. An
+/// eviction is a convergence, not an absence: the leaf is gone once the commit
+/// that removed it has been applied, which is observable, so it is polled.
 async fn expect_no_mls_leaf(holder: &TestNode, group_id: &str, leaf: &str, secs: u64) {
     let ok = wait_until(secs, async || {
         // Some(..) required: a snapshot that never came back is not an eviction.
@@ -1862,15 +1750,12 @@ fn general_channel_of(server_id: &str) -> String {
     format!("{}-general", &server_id[..8.min(server_id.len())])
 }
 
-/// Build a CRDT op by hand, the way a node's own `create_op` would, and sign
-/// it with `signer` (or leave it unsigned when `signer` is `None`).
+/// Build a CRDT op by hand the way `create_op` would, signed with `signer` or left
+/// unsigned when it is `None`.
 ///
-/// `author` is written VERBATIM, which is the whole point: the interesting
-/// cases are an author string that the signing key does not derive (a forgery)
-/// and no signature at all (every op on the wire before this fix). `ahead_ms`
-/// offsets the timestamp from the wall clock so an op that WOULD win the LWW
-/// comparison can be built, without leaving the drift window unless a test
-/// asks for it.
+/// `author` is written VERBATIM, which is the point: the interesting cases are an
+/// author the signing key does not derive, and no signature at all. `ahead_ms`
+/// offsets the timestamp so an op that WOULD win the LWW comparison can be built.
 fn forge_crdt_op(
     server_id: &str,
     author: &str,
@@ -1954,11 +1839,9 @@ async fn peer_fallback_recovers_own_sends_correct_direction() {
 
     let relay = MockRelay::new();
 
-    // A = friend (outsider, single device). M = our identity, with TWO devices:
-    // B (device tag 20) and C (device tag 21). C does the sends while B is
-    // offline; B must later recover them from A on the CORRECT side.
-    // A is a single-device outsider: device == master (the keystone case a
-    // normal friend is in). M is our identity with two devices B + C.
+    // A = friend (outsider, device == master, the keystone case). M = our identity
+    // with two devices B and C; C sends while B is offline, and B must later recover
+    // those sends from A on the correct side.
     const A_MASTER: u8 = 10;
     const M_MASTER: u8 = 20;
     const B_DEV: u8 = 21;
@@ -1986,11 +1869,9 @@ async fn peer_fallback_recovers_own_sends_correct_direction() {
     sleep_ms(1500).await;
     let mut b = spawn_node_with_friends(&relay, M_MASTER, B_DEV, &[&a_master]).await;
 
-    // Olm key exchange (KeyRequest/KeyBundle/SessionAck over SendDirect) must
-    // FULLY CONFIRM between A and the live devices before any DM is sent, or the
-    // DM rides an unconfirmed ratchet and fails to decrypt. Glare resolution
-    // takes a couple of round trips, so this waits for the sessions themselves
-    // rather than guessing how long the round trips take.
+    // Olm key exchange must FULLY CONFIRM before any DM is sent, or the DM rides an
+    // unconfirmed ratchet and fails to decrypt. Glare resolution takes a couple of
+    // round trips, so wait for the sessions rather than guessing at a duration.
     expect_dm_pair_ready(&relay, &a, &b, 20).await;
     expect_dm_pair_ready(&relay, &a, &c, 20).await;
     drain_events(&mut a);
@@ -2001,7 +1882,6 @@ async fn peer_fallback_recovers_own_sends_correct_direction() {
     relay.set_online(&b.device_id, false);
     sleep_ms(300).await;
 
-    // C -> A : three messages (these are OUR sends, made on device C).
     for (i, mid) in ["c1", "c2", "c3"].iter().enumerate() {
         c.cmd_tx
             .send(NodeCommand::SendMessage {
@@ -2015,7 +1895,6 @@ async fn peer_fallback_recovers_own_sends_correct_direction() {
             .unwrap();
         sleep_ms(60).await; // keep timestamps strictly ordered + ratchet settling
     }
-    // A -> M : three replies (A receives C's, then answers).
     for (i, mid) in ["a1", "a2", "a3"].iter().enumerate() {
         a.cmd_tx
             .send(NodeCommand::SendMessage {
@@ -2035,16 +1914,11 @@ async fn peer_fallback_recovers_own_sends_correct_direction() {
     // pending_messages and re-deliver after KeyRequest→KeyBundle settles.
     sleep_ms(2500).await;
 
-    // Sanity (via the DM-thread inspector — reads the thread as A's chat pane
-    // would): A holds all 6, both directions, i.e. the cross-node Olm sessions
-    // formed and DMs decrypted before we even test the backfill.
     {
         let thread = a.dm_thread(&b.master_id);
         assert_eq!(thread.len(), 6, "A should hold all 6 messages, got {}", thread.len());
     }
 
-    // Presence inspector: with all three online, A sees our identity (M) online,
-    // and we see A online — the green dot the member/Home UI shows.
     assert!(
         a.is_online(&m_master, &relay),
         "A should see our identity M online while a device is connected"
@@ -2060,8 +1934,6 @@ async fn peer_fallback_recovers_own_sends_correct_direction() {
     drain_events(&mut b);
     relay.set_online(&b.device_id, true);
 
-    // B's reconnect flow fires DmSyncRequest{both_directions} to A; A serves both
-    // directions; B inserts with the friend-path inversion. Wait for completion.
     let synced = wait_event(&mut b, std::time::Duration::from_secs(5), |ev| {
         matches!(ev, NetworkEvent::DmSyncCompleted { .. })
     })
@@ -2070,7 +1942,6 @@ async fn peer_fallback_recovers_own_sends_correct_direction() {
     sleep_ms(200).await; // let the final inserts commit
 
     // --- THE ASSERTIONS: B recovered all 6 on the CORRECT side ---
-    // Read the thread exactly as B's chat pane would render it (the inspector).
     let thread = b.dm_thread(&a.master_id);
     let by_text: HashMap<String, bool> =
         thread.iter().map(|m| (m.text.clone(), m.is_mine)).collect();
@@ -2084,7 +1955,6 @@ async fn peer_fallback_recovers_own_sends_correct_direction() {
             "our own send {t:?} must land as is_mine=true on B (inversion). Got map: {by_text:?}"
         );
     }
-    // A's sends are RECEIVED on B => is_mine=false.
     for t in ["from-A-1", "from-A-2", "from-A-3"] {
         assert_eq!(
             by_text.get(t),
@@ -2101,7 +1971,6 @@ async fn peer_fallback_recovers_own_sends_correct_direction() {
         "every backfilled DM must be signed (no Unsigned bubbles)"
     );
 
-    // Ordering: C wrote first, so the earliest bubble is our own send.
     let earliest = thread
         .iter()
         .min_by_key(|m| m.timestamp)
@@ -2113,13 +1982,8 @@ async fn peer_fallback_recovers_own_sends_correct_direction() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Rung 2: a friend JOINS a server, the MLS group forms across both nodes, and
-// an encrypted channel message DECRYPTS on the joiner's device. This is the
-// Step-6 multi-device-MLS surface — the biggest untested area — driven and
-// inspected end to end (CRDT member panel + raw MLS leaves + live MLS epoch +
-// decrypted channel message), no live devices.
-// ---------------------------------------------------------------------------
+// Rung 2: a friend JOINS a server, the MLS group forms across both nodes, and an
+// encrypted channel message DECRYPTS on the joiner's device.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
@@ -2149,7 +2013,6 @@ async fn server_join_forms_mls_and_channel_message_decrypts() {
     let general = general_channel_of(&server_id);
     sleep_ms(300).await;
 
-    // Owner has an MLS group with itself as the sole leaf at epoch 0.
     assert_eq!(
         o.mls_members(&server_id).await,
         vec![o.device_id.clone()],
@@ -2158,13 +2021,11 @@ async fn server_join_forms_mls_and_channel_message_decrypts() {
     drain_events(&mut o);
     drain_events(&mut j);
 
-    // --- Joiner joins the server ---
     j.cmd_tx
         .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false })
         .await
         .unwrap();
 
-    // Joiner should complete the CRDT join (ServerJoined) first…
     let joined = wait_event(&mut j, std::time::Duration::from_secs(8), |ev| {
         matches!(ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id)
     })
@@ -2175,7 +2036,6 @@ async fn server_join_forms_mls_and_channel_message_decrypts() {
     // group on the joiner. Give the 2s mls_batch_timer room to fire after the KP.
     sleep_ms(5000).await;
 
-    // --- MLS group formed across BOTH nodes (raw device-keyed leaves) ---
     let owner_leaves = o.mls_members(&server_id).await;
     let joiner_leaves = j.mls_members(&server_id).await;
     let expected = {
@@ -2185,7 +2045,6 @@ async fn server_join_forms_mls_and_channel_message_decrypts() {
     };
     assert_eq!(owner_leaves, expected, "owner's MLS group must contain both device leaves");
     assert_eq!(joiner_leaves, expected, "joiner's MLS group must contain both device leaves");
-    // Both at the same (post-add) epoch.
     assert!(o.mls_epoch(&server_id).await.unwrap_or(0) >= 1, "owner epoch advanced past the add");
     assert_eq!(
         o.mls_epoch(&server_id).await,
@@ -2193,7 +2052,6 @@ async fn server_join_forms_mls_and_channel_message_decrypts() {
         "owner and joiner must be at the same MLS epoch"
     );
 
-    // --- Member panel (UI layer): both see two MASTER-keyed members, online ---
     let panel = j.member_panel(&server_id, &relay);
     let masters: Vec<String> = panel.iter().map(|r| r.master.clone()).collect();
     assert!(masters.contains(&o_master) && masters.contains(&j_master),
@@ -2206,7 +2064,6 @@ async fn server_join_forms_mls_and_channel_message_decrypts() {
 
     drain_events(&mut j);
 
-    // --- Owner sends an MLS-encrypted channel message; joiner DECRYPTS it ---
     o.cmd_tx
         .send(NodeCommand::SendChannelMessage {
             server_id: server_id.clone(),
@@ -2226,27 +2083,16 @@ async fn server_join_forms_mls_and_channel_message_decrypts() {
     assert!(got, "joiner must receive + decrypt the channel message");
     sleep_ms(200).await;
 
-    // Channel-pane inspector: the decrypted message is stored, attributed to the
-    // owner's MASTER, on the receive side (is_mine=false).
     let msgs = j.channel_messages(&server_id, &general);
     let row = msgs.iter().find(|m| m.text == "hello channel").expect("message stored");
     assert_eq!(row.sender_master, o_master, "channel message attributed to owner master");
     assert!(!row.is_mine, "received message is not is_mine on the joiner");
 }
 
-// ---------------------------------------------------------------------------
-// PUBLIC-channel multi-device attribution (UI device→master collapse, 2026-06-24).
-// A PUBLIC channel broadcasts signed PLAINTEXT (no MLS), and the relay frame's
-// `from` is the sender's DEVICE id. Before the fix, the PublicChannelMessage
-// handler passed that raw device id straight to handle_envelope_channel_message,
-// so the message was attributed to + stored under the DEVICE — the bubble showed
-// "12D3KooW…" instead of the sender's name (while the MLS path already resolved
-// to master). It also broke signature verification (the sender SIGNS with its
-// master id). This asserts the fix: the receiver attributes a public-channel
-// message from a device!=master sender to that sender's MASTER, in BOTH the live
-// event (`from_peer`) AND the raw stored row (NOT just the master-collapsed
-// inspector, which would hide a device-keyed row by resolving on read).
-// ---------------------------------------------------------------------------
+// A PUBLIC channel broadcasts signed PLAINTEXT and the relay frame's `from` is the
+// sender's DEVICE id, so the receiver must attribute the message to that sender's
+// MASTER in BOTH the live event and the raw stored row. A device-keyed row breaks
+// the name in the bubble and the signature check alike.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
@@ -2294,7 +2140,6 @@ async fn public_channel_message_from_multidevice_sender_attributes_to_master() {
         .send(NodeCommand::AcceptFriendRequest { peer_id: o_master.clone() })
         .await
         .unwrap();
-    // Let accept + device-list/profile pushes + Olm key exchange settle.
     expect_dm_pair_ready(&relay, &o, &j, 15).await;
     // ...and J's resolver has learned O's device -> master mapping, which is
     // the precondition the assertion below states.
@@ -2329,7 +2174,6 @@ async fn public_channel_message_from_multidevice_sender_attributes_to_master() {
     assert!(joined, "J must join the server");
     sleep_ms(3000).await; // let membership + the shared server room settle
 
-    // O makes #general PUBLIC (plaintext broadcast path, no MLS).
     o.cmd_tx
         .send(NodeCommand::SetChannelPublic {
             server_id: server_id.clone(),
@@ -2376,18 +2220,14 @@ async fn public_channel_message_from_multidevice_sender_attributes_to_master() {
         Some(o_master.as_str()),
         "the stored public-channel row must be MASTER-keyed (raw), not device-keyed"
     );
-    // And the channel-pane inspector agrees (is_mine=false on the receiver).
     let msgs = j.channel_messages(&server_id, &general);
     let row = msgs.iter().find(|m| m.text == "public from a device").expect("public message stored");
     assert_eq!(row.sender_master, o_master, "public channel message attributed to O's master");
     assert!(!row.is_mine, "received public message is not is_mine on J");
 }
 
-// ---------------------------------------------------------------------------
-// Relay connection status (Item 1939): a node emits a real RelayConnected event
-// once its WS connection is up — the signal the UI uses to show a truthful
-// "Connected" instead of the stale "node started" status.
-// ---------------------------------------------------------------------------
+// A node emits a real RelayConnected event once its WS connection is up, which is
+// the signal the UI shows "Connected" from.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
@@ -2406,13 +2246,9 @@ async fn node_emits_relay_connected_on_ws_connect() {
     assert!(connected, "node must emit RelayConnected once its WS link is up");
 }
 
-// ---------------------------------------------------------------------------
-// NSFW join-consent gate: an NSFW-flagged server rejects a first join attempt
-// with an `nsfw_confirm:` reason (carried on TwitchJoinRejected, the shared
-// join-reject event), then accepts the retry that carries nsfw_confirmed=true.
-// This guards Item 1941 — the server-side reject-then-retry consent flow that
-// every join entry point rides for free.
-// ---------------------------------------------------------------------------
+// NSFW join-consent gate: an NSFW-flagged server rejects a first join with an
+// `nsfw_confirm:` reason and accepts the retry that carries nsfw_confirmed, the
+// reject-then-retry flow every join entry point rides for free.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
@@ -2433,7 +2269,6 @@ async fn nsfw_server_gates_join_until_confirmed() {
     let mut j = spawn_node_with_friends(&relay, J_MASTER, J_MASTER, &[&o_master]).await;
     expect_dm_pair_ready(&relay, &o, &j, 15).await;
 
-    // Owner creates a server and flags it NSFW via the settings CRDT.
     let server_id = create_server_and_wait(&mut o, "Adult Server").await;
     o.cmd_tx
         .send(NodeCommand::UpdateServerSetting {
@@ -2447,7 +2282,6 @@ async fn nsfw_server_gates_join_until_confirmed() {
     drain_events(&mut o);
     drain_events(&mut j);
 
-    // First join attempt (no consent) → rejected with the nsfw_confirm reason.
     j.cmd_tx
         .send(NodeCommand::JoinServer {
             server_id: server_id.clone(),
@@ -2463,14 +2297,12 @@ async fn nsfw_server_gates_join_until_confirmed() {
     .await;
     assert!(rejected, "first NSFW join must be rejected with nsfw_confirm:");
 
-    // The joiner did NOT become a member.
     assert!(
         !j.raw_crdt_member_keys(&server_id).contains(&j_master),
         "joiner must not be a member before confirming NSFW consent"
     );
     drain_events(&mut j);
 
-    // Retry WITH consent → join completes.
     j.cmd_tx
         .send(NodeCommand::JoinServer {
             server_id: server_id.clone(),
@@ -2491,15 +2323,8 @@ async fn nsfw_server_gates_join_until_confirmed() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Channel typing indicator round-trips over the MLS server group and is
-// attributed to the sender's MASTER identity on the receiver. Guards the path
-// behind the mobile fix where a phone never SENT channel typing (Dart only
-// called sendTypingIndicator for DMs) — here we drive the Rust send/receive
-// directly to prove the channel-typing wire path is correct end to end, and
-// that TypingStarted carries the master (not the device id), which is what the
-// UI keys its "X is typing…" on.
-// ---------------------------------------------------------------------------
+// A channel typing indicator round-trips over the MLS server group and is
+// attributed to the sender's MASTER, which is what the UI keys "X is typing" on.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
@@ -2510,7 +2335,6 @@ async fn channel_typing_roundtrips_master_attributed() {
 
     let relay = MockRelay::new();
 
-    // O = owner (single device), J = joiner (single device).
     const O_MASTER: u8 = 70;
     const J_MASTER: u8 = 80;
     let o_master = NativeKeypair::from_secret_bytes(&seed_bytes(O_MASTER)).peer_id();
@@ -2546,7 +2370,6 @@ async fn channel_typing_roundtrips_master_attributed() {
     );
     drain_events(&mut j);
 
-    // --- Owner types in #general; joiner receives TypingStarted for the MASTER ---
     o.cmd_tx
         .send(NodeCommand::SendTypingIndicator {
             server_id: server_id.clone(),
@@ -2575,13 +2398,10 @@ async fn channel_typing_roundtrips_master_attributed() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Rung 3: device REVOCATION. One sibling revokes another. Assert the full
-// cutoff: the revoked device gets SelfRevoked, the revoker drops its Olm session
-// to it, and the ghost fan-out guard holds — a subsequent DM from a friend never
-// reaches the revoked-and-dropped device (collect_target_devices filters to
-// devices currently in a room). This is the Steps 7/8 revocation surface.
-// ---------------------------------------------------------------------------
+// Rung 3: device REVOCATION. One sibling revokes another and the cutoff is total:
+// the revoked device gets SelfRevoked, the revoker drops its Olm session, and a
+// later DM from a friend never reaches it, because fan-out targets only devices
+// currently in a room.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
@@ -2653,14 +2473,12 @@ async fn device_revocation_cuts_off_and_ghost_fanout_holds() {
         c.olm_status(&b.device_id).await,
     );
 
-    // B holds a session with sibling C before revocation.
     assert_ne!(
         b.olm_status(&c.device_id).await,
         "absent",
         "B should hold an Olm session with sibling C before revoking it"
     );
 
-    // --- B revokes device C ---
     b.cmd_tx
         .send(NodeCommand::RevokeDevice { device_peer_id: c.device_id.clone() })
         .await
@@ -2740,7 +2558,6 @@ async fn device_revocation_cuts_off_and_ghost_fanout_holds() {
         .await
         .unwrap();
 
-    // B (still live) receives it…
     let b_got = wait_event(&mut b, std::time::Duration::from_secs(20), |ev| {
         matches!(ev, NetworkEvent::MessageReceived { text, .. } if text == "after-revoke")
     })
@@ -2762,18 +2579,10 @@ async fn device_revocation_cuts_off_and_ghost_fanout_holds() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // Issue 1-C: "a NEW DEVICE appeared for this contact" must reach the friend as a
-// visible alert — that is the real-world attack shape (a device linked to a
-// compromised account), and it is detectable only because the device list is
-// master-signed and already ingested + verified.
-//
-// The distributed part is what makes this worth a harness test rather than a
-// unit test: the alert has to be driven by a device list that genuinely
-// propagated over the wire, and it must NOT fire on the FIRST list a friend ever
-// sees (that is a baseline, not a change — an alert there would fire for every
-// new friend and train users to dismiss without reading).
-// ---------------------------------------------------------------------------
+// visible alert, driven by a device list that genuinely propagated over the wire,
+// and must NOT fire on the FIRST list a friend ever sees, which is a baseline
+// rather than a change.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
@@ -2801,7 +2610,6 @@ async fn friend_is_warned_when_a_new_device_joins_their_contact() {
     sleep_ms(1200).await;
     let mut b = spawn_node_with_friends(&relay, M_MASTER, B_DEV, &[&a_master]).await;
 
-    // B publishes a device list of {B}. A ingests it as its BASELINE for M.
     seed_device_list_into_db(&b.db_path, &b.passphrase, M_MASTER, &[b_dev.clone()]);
 
     let mut a_saw_b = false;
@@ -2828,10 +2636,8 @@ async fn friend_is_warned_when_a_new_device_joins_their_contact() {
     );
     drain_events(&mut a);
 
-    // --- M links a SECOND device, C. ---
     let mut c = spawn_node_with_friends(&relay, M_MASTER, C_DEV, &[&a_master]).await;
 
-    // A must now be warned — once, naming the device that appeared.
     let warned = wait_event(&mut a, std::time::Duration::from_secs(30), |ev| {
         matches!(
             ev,
@@ -2882,14 +2688,9 @@ async fn friend_is_warned_when_a_new_device_joins_their_contact() {
     drain_events(&mut c);
 }
 
-// ---------------------------------------------------------------------------
-// Step 9A push targeting: a DM to a multi-device identity must reach a fully-quit
-// (offline-but-real) sibling device via the relay's offline buffer, so the real
-// relay would fire a push to THAT device's token. Guards the Step 9A break where
-// `collect_target_devices` dropped every non-in-room device (the Step 7 ghost
-// filter) and so never targeted a quit phone at all. The complement assertion —
-// a never-contacted GHOST id is NOT buffered — is covered by the revocation test.
-// ---------------------------------------------------------------------------
+// Push targeting: a DM to a multi-device identity must reach a fully-quit sibling
+// device via the relay's offline buffer, so the real relay would fire a push to
+// that device's token.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
@@ -2951,7 +2752,6 @@ async fn dm_buffers_for_offline_real_sibling_device() {
         .await
         .unwrap();
 
-    // B (live) receives it.
     let b_got = wait_event(&mut b, std::time::Duration::from_secs(5), |ev| {
         matches!(ev, NetworkEvent::MessageReceived { text, .. } if text == "wake-the-phone")
     })
@@ -2967,15 +2767,10 @@ async fn dm_buffers_for_offline_real_sibling_device() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Ring-2 CONTROL PLANE: call signal routing. The harness can't run real
-// audio/video/ICE, but it CAN verify the load-bearing CONTROL path that breaks
-// silently: a call signal addressed to a friend's MASTER must be (a) mapped from
-// its whitelisted signal_type to the right HavenMessage variant and (b) routed to
-// the friend's concrete online DEVICE (the master authenticates as no socket).
-// An unknown signal_type must be silently dropped, never delivered. This guards
-// the "WHITELISTED, not passed through" + master-vs-device routing class.
-// ---------------------------------------------------------------------------
+// Call signal routing. A call signal addressed to a friend's MASTER must be mapped
+// from its whitelisted signal_type to the right HavenMessage variant and routed to
+// the friend's concrete online DEVICE, since no socket authenticates as the
+// master. An unknown signal_type is silently dropped, never delivered.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
@@ -3022,7 +2817,6 @@ async fn call_signal_routes_to_friend_device_and_drops_unknown() {
         .await
         .unwrap();
 
-    // B (M's device) receives the CallSignal invite — the call "rings".
     let mut got_call_id = None;
     let rang = wait_event(&mut b, std::time::Duration::from_secs(15), |ev| {
         if let NetworkEvent::CallSignal { signal_type, payload, .. } = ev {
@@ -3118,14 +2912,10 @@ async fn call_signal_routes_to_friend_device_and_drops_unknown() {
     assert!(!leaked, "an unknown call signal type must be silently dropped, never delivered");
 }
 
-// ---------------------------------------------------------------------------
-// Ring-2 SECURITY (TRANSPORT-1): the 1:1 call SFrame media key must never be
-// legible to the relay. Call signaling used to ride the wire as a bare
-// `HavenMessage::CallInvite`, so the relay read the AES-128-GCM key out of every
-// invite and accept (and could inject a forged accept carrying its own). The
-// invite now travels inside the Olm ciphertext: the callee still gets the key,
-// and every frame the relay handled is opaque.
-// ---------------------------------------------------------------------------
+// TRANSPORT-1: the 1:1 call SFrame media key must never be legible to the relay.
+// Call signaling used to ride the wire as a bare `CallInvite`, so the relay read
+// the AES-128-GCM key out of every invite and could inject a forged accept
+// carrying its own. The invite now travels inside the Olm ciphertext.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
@@ -3169,7 +2959,6 @@ async fn call_invite_never_exposes_sframe_key_to_the_relay() {
         .await
         .unwrap();
 
-    // The callee gets the key — the call still works.
     let mut got_key = None;
     let rang = wait_event(&mut b, std::time::Duration::from_secs(10), |ev| {
         if let NetworkEvent::CallSignal { signal_type, payload, .. } = ev {
@@ -3205,12 +2994,9 @@ async fn call_invite_never_exposes_sframe_key_to_the_relay() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Ring-2 SECURITY (TRANSPORT-1, receive half): a Call* frame that arrives in the
-// CLEAR is an injection — from the relay or anyone who can push a frame into the
-// room — and must be rejected, not handled. If the plaintext arms still worked,
-// a forged CallAccept would hand our media session a key the attacker chose.
-// ---------------------------------------------------------------------------
+// TRANSPORT-1, receive half: a Call* frame that arrives in the CLEAR is an
+// injection and must be rejected, not handled. A forged CallAccept would otherwise
+// hand our media session a key the attacker chose.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
@@ -3252,17 +3038,10 @@ async fn plaintext_call_signal_is_rejected() {
     assert!(!rang, "a plaintext call signal must be REJECTED, never surfaced as a call");
 }
 
-// ---------------------------------------------------------------------------
-// Ring-2 FILE TRANSFER: full DM file send end to end. The FileHeader rides Olm
-// (SendDirect); the encrypted bytes fall back to WSS-relay binary streaming when
-// there's no WebRTC data channel (`stream_to_peer` -> ws_stream_send ->
-// SendBinaryDirect), which the MockRelay routes in-room. So MORE than the control
-// plane is coverable here: the bytes actually transfer + decrypt in-process. We
-// assert the receiver emits FileHeaderReceived, persists the files row, and
-// completes the transfer with the correct decrypted contents on disk. (Only the
-// WebRTC-data-channel byte path itself is out of scope — the relay fallback is
-// the same assembly/decrypt logic.)
-// ---------------------------------------------------------------------------
+// Full DM file send end to end: the FileHeader rides Olm and the encrypted bytes
+// fall back to WSS-relay streaming when there is no data channel, so the bytes
+// really transfer and decrypt in-process. Only the WebRTC byte path is out of
+// scope; the relay fallback shares the assembly and decrypt logic.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
@@ -3292,7 +3071,6 @@ async fn dm_file_transfer_completes_and_decrypts() {
     drain_events(&mut a);
     drain_events(&mut b);
 
-    // Write a small real file for the sender to read + send.
     let src = global_tmp.path().join("hello.txt");
     let contents: &[u8] = b"hello file contents";
     std::fs::write(&src, contents).expect("write src file");
@@ -3315,7 +3093,6 @@ async fn dm_file_transfer_completes_and_decrypts() {
         .await
         .unwrap();
 
-    // Receiver B emits FileHeaderReceived and persists a files row.
     let mut got_fid = None;
     let header = wait_event(&mut b, std::time::Duration::from_secs(5), |ev| {
         if let NetworkEvent::FileHeaderReceived { file_id, file_name, .. } = ev {
@@ -3330,7 +3107,6 @@ async fn dm_file_transfer_completes_and_decrypts() {
     assert!(header, "receiver must emit FileHeaderReceived for the sent file");
     let fid = got_fid.expect("file id from header");
 
-    // The bytes stream over the relay fallback + decrypt; wait for completion.
     let done = wait_event(&mut b, std::time::Duration::from_secs(5), |ev| {
         matches!(ev, NetworkEvent::FileCompleted { file_id, .. } if *file_id == fid)
     })
@@ -3338,8 +3114,6 @@ async fn dm_file_transfer_completes_and_decrypts() {
     assert!(done, "receiver must complete the file transfer (relay byte fallback)");
     sleep_ms(200).await;
 
-    // Inspector: the files row is persisted, complete, and on disk with the
-    // ORIGINAL decrypted contents — a true end-to-end file transfer.
     let meta = b.file_meta(&fid).expect("receiver persisted a files row");
     assert_eq!(meta.context_type, "dm", "file context is a DM");
     assert!(meta.file_name.starts_with("hello"), "header name persisted, got {:?}", meta.file_name);
@@ -3348,15 +3122,13 @@ async fn dm_file_transfer_completes_and_decrypts() {
     let disk = meta.disk_path.expect("completed file has a disk path");
     let got = std::fs::read(&disk).expect("read the received file");
     assert_eq!(got, contents, "received file must decrypt to the original contents");
-    // A completed file is no longer in the needs-download set.
     assert!(!b.missing_file_ids().contains(&fid), "completed file is not missing");
 }
 
-/// Issue #41 — auto-download gate. With auto-download OFF for the conversation
-/// the receiver keeps the pushed file's METADATA (the card renders with a
-/// manual Download button) but registers no stream: the pushed bytes are
-/// discarded and the row never completes. An explicit RequestFile (the manual
-/// button) then bypasses the gate and the transfer completes normally.
+/// Issue #41 auto-download gate. With auto-download OFF the receiver keeps the
+/// pushed file's METADATA (the card renders a manual Download button) but registers
+/// no stream, so the bytes are discarded and the row never completes. An explicit
+/// RequestFile then bypasses the gate and completes normally.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
 async fn dm_auto_download_off_declines_push_then_manual_request_completes() {
@@ -3416,7 +3188,6 @@ async fn dm_auto_download_off_declines_push_then_manual_request_completes() {
         .await
         .unwrap();
 
-    // The header still lands (card metadata)...
     let mut got_fid = None;
     let header = wait_event(&mut b, std::time::Duration::from_secs(5), |ev| {
         if let NetworkEvent::FileHeaderReceived { file_id, file_name, .. } = ev {
@@ -3431,7 +3202,6 @@ async fn dm_auto_download_off_declines_push_then_manual_request_completes() {
     assert!(header, "gated push must still deliver FileHeaderReceived (the card)");
     let fid = got_fid.expect("file id from header");
 
-    // ...but the pushed bytes are declined: no FileCompleted, row incomplete.
     let completed_anyway = wait_event(&mut b, std::time::Duration::from_secs(3), |ev| {
         matches!(ev, NetworkEvent::FileCompleted { file_id, .. } if *file_id == fid)
     })
@@ -3463,16 +3233,12 @@ async fn dm_auto_download_off_declines_push_then_manual_request_completes() {
     let got = std::fs::read(&disk).expect("read the received file");
     assert_eq!(got, contents, "manually pulled file decrypts to the original contents");
 
-    // Restore the permissive default for the rest of the suite.
     super::file_handler::set_auto_download_conf(169, std::collections::HashMap::new());
 }
 
-/// Issue #41 carry-over — sender-side pre-negotiation. When the RECEIVER's
-/// gating preference is advertised BEFORE the send (here: conf seeded before
-/// the nodes connect, so the on-join `auto_dl_pref` advert carries 0), the
-/// sender never streams the bytes at all: the receiver gets a METADATA-ONLY
-/// header (no AES material → no pending stream, no decline sentinel — the
-/// old path discarded fully-transmitted bytes instead). The manual
+/// Issue #41, sender-side pre-negotiation. When the receiver's gating preference is
+/// advertised BEFORE the send, the sender never streams the bytes at all: the
+/// receiver gets a METADATA-ONLY header with no AES material. The manual
 /// RequestFile pull then completes normally.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
@@ -3534,7 +3300,6 @@ async fn dm_receiver_pref_prenegotiation_skips_push_bytes() {
         .await
         .unwrap();
 
-    // The metadata-only header still lands (card renders)...
     let mut got_fid = None;
     let header = wait_event(&mut b, std::time::Duration::from_secs(5), |ev| {
         if let NetworkEvent::FileHeaderReceived { file_id, file_name, .. } = ev {
@@ -3568,7 +3333,6 @@ async fn dm_receiver_pref_prenegotiation_skips_push_bytes() {
     let meta = b.file_meta(&fid).expect("metadata row persisted from the meta-only header");
     assert!(meta.completed_at.is_none(), "no bytes may land without a manual pull");
 
-    // Manual pull still works: the explicit-request receipt bypasses the gate.
     b.cmd_tx
         .send(NodeCommand::RequestFile {
             file_id: fid.clone(),
@@ -3594,12 +3358,10 @@ async fn dm_receiver_pref_prenegotiation_skips_push_bytes() {
     super::file_handler::set_auto_download_conf(169, std::collections::HashMap::new());
 }
 
-/// Issue #41 carry-over — voice messages are exempt from the auto-download
-/// gate END TO END: with the conversation gated on the receiver (and that
-/// preference advertised to the sender), a voice-flagged send still streams
-/// and auto-completes. Also covers the legacy filename pattern — the wire
-/// name is the recorder's temp basename (`voice_{stamp}_{rand}.ogg`), which
-/// the old literal "Voice message.ogg" check never matched.
+/// Issue #41: voice messages are exempt from the auto-download gate END TO END, so
+/// a voice-flagged send streams and auto-completes on a gated conversation. Also
+/// covers the wire filename, which is the recorder's temp basename rather than the
+/// literal "Voice message.ogg" the old check matched.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
 async fn dm_voice_message_bypasses_auto_download_gate() {
@@ -3658,7 +3420,6 @@ async fn dm_voice_message_bypasses_auto_download_gate() {
         .await
         .unwrap();
 
-    // Voice auto-completes despite the gated conversation.
     let mut got_fid = None;
     let header = wait_event(&mut b, std::time::Duration::from_secs(5), |ev| {
         if let NetworkEvent::FileHeaderReceived { file_id, file_name, .. } = ev {
@@ -3689,21 +3450,15 @@ async fn dm_voice_message_bypasses_auto_download_gate() {
     super::file_handler::set_auto_download_conf(169, std::collections::HashMap::new());
 }
 
-// ---------------------------------------------------------------------------
-// Honest file card states (tmp.txt item 1). A file whose bytes are not on disk
-// used to show a Download button that could silently do nothing: a holder that
-// no longer had the bytes stayed SILENT, so the asker could not tell "offline"
-// from "gone". `HavenMessage::FileUnavailable` is the negative answer, and
-// `node/file_asks.rs` is the asker-side pending table that rotates on it and
-// tells the card which of the four states it is in.
-// ---------------------------------------------------------------------------
+// Honest file card states. A file whose bytes are not on disk used to show a
+// Download button that could silently do nothing, because a holder that no longer
+// had the bytes stayed SILENT. `FileUnavailable` is the negative answer and
+// `node/file_asks.rs` is the asker-side table that rotates on it.
 
-/// State 3, both shapes of "I lost the bytes". The holder still has the ROW
-/// (so it is entitled to answer at all) but cannot serve: first its disk file
-/// is deleted underneath it (the row's `disk_path` still points at nothing,
-/// which is what an eviction between two sweeps looks like), then the row's
-/// path is nulled the way "clear cached file bytes" leaves it. Both must come
-/// back as `gone`, and neither may complete.
+/// State 3, both shapes of "I lost the bytes". The holder still has the ROW, so it
+/// is entitled to answer, but cannot serve: first its disk file is deleted
+/// underneath it, then the row's path is nulled the way "clear cached bytes" leaves
+/// it. Both must come back as `gone`, and neither may complete.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn dm_file_request_gets_honest_gone_answer_when_holder_lost_bytes() {
@@ -3845,7 +3600,6 @@ async fn dm_file_request_gets_honest_gone_answer_when_holder_lost_bytes() {
     assert!(got, "B must get the gated card for file two");
     let fid_two = fid_two.expect("file two id");
 
-    // "Clear all cached file bytes" on the holder: rows survive, paths do not.
     a.store().null_disk_path_all().expect("clear A's cached bytes");
     drain_events(&mut b);
 
@@ -3880,13 +3634,10 @@ async fn dm_file_request_gets_honest_gone_answer_when_holder_lost_bytes() {
     drop(b);
 }
 
-/// State 2, and the whole point of the pending table: the only holder is
-/// offline when the user taps Download, so the card says so and the request is
-/// QUEUED. The asker's own socket then dies and comes back (which is what
-/// clears `requested_file_receipts`), the holder returns, and the queued ask
-/// fires on the fresh room roster with NO further command from the user. It
-/// can only complete if the retry re-stamped the explicit-pull receipt: the
-/// conversation is gated, so an unstamped answer would be declined.
+/// State 2: the only holder is offline when the user taps Download, so the card
+/// says so and the request is QUEUED. The asker's socket then dies and returns, the
+/// holder comes back, and the queued ask fires with no further command. It can only
+/// complete if the retry re-stamped the explicit-pull receipt.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn dm_file_request_waits_for_offline_holder_then_fetches_on_return() {
@@ -4016,11 +3767,9 @@ async fn dm_file_request_waits_for_offline_holder_then_fetches_on_return() {
     drop(b);
 }
 
-/// The asked-set rule, the file-ask twin of the asset rail's: a device we never
-/// asked cannot steer our walk or delete our ask by volunteering a miss. C is a
-/// friend of B (so it has a room and the frame really does route), was never
-/// asked anything, and says "I don't have it" about a file B is waiting on.
-/// Nothing may move, and the ask must still find its own holder.
+/// The asked-set rule: a device we never asked cannot steer our walk or delete our
+/// ask by volunteering a miss. C really can route the frame and was never asked, so
+/// nothing may move and the ask must still find its own holder.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn file_unavailable_from_unasked_device_changes_nothing() {
@@ -4115,7 +3864,6 @@ async fn file_unavailable_from_unasked_device_changes_nothing() {
     assert!(waiting, "the ask must be queued against the offline holder");
     drain_events(&mut b);
 
-    // C, who was never asked anything, volunteers a miss for the same file.
     let bc_room = super::types::dm_room_code(&b_master, &c_master);
     relay.inject_direct(
         &bc_room,
@@ -4158,12 +3906,10 @@ async fn file_unavailable_from_unasked_device_changes_nothing() {
     drop(c);
 }
 
-/// The negative answer is gated exactly like the positive one. A stranger that
-/// learned a file_id gets SILENCE, because an "I don't have it" to anyone who
-/// asks would let them tell "this device holds a row for X" (silence) from "it
-/// does not" (an answer), which is a membership leak. The entitled DM party
-/// gets the answer for the same file in the same run, so silence cannot be an
-/// accident of routing.
+/// The negative answer is gated exactly like the positive one: a stranger that
+/// learned a file_id gets SILENCE, because answering would tell it "this device
+/// holds a row for X". The entitled DM party gets the answer for the same file in
+/// the same run, so silence cannot be an accident of routing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn file_unavailable_never_answers_a_non_entitled_requester() {
@@ -4230,11 +3976,9 @@ async fn file_unavailable_never_answers_a_non_entitled_requester() {
     assert!(got, "B must get the gated card");
     let fid = got_fid.expect("file id from header");
 
-    // A loses the bytes: from here on every ENTITLED ask gets `gone`.
     a.store().null_disk_path_all().expect("clear A's cached bytes");
     relay.set_recording(&a.device_id, true);
 
-    // The stranger asks, raw, exactly the frame the DM party would send.
     let ad_room = super::types::dm_room_code(&a_master, &d_master);
     relay.inject_direct(
         &ad_room,
@@ -4259,7 +4003,6 @@ async fn file_unavailable_never_answers_a_non_entitled_requester() {
         "a non-entitled requester must get silence, never a file_unavail answer"
     );
 
-    // The DM party asks for the SAME file and IS answered.
     b.cmd_tx
         .send(NodeCommand::RequestFile {
             file_id: fid.clone(),
@@ -4282,11 +4025,9 @@ async fn file_unavailable_never_answers_a_non_entitled_requester() {
     drop(d);
 }
 
-/// A channel file has more than one holder: full replication (<6 members) put
-/// the bytes on every member that was online. The asker targets the SENDER, the
-/// sender no longer has the bytes, and the ask must ROTATE to the next holder
-/// on the negative rather than dying there. The card narrates the walk:
-/// requesting the sender, then requesting the second holder, then done.
+/// A channel file has more than one holder. The asker targets the SENDER, which no
+/// longer has the bytes, and the ask must ROTATE to the next holder on the negative
+/// rather than dying there; the card narrates the walk.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn channel_file_request_rotates_to_next_holder_after_gone() {
@@ -4384,7 +4125,6 @@ async fn channel_file_request_rotates_to_next_holder_after_gone() {
     a.store().null_disk_path_all().expect("clear A's cached bytes");
     relay.set_recording(&a.device_id, true);
 
-    // The asker returns and learns the file exists through catch-up.
     relay.set_online(&b.device_id, true);
     let b_header = wait_event(&mut b, std::time::Duration::from_secs(15), |ev| {
         matches!(ev, NetworkEvent::FileHeaderReceived { file_id, .. } if *file_id == fid)
@@ -4433,7 +4173,6 @@ async fn channel_file_request_rotates_to_next_holder_after_gone() {
         "a rotation that succeeds must never show a dead-end state, got {seq:?}"
     );
 
-    // The sender's negative said `gone`, and it said it on the wire.
     let said_gone = frames_of_type(&relay, &a.device_id, "file_unavail").iter().any(|v| {
         v.get("file_id").and_then(|f| f.as_str()) == Some(fid.as_str())
             && v.get("reason").and_then(|r| r.as_str()) == Some("gone")
@@ -4467,10 +4206,9 @@ async fn channel_file_request_rotates_to_next_holder_after_gone() {
 }
 
 /// State 4 is the ONE remote answer that can write to our own row, so it is
-/// verified locally before we believe it: a member cannot expire someone else's
-/// file by lying. Case A: the row is fresh, the `expired` answer is downgraded
-/// to `gone` and our row keeps `expired_at = NULL`. Case B: the row really is
-/// past the server's own retention window, so the same answer marks it.
+/// verified locally: a member cannot expire someone else's file by lying. A fresh
+/// row downgrades the `expired` answer to `gone`; a row genuinely past the server's
+/// retention is marked.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn expired_answer_is_verified_locally_before_marking_our_row() {
@@ -4562,7 +4300,6 @@ async fn expired_answer_is_verified_locally_before_marking_our_row() {
     .await;
     let fid = got_fid.expect("the sender's own FileCompleted carries the file id");
 
-    // The HOLDER's row is genuinely expired, so it answers `expired` for real.
     let now_secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -4657,18 +4394,11 @@ async fn expired_answer_is_verified_locally_before_marking_our_row() {
     drop(b);
 }
 
-/// "Stop waiting for this file" has to stop BOTH halves of the pull, and the
-/// second half is the one that is easy to forget.
-///
-/// (a) The queued ask is gone, so the holder coming back no longer fires it:
-///     the whole point of the queue is that a return is what would have fired
-///     it, so that return is the moment the absence has to be proved at.
-/// (b) The explicit-pull RECEIPT is gone with it. An answer already on its way
-///     then arrives with nothing to bypass the size cap or the auto-download
-///     gate with, so it is judged exactly as an unsolicited push would be. With
-///     the receipt still standing the very same header COMPLETES, which is what
-///     `dm_auto_download_off_declines_push_then_manual_request_completes`
-///     shows, so the refusal here is the proof that the receipt went.
+/// "Stop waiting for this file" has to stop BOTH halves of the pull, and the second
+/// is easy to forget: the queued ask is gone, so the holder's return no longer
+/// fires it, and the explicit-pull RECEIPT goes with it, so an answer already in
+/// flight is judged exactly as an unsolicited push would be. With the receipt still
+/// standing the very same header completes, which is the proof it went.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn cancel_file_request_drops_the_queued_ask_and_its_receipt() {
@@ -4871,24 +4601,12 @@ async fn cancel_file_request_drops_the_queued_ask_and_its_receipt() {
     drop(b);
 }
 
-/// FILE-2 regression — the voice exemption is not a free pass for bytes.
-///
-/// The exemption used to read `voice || name`, and both of those are fields
-/// the SENDER fills in. With no size bound and no look at the extension, a
-/// header flagged `voice: true` carried anything, at any size, into a
-/// conversation the user had turned auto-download OFF for. Here the gate is
-/// on and two headers that CLAIM to be voice notes are pushed:
-///
-///   (b) genuinely voice-flagged, genuinely `.ogg`, one KB over the note
-///       ceiling, and
-///   (c) a plain file wearing the recorder's display name with the flag off
-///       (the legacy name-only exemption, which a sender could always forge).
-///
-/// Neither may complete or reach disk. The exemption case (a) — a voice flag
-/// and a voice name with a NON-ogg extension — cannot be produced by an
-/// honest sender, because `handle_send_file` derives `ext` from the filename;
-/// it is a forged-frame shape, covered by the predicate unit test
-/// `voice_exemption_requires_flag_name_ext_and_size`.
+/// FILE-2 regression: the voice exemption is not a free pass for bytes. It used to
+/// read `voice || name`, both SENDER-filled, with no size bound and no look at the
+/// extension, so a header flagged `voice: true` carried anything into a
+/// conversation with auto-download OFF. Two headers that CLAIM to be voice notes
+/// are pushed here, one over the note ceiling and one wearing the recorder's name
+/// with the flag off, and neither may complete or reach disk.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
 async fn forged_voice_flag_does_not_bypass_auto_download_gate() {
@@ -4979,7 +4697,6 @@ async fn forged_voice_flag_does_not_bypass_auto_download_gate() {
         fids.push(got.expect("file id from header"));
     }
 
-    // ...and neither completes. Bounded wait, then the absence is a decision.
     let completed = wait_event(&mut b, std::time::Duration::from_secs(4), |ev| {
         matches!(ev, NetworkEvent::FileCompleted { file_id, .. } if fids.contains(file_id))
     })
@@ -5005,12 +4722,10 @@ async fn forged_voice_flag_does_not_bypass_auto_download_gate() {
     super::file_handler::set_auto_download_conf(169, std::collections::HashMap::new());
 }
 
-/// Video poster pipeline: a DM video send with Dart-supplied poster bytes
-/// (the ffmpeg-extracted frame) delivers a FileHeader whose `thumb_b64`
-/// carries the re-encoded lossy poster AND whose width/height fall back to
-/// the poster's own dimensions when the ffmpeg probe supplied none — so the
-/// receiver's bubble renders a real preview at the correct aspect before a
-/// single video byte is local.
+/// Video poster pipeline: a DM video send with Dart-supplied poster bytes delivers
+/// a FileHeader whose `thumb_b64` carries the re-encoded poster and whose
+/// width/height fall back to the poster's own dimensions when the probe supplied
+/// none, so the bubble renders at the right aspect before any video byte is local.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
 async fn dm_video_send_carries_poster_thumb_and_dims() {
@@ -5039,7 +4754,6 @@ async fn dm_video_send_carries_poster_thumb_and_dims() {
     drain_events(&mut a);
     drain_events(&mut b);
 
-    // Fake "video" bytes + a real 64x36 (16:9) PNG poster frame.
     let src = global_tmp.path().join("clip.mp4");
     let contents: &[u8] = b"not really h264 but streams all the same";
     std::fs::write(&src, contents).expect("write src file");
@@ -5085,9 +4799,7 @@ async fn dm_video_send_carries_poster_thumb_and_dims() {
     let (fid, w, h, thumb) = got.expect("header fields");
     let thumb = thumb.expect("header must carry the re-encoded poster thumb");
     assert!(thumb.len() <= super::file_handler::FILE_THUMB_MAX_B64_LEN);
-    // Poster-derived dimension fallback: 64x36 source poster, no upscale.
     assert_eq!((w, h), (Some(64), Some(36)), "header w/h fall back to poster dims");
-    // The poster also persists on the receiver's files row for later reloads.
     let done = wait_event(&mut b, std::time::Duration::from_secs(5), |ev| {
         matches!(ev, NetworkEvent::FileCompleted { file_id, .. } if *file_id == fid)
     })
@@ -5099,14 +4811,10 @@ async fn dm_video_send_carries_poster_thumb_and_dims() {
     assert_eq!((meta.width, meta.height), (Some(64), Some(36)));
 }
 
-// ---------------------------------------------------------------------------
-// Ring-2 CONTROL PLANE: voice-channel join/leave + participant tracking + signal
-// routing. Real audio/SFU is out of scope; the control path rides a plaintext
-// fallback (no formed MLS group needed — only server membership + a Voice
-// channel). Both nodes join a server, J joins the voice channel (O sees it in its
-// participant set), a broadcast signal routes, and leave removes the participant.
-// Also guards the VC signal whitelist (unknown type silently dropped).
-// ---------------------------------------------------------------------------
+// Voice-channel join/leave, participant tracking and signal routing. Real audio is
+// out of scope; the control path rides a plaintext fallback needing only server
+// membership and a Voice channel. Also guards the VC signal whitelist: an unknown
+// type is silently dropped.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
@@ -5127,7 +4835,6 @@ async fn voice_channel_join_leave_and_signal_routing() {
     let mut j = spawn_node_with_friends(&relay, J_MASTER, J_MASTER, &[&o_master]).await;
     expect_dm_pair_ready(&relay, &o, &j, 15).await;
 
-    // Owner creates a server; add a VOICE channel (the default #general is Text).
     let server_id = create_server_and_wait(&mut o, "VC Server").await;
     o.cmd_tx
         .send(NodeCommand::CreateChannel {
@@ -5169,7 +4876,6 @@ async fn voice_channel_join_leave_and_signal_routing() {
     drain_events(&mut o);
     drain_events(&mut j);
 
-    // --- J joins the VOICE channel; O sees J in the participant set ---
     j.cmd_tx
         .send(NodeCommand::VoiceChannelJoin {
             server_id: server_id.clone(),
@@ -5183,7 +4889,6 @@ async fn voice_channel_join_leave_and_signal_routing() {
     .await;
     assert!(o_saw_join, "owner must see the joiner enter the voice channel");
 
-    // --- A broadcast VC signal (audio_state) routes via the plaintext fallback ---
     drain_events(&mut o);
     let audio_payload = serde_json::json!({
         "call_id": voice_cid, "muted": true, "deafened": false,
@@ -5204,7 +4909,6 @@ async fn voice_channel_join_leave_and_signal_routing() {
     .await;
     assert!(o_saw_signal, "owner must receive the routed audio_state VC signal");
 
-    // --- A broadcast recording indicator (issue #53) routes the same way ---
     drain_events(&mut o);
     j.cmd_tx
         .send(NodeCommand::VoiceChannelSendSignal {
@@ -5223,7 +4927,6 @@ async fn voice_channel_join_leave_and_signal_routing() {
     .await;
     assert!(o_saw_rec, "owner must receive the routed recording_start VC signal");
 
-    // Unknown VC signal type is silently dropped (whitelist).
     drain_events(&mut o);
     j.cmd_tx
         .send(NodeCommand::VoiceChannelSendSignal {
@@ -5241,7 +4944,6 @@ async fn voice_channel_join_leave_and_signal_routing() {
     .await;
     assert!(!leaked, "an unknown VC signal type must be silently dropped");
 
-    // --- A targeted screen_watch signal (opt-in watching, issue #38) routes J → O ---
     drain_events(&mut o);
     j.cmd_tx
         .send(NodeCommand::VoiceChannelSendSignal {
@@ -5285,7 +4987,6 @@ async fn voice_channel_join_leave_and_signal_routing() {
         "source_quality must no longer round-trip: {watch_json}"
     );
 
-    // --- J leaves the voice channel; O sees the leave ---
     drain_events(&mut o);
     j.cmd_tx
         .send(NodeCommand::VoiceChannelLeave {
@@ -5301,18 +5002,11 @@ async fn voice_channel_join_leave_and_signal_routing() {
     assert!(o_saw_leave, "owner must see the joiner leave the voice channel");
 }
 
-// ---------------------------------------------------------------------------
-// Ring-2 CONTROL PLANE: the self-ghost regression (2026-08). The VC participant
-// set is keyed by ROUTABLE DEVICE ids — including OUR OWN entry. The bug: the
-// own-join path inserted/emitted the MASTER id while Dart's self-skip compared
-// the DEVICE id, so both ends dialed their own master as a remote participant
-// ("Creating offer for peer <own master>" + endless "No session" storms). This
-// test runs nodes whose device id genuinely differs from the master (the other
-// VC tests use master==device seeds and can never catch the mixup) and pins:
-// own join/leave events carry the DEVICE id + is_self=true, the remote view is
-// device-keyed with is_self=false, and a self-targeted VC signal is dropped
-// BEFORE Olm (no MessageSendFailed storm).
-// ---------------------------------------------------------------------------
+// The VC self-ghost regression. The participant set is keyed by ROUTABLE DEVICE
+// ids including OUR OWN entry, but the own-join path emitted the MASTER id while
+// Dart's self-skip compared the DEVICE id, so both ends dialed their own master as
+// a remote participant. These nodes have device != master, which the other VC
+// tests cannot catch.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
@@ -5473,15 +5167,10 @@ async fn vc_self_participant_is_device_keyed_no_self_dial() {
     assert!(o_saw_leave, "owner must see the joiner leave, keyed by its device id");
 }
 
-// ---------------------------------------------------------------------------
-// Ring-2 CONTROL PLANE: media forwarding step 2 — originator attribution on the
-// VC screen lane. vc_screen_offer/answer/ice carry an optional StreamOrigin
-// (who the stream is FROM vs who DELIVERED it); receivers get it verbatim in
-// the VoiceChannelSignal payload. Guards: absent origin = old wire (delivered
-// untouched), and a spoofed origin (neither the sender nor the recipient) is
-// DROPPED — the SFrame group key is shared, so spoofed attribution would
-// render the spoofer's pixels under the victim's name.
-// ---------------------------------------------------------------------------
+// Originator attribution on the VC screen lane: vc_screen_* carry an optional
+// StreamOrigin, who the stream is FROM versus who delivered it. An absent origin is
+// old wire and passes through untouched; a spoofed one is DROPPED, because the
+// SFrame key is shared and spoofed attribution renders pixels under a victim's name.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
@@ -5568,7 +5257,6 @@ async fn vc_screen_origin_attribution_round_trip() {
     drain_events(&mut o);
     drain_events(&mut j);
 
-    // Helper: pull the next VoiceChannelSignal of a given type + its payload.
     async fn next_signal(
         node: &mut TestNode,
         wanted: &str,
@@ -5589,7 +5277,6 @@ async fn vc_screen_origin_attribution_round_trip() {
         Some(serde_json::from_str(&got.expect("payload")).expect("valid json"))
     }
 
-    // --- 1. Sharer (J) -> viewer (O): screen_offer WITH origin round-trips ---
     j.cmd_tx
         .send(NodeCommand::VoiceChannelSendSignal {
             server_id: server_id.clone(),
@@ -5635,7 +5322,6 @@ async fn vc_screen_origin_attribution_round_trip() {
     assert_eq!(answer["origin"]["peer"], serde_json::json!(j_master),
         "echoed origin must survive the answer direction");
 
-    // --- 3. Viewer (O) -> sharer (J): incoming-role ICE with origin echo ---
     drain_events(&mut j);
     o.cmd_tx
         .send(NodeCommand::VoiceChannelSendSignal {
@@ -5714,25 +5400,12 @@ async fn vc_screen_origin_attribution_round_trip() {
     assert_eq!(healthy["sdp"], serde_json::json!("v=0 healthy"));
 }
 
-// ---------------------------------------------------------------------------
-// Ring-2 CONTROL PLANE: a voice peer that reconnects must be able to RECEIVE
-// again, not just send.
-//
+// A voice peer that reconnects must be able to RECEIVE again, not just send.
 // `WsEvent::Disconnected` purges every remote peer from
-// `voice_channel_participants`, and that set gates EVERY inbound VC signal.
-// Nothing refilled it: the peer on the other side never left its own channel,
-// so it had no reason to announce anything, and the one path that did
-// re-announce sat behind the `is_new`/`synced_peers` guard — which is false
-// for exactly the peer that just came back.
-//
-// Field-caught 2026-08-27: the reconnecting node asked for a leg rebuild four
-// times, its peer dialed four times, and it dropped all four offers as
-// `BLOCKED VC SDP offer from non-participant` while its own requests still
-// arrived. One-way signalling, permanently silent voice channel.
-//
-// The socket is dropped SILENTLY here on purpose: the real relay broadcast no
-// `PeerLeft`, which is what left `is_new` false and skipped the cascade.
-// ---------------------------------------------------------------------------
+// `voice_channel_participants`, which gates every inbound VC signal, and nothing
+// refilled it: the peer never left its own channel, and the one re-announce sat
+// behind the `is_new` guard, which is false for exactly the peer that came back.
+// The socket is dropped SILENTLY here because that is what left `is_new` false.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
@@ -5790,7 +5463,6 @@ async fn vc_reconnecting_peer_can_receive_signals_again() {
     assert!(joined, "joiner should join the server");
     sleep_ms(1500).await;
 
-    // Both in the voice channel.
     for (node, label) in [(&mut o, "owner"), (&mut j, "joiner")] {
         node.cmd_tx
             .send(NodeCommand::VoiceChannelJoin {
@@ -5857,17 +5529,10 @@ async fn vc_reconnecting_peer_can_receive_signals_again() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Ring-2 CONTROL PLANE: the voice mesh's `leg_restart` request.
-//
-// The mesh gives the SDP offer to the lexicographically lower peer id, so the
-// higher side has no way to rebuild a leg it alone can see is broken: before
-// this signal it closed its connection and waited for an offer nobody was
-// going to send (field-caught 2026-08-27, no audio for the rest of the call).
-// A VC signal type is WHITELISTED in Rust across three separate touches, and
-// missing one drops it SILENTLY, so this guards the whole path: it must reach
-// the peer, in both directions, carrying the sender's id.
-// ---------------------------------------------------------------------------
+// The voice mesh's `leg_restart` request. The mesh gives the SDP offer to the
+// lexicographically lower peer id, so the higher side had no way to rebuild a leg
+// only it could see was broken. A VC signal type is whitelisted across three
+// touches and missing one drops it SILENTLY, so this drives both directions.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
@@ -5954,7 +5619,6 @@ async fn vc_leg_restart_signal_round_trips() {
     drain_events(&mut o);
     drain_events(&mut j);
 
-    // Helper: wait for a leg_restart naming a given sender.
     async fn saw_leg_restart(node: &mut TestNode, from: &str, cid: &str, secs: u64) -> bool {
         wait_event(node, std::time::Duration::from_secs(secs), |ev| {
             matches!(
@@ -5966,7 +5630,6 @@ async fn vc_leg_restart_signal_round_trips() {
         .await
     }
 
-    // --- J asks O to re-offer the leg ---
     j.cmd_tx
         .send(NodeCommand::VoiceChannelSendSignal {
             server_id: server_id.clone(),
@@ -6000,14 +5663,9 @@ async fn vc_leg_restart_signal_round_trips() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Ring-2 CONTROL PLANE: recovery-pool formation. The cross-peer shard byte
-// streaming + reconstruction math need a populated vault (heavier setup), but the
-// pool's MEMBERSHIP control path is fully in-process: an initiator opens a pool
-// (joins recovery:{server}:{token}), a second node joins + broadcasts a
-// RecoveryHello, and the initiator registers it as a member. This guards the pool
-// rendezvous + RecoveryHello/Welcome inventory-exchange handshake.
-// ---------------------------------------------------------------------------
+// Recovery-pool formation: an initiator opens a pool, a second node joins and
+// broadcasts a RecoveryHello, and the initiator registers it as a member. Shard
+// streaming needs a populated vault and is out of harness scope.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
@@ -6046,7 +5704,6 @@ async fn recovery_pool_membership_forms() {
     assert!(created, "initiator should emit RecoveryPoolCreated");
     sleep_ms(300).await;
 
-    // Joiner joins the pool → sends RecoveryHello (room broadcast) + emits Joined.
     j.cmd_tx
         .send(NodeCommand::JoinRecoveryPool { server_id: server_id.clone(), token: token.clone() })
         .await
@@ -6057,7 +5714,6 @@ async fn recovery_pool_membership_forms() {
     .await;
     assert!(joined, "joiner should emit RecoveryPoolJoined");
 
-    // The initiator receives the RecoveryHello and registers the joiner as a member.
     let o_saw_member = wait_event(&mut o, std::time::Duration::from_secs(4), |ev| {
         matches!(ev, NetworkEvent::RecoveryPoolMemberJoined { server_id: sid, .. } if *sid == server_id)
     })
@@ -6065,20 +5721,10 @@ async fn recovery_pool_membership_forms() {
     assert!(o_saw_member, "initiator must register the joiner as a recovery-pool member");
 }
 
-// ---------------------------------------------------------------------------
-// Step 9C / C3 (VERIFY-ONLY): sibling↔sibling SERVER-message backfill — the
-// server analog of the DM peer-fallback. Claim under test (tracker §9C): the
-// channel-sync rails already recover a device's OWN channel messages that were
-// sent from a now-offline SIBLING, with NO new code — because the
-// `ChannelSyncRequest` responder has no `is_mine` filter (serves all senders by
-// sender_id+timestamp) and the reconnect trigger (`SyncCoordinator::collect_ready`,
-// registered on PeerJoined/RoomMembers) fires a `ChannelSyncRequest` per channel
-// unconditionally. Scenario: A owns a server; M's two devices B + C both join
-// (both MLS leaves). C goes offline; B sends 3 channel messages (stored on A under
-// master M). Then B goes offline and C reconnects — C must recover B's sends (its
-// OWN identity's messages) from A, the only present member. If this is green, the
-// `[~]` item is confirmed needing no code.
-// ---------------------------------------------------------------------------
+// Sibling-to-sibling SERVER-message backfill, the server analog of the DM
+// peer-fallback: C recovers its own identity's channel messages, sent from a now
+// offline sibling B, from A, the only present member. No new code is needed for
+// that, which is what this confirms.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
@@ -6089,7 +5735,6 @@ async fn sibling_recovers_own_channel_messages_from_present_member() {
 
     let relay = MockRelay::new();
 
-    // A = owner/friend (single device). M = our identity with two devices B + C.
     const A_MASTER: u8 = 150;
     const M_MASTER: u8 = 160;
     const B_DEV: u8 = 161;
@@ -6141,14 +5786,12 @@ async fn sibling_recovers_own_channel_messages_from_present_member() {
     drain_events(&mut a);
     drain_events(&mut b);
 
-    // B and A are the two MLS leaves; B's channel message must decrypt on A.
     let a_leaves = a.mls_members(&server_id).await;
     assert!(
         a_leaves.contains(&b.device_id),
         "A's MLS group must contain B's device leaf, got {a_leaves:?}"
     );
 
-    // --- B sends 3 channel messages; A (present) stores them under master M ---
     for (i, mid) in ["s1", "s2", "s3"].iter().enumerate() {
         b.cmd_tx
             .send(NodeCommand::SendChannelMessage {
@@ -6170,7 +5813,6 @@ async fn sibling_recovers_own_channel_messages_from_present_member() {
     assert!(a_got, "owner A must receive B's channel messages");
     sleep_ms(300).await;
     {
-        // Sanity: A holds B's three sends, attributed to our master M.
         let on_a = a.channel_messages(&server_id, &general);
         for t in ["from-B-1", "from-B-2", "from-B-3"] {
             let row = on_a.iter().find(|m| m.text == t)
@@ -6200,9 +5842,6 @@ async fn sibling_recovers_own_channel_messages_from_present_member() {
     .await;
     assert!(c_joined, "device C should join the server fresh");
 
-    // On join, C registers with the SyncCoordinator and fires a ChannelSyncRequest
-    // per channel; A serves B's messages (sender = master M = C's OWN identity — no
-    // is_mine filter blocks them). The backfill path emits MessageSyncCompleted.
     let recovered = wait_event(&mut c, std::time::Duration::from_secs(10), |ev| {
         matches!(ev, NetworkEvent::MessageSyncCompleted { server_id: sid, new_message_count }
             if *sid == server_id && *new_message_count > 0)
@@ -6212,7 +5851,6 @@ async fn sibling_recovers_own_channel_messages_from_present_member() {
     assert!(recovered, "C should receive a channel-sync carrying B's messages from A on join");
     sleep_ms(700).await; // let any remaining inserts commit
 
-    // --- THE ASSERTION: C recovered all 3 of its own identity's channel sends ---
     let on_c = c.channel_messages(&server_id, &general);
     for t in ["from-B-1", "from-B-2", "from-B-3"] {
         let row = on_c.iter().find(|m| m.text == t).unwrap_or_else(|| {
@@ -6222,7 +5860,6 @@ async fn sibling_recovers_own_channel_messages_from_present_member() {
                 on_c.iter().map(|m| &m.text).collect::<Vec<_>>()
             )
         });
-        // Attributed to our master M (C's own identity) — the messages it sent from B.
         assert_eq!(row.sender_master, m_master, "recovered message attributed to master M");
         // C4: the microsecond ordering key survived the send → A → backfill → C round
         // trip (not NULL), so cross-device ordering is stable.
@@ -6243,18 +5880,11 @@ async fn sibling_recovers_own_channel_messages_from_present_member() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Multi-device self-heal of a PRE-FIX channel row (2026-06-24). A row stored
-// before the device→master resolve fix can be keyed under a sender DEVICE id with
-// signature material that no longer verifies against the master-id payload — the
-// "12D3KooW… + unverified signature" bubble Vitalik hit on VM. INSERT OR IGNORE +
-// the already-exists skip means a later channel sync that carries the CORRECT
-// (verified, master-keyed) copy can't overwrite it. The self-heal: when a synced
-// item's signature VERIFIES and our stored row is attributed to a different
-// sender, repair the row to the verified one. Here we simulate the corruption
-// directly (poison the stored sender to a bogus device id), then re-sync from the
-// member that holds the good copy and assert the row converges back to the master.
-// ---------------------------------------------------------------------------
+// Multi-device self-heal of a PRE-FIX channel row. A row stored before the
+// device-to-master resolve fix is keyed under a DEVICE id with signature material
+// that no longer verifies, and INSERT OR IGNORE means a later sync carrying the
+// correct copy cannot overwrite it. The heal: when a synced item's signature
+// VERIFIES and our row names a different sender, repair the row.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
@@ -6302,8 +5932,6 @@ async fn corrupt_device_keyed_channel_row_self_heals_from_verified_sync() {
     // corrupt-row/rejoin/sync sequence below depends on the latter.
     sleep_ms(4000).await; // MLS leaf forms
 
-    // A sends a channel message; J receives + stores it CORRECTLY (verified, keyed to
-    // A's master). This is the "good" copy A will later re-serve.
     drain_events(&mut j);
     const MID: &str = "heal-1";
     a.cmd_tx
@@ -6373,18 +6001,10 @@ async fn corrupt_device_keyed_channel_row_self_heals_from_verified_sync() {
     assert_eq!(row.sender_master, a_master, "healed message attributed to A's master");
 }
 
-// ---------------------------------------------------------------------------
-// Step 9C / C2: server MODERATION actions reach the actor's OWN sibling devices.
-// The bug: kick/ban/role-change/leave broadcast their CRDT op only to the
-// REMAINING members (master-keyed, actor's identity excluded), so a moderation
-// action on device B never reaches sibling C of the same person — C only
-// converged on restart. Fix: each handler also fans the op (and, for kick/ban,
-// the MLS leaf-removal commit) to our own online siblings, excluding the acting
-// device. Scenario: M owns a server (devices B + C); V is a victim member. B
-// performs role-change then kick of V; C (sibling, never restarted) must reflect
-// both WITHOUT restart. (Owner M creates the server so role-change/kick perms
-// hold for either of M's devices.)
-// ---------------------------------------------------------------------------
+// Server MODERATION actions reach the actor's OWN sibling devices. Kick, ban, role
+// change and leave used to broadcast their CRDT op only to the REMAINING members,
+// so a sibling of the actor converged only on restart. Each handler now also fans
+// the op, and the MLS leaf-removal commit, to our own online siblings.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
@@ -6395,8 +6015,6 @@ async fn moderation_action_converges_on_actor_sibling_without_restart() {
 
     let relay = MockRelay::new();
 
-    // M = owner identity, devices B + C. V = victim (single device, a friend so
-    // the join handshake's Olm session forms).
     const M_MASTER: u8 = 170;
     const B_DEV: u8 = 171;
     const C_DEV: u8 = 172;
@@ -6423,7 +6041,6 @@ async fn moderation_action_converges_on_actor_sibling_without_restart() {
     let server_id = create_server_and_wait(&mut b, "Mod Server").await;
     sleep_ms(500).await;
 
-    // V joins the server.
     v.cmd_tx
         .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false })
         .await
@@ -6435,7 +6052,6 @@ async fn moderation_action_converges_on_actor_sibling_without_restart() {
     assert!(v_joined, "victim V should join the server");
     sleep_ms(2500).await;
 
-    // C (B's sibling) joins so it holds the server CRDT state as a member of M.
     c.cmd_tx
         .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false })
         .await
@@ -6450,7 +6066,6 @@ async fn moderation_action_converges_on_actor_sibling_without_restart() {
     drain_events(&mut c);
     drain_events(&mut v);
 
-    // Pre-state: C's member panel shows M (owner) + V (member), V as a plain Member.
     {
         let panel = c.member_panel(&server_id, &relay);
         let v_row = panel.iter().find(|r| r.master == v_master)
@@ -6460,7 +6075,6 @@ async fn moderation_action_converges_on_actor_sibling_without_restart() {
             "V starts as a plain Member on C");
     }
 
-    // --- B changes V's role to Moderator; C (sibling) must reflect it ---
     b.cmd_tx
         .send(NodeCommand::ChangeRole {
             server_id: server_id.clone(),
@@ -6503,7 +6117,6 @@ async fn moderation_action_converges_on_actor_sibling_without_restart() {
         );
     }
 
-    // --- B kicks V; C (sibling) must drop V from its member panel ---
     b.cmd_tx
         .send(NodeCommand::KickMember {
             server_id: server_id.clone(),
@@ -6511,7 +6124,6 @@ async fn moderation_action_converges_on_actor_sibling_without_restart() {
         })
         .await
         .unwrap();
-    // B emits MemberLeft for V locally.
     let b_kicked = wait_event(&mut b, std::time::Duration::from_secs(4), |ev| {
         matches!(ev, NetworkEvent::MemberLeft { peer_id, .. } if *peer_id == v_master)
     })
@@ -6519,7 +6131,6 @@ async fn moderation_action_converges_on_actor_sibling_without_restart() {
     assert!(b_kicked, "actor B should emit MemberLeft for the kicked victim");
     sleep_ms(1500).await; // removal op fans to C (the fix) — no restart
 
-    // THE C2 ASSERTION: C dropped V without ever restarting.
     {
         let panel = c.member_panel(&server_id, &relay);
         assert!(
@@ -6527,7 +6138,6 @@ async fn moderation_action_converges_on_actor_sibling_without_restart() {
             "sibling C must drop the kicked V from its member panel WITHOUT restart (C2 fix), got {:?}",
             panel.iter().map(|r| &r.master).collect::<Vec<_>>()
         );
-        // C still sees the owner identity M — only V was removed.
         assert!(
             panel.iter().any(|r| r.master == m_master),
             "C still shows the owner identity M after the kick"
@@ -6535,14 +6145,10 @@ async fn moderation_action_converges_on_actor_sibling_without_restart() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// "Latest authorized write wins" (2026-07-16): an Admin holding MANAGE_SERVER
-// flips a server setting the OWNER wrote earlier. Under the old priority-first
-// AdminLwwReg merge the admin's op silently lost on every replica (including
-// the admin's own) — the Twitch toggle "reverted". Pure HLC LWW + the
-// permission-gated ingest must land it everywhere: on the owner, on the admin,
-// and on a member that was OFFLINE during the flip and converges via sync.
-// ---------------------------------------------------------------------------
+// "Latest authorized write wins": an Admin holding MANAGE_SERVER flips a setting
+// the OWNER wrote earlier. Under the old priority-first merge the admin's op
+// silently lost on every replica. Pure HLC LWW plus the permission-gated ingest
+// must land it on the owner, on the admin, and on a member that was offline.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
@@ -6574,7 +6180,6 @@ async fn admin_flips_owner_setting_and_all_nodes_converge() {
     let server_id = create_server_and_wait(&mut o, "Settings Server").await;
     sleep_ms(500).await;
 
-    // A and M join.
     a.cmd_tx
         .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false })
         .await
@@ -6657,7 +6262,6 @@ async fn admin_flips_owner_setting_and_all_nodes_converge() {
     sleep_ms(500).await;
     drain_events(&mut m);
 
-    // ADMIN A flips the owner-written setting OFF.
     a.cmd_tx
         .send(NodeCommand::UpdateServerSetting {
             server_id: server_id.clone(),
@@ -6706,18 +6310,11 @@ async fn admin_flips_owner_setting_and_all_nodes_converge() {
     drop(m);
 }
 
-// ---------------------------------------------------------------------------
-// Step 9C / C5: a freshly-LINKED sibling's "Your devices" list shows BOTH devices
-// immediately (not just itself). Bug: the imported .hollow backup carries the
-// SOURCE device's signed device list, which does NOT contain the new sibling's
-// brand-new device id. At startup the resolver self-seed used ONLY that list, so
-// the running device resolved to ITSELF (not the master) → `myMaster` wrong →
-// `myDevicesProvider` (which inverts the resolver) showed one device until the
-// source came online and the inbox-proof merge fired. Fix: startup seeds
-// `list.devices ∪ {this_device}`. This asserts the Rust state the panel reads
-// (the resolver links), which is the harness-coverable half; the actual panel
-// render is Vitalik's visual check.
-// ---------------------------------------------------------------------------
+// A freshly LINKED sibling's device list shows BOTH devices immediately. The
+// imported backup carries the SOURCE device's signed list, which does not name the
+// new sibling, so a startup seed from that list alone resolved the running device
+// to ITSELF. The fix seeds `list.devices` plus this device; the panel render is a
+// visual check, the resolver links are the half asserted here.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
@@ -6728,8 +6325,6 @@ async fn linked_sibling_resolves_both_devices_at_startup() {
 
     let relay = MockRelay::new();
 
-    // M = our identity. SOURCE device already existed; SIB is the freshly-linked
-    // device we're booting. The imported list contains ONLY the source device id.
     const M_MASTER: u8 = 190;
     const SOURCE_DEV: u8 = 191;
     const SIB_DEV: u8 = 192;
@@ -6752,7 +6347,6 @@ async fn linked_sibling_resolves_both_devices_at_startup() {
         super::resolver::resolve(&sib_dev), m_master,
         "the freshly-linked running device must resolve to the master at startup (C5)"
     );
-    // The source device (from the imported list) also resolves to the master.
     assert_eq!(
         super::resolver::resolve(&source_dev), m_master,
         "the imported source device must resolve to the master"
@@ -6772,14 +6366,9 @@ async fn linked_sibling_resolves_both_devices_at_startup() {
     drop(sib);
 }
 
-// ---------------------------------------------------------------------------
-// Fix 4 (GAP-A, no-relayer isolation): a plaintext-only lifecycle op fans to the
-// actor's OWN sibling DIRECTLY when no other member is online to re-gossip it.
-// M has two devices B + C, ALONE in a server (no friend member). B sets a server
-// nickname; C must reflect it WITHOUT restart — only possible via the direct
-// `fan_to_own_siblings` (the CrdtOpBroadcast re-gossip path has no other member to
-// relay through). Guards the 6 plaintext handlers' sibling fan.
-// ---------------------------------------------------------------------------
+// A plaintext-only lifecycle op fans to the actor's OWN sibling DIRECTLY when no
+// other member is online to re-gossip it. M's two devices are ALONE in a server,
+// so only `fan_to_own_siblings` can carry a nickname change from B to C.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
@@ -6790,7 +6379,6 @@ async fn sibling_nickname_fans_directly_with_no_relayer() {
 
     let relay = MockRelay::new();
 
-    // M = our identity, devices B + C. No friend / other member exists.
     const M_MASTER: u8 = 200;
     const B_DEV: u8 = 201;
     const C_DEV: u8 = 202;
@@ -6841,14 +6429,10 @@ async fn sibling_nickname_fans_directly_with_no_relayer() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Fix 2 (tombstone + reconnect reconciliation): a member who was OFFLINE when the
-// owner deleted a server must learn it's gone on RECONNECT — via the grow-only
-// SyncRequest/SyncResponse path carrying the ServerDeleted tombstone op. Before
-// the fix, deletion was a missable one-shot and the offline member kept the server
-// forever. The MockRelay does NOT durably queue the (now-removed) one-shot, so this
-// test PROVES the tombstone+reconnect path specifically.
-// ---------------------------------------------------------------------------
+// A member offline when the owner deleted a server learns it is gone on RECONNECT,
+// via the grow-only sync path carrying the ServerDeleted tombstone. Deletion used
+// to be a missable one-shot; the MockRelay does not queue that one-shot, so this
+// proves the tombstone path specifically.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
@@ -6859,7 +6443,6 @@ async fn offline_member_reconciles_server_deletion_on_reconnect() {
 
     let relay = MockRelay::new();
 
-    // O = owner (single device), M = member (single device).
     const O_MASTER: u8 = 210;
     const M_MASTER: u8 = 220;
     let o_master = NativeKeypair::from_secret_bytes(&seed_bytes(O_MASTER)).peer_id();
@@ -6901,10 +6484,8 @@ async fn offline_member_reconciles_server_deletion_on_reconnect() {
     .await;
     assert!(o_deleted, "owner O emits ServerDeleted");
     sleep_ms(300).await;
-    // O's UI no longer lists it (tombstone hidden) but O RETAINS the shell to serve.
     assert!(!o.servers().contains(&server_id), "O's UI drops the deleted server");
 
-    // --- M comes back ONLINE → reconnect SyncRequest → O serves the tombstone op ---
     drain_events(&mut m);
     relay.set_online(&m.device_id, true);
     let m_saw_delete = wait_event(&mut m, std::time::Duration::from_secs(10), |ev| {
@@ -6915,7 +6496,6 @@ async fn offline_member_reconciles_server_deletion_on_reconnect() {
     assert!(m_saw_delete, "M must learn the server was deleted on reconnect (tombstone sync)");
     sleep_ms(500).await;
 
-    // --- THE CORE ASSERTION: M no longer lists the deleted server ---
     assert!(
         !m.servers().contains(&server_id),
         "offline member M must reconcile the deletion on reconnect (server gone), got {:?}",
@@ -6923,13 +6503,9 @@ async fn offline_member_reconciles_server_deletion_on_reconnect() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Fix 3 (server CREATE auto-onboards siblings): when one of M's devices creates a
-// server, M's OTHER online device must auto-onboard — see the server AND get its own
-// MLS leaf (so it can decrypt channel messages). The creator announces the new
-// server to siblings (SiblingServerAnnounce), the sibling runs the same-identity
-// join fast-path, and the sibling-re-adds / bootstrap path gives it an MLS leaf.
-// ---------------------------------------------------------------------------
+// When one of M's devices creates a server, M's other online device must
+// auto-onboard: see the server AND get its own MLS leaf, so it can decrypt channel
+// messages.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
@@ -6940,7 +6516,6 @@ async fn server_create_auto_onboards_online_sibling() {
 
     let relay = MockRelay::new();
 
-    // M = our identity, devices B (creator) + C (sibling). No friend needed.
     const M_MASTER: u8 = 230;
     const B_DEV: u8 = 231;
     const C_DEV: u8 = 232;
@@ -6956,11 +6531,9 @@ async fn server_create_auto_onboards_online_sibling() {
     drain_events(&mut b);
     drain_events(&mut c);
 
-    // B creates a server. C is online → should be auto-announced + onboard.
     let server_id = create_server_and_wait(&mut b, "Shared Server").await;
     let general = general_channel_of(&server_id);
 
-    // C learns about the server (ServerJoined) WITHOUT ever calling JoinServer itself.
     let c_onboarded = wait_event(&mut c, std::time::Duration::from_secs(10), |ev| {
         matches!(ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id)
     })
@@ -6968,21 +6541,18 @@ async fn server_create_auto_onboards_online_sibling() {
     assert!(c_onboarded, "sibling C must auto-onboard the newly-created server (ServerJoined)");
     expect_mls_leaf(&b, &server_id, &c.device_id, 15).await;
 
-    // C's UI lists the server.
     assert!(
         c.servers().contains(&server_id),
         "sibling C's server list must include the auto-onboarded server, got {:?}",
         c.servers()
     );
 
-    // B's MLS group must contain C's device leaf (so C can decrypt channel messages).
     let b_leaves = b.mls_members(&server_id).await;
     assert!(
         b_leaves.contains(&c.device_id),
         "creator B's MLS group must contain sibling C's leaf, got {b_leaves:?}"
     );
 
-    // --- THE PAYOFF: B sends a channel message; C (auto-onboarded sibling) decrypts it ---
     drain_events(&mut c);
     b.cmd_tx
         .send(NodeCommand::SendChannelMessage {
@@ -7002,16 +6572,10 @@ async fn server_create_auto_onboards_online_sibling() {
     assert!(c_got, "sibling C must decrypt a channel message in the auto-onboarded server");
 }
 
-// ---------------------------------------------------------------------------
-// Step 9D follow-up (server CREATE/JOIN re-announces to OFFLINE siblings on
-// reconnect): the live SiblingServerAnnounce only reaches siblings online AT
-// create/join time. A sibling that was OFFLINE then never learned the server
-// exists — the asymmetry Vitalik hit (deletion reconciled via the grow-only
-// CRDT tombstone, but creation/join did NOT). Here C is OFFLINE when B creates
-// the server; C comes back online and must auto-onboard via the reconnect
-// re-announce (PeerJoined on B's side + RoomMembers on C's side), get its MLS
-// leaf, and decrypt a channel message — WITHOUT C ever calling JoinServer.
-// ---------------------------------------------------------------------------
+// Server create and join re-announce to OFFLINE siblings on reconnect. The live
+// announce only reaches siblings online at the time, so a sibling that was away
+// never learned the server existed. C comes back, auto-onboards, gets its MLS leaf
+// and decrypts a channel message without ever calling JoinServer.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
@@ -7022,7 +6586,6 @@ async fn server_create_reannounces_to_offline_sibling_on_reconnect() {
 
     let relay = MockRelay::new();
 
-    // M = our identity, devices B (creator) + C (the offline sibling).
     const M_MASTER: u8 = 240;
     const B_DEV: u8 = 241;
     const C_DEV: u8 = 242;
@@ -7046,13 +6609,11 @@ async fn server_create_reannounces_to_offline_sibling_on_reconnect() {
     let general = general_channel_of(&server_id);
     sleep_ms(1500).await;
 
-    // C is offline → it has not onboarded.
     assert!(
         !c.servers().contains(&server_id),
         "offline sibling C must NOT have the server yet (live announce can't reach it)"
     );
 
-    // --- C comes back online: the reconnect re-announce must onboard it ---
     drain_events(&mut c);
     relay.set_online(&c.device_id, true);
 
@@ -7072,14 +6633,12 @@ async fn server_create_reannounces_to_offline_sibling_on_reconnect() {
         c.servers()
     );
 
-    // B's MLS group must contain C's device leaf so C can decrypt channel messages.
     let b_leaves = b.mls_members(&server_id).await;
     assert!(
         b_leaves.contains(&c.device_id),
         "creator B's MLS group must contain reconnected sibling C's leaf, got {b_leaves:?}"
     );
 
-    // --- THE PAYOFF: B sends a channel message; C (re-announced sibling) decrypts it ---
     drain_events(&mut c);
     b.cmd_tx
         .send(NodeCommand::SendChannelMessage {
@@ -7131,14 +6690,10 @@ async fn server_create_reannounces_to_offline_sibling_on_reconnect() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// MANUAL state sync (Security → Your Devices "Sync from this device"): the
-// deterministic escape hatch. The DESTINATION device asks a chosen SOURCE
-// sibling to push its servers + friends. The source announces every server it
-// holds; the destination runs its join flow and the server appears (ServerJoined).
-// This is the user-triggered, on-demand equivalent of the reconnect re-announce —
-// guaranteed to work regardless of whether the automatic sync converged.
-// ---------------------------------------------------------------------------
+// MANUAL state sync ("Sync from this device"), the deterministic escape hatch: the
+// DESTINATION asks a chosen SOURCE sibling to push its servers and friends, the
+// source announces every server it holds, and the destination runs its join flow.
+// The on-demand equivalent of the reconnect re-announce.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
@@ -7149,7 +6704,6 @@ async fn manual_state_sync_pulls_servers_from_source_device() {
 
     let relay = MockRelay::new();
 
-    // M = our identity, devices B (SOURCE, owns a server) + C (DESTINATION, missing it).
     const M_MASTER: u8 = 250;
     const B_DEV: u8 = 251;
     const C_DEV: u8 = 252;
@@ -7175,13 +6729,11 @@ async fn manual_state_sync_pulls_servers_from_source_device() {
     sleep_ms(3000).await; // let C↔B re-meet so the request can target B
     drain_events(&mut c);
 
-    // C (destination) taps "Sync from this device" choosing B (source).
     c.cmd_tx
         .send(NodeCommand::RequestStateSync { source_device_id: b.device_id.clone() })
         .await
         .unwrap();
 
-    // C must onboard the server B pushed (ServerJoined → onServerCreated → UI list).
     let c_synced = wait_event(&mut c, std::time::Duration::from_secs(12), |ev| {
         matches!(ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id)
     })
@@ -7198,14 +6750,10 @@ async fn manual_state_sync_pulls_servers_from_source_device() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Per-channel MLS subgroups (Option B): a restricted (Admin+) channel encrypts
-// under its OWN MLS subgroup, so a plain Member is NOT a leaf and cannot decrypt
-// it — channel visibility is cryptographically enforced, not just UI-filtered.
-// Promotion adds the member to the subgroup (decrypts forward); demotion removes
-// it. Driven + inspected end to end via the raw subgroup leaf set + decrypted
-// channel message — no live devices.
-// ---------------------------------------------------------------------------
+// Per-channel MLS subgroups: a restricted channel encrypts under its OWN subgroup,
+// so a plain Member is not a leaf and cannot decrypt it. Channel visibility is
+// cryptographically enforced, not UI-filtered: promotion adds the member to the
+// subgroup, demotion removes it.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
@@ -7216,7 +6764,6 @@ async fn restricted_channel_subgroup_enforces_visibility() {
 
     let relay = MockRelay::new();
 
-    // O = owner, A = will be promoted to Admin, M = stays a plain Member.
     const O_MASTER: u8 = 60;
     const A_MASTER: u8 = 61;
     const M_MASTER: u8 = 62;
@@ -7259,7 +6806,6 @@ async fn restricted_channel_subgroup_enforces_visibility() {
     drain_events(&mut a);
     drain_events(&mut m);
 
-    // --- Owner creates a channel and makes it Admin+ restricted. ---
     o.cmd_tx
         .send(NodeCommand::CreateChannel {
             server_id: server_id.clone(),
@@ -7314,13 +6860,11 @@ async fn restricted_channel_subgroup_enforces_visibility() {
         !owner_sub_leaves.contains(&m.device_id),
         "plain Member M must NOT be a subgroup leaf, got {owner_sub_leaves:?}"
     );
-    // A doesn't hold the subgroup at all (never welcomed).
     assert!(
         !a.mls_members(&subgroup).await.contains(&a.device_id),
         "A must not hold the restricted subgroup before promotion"
     );
 
-    // --- Owner posts to the restricted channel. A (Member) must NOT decrypt it. ---
     drain_events(&mut a);
     drain_events(&mut m);
     o.cmd_tx
@@ -7345,7 +6889,6 @@ async fn restricted_channel_subgroup_enforces_visibility() {
         "A's DB must not contain the restricted message it can't decrypt"
     );
 
-    // --- Promote A to Admin → reconciler pulls A's KeyPackage → A joins subgroup. ---
     o.cmd_tx
         .send(NodeCommand::ChangeRole {
             server_id: server_id.clone(),
@@ -7366,13 +6909,11 @@ async fn restricted_channel_subgroup_enforces_visibility() {
         a.mls_members(&subgroup).await.contains(&a.device_id),
         "after promotion A must hold the subgroup itself"
     );
-    // M is still a plain Member → still excluded.
     assert!(
         !owner_sub_leaves2.contains(&m.device_id),
         "M (still Member) must remain excluded from the subgroup, got {owner_sub_leaves2:?}"
     );
 
-    // --- Owner posts again; now A (Admin) DECRYPTS it; M still cannot. ---
     drain_events(&mut a);
     drain_events(&mut m);
     o.cmd_tx
@@ -7397,7 +6938,6 @@ async fn restricted_channel_subgroup_enforces_visibility() {
     .await;
     assert!(!m_got2, "plain Member M must STILL not decrypt the restricted message");
 
-    // --- Demote A back to Member → reconciler removes A's leaf from the subgroup. ---
     o.cmd_tx
         .send(NodeCommand::ChangeRole {
             server_id: server_id.clone(),
@@ -7415,14 +6955,10 @@ async fn restricted_channel_subgroup_enforces_visibility() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Label-gated channel access (issue #32). A channel gated on an ACCESS label is
-// encrypted under its own MLS subgroup; only label holders (plus Admin+/Owner)
-// are leaves. The gate op is paired with a legacy `visibility: admin` stamp
-// (old-client fail-closed fallback) — both must replicate. Assigning the label
-// admits the member (KeyPackage pull → Welcome); unassigning evicts the leaf;
-// picking a plain tier clears the gate everywhere and tears the subgroup down.
-// ---------------------------------------------------------------------------
+// Label-gated channel access (issue #32): a channel gated on an ACCESS label is
+// encrypted under its own subgroup, and only label holders plus Admin+ are leaves.
+// The gate op is paired with a legacy `visibility: admin` stamp so old clients fail
+// closed, and both must replicate.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
 async fn label_gated_channel_subgroup_and_fallback() {
@@ -7432,7 +6968,6 @@ async fn label_gated_channel_subgroup_and_fallback() {
 
     let relay = MockRelay::new();
 
-    // O = owner, V = plain member who will receive the VIP label, M = stays out.
     const O_MASTER: u8 = 103;
     const V_MASTER: u8 = 104;
     const M_MASTER: u8 = 105;
@@ -7472,7 +7007,6 @@ async fn label_gated_channel_subgroup_and_fallback() {
     drain_events(&mut v);
     drain_events(&mut m);
 
-    // --- Channel + access label. ---
     o.cmd_tx
         .send(NodeCommand::CreateChannel {
             server_id: server_id.clone(),
@@ -7518,7 +7052,6 @@ async fn label_gated_channel_subgroup_and_fallback() {
     let vip_label = vip_label.expect("VIP label should exist on the owner");
     assert_eq!(o.label_access(&server_id, &vip_label), Some(true));
 
-    // --- Gate the channel on the label. ---
     o.cmd_tx
         .send(NodeCommand::SetChannelVisibilityLabels {
             server_id: server_id.clone(),
@@ -7558,7 +7091,6 @@ async fn label_gated_channel_subgroup_and_fallback() {
     assert!(!owner_leaves.contains(&v.device_id), "V must not be a leaf pre-label");
     assert!(!owner_leaves.contains(&m.device_id), "M must not be a leaf");
 
-    // Not decryptable by V pre-label.
     drain_events(&mut v);
     o.cmd_tx
         .send(NodeCommand::SendChannelMessage {
@@ -7577,7 +7109,6 @@ async fn label_gated_channel_subgroup_and_fallback() {
     .await;
     assert!(!v_got, "V must NOT decrypt the gated message before holding the label");
 
-    // --- Assign the label → V is admitted to the subgroup and decrypts. ---
     o.cmd_tx
         .send(NodeCommand::AssignLabel {
             server_id: server_id.clone(),
@@ -7627,7 +7158,6 @@ async fn label_gated_channel_subgroup_and_fallback() {
     .await;
     assert!(!m_got2, "unlabeled M must still not decrypt");
 
-    // --- Unassign → V's leaf is evicted. ---
     o.cmd_tx
         .send(NodeCommand::UnassignLabel {
             server_id: server_id.clone(),
@@ -7647,7 +7177,6 @@ async fn label_gated_channel_subgroup_and_fallback() {
     );
     assert!(!v.can_see_channel(&server_id, &vip_cid, &v_master));
 
-    // --- Picking a plain tier clears the gate everywhere + tears down. ---
     o.cmd_tx
         .send(NodeCommand::SetChannelVisibility {
             server_id: server_id.clone(),
@@ -7674,11 +7203,9 @@ async fn label_gated_channel_subgroup_and_fallback() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Access labels are NOT self-assignable (that would be privilege escalation —
-// the label gates channels). The authoring gate refuses locally and the
-// `op_allowed` ingest gate refuses remotely; cosmetic labels keep self-service.
-// ---------------------------------------------------------------------------
+// Access labels are NOT self-assignable, since the label gates channels: the
+// authoring gate refuses locally and `op_allowed` refuses remotely, while cosmetic
+// labels keep self-service.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
 async fn access_label_self_assign_locked() {
@@ -7713,7 +7240,6 @@ async fn access_label_self_assign_locked() {
     assert!(joined, "M should join");
     sleep_ms(3000).await;
 
-    // Owner creates one access label and one cosmetic label.
     for (name, access) in [("Staff", true), ("Fun", false)] {
         o.cmd_tx
             .send(NodeCommand::CreateLabel {
@@ -7740,7 +7266,6 @@ async fn access_label_self_assign_locked() {
     assert_eq!(m.label_access(&server_id, &staff_label), Some(true));
     drain_events(&mut m);
 
-    // M tries to self-assign the ACCESS label → refused at authoring.
     m.cmd_tx
         .send(NodeCommand::AssignLabel {
             server_id: server_id.clone(),
@@ -7764,7 +7289,6 @@ async fn access_label_self_assign_locked() {
         "the refused assignment must not land locally either"
     );
 
-    // Cosmetic self-assign still works and replicates.
     m.cmd_tx
         .send(NodeCommand::AssignLabel {
             server_id: server_id.clone(),
@@ -7783,7 +7307,6 @@ async fn access_label_self_assign_locked() {
     }
     assert!(fun_on_owner, "cosmetic self-assign must replicate to the owner");
 
-    // A MANAGE_ROLES holder (owner) CAN assign the access label to M.
     o.cmd_tx
         .send(NodeCommand::AssignLabel {
             server_id: server_id.clone(),
@@ -7803,11 +7326,8 @@ async fn access_label_self_assign_locked() {
     assert!(staff_on_m, "owner-assigned access label must replicate to M");
 }
 
-// ---------------------------------------------------------------------------
-// Temporary channel access grants — MLS lifecycle. A grant admits a plain
-// Member to a restricted channel's subgroup (decryptable); revoking evicts the
-// leaf and hides the channel again.
-// ---------------------------------------------------------------------------
+// Temporary channel access grants, MLS lifecycle: a grant admits a plain Member to
+// a restricted channel's subgroup, and revoking evicts the leaf.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
 async fn channel_grant_lifecycle_mls() {
@@ -7842,7 +7362,6 @@ async fn channel_grant_lifecycle_mls() {
     assert!(joined, "M should join");
     sleep_ms(3000).await;
 
-    // Restricted channel M cannot see.
     o.cmd_tx
         .send(NodeCommand::CreateChannel {
             server_id: server_id.clone(),
@@ -7877,7 +7396,6 @@ async fn channel_grant_lifecycle_mls() {
     let subgroup = crate::crypto::subgroup_id(&server_id, &cid);
     assert!(!o.mls_members(&subgroup).await.contains(&m.device_id));
 
-    // Grant M open-ended access → admitted to the subgroup, decrypts.
     o.cmd_tx
         .send(NodeCommand::GrantChannelAccess {
             server_id: server_id.clone(),
@@ -7914,7 +7432,6 @@ async fn channel_grant_lifecycle_mls() {
     .await;
     assert!(m_got, "granted M must decrypt the restricted message");
 
-    // Revoke → leaf evicted, channel hidden again.
     o.cmd_tx
         .send(NodeCommand::RevokeChannelAccess {
             server_id: server_id.clone(),
@@ -7933,11 +7450,8 @@ async fn channel_grant_lifecycle_mls() {
     assert!(!leaves2.contains(&m.device_id), "revoked M's leaf must be evicted, got {leaves2:?}");
 }
 
-// ---------------------------------------------------------------------------
-// Temporary grant EXPIRY. The predicate denies lazily the instant the clock
-// passes `expires_at` (NO revoke op — mute precedent); the cfg(test) 2s sweep
-// then drives the MLS leaf removal so the member also loses the key material.
-// ---------------------------------------------------------------------------
+// Temporary grant EXPIRY: the predicate denies lazily the instant the clock passes
+// `expires_at` (no revoke op), and the sweep then removes the MLS leaf.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
 async fn channel_grant_expiry_sweep() {
@@ -8053,7 +7567,6 @@ async fn channel_grant_expiry_sweep() {
     }
     assert!(evicted, "the expiry sweep must remove M's subgroup leaf");
 
-    // A fresh message is not decryptable by the expired guest.
     drain_events(&mut m);
     o.cmd_tx
         .send(NodeCommand::SendChannelMessage {
@@ -8073,17 +7586,11 @@ async fn channel_grant_expiry_sweep() {
     assert!(!m_got, "expired guest must not decrypt fresh messages");
 }
 
-// ---------------------------------------------------------------------------
-// Per-channel MLS subgroups — PHASE 2 (VOICE). A RESTRICTED voice channel derives
-// its SFrame media key from the channel's own MLS SUBGROUP, not the server-wide
-// group. The harness can't drive the WebRTC media plane, so it verifies the
-// KEY LAYER: only members whose role satisfies the channel's visibility tier are
-// leaves of the voice subgroup (== the only nodes that can `export_secret` the
-// SFrame key). A non-qualifying Member is excluded → can't derive the key → would
-// decode nothing; the Rust VC-join guard additionally REJECTS its join outright.
-// Promotion adds it to the subgroup; demotion removes it (mid-call re-key / fwd
-// secrecy). Mirrors the text test but on a `voice` channel.
-// ---------------------------------------------------------------------------
+// Per-channel subgroups, VOICE. A restricted voice channel derives its SFrame media
+// key from the channel's own subgroup, so only members whose role satisfies the
+// visibility tier are leaves and can `export_secret` the key. A non-qualifying
+// Member is excluded and its VC join is rejected outright; promotion adds it,
+// demotion removes it.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
@@ -8094,7 +7601,6 @@ async fn restricted_voice_channel_subgroup_enforces_sframe_membership() {
 
     let relay = MockRelay::new();
 
-    // O = owner, A = promoted to Admin, M = stays a plain Member.
     const O_MASTER: u8 = 80;
     const A_MASTER: u8 = 81;
     const M_MASTER: u8 = 82;
@@ -8131,19 +7637,10 @@ async fn restricted_voice_channel_subgroup_enforces_sframe_membership() {
         .await;
         assert!(joined, "{who} should join the server");
     }
-    // Wait until ALL THREE distinct identities are leaves of the server-wide MLS
-    // group — the precondition for an MLS-broadcast ChannelAdded op to reach them.
-    // (Batch-add commits happen on a 2s timer; give it room.)
-    //
-    // The budget is 60s, not the 24s this used to allow. On a coverage-
-    // instrumented CI runner this test takes ~94s against ~40s locally, and
-    // under that squeeze the three sequential batch-add commits overran 24s:
-    // the test flaked at THIS setup assert while the SFrame behaviour it
-    // actually covers was never reached — green in the Rust Coverage job and
-    // red in the Sonar job on the very SAME commit (2026-08-15). The loop exits
-    // as soon as the leaves converge, so a healthy run costs what it did before.
-    // 24s was also the shortest budget of any comparable multi-identity wait in
-    // this file (siblings use 15-25 iterations); this brings it in line.
+    // Wait until ALL THREE distinct identities are leaves of the server-wide group,
+    // the precondition for an MLS-broadcast ChannelAdded op to reach them. The budget
+    // is 60s because a coverage-instrumented runner takes about twice as long; the
+    // loop exits as soon as the leaves converge.
     let mut srv_ok = false;
     let mut last_leaves: Vec<String> = Vec::new();
     for _ in 0..30 {
@@ -8172,7 +7669,6 @@ async fn restricted_voice_channel_subgroup_enforces_sframe_membership() {
     drain_events(&mut a);
     drain_events(&mut m);
 
-    // --- Owner creates a VOICE channel, makes it Admin+ restricted. ---
     o.cmd_tx
         .send(NodeCommand::CreateChannel {
             server_id: server_id.clone(),
@@ -8226,7 +7722,6 @@ async fn restricted_voice_channel_subgroup_enforces_sframe_membership() {
     // absence only means something once real time has passed.
     sleep_ms(800).await;
 
-    // --- Pre-promotion: only the OWNER is a subgroup leaf (== SFrame holder). ---
     let leaves0 = o.mls_members(&subgroup).await;
     assert!(
         leaves0.contains(&o.device_id),
@@ -8273,7 +7768,6 @@ async fn restricted_voice_channel_subgroup_enforces_sframe_membership() {
     .await;
     assert!(!o_saw_m, "owner must not see a rejected member enter the restricted voice channel");
 
-    // --- Promote A to Admin → reconciler adds A to the voice subgroup. ---
     o.cmd_tx
         .send(NodeCommand::ChangeRole {
             server_id: server_id.clone(),
@@ -8307,7 +7801,6 @@ async fn restricted_voice_channel_subgroup_enforces_sframe_membership() {
         "A must see the voice channel as admin-restricted before joining"
     );
 
-    // --- A (Admin) now joins the voice channel — allowed; participates. ---
     drain_events(&mut o);
     a.cmd_tx
         .send(NodeCommand::VoiceChannelJoin {
@@ -8322,7 +7815,6 @@ async fn restricted_voice_channel_subgroup_enforces_sframe_membership() {
     .await;
     assert!(a_joined, "promoted Admin A must be allowed to join the restricted voice channel");
 
-    // --- Demote A back to Member → reconciler removes A's leaf (mid-call re-key). ---
     o.cmd_tx
         .send(NodeCommand::ChangeRole {
             server_id: server_id.clone(),
@@ -8340,14 +7832,10 @@ async fn restricted_voice_channel_subgroup_enforces_sframe_membership() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Real-time channel visibility/posting propagation to a REMOTE member. The UI
-// reads channel visibility/posting + role from the local DB (get_server_channels
-// / getMyRole) and recomputes visibleChannelsProvider / canPostInChannelProvider.
-// This test proves the DATA LAYER those providers read reflects a LIVE change on
-// the receiving member (the contract the Dart reactivity fix depends on), and
-// that an offline member catches up on reconnect. No live devices / UI.
-// ---------------------------------------------------------------------------
+// Real-time channel visibility and posting propagation to a REMOTE member. The UI
+// recomputes its providers from the local DB, so this proves the DATA LAYER those
+// providers read reflects a live change on the receiving member, and that an
+// offline member catches up on reconnect.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
@@ -8358,7 +7846,6 @@ async fn channel_visibility_posting_propagate_to_remote_member_realtime() {
 
     let relay = MockRelay::new();
 
-    // O = owner (admin tier), V = a plain Member viewer.
     const O_MASTER: u8 = 70;
     const V_MASTER: u8 = 71;
     let o_master = NativeKeypair::from_secret_bytes(&seed_bytes(O_MASTER)).peer_id();
@@ -8382,7 +7869,6 @@ async fn channel_visibility_posting_propagate_to_remote_member_realtime() {
     assert!(joined, "V should join");
     sleep_ms(3000).await;
 
-    // Owner creates a channel. Both start seeing it as "everyone".
     o.cmd_tx
         .send(NodeCommand::CreateChannel {
             server_id: server_id.clone(),
@@ -8404,7 +7890,6 @@ async fn channel_visibility_posting_propagate_to_remote_member_realtime() {
     let cid = cid.expect("channel id");
     sleep_ms(2500).await; // ChannelAdded fans to V
 
-    // Baseline: V (plain Member) sees the channel as "everyone" and CAN see it.
     assert_eq!(v.channel_visibility(&server_id, &cid).as_deref(), Some("everyone"),
         "V's DB shows the new channel as everyone-visible");
     assert!(v.can_see_channel(&server_id, &cid, &v_master),
@@ -8412,7 +7897,6 @@ async fn channel_visibility_posting_propagate_to_remote_member_realtime() {
     assert_eq!(v.channel_posting(&server_id, &cid).as_deref(), Some("everyone"),
         "V's DB shows everyone-posting baseline");
 
-    // --- LIVE visibility change: owner restricts the channel to Admin+. ---
     o.cmd_tx
         .send(NodeCommand::SetChannelVisibility {
             server_id: server_id.clone(),
@@ -8432,7 +7916,6 @@ async fn channel_visibility_posting_propagate_to_remote_member_realtime() {
     }
     assert!(vis_ok, "V's DB must reflect the LIVE visibility change to admin (got {:?})",
         v.channel_visibility(&server_id, &cid));
-    // The exact predicate visibleChannelsProvider uses now hides it for V.
     assert!(!v.can_see_channel(&server_id, &cid, &v_master),
         "V (Member) must NOT be able to see an Admin+ channel after the live change → UI hides + evicts");
 
@@ -8466,7 +7949,6 @@ async fn channel_visibility_posting_propagate_to_remote_member_realtime() {
     }
     assert!(post_ok, "V's DB must reflect the LIVE posting change to moderator + visibility back to everyone (got vis={:?} post={:?})",
         v.channel_visibility(&server_id, &cid), v.channel_posting(&server_id, &cid));
-    // V can SEE it again (everyone) but the input bar locks (Member can't post in moderator+).
     assert!(v.can_see_channel(&server_id, &cid, &v_master), "V sees the everyone channel again");
 
     // --- ABSENT-DURING-CHANGE catch-up: a member that was NOT present when the
@@ -8505,12 +7987,9 @@ async fn channel_visibility_posting_propagate_to_remote_member_realtime() {
         "after catch-up, V can't see the now-Admin+ channel");
 }
 
-// ---------------------------------------------------------------------------
-// MODERATION TRIO: mute (timed + permanent), per-channel slow mode, and
-// media-only channels. Covers: CRDT convergence of all three settings to a
-// remote member, send-side rejection (the Error events the input bar toasts),
-// unmute/expiry restoring posting, and the Moderator+ slow-mode exemption.
-// ---------------------------------------------------------------------------
+// MODERATION TRIO: mute (timed and permanent), per-channel slow mode and media-only
+// channels. Covers CRDT convergence to a remote member, send-side rejection, unmute
+// and expiry restoring posting, and the Moderator+ slow-mode exemption.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn moderation_trio_mute_slowmode_mediaonly() {
@@ -8544,7 +8023,6 @@ async fn moderation_trio_mute_slowmode_mediaonly() {
     sleep_ms(3000).await;
     let general = general_channel_of(&server_id);
 
-    // --- Baseline: V can post. ---
     v.cmd_tx
         .send(NodeCommand::SendChannelMessage {
             server_id: server_id.clone(),
@@ -8562,7 +8040,6 @@ async fn moderation_trio_mute_slowmode_mediaonly() {
     .await;
     assert!(got, "owner receives V's baseline message");
 
-    // --- PERMANENT MUTE: converges to V, V's send is rejected. ---
     o.cmd_tx
         .send(NodeCommand::MuteMember {
             server_id: server_id.clone(),
@@ -8601,7 +8078,6 @@ async fn moderation_trio_mute_slowmode_mediaonly() {
         "owner must never store a message a muted member tried to send"
     );
 
-    // --- UNMUTE restores posting. ---
     o.cmd_tx
         .send(NodeCommand::UnmuteMember {
             server_id: server_id.clone(),
@@ -8632,7 +8108,6 @@ async fn moderation_trio_mute_slowmode_mediaonly() {
     .await;
     assert!(got, "after unmute V can post again");
 
-    // --- TIMED MUTE expires on its own (no unmute op). ---
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -8671,7 +8146,6 @@ async fn moderation_trio_mute_slowmode_mediaonly() {
     .await;
     assert!(got, "V can post after the timed mute lapses");
 
-    // --- SLOW MODE: 5s window; Member throttled, Owner exempt. ---
     o.cmd_tx
         .send(NodeCommand::SetChannelSlowMode {
             server_id: server_id.clone(),
@@ -8724,7 +8198,6 @@ async fn moderation_trio_mute_slowmode_mediaonly() {
     assert!(!o_msgs.iter().any(|m| m.text == "slow-2"),
         "slow-2 must never reach the owner (throttled at V's send)");
 
-    // Owner is Moderator+ → exempt: two back-to-back sends both land at V.
     o.cmd_tx
         .send(NodeCommand::SendChannelMessage {
             server_id: server_id.clone(),
@@ -8756,7 +8229,6 @@ async fn moderation_trio_mute_slowmode_mediaonly() {
     assert!(v_msgs.iter().any(|m| m.text == "owner-fast-1"),
         "V stored the owner's first rapid message too (exempt sender not dropped at ingest)");
 
-    // --- MEDIA-ONLY: text-only sends are rejected. ---
     o.cmd_tx
         .send(NodeCommand::SetChannelMediaOnly {
             server_id: server_id.clone(),
@@ -8797,17 +8269,11 @@ async fn moderation_trio_mute_slowmode_mediaonly() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// ANTI-MIS-LINK (the security fix): a friend request between two DISTINCT
-// identities must NEVER fuse them. Sending a friend request makes the requester
-// join the TARGET's `inbox:{target}` room to deliver — which used to trip the
-// inbox-proof, mis-merging the stranger as the target's own sibling device
-// (resolver poison + device-list merge + friend-list leak + auto snapshot/link),
-// and swallowing the real request as a "self friend request". With the
-// cryptographic sibling-proof handshake, the stranger (holding only ITS OWN
-// master key) cannot answer the target's nonce challenge, so NO merge happens and
-// the request flows normally.
-// ---------------------------------------------------------------------------
+// ANTI-MIS-LINK: a friend request between two DISTINCT identities must NEVER fuse
+// them. Sending one makes the requester join the TARGET's inbox room, which used to
+// trip the inbox-proof and merge the stranger as a sibling device (resolver poison,
+// device-list merge, friend-list leak). The stranger holds only ITS OWN master key
+// and cannot answer the target's nonce challenge.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
@@ -8858,7 +8324,6 @@ async fn friend_request_between_strangers_does_not_merge() {
     );
     sleep_ms(2000).await; // give any (buggy) merge / handshake the time to (not) happen
 
-    // --- THE SECURITY ASSERTIONS: A and B remain DISTINCT identities ---
     assert!(
         !super::resolver::same_identity(&a_master, &b_master),
         "A and B must remain distinct identities after a friend request"
@@ -8872,7 +8337,6 @@ async fn friend_request_between_strangers_does_not_merge() {
         "B's device must NOT resolve to A's master (symmetric — no poisoning either way)"
     );
 
-    // B must NOT have merged A's device into B's own master-signed device list.
     let b_devices = super::resolver::devices_for(&b_master);
     assert!(
         !b_devices.contains(&a_dev),
@@ -8885,18 +8349,15 @@ async fn friend_request_between_strangers_does_not_merge() {
             list.devices
         );
     }
-    // Symmetric: A must not have merged B's device.
     let a_devices = super::resolver::devices_for(&a_master);
     assert!(
         !a_devices.contains(&b_dev),
         "A's device set must NOT contain B's device, got {a_devices:?}"
     );
 
-    // B's incoming-friend row is genuinely pending/incoming (the normal flow ran).
-    // It is keyed by A's MASTER (friend save sites resolve device→master; B learned
-    // A's device→master from A's published device list). If B hadn't learned the
-    // mapping yet it would key under the device id — accept either, but it must be
-    // one of A's ids and NOT collapsed into B's own identity.
+    // B's incoming-friend row is genuinely pending and keyed by A's MASTER, since save
+    // sites resolve device to master. If B has not learned the mapping yet it keys under
+    // the device id: either is fine, but it must not collapse into B's own identity.
     let b_friends = b.store().load_friends(None).unwrap_or_default();
     assert!(
         b_friends.iter().any(|(pid, status, dir, _, _)| {
@@ -8904,7 +8365,6 @@ async fn friend_request_between_strangers_does_not_merge() {
         }),
         "B must hold a pending INCOMING friend row for A (master or device), got {b_friends:?}"
     );
-    // And that row must key on A, never on B's own identity.
     assert!(
         b_friends.iter().all(|(pid, _, _, _, _)| !super::resolver::same_identity(pid, &b_master)),
         "no friend row may be keyed under B's own identity, got {b_friends:?}"
@@ -8914,14 +8374,10 @@ async fn friend_request_between_strangers_does_not_merge() {
     drop(b);
 }
 
-// ---------------------------------------------------------------------------
-// Friend convergence across DEVICE≠MASTER (the VM/AL bug): when A friend-requests
-// B (whose device id ≠ master id) and B accepts, A must LEARN B's device→master
-// mapping and end with a SINGLE accepted friend keyed by B's MASTER — not a split
-// (incoming under B's device id + outgoing under B's master). The fix: the friend
-// handlers push our profile+device-list to the peer over the durable room (the
-// `is_new` gate otherwise suppressed it after the transient inbox window).
-// ---------------------------------------------------------------------------
+// Friend convergence across DEVICE != MASTER: when A friend-requests B and B
+// accepts, A must LEARN B's device-to-master mapping and end with a SINGLE accepted
+// friend keyed by B's MASTER, not a split row per id. The handlers push our profile
+// and device list over the durable room, past the `is_new` gate.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
@@ -8932,7 +8388,6 @@ async fn friend_converges_to_master_across_distinct_device() {
 
     let relay = MockRelay::new();
 
-    // A and B are distinct identities, EACH with device != master (the VM/AL shape).
     const A_MASTER: u8 = 8;
     const A_DEV: u8 = 9;
     const B_MASTER: u8 = 11;
@@ -8947,7 +8402,6 @@ async fn friend_converges_to_master_across_distinct_device() {
     drain_events(&mut a);
     drain_events(&mut b);
 
-    // A requests B (by master). B accepts.
     a.cmd_tx
         .send(NodeCommand::SendFriendRequest { peer_id: b_master.clone() })
         .await
@@ -8961,11 +8415,9 @@ async fn friend_converges_to_master_across_distinct_device() {
     drain_events(&mut a);
     drain_events(&mut b);
 
-    // --- THE CORE FIX: A learned B's device→master mapping (the pushed device list).
-    // This is what was BROKEN: A's only chance to ingest B's device list was the
-    // transient inbox window, then the is_new gate suppressed it forever, so A never
-    // collapsed B's device→master. The friend handlers now push the device list over
-    // the durable room. ---
+    // THE CORE FIX: A learned B's device-to-master mapping from the pushed device list.
+    // A's only chance used to be the transient inbox window, after which the is_new gate
+    // suppressed it forever and A never collapsed B's device.
     assert_eq!(
         super::resolver::resolve(&b_dev), b_master,
         "A must resolve B's device → B's master after the device-list push (the fix)"
@@ -8988,12 +8440,9 @@ async fn friend_converges_to_master_across_distinct_device() {
     drop(b);
 }
 
-// ---------------------------------------------------------------------------
-// Showcase board replication (profile field, 2026-07): A's board JSON rides
-// ProfileUpdate to B and lands keyed by A's MASTER (A uses device != master);
-// a later update that doesn't touch the board (input None → the handler
-// rebroadcasts the STORED value) must not lose it; Some("") clears it.
-// ---------------------------------------------------------------------------
+// Showcase board replication: A's board JSON rides ProfileUpdate to B keyed by A's
+// MASTER, a later update that does not touch the board must not lose it (None means
+// preserve), and `Some("")` clears it.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
@@ -9031,11 +8480,9 @@ async fn showcase_board_replicates_preserves_and_clears() {
         support_creds: None,
     };
 
-    // --- 1. A composes an ENRICHED game-block board (+ a two-asset bundle:
-    // cover + company logo) → B stores both under A's MASTER. The baked game
-    // card (Steam/IGDB details, dev credit with a logo asset) replicates
-    // exactly like any board: JSON is opaque, images ride the bundle. This
-    // exercises the multi-asset (cover + logo) replication path. ---
+    // 1. A composes an ENRICHED game-block board plus a two-asset bundle (cover and
+    // company logo): the JSON is opaque and the images ride the bundle, which exercises
+    // the multi-asset replication path.
     use sha2::{Digest, Sha256};
     let cover_bytes = vec![7u8; 512];
     let cover_hash = hex::encode(Sha256::digest(&cover_bytes));
@@ -9094,7 +8541,6 @@ async fn showcase_board_replicates_preserves_and_clears() {
     assert_eq!(p.showcase_assets.as_deref(), Some(bundle.as_slice()),
         "an update that didn't touch the assets must NOT lose them");
 
-    // --- 3. Explicit clear (Some("") / empty bundle) propagates. ---
     drain_events(&mut b);
     a.cmd_tx.send(send_update("cleared", Some(String::new()), Some(Vec::new()))).await.unwrap();
     let got = wait_event(&mut b, std::time::Duration::from_secs(8), |ev| {
@@ -9111,15 +8557,10 @@ async fn showcase_board_replicates_preserves_and_clears() {
     drop(b);
 }
 
-// ---------------------------------------------------------------------------
-// POSITIVE (no regression): the sibling-proof handshake itself links two genuine
-// siblings that meet LIVE in the inbox with NO pre-seeded resolver. Unlike
-// `linked_sibling_resolves_both_devices_at_startup` (which pre-seeds the resolver
-// from an imported device list), here neither device knows the other at boot —
-// the ONLY way they converge is the challenge→master-signed-response→merge path.
-// Proves the handshake replaces the old bare-inbox shortcut without breaking
-// genuine multi-device convergence.
-// ---------------------------------------------------------------------------
+// The sibling-proof handshake links two genuine siblings that meet LIVE in the inbox
+// with NO pre-seeded resolver: neither device knows the other at boot, so the
+// challenge, master-signed response and merge are the only way they converge. The
+// handshake must not break genuine multi-device convergence.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
@@ -9177,16 +8618,10 @@ async fn genuine_siblings_converge_via_proof_handshake() {
     drop(c);
 }
 
-// ---------------------------------------------------------------------------
-// Friend REMOVAL must be symmetric across a device != master shape. The bug:
-// every remove_friend call (send side + the FriendRemove receive arm) passed a
-// RAW id with no device→master resolution. Once the UI collapses to master, A
-// removing B addressed the bare master (no socket → the online branch was
-// skipped → a stuck offline tombstone) while B, receiving FriendRemove from A's
-// DEVICE id, DELETEd `WHERE peer_id = <A device>` and MISSED its master-keyed
-// row — so B still listed A. This test drives the real request/accept/remove
-// flow and asserts BOTH sides end with NO row for the other.
-// ---------------------------------------------------------------------------
+// Friend REMOVAL must be symmetric across a device != master shape. Every
+// remove_friend call used to pass a RAW id with no resolution, so A addressed the
+// bare master while B deleted `WHERE peer_id = <A device>` and missed its
+// master-keyed row. Both sides must end with NO row for the other.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests vs the global resolver
@@ -9197,7 +8632,6 @@ async fn friend_removal_is_symmetric_across_distinct_device() {
 
     let relay = MockRelay::new();
 
-    // A and B distinct identities, EACH device != master (the VM/AL shape).
     const A_MASTER: u8 = 8;
     const A_DEV: u8 = 9;
     const B_MASTER: u8 = 11;
@@ -9233,12 +8667,9 @@ async fn friend_removal_is_symmetric_across_distinct_device() {
     let a_id_for_accept = a_id_as_b_saw.expect("captured the requester id");
     sleep_ms(1500).await; // let A's device list propagate so B can resolve A→master
 
-    // Accept and wait for BOTH sides to record the accepted friendship. Acceptance
-    // delivery depends on the device lists having propagated so both sides agree on
-    // the DM room — in the harness that can take a couple of round-trips, so re-send
-    // the (idempotent) accept and re-check up to a few times rather than racing a
-    // single fixed sleep. This mirrors real use, where convergence is within
-    // seconds and the human clicks Accept well after the request lands.
+    // Accept and wait for BOTH sides to record it. Delivery depends on the device lists
+    // having propagated so both agree on the DM room, so re-send the idempotent accept
+    // a few times rather than racing one fixed sleep.
     let mut converged = false;
     for _ in 0..6 {
         b.cmd_tx
@@ -9262,7 +8693,6 @@ async fn friend_removal_is_symmetric_across_distinct_device() {
         "precondition: both A and B must list each other as accepted (master-keyed) before removal"
     );
 
-    // --- THE ACT: A removes B (by MASTER, exactly as the collapsed UI does). ---
     a.cmd_tx
         .send(NodeCommand::RemoveFriend { peer_id: b_master.clone() })
         .await
@@ -9276,7 +8706,6 @@ async fn friend_removal_is_symmetric_across_distinct_device() {
     assert!(b_removed, "B must receive the FriendRemove and emit FriendRemoved");
     sleep_ms(500).await;
 
-    // --- ASSERT: NEITHER side has ANY row for the other (no ghost, no asymmetry). ---
     let a_rows_for_b: Vec<_> = a.store().load_friends(None).unwrap_or_default()
         .into_iter()
         .filter(|(pid, _, _, _, _)| super::resolver::same_identity(pid, &b_master))
@@ -9298,16 +8727,10 @@ async fn friend_removal_is_symmetric_across_distinct_device() {
     drop(b);
 }
 
-// ---------------------------------------------------------------------------
 // The REQUESTER must end up with an ACCEPTED friend row after the other side
-// accepts — even though it was the requester (it never clicked Accept). The bug:
-// the accepter's FriendAccept could be lost (the requester's device raced the
-// accept and wasn't yet in the accepter's DM room, OR the FriendRequest-receive
-// handler joined a DEVICE-keyed DM room that the requester never shared), so the
-// requester stayed stuck "pending outgoing" forever. The pending-accepts queue +
-// master-keyed DM-room join fix this: the accept is (re)delivered when the
-// requester's device appears. This test pins the REQUESTER's side specifically.
-// ---------------------------------------------------------------------------
+// accepts, even though it never clicked Accept. The FriendAccept could be lost (the
+// requester was not yet in the accepter's DM room, or that room was device-keyed),
+// leaving it stuck "pending outgoing" forever.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)]
@@ -9318,7 +8741,6 @@ async fn requester_gets_accepted_row_after_acceptance() {
 
     let relay = MockRelay::new();
 
-    // REQUESTER R and ACCEPTER C, each device != master.
     const R_MASTER: u8 = 30;
     const R_DEV: u8 = 31;
     const C_MASTER: u8 = 32;
@@ -9332,7 +8754,6 @@ async fn requester_gets_accepted_row_after_acceptance() {
     drain_events(&mut r);
     drain_events(&mut c);
 
-    // R requests C (by master).
     r.cmd_tx
         .send(NodeCommand::SendFriendRequest { peer_id: c_master.clone() })
         .await
@@ -9381,18 +8802,11 @@ async fn requester_gets_accepted_row_after_acceptance() {
     drop(c);
 }
 
-// ---------------------------------------------------------------------------
-// Temporary nicknames (2026-07-16): a nickname is claimed under the claimer's
-// WS-auth DEVICE id, but friend requests must target the MASTER — the claim now
-// carries the master through the relay and resolve hands it back (`master_id`),
-// so a stranger's request lands in `inbox:{master}` (the room the claimer
-// actually listens on) instead of queuing forever under a device id.
-//
-// Harness caveat: the resolver is process-global, so B's node incidentally
-// knows A's device→master mapping here (in production a stranger's resolver is
-// COLD). The relay-reported master_id path this test drives bypasses the
-// resolver entirely; the `nickname_master` inspector pins the new plumbing.
-// ---------------------------------------------------------------------------
+// Temporary nicknames: a nickname is claimed under the claimer's WS-auth DEVICE id,
+// but friend requests must target the MASTER, so the claim carries the master
+// through the relay and resolve hands it back. Harness caveat: the resolver is
+// process-global, so B's node incidentally knows A's mapping; the relay-reported
+// `master_id` path this test drives bypasses the resolver entirely.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
@@ -9419,7 +8833,6 @@ async fn nickname_friend_request_reaches_multi_device_claimer() {
     drain_events(&mut a);
     drain_events(&mut b);
 
-    // A claims a nickname; the claim must carry A's MASTER to the relay.
     a.cmd_tx
         .send(NodeCommand::ClaimNickname { nickname: "testnick".to_string() })
         .await
@@ -9449,7 +8862,6 @@ async fn nickname_friend_request_reaches_multi_device_claimer() {
     assert!(a_got, "claimer A must receive the stranger's friend request");
     sleep_ms(800).await;
 
-    // B's outgoing row is keyed by A's MASTER — never the device id.
     let b_rows = b.store().load_friends(None).unwrap_or_default();
     assert!(
         b_rows.iter().any(|r| r.0 == a_master && r.1 == "pending" && r.2 == "outgoing"),
@@ -9464,16 +8876,10 @@ async fn nickname_friend_request_reaches_multi_device_claimer() {
     drop(b);
 }
 
-// ---------------------------------------------------------------------------
-// REMOVE → RE-ADD must NOT ping-pong. The bug: removing a friend while they were
-// offline queued a FriendRemove; re-adding then queued a FriendRequest — and on
-// the peer's reconnect BOTH drained, sending a contradictory FriendRequest +
-// FriendRemove. The peer removed us back and the friendship flapped. The fix:
-// sending a request (or accepting) CANCELS any pending removal for that person,
-// and removing CANCELS any pending request/accept. This test removes B while B is
-// offline, re-adds, then brings B's contact back and asserts the friendship forms
-// cleanly (no stray removal tears it down).
-// ---------------------------------------------------------------------------
+// REMOVE then RE-ADD must NOT ping-pong. Removing an offline friend queued a
+// FriendRemove and re-adding queued a FriendRequest, so both drained on the peer's
+// reconnect and the friendship flapped. Sending a request now CANCELS a pending
+// removal, and removing CANCELS a pending request or accept.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)]
@@ -9496,13 +8902,11 @@ async fn remove_then_readd_does_not_pingpong() {
     sleep_ms(1000).await;
     drain_events(&mut a);
 
-    // A removes B (B offline → removal is QUEUED, not delivered).
     a.cmd_tx
         .send(NodeCommand::RemoveFriend { peer_id: b_master.clone() })
         .await
         .unwrap();
     sleep_ms(500).await;
-    // A re-adds B (sends a fresh request). This MUST cancel the queued removal.
     a.cmd_tx
         .send(NodeCommand::SendFriendRequest { peer_id: b_master.clone() })
         .await
@@ -9514,7 +8918,6 @@ async fn remove_then_readd_does_not_pingpong() {
     // send ONLY the friend request (the removal was cancelled) — so the friendship
     // forms and STAYS.
     let mut b = spawn_node_with_friends(&relay, B_MASTER, B_DEV, &[]).await;
-    // B should receive A's request; accept it using the id B saw.
     let mut a_id_as_b_saw = None;
     let b_got = wait_event(&mut b, std::time::Duration::from_secs(10), |ev| {
         if let NetworkEvent::FriendRequestReceived { peer_id } = ev {
@@ -9564,19 +8967,11 @@ async fn remove_then_readd_does_not_pingpong() {
     drop(b);
 }
 
-// ---------------------------------------------------------------------------
-// REMOVE → RE-ADD while BOTH stay ONLINE must require fresh CONSENT (2026-06-23).
-// THE LIVE BUG (Vitalik): A and B become friends (B clicked Accept, so B holds a
-// `pending_friend_accepts[A]` entry, ALSO re-seeded from accepted-friends at every
-// startup). A removes B; B receives the FriendRemove and DELETES its row — but the
-// stale `pending_friend_accepts[A]` SURVIVES (the FriendRemove receive handler
-// never cleared it). When A re-adds (fresh FriendRequest) and A's device reappears
-// in B's rooms, B's pending-accepts drain AUTO-SENDS a FriendAccept — WITHOUT ever
-// showing A's request in B's Incoming tab. A re-adds B as a friend off that stale
-// accept; B has NO row and never consented. Result: asymmetric (A has B, B has
-// nothing). This test drives the exact flow (both online throughout) and asserts B
-// gets a genuine INCOMING pending request on re-add and does NOT silently re-friend.
-// ---------------------------------------------------------------------------
+// REMOVE then RE-ADD while BOTH stay ONLINE must require fresh CONSENT. B's
+// `pending_friend_accepts[A]` survived the FriendRemove, so when A re-added, B's
+// drain AUTO-SENT a FriendAccept without ever showing A's request in Incoming: A
+// had B as a friend, B had no row and never consented. B must get a genuine
+// INCOMING request on re-add.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests vs the global resolver
@@ -9636,7 +9031,6 @@ async fn readd_while_online_requires_fresh_consent() {
     }
     assert!(converged, "precondition: both must be accepted friends before removal");
 
-    // --- Phase 2: A removes B (both still ONLINE). B deletes its row. ---
     a.cmd_tx
         .send(NodeCommand::RemoveFriend { peer_id: b_master.clone() })
         .await
@@ -9649,7 +9043,6 @@ async fn readd_while_online_requires_fresh_consent() {
     sleep_ms(1000).await;
     drain_events(&mut a);
     drain_events(&mut b);
-    // Sanity: B has no row for A right now.
     assert!(
         !b.store().load_friends(None).unwrap_or_default()
             .iter().any(|(pid, _, _, _, _)| super::resolver::same_identity(pid, &a_master)),
@@ -9697,7 +9090,6 @@ async fn readd_while_online_requires_fresh_consent() {
         "A must NOT list B as accepted off a stale auto-accept (B never consented)"
     );
 
-    // --- Phase 4: B genuinely accepts → NOW it converges cleanly both ways. ---
     let mut reconverged = false;
     for _ in 0..6 {
         b.cmd_tx
@@ -9893,10 +9285,8 @@ async fn startup_canonicalizes_device_keyed_friend_row() {
 
     let relay = MockRelay::new();
 
-    // The local node.
     const LOCAL_MASTER: u8 = 20;
     const LOCAL_DEV: u8 = 21;
-    // The FRIEND: distinct identity with device != master.
     const FRIEND_MASTER: u8 = 22;
     const FRIEND_DEV: u8 = 23;
     let friend_master = NativeKeypair::from_secret_bytes(&seed_bytes(FRIEND_MASTER)).peer_id();
@@ -9913,7 +9303,6 @@ async fn startup_canonicalizes_device_keyed_friend_row() {
         .expect("auto_vacuum migration");
     {
         let store = crate::storage::MessageStore::open(&db_path, &passphrase).expect("open store");
-        // (1) Friend row stranded under the friend's DEVICE id.
         store.save_friend(&friend_dev, "accepted", "", 100).expect("seed device-keyed friend");
         // (2) Persisted device list: friend_dev → friend_master (so the resolver
         //     can collapse it at startup).
@@ -9956,26 +9345,12 @@ async fn startup_canonicalizes_device_keyed_friend_row() {
     drop(local);
 }
 
-// ---------------------------------------------------------------------------
-// THE LIVE BUG REPRODUCTION (2026-06-23): two FRESH single-device people (AL/VM),
-// each device != master, become friends ORGANICALLY (no pre-seeded resolver, real
-// FriendRequest→Accept handshake), then DM each other BOTH ways. Every fresh
-// install since ad7b49e mints a random device key, so device != master even with
-// NO sibling — the "byte-for-byte pre-multi-device" claim only ever held on
-// MIGRATED keystone installs. This is the exact shape Vitalik reports: AL→VM DMs
-// never render on VM while VM→AL works.
-//
-// What this pins (the WHOLE chain, end to end, on REAL state):
-//   1. After the handshake, EACH side's resolver maps the OTHER's device→master
-//      (the device-list push over the durable room must land BOTH directions).
-//   2. Olm sessions confirm BOTH ways (no glare deadlock / incompatible halves).
-//   3. A DM sent each way RENDERS in the receiver's master-keyed UI thread
-//      (`dm_thread(sender_master)`) — this is the assertion the convergence test
-//      was MISSING. If the receiver filed the DM under the sender's DEVICE id
-//      (cold resolver), `dm_thread` (which keys on master) is EMPTY → caught here.
-//   4. The rendered bubble is INCOMING (is_mine == false) and SIGNED.
-// This is the headless equivalent of the live two-laptop test.
-// ---------------------------------------------------------------------------
+// Two FRESH single-device people, each with device != master, become friends
+// ORGANICALLY and DM each other both ways. Every fresh install mints a random device
+// key, so device != master even with no sibling. The whole chain is pinned: each
+// side's resolver maps the other's device to master, Olm confirms both ways, a DM
+// each way RENDERS in the receiver's MASTER-keyed thread (a device-keyed file leaves
+// `dm_thread` empty), and the bubble is incoming and signed.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests vs the global resolver
@@ -10080,7 +9455,6 @@ async fn fresh_single_device_friends_dm_both_ways() {
          it never rendered / was attributed to AL's device)"
     );
 
-    // VM → AL (the working direction — guards against a fix that breaks it).
     vm.cmd_tx
         .send(NodeCommand::SendMessage {
             peer_id: al_master.clone(),
@@ -10125,13 +9499,9 @@ async fn fresh_single_device_friends_dm_both_ways() {
     drop(vm);
 }
 
-// ---------------------------------------------------------------------------
-// Reject must NOT silently re-friend: rejecting an incoming request while our
-// OWN outbound request to the same person is still queued used to leave the
-// outbound request armed; it drained on the peer's next appearance, the peer
-// accepted, and the pair became friends behind the user's back. The fix clears
-// pending_friend_requests on reject. Regression guard for the reject/accept race.
-// ---------------------------------------------------------------------------
+// Reject must NOT silently re-friend: rejecting an incoming request while our OWN
+// outbound request to the same person was queued left that request armed, so it
+// drained later and the pair became friends behind the user's back.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)]
 async fn reject_cancels_own_queued_request_no_refriend() {
@@ -10153,7 +9523,6 @@ async fn reject_cancels_own_queued_request_no_refriend() {
     drain_events(&mut al);
     drain_events(&mut vm);
 
-    // BOTH sides request each other (mutual). AL's request + VM's request cross.
     al.cmd_tx
         .send(NodeCommand::SendFriendRequest { peer_id: vm_master.clone() })
         .await
@@ -10187,11 +9556,9 @@ async fn reject_cancels_own_queued_request_no_refriend() {
          (got status {al_status:?})"
     );
 
-    // And the decline is SYMMETRIC. AL's reject names the very request that produced
-    // the friendship, so VM must drop AL too. Leaving VM "accepted" while AL is
-    // "declined" is not a cosmetic split: VM re-seeds `pending_friend_accepts` from
-    // its accepted friends at every startup and re-fires a FriendAccept on AL's next
-    // appearance, which is the loop this test exists to close.
+    // And the decline is SYMMETRIC: AL's reject names the very request that produced the
+    // friendship, so VM must drop AL too. Leaving VM "accepted" is not cosmetic, because
+    // VM re-seeds `pending_friend_accepts` at startup and re-fires on AL's next appearance.
     let vm_status = vm.friend_status(&al_master);
     assert_eq!(
         vm_status, None,
@@ -10203,12 +9570,8 @@ async fn reject_cancels_own_queued_request_no_refriend() {
     drop(vm);
 }
 
-// ---------------------------------------------------------------------------
-// Mutual friend requests converge to friends WITHOUT a reject prompt. When both
-// sides request each other, the inbound request arriving while our own outbound
-// request is live is treated as an implicit accept → both become friends. Guards
-// the mutual auto-converge path.
-// ---------------------------------------------------------------------------
+// Mutual friend requests converge to friends WITHOUT a reject prompt: an inbound
+// request arriving while our own outbound one is live is an implicit accept.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)]
 async fn mutual_friend_requests_auto_converge() {
@@ -10230,7 +9593,6 @@ async fn mutual_friend_requests_auto_converge() {
     drain_events(&mut al);
     drain_events(&mut vm);
 
-    // Both request each other with no explicit accept from either side.
     al.cmd_tx
         .send(NodeCommand::SendFriendRequest { peer_id: vm_master.clone() })
         .await
@@ -10243,7 +9605,6 @@ async fn mutual_friend_requests_auto_converge() {
     drain_events(&mut al);
     drain_events(&mut vm);
 
-    // Both sides converge to "accepted" purely from the mutual requests.
     assert_eq!(
         al.friend_status(&vm_master).as_deref(),
         Some("accepted"),
@@ -10259,20 +9620,12 @@ async fn mutual_friend_requests_auto_converge() {
     drop(vm);
 }
 
-// ---------------------------------------------------------------------------
 // One-way DM delivery guard: a DM must arrive when the sender is in several relay
 // rooms alongside the DM room. The online send path used to route via
-// `ws_room_for_peer` (first-match over a HashMap); if the sender's map ever lists
-// the recipient's device under a room the recipient has since left (handshake
-// room churn / a stale ghost entry), the first-match can pick it, the relay
-// buffers the frame against a room the recipient never rejoins, and it's silently
-// lost (sends "succeeded", never arrived — the one-way DM bug). The fix routes
-// online DMs into the deterministic `dm_room_code`, which every recipient device
-// is always a member of. NOTE: the harness can't force a stale relay-room desync
-// (no node-level LeaveRoom command), so this asserts delivery under multiple
-// shared rooms rather than reproducing the exact staleness; the fix's correctness
-// is that it never consults the racy lookup for a DM.
-// ---------------------------------------------------------------------------
+// `ws_room_for_peer` (first match over a HashMap), so it could pick a room the
+// recipient has since left and the frame was buffered against one they never rejoin.
+// The harness cannot force a stale relay room, so this asserts delivery under
+// multiple shared rooms; the fix is that a DM never consults that lookup.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)]
 async fn dm_delivers_with_multiple_shared_rooms() {
@@ -10294,7 +9647,6 @@ async fn dm_delivers_with_multiple_shared_rooms() {
     drain_events(&mut al);
     drain_events(&mut vm);
 
-    // Establish the friendship (drives the real handshake + confirmed Olm session).
     al.cmd_tx
         .send(NodeCommand::SendFriendRequest { peer_id: vm_master.clone() })
         .await
@@ -10312,12 +9664,9 @@ async fn dm_delivers_with_multiple_shared_rooms() {
     drain_events(&mut al);
     drain_events(&mut vm);
 
-    // Multi-shared-room condition: AL joins an EXTRA room that VM never joins, but
-    // whose membership churn (plus the inbox/DM rooms) means AL's ws_room_peers can
-    // list VM's device under more than one room key across the handshake. The DM
-    // send must deterministically target the DM room, not a first-match room VM is
-    // absent from. Driving several extra rooms widens the window that the racy
-    // first-match would land on the wrong one; the fix makes delivery reliable.
+    // AL joins EXTRA rooms VM never joins, so AL's `ws_room_peers` can list VM's device
+    // under more than one key. The send must deterministically target the DM room rather
+    // than a first match VM is absent from.
     for i in 0..6 {
         al.cmd_tx
             .send(NodeCommand::JoinRoom { room_code: format!("extra_room_{i}") })
@@ -10328,7 +9677,6 @@ async fn dm_delivers_with_multiple_shared_rooms() {
     drain_events(&mut al);
     drain_events(&mut vm);
 
-    // AL → VM DM. Must arrive despite the multiple shared rooms.
     al.cmd_tx
         .send(NodeCommand::SendMessage {
             peer_id: vm_master.clone(),
@@ -10354,19 +9702,11 @@ async fn dm_delivers_with_multiple_shared_rooms() {
     drop(vm);
 }
 
-// ---------------------------------------------------------------------------
-// Friend-request-needs-restart race: a request sent to a target whose device→
-// master mapping the requester hasn't learned yet queues (keyed by target MASTER)
-// and the presence-event drains no-op (they can't attribute the target's present
-// DEVICE to the queued master while the resolver is cold). The target then never
-// receives it until it re-joins a shared room (a restart). The fix drains the
-// queue the moment the mapping is learned (device-list ingest). This test drives
-// a fresh cold requester and asserts the target receives the request WITHOUT
-// restarting. NOTE: the in-process MockRelay collapses the exact micro-timing
-// window of the field race, so this is a delivery guarantee for the cold-requester
-// path rather than a deterministic repro of the presence-event miss; the fix's
-// correctness is that learning the mapping now always re-drives the queued drain.
-// ---------------------------------------------------------------------------
+// A friend request to a target whose device-to-master mapping the requester has not
+// learned queues under the target MASTER, and the presence drain no-ops while the
+// resolver is cold, so the target never received it until a restart. The queue is
+// now drained the moment the mapping is learned. The MockRelay collapses the field
+// race's timing, so this is a delivery guarantee for the cold-requester path.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)]
 async fn friend_request_delivers_without_recipient_restart() {
@@ -10420,19 +9760,12 @@ async fn friend_request_delivers_without_recipient_restart() {
     drop(vm);
 }
 
-// ---------------------------------------------------------------------------
-// LEAVE converges DURABLY on the leaver's sibling devices (2026-07-02).
-// THE AUDIT FINDING: the acting device tears down fully in handle_leave_server,
-// but a SIBLING applying the fanned self-MemberRemoved only emitted MemberLeft —
-// no state/DB teardown. The shell reloaded on restart, re-listed the server, and
-// the sibling re-announce loop (which filtered only on is_deleted, never on
-// membership) could re-ADD the identity to a server it left — authored by a
-// non-member, rejected by real members → permanent fork. This drives: owner O;
-// member identity M with devices B + C; B joins, C onboards via the reconnect
-// re-announce; B LEAVES → C must tear down durably (state deleted, UI list
-// empty), O prunes M from members, and a later C reconnect must NOT resurrect
-// the server via re-announce.
-// ---------------------------------------------------------------------------
+// LEAVE converges DURABLY on the leaver's sibling devices. The acting device tears
+// down fully, but a SIBLING applying the fanned self-MemberRemoved only emitted
+// MemberLeft: the shell reloaded on restart, re-listed the server, and the
+// re-announce loop could re-ADD the identity to a server it had left, authored by a
+// non-member and rejected by real members, a permanent fork. C must tear down
+// durably and a later reconnect must not resurrect the server.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
@@ -10443,7 +9776,6 @@ async fn leave_tears_down_durably_on_sibling_and_owner_prunes_member() {
 
     let relay = MockRelay::new();
 
-    // O = owner (single device). M = member identity, devices B (actor) + C (sibling).
     const O_MASTER: u8 = 250;
     const O_DEV: u8 = 251;
     const M_MASTER: u8 = 252;
@@ -10503,7 +9835,6 @@ async fn leave_tears_down_durably_on_sibling_and_owner_prunes_member() {
     drain_events(&mut b);
     drain_events(&mut c);
 
-    // --- B LEAVES the server ---
     b.cmd_tx
         .send(NodeCommand::LeaveServer { server_id: server_id.clone() })
         .await
@@ -10542,7 +9873,6 @@ async fn leave_tears_down_durably_on_sibling_and_owner_prunes_member() {
         "leaver B's DB must no longer hold the left server's state"
     );
 
-    // Owner keeps the server but prunes M from the members.
     assert!(
         o.servers().contains(&server_id),
         "owner O must still list the server, got {:?}",
@@ -10578,14 +9908,10 @@ async fn leave_tears_down_durably_on_sibling_and_owner_prunes_member() {
     drop(c);
 }
 
-// ---------------------------------------------------------------------------
-// Relay message-availability cache (opt-in offline buffer) — DM leg.
-// The classic gap: Alice DMs Bob while Bob is offline, then ALICE goes offline
-// before Bob returns. No peer holds the message online — only the relay's
-// offline buffer can deliver it. The buffer must replay on Bob's DM-room join
-// and be CLEARED afterwards (delete-on-delivery frees relay RAM). Availability,
-// not authority: the replayed frame rides the normal Olm-decrypt + dedup path.
-// ---------------------------------------------------------------------------
+// Relay availability cache, DM leg. Alice DMs Bob while Bob is offline, then Alice
+// goes offline too, so no peer holds the message online and only the relay's buffer
+// can deliver it. It must replay on Bob's DM-room join and be CLEARED afterwards;
+// the replayed frame rides the normal decrypt and dedup path.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
@@ -10620,7 +9946,6 @@ async fn dm_relay_buffer_delivers_after_sender_goes_offline_and_clears() {
     sleep_ms(500).await;
     drain_events(&mut b);
 
-    // Alice sends while Bob is gone — the relay buffers under Bob's device id.
     a.cmd_tx
         .send(NodeCommand::SendMessage {
             peer_id: b_master.clone(),
@@ -10642,7 +9967,6 @@ async fn dm_relay_buffer_delivers_after_sender_goes_offline_and_clears() {
     sleep_ms(300).await;
     drain_events(&mut a);
 
-    // Bob returns: the relay replay (on DM-room join) is the ONLY delivery path.
     relay.set_online(&b.device_id, true);
     let got = wait_event(&mut b, std::time::Duration::from_secs(8), |ev| {
         matches!(ev, NetworkEvent::MessageReceived { text, .. } if text == "missed-you")
@@ -10651,13 +9975,11 @@ async fn dm_relay_buffer_delivers_after_sender_goes_offline_and_clears() {
     assert!(got, "Bob must receive the buffered DM from the relay with Alice offline");
     sleep_ms(300).await;
 
-    // Delivered entries are deleted relay-side (freeing RAM).
     assert_eq!(
         relay.buffered_count(&b.device_id), 0,
         "the relay buffer for Bob must be cleared after replay"
     );
 
-    // The message persisted through the normal verify/dedup path.
     let dm_texts: Vec<String> = b.dm_thread(&a_master).iter().map(|m| m.text.clone()).collect();
     assert!(
         dm_texts.contains(&"missed-you".to_string()),
@@ -10668,14 +9990,10 @@ async fn dm_relay_buffer_delivers_after_sender_goes_offline_and_clears() {
     drop(b);
 }
 
-// ---------------------------------------------------------------------------
-// Relay message-availability cache — CHANNEL leg (server-owner opt-in).
-// Owner enables `relay_catchup_secs` (a normal Owner/Admin ServerSettingChanged
-// key). From then on channel topic frames tee into a per-channel relay ring.
-// Alice (owner) posts while Bob is offline, then Alice goes offline; Bob's
-// reconnect must deliver the message via TopicCatchup replay — one stored copy
-// serves any late joiner; nothing depends on a member staying online.
-// ---------------------------------------------------------------------------
+// Relay availability cache, CHANNEL leg. The owner opts in via `relay_catchup_secs`,
+// after which channel topic frames tee into a per-channel ring. Alice posts while
+// Bob is offline and then goes offline herself; Bob's reconnect must get the message
+// from the ring, with no member staying online.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
@@ -10754,7 +10072,6 @@ async fn channel_relay_catchup_delivers_when_all_other_members_offline() {
     sleep_ms(300).await;
     drain_events(&mut o);
 
-    // Bob returns to an EMPTY room. TopicCatchup replay is the only path.
     relay.set_online(&j.device_id, true);
     let got = wait_event(&mut j, std::time::Duration::from_secs(10), |ev| {
         matches!(ev, NetworkEvent::ChannelMessageReceived { text, .. } if text == "catch-me-later")
@@ -10789,12 +10106,9 @@ async fn channel_relay_catchup_delivers_when_all_other_members_offline() {
     drop(j);
 }
 
-// ---------------------------------------------------------------------------
-// Relay catch-up must cover EVERY text channel, not just the first/selected
-// one (field report 2026-07-04: #general caught up on launch but a second
-// channel stayed empty). Owner posts to TWO channels while the joiner is
-// offline, then goes offline; the returning joiner must get BOTH.
-// ---------------------------------------------------------------------------
+// Relay catch-up must cover EVERY text channel, not just the selected one: the owner
+// posts to TWO channels while the joiner is offline, then goes offline, and the
+// returning joiner must get both.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
@@ -10818,7 +10132,6 @@ async fn channel_relay_catchup_covers_all_channels() {
     let server_id = create_server_and_wait(&mut o, "Two Chan Server").await;
     let general = general_channel_of(&server_id);
 
-    // Owner creates a SECOND text channel.
     o.cmd_tx
         .send(NodeCommand::CreateChannel {
             server_id: server_id.clone(),
@@ -10856,7 +10169,6 @@ async fn channel_relay_catchup_covers_all_channels() {
     drain_events(&mut o);
     drain_events(&mut j);
 
-    // Owner enables relay catch-up; wait for the joiner to apply the op.
     o.cmd_tx
         .send(NodeCommand::UpdateServerSetting {
             server_id: server_id.clone(),
@@ -10898,7 +10210,6 @@ async fn channel_relay_catchup_covers_all_channels() {
     sleep_ms(300).await;
     drain_events(&mut o);
 
-    // Joiner returns to an empty room — catch-up must deliver BOTH channels.
     relay.set_online(&j.device_id, true);
     let mut got_general = false;
     let mut got_second = false;
@@ -10925,18 +10236,11 @@ async fn channel_relay_catchup_covers_all_channels() {
     drop(j);
 }
 
-// ---------------------------------------------------------------------------
-// Relay catch-up must deliver a PUBLIC channel's file caption too.
-//
-// A public channel's caption is a plaintext `PublicChannelMessage` sent as a
-// 0x03 room broadcast, because guests are in the room and cannot decrypt an
-// MLS topic frame. A 0x03 broadcast NEVER enters the relay's per-channel ring
-// (only a 0x07 topic frame is teed) — while the FileHeader that follows rides
-// the topic either way. A member who was away therefore came back to file
-// metadata with no message row to hang it on, and the channel list builds its
-// rows from `channel_messages`: the card had nowhere to render and the post
-// showed as nothing at all, which is the shape of the open field report.
-// ---------------------------------------------------------------------------
+// Relay catch-up must deliver a PUBLIC channel's file caption too. The caption is a
+// plaintext `PublicChannelMessage` sent as a 0x03 broadcast, because guests cannot
+// decrypt an MLS topic frame, and a 0x03 broadcast never enters the ring while the
+// FileHeader rides the topic either way. The member came back to file metadata with
+// no message row to hang it on, so the post showed as nothing at all.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
@@ -10971,7 +10275,6 @@ async fn channel_relay_catchup_delivers_public_channel_file_caption() {
     assert!(joined, "joiner should join the server");
     expect_mls_group(&[&o, &j], &server_id, 15).await;
 
-    // The owner publishes #general, and the member learns it before leaving.
     o.cmd_tx
         .send(NodeCommand::SetChannelPublic {
             server_id: server_id.clone(),
@@ -11066,25 +10369,12 @@ async fn channel_relay_catchup_delivers_public_channel_file_caption() {
     drop(j);
 }
 
-// ---------------------------------------------------------------------------
-// Relay catch-up must survive a channel subscribe that BEATS the room join
-// (fleet log 2026-09-05, run 105109: `Catch-up request (channel open)
-// .../general` landed ahead of `Room ... members`, and no `(connect)` request
-// for that channel followed).
-//
-// Dart subscribes the moment the shell picks a channel, and on a cold start
-// that is well before the socket has authenticated and joined the server room.
-// The relay answers neither `set_topic_buffer` nor `topic_catchup` from a peer
-// that is not in the room, and says nothing about the refusal — but the client
-// had already recorded the pull in `relay_catchup_done`, so the connect-time
-// sweep skipped that channel and NOTHING replayed its ring for the rest of the
-// connection. A file posted while the member was away then never arrived.
-//
-// Modelled here by sending the subscribe into a socket that cannot answer,
-// which is what a pre-join subscribe is: `MockRelay::handle_command` drops
-// every command from an offline node, exactly as the relay drops a non-member's
-// `topic_catchup`.
-// ---------------------------------------------------------------------------
+// Relay catch-up must survive a channel subscribe that BEATS the room join. Dart
+// subscribes the moment the shell picks a channel, well before the socket has joined
+// the server room, and the relay answers neither `set_topic_buffer` nor
+// `topic_catchup` from a non-member and says nothing about the refusal, while the
+// client had already recorded the pull. Modelled by sending the subscribe into a
+// socket that cannot answer, which is what a pre-join subscribe is.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
@@ -11210,14 +10500,10 @@ async fn channel_relay_catchup_survives_subscribe_before_room_join() {
     drop(j);
 }
 
-// ---------------------------------------------------------------------------
-// Relay catch-up must deliver CHANNEL FILE messages (field report 2026-07-04
-// round 2: captions/cards never appeared). The companion text message used to
-// fan targeted per-member sends — offline members got nothing and nothing
-// entered the ring; the FileHeader alone replayed with no message row to hang
-// on. Both now ride the topic broadcast: the returning member must get the
-// caption row + the file metadata (bytes come later via request-on-open).
-// ---------------------------------------------------------------------------
+// Relay catch-up must deliver CHANNEL FILE messages. The companion text message used
+// to fan targeted per-member sends, so offline members got nothing and nothing
+// entered the ring, leaving the FileHeader with no message row to hang on. Both now
+// ride the topic broadcast.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
@@ -11323,15 +10609,10 @@ async fn channel_relay_catchup_delivers_file_message_and_header() {
     drop(j);
 }
 
-// ---------------------------------------------------------------------------
-// Channel file fallback (HOLLOW_PLAN line 2016, fixed 2026-07-16): O sends an
-// image/file to a full-replication channel, B (online) receives the bytes, O
-// goes OFFLINE, then C comes online and requests the file — targeting O, the
-// only holder the UI knows. `handle_request_file` used to drop the request on
-// the floor ("no online device"); now it reroutes to ONE online device of
-// another server member (B), who serves any file it has on disk. O being
+// Channel file fallback: O sends a file to a full-replication channel, B receives the
+// bytes, O goes offline, and C then requests the file targeting O, the only holder
+// the UI knows. The request reroutes to one online device of another member; O being
 // offline proves the bytes can only have come from B.
-// ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
@@ -11386,7 +10667,6 @@ async fn channel_file_request_reroutes_to_online_holder_when_sender_offline() {
     drain_events(&mut o);
     drain_events(&mut c);
 
-    // O sends a channel file; online member B receives the full bytes.
     let contents: &[u8] = b"reroute me to an online holder";
     let src = global_tmp.path().join("reroute.txt");
     std::fs::write(&src, contents).expect("write src file");
@@ -11484,18 +10764,11 @@ async fn channel_file_request_reroutes_to_online_holder_when_sender_offline() {
     drop(c);
 }
 
-// ---------------------------------------------------------------------------
-// FileRequest gate + guest public downloads (0.9.1). Serving used to be
-// UNGATED — any peer that learned a file_id could pull ANY file. Now:
-//   1. a NON-member requesting a file from a PRIVATE channel is refused
-//      (no header, no bytes, no row);
-//   2. once the channel is PUBLIC, guest sync carries the file's metadata
-//      (SyncFileMetaItem → GuestSyncMessageFfi — it used to be dropped);
-//   3. RequestPublicFile serves the guest the actual bytes via the plaintext
-//      PublicFileHeader + WS stream (receipt-cap armed);
-//   4. a file posted live into a public channel reaches the guest as a
-//      plaintext PublicChannelMessage + metadata FileHeaderReceived.
-// ---------------------------------------------------------------------------
+// FileRequest gate and guest public downloads. Serving used to be UNGATED, so any
+// peer that learned a file_id could pull any file. Now a NON-member is refused a
+// private channel's file entirely; once the channel is PUBLIC, guest sync carries the
+// file's metadata, RequestPublicFile serves the bytes against the receipt cap, and a
+// file posted live reaches the guest as a plaintext message plus metadata.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
@@ -11519,7 +10792,6 @@ async fn file_request_gate_refuses_stranger_and_serves_guest_public() {
     let general = general_channel_of(&server_id);
     sleep_ms(500).await;
 
-    // O posts a file while #general is PRIVATE.
     let contents: &[u8] = b"gated bytes - guests only once public";
     let src = global_tmp.path().join("gated.txt");
     std::fs::write(&src, contents).expect("write src file");
@@ -11560,7 +10832,6 @@ async fn file_request_gate_refuses_stranger_and_serves_guest_public() {
     sleep_ms(2500).await; // room join + presence settle
     drain_events(&mut g);
 
-    // 1. PRIVATE channel: the stranger's request must be REFUSED.
     g.cmd_tx
         .send(NodeCommand::RequestFile {
             file_id: fid.clone(),
@@ -11580,7 +10851,6 @@ async fn file_request_gate_refuses_stranger_and_serves_guest_public() {
         "no bytes may have landed on the stranger's disk"
     );
 
-    // O publishes #general.
     o.cmd_tx
         .send(NodeCommand::SetChannelPublic {
             server_id: server_id.clone(),
@@ -11592,7 +10862,6 @@ async fn file_request_gate_refuses_stranger_and_serves_guest_public() {
     sleep_ms(2000).await;
     drain_events(&mut g);
 
-    // 2. Guest sync now carries the attachment's metadata.
     g.cmd_tx
         .send(NodeCommand::RequestPublicChannelSync {
             server_id: server_id.clone(),
@@ -11615,7 +10884,6 @@ async fn file_request_gate_refuses_stranger_and_serves_guest_public() {
     .await;
     assert!(synced_meta, "guest sync must carry file metadata for the card");
 
-    // 3. The gated public download serves the bytes.
     drain_events(&mut g);
     g.cmd_tx
         .send(NodeCommand::RequestPublicFile {
@@ -11672,11 +10940,9 @@ async fn file_request_gate_refuses_stranger_and_serves_guest_public() {
     assert!(live_row, "guest must receive the live public file message");
     assert!(live_meta, "guest must receive the live file's metadata header");
 
-    // 5. Owner-preview window: the LOCAL sync branch (member browsing their
-    // own public channel) must return the LATEST page, mirroring the remote
-    // responder — `messages_since(0)` returned the OLDEST 50, landing a
-    // cold-started owner at the top of history. Push the channel past one
-    // page and check the local sync window.
+    // 5. Owner-preview window: the LOCAL sync branch must return the LATEST page like
+    // the remote responder. `messages_since(0)` returned the OLDEST 50, landing a
+    // cold-started owner at the top of history.
     for i in 0..55 {
         o.cmd_tx
             .send(NodeCommand::SendChannelMessage {
@@ -11720,20 +10986,11 @@ async fn file_request_gate_refuses_stranger_and_serves_guest_public() {
     drop(g);
 }
 
-// ---------------------------------------------------------------------------
-// SELF-DM ("Saved messages", 2026-07): a DM whose recipient is our OWN master
-// is a notes-to-self thread. The send path stores it locally (keyed on our own
-// master) exactly like any DM, but `fan_out_dm_envelope` must SKIP the
-// recipient-device expansion (`same_identity(local, recipient)`) — there is no
-// other party, and the bare-master fallback would otherwise queue a dead
-// envelope (KeyRequest to a peer nobody authenticates as) forever. Our own
-// SIBLINGS still get the echo (convo-tagged with our own master), so the saved
-// note appears on every device. This drives both halves:
-//   1. solo device: the note lands in the own-master thread (is_mine, signed)
-//      and NOTHING is queued at the relay under the bare master id;
-//   2. a live sibling receives the echo and files it under the own-master
-//      conversation (is_own=true), same thread key as the sender.
-// ---------------------------------------------------------------------------
+// SELF-DM ("Saved messages"): a DM whose recipient is our OWN master is a
+// notes-to-self thread. The send stores it locally like any DM, but fan-out must SKIP
+// the recipient-device expansion, or the bare-master fallback queues a dead envelope
+// forever. Our own SIBLINGS still get the echo under the same thread key, so the note
+// appears on every device.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
@@ -11762,7 +11019,6 @@ async fn self_dm_saved_messages_stores_locally_and_replicates_to_sibling() {
     sleep_ms(1500).await;
     drain_events(&mut b);
 
-    // --- Phase 1: SOLO self-DM (single device, nobody else online) ---
     b.cmd_tx
         .send(NodeCommand::SendMessage {
             peer_id: m_master.clone(),
@@ -11773,7 +11029,6 @@ async fn self_dm_saved_messages_stores_locally_and_replicates_to_sibling() {
         })
         .await
         .unwrap();
-    // The send path completes (local insert → fan-out no-op → MessageSent hydrate).
     let sent = wait_event(&mut b, std::time::Duration::from_secs(5), |ev| {
         matches!(ev, NetworkEvent::MessageSent { message_id, .. } if message_id == "self-1")
     })
@@ -11834,7 +11089,6 @@ async fn self_dm_saved_messages_stores_locally_and_replicates_to_sibling() {
     );
     sleep_ms(300).await;
 
-    // UI layer on BOTH devices: same thread key (own master), outgoing side.
     let c_thread = c.dm_thread(&m_master);
     assert!(
         c_thread.iter().any(|m| m.text == "saved-note-echo" && m.is_mine),
@@ -11858,22 +11112,14 @@ async fn self_dm_saved_messages_stores_locally_and_replicates_to_sibling() {
     drop(c);
 }
 
-// ---------------------------------------------------------------------------
-// BLOCK ENFORCEMENT AT INGEST (node/blocklist.rs, 2026-07): blocking is
-// receiver-side self-protection — the blocked identity's traffic still arrives
-// at the socket, but the swarm guards drop it BEFORE store + emit. This drives
-// the two hot surfaces: a live DM from a blocked FRIEND (guard in the
-// DirectMessage arm, collapsing sender device→master through the resolver) and
-// a friend request from a blocked STRANGER (guard in the FriendRequest arm —
-// the anti-spam surface blocking exists for).
+// BLOCK ENFORCEMENT AT INGEST: blocking is receiver-side self-protection, so the
+// blocked identity's traffic still arrives at the socket and the swarm guards drop it
+// BEFORE store and emit. Both hot surfaces are driven: a live DM from a blocked
+// FRIEND and a friend request from a blocked STRANGER.
 //
-// CAUTION — the blocklist is PROCESS-GLOBAL (like the resolver), so a block "by
-// A" is visible to every node's guards in the harness process. Assertions are
-// structured so that can't false-positive: the only guarded deliveries the test
-// asserts on are TO A, the control sender (stranger D) is never blocked, and
-// the set is cleared at start + on scope exit (panic-safe drop guard) so later
-// tests aren't poisoned.
-// ---------------------------------------------------------------------------
+// CAUTION: the blocklist is PROCESS-GLOBAL, so a block "by A" is visible to every
+// node's guards here. The asserted deliveries are all TO A, the control sender is
+// never blocked, and the set is cleared at start and on scope exit.
 
 /// RAII guard: clears the process-global blocklist on scope exit — INCLUDING a
 /// panicking assert — so a failed block test can't leave ids blocked for the
@@ -11945,10 +11191,8 @@ async fn blocked_peer_dm_and_friend_request_dropped() {
     drain_events(&mut a);
     drain_events(&mut b);
 
-    // --- A blocks B (by MASTER — the FFI wrapper persists then calls this). ---
     super::blocklist::block(&b_master);
 
-    // B sends again. A's DirectMessage-arm guard must drop it before store+emit.
     b.cmd_tx
         .send(NodeCommand::SendMessage {
             peer_id: a_master.clone(),
@@ -11968,7 +11212,6 @@ async fn blocked_peer_dm_and_friend_request_dropped() {
         "A must emit NO MessageReceived for the blocked friend's DM"
     );
 
-    // A's store: the pre-block row is there, the blocked one is NOT.
     let a_thread = a.dm_thread(&b_master);
     assert!(
         a_thread.iter().any(|m| m.text == "before-block"),
@@ -11978,7 +11221,6 @@ async fn blocked_peer_dm_and_friend_request_dropped() {
         !a_thread.iter().any(|m| m.text == "after-block"),
         "the blocked DM must never reach A's store, got {a_thread:?}"
     );
-    // Sender-side: blocking is receiver-side only — B keeps its own sent row.
     let b_thread = b.dm_thread(&a_master);
     assert!(
         b_thread.iter().any(|m| m.text == "after-block" && m.is_mine),
@@ -12005,7 +11247,6 @@ async fn blocked_peer_dm_and_friend_request_dropped() {
         .await
         .unwrap();
 
-    // Wait for D's request (the positive control), noting if C's ever leaks.
     let mut saw_c = false;
     let d_got = wait_event(&mut a, std::time::Duration::from_secs(10), |ev| {
         if let NetworkEvent::FriendRequestReceived { peer_id } = ev {
@@ -12019,7 +11260,6 @@ async fn blocked_peer_dm_and_friend_request_dropped() {
     })
     .await;
     assert!(d_got, "control stranger D's friend request must reach A");
-    // Extra window in case C's (dropped) request would have trailed D's.
     let c_late = wait_event(&mut a, std::time::Duration::from_secs(2), |ev| {
         matches!(ev, NetworkEvent::FriendRequestReceived { peer_id } if *peer_id == c_master)
     })
@@ -12029,7 +11269,6 @@ async fn blocked_peer_dm_and_friend_request_dropped() {
         "A must emit NO FriendRequestReceived for blocked stranger C"
     );
 
-    // A's friend rows: D has a pending incoming row; C has NO row at all.
     let a_friends = a.store().load_friends(None).unwrap_or_default();
     assert!(
         a_friends.iter().any(|(pid, status, dir, _, _)| {
@@ -12044,7 +11283,6 @@ async fn blocked_peer_dm_and_friend_request_dropped() {
         "A must hold NO friend row for blocked stranger C, got {a_friends:?}"
     );
 
-    // Leave the process clean for later tests (the drop guard also covers panics).
     super::blocklist::clear_for_test();
 
     drop(a);
@@ -12053,27 +11291,13 @@ async fn blocked_peer_dm_and_friend_request_dropped() {
     drop(d);
 }
 
-// ---------------------------------------------------------------------------
-// SCALING BENCHMARK (large-server MLS viability, 2026-07-06).
-//
-// Question: can MLS server groups scale to thousands / tens-of-thousands of
-// members without a plaintext downgrade? The investigation identified TWO
-// O(N) fan-out points; this benchmark MEASURES them on the real join/commit/
-// message code so the slope is fact, not estimate, then extrapolates.
-//
-// Metric source of truth: the MockRelay load meter (RelayMeter) â€” it counts
-// exactly what the production relay would copy to sockets, plus the targeted
-// SendDirect commit/welcome fan-out the coordinator issues. We drive the REAL
-// spawn_node event loops, the REAL JoinServer -> KeyPackage -> 2s-batch ->
-// Welcome MLS handshake, and the REAL MLS-encrypted channel send.
-//
-// We measure at increasing member counts, isolate the PER-MEMBER incremental
-// cost of (a) a join/commit and (b) one channel message, confirm both are
-// linear, and print the extrapolation to 1k / 50k. Run with:
+// SCALING BENCHMARK (large-server MLS viability). Measures the two O(N) fan-out
+// points on the real join/commit/message code so the slope is fact rather than
+// estimate, then extrapolates to 1k and 50k members. The metric source is the
+// MockRelay load meter, which counts what the production relay would copy to sockets
+// plus the coordinator's targeted fan-out. Ignored, since it spawns many real nodes
+// and waits on MLS batch timers:
 //   cargo test --lib scaling_benchmark_mls_fanout -- --nocapture --ignored
-// Marked ignore so it never runs in the normal fast suite (it spawns many real
-// nodes and sleeps for MLS batch timers).
-// ---------------------------------------------------------------------------
 
 /// One measured data point: the relay/coordinator load for a server that grew
 /// to `members` total members.
@@ -12157,7 +11381,6 @@ async fn scaling_benchmark_mls_fanout() {
         let join_meter = relay.meter().expect("meter enabled");
         let members = target + 1; // + owner
 
-        // Measure ONE channel message broadcast at this size.
         for j in joiners.iter_mut() { drain_events(j); }
         drain_events(&mut o);
         relay.reset_meter();
@@ -12242,12 +11465,9 @@ async fn scaling_benchmark_mls_fanout() {
 }
 
 
-// ---------------------------------------------------------------------------
-// Custom emotes: EmojiAdded replicates the (name, hash) metadata via the CRDT
-// to a joined member; the member pulls the content-addressed BYTES on demand
-// (EmoteRequest → EmoteAssets) and verifies them before caching; a member
-// without MANAGE_EMOTES is rejected at ingest; EmojiRemoved converges.
-// ---------------------------------------------------------------------------
+// Custom emotes: EmojiAdded replicates the (name, hash) metadata via the CRDT, the
+// member pulls the content-addressed BYTES on demand and verifies them, a member
+// without MANAGE_EMOTES is rejected at ingest, and EmojiRemoved converges.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
@@ -12258,7 +11478,6 @@ async fn server_emote_replicates_and_bytes_pull_on_demand() {
 
     let relay = MockRelay::new();
 
-    // O = owner, J = joiner — both plain single-device identities.
     const O_MASTER: u8 = 73;
     const J_MASTER: u8 = 74;
     let o_master = NativeKeypair::from_secret_bytes(&seed_bytes(O_MASTER)).peer_id();
@@ -12287,7 +11506,6 @@ async fn server_emote_replicates_and_bytes_pull_on_demand() {
     drain_events(&mut o);
     drain_events(&mut j);
 
-    // --- 1. Owner processes + registers a custom emote; metadata replicates. ---
     use sha2::{Digest, Sha256};
     // A tiny valid WebP the way authoring produces it (still, ≤64px).
     let (emote_bytes, animated) = {
@@ -12324,7 +11542,6 @@ async fn server_emote_replicates_and_bytes_pull_on_demand() {
     assert_eq!(emote.hash, hash, "replicated hash matches");
     assert!(!emote.animated);
 
-    // --- 2. J pulls the bytes on demand (EmoteRequest → EmoteAssets). ---
     assert!(
         !j.store().has_emote_blob(&hash).unwrap(),
         "J must NOT have the bytes yet — they never ride the CRDT"
@@ -12350,7 +11567,6 @@ async fn server_emote_replicates_and_bytes_pull_on_demand() {
         "pulled bytes must match the owner's blob byte-exact (hash-verified)"
     );
 
-    // --- 3. A plain Member's EmojiAdded is REJECTED at ingest (no MANAGE_EMOTES). ---
     drain_events(&mut o);
     j.cmd_tx
         .send(NodeCommand::AddServerEmote {
@@ -12361,7 +11577,6 @@ async fn server_emote_replicates_and_bytes_pull_on_demand() {
         })
         .await
         .unwrap();
-    // J's own authoring handler refuses (permission denied error event).
     let denied = wait_event(&mut j, std::time::Duration::from_secs(5), |ev| {
         matches!(ev, NetworkEvent::Error { message } if message.contains("cannot manage emotes"))
     })
@@ -12374,7 +11589,6 @@ async fn server_emote_replicates_and_bytes_pull_on_demand() {
         "a member-authored emote op must never reach the owner's state"
     );
 
-    // --- 4. EmojiRemoved converges. ---
     drain_events(&mut j);
     o.cmd_tx
         .send(NodeCommand::RemoveServerEmote {
@@ -12396,15 +11610,10 @@ async fn server_emote_replicates_and_bytes_pull_on_demand() {
     drop(j);
 }
 
-// ---------------------------------------------------------------------------
-// Server sticker packs (asset-rail Phase 5): StickerAdded replicates the
-// hash-keyed metadata to a joined member, who pulls the BYTES on demand at
-// AssetKind::Sticker; a member without MANAGE_EMOTES is refused; a sticker
-// whose transparency must survive the round trip does; StickerRemoved
-// converges. The emote twin above is the model — what differs is that
-// stickers are keyed by HASH (never by name), carry pack/w/h, and ride a
-// larger per-kind receipt cap.
-// ---------------------------------------------------------------------------
+// Server sticker packs: StickerAdded replicates hash-keyed metadata to a joined
+// member who pulls the BYTES at AssetKind::Sticker, a member without MANAGE_EMOTES
+// is refused, transparency survives the round trip, and StickerRemoved converges.
+// Unlike emotes, stickers are keyed by HASH, carry pack/w/h and get a bigger cap.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
@@ -12443,7 +11652,6 @@ async fn sticker_set_replicates_and_converges_on_removal() {
     drain_events(&mut o);
     drain_events(&mut j);
 
-    // --- 1. Owner processes + registers a sticker; metadata replicates. ---
     use sha2::{Digest, Sha256};
     // A CUT-OUT source: transparent left half, opaque right half. A sticker
     // that comes back matted is a visible defect, so the alpha is asserted
@@ -12496,7 +11704,6 @@ async fn sticker_set_replicates_and_converges_on_removal() {
     assert_eq!(sticker.pack, "greetings");
     assert_eq!((sticker.w, sticker.h), (w, h), "dims ride the CRDT so the cell can be reserved");
 
-    // --- 2. J pulls the bytes on demand, at the STICKER kind. ---
     assert!(
         !j.store().has_emote_blob(&hash).unwrap(),
         "J must NOT have the bytes yet — they never ride the CRDT"
@@ -12535,7 +11742,6 @@ async fn sticker_set_replicates_and_converges_on_removal() {
     assert_eq!(px(4, 4), 0, "the transparent half must stay transparent");
     assert_eq!(px(w - 4, 4), 255, "the opaque half must stay opaque");
 
-    // --- 3. A plain Member's StickerAdded is REJECTED (no MANAGE_EMOTES). ---
     drain_events(&mut o);
     j.cmd_tx
         .send(NodeCommand::AddServerSticker {
@@ -12562,7 +11768,6 @@ async fn sticker_set_replicates_and_converges_on_removal() {
         "a member-authored sticker op must never reach the owner's state"
     );
 
-    // --- 4. StickerRemoved converges. ---
     drain_events(&mut j);
     o.cmd_tx
         .send(NodeCommand::RemoveServerSticker {
@@ -12584,13 +11789,10 @@ async fn sticker_set_replicates_and_converges_on_removal() {
     drop(j);
 }
 
-// ---------------------------------------------------------------------------
-// Asset rail: the size cap enforced on receipt comes from the kind WE
-// recorded at request time, never from the sender. A 300 KB blob is refused
-// when it was requested as an 'emote' (256 KB cap) and accepted when the
-// same hash is re-requested as a 'gif' (2 MB cap) — the failed receipt must
-// free the request slot so the re-ask isn't throttled away.
-// ---------------------------------------------------------------------------
+// Asset rail: the size cap enforced on receipt comes from the kind WE recorded at
+// request time, never from the sender. A 300 KB blob is refused as an 'emote' (256
+// KB cap) and accepted when the same hash is re-requested as a 'gif' (2 MB), and the
+// failed receipt must free the slot so the re-ask is not throttled away.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
@@ -12624,7 +11826,6 @@ async fn asset_cap_enforced_per_kind() {
         .save_asset_blob(&hash, &big, false, "gif")
         .expect("owner caches the big blob");
 
-    // --- 1. Requested as an EMOTE (256 KB cap): the reply must be REFUSED. ---
     drain_events(&mut j);
     j.cmd_tx
         .send(NodeCommand::RequestEmotes {
@@ -12645,7 +11846,6 @@ async fn asset_cap_enforced_per_kind() {
         "the over-cap blob must not be cached"
     );
 
-    // --- 2. Re-requested as a GIF (2 MB cap): accepted byte-exact. ---
     j.cmd_tx
         .send(NodeCommand::RequestEmotes {
             hashes: vec![hash.clone()],
@@ -12671,12 +11871,9 @@ async fn asset_cap_enforced_per_kind() {
     drop(j);
 }
 
-// ---------------------------------------------------------------------------
-// Asset rail: an UNSOLICITED EmoteAssets bundle — valid container, valid
-// content hash, from a friend, in a shared room — must be dropped, because
-// the receiver never requested the hash. Without this gate any peer could
-// stuff arbitrary blobs into our encrypted DB at the largest kind's cap.
-// ---------------------------------------------------------------------------
+// Asset rail: an UNSOLICITED bundle with a valid container and content hash, from a
+// friend in a shared room, is dropped because the receiver never requested the hash.
+// Otherwise any peer could stuff blobs into our encrypted DB at the largest cap.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
@@ -12715,7 +11912,6 @@ async fn asset_request_not_answered_for_unrequested_hash() {
     sleep_ms(2000).await;
     drain_events(&mut j);
 
-    // A perfectly valid small WebP bundle J never asked for.
     use sha2::{Digest, Sha256};
     let (blob, _) = {
         let img = image::RgbaImage::from_pixel(16, 16, image::Rgba([10, 200, 90, 255]));
@@ -12747,14 +11943,10 @@ async fn asset_request_not_answered_for_unrequested_hash() {
     drop(j);
 }
 
-// ---------------------------------------------------------------------------
-// Server banners (issue #25, asset-rail Phase 2): the CRDT carries ONLY the
-// banner hash in settings["server_banner"]; a joined member sees the setting
-// converge, then pulls the content-addressed BYTES on demand over the asset
-// rail at AssetKind::Banner. Clearing converges too. The command sequence
-// mirrors what the set_server_banner FFI decomposes into: blob into the
-// local store, then UpdateServerSetting writes.
-// ---------------------------------------------------------------------------
+// Server banners: the CRDT carries ONLY the banner hash in
+// settings["server_banner"], and a joined member pulls the content-addressed BYTES on
+// demand at AssetKind::Banner. The command sequence mirrors what the
+// set_server_banner FFI decomposes into; clearing converges too.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
@@ -12793,7 +11985,6 @@ async fn server_banner_hash_replicates_and_bytes_pull_on_demand() {
     drain_events(&mut o);
     drain_events(&mut j);
 
-    // --- 1. Owner processes a banner, caches the blob, writes the hash. ---
     use sha2::{Digest, Sha256};
     let (banner_bytes, animated) = {
         let img = image::RgbaImage::from_pixel(96, 32, image::Rgba([30, 90, 200, 255]));
@@ -12837,7 +12028,6 @@ async fn server_banner_hash_replicates_and_bytes_pull_on_demand() {
     }
     assert!(hash_converged, "the banner hash must converge to J's settings");
 
-    // --- 2. Bytes never ride the CRDT; J pulls them over the asset rail. ---
     assert!(
         !j.store().has_emote_blob(&hash).unwrap(),
         "J must NOT have the banner bytes yet — the CRDT carries only the hash"
@@ -12863,7 +12053,6 @@ async fn server_banner_hash_replicates_and_bytes_pull_on_demand() {
         "pulled banner must match the owner's blob byte-exact (hash-verified)"
     );
 
-    // --- 3. Clearing converges ("" = cleared, key persists per LWW). ---
     drain_events(&mut j);
     o.cmd_tx
         .send(NodeCommand::UpdateServerSetting {
@@ -12892,11 +12081,9 @@ async fn server_banner_hash_replicates_and_bytes_pull_on_demand() {
     drop(j);
 }
 
-// ---------------------------------------------------------------------------
 // A plain Member cannot write the banner setting: ServerSettingChanged is
-// MANAGE_SERVER-gated at authoring (and the matching ingest gate), so the
-// write dies with the author's own Error event and never reaches the owner.
-// ---------------------------------------------------------------------------
+// MANAGE_SERVER-gated at authoring and at ingest, so the write dies with the author's
+// own Error event and never reaches the owner.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
@@ -12960,17 +12147,11 @@ async fn banner_write_rejected_without_manage_server() {
     drop(j);
 }
 
-// ---------------------------------------------------------------------------
-// Avatar frames (issue #54): the profile carries an ID, never the art. A
-// built-in `b:<hue>` costs nothing on the wire; an uploaded frame puts a
-// 64-hex hash on the LIGHT announce and the bytes ride the asset rail at
-// AssetKind::Frame, pulled on demand from the owner's devices. An update
-// that doesn't touch the frame must preserve it (old clients send None), and
-// an explicit "" must clear it.
-//
-// This is the half a widget test cannot reach: whether the ID converges and
-// whether the bytes stay OFF the profile push.
-// ---------------------------------------------------------------------------
+// Avatar frames (issue #54): the profile carries an ID, never the art. A built-in
+// `b:<hue>` costs nothing on the wire; an uploaded frame puts a 64-hex hash on the
+// LIGHT announce with the bytes on the asset rail at AssetKind::Frame. An update that
+// does not touch the frame preserves it and `""` clears it. Only a live run can show
+// the ID converging while the bytes stay OFF the push.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
@@ -13024,7 +12205,6 @@ async fn avatar_frame_id_replicates_and_art_pulls_on_demand() {
     // --- 2. An uploaded frame: the ID is a hash, the ART stays local until
     // pulled. This is the whole reason frames are not profile blobs. ---
     let frame_png = {
-        // Opaque ring, transparent middle - the shape the authoring gate wants.
         let mut img = image::RgbaImage::from_pixel(64, 64, image::Rgba([200, 90, 40, 255]));
         for y in 10..54 {
             for x in 10..54 {
@@ -13097,7 +12277,6 @@ async fn avatar_frame_id_replicates_and_art_pulls_on_demand() {
     assert_eq!(p.status, "status changed", "the non-frame field must update");
     assert_eq!(p.avatar_frame, hash, "an update that didn't touch the frame must NOT lose it");
 
-    // --- 4. Explicit clear. ---
     drain_events(&mut b);
     a.cmd_tx.send(send_update("cleared", Some(String::new()))).await.unwrap();
     let got = wait_event(&mut b, std::time::Duration::from_secs(8), |ev| {
@@ -13113,17 +12292,11 @@ async fn avatar_frame_id_replicates_and_art_pulls_on_demand() {
     drop(b);
 }
 
-// ---------------------------------------------------------------------------
-// Animated profile media on the asset rail: a person's ANIMATED avatar and
-// banner stop riding the pushed profile blob. The still companion stays in
-// `avatar`/`banner` (old clients and the guest thumb read it); the animation
-// becomes a 64-hex hash on the LIGHT announce, with the bytes pulled on
-// demand at AssetKind::Profile from the owner's devices.
-//
-// This is the bandwidth fix: before it, every re-announce path re-shipped
-// megabytes of unchanged GIF. Only a live multi-node run can show that the
-// hash converges while the bytes stay OFF the push.
-// ---------------------------------------------------------------------------
+// Animated profile media on the asset rail: the still companion stays in
+// `avatar`/`banner` for old clients and the guest thumb, while the animation becomes
+// a 64-hex hash on the LIGHT announce with the bytes pulled at AssetKind::Profile.
+// This is the bandwidth fix: every re-announce path used to re-ship megabytes of
+// unchanged GIF.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
@@ -13191,7 +12364,6 @@ async fn animated_profile_media_hash_replicates_and_bytes_pull_on_demand() {
         support_creds: None,
     };
 
-    // --- 1. The hash replicates, the still rides the push, the bytes do not. ---
     a.cmd_tx
         .send(send_update("hi", Some(still.clone()), Some(hash.clone())))
         .await
@@ -13255,7 +12427,6 @@ async fn animated_profile_media_hash_replicates_and_bytes_pull_on_demand() {
         "an update that didn't touch the animation must NOT lose it"
     );
 
-    // --- 4. A still-only pick clears the animation explicitly. ---
     drain_events(&mut b);
     a.cmd_tx
         .send(send_update("still now", Some(still.clone()), Some(String::new())))
@@ -13274,15 +12445,10 @@ async fn animated_profile_media_hash_replicates_and_bytes_pull_on_demand() {
     drop(b);
 }
 
-// ---------------------------------------------------------------------------
-// Animated server icons (asset-rail follow-up): the still icon stays base64
-// in settings["server_avatar"]; an animated upload ADDITIONALLY writes only
-// a hash into settings["server_avatar_anim"], with the 128px animated WebP
-// blob riding the asset rail at AssetKind::Avatar. A joined member sees the
-// hash converge, pulls the bytes on demand, and a later still upload (anim
-// hash -> "") converges too. Command sequence mirrors what the
-// set_server_avatar FFI decomposes into.
-// ---------------------------------------------------------------------------
+// Animated server icons: the still icon stays base64 in settings["server_avatar"]
+// while an animated upload writes only a hash into settings["server_avatar_anim"],
+// with the 128px animated WebP on the rail at AssetKind::Avatar. A later still upload
+// clears the anim hash and converges.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
@@ -13321,7 +12487,6 @@ async fn server_avatar_anim_hash_replicates_and_bytes_pull_on_demand() {
     drain_events(&mut o);
     drain_events(&mut j);
 
-    // --- 1. Owner processes an animated GIF icon: still b64 + anim blob. ---
     use sha2::{Digest, Sha256};
     let gif_bytes = {
         let f1 = image::RgbaImage::from_pixel(64, 48, image::Rgba([200, 40, 40, 255]));
@@ -13393,7 +12558,6 @@ async fn server_avatar_anim_hash_replicates_and_bytes_pull_on_demand() {
     }
     assert!(hash_converged, "the anim-icon hash must converge to J's settings");
 
-    // --- 2. Bytes never ride the CRDT; J pulls them over the asset rail. ---
     assert!(
         !j.store().has_emote_blob(&hash).unwrap(),
         "J must NOT have the anim-icon bytes yet — the CRDT carries only the hash"
@@ -13419,7 +12583,6 @@ async fn server_avatar_anim_hash_replicates_and_bytes_pull_on_demand() {
         "pulled anim icon must match the owner's blob byte-exact (hash-verified)"
     );
 
-    // --- 3. A still re-upload clears the anim hash; the clear converges. ---
     drain_events(&mut j);
     o.cmd_tx
         .send(NodeCommand::UpdateServerSetting {
@@ -13448,15 +12611,10 @@ async fn server_avatar_anim_hash_replicates_and_bytes_pull_on_demand() {
     drop(j);
 }
 
-// ---------------------------------------------------------------------------
-// Conferences (reports/CONFERENCES_PLAN.md): the waiting room IS an MLS add.
-// Host starts a meeting (fresh conf group + relay room `conf:{id}`), a knocker
-// broadcasts a join request carrying its KeyPackage, the host admits (MLS add
-// → direct Welcome → room-broadcast commit) or denies. Chat is an MLS
-// application message attributed by the authenticated leaf credential, and the
-// voice-channel machinery runs on the virtual server id (envelope join guard's
-// conference branch). Also covers the wrong-access-code rejection.
-// ---------------------------------------------------------------------------
+// Conferences: the waiting room IS an MLS add. The host starts a meeting, a knocker
+// broadcasts a join request carrying its KeyPackage, and the host admits (MLS add,
+// direct Welcome, room-broadcast commit) or denies. Chat is an MLS application
+// message attributed by the authenticated leaf credential.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
@@ -13480,7 +12638,6 @@ async fn conference_waiting_room_admits_denies_and_chats() {
     let conf_id = "harnessconf1".to_string();
     let conf_sid = super::conference::conf_server_id(&conf_id);
 
-    // --- 1. Host starts the meeting (waiting room ON, no code). ---
     host.cmd_tx
         .send(NodeCommand::ConferenceStart {
             conf_id: conf_id.clone(),
@@ -13493,7 +12650,6 @@ async fn conference_waiting_room_admits_denies_and_chats() {
         .unwrap();
     sleep_ms(800).await;
 
-    // --- 2. Bee knocks: host sees the waiting-room entry, Bee sees the lobby. ---
     bee.cmd_tx
         .send(NodeCommand::ConferenceRequestJoin {
             conf_id: conf_id.clone(),
@@ -13533,7 +12689,6 @@ async fn conference_waiting_room_admits_denies_and_chats() {
     assert!(admitted, "Bee must be admitted after the host's MLS add");
     drain_events(&mut bee);
 
-    // --- 4. Chat rides the conf MLS group, attributed by leaf credential. ---
     bee.cmd_tx
         .send(NodeCommand::ConferenceSendChat {
             conf_id: conf_id.clone(),
@@ -13588,7 +12743,6 @@ async fn conference_waiting_room_admits_denies_and_chats() {
     .await;
     assert!(host_seen, "Bee must learn the host was ALREADY in the call (reply-on-join sync)");
 
-    // --- 5b. Kick: MLS remove + courtesy signal reach the removed member. ---
     host.cmd_tx
         .send(NodeCommand::ConferenceKick {
             conf_id: conf_id.clone(),
@@ -13602,7 +12756,6 @@ async fn conference_waiting_room_admits_denies_and_chats() {
     .await;
     assert!(kicked, "the removed member must receive ConferenceKicked");
 
-    // --- 6. Deny path: Mallory knocks, host declines, Mallory learns why. ---
     mallory.cmd_tx
         .send(NodeCommand::ConferenceRequestJoin {
             conf_id: conf_id.clone(),
@@ -13633,7 +12786,6 @@ async fn conference_waiting_room_admits_denies_and_chats() {
     .await;
     assert!(denied, "Mallory must receive the decline");
 
-    // --- 7. Wrong access code is rejected BEFORE the waiting room. ---
     let coded_id = "harnessconf2".to_string();
     host.cmd_tx
         .send(NodeCommand::ConferenceStart {
@@ -13673,19 +12825,11 @@ async fn conference_waiting_room_admits_denies_and_chats() {
     drop(mallory);
 }
 
-// ---------------------------------------------------------------------------
-// 0.8.4 — deletion propagation through sync is AUTHENTICATED (reject-absent).
-//
-// `hidden_at` on a sync item is only honored with the author's own
-// "ch-delete"/"dm-delete" proof riding next to it (`hidden_sig`/`hidden_pk`).
-// Three scenarios:
-//   1. A real deletion (signed by the author) reaches a late joiner via sync
-//      and the joiner ADOPTS the proof (transitive propagation).
-//   2. A bare hidden flag (no proof — legacy responder or omit-the-sig
-//      attack) is DROPPED: the message stays visible.
-//   3. A forged proof (a non-author identity signing the deletion payload
-//      with its own key) is DROPPED: the pk↔author binding rejects it.
-// ---------------------------------------------------------------------------
+// Deletion propagation through sync is AUTHENTICATED: `hidden_at` on a sync item is
+// honoured only with the author's own signed proof beside it. Three cases: a real
+// deletion reaches a late joiner and the joiner ADOPTS the proof; a bare hidden flag
+// with no proof is DROPPED and the message stays visible; and a forged proof signed
+// by a non-author is DROPPED by the pk-to-author binding.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
@@ -13818,7 +12962,6 @@ async fn synced_channel_deletion_rejects_unproven_hidden_flags() {
     }
     sleep_ms(400).await;
 
-    // Tamper A's store the way a malicious/legacy responder would serve it.
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -13890,7 +13033,6 @@ async fn synced_dm_deletion_requires_proof() {
     drain_events(&mut a);
     drain_events(&mut b);
 
-    // A sends B two DMs live (real Olm path); both land on B.
     for (mid, text) in [("dmdel-1", "dm to be deleted"), ("dmabs-1", "dm bare-hidden")] {
         a.cmd_tx
             .send(NodeCommand::SendMessage {
@@ -13930,7 +13072,6 @@ async fn synced_dm_deletion_requires_proof() {
             &row.as_signed("dmdel-1"), &text,
         );
         store.hide_dm_message("dmdel-1", del_ts, sig.as_deref(), pk.as_deref()).unwrap();
-        // The bare flag: hidden with NO proof to serve.
         store.set_dm_message_hidden("dmabs-1", del_ts + 10).unwrap();
     }
 
@@ -13968,17 +13109,11 @@ async fn synced_dm_deletion_requires_proof() {
     drop(b);
 }
 
-// ---------------------------------------------------------------------------
-// SFrame heal ladder (issue #27). Two nodes in a server-wide MLS group; the
-// Dart layer detects sustained cryptor failures and fires VoiceSframeHeal.
-// The harness can't drive the media plane, so it verifies the KEY layer:
-//   * non-escalated heal re-emits the CURRENT epoch key (MlsEpochChanged);
-//   * non-authority escalation drops the local group, re-bootstraps from the
-//     owner, and converges leaves + epoch with the owner;
-//   * authority escalation removes + re-adds the failing peer's leaf; the
-//     peer's EVICTION recovery (inactive group → drop + re-bootstrap) pulls
-//     it back in and both converge.
-// ---------------------------------------------------------------------------
+// SFrame heal ladder (issue #27). The harness cannot drive the media plane, so this
+// verifies the KEY layer: a non-escalated heal re-emits the CURRENT epoch key; a
+// non-authority escalation drops the local group, re-bootstraps from the owner and
+// converges; an authority escalation removes and re-adds the failing peer's leaf,
+// whose own eviction recovery pulls it back in.
 
 /// Shared setup: O = owner creates a server, B joins, wait until BOTH device
 /// leaves are in the server-wide MLS group on both sides.
@@ -14046,7 +13181,6 @@ async fn sframe_heal_reemits_current_epoch_key() {
     let epoch_before = b.mls_epoch(&server_id).await;
     assert!(epoch_before.is_some(), "B must hold the group before healing");
 
-    // Non-escalated heal: must RE-EMIT the current key without advancing the epoch.
     b.cmd_tx
         .send(NodeCommand::VoiceSframeHeal {
             server_id: server_id.clone(),
@@ -14167,28 +13301,13 @@ async fn sframe_heal_escalation_authority_removes_and_readds_peer() {
     drop(b);
 }
 
-// ---------------------------------------------------------------------------
-// Join-order MLS epoch race (the "long black screens on run 2" bug, media
-// forwarding field session 2026-08-07). MLS commits ride an UNBUFFERED 0x03
-// room broadcast — a member whose socket misses them (join race, relay
-// backpressure drop) holds the group at a silently STALE epoch: every
-// recovery trigger keys on has_group/leaf-missing, no plaintext signal
-// carried the epoch, and in a voice-only channel no MLS ciphertext ever
-// fails a decrypt. The sharer rotates its SFrame key to the new epoch
-// immediately → the stale viewer gets MissingKey until the escalated heal
-// (~16 s; forever on a thrashed group).
-//
-// The fix under test: commit frames are CACHED per group; a stale member is
-// DETECTED via epoch hints (first-contact SyncRequest / MlsEpochProbe at VC
-// join + heal step 2) and served an MlsCommitCatchup REPLAY — marching to the
-// current epoch with ZERO added commits (repair-by-re-add bumps the epoch for
-// everyone and feeds the churn spiral). Fallback when the cache can't bridge:
-// the existing remove+re-add.
-//
-// The harness models the loss with MockRelay::set_broadcast_deaf — the
-// victim stays in the room, looks healthy, and silently misses 0x03 frames,
-// exactly like a backpressured relay socket.
-// ---------------------------------------------------------------------------
+// Join-order MLS epoch race. MLS commits ride an UNBUFFERED 0x03 room broadcast, so a
+// member whose socket misses them holds the group at a silently STALE epoch: every
+// recovery trigger keys on has_group or a missing leaf, and a voice-only channel has
+// no ciphertext to fail a decrypt. The fix caches commit frames per group, detects a
+// stale member via epoch hints, and serves an MlsCommitCatchup REPLAY, which adds no
+// commits (repair-by-re-add bumps the epoch for everyone and feeds the churn
+// spiral). `set_broadcast_deaf` models the loss.
 
 /// Trio setup: O = owner, B = future stale victim, C = churn generator.
 /// All mutually friended; all three device leaves converged in the
@@ -14253,16 +13372,11 @@ async fn setup_epoch_race_trio(
         }
     }
     assert!(ok, "all three leaves must join the server-wide MLS group everywhere");
-    // The join bootstrap is racy by construction: a joiner sends its KeyPackage
-    // twice (at ServerJoined, and again when an MLS frame reaches it before its
-    // Welcome), and two copies that straddle a batch tick become a remove +
-    // re-add whose removal commit the joiner reads as an eviction and answers
-    // with yet another KeyPackage. That churn settles, but a batch can still be
-    // pending when the leaves first agree, and a KeyPackage flushed in the same
-    // tick as the heal staged by `make_b_stale` re-adds the member that must
-    // stay stale (CI, 2026-08-29: "churn must advance O+C past deaf B"). The
-    // subject of these tests is the heal, so wait for a QUIET group first: one
-    // epoch, agreed by all three, unchanged across more than two batch ticks.
+    // The join bootstrap is racy by construction: a joiner sends its KeyPackage twice,
+    // and two copies straddling a batch tick become a remove + re-add whose removal
+    // commit the joiner reads as an eviction. That churn settles, but a pending batch can
+    // still re-add the member that must stay stale, so wait for a QUIET group: one epoch,
+    // agreed by all three, unchanged across two batch ticks.
     let mut quiet_since = std::time::Instant::now();
     let mut last: Option<u64> = None;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
@@ -14409,7 +13523,6 @@ async fn stale_epoch_vc_join_probe_converges_via_commit_replay() {
     let relay = MockRelay::new();
     let (mut o, mut b, mut c, server_id) = setup_epoch_race_trio(&relay, 99, 100, 101).await;
 
-    // A voice channel, known to everyone BEFORE the staleness window.
     o.cmd_tx
         .send(NodeCommand::CreateChannel {
             server_id: server_id.clone(),
@@ -14482,7 +13595,6 @@ async fn stale_epoch_first_contact_hint_converges_on_reconnect() {
     relay.set_online(&b.device_id, false);
     sleep_ms(500).await;
 
-    // Churn while B is fully offline (0x03 broadcasts to it just vanish).
     c.cmd_tx
         .send(NodeCommand::VoiceSframeHeal {
             server_id: server_id.clone(),
@@ -14534,21 +13646,13 @@ async fn stale_epoch_first_contact_hint_converges_on_reconnect() {
     drop(c);
 }
 
-/// Issue #45 — a link preview whose fetch finished AFTER the send still lands
-/// on the message, everywhere the message went.
+/// Issue #45: a link preview whose fetch finished AFTER the send still lands on the
+/// message, everywhere the message went. The compose box debounces 600ms before
+/// fetching, so anyone who pasted a URL and sent immediately got no card at all.
 ///
-/// The regression this locks down is the whole complaint: the compose box
-/// debounces 600 ms before fetching, so anyone who pastes a URL and sends
-/// immediately used to get no card at all. The fetch was always still
-/// running; nothing was listening for it.
-///
-/// What must hold once the card lands:
-///  * the recipient's row shows it,
-///  * OUR OWN other device's row shows it (the fan-out reaches siblings),
-///  * the row still VERIFIES — the attach re-signs, and a preview that broke
-///    the signature would stop the message replicating through signed sync,
-///  * `edited_at` stays NULL. An attach is not an edit, and a bubble must not
-///    sprout "(edited)" because a fetch was slow.
+/// Once the card lands the recipient's row shows it, our own other device's row shows
+/// it, the row still VERIFIES (the attach re-signs, and a broken signature would stop
+/// the message replicating through signed sync), and `edited_at` stays NULL.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn late_link_preview_lands_on_recipient_and_sibling_without_marking_edited() {
     let _g = test_guard();
@@ -14557,7 +13661,6 @@ async fn late_link_preview_lands_on_recipient_and_sibling_without_marking_edited
 
     let relay = MockRelay::new();
 
-    // M = us, two devices B (sending) + C (the phone). A = the friend.
     const A_MASTER: u8 = 140;
     const M_MASTER: u8 = 141;
     const B_DEV: u8 = 142;
@@ -14580,7 +13683,6 @@ async fn late_link_preview_lands_on_recipient_and_sibling_without_marking_edited
     drain_events(&mut b);
     drain_events(&mut c);
 
-    // B sends with NO preview — the fetch is still in flight at this point.
     const MID: &str = "lp-late-1";
     b.cmd_tx
         .send(NodeCommand::SendMessage {
@@ -14599,13 +13701,11 @@ async fn late_link_preview_lands_on_recipient_and_sibling_without_marking_edited
     assert!(delivered, "the plain message must reach the friend first");
     sleep_ms(500).await;
 
-    // Nobody has a card yet.
     assert!(
         a.store().get_dm_message_sig_row(MID).and_then(|r| r.link_preview).is_none(),
         "the friend's row must start with no card"
     );
 
-    // ...and now the fetch lands. This is what the compose pane calls.
     let preview = crate::node::LinkPreviewRef {
         url: "https://example.com/post".to_string(),
         title: "A Post".to_string(),
@@ -14632,7 +13732,6 @@ async fn late_link_preview_lands_on_recipient_and_sibling_without_marking_edited
         .unwrap();
     sleep_ms(2500).await;
 
-    // Every copy of the row: sender, recipient, and our own second device.
     for (name, node) in [("sender B", &b), ("friend A", &a), ("sibling C", &c)] {
         let row = node
             .store()
@@ -14653,7 +13752,6 @@ async fn late_link_preview_lands_on_recipient_and_sibling_without_marking_edited
             "{name}: a late card must NOT mark the message edited"
         );
 
-        // The signature must cover the card that is now on the row.
         let digest = crate::node::crypto_handler::link_preview_digest(card);
         let extras = crate::node::crypto_handler::SignedExtras {
             mid: Some(MID),
@@ -14751,7 +13849,6 @@ async fn clearing_a_link_preview_re_signs_and_propagates() {
         thumb_h: None,
         rich: None,
     };
-    // Sent WITH a card this time.
     b.cmd_tx
         .send(NodeCommand::SendMessage {
             peer_id: a_master.clone(),
@@ -14773,7 +13870,6 @@ async fn clearing_a_link_preview_re_signs_and_propagates() {
         "precondition: the friend has the original card"
     );
 
-    // The author edits the URL out, so the card is cleared.
     b.cmd_tx
         .send(NodeCommand::AttachDmLinkPreview {
             peer_id: a_master.clone(),
@@ -14820,30 +13916,15 @@ async fn clearing_a_link_preview_re_signs_and_propagates() {
     drop(b);
 }
 
-/// Issue #45 follow-up — a peer that gets a message through BACKFILL gets the
-/// card with it, not just a bare link.
+/// Issue #45 follow-up: a peer that gets a message through BACKFILL gets the card with
+/// it, not just a bare link. Backfill carried only `lp_digest`, the hash the signature
+/// binds, and nothing else in the protocol ever re-sends a card.
 ///
-/// The field report: previews work when both peers are online and the sender
-/// always sees their own, but a peer catching up gets the text and no card.
-/// Backfill carried only `lp_digest` — the 64-char hash the signature binds —
-/// on the reasoning that verification never needs more than the hash. True,
-/// and exactly why the card never arrived: nothing else in the protocol ever
-/// re-sends one.
-///
-/// The scenario is a member who joins AFTER the card exists, chosen because it
-/// is the one where sync is provably the only vehicle. A member who merely
-/// goes offline and returns can also be rescued by a queued live envelope or a
-/// relay topic replay, which would make this test pass with the bug still in
-/// place (it did, while being written).
-///
-/// Two things must hold on the joiner's row, and the second is the quieter
-/// half of the bug:
-///  * the card is THERE, and
-///  * the row still VERIFIES against the digest of that card — because the row
-///    a peer stores is the row it later re-serves. A row holding a signature
-///    over a preview it does not have computes `lp_digest = None` when packed
-///    for the next peer, and that peer REJECTS the message as forged. The card
-///    used to die after one hop; so did the message behind it.
+/// The scenario is a member who joins AFTER the card exists, because that is the one
+/// where sync is provably the only vehicle. Two things must hold on the joiner's row:
+/// the card is THERE, and the row still VERIFIES against its digest, because a row
+/// holding a signature over a preview it does not have packs `lp_digest = None` for
+/// the next peer, who then rejects the message as forged.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn backfilled_member_gets_link_preview_through_channel_sync() {
@@ -14853,7 +13934,6 @@ async fn backfilled_member_gets_link_preview_through_channel_sync() {
 
     let relay = MockRelay::new();
 
-    // O = owner/poster, J = the member who only ever sees history.
     const O_MASTER: u8 = 144;
     const J_MASTER: u8 = 145;
     let o_master = NativeKeypair::from_secret_bytes(&seed_bytes(O_MASTER)).peer_id();
@@ -14869,7 +13949,6 @@ async fn backfilled_member_gets_link_preview_through_channel_sync() {
     drain_events(&mut o);
     drain_events(&mut j);
 
-    // --- The message and its card happen with O alone in the server. ---
     const MID: &str = "lp-sync-1";
     o.cmd_tx
         .send(NodeCommand::SendChannelMessage {
@@ -14923,7 +14002,6 @@ async fn backfilled_member_gets_link_preview_through_channel_sync() {
         "precondition: the non-member must not have the row yet"
     );
 
-    // --- J joins. History arrives as a ChannelSyncBatch and nothing else. ---
     drain_events(&mut j);
     j.cmd_tx
         .send(NodeCommand::JoinServer {
@@ -14948,7 +14026,6 @@ async fn backfilled_member_gets_link_preview_through_channel_sync() {
         .get_channel_message_sig_row(MID)
         .expect("the joining member must backfill the message row");
 
-    // 1. The card came with the message.
     let card = row
         .link_preview
         .as_ref()
@@ -15014,16 +14091,11 @@ async fn backfilled_member_gets_link_preview_through_channel_sync() {
     drop(j);
 }
 
-/// The DM half of the same fix — a card reaching a device through
-/// `DmSiblingSyncBatch`, which is the DM path where backfill is provably the
-/// only vehicle.
-///
-/// A friend who merely goes offline is rescued by the sender's pending queue
-/// and the relay's per-device buffer, so that scenario cannot tell the fix from
-/// the bug. A device that did not EXIST when the message was sent has neither:
-/// nothing was ever queued or buffered for it, and nothing re-broadcasts. It
-/// has exactly what its sibling will hand it. This is the "link my phone and
-/// scroll back" case.
+/// The DM half of the same fix: a card reaching a device through
+/// `DmSiblingSyncBatch`, the DM path where backfill is provably the only vehicle. A
+/// friend who merely goes offline is rescued by the sender's queue and the relay's
+/// per-device buffer, but a device that did not EXIST when the message was sent has
+/// neither: it has exactly what its sibling hands it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn freshly_linked_device_backfills_dm_link_previews_from_its_sibling() {
@@ -15033,7 +14105,6 @@ async fn freshly_linked_device_backfills_dm_link_previews_from_its_sibling() {
 
     let relay = MockRelay::new();
 
-    // A = the friend. M = us: device B exists, device C gets linked later.
     const A_MASTER: u8 = 146;
     const M_MASTER: u8 = 147;
     const B_DEV: u8 = 148;
@@ -15097,7 +14168,6 @@ async fn freshly_linked_device_backfills_dm_link_previews_from_its_sibling() {
         "precondition: the sending device holds the card"
     );
 
-    // --- NOW device C is linked. Its DB is empty; sibling backfill is all it has. ---
     super::resolver::seed_self(&m_master, &[b_dev.clone(), c_dev.clone()]);
     super::resolver::update_many(&m_master, [b_dev.as_str(), c_dev.as_str()]);
     let c = spawn_node_full(
@@ -15155,22 +14225,13 @@ async fn freshly_linked_device_backfills_dm_link_previews_from_its_sibling() {
     drop(c);
 }
 
-// ---------------------------------------------------------------------------
-// Media forwarder control plane (step 3, D3): the fwd_* client plumbing.
-//
-// A full mock node F plays the FORWARDER role (same relay-room mechanics; the
-// real forwarder's engine/media plane is outside harness scope by doctrine —
-// D6 field verification covers it). Verified here:
-//   1. JoinForwarderRoom is a PURE transport join — no RoomCleared (the
-//      NodeCommand::JoinRoom arm would wipe the open DM pane).
-//   2. First ForwarderSendSignal with NO Olm session queues + fires a signed
-//      KeyRequest; the envelope drains and arrives after key exchange.
-//   3. A client-bound fwd envelope (fwd_attach at a client) hits the ignore
-//      arm and the node stays healthy.
-//   4. Forwarder-sendable signals (fwd_egress_offer / fwd_error) emit
-//      NetworkEvent::ForwarderSignal on the client with origin + payload
-//      intact (the test-only build arms impersonate the forwarder role).
-// ---------------------------------------------------------------------------
+// Media forwarder control plane: the fwd_* client plumbing, with a mock node F
+// playing the FORWARDER role (the real forwarder's media plane is out of harness
+// scope). Verified: JoinForwarderRoom is a PURE transport join with no RoomCleared;
+// a first ForwarderSendSignal with no Olm session queues and fires a signed
+// KeyRequest, then drains; a client-bound fwd envelope hits the ignore arm and the
+// node stays healthy; and forwarder-sendable signals emit ForwarderSignal with origin
+// and payload intact.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
@@ -15190,16 +14251,10 @@ async fn forwarder_room_and_signal_round_trip() {
     let f_id = f.device_id.clone();
     let a_id = a.device_id.clone();
 
-    // F "hosts" its own fwd room (what the real forwarder does on connect);
-    // A joins it to reach the forwarder.
-    //
-    // Both nodes ALSO join `fwd:{a_id}` because step 4 below has F impersonate
-    // the forwarder role over the CLIENT send path (`ForwarderSendSignal`),
-    // which routes by `fwd:{target}` — correct for client→forwarder, but the
-    // real forwarder ships its replies from its OWN room
-    // (`forwarder::signaling::send_haven_direct`), a path no mock node runs.
-    // Joining both rooms keeps that one artifice deliverable without weakening
-    // the production routing rule under test.
+    // F hosts its own fwd room and A joins it. Both ALSO join `fwd:{a_id}` because step 4
+    // has F impersonate the forwarder over the CLIENT send path, which routes by
+    // `fwd:{target}`, while the real forwarder replies from its OWN room. Joining both
+    // keeps that one artifice deliverable without weakening the routing rule under test.
     for room_owner in [&f_id, &a_id] {
         f.cmd_tx
             .send(NodeCommand::JoinForwarderRoom { forwarder_peer_id: room_owner.clone() })
@@ -15216,7 +14271,6 @@ async fn forwarder_room_and_signal_round_trip() {
     }
     sleep_ms(1200).await;
 
-    // 1. The fwd-room join must NOT clear the DM conversation pane.
     let mut saw_room_cleared = false;
     while let Ok(ev) = a.event_rx.try_recv() {
         if matches!(ev, NetworkEvent::RoomCleared) {
@@ -15225,7 +14279,6 @@ async fn forwarder_room_and_signal_round_trip() {
     }
     assert!(!saw_room_cleared, "JoinForwarderRoom must never emit RoomCleared");
 
-    // 2. First signal with no Olm session: queue + KeyRequest + drain.
     let origin = serde_json::json!({"peer": f_id, "kind": "screen", "stream": "ab12cd34"});
     a.cmd_tx
         .send(NodeCommand::ForwarderSendSignal {
@@ -15255,7 +14308,6 @@ async fn forwarder_room_and_signal_round_trip() {
     );
     drain_events(&mut a);
 
-    // 4a. Forwarder-sendable: F -> A fwd_egress_offer emits ForwarderSignal.
     f.cmd_tx
         .send(NodeCommand::ForwarderSendSignal {
             forwarder_peer_id: a_id.clone(),
@@ -15282,7 +14334,6 @@ async fn forwarder_room_and_signal_round_trip() {
     assert_eq!(v["origin"]["peer"], serde_json::json!(f_id.clone()));
     assert_eq!(v["origin"]["stream"], serde_json::json!("ab12cd34"));
 
-    // 4b. fwd_error round-trips with code + detail.
     f.cmd_tx
         .send(NodeCommand::ForwarderSendSignal {
             forwarder_peer_id: a_id.clone(),
@@ -15314,22 +14365,12 @@ async fn forwarder_room_and_signal_round_trip() {
     drop(f);
 }
 
-// ---------------------------------------------------------------------------
-// fwd-room discovery-cascade suppression (§9.4).
-//
-// A forwarder discards every profile / sync / friend / MLS / DM frame a client
-// could send it, so presence in a `fwd:` room must NOT run the peer-discovery
-// cascade (~45 junk frames per join at the forwarder — the burst that used to
-// drain the removed fwd control-plane token bucket and eat the large frame
-// behind it). Verified here:
-//   1. Joining `fwd:{F}` emits NO PeerDiscovered for F (the cascade's first
-//      emission) and pushes NO profile at F.
-//   2. The Olm session STILL establishes — the one piece the lane needs, since
-//      queued fwd envelopes drain through it.
-//   3. `synced_peers` was NOT burned: a later join of a genuinely shared room
-//      runs the FULL cascade for the same peer. This is the regression that
-//      would otherwise be a silent, permanent discovery blackhole.
-// ---------------------------------------------------------------------------
+// fwd-room discovery-cascade suppression. A forwarder discards every profile, sync,
+// friend, MLS and DM frame a client could send it, so presence in a `fwd:` room must
+// NOT run the peer-discovery cascade (~45 junk frames per join). Verified: no
+// PeerDiscovered and no profile push, the Olm session still establishes because
+// queued fwd envelopes drain through it, and `synced_peers` is NOT burned, or a later
+// genuinely shared room would be a permanent discovery blackhole.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
@@ -15354,7 +14395,6 @@ async fn fwd_room_join_skips_discovery_but_keeps_olm() {
     drain_events(&mut a);
     drain_events(&mut f);
 
-    // Both sides in the forwarder's room (F hosts it, A joins to reach it).
     f.cmd_tx
         .send(NodeCommand::JoinForwarderRoom { forwarder_peer_id: f_id.clone() })
         .await
@@ -15371,7 +14411,6 @@ async fn fwd_room_join_skips_discovery_but_keeps_olm() {
     // to mean anything.
     sleep_ms(4000).await;
 
-    // 1. No discovery emission for the forwarder, and no profile pushed at it.
     let mut a_discovered_f = false;
     let mut a_session_with_f = false;
     while let Ok(ev) = a.event_rx.try_recv() {
@@ -15439,13 +14478,9 @@ async fn fwd_room_join_skips_discovery_but_keeps_olm() {
     drop(f);
 }
 
-// ---------------------------------------------------------------------------
-// vc_screen_assign + route hint (media forwarding step 3, D5 wire): the
-// sharer assigns a relay-routed viewer to a media forwarder over the VC lane.
-// Verified: route round-trips on screen_watch (absent = "" is serde-tested);
-// screen_assign round-trips origin + forwarder; a SPOOFED origin (naming a
-// third party) drops the whole signal and the node stays healthy.
-// ---------------------------------------------------------------------------
+// vc_screen_assign and route hint: the sharer assigns a relay-routed viewer to a
+// media forwarder over the VC lane. The route round-trips on screen_watch, assign
+// round-trips origin and forwarder, and a SPOOFED origin drops the whole signal.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
@@ -15602,7 +14637,6 @@ async fn vc_screen_assign_and_route_round_trip() {
     assert_eq!(watch["fwd_capable"], serde_json::json!(false));
     assert_eq!(watch["relay_private"], serde_json::json!(false));
 
-    // --- 2. Sharer (O) -> viewer (J): screen_assign round-trips ---
     o.cmd_tx
         .send(NodeCommand::VoiceChannelSendSignal {
             server_id: server_id.clone(),
@@ -15624,7 +14658,6 @@ async fn vc_screen_assign_and_route_round_trip() {
     assert_eq!(assign["forwarder"], serde_json::json!("12D3KooWFwdInfra"));
     drain_events(&mut j);
 
-    // --- 3. SPOOFED origin (third party) must drop the WHOLE signal ---
     let third_party = NativeKeypair::from_secret_bytes(&seed_bytes(199)).peer_id();
     o.cmd_tx
         .send(NodeCommand::VoiceChannelSendSignal {
@@ -15643,7 +14676,6 @@ async fn vc_screen_assign_and_route_round_trip() {
     let spoofed = next_signal(&mut j, "screen_assign", 3).await;
     assert!(spoofed.is_none(), "a spoofed screen_assign origin must be dropped");
 
-    // Node stays healthy: a legit assign still arrives afterwards.
     o.cmd_tx
         .send(NodeCommand::VoiceChannelSendSignal {
             server_id: server_id.clone(),
@@ -15666,16 +14698,10 @@ async fn vc_screen_assign_and_route_round_trip() {
     drop(j);
 }
 
-// ---------------------------------------------------------------------------
-// OWNER OFFLINE: a plain member has to carry a stranger's whole join.
-//
-// The owner-preferred coordinator model says the owner is PREFERRED, not
-// REQUIRED. Nothing covered the fallback end to end: `server_join_forms_mls_
-// and_channel_message_decrypts` only ever joins against a LIVE owner, so the
-// claim that a member can admit someone on its own — the CRDT side (MemberAdded
-// + state snapshot + op log) AND the MLS side (batch commit + Welcome) — was
-// argued from `elect_server_coordinator`'s fallback arm and never driven.
-// ---------------------------------------------------------------------------
+// OWNER OFFLINE: a plain member carries a stranger's whole join. The owner is
+// PREFERRED, not required, but nothing covered the fallback end to end, so the claim
+// that a member can admit someone on its own, on the CRDT side and the MLS side both,
+// was argued from the election's fallback arm and never driven.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
@@ -15700,7 +14726,6 @@ async fn join_succeeds_while_owner_is_offline() {
     let server_id = create_server_and_wait(&mut o, "Owner Away").await;
     let general = general_channel_of(&server_id);
 
-    // A joins the normal way, against a live owner: group = {O, A}.
     a.cmd_tx
         .send(NodeCommand::JoinServer {
             server_id: server_id.clone(),
@@ -15731,7 +14756,6 @@ async fn join_succeeds_while_owner_is_offline() {
         "A must see the owner drop before the join, or it elects a ghost committer"
     );
 
-    // --- A stranger joins with only A there to serve it. ---
     let mut b = spawn_node_with_friends(&relay, B_MASTER, B_MASTER, &[]).await;
     b.cmd_tx
         .send(NodeCommand::JoinServer {
@@ -15749,14 +14773,12 @@ async fn join_succeeds_while_owner_is_offline() {
         "CRDT admission must not need the owner — A serves the snapshot + op log"
     );
 
-    // MLS: A is the fallback committer, so B's leaf lands on both sides…
     expect_mls_leaf(&a, &server_id, &b.device_id, 30).await;
     expect_mls_leaf(&b, &server_id, &b.device_id, 30).await;
     // …and the ABSENT owner's leaf survives the commit (an add must never
     // double as an eviction of whoever happened to be offline).
     expect_mls_leaf(&b, &server_id, &o.device_id, 30).await;
 
-    // CRDT: three master-keyed members on the joiner.
     let mut expect_members = vec![o_master.clone(), a_master.clone(), b_master.clone()];
     expect_members.sort();
     assert!(
@@ -15792,35 +14814,14 @@ async fn join_succeeds_while_owner_is_offline() {
     drop(b);
 }
 
-// ---------------------------------------------------------------------------
-// …and the owner comes BACK. It slept through an epoch advance it did not
-// author, which is the exact shape of a present-but-stale group: the owner
-// still holds a leaf, so nothing keyed on `has_group` or leaf-missing fires.
-//
-// This was BROKEN until 2026-08-27 and the regression it guards is subtle, so
-// the shape is worth keeping written down. Both epoch hints the reconnect
-// generates used to be dropped, for two separate reasons:
-//
-//  1. The hint from the NEW member races the CRDT delta. `handle_epoch_hint`
-//     gates on `state.members`, the returning owner has not ingested
-//     MemberAdded yet, so it returned and nothing re-sent the hint.
-//  2. The owner-as-authority deadlock. `group_authority` prefers the owner for
-//     the server group, so the owner (theirs > ours) bailed out of
-//     `send_epoch_probe` with "our epoch defines the group — nobody to ask",
-//     and the member that actually HELD the newer epoch refused to serve
-//     because it was not the authority. Both deferred to the owner and the
-//     owner was the stale one.
-//
-// Measured then: the owner dropped the first 3 channel messages before the
-// decrypt-fail ladder rescued it. In a VOICE-only channel no MLS ciphertext
-// ever flows to fail a decrypt, so there was no ladder and no end to it.
-//
-// The fix is `epoch_catchup_responder`: owner-preference is right for the
-// COMMITTER (linear epochs) and wrong for the catch-up AUTHORITY, which is
-// whoever holds the higher epoch. Both sides now elect with the peer that is
-// BEHIND excluded, so they agree on one responder and a stale authority still
-// gets served. The non-member branch self-probes instead of returning.
-// ---------------------------------------------------------------------------
+// ...and the owner comes BACK, having slept through an epoch advance it did not
+// author: it still holds a leaf, so nothing keyed on `has_group` fires. Both epoch
+// hints the reconnect generates used to be dropped. The hint from the NEW member
+// races the CRDT delta, so `handle_epoch_hint`'s membership gate returned and nothing
+// re-sent it; and the owner-as-authority deadlock had the owner bail out of
+// `send_epoch_probe` while the member holding the newer epoch refused to serve. The
+// fix is `epoch_catchup_responder`: both sides elect with the peer that is BEHIND
+// excluded, and the non-member branch self-probes instead of returning.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
@@ -15896,7 +14897,6 @@ async fn owner_returns_from_a_join_it_missed_and_converges() {
         "the add must have advanced the epoch past the owner ({epoch_before} -> {epoch_after})"
     );
 
-    // --- The owner comes back, an epoch behind. ---
     drain_events(&mut o);
     relay.set_online(&o.device_id, true);
 
@@ -15912,12 +14912,9 @@ async fn owner_returns_from_a_join_it_missed_and_converges() {
         o.raw_crdt_member_keys(&server_id),
     );
 
-    // Then MLS, and THIS is the claim the fix makes: the heal is TRAFFIC-FREE.
-    // Before it, nothing healed until 3 channel messages had failed to decrypt
-    // (measured), so a quiet server — or a VOICE-only channel, where no MLS
-    // ciphertext ever flows to fail — left the owner stale indefinitely. The
-    // reconnect's own epoch hint is now enough, so assert the leaf and the epoch
-    // converge with NOTHING yet sent in the channel.
+    // Then MLS, and this is the claim the fix makes: the heal is TRAFFIC-FREE. Nothing
+    // healed until three channel messages had failed to decrypt, so a quiet server, or a
+    // voice-only channel, left the owner stale indefinitely. Assert with nothing yet sent.
     expect_mls_leaf(&o, &server_id, &b.device_id, 45).await;
     assert!(
         wait_until(30, async || {
@@ -15967,20 +14964,11 @@ async fn owner_returns_from_a_join_it_missed_and_converges() {
     drop(b);
 }
 
-// ---------------------------------------------------------------------------
-// The join coordinator gate's failure mode, driven.
-//
-// Joins are served by ONE elected member now (the CRDT accept path used to run
-// in full on every online member: N snapshots, N op logs, N duplicate
-// MemberAdded ops at a single joiner). The election reads each member's OWN
-// `ws_room_peers`, so a coordinator whose socket died WITHOUT a PeerLeft is
-// still elected by everyone and answers for nobody — the whole join would hang
-// to the 15s timeout. `drop_socket_silently` is exactly that loss mode.
-//
-// The safety net is the joiner's 4s re-ask, which members recognise as a repeat
-// and serve unconditionally. So the gate costs one responder on the happy path
-// and degrades to the OLD fan-out, not to a failed join.
-// ---------------------------------------------------------------------------
+// The join coordinator gate's failure mode. Joins are served by ONE elected member,
+// and the election reads each member's OWN `ws_room_peers`, so a coordinator whose
+// socket died WITHOUT a PeerLeft is still elected by everyone and answers for nobody.
+// The safety net is the joiner's 4s re-ask, so the gate degrades to the OLD fan-out
+// rather than to a failed join.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
@@ -16059,16 +15047,11 @@ async fn join_survives_a_coordinator_that_vanished_silently() {
         b.raw_crdt_member_keys(&server_id),
     );
 
-    // SCOPE, deliberately. The MLS leaf does NOT follow here, and that is not
-    // this fix regressing: the same assertion fails identically with the
-    // coordinator gate reverted (checked 2026-08-27). The MLS committer election
-    // reads the same stale `ws_room_peers` and elects the same ghost, and a
-    // KeyPackage has no re-ask of its own. In production the relay's own
-    // keepalive evicts the dead socket and broadcasts the presence change, which
-    // corrects the view and lets the existing bootstrap paths finish the add;
-    // `drop_socket_silently` models the window BEFORE that, where by construction
-    // nothing ever corrects it. So the joiner is a CRDT member reading an empty
-    // channel until presence catches up — worth closing, separate from this.
+    // SCOPE, deliberately: the MLS leaf does NOT follow here, and that is not this fix
+    // regressing (the same assertion fails with the gate reverted). The committer
+    // election reads the same stale `ws_room_peers` and a KeyPackage has no re-ask of its
+    // own. In production the relay's keepalive evicts the dead socket and corrects the
+    // view; `drop_socket_silently` models the window before that.
     assert!(
         b.mls_members(&server_id).await.is_empty(),
         "if the MLS add now lands here too, the residual is fixed — tighten this test          to assert the leaf and the decrypt instead of pinning the gap"
@@ -16079,25 +15062,13 @@ async fn join_survives_a_coordinator_that_vanished_silently() {
     drop(b);
 }
 
-// ---------------------------------------------------------------------------
-// ASYNC FRIENDING — two people who are NEVER online at the same moment.
-//
-// Three legs had to land together for this to work at all, and each one fails
-// silently on its own:
-//   1. the request is addressed to a MASTER, which no socket authenticates as,
-//      so the relay buffers it under a key nobody would ever replay -> a
-//      mailbox, gated by an ownership proof;
-//   2. the accept rides the existing device-keyed buffer, but only because the
-//      accepter learned the requester's device from the request itself;
-//   3. the Olm handshake used to need co-presence and refused anything older
-//      than five minutes -> the bundle rides INSIDE the request, under its own
-//      freshness rule.
-// The tests below drive each leg, then the whole thing end to end.
-//
-// "Offline" here is `set_online(false)`: the relay drops the socket from every
-// room and stops delivering, which is exactly what the feature has to survive.
-// The two nodes are never both reachable at any point in the end-to-end test.
-// ---------------------------------------------------------------------------
+// ASYNC FRIENDING: two people who are NEVER online at the same moment. Three legs had
+// to land together, each failing silently on its own. The request is addressed to a
+// MASTER, which no socket authenticates as, so it needs a mailbox gated by an
+// ownership proof; the accept rides the device-keyed buffer, but only because the
+// accepter learned the requester's device from the request; and the Olm handshake
+// needed co-presence, so the bundle now rides INSIDE the request under its own
+// freshness rule. "Offline" here is `set_online(false)`.
 
 /// A raw socket on the MockRelay with no node behind it: the only way to drive a
 /// join a real node would never send (a stranger claiming someone else's inbox,
@@ -16174,13 +15145,9 @@ fn buffered_request_ats(relay: &MockRelay, target: &str) -> Vec<i64> {
         .collect()
 }
 
-// ---------------------------------------------------------------------------
-// Leg 1. A requests B while B has never connected, then A goes dark. B boots
-// ALONE and must still find the request waiting. Before the mailbox this was
-// impossible: the request was a targeted send to a master id, so it reached no
-// socket, and the queue meant to retry it only ever fired on a co-presence that
-// by definition never came.
-// ---------------------------------------------------------------------------
+// Leg 1. A requests B while B has never connected, then A goes dark; B boots ALONE
+// and must still find the request waiting. Before the mailbox the request reached no
+// socket, and its retry queue only fired on a co-presence that never came.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests vs the global resolver
@@ -16256,7 +15223,6 @@ async fn friend_accept_and_dms_with_zero_overlap() {
     let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER)).peer_id();
     let b_master = NativeKeypair::from_secret_bytes(&seed_bytes(B_MASTER)).peer_id();
 
-    // --- 1. A alone: request B, who does not exist yet. ---
     let mut a = spawn_node_with_friends(&relay, A_MASTER, A_DEV, &[]).await;
     let a_device = a.device_id.clone();
     a.cmd_tx
@@ -16268,11 +15234,9 @@ async fn friend_accept_and_dms_with_zero_overlap() {
         "request must reach B's mailbox",
     );
 
-    // --- 2. A goes dark. ---
     relay.set_online(&a_device, false);
     drain_events(&mut a);
 
-    // --- 3. B alone: collect the request and accept it. ---
     let mut b = spawn_node_with_friends(&relay, B_MASTER, B_DEV, &[]).await;
     let b_device = b.device_id.clone();
     let mut requester_id = None;
@@ -16288,7 +15252,6 @@ async fn friend_accept_and_dms_with_zero_overlap() {
         .await,
         "B must see the mailbox request",
     );
-    // Accept with the id the UI actually holds, exactly as a person would.
     let accept_id = requester_id.expect("captured requester id");
     b.cmd_tx
         .send(NodeCommand::AcceptFriendRequest { peer_id: accept_id })
@@ -16310,12 +15273,10 @@ async fn friend_accept_and_dms_with_zero_overlap() {
         "B must build its Olm session from the carried bundle at accept time",
     );
 
-    // --- 4. B goes dark, A comes back. Still never both up. ---
     relay.set_online(&b_device, false);
     drain_events(&mut b);
     relay.set_online(&a_device, true);
 
-    // --- 5. A alone: learns it was accepted and ends up with a live session. ---
     assert!(
         wait_until(20, async || {
             friend_row(&a, &b_master).map(|(st, _)| st) == Some("accepted".to_string())
@@ -16329,7 +15290,6 @@ async fn friend_accept_and_dms_with_zero_overlap() {
         "the establisher must give A a CONFIRMED inbound session, got {:?}",
         a.olm_status(&b_device).await,
     );
-    // The establisher is control traffic: it must never render as a message.
     assert!(
         a.dm_thread(&b_master).is_empty(),
         "the handshake sentinel must not insert a DM row, got {:?}",
@@ -16337,7 +15297,6 @@ async fn friend_accept_and_dms_with_zero_overlap() {
     );
     drain_events(&mut a);
 
-    // --- 6. A sends a DM while B is still gone. ---
     a.cmd_tx
         .send(NodeCommand::SendMessage {
             peer_id: b_master.clone(),
@@ -16353,7 +15312,6 @@ async fn friend_accept_and_dms_with_zero_overlap() {
         "A's DM must be buffered for the offline B",
     );
 
-    // --- 7. A goes dark, B comes back, reads it, and replies. ---
     relay.set_online(&a_device, false);
     drain_events(&mut a);
     relay.set_online(&b_device, true);
@@ -16386,7 +15344,6 @@ async fn friend_accept_and_dms_with_zero_overlap() {
         "B's reply must be buffered for the offline A",
     );
 
-    // --- 8. B goes dark, A comes back and reads the reply. ---
     relay.set_online(&b_device, false);
     drain_events(&mut b);
     relay.set_online(&a_device, true);
@@ -16408,20 +15365,11 @@ async fn friend_accept_and_dms_with_zero_overlap() {
     drop(b);
 }
 
-// ---------------------------------------------------------------------------
-// FIX A — the accepted-friend DOWNGRADE. The inbox mailbox is TTL-only: it
-// re-delivers the ORIGINAL request to a device on EVERY `inbox:` join (so every
-// sibling collects it). Before the anti-downgrade guard, an accepter who had
-// already accepted, then rebooted, had the replay walk its "accepted" row back
-// to "pending incoming" and re-fire FriendRequestReceived — the field symptom
-// where the DM vanished from Recent Conversations and the person reappeared as
-// an Incoming request. This drives that exact sequence: request → accept →
-// reboot (which re-runs JoinInbox and re-delivers) and asserts the friendship
-// survives, with no second FriendRequestReceived. A reboot is modelled as an
-// offline→online cycle: the relay re-emits Connected, so the node re-runs its
-// whole join flow from scratch (the same code path a fresh process runs), and
-// the guard's decision reads the DURABLE friends row, not in-memory state.
-// ---------------------------------------------------------------------------
+// FIX A, the accepted-friend DOWNGRADE. The inbox mailbox is TTL-only and re-delivers
+// the ORIGINAL request on EVERY `inbox:` join, so an accepter who rebooted had the
+// replay walk its "accepted" row back to "pending incoming" and re-fire
+// FriendRequestReceived. A reboot is modelled as an offline-online cycle, which
+// re-runs the whole join flow, and the guard reads the DURABLE friends row.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests vs the global resolver
@@ -16439,7 +15387,6 @@ async fn friend_accept_survives_mailbox_redelivery() {
     let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER)).peer_id();
     let b_master = NativeKeypair::from_secret_bytes(&seed_bytes(B_MASTER)).peer_id();
 
-    // 1. A alone requests B (absent) → the request lands in B's TTL-only mailbox.
     let mut a = spawn_node_with_friends(&relay, A_MASTER, A_DEV, &[]).await;
     let a_device = a.device_id.clone();
     a.cmd_tx
@@ -16451,11 +15398,9 @@ async fn friend_accept_survives_mailbox_redelivery() {
         "request must reach B's mailbox",
     );
 
-    // 2. A goes dark; the two are never reachable together again.
     relay.set_online(&a_device, false);
     drain_events(&mut a);
 
-    // 3. B boots, collects the request, and ACCEPTS. Row for A becomes "accepted".
     let mut b = spawn_node_with_friends(&relay, B_MASTER, B_DEV, &[]).await;
     let b_device = b.device_id.clone();
     let mut requester_id = None;
@@ -16517,15 +15462,10 @@ async fn friend_accept_survives_mailbox_redelivery() {
     drop(b);
 }
 
-// ---------------------------------------------------------------------------
-// FIX B — a friend request carries the sender's OWN signed profile, so a
-// stranger's incoming card renders a real name (and, once online, avatar)
-// instead of a raw peer id. LIGHT: the avatar HASH rides, never the bytes.
-// Verified + stored exactly like a ProfileRelay: a valid carried profile makes
-// the receiver hold the sender's display name; a TAMPERED signature is rejected
-// — the request still lands, but the profile is not stored (never store-and-log
-// an unverified profile).
-// ---------------------------------------------------------------------------
+// FIX B: a friend request carries the sender's OWN signed profile, so a stranger's
+// incoming card renders a real name. LIGHT: the avatar HASH rides, never the bytes. A
+// TAMPERED signature means the request still lands but the profile is not stored,
+// because an unverified profile is never store-and-logged.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests vs the global resolver
@@ -16582,7 +15522,6 @@ async fn friend_request_carries_sender_profile() {
         "request (carrying A's profile) must reach B's mailbox",
     );
 
-    // --- 2. A goes dark; B boots ALONE and collects the request. ---
     relay.set_online(&a_device, false);
     drain_events(&mut a);
     let mut b = spawn_node_with_friends(&relay, B_MASTER, B_DEV, &[]).await;
@@ -16661,14 +15600,10 @@ async fn friend_request_carries_sender_profile() {
     drop(b);
 }
 
-// ---------------------------------------------------------------------------
-// DECLINE IS STICKY. Reject writes a "declined" tombstone (preserving the
-// original requested_at) instead of deleting the row. Under the TTL-only mailbox
-// a deleted row let the buffered request re-deliver on every reboot for 3 days
-// and resurface in Incoming. This drives request → decline → reboot (re-delivery)
-// and asserts the decline holds, then that a genuinely NEWER request (a cancel +
-// re-add) still falls through and shows again.
-// ---------------------------------------------------------------------------
+// DECLINE IS STICKY. Reject writes a "declined" tombstone preserving the original
+// requested_at instead of deleting the row, because under a TTL-only mailbox a
+// deleted row let the buffered request resurface on every reboot for three days. A
+// genuinely NEWER request still falls through and shows again.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests vs the global resolver
@@ -16686,7 +15621,6 @@ async fn declined_request_does_not_resurrect_on_mailbox_redelivery() {
     let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER)).peer_id();
     let b_master = NativeKeypair::from_secret_bytes(&seed_bytes(B_MASTER)).peer_id();
 
-    // 1. A alone requests B (absent) → the request lands in B's TTL-only mailbox.
     let mut a = spawn_node_with_friends(&relay, A_MASTER, A_DEV, &[]).await;
     let a_device = a.device_id.clone();
     a.cmd_tx
@@ -16698,7 +15632,6 @@ async fn declined_request_does_not_resurrect_on_mailbox_redelivery() {
         "request must reach B's mailbox",
     );
 
-    // 2. A goes dark; B boots, collects the request, and DECLINES it.
     relay.set_online(&a_device, false);
     drain_events(&mut a);
     let mut b = spawn_node_with_friends(&relay, B_MASTER, B_DEV, &[]).await;
@@ -16804,11 +15737,9 @@ async fn declined_request_does_not_resurrect_on_mailbox_redelivery() {
     drop(b);
 }
 
-// ---------------------------------------------------------------------------
-// The mailbox is only as safe as its gate. A master's inbox room name is public,
-// so without the ownership proof anyone could join `inbox:{victim}` and read
-// every request the victim has not collected yet.
-// ---------------------------------------------------------------------------
+// The mailbox is only as safe as its gate: a master's inbox room name is public, so
+// without the ownership proof anyone could join it and read every request the victim
+// has not collected yet.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests vs the global resolver
@@ -16939,11 +15870,9 @@ async fn mailbox_requires_ownership_proof() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// The two freshness rules are independent, and that independence is the point:
-// the carried rule has to be days long, and widening the LIVE rule to reach it
-// would have handed every peer a days-long key-exchange replay window.
-// ---------------------------------------------------------------------------
+// The two freshness rules are independent, and that is the point: the carried rule
+// has to be days long, and widening the LIVE rule to reach it would hand every peer a
+// days-long key-exchange replay window.
 
 #[test]
 fn carried_bundle_freshness_is_its_own_rule() {
@@ -17023,12 +15952,9 @@ fn carried_bundle_freshness_is_its_own_rule() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Re-depositing on every connect is the design (a relay buffer has a TTL and
-// dies with a relay restart), so the receiver has to be idempotent. It dedups on
-// the friends row, and the bundle is minted ONCE per target so every copy
-// carries the same one-time key.
-// ---------------------------------------------------------------------------
+// Re-depositing on every connect is the design, since a relay buffer has a TTL and
+// dies with a relay restart, so the receiver dedups on the friends row and the bundle
+// is minted ONCE per target so every copy carries the same one-time key.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests vs the global resolver
@@ -17054,7 +15980,6 @@ async fn mailbox_redeposit_dedups() {
         .unwrap();
     assert!(wait_until(10, async || relay.buffered_count(&b_master) > 0).await);
 
-    // Five reconnects, each re-depositing the same request.
     for i in 0..5u64 {
         relay.set_online(&a_device, false);
         relay.set_online(&a_device, true);
@@ -17072,7 +15997,6 @@ async fn mailbox_redeposit_dedups() {
     relay.set_online(&a_device, false);
     drain_events(&mut a);
 
-    // B boots once and drains all of them.
     let mut b = spawn_node_with_friends(&relay, B_MASTER, B_DEV, &[]).await;
     assert!(
         wait_event(&mut b, std::time::Duration::from_secs(10), |ev| {
@@ -17082,7 +16006,6 @@ async fn mailbox_redeposit_dedups() {
         "B must see the request",
     );
 
-    // ONE row, whatever the mailbox held.
     let rows: Vec<_> = b.store().load_friends(None).unwrap_or_default()
         .into_iter()
         .filter(|(pid, _, _, _, _)| super::resolver::same_identity(pid, &a_master))
@@ -17131,7 +16054,6 @@ async fn blocked_sender_mailbox_request_dropped() {
     let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER)).peer_id();
     let b_master = NativeKeypair::from_secret_bytes(&seed_bytes(B_MASTER)).peer_id();
 
-    // B blocks A (master-keyed, exactly as the FFI wrapper does after persisting).
     super::blocklist::block(&a_master);
 
     let mut a = spawn_node_with_friends(&relay, A_MASTER, A_DEV, &[]).await;
@@ -17164,17 +16086,11 @@ async fn blocked_sender_mailbox_request_dropped() {
     drop(b);
 }
 
-// ---------------------------------------------------------------------------
-// DECLINE STICKS END TO END. The tombstone alone only made the DECLINER quiet:
-// the reject itself was a best-effort live send, so a requester who was offline
-// when it fired never learned, kept its row "pending outgoing" forever, and
-// re-deposited the same request into the decliner's mailbox on every reconnect.
-// The decline now rides the requester's OWN master-keyed mailbox as well, which
-// is the only leg that reaches somebody who is simply not here.
-//
-// Zero moments where both are online, right up to the deliberate re-add at the
-// end — the whole point is that a decline converges without co-presence.
-// ---------------------------------------------------------------------------
+// DECLINE STICKS END TO END. The tombstone alone only made the DECLINER quiet: the
+// reject was a best-effort live send, so a requester who was offline never learned,
+// stayed "pending outgoing" forever and re-deposited on every reconnect. The decline
+// now rides the requester's OWN master-keyed mailbox, the only leg that reaches
+// somebody who is simply not here. Nobody is online together until the final re-add.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests vs the global resolver
@@ -17192,7 +16108,6 @@ async fn friend_reject_delivered_with_no_overlap() {
     let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER)).peer_id();
     let b_master = NativeKeypair::from_secret_bytes(&seed_bytes(B_MASTER)).peer_id();
 
-    // 1. A alone requests B (absent) → the request lands in B's TTL-only mailbox.
     let mut a = spawn_node_with_friends(&relay, A_MASTER, A_DEV, &[]).await;
     let a_device = a.device_id.clone();
     a.cmd_tx
@@ -17207,11 +16122,9 @@ async fn friend_reject_delivered_with_no_overlap() {
         .expect("A must hold a pending outgoing row")
         .2;
 
-    // 2. A goes dark. From here neither is reachable while the other is up.
     relay.set_online(&a_device, false);
     drain_events(&mut a);
 
-    // 3. B boots, collects the request, and DECLINES it.
     let mut b = spawn_node_with_friends(&relay, B_MASTER, B_DEV, &[]).await;
     let b_device = b.device_id.clone();
     let mut requester_id = None;
@@ -17253,16 +16166,12 @@ async fn friend_reject_delivered_with_no_overlap() {
         buffered_reject_ats(&relay, &a_master),
     );
 
-    // 4. B goes dark; A comes back ALONE and learns it was declined.
     relay.set_online(&b_device, false);
     drain_events(&mut b);
-    // HARNESS HONESTY. The resolver is process-GLOBAL in the test binary, so every
-    // node's device -> master link is visible to every other node and `resolve(b_device)`
-    // succeeds here for a node that, in the field, has never heard of B. That mock
-    // fidelity gap is exactly what hid the field bug: two fresh installs that were
-    // never online together, so A's resolver was cold and the reject was dropped with
-    // `row None`. Forget the link before A collects, so attribution MUST come from the
-    // list the reject carries. Restored below, before B needs its own mapping again.
+    // HARNESS HONESTY: the resolver is process-GLOBAL in the test binary, so every node
+    // sees every device-to-master link and `resolve(b_device)` succeeds for a node that
+    // in the field has never heard of B. That gap is what hid the field bug, so forget
+    // the link and make attribution come from the list the reject carries.
     super::resolver::forget(&b_device);
     relay.set_online(&a_device, true);
     assert!(
@@ -17277,7 +16186,6 @@ async fn friend_reject_delivered_with_no_overlap() {
         "the declined outgoing request must be gone from A's books, got {:?}",
         friend_row(&a, &b_master),
     );
-    // Exactly once, however many copies the TTL-only mailbox replays.
     let twice = wait_event(&mut a, std::time::Duration::from_secs(3), |ev| {
         matches!(ev, NetworkEvent::FriendRequestRejected { peer_id } if *peer_id == b_master)
     })
@@ -17354,14 +16262,10 @@ async fn friend_reject_delivered_with_no_overlap() {
     drop(b);
 }
 
-// ---------------------------------------------------------------------------
-// The mailbox has a TTL, so the decline can EXPIRE before the requester next
-// boots. Then the requester re-deposits its request, the decliner swallows it
-// silently against the tombstone, and — without this — nobody ever answers
-// again: the request is stuck pending on one side and declined on the other
-// forever. Every swallow therefore RE-ARMS the answer, once per requester per
-// process, so the decline converges in every ordering.
-// ---------------------------------------------------------------------------
+// The mailbox has a TTL, so a decline can EXPIRE before the requester next boots. The
+// requester then re-deposits, the decliner swallows it against the tombstone, and
+// without a re-arm nobody ever answers again. Every swallow therefore RE-ARMS the
+// answer, once per requester per connection.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests vs the global resolver
@@ -17379,7 +16283,6 @@ async fn declined_reject_is_resent_when_stale_redeposit_returns() {
     let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER)).peer_id();
     let b_master = NativeKeypair::from_secret_bytes(&seed_bytes(B_MASTER)).peer_id();
 
-    // 1. A alone requests B (absent), then goes dark.
     let mut a = spawn_node_with_friends(&relay, A_MASTER, A_DEV, &[]).await;
     let a_device = a.device_id.clone();
     a.cmd_tx
@@ -17396,11 +16299,9 @@ async fn declined_reject_is_resent_when_stale_redeposit_returns() {
     relay.set_online(&a_device, false);
     drain_events(&mut a);
 
-    // 2. Clear B's mailbox and hand it the request DIRECTLY instead. The re-arm is
-    //    bounded to one deposit per requester per process, so this test has to own
-    //    exactly when the first swallow happens: a mailbox that replays the same
-    //    request twice on one boot would spend the budget here, long before the
-    //    expiry this test is actually about. Same frame either way.
+    // 2. Clear B's mailbox and hand it the request DIRECTLY. The re-arm is bounded to one
+    // deposit per requester, so the test must own exactly when the first swallow happens;
+    // a mailbox replaying twice on one boot would spend the budget here.
     relay.expire_mailbox(&b_master);
     let a_master_kp = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER));
     let a_list = super::crypto_handler::build_signed_device_list(
@@ -17414,7 +16315,6 @@ async fn declined_reject_is_resent_when_stale_redeposit_returns() {
     })
     .unwrap();
 
-    // 3. B boots into an empty mailbox, collects the request, declines.
     let mut b = spawn_node_with_friends(&relay, B_MASTER, B_DEV, &[]).await;
     let b_device = b.device_id.clone();
     let inbox = format!("inbox:{b_master}");
@@ -17448,11 +16348,9 @@ async fn declined_reject_is_resent_when_stale_redeposit_returns() {
     relay.set_online(&b_device, false);
     drain_events(&mut b);
 
-    // 4. THREE DAYS PASS. The relay drops A's mailbox before A ever comes back.
     relay.expire_mailbox(&a_master);
     assert_eq!(relay.buffered_count(&a_master), 0, "precondition: the decline expired");
 
-    // 5. A returns knowing nothing, so its reconnect re-deposits the request.
     let deposits_before = relay.buffered_count(&b_master);
     relay.set_online(&a_device, true);
     assert!(
@@ -17488,11 +16386,9 @@ async fn declined_reject_is_resent_when_stale_redeposit_returns() {
         buffered_reject_ats(&relay, &a_master),
     );
 
-    // 7. And it re-arms on the NEXT reconnect too. Expire A's mailbox a second
-    //    time and bounce B: the re-send set is connection-scoped, not
-    //    process-scoped, because the mailbox only replays on an inbox (re)join.
-    //    Without the reset a decliner whose process stays up for days answers a
-    //    returning requester exactly once, ever, and then goes quiet.
+    // 7. And it re-arms on the NEXT reconnect too: the re-send set is connection-scoped,
+    // not process-scoped, because the mailbox only replays on an inbox rejoin. Otherwise
+    // a decliner whose process stays up answers a returning requester once, ever.
     relay.expire_mailbox(&a_master);
     assert_eq!(
         relay.buffered_count(&a_master), 0,
@@ -17511,16 +16407,12 @@ async fn declined_reject_is_resent_when_stale_redeposit_returns() {
         buffered_reject_ats(&relay, &a_master),
     );
 
-    // 8. B goes dark, A returns and finally converges.
     relay.set_online(&b_device, false);
     drain_events(&mut b);
-    // HARNESS HONESTY. The resolver is process-GLOBAL in the test binary, so every
-    // node's device -> master link is visible to every other node and `resolve(b_device)`
-    // succeeds here for a node that, in the field, has never heard of B. That mock
-    // fidelity gap is exactly what hid the field bug: two fresh installs that were
-    // never online together, so A's resolver was cold and the reject was dropped with
-    // `row None`. Forget the link before A collects, so attribution MUST come from the
-    // list the reject carries. Restored below, before B needs its own mapping again.
+    // HARNESS HONESTY: the resolver is process-GLOBAL in the test binary, so every node
+    // sees every device-to-master link and `resolve(b_device)` succeeds for a node that
+    // in the field has never heard of B. Forget the link so attribution must come from
+    // the list the reject carries; it is restored below.
     super::resolver::forget(&b_device);
     relay.set_online(&a_device, true);
     assert!(
@@ -17545,12 +16437,9 @@ async fn declined_reject_is_resent_when_stale_redeposit_returns() {
     drop(b);
 }
 
-// ---------------------------------------------------------------------------
-// A re-deposit must be the SAME request, not a fresh one. The requested_at is
-// what every dedup/anti-downgrade decision downstream compares against, so if a
-// reconnect minted a new one, a declined or already-shown request would look
-// strictly newer on every boot and resurface forever.
-// ---------------------------------------------------------------------------
+// A re-deposit must be the SAME request, not a fresh one: `requested_at` is what
+// every dedup and anti-downgrade decision compares against, so a new stamp would make
+// a declined request look strictly newer and resurface forever.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests vs the global resolver
@@ -17582,7 +16471,6 @@ async fn redeposit_keeps_original_requested_at_and_dedups() {
         .expect("A must hold a pending outgoing row")
         .2;
 
-    // Three reconnects, three more copies of the SAME request.
     for i in 0..3usize {
         let before = relay.buffered_count(&b_master);
         relay.set_online(&a_device, false);
@@ -17601,7 +16489,6 @@ async fn redeposit_keeps_original_requested_at_and_dedups() {
         "every re-deposit must carry the ORIGINAL requested_at {original_at}, got {ats:?}",
     );
 
-    // B boots once and shows it exactly ONCE, whatever the mailbox depth.
     relay.set_online(&a_device, false);
     drain_events(&mut a);
     let mut b = spawn_node_with_friends(&relay, B_MASTER, B_DEV, &[]).await;
@@ -17624,12 +16511,9 @@ async fn redeposit_keeps_original_requested_at_and_dedups() {
     drop(b);
 }
 
-// ---------------------------------------------------------------------------
-// The stored `requested_at` on a pending row has to ADVANCE. The upsert used to
-// keep whatever was written first, so on a pending-incoming row every later
-// re-delivery of a genuinely newer request still measured against the OLD
-// timestamp, fell through the dedup guard, and re-notified on every replay.
-// ---------------------------------------------------------------------------
+// The stored `requested_at` on a pending row has to ADVANCE. The upsert kept whatever
+// was written first, so a genuinely newer request still measured against the OLD
+// timestamp, fell through the dedup guard and re-notified on every replay.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests vs the global resolver
@@ -17671,7 +16555,6 @@ async fn newer_request_advances_stored_requested_at() {
         .unwrap()
     };
 
-    // 1. The original request lands as pending incoming at T0.
     relay.inject_direct(&inbox, &a_device, &b.device_id, request_at(t0));
     assert!(
         wait_event(&mut b, std::time::Duration::from_secs(10), |ev| {
@@ -17682,7 +16565,6 @@ async fn newer_request_advances_stored_requested_at() {
         "B must show the first request",
     );
 
-    // 2. A cancel + re-add mints T2 > T0, which must fall through and re-notify.
     drain_events(&mut b);
     relay.inject_direct(&inbox, &a_device, &b.device_id, request_at(t2));
     assert!(
@@ -17720,15 +16602,10 @@ async fn newer_request_advances_stored_requested_at() {
     drop(b);
 }
 
-// ---------------------------------------------------------------------------
-// A decline now travels through a mailbox, which means it can arrive LATE, out
-// of order, or replayed for the whole TTL. So a reject only ever acts on the
-// request it NAMES: an older stamp, or the legacy no-stamp wire form, must never
-// become a remote un-friend primitive against a settled friendship. The positive
-// half is the mutual race, and runs last because it is destructive: a reject
-// carrying the accepted row's OWN requested_at answers the very request that
-// produced the friendship, and must land.
-// ---------------------------------------------------------------------------
+// A decline travels through a mailbox, so it can arrive late, out of order or
+// replayed for the whole TTL. A reject therefore only ever acts on the request it
+// NAMES: an older stamp, or the legacy no-stamp wire form, must never become a remote
+// un-friend primitive. The positive half runs last because it is destructive.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests vs the global resolver
@@ -17804,12 +16681,9 @@ async fn stale_reject_never_deletes_an_accepted_friendship() {
         "and the accepted friendship must survive untouched",
     );
 
-    // THE POSITIVE HALF (destructive, so last). The mutual race: both sides
-    // requested each other, both auto-converged to friends, and B then hit Reject
-    // on that same request. Its reject carries the stamp our accepted row froze at,
-    // so it answers the request this friendship is made of and must land -- else
-    // the pair is friends on one side and declined on the other, and A keeps
-    // re-sending FriendAccept forever.
+    // THE POSITIVE HALF, destructive so last. Both sides requested each other and
+    // auto-converged; B's reject carries the stamp our accepted row froze at, so it
+    // answers the request this friendship is made of and must land.
     drain_events(&mut a);
     let answered = serde_json::to_vec(
         &super::types::HavenMessage::FriendReject {
@@ -17840,14 +16714,10 @@ async fn stale_reject_never_deletes_an_accepted_friendship() {
 }
 
 
-// ---------------------------------------------------------------------------
-// The carried list is ATTRIBUTION, so it is a trust boundary: it decides which
-// friend row a reject deletes. A list that is present but bad must be a REJECTED
-// message, never a quiet downgrade to the resolver -- `if list.is_some()` would
-// be the bypass. Both halves are checked here against a resolver that WOULD have
-// found the row, so a drop can only be the gate's doing, and the last step proves
-// exactly that by sending the same frame with no list at all.
-// ---------------------------------------------------------------------------
+// The carried list is ATTRIBUTION, so it is a trust boundary: it decides which friend
+// row a reject deletes. A list that is present but bad must be a REJECTED message,
+// never a quiet downgrade to the resolver, since `if list.is_some()` is the bypass.
+// Checked against a resolver that WOULD have found the row.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests vs the global resolver
@@ -17865,7 +16735,6 @@ async fn friend_reject_with_bad_carried_list_is_dropped() {
     let b_master_kp = NativeKeypair::from_secret_bytes(&seed_bytes(B_MASTER));
     let b_master = b_master_kp.peer_id();
     let b_device = NativeKeypair::from_secret_bytes(&seed_bytes(B_DEV)).peer_id();
-    // A SECOND device of B's that the signed list does NOT name.
     let b_unlisted = NativeKeypair::from_secret_bytes(&seed_bytes(185)).peer_id();
     let b_list = super::crypto_handler::build_signed_device_list(
         &b_master_kp, 1, vec![b_device.clone()], Vec::new(),
@@ -17904,7 +16773,6 @@ async fn friend_reject_with_bad_carried_list_is_dropped() {
     let mut stolen = b_list.clone();
     stolen.master_peer_id = NativeKeypair::from_secret_bytes(&seed_bytes(186)).peer_id();
     relay.inject_direct(&room, &b_device, &a.device_id, reject_with(Some(stolen)));
-    // (3) A list whose signature no longer covers its devices.
     let mut tampered = b_list.clone();
     tampered.devices.push(b_unlisted.clone());
     relay.inject_direct(&room, &b_unlisted, &a.device_id, reject_with(Some(tampered)));
@@ -17945,25 +16813,13 @@ async fn friend_reject_with_bad_carried_list_is_dropped() {
     drop(a);
 }
 
-// ---------------------------------------------------------------------------
-// PARKED JOINS (pending joins, rung 1).
-//
-// A join into a server whose members are ALL offline used to fail loudly on the
-// 15s timeout and leave nothing behind. It now PARKS: the request is persisted
-// locally and deposited into the server room's `~join` ring, which the relay
-// holds for the room's catch-up retention. The next member to come back reads
-// the ring, admits (or rejects) the joiner and publishes its answer back into
-// the ring, and the joiner picks the answer up on ITS next connect. Nobody is
-// ever online at the same time.
-//
-// The attribution trap is the whole reason the request carries a signed device
-// list: a member serving a parked request has by definition never been online
-// with the joiner, so `resolve(sender_device)` hands the device straight back
-// and the CRDT member entry would be keyed by a DEVICE id. The tests call
-// `resolver::forget` on the joiner's device before the serving node returns,
-// because the harness resolver is process-global and would otherwise make the
-// carried list look unnecessary.
-// ---------------------------------------------------------------------------
+// PARKED JOINS. A join into a server whose members are ALL offline used to fail on
+// the 15s timeout. It now PARKS: the request is persisted locally and deposited into
+// the server room's `~join` ring, the next member back reads the ring, admits or
+// rejects, and publishes its answer there for the joiner's next connect. The request
+// carries a signed device list because a member serving a parked request has never
+// been online with the joiner, so `resolve` would hand back a DEVICE id; the tests
+// call `resolver::forget` to hold that shape against a process-global resolver.
 
 /// Every `~join` ring frame for `server_id`, parsed, paired with the
 /// relay-stamped sender device. The relay-side truth behind a parked join.
@@ -17991,13 +16847,9 @@ fn ring_requests_from(relay: &MockRelay, server_id: &str, device: &str) -> usize
 
 /// Wait until `device`'s parked request is actually IN the room's ring.
 ///
-/// `ServerJoinParked` is emitted on the event loop the instant after the
-/// deposit is QUEUED on `ws_cmd_tx`; the relay drains that queue on its own
-/// task. Taking the node offline in between makes the mock drop the still
-/// queued frame (`handle_command` refuses everything from an offline node,
-/// which is exactly what a dead socket does), and the ring ends up empty with
-/// nobody to answer. So every test that parks and then disconnects has to wait
-/// for the frame, not for the event.
+/// `ServerJoinParked` fires the instant the deposit is QUEUED, and taking the node
+/// offline in between makes the mock drop the still-queued frame, exactly as a dead
+/// socket does. So wait for the frame, never for the event.
 async fn expect_ring_request(relay: &MockRelay, server_id: &str, device: &str, count: usize) {
     let ok = wait_until(15, async || {
         ring_requests_from(relay, server_id, device) == count
@@ -18015,14 +16867,9 @@ async fn expect_ring_request(relay: &MockRelay, server_id: &str, device: &str, c
 
 /// Wait until `from_device`'s verdict on `joiner_master` is in the room's ring.
 ///
-/// The counterpart to [`expect_ring_request`], and needed for exactly the same
-/// reason at the other end of the exchange. A node APPLIES `MemberAdded` and
-/// only then queues the `SendToRoomTopic` that publishes the resolution, so
-/// `wait_until(... raw_crdt_member_keys contains X)` returns while the frame is
-/// still in flight to the relay. Reading `join_ring` once at that moment is a
-/// race the test loses under load. Polling costs nothing: the inspector is a
-/// mutex read, not a DB open, so this does not violate the "never poll a
-/// running node's DB" rule.
+/// A node applies `MemberAdded` and only then queues the frame that publishes the
+/// resolution, so reading `join_ring` once at that moment is a race. Polling is free
+/// here: the inspector is a mutex read, not a DB open.
 async fn expect_ring_resolution(
     relay: &MockRelay,
     server_id: &str,
@@ -18075,13 +16922,10 @@ async fn expect_ring_parked_request(relay: &MockRelay, server_id: &str, device: 
 /// Barrier: every ws command `node` had queued when this is called has now been
 /// processed by the relay.
 ///
-/// A node's outbound commands ride ONE unbounded channel drained by ONE relay
-/// task, in order, so joining a throwaway room and waiting for the relay to
-/// show us in it proves everything queued earlier has landed. This is what
-/// makes a NEGATIVE assertion about relay state honest: "nothing was
-/// published" only means something once nothing is still in flight. The caller
-/// must already have observed that the handler under test RAN (otherwise the
-/// barrier can overtake work that has not been queued yet).
+/// A node's outbound commands ride ONE channel drained in order, so joining a
+/// throwaway room and waiting to appear in it proves everything queued earlier has
+/// landed. That is what makes a NEGATIVE assertion about relay state honest. The
+/// caller must already have observed that the handler under test RAN.
 async fn expect_relay_drained(relay: &MockRelay, node: &TestNode, tag: &str) {
     let room = format!("barrier:{}:{}", node.device_id, tag);
     node.cmd_tx
@@ -18116,12 +16960,9 @@ async fn parked_join_completes_with_zero_overlap() {
     const O_MASTER: u8 = 55; // owner
     const A_MASTER: u8 = 56; // plain member: the one that comes back and admits
     const B_MASTER: u8 = 57; // stranger holding an invite
-    // B's transport id is NOT its master id, which is what every real install
-    // looks like, and here it also keeps the mock relay honest: it keys the
-    // offline buffer and the master mailbox by the same string, so a node whose
-    // device id equals its master id has its buffered server-room frames
-    // delivered twice, once by the undrained inbox replay. Production keeps
-    // those two queues apart.
+    // B's transport id is NOT its master id, which is what every real install looks like
+    // and also keeps the mock honest: it keys the offline buffer and the master mailbox
+    // by the same string, so device == master gets its frames delivered twice.
     const B_DEVICE: u8 = 227;
     let o_master = NativeKeypair::from_secret_bytes(&seed_bytes(O_MASTER)).peer_id();
     let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER)).peer_id();
@@ -18169,7 +17010,6 @@ async fn parked_join_completes_with_zero_overlap() {
         relay.room_devices(&server_id),
     );
 
-    // --- The stranger asks into an empty room. That is a PARK, not a failure. ---
     let mut b = spawn_node_with_friends(&relay, B_MASTER, B_DEVICE, &[]).await;
     b.cmd_tx
         .send(NodeCommand::JoinServer {
@@ -18215,14 +17055,12 @@ async fn parked_join_completes_with_zero_overlap() {
         join_ring(&relay, &server_id),
     );
 
-    // --- B leaves. Nobody has ever been online with anybody. ---
     go_offline(&relay, &b, &server_id).await;
     // The harness resolver is PROCESS-GLOBAL, so without this A could attribute
     // B's device from a link no real member could possibly hold. Forgetting it
     // makes the carried signed device list the only thing that can work.
     super::resolver::forget(&b.device_id);
 
-    // --- A returns ALONE and serves the ring. ---
     relay.set_online(&a.device_id, true);
     assert!(
         wait_until(40, async || a.raw_crdt_member_keys(&server_id).contains(&b_master)).await,
@@ -18233,7 +17071,6 @@ async fn parked_join_completes_with_zero_overlap() {
     // MemberAdded and only then queues the publish, so both of these have to be
     // waited for, not read.
     expect_ring_parked_request(&relay, &server_id, &b.device_id).await;
-    // A's admission, so a LATER member never re-serves this join.
     expect_ring_resolution(&relay, &server_id, &a.device_id, &b_master, true).await;
 
     // Rung 2: the admission seated B's LEAF too, out of the KeyPackage the ring
@@ -18270,7 +17107,6 @@ async fn parked_join_completes_with_zero_overlap() {
         .unwrap();
     expect_relay_drained(&relay, &a, "posted-before-return").await;
 
-    // --- A leaves; B returns ALONE and completes. ---
     go_offline(&relay, &a, &server_id).await;
     relay.set_online(&b.device_id, true);
     let mut saw_admitted = false;
@@ -18294,7 +17130,6 @@ async fn parked_join_completes_with_zero_overlap() {
     );
     assert!(b.pending_joins().is_empty(), "a completed join deletes its row");
 
-    // --- Rung 2: still ALONE, B forms the group and reads the backlog. ---
     assert!(
         wait_event(&mut b, std::time::Duration::from_secs(40), |ev| matches!(
             ev, NetworkEvent::PendingJoinUpdated { server_id: sid, state, .. }
@@ -18322,7 +17157,6 @@ async fn parked_join_completes_with_zero_overlap() {
         b.channel_messages(&server_id, &general).iter().map(|m| m.text.clone()).collect::<Vec<_>>(),
     );
 
-    // --- Only now are the two ever online together: chat works live. ---
     relay.set_online(&a.device_id, true);
     expect_mls_group(&[&a, &b], &server_id, 40).await;
     drain_events(&mut b);
@@ -18350,16 +17184,10 @@ async fn parked_join_completes_with_zero_overlap() {
     drop(b);
 }
 
-// ---------------------------------------------------------------------------
-// A join costs exactly ONE epoch. Three members, two live joins, epoch 2.
-//
-// The joiner used to send its KeyPackage TWICE: once to the sync responder on
-// the join itself, and once again the instant the admitter's MLS-encrypted
-// `MemberAdded` twin arrived for a group it did not hold yet. Two KeyPackages
-// from one device straddling a batch tick are a remove + re-add, the removal
-// commit evicts the leaf the first Welcome just granted, and the eviction used
-// to ask for a THIRD. A clean three-member join landed at epoch 5.
-// ---------------------------------------------------------------------------
+// A join costs exactly ONE epoch: three members, two live joins, epoch 2. The joiner
+// used to send its KeyPackage TWICE, and two copies straddling a batch tick are a
+// remove + re-add whose removal commit evicts the leaf the first Welcome granted;
+// the eviction then asked for a third, landing a clean three-member join at epoch 5.
 
 /// The epoch every node in `nodes` reports for `group_id`, or `None` if they
 /// disagree or one of them did not answer. A timed-out snapshot is NOT an
@@ -18377,15 +17205,12 @@ async fn agreed_epoch(nodes: &[&TestNode], group_id: &str) -> Option<u64> {
     seen
 }
 
-/// Wait until `nodes` agree on an epoch for `group_id` AND still agree on the
-/// same one two batch ticks later. Returns that epoch.
+/// Wait until `nodes` agree on an epoch for `group_id` AND still agree on the same
+/// one two batch ticks later. Returns that epoch.
 ///
-/// "Formed" is not "settled": a remove + re-add treadmill passes through
-/// agreement at every rung, so one agreeing read can be the calm between two
-/// commits. The batch timer runs at 2s, so a second read 2500ms later with the
-/// value unmoved means a whole tick went by and committed nothing. There is no
-/// state to poll for "no commit happened", which is why that one window is real
-/// time rather than a condition.
+/// "Formed" is not "settled": a remove + re-add treadmill passes through agreement at
+/// every rung. There is no state to poll for "no commit happened", which is why that
+/// one window is real time rather than a condition.
 async fn expect_quiet_group(nodes: &[&TestNode], group_id: &str, secs: u64) -> u64 {
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(secs);
     loop {
@@ -18423,7 +17248,6 @@ async fn three_member_live_join_lands_at_minimal_epoch() {
     let m_master = NativeKeypair::from_secret_bytes(&seed_bytes(M_MASTER)).peer_id();
     let j_master = NativeKeypair::from_secret_bytes(&seed_bytes(J_MASTER)).peer_id();
 
-    // Mutual friends so every pair's Olm session forms before the joins.
     let mut o = spawn_node_with_friends(&relay, O_MASTER, O_MASTER, &[&m_master, &j_master]).await;
     let m = spawn_node_with_friends(&relay, M_MASTER, M_MASTER, &[&o_master, &j_master]).await;
     let j = spawn_node_with_friends(&relay, J_MASTER, J_MASTER, &[&o_master, &m_master]).await;
@@ -18441,7 +17265,6 @@ async fn three_member_live_join_lands_at_minimal_epoch() {
 
     let general = general_channel_of(&server_id);
 
-    // --- M joins while the owner is online: one add, one epoch. ---
     let mut m = m;
     let mut j = j;
     m.cmd_tx
@@ -18459,12 +17282,9 @@ async fn three_member_live_join_lands_at_minimal_epoch() {
         .await,
         "M joins while the owner is online",
     );
-    // A real server is not silent while a joiner waits for its leaf. The
-    // window between "the join completed" and "the Welcome landed" is one
-    // batch tick, and ANY MLS frame arriving inside it used to make the
-    // joiner mint a SECOND KeyPackage — the one the next tick turns into a
-    // remove + re-add. So post into the channel the moment the join lands,
-    // which is what a live room does by itself.
+    // A real server is not silent while a joiner waits for its leaf, and ANY MLS frame
+    // arriving in the one-tick window used to make the joiner mint a SECOND KeyPackage.
+    // So post the moment the join lands, which is what a live room does by itself.
     o.cmd_tx
         .send(NodeCommand::SendChannelMessage {
             server_id: server_id.clone(),
@@ -18478,7 +17298,6 @@ async fn three_member_live_join_lands_at_minimal_epoch() {
         .unwrap();
     expect_mls_leaf(&o, &server_id, &m.device_id, 30).await;
 
-    // --- J joins the same way, into a room that is now two people. ---
     j.cmd_tx
         .send(NodeCommand::JoinServer {
             server_id: server_id.clone(),
@@ -18507,7 +17326,6 @@ async fn three_member_live_join_lands_at_minimal_epoch() {
         .unwrap();
     expect_mls_leaf(&o, &server_id, &j.device_id, 30).await;
 
-    // --- Now let it settle and count what it cost. ---
     let epoch = expect_quiet_group(&[&o, &m, &j], &server_id, 60).await;
 
     let key_packages_sent = |dev: &str| {
@@ -18550,15 +17368,9 @@ async fn three_member_live_join_lands_at_minimal_epoch() {
 
     // --- And a LEAF REPAIR costs exactly two: one remove, one re-add. ---
     //
-    // The owner asks J for a fresh KeyPackage (what `handle_epoch_hint`'s repair
-    // arm and the PeerJoined coordinator do when a leaf looks wrong). J answers,
-    // the owner removes the old leaf and adds the new one in ONE batch, and the
-    // removal commit reaches J BEFORE the Welcome that puts it back, because
-    // phase 1 goes out ahead of phase 2. Asking for a leaf on seeing that
-    // removal is what turned one repair into a treadmill: the fresh KeyPackage
-    // becomes the next tick's remove + re-add, and the Welcome that cleared the
-    // throttle means nothing throttles it. J now holds the eviction for a short
-    // grace instead, and the Welcome ends the wait.
+    // The removal commit reaches J BEFORE the Welcome that puts it back, because phase 1
+    // goes out ahead of phase 2. Asking for a leaf on seeing that removal is what turned
+    // one repair into a treadmill, so J holds the eviction for a short grace instead.
     let request = serde_json::to_vec(&super::types::HavenMessage::MlsKeyPackageRequest {
         server_id: server_id.clone(),
         channel_id: None,
@@ -18591,16 +17403,10 @@ async fn three_member_live_join_lands_at_minimal_epoch() {
     drop(j);
 }
 
-// ---------------------------------------------------------------------------
-// A parked join's KeyPackage has to be usable on the other side of a RESTART.
-//
-// The private half of a KeyPackage (its init key and its leaf encryption key)
-// lives in OpenMLS's storage, and nothing on the mint path used to write that
-// storage to disk. So the joiner could deposit a package into the ring, quit,
-// come back, and watch the member that admitted it seat a leaf it had no key
-// for: "Failed to process Welcome ... NoMatchingKeyPackage", forever. A parked
-// join is measured in days, so that window is the normal case, not a corner.
-// ---------------------------------------------------------------------------
+// A parked join's KeyPackage has to be usable on the other side of a RESTART. Its
+// private half lives in OpenMLS storage, which nothing on the mint path used to write
+// to disk, so the admitting member seated a leaf the joiner had no key for:
+// "NoMatchingKeyPackage", forever. A parked join is measured in days.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
@@ -18613,11 +17419,9 @@ async fn parked_join_key_package_survives_a_restart_before_the_welcome() {
 
     const A_MASTER: u8 = 234; // owner
     const B_MASTER: u8 = 235; // stranger holding an invite
-    // Distinct device tag, the way every fresh install is: the mock relay keys
-    // its offline buffer and its master mailbox by the same string, so a node
-    // whose device id EQUALS its master id gets every buffered server-room
-    // frame delivered a second time by the inbox replay. Production keeps those
-    // two queues apart, and production device ids are never master ids.
+    // Distinct device tag, the way every fresh install is: the mock relay keys its
+    // offline buffer and its master mailbox by the same string, so device == master gets
+    // every buffered server-room frame delivered a second time by the inbox replay.
     const B_DEVICE: u8 = 236;
     let b_master = NativeKeypair::from_secret_bytes(&seed_bytes(B_MASTER)).peer_id();
 
@@ -18631,7 +17435,6 @@ async fn parked_join_key_package_survives_a_restart_before_the_welcome() {
     );
     go_offline(&relay, &a, &server_id).await;
 
-    // --- B asks into an empty room and parks, KeyPackage and all. ---
     let mut b = spawn_node_with_friends(&relay, B_MASTER, B_DEVICE, &[]).await;
     b.cmd_tx
         .send(NodeCommand::JoinServer {
@@ -18659,7 +17462,6 @@ async fn parked_join_key_package_survives_a_restart_before_the_welcome() {
         join_ring(&relay, &server_id),
     );
 
-    // --- B quits and comes back. RAM is gone; the DB is the whole story. ---
     let mut b = restart_node(&relay, b, B_MASTER, B_DEVICE).await;
     assert_eq!(
         b.pending_joins(),
@@ -18670,11 +17472,9 @@ async fn parked_join_key_package_survives_a_restart_before_the_welcome() {
     // copy rather than from a live re-request racing it.
     go_offline(&relay, &b, &server_id).await;
 
-    // --- A returns alone, reads the ring, and seats B's leaf from the copy. ---
     relay.set_online(&a.device_id, true);
     expect_mls_leaf(&a, &server_id, &b.device_id, 40).await;
 
-    // --- B comes back and reads the Welcome that was waiting for it. ---
     relay.set_online(&b.device_id, true);
     assert!(
         wait_event(&mut b, std::time::Duration::from_secs(40), |ev| matches!(
@@ -18707,18 +17507,11 @@ async fn parked_join_key_package_survives_a_restart_before_the_welcome() {
     drop(b);
 }
 
-// ---------------------------------------------------------------------------
-// A join into a room with NOBODY in it should say so quickly.
-//
-// Parking is not a failure, it is the honest answer to "everyone who could
-// admit you is asleep", and the tile that says it is the whole point of rung 1.
-// Sitting on a spinner for fifteen seconds to reach an answer the relay already
-// gave us (the room is empty) is just a worse way of saying it. So an empty room
-// parks after a short window and a room with somebody in it keeps the full one:
-// a member who is present may still be a few seconds from answering, and parking
-// under them would put a "waiting for a member" tile in front of a join that is
-// about to complete.
-// ---------------------------------------------------------------------------
+// A join into a room with NOBODY in it should say so quickly. Parking is the honest
+// answer to "everyone who could admit you is asleep", so an empty room parks after a
+// short window while a room with somebody in it keeps the full one: a present member
+// may still be seconds from answering, and parking under them would put a waiting
+// tile in front of a join that is about to complete.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
@@ -18859,11 +17652,9 @@ async fn join_with_a_silent_member_present_keeps_the_long_window() {
     drop(b);
 }
 
-// ---------------------------------------------------------------------------
-// A rejection has to travel the same road the request did. A banned stranger
-// that asks into an empty room must learn it was refused, days later, without
-// ever having been online with the person who refused it.
-// ---------------------------------------------------------------------------
+// A rejection has to travel the same road the request did: a banned stranger that
+// asks into an empty room must learn it was refused, days later, without ever having
+// been online with the person who refused it.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
@@ -18925,7 +17716,6 @@ async fn parked_join_rejection_reaches_an_offline_joiner() {
     go_offline(&relay, &b, &server_id).await;
     super::resolver::forget(&b.device_id);
 
-    // --- The owner returns alone and writes the refusal into the ring. ---
     relay.set_online(&o.device_id, true);
     expect_ring_resolution(&relay, &server_id, &o.device_id, &b_master, false).await;
     // Race-free now that the frame is known to be there: the refusal names the
@@ -18941,7 +17731,6 @@ async fn parked_join_rejection_reaches_an_offline_joiner() {
     );
     go_offline(&relay, &o, &server_id).await;
 
-    // --- B returns alone and finds out. ---
     relay.set_online(&b.device_id, true);
     assert!(
         wait_event(&mut b, std::time::Duration::from_secs(25), |ev| matches!(
@@ -18951,7 +17740,6 @@ async fn parked_join_rejection_reaches_an_offline_joiner() {
         .await,
         "the refusal reaches a joiner that was never online with the refuser"
     );
-    // The event is emitted before the store write lands, so poll the row.
     let rejected = vec![(server_id.clone(), "rejected".to_string(), "banned".to_string())];
     assert!(
         wait_until(5, async || b.pending_joins() == rejected).await,
@@ -18969,12 +17757,9 @@ async fn parked_join_rejection_reaches_an_offline_joiner() {
     drop(b);
 }
 
-// ---------------------------------------------------------------------------
-// The resolution is not a courtesy: it is what stops a LATE member re-serving a
-// join that has already been answered. C was offline before B ever asked, so
-// its own state says nothing about B; it must learn the outcome from the ring
-// and do nothing about it.
-// ---------------------------------------------------------------------------
+// The resolution is what stops a LATE member re-serving a join that has already been
+// answered. C was offline before B ever asked, so its own state says nothing about B:
+// it must learn the outcome from the ring and do nothing about it.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
@@ -19021,7 +17806,6 @@ async fn late_member_does_not_reserve_a_parked_join() {
     }
     expect_mls_group(&[&o, &a, &c], &server_id, 30).await;
 
-    // --- C goes dark BEFORE B ever asks, then the owner. A is left alone. ---
     drain_events(&mut a);
     relay.set_online(&c.device_id, false);
     assert!(
@@ -19055,14 +17839,12 @@ async fn late_member_does_not_reserve_a_parked_join() {
         "A is online, so this join is served LIVE, got {:?}",
         a.raw_crdt_member_keys(&server_id),
     );
-    // A LIVE admission still publishes its resolution.
     expect_ring_resolution(&relay, &server_id, &a.device_id, &b_master, true).await;
 
     go_offline(&relay, &b, &server_id).await;
     go_offline(&relay, &a, &server_id).await;
     super::resolver::forget(&b.device_id);
 
-    // --- C returns alone. It must learn B is a member and NOT serve it. ---
     let buffered_before = relay.buffered_count(&b.device_id);
     relay.reset_meter();
     relay.set_online(&c.device_id, true);
@@ -19087,7 +17869,6 @@ async fn late_member_does_not_reserve_a_parked_join() {
         "nothing new is queued for B's device"
     );
 
-    // --- Now the two of them meet for the first time and converge. ---
     relay.set_online(&b.device_id, true);
     expect_mls_group(&[&b, &c], &server_id, 40).await;
     let mut expect_members =
@@ -19105,11 +17886,9 @@ async fn late_member_does_not_reserve_a_parked_join() {
     drop(c);
 }
 
-// ---------------------------------------------------------------------------
-// A ring is 200 frames shared by everyone joining a server. A joiner that flaps
-// must not own it. Reconnects re-send LIVE (free, targeted) and re-deposit only
-// on a 12h interval; the user asking again is the one thing that always writes.
-// ---------------------------------------------------------------------------
+// A ring is 200 frames shared by everyone joining a server, so a joiner that flaps
+// must not own it: reconnects re-send LIVE and re-deposit only on a 12h interval,
+// while the user asking again is the one thing that always writes.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
@@ -19168,7 +17947,6 @@ async fn parked_join_redeposit_is_interval_bounded() {
         "five reconnects inside the 12h window must not write five frames"
     );
 
-    // The user asking again is a fresh nonce, so it always earns a deposit.
     drain_events(&mut b);
     b.cmd_tx
         .send(NodeCommand::RequestPendingJoinAgain { server_id: server_id.clone() })
@@ -19187,11 +17965,9 @@ async fn parked_join_redeposit_is_interval_bounded() {
     drop(b);
 }
 
-// ---------------------------------------------------------------------------
-// The carried device list is SECURITY-BEARING, so present-but-bad is a DROP,
-// never a downgrade to the resolver. A request with no list at all is a
-// pre-parked-joins client and still works, through the legacy resolver path.
-// ---------------------------------------------------------------------------
+// The carried device list is SECURITY-BEARING, so present-but-bad is a DROP, never a
+// downgrade to the resolver. A request with no list at all is a pre-parked-joins
+// client and still works through the legacy resolver path.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
@@ -19312,11 +18088,9 @@ async fn parked_join_with_a_bad_carried_device_list_is_dropped() {
     drop(a);
 }
 
-// ---------------------------------------------------------------------------
-// Discarding is the user changing their mind. The ring copy cannot be recalled,
-// so a member WILL still admit them; the guarantee is local: no row, no room,
-// no server. The buffered answer is never collected because we never rejoin.
-// ---------------------------------------------------------------------------
+// Discarding is the user changing their mind. The ring copy cannot be recalled, so a
+// member WILL still admit them; the guarantee is local (no row, no room, no server)
+// and the buffered answer is never collected because we never rejoin.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
@@ -19409,7 +18183,6 @@ async fn discarded_parked_join_ignores_a_late_answer() {
     go_offline(&relay, &b, &server_id).await;
     super::resolver::forget(&b.device_id);
 
-    // --- A returns and serves the ring copy. It cannot know B changed its mind. ---
     relay.set_online(&a.device_id, true);
     assert!(
         wait_until(40, async || a.raw_crdt_member_keys(&server_id).contains(&b_master)).await,
@@ -19438,21 +18211,12 @@ async fn discarded_parked_join_ignores_a_late_answer() {
     drop(b);
 }
 
-// ---------------------------------------------------------------------------
-// A Twitch-gated join PARKS like any other, since 2026-09-03.
-//
-// It could not before. The old proof was the joiner's own JSON naming a Twitch
-// account, and a RING copy can be pulled by anyone holding the invite for the
-// ring's whole retention — so the parked copy shipped without it, which left a
-// proofless request nobody could act on and a joiner waiting for co-presence.
-//
-// A follow CREDENTIAL is different in kind: `parts` is a channel id, an age
-// bucket and a subscription tier, all of them facts about the SERVER's own
-// channel, blind-signed onto the joiner's master. There is no field in it that
-// can name a Twitch account. So it rides the ring, the owner runs the same
-// offline gate on the parked copy as on a live one, and the join completes
-// while the joiner is asleep.
-// ---------------------------------------------------------------------------
+// A Twitch-gated join PARKS like any other. It could not before: the old proof was
+// the joiner's own JSON naming a Twitch account, and a RING copy can be pulled by
+// anyone holding the invite for the ring's whole retention. A follow CREDENTIAL is
+// different in kind, a channel id, an age bucket and a tier blind-signed onto the
+// joiner's master with no field that can name an account, so it rides the ring and
+// the owner runs the same offline gate on the parked copy as on a live one.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
@@ -19582,7 +18346,6 @@ async fn parked_twitch_gated_join_carries_the_credential_and_leaks_no_identity()
     );
     go_offline(&relay, &o, &server_id).await;
 
-    // --- And the joiner finds out on its own next boot. ---
     relay.set_online(&b.device_id, true);
     assert!(
         wait_until(25, || async { b.servers().contains(&server_id) }).await,
@@ -19594,18 +18357,11 @@ async fn parked_twitch_gated_join_carries_the_credential_and_leaks_no_identity()
     drop(b);
 }
 
-// ---------------------------------------------------------------------------
-// An NSFW consent prompt is a QUESTION, not a refusal, and a question must not
-// become permanent. The member never writes one into the ring (it would be
-// re-served to every member on every catch-up for days), and the joiner never
-// keeps a row for one (a persisted tile would restore a pending join at every
-// boot and pop the same dialog forever).
-//
-// The nonce on the refusal is what makes the re-request survive: the member
-// keeps re-serving the parked copy from the ring, so an old `nsfw_confirm:`
-// sits buffered for the joiner's device and is replayed the instant the joiner
-// rejoins that room — which is exactly when the user asks again.
-// ---------------------------------------------------------------------------
+// An NSFW consent prompt is a QUESTION, not a refusal, and must not become permanent:
+// the member never writes one into the ring (it would be re-served to every member
+// for days) and the joiner never keeps a row for one (it would pop the same dialog at
+// every boot). The nonce on the refusal is what makes the re-request survive, since
+// the buffered `nsfw_confirm:` replays the instant the joiner rejoins that room.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
@@ -19661,7 +18417,6 @@ async fn parked_nsfw_join_asks_for_consent_once_then_completes() {
     go_offline(&relay, &b, &server_id).await;
     super::resolver::forget(&b.device_id);
 
-    // --- The owner returns alone, reads the parked request and ASKS. ---
     relay.set_online(&o.device_id, true);
     assert!(
         wait_until(40, async || relay.buffered_count(&b.device_id) > 0).await,
@@ -19681,7 +18436,6 @@ async fn parked_nsfw_join_asks_for_consent_once_then_completes() {
     );
     go_offline(&relay, &o, &server_id).await;
 
-    // --- The joiner boots, is asked, and the tile GOES. ---
     relay.set_online(&b.device_id, true);
     let mut discarded = false;
     let asked = wait_event(&mut b, std::time::Duration::from_secs(25), |ev| match ev {
@@ -19748,27 +18502,13 @@ async fn parked_nsfw_join_asks_for_consent_once_then_completes() {
     drop(b);
 }
 
-// ---------------------------------------------------------------------------
-// A tombstone must reach a member that cannot read MLS.
-//
-// Rung 1 deliberately creates that member: a parked join completes its CRDT
-// half from a buffered snapshot with NOBODY online, so the joiner holds the
-// server (name, channels, member list) while holding no MLS leaf at all. The
-// leaf only forms later, on co-presence. Anything sent MLS-only in that window
-// is invisible to it, and `ServerDeleted` was sent MLS-only.
-//
-// Field-caught on a fleet run against the real relay: the owner deleted the
-// server in exactly that window, the joiner logged "Received MlsChannelMessage
-// for unknown group", never applied the tombstone, and went on listing a server
-// that no longer existed.
-//
-// The lever here is `set_broadcast_deaf`, which drops 0x03 room broadcasts to
-// one device while leaving targeted 0x04 frames alone. That is precisely the
-// asymmetry the bug lives in: the MLS copy rides SendToRoom, the plaintext twin
-// rides SendDirect, and the SENDER cannot see which of the two the receiver was
-// able to consume. Modelling it this way makes the test deterministic instead
-// of a race against the 2s MLS batch timer.
-// ---------------------------------------------------------------------------
+// A tombstone must reach a member that cannot read MLS. A parked join completes its
+// CRDT half from a buffered snapshot with nobody online, so the joiner holds the
+// server while holding no MLS leaf, and `ServerDeleted` was sent MLS-only.
+// Field-caught on a fleet run: the owner deleted in exactly that window, the joiner
+// logged "unknown group" and went on listing a server that no longer existed.
+// `set_broadcast_deaf` drops 0x03 broadcasts while leaving targeted 0x04 frames
+// alone, which is precisely the asymmetry the bug lives in.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
@@ -19809,7 +18549,6 @@ async fn server_deleted_reaches_a_parked_member_with_no_mls_leaf() {
     );
     expect_mls_group(&[&o, &a], &server_id, 20).await;
 
-    // --- Everybody dark, stranger parks, A admits it from the ring alone. ---
     drain_events(&mut a);
     relay.set_online(&o.device_id, false);
     assert!(
@@ -19850,7 +18589,6 @@ async fn server_deleted_reaches_a_parked_member_with_no_mls_leaf() {
     expect_ring_resolution(&relay, &server_id, &a.device_id, &b_master, true).await;
     go_offline(&relay, &a, &server_id).await;
 
-    // --- B returns ALONE and completes: it HOLDS the server, with no leaf. ---
     relay.set_online(&b.device_id, true);
     assert!(
         wait_event(&mut b, std::time::Duration::from_secs(25), |ev| matches!(
@@ -19870,10 +18608,8 @@ async fn server_deleted_reaches_a_parked_member_with_no_mls_leaf() {
     );
 
     // --- The owner returns to a member that cannot consume an MLS frame. ---
-    //
-    // Deaf BEFORE the owner arrives, so no 0x03 frame is ever consumed by B.
-    // Targeted 0x04 frames still flow, which is why the MLS Welcome below
-    // still lands: the asymmetry is the point.
+    // Deaf BEFORE the owner arrives, so no 0x03 frame is ever consumed by B, while
+    // targeted 0x04 frames still flow: the asymmetry is the point.
     relay.set_broadcast_deaf(&b.device_id, true);
     relay.set_online(&o.device_id, true);
     assert!(
@@ -19885,19 +18621,12 @@ async fn server_deleted_reaches_a_parked_member_with_no_mls_leaf() {
         "owner and joiner must both be in the server room, got {:?}",
         relay.room_devices(&server_id),
     );
-    // Let the co-presence cascade finish BEFORE deleting. This is what isolates
-    // the broadcast: the grow-only sync round trip fires once per connection,
-    // so if the delete lands while a `SyncRequest` is still in flight the
-    // tombstone rides the `SyncResponse` op log instead and the test proves
-    // nothing about the broadcast at all. Measured: that is exactly what
-    // happened on the first attempt, and it made the test pass against the
-    // broken guard.
-    //
-    // Olm confirming both ways means the burst has run (the key exchange and
-    // the sync request ride the same PeerJoined cascade); draining both queues
-    // then rules out a `SyncResponse` still in flight. B's MLS leaf is NOT
-    // waited for, because a deaf device can never form one: the add commit is a
-    // room broadcast. That is the honest shape of the bug anyway.
+    // Let the co-presence cascade finish BEFORE deleting, which is what isolates the
+    // broadcast: the grow-only sync round trip fires once per connection, so a delete
+    // landing while a `SyncRequest` is in flight rides the `SyncResponse` op log instead
+    // and proves nothing. Olm confirming both ways means the burst has run, and draining
+    // both queues rules out a response still in flight. B's MLS leaf is NOT waited for,
+    // because a deaf device can never form one.
     expect_olm_confirmed(&o, &b, 30).await;
     expect_relay_drained(&relay, &o, "pre-delete").await;
     expect_relay_drained(&relay, &b, "pre-delete").await;
@@ -19921,27 +18650,13 @@ async fn server_deleted_reaches_a_parked_member_with_no_mls_leaf() {
 }
 
 
-// ---------------------------------------------------------------------------
-// The MLS-first / fallback sweep: a member who cannot read the MLS copy.
-//
-// Two shapes of "cannot read", and they are NOT the same failure:
-//
-//   * DEAF — the member holds a perfectly good leaf, but its socket never
-//     consumes a 0x03 room broadcast (relay backpressure drop, a join race).
-//     The MLS copy of a broadcast rides SendToRoom; the plaintext twin rides
-//     SendDirect. Only an UNCONDITIONAL twin reaches this member, which is why
-//     CRDT ops and VC signals send one every time instead of `if !mls_sent`.
-//
-//   * LEAF-LESS — the member is a CRDT member and is reachable, but holds no
-//     leaf in the sender's copy of the group, so an MLS frame is undecryptable
-//     for it no matter how many sockets consume it. A parked joiner completes
-//     its CRDT half BEFORE co-presence forms the leaf, by design, so this is
-//     ordinary rather than exotic. Encrypted content and ephemeral signals send
-//     their fallback copy to exactly these devices (`leafless_member_devices`).
-//
-// The sender can see NEITHER condition, which is the whole bug class: its own
-// encrypt succeeding measures the wrong end of the wire.
-// ---------------------------------------------------------------------------
+// The MLS-first / fallback sweep: a member who cannot read the MLS copy, in two
+// shapes that are NOT the same failure. DEAF means the member holds a good leaf but
+// its socket never consumes a 0x03 room broadcast, so only an UNCONDITIONAL plaintext
+// twin reaches it, which is why CRDT ops and VC signals send one every time instead
+// of `if !mls_sent`. LEAF-LESS means the member is reachable but holds no leaf in the
+// sender's copy of the group, which a parked joiner is by design. The sender can see
+// NEITHER: its own encrypt succeeding measures the wrong end of the wire.
 
 /// Count the events already queued on `node` that match `pred`, without
 /// blocking. Used for the "and the member WITH a leaf got it exactly once"
@@ -19957,30 +18672,13 @@ fn count_queued(node: &mut TestNode, mut pred: impl FnMut(&NetworkEvent) -> bool
     n
 }
 
-// ---------------------------------------------------------------------------
-// CRDT ops reach a member that cannot consume a room broadcast: `MemberAdded`
-// (owner-authored, at admission) and the joiner's own auto-`StoragePledgeChanged`.
-//
-// Both used to send the plaintext `CrdtOpBroadcast` twin only in the `else` of
-// `if mls_ok`, so a member whose socket drops 0x03 frames silently kept a stale
-// member panel and never learned anybody's pledge. Nothing on the sender side
-// showed it: the encrypt succeeded.
-//
-// The member here is a relay socket rather than a node, for two reasons that
-// both matter. It is deaf by construction as well as by the relay's drop lever,
-// so the MLS copy provably cannot reach it. And it never runs the co-presence
-// sync — which is the whole reason a node would be the wrong instrument: a real
-// member and the new joiner exchange state vectors the moment they see each
-// other, so the op arrives through the sync round trip whether or not the twin
-// was ever sent, and the test would pass against the broken guard. Reading the
-// frames the sender actually delivered removes that ambiguity: the assertion is
-// that the op went out in the clear, aimed at a member that could not have read
-// it any other way.
-//
-// The socket is a genuine CRDT member: it parks a join carrying no KeyPackage
-// (a client older than the carried-KeyPackage join) and is admitted from the
-// ring, so it also holds no MLS leaf, which is the state rung 1 creates.
-// ---------------------------------------------------------------------------
+// CRDT ops reach a member that cannot consume a room broadcast: `MemberAdded` at
+// admission and the joiner's own auto-`StoragePledgeChanged`. Both used to send the
+// plaintext twin only in the `else` of `if mls_ok`, so a member whose socket drops
+// 0x03 frames kept a stale member panel and nothing on the sender side showed it. The
+// member here is a relay socket rather than a node, so it is deaf by construction AND
+// never runs the co-presence sync that would deliver the op anyway; the assertion is
+// on the frames the sender actually delivered.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
@@ -20026,7 +18724,6 @@ async fn member_added_and_pledge_ops_reach_a_deaf_member() {
         "the join ring must be registered before anyone parks into it"
     );
 
-    // --- Everybody dark; the deaf member parks a join carrying no KeyPackage. ---
     drain_events(&mut a);
     relay.set_online(&o.device_id, false);
     assert!(
@@ -20095,7 +18792,6 @@ async fn member_added_and_pledge_ops_reach_a_deaf_member() {
         "the owner must hold a formed group with A in it, got {leaves:?}"
     );
 
-    // --- C joins live: the owner mints MemberAdded, C mints its own pledge. ---
     let mut c = spawn_node_with_friends(&relay, C_MASTER, C_MASTER, &[&o_master]).await;
     expect_dm_pair_ready(&relay, &o, &c, 20).await;
     c.cmd_tx
@@ -20148,14 +18844,9 @@ async fn member_added_and_pledge_ops_reach_a_deaf_member() {
     drop(c);
 }
 
-// ---------------------------------------------------------------------------
-// A VC state signal reaches a DEAF member (site 7).
-//
-// `broadcast_vc_state_signal` carried the literal `if !mls_sent` this sweep is
-// named after, so a deaf member's tile kept showing somebody unmuted who had
-// muted minutes earlier. `broadcast_vc_presence` next to it was already right,
-// which is why join/leave arrived and only the state did not.
-// ---------------------------------------------------------------------------
+// A VC state signal reaches a DEAF member. `broadcast_vc_state_signal` carried the
+// literal `if !mls_sent` this sweep is named after, so a deaf member's tile kept
+// showing somebody unmuted who had muted minutes earlier.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
@@ -20257,7 +18948,6 @@ async fn vc_state_signal_reaches_a_deaf_member() {
         .send(NodeCommand::VoiceChannelSendSignal {
             server_id: server_id.clone(),
             channel_id: voice_cid.clone(),
-            // Broadcast class: the Rust send path ignores peer_id here.
             peer_id: String::new(),
             signal_type: "audio_state".to_string(),
             payload: serde_json::json!({"call_id": voice_cid, "muted": true, "deafened": false})
@@ -20280,30 +18970,14 @@ async fn vc_state_signal_reaches_a_deaf_member() {
     drop(b);
 }
 
-// ---------------------------------------------------------------------------
-// Channel typing (site 1) and a profile update (site 2) reach a member device
-// that holds NO LEAF, and reach a member device that DOES hold one exactly once.
+// Channel typing and a profile update reach a member device that holds NO LEAF, and
+// reach a member device that DOES hold one exactly once.
 //
-// Modelling leaf-lessness honestly needs care. A live node co-present with the
-// group's coordinator is pulled in within about a second — measured: the
-// coordinator asks for a KeyPackage on PeerJoined, the node answers, the 2s
-// batch timer commits, and the Welcome rides a targeted frame. A parked joiner
-// now carries its KeyPackage inside the join request, so even that gap closes
-// at admission. Racing either window would make this test pass or fail on
-// machine load rather than on the code.
-//
-// What stays leaf-less is a member that never offers a KeyPackage at all: a
-// client older than the carried-KeyPackage join, admitted from the ring on its
-// request alone. Its device is a plain relay socket here — a CRDT member,
-// online, reachable by targeted frames, and permanently invisible to MLS
-// because nothing behind it answers an MlsKeyPackageRequest. That is the state
-// the complement rule exists for, held still.
-//
-// The receiver-side assertion is therefore on the FRAME the sender delivered
-// rather than on a stored row, which is the stronger statement anyway: it pins
-// the exact wire form the leaf-less member was sent, and it COUNTS, so a
-// duplicate is as visible as a silence.
-// ---------------------------------------------------------------------------
+// A live node co-present with the coordinator is pulled in within about a second, so
+// racing that window would make this test pass or fail on machine load. What stays
+// leaf-less is a member that never offers a KeyPackage: a plain relay socket, online
+// and reachable but permanently invisible to MLS. The assertion is on the FRAME the
+// sender delivered, and it COUNTS, so a duplicate is as visible as a silence.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
@@ -20497,33 +19171,15 @@ async fn channel_typing_and_profile_update_reach_a_member_without_a_leaf() {
     drop(a);
 }
 
-// ---------------------------------------------------------------------------
-// A channel FileHeader and the members with no leaf in the group that carried
-// it (site 8).
-//
-// The group here is a restricted channel's SUBGROUP, which is where a
-// qualifying member stays leaf-less on its own: subgroup membership is
-// reconciled on lifecycle events, not on co-presence, so a member who was
-// offline when the channel became restricted qualifies for it and holds no leaf
-// in it. The owner posts a file there; the caption is MLS and stays unreadable,
-// but the header must still arrive, or the member renders a message with no
-// file card and no way to ask for the bytes. The fallback is Olm, never
-// plaintext: a header names a file and carries its key.
-//
-// A member who does not qualify for the channel is not a leaf-less member, it
-// is somebody who must never be sent the header at all, so the complement set
-// is filtered through `can_see_channel`. The plain Member here is present to
-// hold that shape in view; see the note further down for why its absence is not
-// asserted.
-//
-// Read this as a regression guard rather than a discriminator. Channel content
-// has several independent redelivery paths to a member that failed to decrypt
-// (the relay's per-channel ring, turned off here, and the decrypt-failure
-// scoped channel sync, which cannot be turned off), so the arrival on its own
-// does not prove which leg carried it. What the test does pin is the sender's
-// state at the moment it chose recipients: a formed subgroup with neither
+// A channel FileHeader and the members with no leaf in the group that carried it. The
+// group is a restricted channel's SUBGROUP, where a qualifying member stays leaf-less
+// on its own, because subgroup membership is reconciled on lifecycle events rather
+// than on co-presence. The caption stays unreadable but the header must arrive, or
+// the member renders a message with no card and no way to ask for the bytes; the
+// fallback is Olm, never plaintext, since a header carries the file's key. Read this
+// as a regression guard: channel content has other redelivery paths, so what the test
+// pins is the sender's state when it chose recipients, a formed subgroup with neither
 // member's leaf in it.
-// ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
@@ -20726,49 +19382,28 @@ async fn channel_file_header_reaches_a_member_without_a_leaf() {
     let meta = b.file_meta(&fid).expect("header persisted on the leaf-less member");
     assert_eq!(meta.file_name, "ledger.txt", "the header names the file");
 
-    // NOT asserted here, though it belongs to this site: that a member who does
-    // NOT qualify for the restricted channel is never sent the header. The
-    // complement set IS filtered through `can_see_channel` for exactly that
-    // reason, and the filter holds — but a plain Member still ends up holding
-    // the file, because two OTHER paths hand it over with no visibility gate at
-    // all: `replicate_channel_file_full` streams the bytes to every member
-    // device, and the channel-sync responder serves the restricted channel's
-    // rows to anyone who asks. Both predate this sweep and both are somebody
-    // else's fix; asserting the absence here would only fail on them.
+    // NOT asserted here, though it belongs to this site: that a member who does NOT
+    // qualify is never sent the header. The complement set IS filtered through
+    // `can_see_channel`, but `replicate_channel_file_full` and the channel-sync responder
+    // both hand it over with no visibility gate, and both predate this sweep.
 
-    // No assertion on the subgroup AFTER the send, on purpose. A leaf-less
-    // member that reads an undecryptable frame asks to be bootstrapped — that is
-    // the system working — so its leaf state a second later is not a stable fact
-    // to pin. The pre-send assertions fix the state the sender was in when it
-    // chose who to send to, which is what this site decides.
+    // No assertion on the subgroup AFTER the send, on purpose: a leaf-less member that
+    // reads an undecryptable frame asks to be bootstrapped, so its leaf state a second
+    // later is not a stable fact to pin.
 
     drop(o);
     drop(b);
     drop(m);
 }
 
-// ---------------------------------------------------------------------------
-// A restricted channel's HISTORY and FILES never reach a member who cannot see
-// it (backfill access control).
-//
-// The per-channel MLS subgroup only protects LIVE traffic. Backfill went round
-// it three separate ways, and all three were reachable by any plain Member of
-// the server:
-//
-//   * `ChannelSyncRequest` / `ChannelSyncProbe` gated on holding the SERVER and
-//     served ANY channel's stored rows — file headers, which carry the file's
-//     AES key, included. The probe alone leaked the hidden channel's message
-//     count and latest timestamp.
-//   * `replicate_channel_file_full` streamed the ciphertext to every member
-//     device with no visibility check at all.
-//   * the `FileRequest` responder checked membership and public-ness, but not
-//     whether the requester could see the channel the file lives in.
-//
-// So: O owns an Admin-only channel, C is an Admin and B is a plain Member. Both
-// are members, both online, both hold an Olm session with O. C must end with
-// the message and the file; B must end with nothing about either, having asked
-// for all three (its own sync round on reconnect, and an explicit FileRequest).
-// ---------------------------------------------------------------------------
+// A restricted channel's HISTORY and FILES never reach a member who cannot see it.
+// The per-channel subgroup protects LIVE traffic only, and backfill went round it
+// three ways, all reachable by any plain Member: the channel sync responder gated on
+// holding the SERVER and served any channel's rows, file headers (which carry the
+// AES key) included, with the probe alone leaking the hidden channel's message count;
+// `replicate_channel_file_full` streamed the ciphertext with no check at all; and the
+// `FileRequest` responder never asked whether the requester could see the channel. B
+// must end with nothing about either, having asked for all three.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
@@ -20917,7 +19552,6 @@ async fn restricted_channel_history_and_files_never_reach_a_non_qualifier() {
         .await
         .unwrap();
 
-    // The qualifying member gets both.
     let mut got_fid: Option<String> = None;
     wait_event(&mut c, std::time::Duration::from_secs(25), |ev| {
         if let NetworkEvent::FileHeaderReceived { file_id, file_name, .. } = ev {
@@ -20941,15 +19575,10 @@ async fn restricted_channel_history_and_files_never_reach_a_non_qualifier() {
 
     // --- B now asks for all three, and must be refused every time. ---
     //
-    // A reconnect is what makes B's own sync coordinator fire a probe and a
-    // request for EVERY channel it holds, this one included; the explicit
-    // RequestFile covers the third path. B has no way to learn the file id on
-    // its own, which is the point, so the test hands it the one C was told.
-    //
-    // The owner also posts in #general while B is away, so the same run proves
-    // the gate does not OVER-block: B is a member of that channel and must be
-    // served its backfill through the very responders that just refused it the
-    // restricted one.
+    // A reconnect makes B's own sync coordinator fire a probe and a request for EVERY
+    // channel it holds; the explicit RequestFile covers the third path. The owner also
+    // posts in #general while B is away, so the same run proves the gate does not
+    // OVER-block.
     drain_events(&mut b);
     go_offline(&relay, &b, &server_id).await;
     o.cmd_tx
@@ -21023,15 +19652,12 @@ async fn restricted_channel_history_and_files_never_reach_a_non_qualifier() {
         b.channel_messages(&server_id, &general),
     );
 
-    // --- And a NON-MEMBER in the room gets nothing, for a channel whose
-    //     visibility is Everyone and which is not public. ---
+    // --- And a NON-MEMBER in the room gets nothing, for an Everyone channel that is not
+    //     public. ---
     //
-    // `can_see_channel` on its own is not a gate here: an unknown peer's role
-    // resolves to plain Member, so the visibility ladder says yes to every
-    // Everyone channel. Membership is the first rung, and a socket that never
-    // joined the server is the honest way to hold a non-member still. The probe
-    // response is the discriminating frame because it goes out in the CLEAR;
-    // the full sync batch rides Olm, which a socket could not read anyway.
+    // `can_see_channel` on its own is not a gate: an unknown peer's role resolves to
+    // plain Member, so membership is the first rung. The probe response is the
+    // discriminating frame because it goes out in the CLEAR.
     const X_MASTER: u8 = 245; // never joins the server
     let x_device = NativeKeypair::from_secret_bytes(&seed_bytes(X_MASTER)).peer_id();
     assert!(
@@ -21085,7 +19711,6 @@ async fn restricted_channel_history_and_files_never_reach_a_non_qualifier() {
         "a NON-MEMBER must be served nothing for a non-public channel, not even the          probe's message count and latest timestamp: membership is the first rung of          the gate, and the visibility ladder alone says yes to every Everyone channel"
     );
 
-    // The qualifying member is unaffected by the gates.
     let meta = c.file_meta(&fid).expect("the Admin still holds the header");
     assert_eq!(meta.file_name, "payroll.txt", "the header names the file");
 
@@ -21100,68 +19725,19 @@ async fn restricted_channel_history_and_files_never_reach_a_non_qualifier() {
 
 /// Fail when the total `sleep_ms` budget in this file grows.
 ///
-/// This is how the suite reached 16 minutes: 471 fixed sleeps totalling 831
-/// seconds, 87% of the runtime, with the CPU idle the whole time. Each one was a
-/// settle with a condition nobody polled for. nextest made them overlap, which
-/// hid the cost without removing it, and a suite that is 87% sleep grows back to
-/// 40 minutes one reasonable-looking `sleep_ms(2000)` at a time.
-///
-/// So the budget is a number in a test now. A new sleep has to come out of the
-/// existing total or be argued for by raising this cap in a diff someone reads.
-/// The alternatives are in the module above: `wait_until`, `expect_olm_confirmed`,
-/// `expect_mls_leaf`, `expect_mls_group`, `expect_no_mls_leaf`. Keep `sleep_ms`
-/// for the two cases that genuinely have no condition to poll: proving an
-/// ABSENCE, and a settle whose only signal is a running node's SQLCipher DB.
+/// The suite once reached 16 minutes: 471 fixed sleeps totalling 831 seconds, 87% of
+/// the runtime with the CPU idle, each a settle with a condition nobody polled for.
+/// So the budget is a number in a test: a new sleep comes out of the existing total,
+/// or is argued for by raising this cap in a diff someone reads. The alternatives are
+/// in the module above (`wait_until`, `expect_olm_confirmed`, `expect_mls_leaf`,
+/// `expect_mls_group`, `expect_no_mls_leaf`); keep `sleep_ms` for an ABSENCE proof and
+/// for a settle whose only signal is a running node's SQLCipher DB.
 #[test]
 fn harness_fixed_sleep_budget_does_not_grow() {
-    // Raised 566_000 -> 572_000 on 2026-08-29 for exactly one new sleep: the
-    // 6s absence window in
-    // `parked_twitch_gated_join_waits_for_co_presence_and_leaks_no_proof`. That
-    // test proves a member takes NO action on a proofless parked request, and
-    // there is no state to poll for a decision that must never be taken, so the
-    // window has to be real time. Every other parked-join test settles on a
-    // condition.
-    //
-    // Raised 572_000 -> 575_000 on 2026-09-03 for two more absence windows, in
-    // `crdt_forged_author_op_is_rejected_on_every_ingest_path` and
-    // `crdt_future_hlc_op_is_rejected_and_owner_can_still_rename`. Both push a
-    // forged CRDT op at a running node and assert it never lands; "the role
-    // did not change" has no arrival to poll for, so the window is real time.
-    // Everything else in those tests settles on the live server state.
-    // Raised 575_000 -> 579_000 on 2026-09-05 for the two relay catch-up file
-    // tests, `channel_relay_catchup_survives_subscribe_before_room_join` and
-    // `channel_relay_catchup_delivers_public_channel_file_caption`. Everything
-    // in them that HAS a signal settles on one: the MLS group via
-    // `expect_mls_group`, the published channel and the filled ring via
-    // `wait_until`. What is left is the spawn stagger and three windows with
-    // nothing to poll — a node processing its own `WsEvent::Disconnected`, and
-    // a `SubscribeChannels` deliberately sent into a socket that CANNOT answer,
-    // which is the whole point of the first test and therefore has no arrival
-    // to wait for by construction. Both tests still run in about four seconds,
-    // down from twenty-two before the de-sleeping.
-    // Raised 579_000 -> 581_800 on 2026-09-05 for exactly 2800ms across two new
-    // fixed sleeps. `expect_quiet_group` sleeps 2500ms between its two reads:
-    // it is proving that a whole batch tick went by and committed NOTHING, and
-    // there is no arrival to poll for a commit that must not happen.
-    // `restart_node` sleeps 300ms after aborting a node event loop: an aborted
-    // task finishing the drop of its SQLCipher handles has no signal either, and
-    // reopening the file under the old writer costs a 4s busy_timeout per query.
-    // Everything else the three new tests wait on settles on a condition.
-    // Raised 581_800 -> 599_700 on 2026-09-05 for exactly 17_900ms across the
-    // six honest-file-card tests. What is left in them has nothing to poll:
-    // the spawn stagger; the 1000ms auto-download advert window, which every
-    // test in this family already carries because the pre-negotiation exchange
-    // has no live probe (see `dm_file_transfer_completes_and_decrypts`); the
-    // 2000ms after a member drops so the SENDER's room view is settled before
-    // it fans a file, copied verbatim from
-    // `channel_file_request_reroutes_to_online_holder_when_sender_offline`; and
-    // the 500ms before reading a RUNNING node's files row, which this module's
-    // own `wait_until` doc forbids polling. The MLS settles that DID have a
-    // signal use `expect_mls_group` instead.
-    // Raised 599_700 -> 601_900 on 2026-09-06 for exactly 2200ms:
-    // `cancel_file_request_drops_the_queued_ask_and_its_receipt` carries the
-    // same spawn stagger and 1000ms auto-download advert window as the rest of
-    // that family, and nothing else in it is slept on.
+    // The cap moves only for sleeps with nothing to poll: an ABSENCE proof, a settle
+    // whose only signal is a running node's DB, the spawn stagger, and the auto-download
+    // advert window that has no live probe. Every such sleep says so at its own call
+    // site, which is where the reason for the current number lives.
     const BUDGET_MS: u64 = 601_900;
 
     let src = include_str!("test_harness.rs");
@@ -21222,14 +19798,10 @@ fn harness_fixed_sleep_budget_does_not_grow() {
 }
 
 
-// ---------------------------------------------------------------------------
-// A verified Twitch account rides the profile as a `t = 3` support credential
-// and nothing else: the purple chip draws from THIS or from nothing. It is
-// bound to one master like every other credential, so a transplant is dropped;
-// and it is the first credential type whose `period` means time, so an entry
-// minted two windows ago is dropped as well, even though its chain and its
-// signature are perfectly good.
-// ---------------------------------------------------------------------------
+// A verified Twitch account rides the profile as a `t = 3` support credential and
+// nothing else: the purple chip draws from THIS or from nothing. It is bound to one
+// master, so a transplant is dropped, and its `period` means time, so an entry minted
+// two windows ago is dropped as well, chain and signature notwithstanding.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
@@ -21261,9 +19833,7 @@ async fn twitch_owner_credential_replicates_and_stale_period_is_dropped() {
 
     use super::support_creds::{self, testing};
     let now = support_creds::now_period();
-    // The real one: A's master, this window.
     let real = testing::mint_owner_for(&a_master, "12345", "somestreamer", now);
-    // Somebody else's, pasted onto A's field.
     let transplant = testing::mint_owner_for("somebody-else", "99999", "otherperson", now);
     // A's own, chain and signature perfect, but minted two windows ago: past
     // the one window of grace. A different account so its `item` differs from
@@ -21327,7 +19897,6 @@ async fn twitch_owner_credential_replicates_and_stale_period_is_dropped() {
         "and the entry from two windows ago is gone, chain and signature notwithstanding: {}",
         p.support_creds
     );
-    // What B stored verifies again, offline, against the pinned root.
     support_creds::verify_entry(&kept[0], &a_master, &support_creds::root_verifying_key())
         .expect("B's stored account entry verifies for A's master");
 
@@ -21335,16 +19904,11 @@ async fn twitch_owner_credential_replicates_and_stale_period_is_dropped() {
     drop(b);
 }
 
-// ---------------------------------------------------------------------------
-// The Twitch join gate, offline. A joiner presents a blind-signed FOLLOW
-// credential bound to its own master; the owner checks the chain against the
-// pinned root, the channel, the age bucket and the tier, and contacts nobody.
-//
-// The bucket is the whole claim, so a setting rounds UP: "at least 14 days" is
-// met by the 30-day bucket and not by the 7-day one. And the old JSON proof —
-// the joiner's own unsigned word, which any modified client could write — is
-// refused outright with a sentence that says what to do about it.
-// ---------------------------------------------------------------------------
+// The Twitch join gate, offline. A joiner presents a blind-signed FOLLOW credential
+// bound to its own master; the owner checks the chain against the pinned root, the
+// channel, the age bucket and the tier, and contacts nobody. The bucket is the whole
+// claim, so a setting rounds UP, and the old JSON proof (the joiner's own unsigned
+// word) is refused with a sentence that says what to do about it.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
@@ -21419,7 +19983,6 @@ async fn twitch_follow_gate_accepts_bucket_and_refuses_the_rest() {
         said
     }
 
-    // (a) A real credential, one bucket short. 7 < 14.
     let short = serde_json::to_string(&testing::mint_follow_for(&b_master, "1234567", 7, "0", now))
         .expect("entry json");
     let said = knock(&mut b, &server_id, short).await.expect("a refusal");
@@ -21429,7 +19992,6 @@ async fn twitch_follow_gate_accepts_bucket_and_refuses_the_rest() {
     );
     assert!(b.servers().is_empty(), "and nothing was joined");
 
-    // (b) A real credential for somebody else's channel.
     let elsewhere =
         serde_json::to_string(&testing::mint_follow_for(&b_master, "7654321", 365, "0", now))
             .expect("entry json");
@@ -21466,7 +20028,6 @@ async fn twitch_follow_gate_accepts_bucket_and_refuses_the_rest() {
         "the old proof shape must be refused with its own sentence, got {said}",
     );
 
-    // (e) Subscription required, tier "0" presented.
     o.cmd_tx
         .send(NodeCommand::UpdateServerSetting {
             server_id: server_id.clone(),
@@ -21492,7 +20053,6 @@ async fn twitch_follow_gate_accepts_bucket_and_refuses_the_rest() {
         "tier 0 must not satisfy a sub requirement, got {said}",
     );
 
-    // (f) A subscriber at a bucket over the line: in.
     let good =
         serde_json::to_string(&testing::mint_follow_for(&b_master, "1234567", 30, "1000", now))
             .expect("entry json");
@@ -21519,21 +20079,12 @@ async fn twitch_follow_gate_accepts_bucket_and_refuses_the_rest() {
     drop(b);
 }
 
-// ---------------------------------------------------------------------------
-// CRYPTO-1, over the wire. A master-signed device list rides every profile
-// announce in the clear, so anyone who has seen one is holding a genuine,
-// perfectly valid signed list for somebody else. The receiver used to bind
-// whichever device DELIVERED it to that master, on the theory that delivery
-// proves membership. It does not: replaying the victim's own announce from
-// another socket handed the attacker the victim's identity on the target,
-// which means the target's next DM to the victim fans out to the attacker,
-// its Olm key exchange is authorised against the same poisoned set, and its
-// CRDT role checks resolve through it.
-//
-// The attacker here is a bare device id with a socket, which is all the relay
-// authenticates. No node is spawned for it, so nothing can re-teach the target
-// that id afterwards and mask the result.
-// ---------------------------------------------------------------------------
+// CRYPTO-1, over the wire. A master-signed device list rides every profile announce
+// in the clear, so anyone who has seen one holds a genuine, perfectly valid list for
+// somebody else. The receiver used to bind whichever device DELIVERED it to that
+// master, which hands the attacker the victim's DM fan-out, its Olm authorisation and
+// its CRDT role checks. The attacker here is a bare device id with a socket, so
+// nothing can re-teach the target that id afterwards and mask the result.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
@@ -21657,14 +20208,10 @@ async fn replayed_device_list_from_an_unlisted_device_does_not_bind() {
     drop(t);
 }
 
-// ---------------------------------------------------------------------------
-// The same replay through the OTHER stranger-reachable door. A friend request
-// lands in `inbox:{master}` from someone the target has never met, and it
-// carries a device list precisely because the resolver is cold for a stranger.
-// That made it the cheapest place to plant the mapping, and it is now gated
-// like the `ServerJoinRequest` and `FriendReject` arms: a carried list that
-// does not name its deliverer is a DROPPED request.
-// ---------------------------------------------------------------------------
+// The same replay through the OTHER stranger-reachable door. A friend request lands
+// in `inbox:{master}` from someone the target has never met, carrying a device list
+// precisely because the resolver is cold for a stranger, which made it the cheapest
+// place to plant the mapping. A list that does not name its deliverer is DROPPED.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
@@ -21760,20 +20307,12 @@ async fn friend_request_from_an_unlisted_device_does_not_bind() {
     drop(t);
 }
 
-// ---------------------------------------------------------------------------
-// `support_creds` sits outside the profile signature, so on the plaintext
-// fallback a relay can rewrite it to `""` in flight and every receiver reads
-// the holder's explicit clear. The field's OWN master signature closes that,
-// and it is REQUIRED: no valid signature, no change, whatever the field says.
-//
-// This used to be a per-master pin instead — an unsigned field applied until
-// that master had been seen signing once. A relay that stripped the signature
-// from the FIRST announce it ever carried kept the master on the unsigned
-// branch permanently and could then write the field itself, so the baseline
-// never existed for exactly the masters that needed it. Three things have to
-// hold together now: a signed field applies, a stripped one changes nothing,
-// and an unsigned one changes nothing either, pin or no pin.
-// ---------------------------------------------------------------------------
+// `support_creds` sits outside the profile signature, so on the plaintext fallback a
+// relay can rewrite it to `""` and every receiver reads the holder's explicit clear.
+// The field's OWN master signature closes that, and it is REQUIRED. The earlier
+// per-master pin was worse than nothing: a relay that stripped the signature from the
+// FIRST announce kept that master on the unsigned branch permanently, so the baseline
+// never existed for exactly the masters that needed it.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
@@ -21846,7 +20385,6 @@ async fn stripped_support_creds_never_clears_a_pinned_mark() {
         "B must see A before there is anything to strip"
     );
 
-    // --- 1. A signed announce with a mark. B stores it and PINS A. ---
     a.cmd_tx
         .send(profile("with a mark", Some(support_creds::encode_entries(&[mark.clone()]))))
         .await
@@ -21901,7 +20439,6 @@ async fn stripped_support_creds_never_clears_a_pinned_mark() {
     );
     relay.set_drop_support_creds_sig(&a.device_id, false);
 
-    // --- 2. The relay strips the field on the way to B. The row is intact. ---
     relay.set_strip_support_creds(&a.device_id, true);
     drain_events(&mut b);
     a.cmd_tx.send(profile("stripped in flight", None)).await.unwrap();
@@ -21964,12 +20501,9 @@ async fn stripped_support_creds_never_clears_a_pinned_mark() {
         p.support_creds,
     );
 
-    // --- 4. A master B has NEVER seen sign gets no softer rule. This is the
-    //        leg that used to go the other way, on a per-master pin, and the
-    //        pin is exactly what a relay could keep unset: strip the signature
-    //        from the first frame it ever carries for C and C stays on the
-    //        unsigned branch forever, at which point the relay writes C's marks
-    //        itself. There is no trust-on-first-use left to attack. ---
+    // --- 4. A master B has NEVER seen sign gets no softer rule. This is the leg that
+    // used to go the other way, on a per-master pin a relay could keep unset forever.
+    // There is no trust-on-first-use left to attack. ---
     relay.set_drop_support_creds_sig(&c.device_id, true);
     let c_mark = testing::mint_for(&c_master, &[hex::encode([0x5bu8; 32])]);
     c.cmd_tx
@@ -22023,14 +20557,10 @@ async fn stripped_support_creds_never_clears_a_pinned_mark() {
     drop(c);
 }
 
-// ---------------------------------------------------------------------------
-// Artist shop, phase 2: a support credential rides the profile as
-// `support_creds`, the receiver verifies it OFFLINE against the pinned root
-// (the test root in this build) and stores it under the sender's MASTER, a
-// transplanted entry (minted for another identity) is dropped in silence, an
-// untouched update preserves it, an explicit `""` clears it, and a sibling
-// device of the holder receives it with the profile.
-// ---------------------------------------------------------------------------
+// Artist shop, phase 2: a support credential rides the profile as `support_creds`,
+// the receiver verifies it OFFLINE against the pinned root and stores it under the
+// sender's MASTER, a transplanted entry is dropped in silence, an untouched update
+// preserves it, an explicit `""` clears it, and a sibling of the holder receives it.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
@@ -22051,7 +20581,6 @@ async fn support_credential_replicates_and_transplant_is_dropped() {
     let mut a = spawn_node_with_friends(&relay, A_MASTER, A_DEV, &[&b_master]).await;
     let mut a2 = spawn_node_with_friends(&relay, A_MASTER, A_DEV2, &[&b_master]).await;
     let mut b = spawn_node_with_friends(&relay, B_MASTER, B_MASTER, &[&a_master]).await;
-    // Settle on the condition, not on a clock: A sees B online and B sees A.
     assert!(
         wait_until(15, || async {
             a.online_identities(&relay).contains(&b_master)
@@ -22066,9 +20595,7 @@ async fn support_credential_replicates_and_transplant_is_dropped() {
 
     use super::support_creds::{self, testing};
     let frame_hash = hex::encode([0x5au8; 32]);
-    // Minted for A's MASTER, exactly as the redeem path does it.
     let real = testing::mint_for(&a_master, &[frame_hash.clone()]);
-    // Minted for somebody else and pasted into A's field: worthless.
     let transplant = testing::mint_for("somebody-else", &[hex::encode([0x5bu8; 32])]);
     let announced = support_creds::encode_entries(&[transplant.clone(), real.clone()]);
 
@@ -22087,7 +20614,6 @@ async fn support_credential_replicates_and_transplant_is_dropped() {
         support_creds: creds,
     };
 
-    // --- 1. B keeps the real entry, drops the transplant, under A's MASTER. ---
     a.cmd_tx.send(send("hi", Some(announced))).await.unwrap();
     let got = wait_event(&mut b, std::time::Duration::from_secs(8), |ev| {
         matches!(ev, NetworkEvent::ProfileUpdated { .. })
@@ -22107,12 +20633,10 @@ async fn support_credential_replicates_and_transplant_is_dropped() {
     assert_eq!(kept.len(), 1, "exactly the real credential survives: {}", p.support_creds);
     assert_eq!(kept[0].item, real.item, "the surviving entry is the one minted for A");
     assert!(!p.support_creds.contains(&transplant.item), "the transplant is gone");
-    // What B stored verifies again, offline, against the pinned root.
     support_creds::verify_entry(&kept[0], &a_master, &support_creds::root_verifying_key())
         .expect("B's stored entry verifies for A's master");
     assert_eq!(kept[0].parts, vec![frame_hash.clone()], "the parts name the frame hash");
 
-    // --- 2. A's sibling device holds the same credential with the profile. ---
     let got = wait_event(&mut a2, std::time::Duration::from_secs(8), |ev| {
         matches!(ev, NetworkEvent::ProfileUpdated { peer_id } if *peer_id == a_master)
     })
@@ -22154,7 +20678,6 @@ async fn support_credential_replicates_and_transplant_is_dropped() {
         "an update that did not touch the credentials must NOT lose them"
     );
 
-    // --- 4. An explicit empty field clears. ---
     drain_events(&mut b);
     a.cmd_tx.send(send("cleared", Some(String::new()))).await.unwrap();
     let got = wait_event(&mut b, std::time::Duration::from_secs(8), |ev| {
@@ -22177,21 +20700,12 @@ async fn support_credential_replicates_and_transplant_is_dropped() {
     drop(b);
 }
 
-// ---------------------------------------------------------------------------
-// CRDT op authenticity (audit 2026-09, CRDT-1 + CRDT-2).
-//
-// Before the fix a `CrdtOp` carried no signature and `author` was a free
-// string, so anyone who could put a frame into a server room could write ops
-// as the Owner — and `op_allowed` waved `ServerCreated` through for everyone,
-// which handed a plain member the Owner role outright. On top of that, three
-// of the four ingest paths ran no permission check at all: `merge_ops` (every
-// SyncResponse) and the Olm-fallback single-op path applied whatever arrived.
-//
-// These tests drive the REAL loops and push forged frames in through the relay
-// the way a hostile member would, on every one of those paths. State is read
-// from the LIVE in-memory copy (the one that enforces), never from a running
-// node's DB.
-// ---------------------------------------------------------------------------
+// CRDT op authenticity (audit 2026-09). Before the fix a `CrdtOp` carried no signature
+// and `author` was a free string, so anyone who could put a frame into a server room
+// could write ops as the Owner, and `op_allowed` waved `ServerCreated` through for
+// everyone. Three of the four ingest paths ran no permission check at all. These
+// tests push forged frames in through the relay on every path and read the LIVE
+// in-memory copy, the one that enforces.
 
 /// Bring three friends up, have O create a server, and have M and X join it.
 /// Returns (o, m, x, server_id) with everyone converged on two members plus
@@ -22213,7 +20727,6 @@ async fn three_member_server(
     expect_dm_pair_ready(relay, &o, &x, 15).await;
 
     let server_id = create_server_and_wait(&mut o, "Real Server").await;
-    // The owner has to be IN the server room before anyone asks to join it.
     assert!(
         wait_until(10, async || relay.room_devices(&server_id).contains(&o.device_id)).await,
         "owner must join its own server room"
@@ -22236,7 +20749,6 @@ async fn three_member_server(
         assert!(joined, "joiner should emit ServerJoined");
     }
 
-    // Everyone agrees on the membership before a single hostile frame flies.
     for (node, who) in [(&o, "O"), (&m, "M"), (&x, "X")] {
         let ok = wait_until(10, async || {
             let Some(state) = node.live_server_state(&server_id).await else { return false };
@@ -22361,7 +20873,6 @@ async fn crdt_forged_author_op_is_rejected_on_every_ingest_path() {
         }
     }
 
-    // The owner's own authority is intact: a real promotion still works.
     o.cmd_tx
         .send(NodeCommand::ChangeRole {
             server_id: server_id.clone(),
@@ -22441,7 +20952,6 @@ async fn crdt_future_hlc_op_is_rejected_and_owner_can_still_rename() {
         );
     }
 
-    // The name is bounded, not locked: the Owner renames and everyone follows.
     o.cmd_tx
         .send(NodeCommand::RenameServer {
             server_id: server_id.clone(),
@@ -22519,17 +21029,12 @@ async fn crdt_signed_op_relayed_by_another_member_is_accepted() {
     drop(x);
 }
 
-// ---------------------------------------------------------------------------
-// Asset rail: the pull RETRIES.
-//
-// A message carrying an asset token replays fine from the relay's offline
-// ring, but before this the BYTES never arrived when the holder was not
-// reachable at the moment of the first ask: the ask was made once per
-// connection, into a room nobody was in, and nothing ever asked again. These
-// tests pin the four halves of the fix — a holder that shows up later gets
-// asked, a holder that answers "I don't have it" hands the ask on, the walk
-// is bounded, and a peer we never asked cannot steer it.
-// ---------------------------------------------------------------------------
+// Asset rail: the pull RETRIES. A message carrying an asset token replays fine from
+// the relay ring, but the BYTES never arrived when the holder was not reachable at
+// the moment of the first ask: the ask was made once per connection and nothing ever
+// asked again. Four halves: a holder that shows up later gets asked, one that answers
+// "I don't have it" hands the ask on, the walk is bounded, and an unasked peer cannot
+// steer it.
 
 /// Every frame this device sent that decodes as a HavenMessage of `kind`
 /// (the externally-tagged `type` field). Recording is armed per device with
@@ -22556,11 +21061,9 @@ fn asset_blob(tint: u8) -> (Vec<u8>, String) {
     (bytes, hash)
 }
 
-// ---------------------------------------------------------------------------
-// 1. The DM case. B asks for a GIF whose only holder is offline: the ask has
-//    nowhere to go and the old code gave up there forever. The holder comes
-//    back minutes later and the bytes have to follow it in, off ONE retry.
-// ---------------------------------------------------------------------------
+// 1. The DM case. B asks for a GIF whose only holder is offline, so the ask has
+// nowhere to go; the holder comes back minutes later and the bytes have to follow it
+// in, off ONE retry.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
@@ -22580,7 +21083,6 @@ async fn asset_pull_retries_when_the_holder_comes_online() {
     let mut b = spawn_node_with_friends(&relay, B_MASTER, B_MASTER, &[&a_master]).await;
     expect_dm_pair_ready(&relay, &a, &b, 15).await;
 
-    // A is the only holder of the GIF the message token points at.
     let (blob, hash) = asset_blob(210);
     a.store()
         .save_asset_blob(&hash, &blob, false, "gif")
@@ -22646,12 +21148,9 @@ async fn asset_pull_retries_when_the_holder_comes_online() {
     drop(b);
 }
 
-// ---------------------------------------------------------------------------
-// 2. The server case. Three members, the blob on exactly one of them, and the
-//    first holder the deterministic walk picks is the one WITHOUT it. The old
-//    code asked that one member and stopped; now the miss comes back named
-//    and the ask moves on.
-// ---------------------------------------------------------------------------
+// 2. The server case. Three members, the blob on exactly one of them, and the first
+// holder the deterministic walk picks is the one WITHOUT it: the miss comes back
+// named and the ask moves on.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
@@ -22737,7 +21236,6 @@ async fn asset_pull_rotates_to_another_holder_after_a_miss() {
         "rotated pull must land the bytes byte-exact"
     );
 
-    // The empty member answered, and said what it did not have.
     let empty_replies = frames_of_type(&relay, &empty_id, "emote_assets");
     assert!(
         empty_replies.iter().any(|v| {
@@ -22752,7 +21250,6 @@ async fn asset_pull_rotates_to_another_holder_after_a_miss() {
         "the member without the bytes must answer, naming the hash as missing"
     );
 
-    // The holder answered with the bytes.
     let holder_replies = frames_of_type(&relay, &holder_id, "emote_assets");
     assert!(
         holder_replies.iter().any(|v| {
@@ -22780,12 +21277,9 @@ async fn asset_pull_rotates_to_another_holder_after_a_miss() {
     drop(b);
 }
 
-// ---------------------------------------------------------------------------
-// 3. The walk is BOUNDED. Five other members, none of them holding the blob:
-//    the asker tries four and then stops, however long it waits. A new socket
-//    is the only thing that starts it again — otherwise one unrenderable
-//    token becomes a permanent trickle of requests around the room.
-// ---------------------------------------------------------------------------
+// 3. The walk is BOUNDED. Five other members, none of them holding the blob: the
+// asker tries four and then stops, and only a new socket starts it again. Otherwise
+// one unrenderable token becomes a permanent trickle of requests around the room.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
@@ -22802,7 +21296,6 @@ async fn asset_pull_asks_are_bounded_per_connection() {
     let mut o = spawn_node_with_friends(&relay, O_MASTER, O_MASTER, &[]).await;
     let server_id = create_server_and_wait(&mut o, "Bounded Server").await;
 
-    // Four more browsers, so the asker has five members it could ask.
     let mut others: Vec<TestNode> = Vec::new();
     for tag in [166u8, 167, 168, 169] {
         let n = spawn_node_with_friends(&relay, tag, tag, &[]).await;
@@ -22824,7 +21317,6 @@ async fn asset_pull_asks_are_bounded_per_connection() {
         relay.room_devices(&server_id).len()
     );
 
-    // Nobody holds this.
     let (_, hash) = asset_blob(30);
     drain_events(&mut b);
     relay.set_recording(&b.device_id, true);
@@ -22859,7 +21351,6 @@ async fn asset_pull_asks_are_bounded_per_connection() {
     let settled = frames_of_type(&relay, &b.device_id, "emote_request").len();
     assert_eq!(settled, 4, "four asks and no more, sent {settled}");
 
-    // A new socket is a fresh set of candidates, so the walk resumes.
     relay.set_online(&b.device_id, false);
     let dropped = wait_until(10, async || !relay.online_devices().contains(&b.device_id)).await;
     assert!(dropped, "B must actually leave the relay");
@@ -22879,11 +21370,9 @@ async fn asset_pull_asks_are_bounded_per_connection() {
     drop(b);
 }
 
-// ---------------------------------------------------------------------------
-// 4. A "missing" from a peer we never asked changes nothing. Otherwise any
-//    member of a shared room could make us fan requests around it by
-//    volunteering that it does not hold things nobody asked it for.
-// ---------------------------------------------------------------------------
+// 4. A "missing" from a peer we never asked changes nothing. Otherwise any member of
+// a shared room could make us fan requests around it by volunteering that it does not
+// hold things nobody asked it for.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
@@ -22944,7 +21433,6 @@ async fn asset_pull_ignores_missing_from_a_peer_we_did_not_ask() {
     .await;
     assert!(!asked, "no ask can go out while the only holder is offline");
 
-    // C, who was never asked anything, volunteers a miss.
     let msg = super::types::HavenMessage::EmoteAssets {
         bundle_json: String::from_utf8(crate::api::showcase::encode_asset_bundle(&[]))
             .expect("empty bundle is JSON"),
@@ -22980,12 +21468,9 @@ async fn asset_pull_ignores_missing_from_a_peer_we_did_not_ask() {
     drop(c);
 }
 
-// ---------------------------------------------------------------------------
-// 5. The responder side of the rotation: asked for a hash it does not hold, a
-//    node answers and NAMES it, rather than saying nothing and leaving the
-//    asker to time out. The bundle is empty, and an old client has to be able
-//    to decode that.
-// ---------------------------------------------------------------------------
+// 5. The responder side of the rotation: asked for a hash it does not hold, a node
+// answers and NAMES it rather than saying nothing and leaving the asker to time out.
+// The bundle is empty, and an old client has to be able to decode that.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
@@ -23049,20 +21534,11 @@ async fn emote_request_for_unheld_hashes_answers_missing() {
     drop(b);
 }
 
-// ---------------------------------------------------------------------------
-// 6. Garbage from a holder is a MISS, not the end of the hunt. A holder that
-//    answers with bytes we refuse used to delete the ask outright, and since
-//    the UI asks once a session and never asks again, that ended the search
-//    for that hash for good. The ask has to survive and move on, exactly the
-//    way a named `missing` moves it on.
-//
-//    "Invalid" here is the RECORDED KIND's cap, because content addressing
-//    makes it the only kind of invalidity a test can recover from: every
-//    honest holder of a hash serves the same bytes, so bad-bytes-then-good-
-//    bytes cannot exist for one hash. A blob over the emote ceiling and under
-//    the GIF one is refused at the kind we asked as, and accepted at the kind
-//    we ask as next, off the SAME surviving entry.
-// ---------------------------------------------------------------------------
+// 6. Garbage from a holder is a MISS, not the end of the hunt. A holder that answers
+// with bytes we refuse used to delete the ask outright, and since the UI asks once a
+// session, that ended the search for that hash for good. "Invalid" here is the
+// RECORDED KIND's cap, the only kind of invalidity a test can recover from, since
+// every honest holder of a hash serves the same bytes.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
@@ -23126,7 +21602,6 @@ async fn asset_pull_rotates_after_invalid_bytes() {
     relay.set_recording(&first_id, true);
     relay.set_recording(&second_id, true);
 
-    // Asked as an EMOTE, so the answer is refused at OUR cap.
     b.cmd_tx
         .send(NodeCommand::RequestEmotes {
             hashes: vec![hash.clone()],
@@ -23153,7 +21628,6 @@ async fn asset_pull_rotates_after_invalid_bytes() {
         "the over-cap blob must not be cached at either holder"
     );
 
-    // The SECOND holder really was the one asked next: it answered.
     let second_answered = wait_until(10, async || {
         frames_of_type(&relay, &second_id, "emote_assets").iter().any(|v| {
             crate::api::showcase::decode_asset_bundle(

@@ -5,19 +5,15 @@ import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_tooltip.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-/// Connection stage for the status indicator.
 enum ConnectionStage {
-  /// YOU are not connected — no relay link (or, in a DM header, no session
-  /// with that person). Never used just because nobody else is around.
+  /// OUR link is down: no relay, or in a DM header no session with that
+  /// person. Never used just because nobody else is around.
   offline,
 
-  /// Connected, but nobody else is here yet.
   alone,
 
-  /// Fully encrypted session established.
   encrypted,
 
-  /// User is on a custom (non-official) relay network.
   customNetwork,
 }
 
@@ -26,9 +22,8 @@ enum ConnectionStage {
 class ConnectionProgress extends StatelessWidget {
   final ConnectionStage stage;
 
-  /// Overrides the default hover explanation — the same [ConnectionStage] means
-  /// something slightly different in a DM header (the person) and a channel
-  /// header (the relay + the other members).
+  /// Overrides the hover explanation: one [ConnectionStage] means something
+  /// different in a DM header and in a channel header.
   final String? tooltip;
 
   const ConnectionProgress({super.key, required this.stage, this.tooltip});

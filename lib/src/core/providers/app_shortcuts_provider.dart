@@ -5,13 +5,11 @@ import 'package:hollow/src/core/services/hotkeys/hotkey_binding.dart';
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 
 /// Rebindable application shortcuts (Settings > Shortcuts). The voice trio
-/// (PTT/mute/deafen) is deliberately NOT here — those live in their own
-/// providers (settings_provider.dart) because the in-call HotkeyController
-/// consumes them system-wide; the Shortcuts page edits both sets.
+/// (PTT/mute/deafen) is deliberately NOT here: those live in settings_provider
+/// because the in-call HotkeyController consumes them system-wide.
 ///
-/// Enforcement sites read the live map: HollowShell's `_handleGlobalKey`
-/// (General group) and `handleChatInputKey` (formatting group). Enter /
-/// Shift+Enter / Ctrl+V are structural, not shortcuts — never listed here.
+/// Enforcement sites read the live map. Enter / Shift+Enter / Ctrl+V are
+/// structural, not shortcuts, and are never listed here.
 enum AppShortcut {
   openSettings('Open settings', 'ctrl+comma'),
   toggleMemberPanel('Toggle member panel', 'ctrl+shift+p'),

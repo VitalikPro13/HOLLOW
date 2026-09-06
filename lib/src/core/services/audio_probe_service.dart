@@ -16,12 +16,10 @@ typedef AudioProcessRunner = Future<ProcessResult> Function(
   List<String> arguments,
 );
 
-/// Extracts duration metadata from audio files using the bundled ffmpeg binary.
-///
-/// Reuses [VideoThumbnailService.findFfmpegBinary] to locate the binary and
-/// the same `Duration: HH:MM:SS.cs` stderr parsing pattern.
-///
-/// Results are cached in-memory so repeated widget rebuilds don't re-probe.
+/// Extracts duration metadata from audio files using the bundled ffmpeg
+/// binary, reusing [VideoThumbnailService.findFfmpegBinary] and the same
+/// `Duration: HH:MM:SS.cs` stderr parsing. Results are memoised so repeated
+/// widget rebuilds do not re-probe.
 class AudioProbeService {
   static final Map<String, int> _cache = {};
 
@@ -39,15 +37,13 @@ class AudioProbeService {
   static void debugResetCache() => _cache.clear();
 
   /// Cheap container sniff: true when the file opens with the Ogg capture
-  /// pattern. Four bytes off the front of the file, no decoder involved.
+  /// pattern, four bytes off the front and no decoder involved.
   ///
-  /// This is what stands between an auto-downloaded attachment and ffmpeg:
-  /// an extension is the sender's choice, the magic is not. It proves only
-  /// that the container claims to be Ogg, which is enough to refuse the
-  /// obvious forgeries before anything memory-unsafe reads the bytes.
-  /// The read itself is synchronous: it is four bytes, the caller has already
-  /// stat'd the file, and the answer has to be in hand on the frame the bubble
-  /// builds so the decision is made once rather than after a rebuild.
+  /// This is what stands between an auto-downloaded attachment and ffmpeg: an
+  /// extension is the sender's choice, the magic is not. It proves only that
+  /// the container claims to be Ogg, which is enough to refuse the obvious
+  /// forgeries before anything memory-unsafe reads the bytes. Synchronous
+  /// because the answer has to be in hand on the frame the bubble builds.
   static Future<bool> looksLikeOgg(String path) async {
     RandomAccessFile? handle;
     try {
@@ -68,16 +64,13 @@ class AudioProbeService {
     }
   }
 
-  /// Returns the duration in milliseconds for the audio file at [audioPath],
-  /// or null if probing fails (missing ffmpeg, corrupt file, timeout).
-  ///
-  /// Results are cached by path — subsequent calls for the same path return
-  /// instantly.
+  /// Duration in milliseconds for the audio file at [audioPath], or null when
+  /// probing fails (missing ffmpeg, corrupt file, timeout). Cached by path.
   ///
   /// This runs a decoder over bytes a stranger sent. Callers decide WHEN that
-  /// is allowed to happen: see [AudioMessageBubble], which runs it without a
-  /// tap only for a file that passes every voice-note test, and otherwise
-  /// waits for the user to press play.
+  /// is allowed: see [AudioMessageBubble], which runs it without a tap only
+  /// for a file that passes every voice-note test, and otherwise waits for
+  /// the user to press play.
   static Future<int?> probeDurationMs(String audioPath) async {
     final cached = _cache[audioPath];
     if (cached != null) return cached;
@@ -90,9 +83,8 @@ class AudioProbeService {
     if (runner == null && !File(audioPath).existsSync()) return null;
 
     try {
-      // Run ffmpeg with no output — we only need the stderr probe info.
-      // -i <path>    input file (triggers format detection + probe)
-      // -f null -    discard output (we just want the probe metadata)
+      // No output wanted, only the stderr probe info: -i triggers format
+      // detection, `-f null -` discards the decode.
       final args = ['-i', audioPath, '-f', 'null', '-'];
       final result = await (runner != null
               ? runner(ffmpeg, args)
@@ -120,8 +112,8 @@ class AudioProbeService {
     }
   }
 
-  /// Parse `Duration: HH:MM:SS.cs` from ffmpeg stderr.
-  /// Same regex pattern as [VideoThumbnailService._parseFfmpegStderr].
+  /// Parses `Duration: HH:MM:SS.cs` from ffmpeg stderr, with the same regex
+  /// as [VideoThumbnailService._parseFfmpegStderr].
   static int? _parseDuration(String stderr) {
     final match =
         RegExp(r'Duration:\s*(\d+):(\d+):(\d+)\.(\d+)').firstMatch(stderr);

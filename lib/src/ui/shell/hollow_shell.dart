@@ -124,15 +124,13 @@ import 'package:hollow/src/ui/guest/public_channel_browser.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:window_manager/window_manager.dart';
 
-/// Breakpoints for adaptive layout.
 const _kDesktopBreakpoint = 1024.0;
 const _kTabletBreakpoint = 600.0;
 
-/// Main application shell — Discord-like multi-panel layout.
+/// Main application shell.
 ///
-/// Desktop: ServerStrip | ChannelSidebar | ChatPane | MemberPanel
-/// Tablet:  ServerStrip | ChannelSidebar | ChatPane (member panel toggleable)
-/// Mobile:  Active tab view + bottom navigation bar
+/// Desktop is ServerStrip | ChannelSidebar | ChatPane | MemberPanel, tablet
+/// drops to a toggleable member panel, mobile to one tab view plus a nav bar.
 class HollowShell extends ConsumerStatefulWidget {
   const HollowShell({super.key});
 
@@ -144,36 +142,29 @@ class _HollowShellState extends ConsumerState<HollowShell>
     with TickerProviderStateMixin, WidgetsBindingObserver {
   bool _initialized = false;
 
-  // True while the identity is being unlocked + the local DB is loading after
-  // a successful PIN/password/biometric unlock. The Argon2id key derivation
-  // alone is ~1.5-3s on a phone (intentionally slow — it's the at-rest
-  // protection), so we show a centered "Unlocking…" spinner over the shell
-  // rather than letting it look frozen. Only set when App Lock is active.
+  // True while the identity unlocks and the DB loads. Argon2id is deliberately
+  // slow (~1.5-3s on a phone, that is the at-rest protection), so the shell
+  // shows a spinner rather than looking frozen. Only set under App Lock.
   bool _unlocking = false;
 
-  // Startup reveal animation — master controller shared via InheritedWidget.
+  // Master startup controller, shared down the tree by an InheritedWidget.
   late final AnimationController _revealController;
   bool _revealComplete = false;
 
-  // Chat pane reveal sub-animation.
   late final Animation<double> _chatReveal;
 
-  // Dock layout reveal sub-animations.
   late final Animation<double> _friendsBarReveal;
   late final Animation<double> _bottomBarReveal;
   late final Animation<double> _dockChatReveal;
 
-  // Responsive member panel: below the desktop breakpoint (a small window, or
-  // a normal one at a high interface scale — the scale transform shrinks the
-  // logical width) the panel auto-collapses, and re-opens itself when there's
-  // room again. `_memberPanelWasOpen` is what the user had before the collapse,
-  // so widening never forces open a panel they closed themselves.
+  // The member panel auto-collapses below the desktop breakpoint, which a high
+  // interface scale can cross on its own. `_memberPanelWasOpen` holds what the
+  // user had before, so widening never forces open a panel they closed.
   bool? _wideEnoughForMembers;
   bool _memberPanelWasOpen = true;
 
-  /// Collapse/restore the member panel as the shell crosses the breakpoint.
-  /// Only fires ON A CROSSING, so it never fights the header toggle: while
-  /// narrow, the user can still open the panel — it just costs chat width.
+  /// Collapses or restores the member panel as the shell crosses the
+  /// breakpoint. Only ON A CROSSING, so it never fights the header toggle.
   void _syncMemberPanelToWidth(bool wideEnough) {
     if (_wideEnoughForMembers == wideEnough) return;
     _wideEnoughForMembers = wideEnough;
@@ -191,11 +182,9 @@ class _HollowShellState extends ConsumerState<HollowShell>
     });
   }
 
-  /// Subscribe the node to a channel's relay topic so live MLS topic-broadcasts
-  /// are delivered (the relay only routes a topic message to subscribed sockets).
-  /// Includes any unread channels of the same server so @mentions still arrive
-  /// on channels you haven't opened. Idempotent — safe to call on every
-  /// channel/server activation (sidebar click, auto-select, startup, switch).
+  /// Subscribes the node to a channel's relay topic, without which the relay
+  /// routes no topic message to this socket. Unread channels of the same server
+  /// come along so @mentions still arrive. Idempotent.
   void _subscribeActiveChannel(String serverId, String channelId) {
     final unread = ref.read(unreadProvider);
     final prefix = '$serverId:';
@@ -204,20 +193,18 @@ class _HollowShellState extends ConsumerState<HollowShell>
         .map((e) => e.key.substring(prefix.length))
         .toList();
     final topics = <String>{channelId, ...unreadChannels}.toList();
-    // Node-safe: never throws, retries if the node isn't running yet
-    // (startup auto-select can race start_node()).
+    // Never throws and retries if the node is not running yet, which startup
+    // auto-select can race.
     subscribeChannelTopics(serverId: serverId, channelIds: topics);
   }
 
-  /// Wire the desktop OS-toast callbacks (tap → open conversation, Reply → send
-  /// a DM). Registered once at startup; the handlers capture `ref` and reuse the
-  /// same navigation the in-app notification card uses.
+  /// Wires the desktop OS-toast callbacks once at startup; the handlers reuse
+  /// the same navigation the in-app notification card uses.
   void _registerDesktopNotificationHandlers() {
     if (!DesktopNotificationService.isSupported) return;
 
     DesktopNotificationService.registerOpenHandler((payload) async {
-      // Bring the window up first (a toast can be tapped while we're in the
-      // background / tray).
+      // A toast can be tapped while we are in the background or the tray.
       await ref.read(systemNotificationProvider.notifier).bringWindowToFront();
       if (!mounted) return;
       if (payload.startsWith('channel:')) {
@@ -232,8 +219,7 @@ class _HollowShellState extends ConsumerState<HollowShell>
     });
 
     DesktopNotificationService.registerReplyHandler((peerId, text) {
-      // Inline Reply from a DM toast → send straight away (no window focus
-      // needed). Reuses the standard send + local-echo path.
+      // Inline Reply sends straight away, with no window focus needed.
       ref.read(chatProvider.notifier).sendMessage(peerId, text);
     });
   }
@@ -300,7 +286,6 @@ class _HollowShellState extends ConsumerState<HollowShell>
       }
     });
 
-    // Register global keyboard shortcut handler.
     HardwareKeyboard.instance.addHandler(_handleGlobalKey);
 
     // Mobile lifecycle observer for WS reconnection on app resume.
@@ -308,11 +293,11 @@ class _HollowShellState extends ConsumerState<HollowShell>
       WidgetsBinding.instance.addObserver(this);
     }
 
-    // Delay reveal until after the first frame so the window is visible.
+    // After the first frame, so the window is visible before anything moves.
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _revealController.forward();
-      // Shell is mounted — flush any deep link that arrived during startup
-      // (cold-start protocol launches buffer in the service until now).
+      // A cold-start protocol launch buffers in the service until the shell is
+      // mounted.
       DeepLinkService.instance.notifyShellReady();
     });
     _bootstrap();
@@ -363,7 +348,6 @@ class _HollowShellState extends ConsumerState<HollowShell>
   }
 
   Future<void> _handleLicenseError(String reason) async {
-    // Stop the node so we don't keep retrying.
     ref.read(nodeProvider.notifier).stop();
     await ref.read(licenseKeyProvider.notifier).clearKey();
     ref.read(licenseErrorProvider.notifier).state = null;
@@ -387,24 +371,23 @@ class _HollowShellState extends ConsumerState<HollowShell>
     }
   }
 
-  /// Attempt to unlock the identity. Shows appropriate blocking dialog if needed.
-  /// Returns true if unlocked, false if the user cancelled.
+  /// Unlocks the identity, showing a blocking dialog when one is needed.
+  /// Returns false when the user cancelled.
   Future<bool> _unlockIdentity() async {
     try {
-      // First, try unlocking without a password (DPAPI/Keychain or plaintext).
+      // Without a password first: DPAPI, Keychain or plaintext.
       await identity_api.unlockIdentity();
       return true;
     } catch (e) {
       final msg = e.toString();
-      // Password required — show password lock screen.
       if (msg.contains('password') || msg.contains('Password')) {
         return _showPasswordUnlockDialog();
       }
-      // DPAPI/Keychain failure (different machine) — show recovery dialog.
+      // A DPAPI or Keychain failure means a different machine.
       if (msg.contains('credentials') || msg.contains('device') || msg.contains('keychain')) {
         return _showDeviceBoundRecoveryDialog();
       }
-      // Other error (corrupted file, etc.) — show recovery as fallback.
+      // Anything else (a corrupted file) falls back to recovery.
       if (mounted) {
         return _showDeviceBoundRecoveryDialog(
           errorMessage: 'Failed to unlock identity: $msg',
@@ -414,8 +397,8 @@ class _HollowShellState extends ConsumerState<HollowShell>
     }
   }
 
-  /// Full-screen blocking dialog for DPAPI/Keychain failure (identity copied
-  /// to a different machine). Only recovery option is the 24-word mnemonic.
+  /// Full-screen blocking dialog for an identity copied to another machine. The
+  /// 24-word mnemonic is the only way out.
   Future<bool> _showDeviceBoundRecoveryDialog({String? errorMessage}) async {
     final controller = TextEditingController();
     final result = await showHollowDialog<bool>(
@@ -478,8 +461,8 @@ class _HollowShellState extends ConsumerState<HollowShell>
                           try {
                             await identity_api.restoreIdentityFromMnemonic(phrase: phrase);
                             await identity_api.unlockIdentity();
-                            // Identity reset to plaintext — drop stale App
-                            // Lock marker + biometric secret.
+                            // Reset to plaintext, so the App Lock marker and
+                            // biometric secret are stale.
                             await AppLockService().clearAll();
                             if (ctx.mounted) Navigator.of(ctx).pop(true);
                           } catch (e) {
@@ -513,8 +496,8 @@ class _HollowShellState extends ConsumerState<HollowShell>
     Future<bool> tryBiometric() async {
       final secret = await appLock.authenticateAndGetSecret();
       if (secret == null) return false;
-      // Secret in hand — the slow Argon2id derivation runs next. Show the
-      // "Unlocking…" spinner now (the biometric OS sheet has dismissed).
+      // The slow Argon2id derivation runs next and the OS sheet has dismissed,
+      // so the spinner belongs here.
       if (mounted) setState(() => _unlocking = true);
       try {
         await identity_api.unlockIdentity(password: secret);
@@ -522,14 +505,14 @@ class _HollowShellState extends ConsumerState<HollowShell>
         return true;
       } catch (_) {
         if (mounted) setState(() => _unlocking = false);
-        // Stale stored secret (PIN/password changed via recovery) — drop it
-        // so the user isn't stuck in a failing biometric loop.
+        // A stale stored secret (changed via recovery) would leave the user in
+        // a failing biometric loop.
         await appLock.disableBiometric();
         return false;
       }
     }
 
-    // Lead with the biometric prompt — most unlocks end right here.
+    // Most unlocks end right here.
     if (hasBiometric && await tryBiometric()) return true;
     if (!mounted) return false;
 
@@ -537,8 +520,8 @@ class _HollowShellState extends ConsumerState<HollowShell>
     final controller = TextEditingController();
     var attempts = 0;
     while (true) {
-      // Statement-level guard (not just the loop condition) so the gap
-      // between the previous iteration's awaits and this use is covered.
+      // Statement-level, not just the loop condition, so the gap after the
+      // previous iteration's awaits is covered.
       if (!mounted) return false;
       final result = await showHollowDialog<String>(
         context: context,
@@ -651,7 +634,7 @@ class _HollowShellState extends ConsumerState<HollowShell>
       if (result == '__recover__') {
         final recovered = await _recoverWithMnemonic();
         if (recovered) {
-          // Identity was reset to plaintext — stale lock state must go.
+          // Reset to plaintext, so the lock state is stale.
           await AppLockService().clearAll();
           return true;
         }
@@ -664,14 +647,14 @@ class _HollowShellState extends ConsumerState<HollowShell>
         continue;
       }
 
-      // Correct-secret case runs Argon2id next; show the spinner across it.
+      // Argon2id runs next, so the spinner covers it.
       if (mounted) setState(() => _unlocking = true);
       try {
         await identity_api.unlockIdentity(password: result);
         appLock.sessionSecret = result;
         return true;
       } catch (_) {
-        // Wrong secret — hide the spinner and let the dialog re-prompt.
+        // Wrong secret: let the dialog re-prompt.
         if (mounted) setState(() => _unlocking = false);
         attempts++;
         controller.clear();
@@ -741,7 +724,6 @@ class _HollowShellState extends ConsumerState<HollowShell>
                           }
                           try {
                             await identity_api.restoreIdentityFromMnemonic(phrase: phrase);
-                            // Identity restored as plaintext — unlock it.
                             await identity_api.unlockIdentity();
                             if (ctx.mounted) Navigator.of(ctx).pop(true);
                           } catch (e) {
@@ -769,12 +751,10 @@ class _HollowShellState extends ConsumerState<HollowShell>
     if (_initialized) return;
     _initialized = true;
 
-    // Multi-device: the user backed out of "Link a device" (throwaway identity).
-    // Wipe the data dir to a clean slate NOW — pre-node-start, no open SQLCipher
-    // handles — so Welcome can create/import/link fresh. Must run BEFORE the pending
-    // link import and identity load. (Deleting the DB in-process before relaunch
-    // failed on Windows — open handles — leaving messages.db behind → infinite
-    // loading on the next identity.)
+    // Backing out of "Link a device" leaves a throwaway identity. Wipe the data
+    // dir HERE, before the node starts and before the pending link import: with
+    // SQLCipher handles open, Windows keeps messages.db and the next identity
+    // loads forever.
     try {
       if (await storage_api.hasPendingWipe()) {
         await storage_api.performPendingWipe();
@@ -783,9 +763,9 @@ class _HollowShellState extends ConsumerState<HollowShell>
       debugPrint('[HOLLOW] Pending data-dir wipe failed: $e');
     }
 
-    // Multi-device: a link transfer stashed an encrypted .hollow blob for us to
-    // import. Do it FIRST — pre-node-start, the same known-good window as a manual
-    // "Restore from backup" — then fall through as a normal restored launch.
+    // A link transfer stashed an encrypted .hollow blob. Import it FIRST, in the
+    // same pre-node-start window a manual restore uses, then fall through as a
+    // normal restored launch.
     try {
       if (await storage_api.hasPendingLink()) {
         await storage_api.importPendingLink();
@@ -794,29 +774,26 @@ class _HollowShellState extends ConsumerState<HollowShell>
       debugPrint('[HOLLOW] Pending link import failed: $e');
     }
 
-    // Check if an identity already exists on disk.
     final hasExisting = await storage_api.hasIdentity();
 
-    // First launch — show welcome dialog before creating identity.
     WelcomeResult? welcomeResult;
     if (!hasExisting && mounted) {
       welcomeResult = await showWelcomeDialog(context);
       if (!mounted) return;
 
-      // 'restored_mnemonic' / 'restored_backup' — identity already on disk.
-      // 'create_new' / null — proceed to normal load (will generate new).
+      // 'restored_mnemonic' and 'restored_backup' leave an identity on disk;
+      // 'create_new' and null fall through to a normal load, which generates.
     }
 
-    // Unlock the identity (handles DPAPI/Keychain + optional password).
     if (hasExisting && mounted) {
       final unlocked = await _unlockIdentity();
       if (!unlocked || !mounted) return;
     } else {
-      // New identity or just restored — unlock without password.
+      // New or just restored: no password to ask for.
       try {
         await identity_api.unlockIdentity();
       } catch (_) {
-        // First launch, no identity yet — load() will create one.
+        // First launch: load() creates the identity.
       }
     }
 
@@ -828,27 +805,21 @@ class _HollowShellState extends ConsumerState<HollowShell>
       return;
     }
 
-    // Restore the reduce-motion override from DB (must be after identity load
-    // opens DB). Building the provider self-applies the persisted Auto/On/Off
-    // mode to ReduceMotionController, which owns both motion statics + tickers.
-    // We seeded from the OS flag in main() already; this refines with the
-    // user's override.
+    // Must follow the identity load, which opens the DB. Building the provider
+    // self-applies the persisted mode to ReduceMotionController, refining the OS
+    // flag main() seeded.
     try {
       await ref.read(reduceMotionProvider.future);
       if (ReduceMotionController.instance.isReduced) {
-        // Skip the startup reveal animation instantly.
         if (!_revealController.isCompleted) {
           _revealController.value = 1.0;
         }
       }
     } catch (_) {}
 
-    // AI noise suppression pre-warm: engine create is a one-time background
-    // cost per process — instant for RNNoise (the default), but DFN3's
-    // model load measured 15 SECONDS on a Pixel; kicked at first call it
-    // eats the start of the call (frames pass through undenoised until
-    // ready). If the user has the toggle on, start the load NOW so the
-    // engine is warm before any call begins.
+    // Engine create is a one-time per-process cost: instant for RNNoise, but
+    // DFN3's model load measured 15 SECONDS on a Pixel, and kicked at first call
+    // it eats the start of the call with undenoised frames.
     try {
       final aiNs = await ref.read(noiseSuppressAiProvider.future);
       if (aiNs) {
@@ -859,26 +830,22 @@ class _HollowShellState extends ConsumerState<HollowShell>
       }
     } catch (_) {}
 
-    // A 'link_device' welcome choice creates a THROWAWAY identity just to connect;
-    // the snapshot pull will replace it. Don't nag the user to back up its mnemonic
-    // — it's about to be overwritten by their real identity.
+    // 'link_device' creates a THROWAWAY identity that the snapshot pull
+    // replaces, so there is no mnemonic worth backing up.
     final isLinkDevice = welcomeResult?.action == 'link_device';
 
-    // Node startup + relay connect takes a few seconds; without feedback the
-    // welcome dialog just vanishes and the link prompt appears ~7s later. Show a
-    // "Connecting…" dialog now and dismiss it right before the link flow opens.
+    // Node startup and relay connect take a few seconds, and without this the
+    // welcome dialog just vanishes until the link prompt appears.
     if (isLinkDevice && mounted) {
       showConnectingDialog(context, message: 'Connecting to link your device…');
     }
 
     if (identity.mnemonic != null && mounted && !isLinkDevice) {
-      // New identity was generated — save mnemonic to DB then show dialog.
       await storage_api.saveMnemonic(mnemonic: identity.mnemonic!);
       if (!mounted) return;
       showMnemonicDialog(context, identity.mnemonic!);
     }
 
-    // Load relay domain and saved relay list from DB.
     await ref.read(relayDomainProvider.notifier).loadCached();
     await ref.read(savedRelayListProvider.notifier).loadCached();
     if (welcomeResult != null && welcomeResult.relayDomain != kDefaultRelayDomain) {
@@ -889,8 +856,8 @@ class _HollowShellState extends ConsumerState<HollowShell>
     await network_api.setRelayUrl(domain: relayDomain);
     await ref.read(licenseKeyProvider.notifier).loadCached();
 
-    // Auto-download config (issue #41) — push explicitly, like the relay URL:
-    // the Rust-side gate defaults permissive until this lands.
+    // Pushed explicitly, like the relay URL: the Rust-side gate defaults
+    // permissive until this lands (issue #41).
     await pushAutoDownloadConfig(
       thresholdMb: await ref
           .read(autoDownloadThresholdProvider.future)
@@ -900,31 +867,26 @@ class _HollowShellState extends ConsumerState<HollowShell>
           .catchError((_) => const <String, bool>{}),
     );
 
-    // GIF source settings — push explicitly, like the relay URL above:
-    // proxy override (self-hosters), the user's own Klipy key (direct mode),
-    // its media allowlist, and the content rating.
+    // GIF source settings, pushed explicitly for the same reason: proxy
+    // override, the user's own key, its allowlist and the content rating.
     await ref.read(gifProxyUrlProvider.notifier).loadCached();
     await ref.read(gifApiKeyProvider.notifier).loadCached();
     await ref.read(gifMediaHostsProvider.notifier).loadCached();
     await ref.read(gifRatingProvider.notifier).loadCached();
     await ref.read(gifAutoplayProvider.notifier).loadCached();
-    // Link previews (issue #45) — same shape: the master on/off switch, plus
-    // the optional social-lookup proxy, pushed into Rust here rather than
-    // read lazily, so the first URL typed already honours them.
+    // Link previews (issue #45), pushed here rather than read lazily so the
+    // first URL typed already honours them.
     await ref.read(linkPreviewsEnabledProvider.notifier).loadCached();
     await ref.read(embedProxyUrlProvider.notifier).loadCached();
-    // AFTER the source settings: saved GIFs store proxy-RELATIVE media paths
-    // (or, for direct-mode picks, absolute CDN URLs) and resolve against
-    // whatever source is active.
+    // AFTER the source settings: saved GIFs store proxy-RELATIVE paths and
+    // resolve against whatever source is active.
     await ref.read(gifLibraryProvider.notifier).loadCached();
-    // Sticker recents. No source coupling here — a sticker's bytes are
-    // already a local content-addressed blob, so unlike the GIF library
-    // there is nothing to resolve against a proxy base.
+    // No source coupling: a sticker's bytes are already a local
+    // content-addressed blob, so there is no proxy base to resolve against.
     await ref.read(stickerRecentsProvider.notifier).loadCached();
     await ref.read(stickerLastTabProvider.notifier).loadCached();
     await ref.read(stickerPacksProvider.notifier).loadCached();
-    // Then warm the trending page a little later so the GIF picker opens
-    // with zero spinner (plan: prefetch at app idle).
+    // Warmed late so the GIF picker opens without a spinner.
     Future.delayed(const Duration(seconds: 5), () {
       if (mounted) {
         ref.read(gifCatalogProvider).prefetchTrending(ref.read(gifRatingProvider));
@@ -939,18 +901,14 @@ class _HollowShellState extends ConsumerState<HollowShell>
     // how setRelayUrl is pushed explicitly here rather than relied on lazily.
     await ref.read(proxyConfigProvider.future);
 
-    // ── LOCAL-FIRST RENDER ────────────────────────────────────────────────
-    // Load everything the conversation/server list needs from the LOCAL DB
-    // FIRST, before any network call. These are pure SQLCipher reads and don't
-    // need connectivity — populating them up front means the UI shows your
-    // servers/friends/DMs instantly instead of looking like it's "connecting"
-    // while a blocking relay-status HTTP call (below, up to 5s) runs.
+    // LOCAL-FIRST RENDER: everything the conversation and server lists need is
+    // a pure SQLCipher read, so it all loads before the network phase and the
+    // shell shows real content instead of "connecting" behind a 5s HTTP call.
 
-    // Load servers from local DB (needed for unread computation).
+    // Before unread, which is computed from it.
     await ref.read(serverListProvider.notifier).loadFromDb();
 
-    // Load unread state from DB BEFORE starting the node,
-    // so sync events don't race with loadAll.
+    // Before the node starts, so sync events do not race loadAll.
     try {
       final servers = ref.read(serverListProvider);
       final serverChannels = <String, List<String>>{};
@@ -959,7 +917,7 @@ class _HollowShellState extends ConsumerState<HollowShell>
         serverChannels[sid] = channels.map((c) => c.channelId).toList();
       }
       final dmPeerIds = await storage_api.getDmPeerIds();
-      // Load notification settings BEFORE unread — unread depends on notif levels.
+      // Before unread, which depends on the notification levels.
       await ref.read(notificationSettingsProvider.notifier)
           .loadAll(servers.keys.toList(), serverChannels, dmPeerIds);
       await ref.read(unreadProvider.notifier).loadAll(serverChannels, dmPeerIds);
@@ -967,43 +925,34 @@ class _HollowShellState extends ConsumerState<HollowShell>
       debugPrint('[HOLLOW] Failed to load unread state: $e');
     }
 
-    // Cached user profiles + friends list (the DM/conversation list source).
-    // Pure local reads — load before the network so the list renders immediately.
+    // The DM list's source, and a pure local read, so it precedes the network.
     await ref.read(profileProvider.notifier).loadAll();
     await ref.read(friendsProvider.notifier).loadAll();
 
-    // Theme mode, accent color, background, presets, local nicknames, strip
-    // layout: pure DB reads. These used to run AFTER fetchRelayStatus (up to
-    // 5s) + node start — a slow relay meant seconds of wrong theme and no
-    // background image on a fully-local render.
+    // Pure DB reads: behind fetchRelayStatus a slow relay means seconds of the
+    // wrong theme on a fully local render.
     await ref.read(themeModeProvider.notifier).load();
     await ref.read(accentHueProvider.notifier).load();
-    // Dock vs Classic shell (#58): same rule as the theme — reading it from the
-    // provider's build() raced the store open, so Classic never survived a
-    // restart.
+    // Dock vs Classic shell (#58): read from a provider's build() this races the
+    // store open, and Classic never survives a restart.
     await ref.read(layoutModeProvider.notifier).load();
-    // Whether the Hollow Shop has been woken up here (seven taps on the
-    // version row in Settings > About). Same rule as the layout: the dock bar
-    // watches the gate on the first frame, so it loads here, never in build().
+    // Whether the shop has been woken up here. The dock bar watches the gate on
+    // the first frame, so it loads here, never in build().
     await ref.read(shopUnlockedProvider.notifier).load();
-    // Display size (issue #20) — same rule as the theme: loadSetting throws
-    // until the store is open, so these load here, never in build().
+    // Display size (issue #20): loadSetting throws until the store is open.
     await ref.read(uiScaleProvider.notifier).load();
     await ref.read(chatTextScaleProvider.notifier).load();
     // Panel widths, panel zoom, profile-card style and the folded member-list
-    // sections (issue #54) — same rule again: these are watched by the first
-    // frame, so they load HERE, never from a provider's build().
+    // sections (issue #54): all watched by the first frame.
     await loadLayoutPrefs(ref);
     await ref.read(backgroundProvider.notifier).load();
     await ref.read(accentPresetsProvider.notifier).load();
-    // UI sound pack (#55): loaded here for the same reason as the theme, and
-    // because the notifiers mirror their value into SoundService's statics —
-    // the sounds fire from notifiers that have no `ref` of their own.
+    // UI sound pack (#55): the notifiers mirror their value into SoundService's
+    // statics, because the sounds fire from notifiers with no `ref` of their own.
     await ref.read(soundEffectsEnabledProvider.notifier).load();
     await ref.read(soundEffectsVolumeProvider.notifier).load();
-    // Building the ringtone-volume provider is what publishes it to
-    // SoundService, which the outgoing ringback reads. Without this the first
-    // outgoing call of a session rings at the default, not the user's setting.
+    // Building the provider is what publishes the volume to SoundService, so
+    // without this the first outgoing call of a session rings at the default.
     try {
       await ref.read(ringtoneVolumeProvider.future);
     } catch (e) {
@@ -1012,21 +961,18 @@ class _HollowShellState extends ConsumerState<HollowShell>
     await ref.read(localNicknameProvider.notifier).loadAll();
     setLocalNicknamesRef(ref.read(localNicknameProvider));
     await ref.read(serverStripLayoutProvider.notifier).loadLayout();
-    // "Always relay calls" must be known BEFORE the node starts: the first
-    // TURN credentials land moments after, and IceConfigNotifier composes the
-    // ICE map from this flag. Loading it later would leave a window where a
-    // peer connection is built with direct candidates.
+    // Must be known BEFORE the node starts: the first TURN credentials land
+    // moments after and IceConfigNotifier composes the ICE map from this flag,
+    // so loading it later leaves a window with direct candidates.
     await ref.read(alwaysRelayCallsProvider.notifier).load();
-    // Peer media forwarding (step 3 phase 2): load with the same timing;
-    // pushed into the node right after start below.
+    // Peer media forwarding, on the same timing and pushed into the node right
+    // after it starts.
     await ref.read(peerForwardingProvider.notifier).load();
 
-    // The conversation/server list is now populated from the local DB — drop
-    // the "Unlocking…" spinner. The remaining network phase runs behind the
-    // already-visible shell (local-first render).
+    // The lists are populated from the local DB, so the network phase can run
+    // behind an already-visible shell.
     if (_unlocking && mounted) setState(() => _unlocking = false);
 
-    // Pre-load last message per DM peer for home dashboard / conversation previews.
     final earlyAcceptedPeerIds = ref
         .read(friendsProvider)
         .values
@@ -1037,11 +983,9 @@ class _HollowShellState extends ConsumerState<HollowShell>
       ref.read(chatProvider.notifier).loadLastMessagePreviews(earlyAcceptedPeerIds);
     }
 
-    // ── NETWORK PHASE (after local UI is already populated) ───────────────
-    // License key gate — check relay status and prompt if required. This is the
-    // blocking HTTP call (5s timeout) that previously sat in front of the local
-    // loads; it now runs after the UI is rendered. Non-fatal on failure
-    // (fetchRelayStatus swallows errors and returns license-not-required).
+    // NETWORK PHASE, once the local UI is populated. This is the blocking 5s
+    // HTTP call, and it is non-fatal: fetchRelayStatus swallows errors and
+    // answers license-not-required.
     final relayStatus = await fetchRelayStatus(domain: relayDomain);
     if (relayStatus.licenseRequired) {
       var cachedKey = ref.read(licenseKeyProvider);
@@ -1062,50 +1006,36 @@ class _HollowShellState extends ConsumerState<HollowShell>
 
     await ref.read(nodeProvider.notifier).start();
 
-    // Peer media forwarding: the node starts with it OFF — mirror the loaded
-    // setting in (desktop only; the command is a no-op on mobile builds).
+    // The node starts with forwarding OFF, so the loaded setting is mirrored in.
     ref.read(peerForwardingProvider.notifier).pushToNode();
 
-    // Load invisible mode preference (non-blocking — Rust already loaded it
-    // from DB at node startup, this is just for the Dart UI to show the
-    // correct toggle/status).
+    // Rust already loaded this at node startup; this is only for the Dart UI's
+    // toggle.
     ref.read(invisibleModeProvider.notifier).load();
 
-    // Parked server joins. AFTER the node starts, because the boot path is
-    // what restores the in-memory entries and rejoins their rooms; loading it
-    // here rather than from a provider's build() is the #58 rule (the strip
-    // watches this map on the first frame). It also re-syncs the strip, so a
-    // tile whose row Rust dropped while we were away disappears.
+    // AFTER the node starts, which is what restores the in-memory entries and
+    // rejoins their rooms; the strip watches this map on the first frame (#58).
     await ref.read(pendingJoinsProvider.notifier).load();
 
-    // Offline inbox (relay message-availability cache): the relay registry is
-    // RAM-only, so re-register on every app start. Retention loads FIRST so
-    // the enable re-apply reads the right window; enabled.load() then calls
-    // the FFI when opted in. Fire-and-forget (node just started above).
+    // The relay's availability registry is RAM-only, so this re-registers on
+    // every start. Retention loads FIRST, or the enable re-apply reads the wrong
+    // window.
     ref.read(offlineInboxRetentionProvider.notifier).load().then((_) {
       ref.read(offlineInboxProvider.notifier).load();
     }).catchError((_) {});
 
-    // (theme/accent/background/nicknames/strip layout already loaded in the
-    // local-first phase above, before the network calls.)
-
-    // Keep the verified Twitch mark fresh, silently. A credential is minted
-    // for a 90-day window and verifies for that window and the one after it,
-    // so there is a whole window in which to renew it from the persisted
-    // refresh token without asking for anything. Rust holds a 24-hour
-    // cooldown, answers false for every reason that is not "a fresh
-    // credential was minted", and does nothing at all when Twitch is not
-    // connected. Fire-and-forget with the explicit catchError the FFI rule
-    // demands (`feedback_ffi_fire_and_forget_catcherror`).
+    // A credential verifies for its 90-day window and the one after, so there is
+    // a whole window in which to renew it silently from the persisted refresh
+    // token. Fire-and-forget needs the explicit catchError
+    // (`feedback_ffi_fire_and_forget_catcherror`).
     twitch_api.twitchMaintainOwnerCredential().then((minted) {
       if (minted) ref.read(profileProvider.notifier).loadAll();
     }).catchError((e) {
       debugPrint('[HOLLOW] Twitch re-verify skipped: $e');
     });
 
-    // One-shot: move an animated avatar/banner authored before the asset-rail
-    // split off the pushed profile blob. Fire-and-forget with an explicit
-    // catchError - an un-awaited FFI rejection otherwise reaches the zone
+    // One-shot: move animated avatars authored before the asset-rail split off
+    // the pushed profile blob. An un-awaited FFI rejection reaches the zone
     // crash handler, and a migration that cannot run is not worth a crash.
     network_api.migrateProfileMediaOnce().then((moved) {
       if (moved) ref.read(profileProvider.notifier).loadAll();
@@ -1114,65 +1044,47 @@ class _HollowShellState extends ConsumerState<HollowShell>
       return false;
     });
 
-    // Load server avatars (+ animated icons) + banners.
     final serverIds = ref.read(serverListProvider).keys.toList();
     ref.read(serverAvatarProvider.notifier).loadAll(serverIds);
     ref.read(serverAvatarAnimProvider.notifier).loadAll(serverIds);
     ref.read(serverBannerProvider.notifier).loadAll(serverIds);
 
-    // (profiles + friends + DM previews already loaded above in the local-first
-    // render phase, before the network calls.)
-
-    // Load share entries so hollow://share cards in chat show correct state.
+    // So hollow://share cards in chat show the right state.
     ref.read(shareTabProvider.notifier).loadAll();
 
-    // Load favourite friends order from local DB.
     await ref.read(favouriteFriendsProvider.notifier).load();
 
-    // Load hidden Archive DMs from local DB.
     await ref.read(hiddenArchiveDmsProvider.notifier).load();
 
-    // Load the block list from local DB (master-keyed; mirrors Rust's ingest
-    // guard set so Block/Unblock UI and channel hiding are correct at boot).
+    // Master-keyed, mirroring Rust's ingest guard set, so the Block UI and
+    // channel hiding are correct at boot.
     await ref.read(blockedUsersProvider.notifier).load();
 
-    // Load verified peers from local DB.
     await ref.read(verifiedPeersProvider.notifier).load();
 
-    // Load recorded key/device change alerts (Issue 1-C). Must be loaded, not
-    // only streamed: an alert raised while the app was closed has to be waiting
-    // in the conversation on next launch, or the warning is missable.
+    // Loaded, not only streamed: an alert raised while the app was closed has to
+    // be waiting in the conversation on the next launch, or it is missable.
     await ref.read(securityAlertsProvider.notifier).load();
 
-    // Load the persisted system-status dismissal (must run after the DB is open
-    // — see StatusNotifier.loadDismissed). Without this the dismissed banner
-    // re-appeared on every restart.
+    // After the DB is open, or the dismissed banner re-appears on every restart.
     await ref.read(statusProvider.notifier).loadDismissed();
 
-    // Initialize native notifications (tray + unfocused-background toasts).
     await ref.read(systemNotificationProvider.notifier).init();
     _registerDesktopNotificationHandlers();
 
-    // Multi-device: the user chose "Link a device" on the welcome screen. The node
-    // is now connected on a throwaway identity — open the enter-code flow so they
-    // can pull their real data. A successful import replaces identity + DB; the UI
-    // prompts a restart at that point.
+    // The node is connected on a throwaway identity, so the enter-code flow can
+    // pull the real data; a successful import replaces identity and DB.
     if (isLinkDevice && mounted) {
-      // Dismiss the "Connecting…" placeholder now that the node is up.
       dismissConnectingDialog();
       final wentBack = await showDeviceLinkDialog(context, mode: DeviceLinkMode.enterCode);
-      // Cancel/Back = "go back to Welcome". The throwaway identity we just created has
-      // no real data, so discard it and RELAUNCH — the next launch sees no identity
-      // and shows the Welcome dialog fresh (the running node still holds the old DB
-      // handle, so we can't just re-show Welcome in place). A bare exit(0) here just
-      // killed the app and left the user staring at nothing — spawn a fresh copy of
-      // ourselves first (mirrors the dialog's _restartApp / "Apply & Restart" pattern).
+      // Back means "go back to Welcome", and the running node still holds the DB
+      // handle, so the throwaway identity is discarded by RELAUNCHING rather than
+      // by re-showing Welcome in place.
       //
-      // We MARK a wipe rather than deleting now: the live node holds open SQLCipher
-      // handles (CrdtStore/CryptoStore + WAL/-shm), and on Windows deleting an open
-      // messages.db fails silently — it survives, encrypted with the throwaway
-      // passphrase, and the next identity can't open it → infinite loading. The
-      // next launch's _bootstrap runs performPendingWipe() BEFORE the node starts.
+      // The wipe is MARKED, not done now: with SQLCipher handles open, deleting
+      // messages.db fails silently on Windows and it survives encrypted with the
+      // throwaway passphrase, so the next identity loads forever. The next
+      // launch's _bootstrap wipes before the node starts.
       if (wentBack == true) {
         await storage_api.stashPendingWipe();
         try {
@@ -1190,12 +1102,11 @@ class _HollowShellState extends ConsumerState<HollowShell>
       }
     }
 
-    // Android: acquire WiFi lock to prevent network throttling, and
-    // request battery optimization exemption on first launch.
+    // The WiFi lock is what stops Android throttling the socket.
     if (Platform.isAndroid) {
       await acquireWifiLock();
-      // Prime Build.VERSION.SDK_INT so the screen-share sheet can lock the
-      // audio toggle on Android < 10 without a first-frame flash.
+      // Primed so the screen-share sheet can lock the audio toggle on
+      // Android < 10 without a first-frame flash.
       await AndroidScreenAudioSupport.prime();
       final optimized = await isBatteryOptimized();
       if (optimized && mounted) {
@@ -1208,8 +1119,8 @@ class _HollowShellState extends ConsumerState<HollowShell>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (!(Platform.isAndroid || Platform.isIOS)) return;
-    // Mirror the lifecycle state so event routing can choose OS notification vs
-    // in-app banner. Set BEFORE the _initialized guard so it's always current.
+    // Event routing picks an OS notification or an in-app banner from this, so
+    // it is set BEFORE the _initialized guard and is always current.
     ref.read(appLifecycleProvider.notifier).state = state;
     if (!_initialized) return;
     if (state == AppLifecycleState.resumed) {
@@ -1220,16 +1131,15 @@ class _HollowShellState extends ConsumerState<HollowShell>
     } else if (state == AppLifecycleState.paused) {
       debugPrint('[HOLLOW] App paused — releasing WiFi lock');
       releaseWifiLock();
-      // Mark app inactive so the NSE runs its OWN fetch while we're gone (a live
-      // node only receives messages while resumed). iOS-only; no-op elsewhere.
+      // A live node only receives while resumed, so the NSE has to run its own
+      // fetch while we are gone.
       _updateIosPushHeartbeat(active: false);
     }
   }
 
-  /// iOS push heartbeat: the NSE skips its fetch (and just shows name+avatar) if
-  /// the app reported itself active recently — because the live node already got
-  /// the message. The heartbeat file lives in the App Group container, which is
-  /// the PARENT of the (migrated) data dir.
+  /// iOS push heartbeat: the NSE skips its own fetch while the app has reported
+  /// itself active recently, because the live node already has the message. The
+  /// file lives in the App Group container, the PARENT of the data dir.
   void _updateIosPushHeartbeat({required bool active}) {
     if (!Platform.isIOS) return;
     final dataDir = hollowDataDir; // <AppGroupContainer>/hollow_data
@@ -1245,10 +1155,9 @@ class _HollowShellState extends ConsumerState<HollowShell>
     final servers = ref.read(serverListProvider);
     final peerId = ref.read(identityProvider).peerId;
     if (peerId == null) return;
-    // .catchError, not try/catch: fire-and-forget — an async rejection (e.g.
-    // "Node is not running" when a resume fires during the startup window)
-    // would escape a sync try/catch. The node's own start path joins rooms,
-    // so a swallowed early failure self-heals.
+    // .catchError, not try/catch: an async rejection ("Node is not running" when
+    // a resume fires during startup) escapes a sync try/catch. The node's own
+    // start path joins rooms, so a swallowed early failure self-heals.
     network_api.joinRoom(roomCode: peerId).catchError((_) {});
     for (final serverId in servers.keys) {
       network_api.joinRoom(roomCode: serverId).catchError((_) {});
@@ -1265,15 +1174,14 @@ class _HollowShellState extends ConsumerState<HollowShell>
     super.dispose();
   }
 
-  /// Global keyboard shortcut handler — registered on HardwareKeyboard
-  /// so it works regardless of which widget currently has focus. Bindings
-  /// come from [appShortcutsProvider] (rebindable, Settings > Shortcuts);
-  /// `matchesEvent` carries the AltGr guard (a held Alt = the user typing
-  /// a layout character, AZERTY @ = AltGr+à, issue #43 — never a shortcut).
+  /// Global keyboard shortcut handler, on HardwareKeyboard so it works whatever
+  /// has focus. Bindings come from [appShortcutsProvider], and `matchesEvent`
+  /// carries the AltGr guard: a held Alt is the user typing a layout character
+  /// (AZERTY @ is AltGr+à, issue #43), never a shortcut.
   bool _handleGlobalKey(KeyEvent event) {
     if (event is! KeyDownEvent) return false;
-    // A keybind capture field is armed: the user is TYPING a new binding,
-    // not invoking one — acting here would fire the shortcut being rebound.
+    // A keybind capture field is armed: the user is TYPING a binding, and acting
+    // here would fire the shortcut being rebound.
     if (ref.read(keybindCaptureActiveProvider)) return false;
 
     final hk = HardwareKeyboard.instance;
@@ -1298,9 +1206,9 @@ class _HollowShellState extends ConsumerState<HollowShell>
       return true;
     }
 
-    // Interface zoom (issue #20). On the DEFAULT bindings the historical
-    // aliases stay: "+" is Shift+= on most layouts (so shift is tolerated)
-    // and the numpad variants count. A custom binding matches exactly.
+    // Interface zoom (issue #20). The DEFAULT bindings keep their aliases: "+"
+    // is Shift+= on most layouts and the numpad variants count. A custom binding
+    // matches exactly.
     if (_matchZoom(event, hk, binds[AppShortcut.zoomIn]!, AppShortcut.zoomIn,
         const [LogicalKeyboardKey.equal, LogicalKeyboardKey.add,
             LogicalKeyboardKey.numpadAdd],
@@ -1321,7 +1229,6 @@ class _HollowShellState extends ConsumerState<HollowShell>
       return true;
     }
 
-    // Split view toggle (dock mode only).
     if (match(AppShortcut.toggleSplitView)) {
       if (ref.read(layoutModeProvider) == LayoutMode.dock) {
         final split = ref.read(splitViewProvider);
@@ -1353,10 +1260,9 @@ class _HollowShellState extends ConsumerState<HollowShell>
     return false;
   }
 
-  /// Zoom shortcuts keep their legacy alias behavior while on the default
-  /// binding: [aliasKeys] all count as the trigger, and with [shiftTolerant]
-  /// the shift state is ignored (Ctrl+Shift+= IS Ctrl++). Custom bindings
-  /// go through the exact [HotkeyBinding.matchesEvent] path instead.
+  /// Zoom keeps its aliases while on the default binding: every key in
+  /// [aliasKeys] triggers, and [shiftTolerant] ignores shift (Ctrl+Shift+= IS
+  /// Ctrl++). A custom binding goes through [HotkeyBinding.matchesEvent].
   bool _matchZoom(KeyEvent event, HardwareKeyboard hk, HotkeyBinding binding,
       AppShortcut shortcut, List<LogicalKeyboardKey> aliasKeys,
       {bool shiftTolerant = false}) {
@@ -1408,28 +1314,23 @@ class _HollowShellState extends ConsumerState<HollowShell>
       onPeerSelected: (peerId) {
         setShellTab(ref.read, null);
         ref.read(selectedPeerProvider.notifier).state = peerId;
-        // Mark DM as read — use ref.read (not watch) since this is a callback.
         final lastMsg = ref.read(lastDmMessageProvider)[peerId];
         ref.read(unreadProvider.notifier).markDmSeen(peerId, lastMsg?.messageId);
-        // On mobile, switch to chat tab when peer is selected.
         ref.read(mobileTabProvider.notifier).state = 1;
       },
       lastMessage: (peerId) => _lastMessage(peerId, lastMessages),
       formatTime: _formatTime,
-      // Server mode props
       selectedServer: selectedServer,
       channels: channels,
       selectedChannelId: selectedChannelId,
       onChannelSelected: (channelId) {
         ref.read(selectedChannelProvider.notifier).state = channelId;
-        // Remember last channel for this server.
         final serverId = ref.read(selectedServerProvider);
         if (serverId != null) {
           final map = Map<String, String>.from(
               ref.read(lastChannelPerServerProvider));
           map[serverId] = channelId;
           ref.read(lastChannelPerServerProvider.notifier).state = map;
-          // Mark channel as read.
           final chState = ref.read(channelChatProvider);
           final msgs = chState['$serverId:$channelId'];
           final latestId = msgs != null && msgs.isNotEmpty
@@ -1437,10 +1338,8 @@ class _HollowShellState extends ConsumerState<HollowShell>
               : null;
           ref.read(unreadProvider.notifier)
               .markChannelSeen(serverId, channelId, latestId);
-          // Subscribe to this channel for topic-based relay routing.
           _subscribeActiveChannel(serverId, channelId);
         }
-        // On mobile, switch to chat tab when channel is selected.
         ref.read(mobileTabProvider.notifier).state = 1;
       },
       onCreateChannel: () {
@@ -1491,7 +1390,6 @@ class _HollowShellState extends ConsumerState<HollowShell>
   Widget _buildChannelPlaceholder(HollowTheme hollow, ChannelInfo? channel) {
     return Column(
       children: [
-        // Channel header
         Container(
           constraints: const BoxConstraints(minHeight: 48),
           padding: const EdgeInsets.symmetric(
@@ -1504,8 +1402,8 @@ class _HollowShellState extends ConsumerState<HollowShell>
             children: [
               Icon(LucideIcons.hash, size: 20, color: hollow.textSecondary),
               const SizedBox(width: HollowSpacing.sm),
-              // Larger Text (a11y P3): name yields to the trailing action; the
-              // Expanded fills the gap (no Spacer needed) and ellipsizes.
+              // Larger Text: the name yields to the trailing action and
+              // ellipsizes rather than pushing it off.
               Expanded(
                 child: Text(
                   channel?.name ?? 'Unknown Channel',
@@ -1534,7 +1432,6 @@ class _HollowShellState extends ConsumerState<HollowShell>
             ],
           ),
         ),
-        // Placeholder body
         Expanded(
           child: Center(
             child: Column(
@@ -1570,36 +1467,30 @@ class _HollowShellState extends ConsumerState<HollowShell>
     required String? selectedChannelId,
     required Map<String, ChannelInfo> channels,
   }) {
-    // Public channel browser
     final guestOpen = ref.watch(guestTabOpenProvider);
     if (guestOpen) {
       return const PublicChannelBrowser();
     }
 
-    // Share tab view
     final shareOpen = ref.watch(shareTabOpenProvider);
     if (shareOpen) {
       return const ShareDashboard();
     }
 
-    // Archive tab view
     final archiveOpen = ref.watch(archiveTabOpenProvider);
     if (archiveOpen) {
       return const ArchiveDashboard();
     }
 
-    // Conferences tab view
     final conferenceOpen = ref.watch(conferenceTabOpenProvider);
     if (conferenceOpen) {
       return const ConferenceDashboard();
     }
 
-    // Hollow Shop tab view
     if (ref.watch(shopTabOpenProvider)) {
       return const ShopDashboard();
     }
 
-    // Server channel view
     if (selectedChannelId != null) {
       final channel = channels[selectedChannelId];
       final serverId = ref.read(selectedServerProvider);
@@ -1622,13 +1513,9 @@ class _HollowShellState extends ConsumerState<HollowShell>
       }
       return _buildChannelPlaceholder(hollow, channel);
     }
-    // DM chat view — the Home dashboard is a DOCK surface and stays one.
-    // Classic's centre pane is a blank slate that only ever shows what the
-    // left panels select; putting the dock's Home tab there makes the two
-    // layouts bleed into each other (rejected on sight, #58 follow-up). That
-    // also means the dashboard's Network column is Dock-only by design — the
-    // answer to vico93's second question is "switch to Dock", not "show the
-    // dock's Home tab inside Classic".
+    // The Home dashboard is a DOCK surface and stays one: Classic's centre pane
+    // only ever shows what the left panels select, so putting the dock's Home
+    // tab there makes the two layouts bleed into each other (#58).
     if (selectedPeerId == null) {
       return ref.watch(layoutModeProvider) == LayoutMode.dock
           ? const HomeDashboard()
@@ -1640,10 +1527,9 @@ class _HollowShellState extends ConsumerState<HollowShell>
     );
   }
 
-  /// Wraps the chat pane with a fade for the startup reveal.
-  /// Always keeps the FadeTransition in the tree so the child's State
-  /// (e.g. AmbientBackground's AnimationController) is preserved when
-  /// the reveal completes — avoids resetting the ambient blob positions.
+  /// Wraps the chat pane with a fade for the startup reveal. The FadeTransition
+  /// stays in the tree so the child's State survives the reveal completing,
+  /// which would otherwise reset the ambient blob positions.
   Widget _chatRevealWrap(Widget child) {
     return FadeTransition(
       opacity: _chatReveal,
@@ -1653,25 +1539,22 @@ class _HollowShellState extends ConsumerState<HollowShell>
 
   @override
   Widget build(BuildContext context) {
-    // Keep the voice hotkey controller alive (PTT + mute/deafen, issue #38).
-    // Desktop only — it self-activates while in a call and idles otherwise.
+    // Desktop only: the controller self-activates in a call and idles otherwise
+    // (issue #38).
     if (!Platform.isAndroid && !Platform.isIOS) {
       ref.watch(hotkeyControllerProvider);
     }
 
-    // Annotation mode hides the entire shell so the user sees the apps
-    // underneath through the now-transparent Hollow window. The annotation
-    // OverlayEntry (drawing surface + toolbar) sits in the root Navigator
-    // overlay and stays visible above this empty route content.
+    // Annotation mode hides the shell so the apps underneath show through the
+    // transparent window; the drawing surface is an OverlayEntry in the root
+    // Navigator and stays above this empty route.
     if (ref.watch(annotationModeProvider)) {
       return const SizedBox.shrink();
     }
 
-    // Multi-device: when another device asks to link, pop the confirm flow
-    // globally — UNLESS a link dialog is already showing (e.g. the Settings
-    // show-code dialog), in which case it re-renders into the confirm view on the
-    // phase change. Opening a second dialog would re-run its initState and mint a
-    // fresh code (the "entering the code spawns a new code" bug).
+    // Pops the confirm flow globally, unless a link dialog is already showing:
+    // that one re-renders into the confirm view, while a second dialog would
+    // re-run initState and mint a fresh code.
     ref.listen<DeviceLinkState>(deviceLinkSyncProvider, (prev, next) {
       if (next.phase == LinkPhase.confirmPush &&
           prev?.phase != LinkPhase.confirmPush &&
@@ -1681,19 +1564,15 @@ class _HollowShellState extends ConsumerState<HollowShell>
       }
     });
 
-    // Subscribe to the active channel's relay topic whenever it changes — NOT
-    // only on an explicit sidebar click. A server's first channel is
-    // auto-selected (no click), and on startup a server may already be selected;
-    // without this the node never subscribes, so live MLS topic-broadcasts never
-    // arrive and messages only appear on the next ChannelSyncRequest (tab-switch).
+    // On every change, NOT only an explicit sidebar click: a server's first
+    // channel is auto-selected, and without a subscription live MLS
+    // topic-broadcasts never arrive until the next sync request.
     ref.listen<String?>(selectedChannelProvider, (prev, next) {
       if (next == null || next == prev) return;
-      // The selection batch writes selectedChannel BEFORE selectedServer
-      // (canonical _selectServer order) and this callback fires on the
-      // channel write — reading the server here returns the OLD server on a
-      // cross-server switch, subscribing the new channel under the WRONG
-      // relay room (live topic broadcasts then never arrive until a later
-      // resubscribe). Defer the read one microtask so the batch settles.
+      // The selection batch writes selectedChannel BEFORE selectedServer and
+      // this fires on the channel write, so reading the server now returns the
+      // OLD one and subscribes the new channel under the WRONG relay room. One
+      // microtask lets the batch settle.
       Future.microtask(() {
         if (!mounted) return;
         final serverId = ref.read(selectedServerProvider);
@@ -1704,18 +1583,16 @@ class _HollowShellState extends ConsumerState<HollowShell>
       });
     });
 
-    // Channel-visibility eviction: when the channel you're viewing stops being
-    // visible to you in real-time (visibility tier raised, or you were demoted),
-    // the data already propagated via CRDT — this navigates the UI to match.
-    // Land on the next visible text channel, else clear to the server's home.
+    // The channel being viewed can stop being visible in real time (tier raised,
+    // or a demotion); the CRDT already propagated, so this only moves the UI to
+    // the next visible text channel, else to the server's home.
     ref.listen<Map<String, ChannelInfo>>(visibleChannelsProvider, (prev, next) {
       final selectedChannel = ref.read(selectedChannelProvider);
       final serverId = ref.read(selectedServerProvider);
       if (selectedChannel == null || serverId == null) return;
-      // Settings panel open → don't yank the user; the panel handles its own state.
+      // Do not yank the user out of the settings panel; it owns its own state.
       if (ref.read(serverSettingsOpenProvider)) return;
-      if (next.containsKey(selectedChannel)) return; // still visible — fine
-      // No longer visible: pick the next visible text channel from the layout.
+      if (next.containsKey(selectedChannel)) return;
       final layout = ref.read(channelLayoutProvider);
       final fallback = firstTextChannelInLayout(next, layout);
       ref.read(selectedChannelProvider.notifier).state = fallback;
@@ -1737,7 +1614,6 @@ class _HollowShellState extends ConsumerState<HollowShell>
     final memberPanelOpen = ref.watch(memberPanelProvider);
     final helpPanelOpen = ref.watch(helpPanelOpenProvider);
 
-    // Server/channel state
     final servers = ref.watch(serverListProvider);
     final selectedServerId = ref.watch(selectedServerProvider);
     final channels = ref.watch(visibleChannelsProvider);
@@ -1747,16 +1623,14 @@ class _HollowShellState extends ConsumerState<HollowShell>
     final channelLayout = ref.watch(channelLayoutProvider);
     final settingsOpen = ref.watch(serverSettingsOpenProvider);
 
-    // Layout mode
     final layoutMode = ref.watch(layoutModeProvider);
 
     final shellBody = LayoutBuilder(
       builder: (context, constraints) {
         final width = constraints.maxWidth;
         final isDesktop = width >= _kDesktopBreakpoint;
-        // Android/iOS ALWAYS get the mobile shell — tablets (and landscape
-        // phones, before the portrait lock in main.dart) cross the 600px
-        // breakpoint and used to fall into the desktop layout.
+        // Android and iOS ALWAYS get the mobile shell: a tablet or a landscape
+        // phone crosses the breakpoint and would fall into the desktop layout.
         final isMobile = width < _kTabletBreakpoint ||
             Platform.isAndroid ||
             Platform.isIOS;
@@ -1810,16 +1684,14 @@ class _HollowShellState extends ConsumerState<HollowShell>
           );
         }
 
-        // Wrap in DragToResizeArea to restore edge/corner resize handles
-        // after setAsFrameless() removed them.
+        // setAsFrameless() removed the edge and corner resize handles; this
+        // puts them back.
         if (isDesktopPlatform) {
           body = DragToResizeArea(child: body);
         }
 
-        // Give the desktop shell a sane keyboard Tab order (a11y 2.6): reading
-        // order follows the visual layout left-to-right, top-to-bottom
-        // (server strip → channel list → chat → member panel) without manual
-        // ordering. Dialogs/routes pushed above this trap their own focus.
+        // Tab order follows the visual layout without any manual ordering
+        // (a11y 2.6); dialogs pushed above this trap their own focus.
         body = FocusTraversalGroup(
           policy: ReadingOrderTraversalPolicy(),
           child: body,
@@ -1829,16 +1701,14 @@ class _HollowShellState extends ConsumerState<HollowShell>
       },
     );
 
-    // Overlay the "Unlocking…" spinner across the shell while the identity is
-    // being unlocked + the local DB loads (after a PIN/password/biometric
-    // unlock). Without it the shell looks frozen during the Argon2id wait.
+    // Without the spinner the shell looks frozen through the Argon2id wait.
     if (!_unlocking) return shellBody;
     return Stack(
       children: [shellBody, _UnlockingOverlay(hollow: hollow)],
     );
   }
 
-  /// Classic Discord-like layout: ServerStrip | ChannelSidebar | ChatPane | MemberPanel
+  /// Classic layout: ServerStrip | ChannelSidebar | ChatPane | MemberPanel.
   Widget _buildClassicLayout({
     required HollowTheme hollow,
     required bool isDesktopPlatform,
@@ -1856,10 +1726,8 @@ class _HollowShellState extends ConsumerState<HollowShell>
     required bool memberPanelOpen,
     required bool helpPanelOpen,
   }) {
-    // Check if viewing a voice channel with active screen share (full-bleed mode).
-    // Field-tuple select: the whole SHELL used to rebuild on ANY voice-channel
-    // state change (mute, deafen, per-peer audio/camera maps). Only these
-    // three facts matter here.
+    // Field-tuple select: without it the whole SHELL rebuilds on ANY
+    // voice-channel state change, down to a per-peer audio map.
     final vc = ref.watch(voiceChannelProvider.select((s) => (
           s.currentChannelId,
           s.isInVoiceChannel,
@@ -1876,8 +1744,8 @@ class _HollowShellState extends ConsumerState<HollowShell>
       isComplete: _revealComplete,
       child: Column(
         children: [
-          // Global system-status banner (Classic layout) — full-width strip at
-          // the very top. Self-hides when there's nothing to announce.
+          // Full-width strip at the very top, self-hiding when there is nothing
+          // to announce.
           const SystemStatusBanner(),
           Expanded(
             child: Row(
@@ -1939,10 +1807,8 @@ class _HollowShellState extends ConsumerState<HollowShell>
                     ),
                   ),
                 ),
-                // Docked at every width the desktop shell runs at: a narrow
-                // window auto-collapses it (`_syncMemberPanelToWidth`), and
-                // re-opening it has to PUSH the chat over, never cover it —
-                // an overlay would sit on top of the header's own toggle.
+                // Docked at every width: re-opening it has to PUSH the chat
+                // over, because an overlay would cover the header's own toggle.
                 _MemberPanelSlider(
                   visible: selectedServerId != null && memberPanelOpen && !vcScreenShareFullBleed,
                   serverId: selectedServerId,
@@ -1956,7 +1822,8 @@ class _HollowShellState extends ConsumerState<HollowShell>
     );
   }
 
-  /// Dock layout: FriendsBar (top) | ChannelSidebar + ChatPane + MemberPanel | BottomBar
+  /// Dock layout: FriendsBar, then ChannelSidebar + ChatPane + MemberPanel,
+  /// then BottomBar.
   Widget _buildDockLayout({
     required HollowTheme hollow,
     required bool isDesktopPlatform,
@@ -1976,10 +1843,8 @@ class _HollowShellState extends ConsumerState<HollowShell>
   }) {
     final splitState = ref.watch(splitViewProvider);
 
-    // Check if viewing a voice channel with active screen share (full-bleed mode).
-    // Field-tuple select: the whole SHELL used to rebuild on ANY voice-channel
-    // state change (mute, deafen, per-peer audio/camera maps). Only these
-    // three facts matter here.
+    // Field-tuple select: without it the whole SHELL rebuilds on ANY
+    // voice-channel state change, down to a per-peer audio map.
     final vc = ref.watch(voiceChannelProvider.select((s) => (
           s.currentChannelId,
           s.isInVoiceChannel,
@@ -1991,14 +1856,15 @@ class _HollowShellState extends ConsumerState<HollowShell>
         && vc.$1 == selectedChannelId
         && vc.$3;
 
-    // Handle pending migration: when the left pane was closed in split mode,
-    // the right pane's context needs to be applied to global providers.
+    // Closing the left pane in split mode leaves the right pane's context to be
+    // applied to the global providers.
     if (splitState.pendingMigration != null) {
       WidgetsBinding.instance.addPostFrameCallback((_) async {
         final migration = ref.read(splitViewProvider).pendingMigration;
         if (migration == null) return;
         if (migration.serverId != null) {
-          // Fetch first, then batch all writes — no intermediate rebuilds.
+          // Fetch first, then batch the writes, so there are no intermediate
+          // rebuilds.
           final channels = await ChannelListNotifier.fetchChannels(
               migration.serverId!);
           final layout = await ChannelLayoutNotifier.fetchLayout(
@@ -2021,7 +1887,6 @@ class _HollowShellState extends ConsumerState<HollowShell>
       });
     }
 
-    // Member panel shows for focused pane's server.
     final effectiveServerId = splitState.isSplit && splitState.focusedPane == 1
         ? splitState.rightPane?.serverId
         : selectedServerId;
@@ -2032,7 +1897,6 @@ class _HollowShellState extends ConsumerState<HollowShell>
       child: Column(
         children: [
 
-          // Friends bar (top) — slides down from top
           ClipRect(
             child: AnimatedBuilder(
               animation: _friendsBarReveal,
@@ -2048,20 +1912,17 @@ class _HollowShellState extends ConsumerState<HollowShell>
             ),
           ),
 
-          // Global system-status banner — directly under the Friends bar. Self-
-          // hides unless there's a banner-worthy (warning/maintenance/critical/
-          // info) notice; reaches users no matter what they're viewing.
+          // Self-hides unless there is a banner-worthy notice, so it reaches
+          // users whatever they are viewing.
           const SystemStatusBanner(),
 
-          // Main content area
           Expanded(
             child: ClipRect(child: Row(
               children: [
-                // Channel sidebar — animated slide in/out in dock mode
                 _DockSidebarSlider(
                   visible: selectedServerId != null,
-                  // The seam rides INSIDE the slider so it slides away with
-                  // the panel it sizes instead of hanging in empty space.
+                  // The seam rides INSIDE the slider so it slides away with the
+                  // panel it sizes.
                   child: Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
@@ -2081,7 +1942,6 @@ class _HollowShellState extends ConsumerState<HollowShell>
                   ),
                 ),
 
-                // Chat area (single pane or split, animated transition)
                 Expanded(
                   child: FadeTransition(
                     opacity: _dockChatReveal,
@@ -2167,9 +2027,8 @@ class _HollowShellState extends ConsumerState<HollowShell>
                   ),
                 ),
 
-                // Member panel — hidden during split view and VC screen share.
-                // Width is no longer gated: below the breakpoint it starts
-                // collapsed (`_syncMemberPanelToWidth`) and re-opening it
+                // Hidden during split view and VC screen share. Width is not
+                // gated: below the breakpoint it starts collapsed and re-opening
                 // pushes the chat over, keeping the header's toggle reachable.
                 if (!splitState.isSplit)
                   _MemberPanelSlider(
@@ -2182,7 +2041,6 @@ class _HollowShellState extends ConsumerState<HollowShell>
             )),
           ),
 
-          // Bottom bar (dock) — slides up from bottom
           ClipRect(
             child: AnimatedBuilder(
               animation: _bottomBarReveal,
@@ -2204,12 +2062,10 @@ class _HollowShellState extends ConsumerState<HollowShell>
 
 }
 
-/// Animates the member panel sliding in/out from the right edge.
-/// Uses clip + width factor like the startup RevealClip.
+/// Animates the member panel sliding in and out from the right edge.
 ///
-/// Freezes the panel content during close animation by overriding
-/// [selectedServerProvider] with the last known server ID, preventing
-/// the "No peers online" flash.
+/// While closing, [selectedServerProvider] is overridden with the last known
+/// server id so the content cannot flash "No peers online" on the way out.
 class _MemberPanelSlider extends StatefulWidget {
   final bool visible;
   final String? serverId;
@@ -2228,7 +2084,7 @@ class _MemberPanelSliderState extends State<_MemberPanelSlider>
   late final AnimationController _controller;
   late final CurvedAnimation _curved;
 
-  /// Cached server ID — kept while closing so panel doesn't flash.
+  /// Kept while closing so the panel cannot flash.
   String? _frozenServerId;
 
   @override
@@ -2247,7 +2103,7 @@ class _MemberPanelSliderState extends State<_MemberPanelSlider>
     );
   }
 
-  /// True while the panel is animating closed — freezes content.
+  /// True while the panel animates closed, which freezes its content.
   bool _isClosing = false;
 
   @override
@@ -2256,17 +2112,15 @@ class _MemberPanelSliderState extends State<_MemberPanelSlider>
     if (widget.visible != oldWidget.visible) {
       _controller.duration = HollowDurations.normal;
       if (widget.visible) {
-        // Opening — unfreeze content, update server ID.
         _isClosing = false;
         _frozenServerId = widget.serverId;
         _controller.forward();
       } else {
-        // Closing — freeze content so it doesn't flash "No peers online".
+        // Freeze the content so it cannot flash "No peers online".
         _isClosing = true;
         _controller.reverse();
       }
     } else if (widget.visible && widget.serverId != oldWidget.serverId) {
-      // Server changed while panel is open — update live.
       _frozenServerId = widget.serverId;
     }
   }
@@ -2283,7 +2137,6 @@ class _MemberPanelSliderState extends State<_MemberPanelSlider>
     return AnimatedBuilder(
       animation: _curved,
       builder: (context, child) {
-        // Hide completely when animation finishes closing.
         if (_curved.value == 0.0) return const SizedBox.shrink();
 
         return ClipRect(
@@ -2297,8 +2150,7 @@ class _MemberPanelSliderState extends State<_MemberPanelSlider>
           ),
         );
       },
-      // Only override selectedServerProvider during close animation
-      // to freeze content. Otherwise let it use the real provider.
+      // Overridden only while closing; otherwise the real provider wins.
       child: _isClosing && _frozenServerId != null
           ? ProviderScope(
               overrides: [
@@ -2351,7 +2203,7 @@ class _MemberPanelWithSeam extends ConsumerWidget {
               ref.read(memberPanelWidthProvider.notifier).setWidth(w),
           onReset: () => ref.read(memberPanelWidthProvider.notifier).reset(),
         ),
-        // The seam above paints the divider on this panel's left edge.
+        // The seam paints the divider on this panel's left edge.
         const RepaintBoundary(child: MemberPanel(edgeBorder: false)),
       ],
     );
@@ -2377,8 +2229,8 @@ class _DockSidebarSliderState extends State<_DockSidebarSlider>
   late final AnimationController _controller;
   late final CurvedAnimation _curved;
 
-  /// Cached child widget — kept during close animation so content
-  /// doesn't collapse before the slide-out finishes.
+  /// Kept while closing so the content cannot collapse before the slide-out
+  /// finishes.
   Widget? _frozenChild;
   bool _isClosing = false;
 
@@ -2408,12 +2260,10 @@ class _DockSidebarSliderState extends State<_DockSidebarSlider>
         _frozenChild = widget.child;
         _controller.forward();
       } else {
-        // Freeze the current child so it stays visible during close.
         _isClosing = true;
         _controller.reverse();
       }
     } else if (widget.visible) {
-      // Update child while open.
       _frozenChild = widget.child;
     }
   }
@@ -2442,13 +2292,12 @@ class _DockSidebarSliderState extends State<_DockSidebarSlider>
           ),
         );
       },
-      // During close animation, show the frozen child.
       child: _isClosing ? _frozenChild : widget.child,
     );
   }
 }
 
-/// Split chat area — two panes side by side with a draggable divider.
+/// Two chat panes side by side with a draggable divider.
 class _SplitChatArea extends ConsumerStatefulWidget {
   final HollowTheme hollow;
   final String? selectedPeerId;
@@ -2483,7 +2332,7 @@ class _SplitChatAreaState extends ConsumerState<_SplitChatArea> {
     final leftFlex = (dividerPos * 1000).round();
     final rightFlex = ((1 - dividerPos) * 1000).round();
 
-    // ProviderScope for the entire right section (sidebar + chat).
+    // One scope for the whole right section, sidebar and chat.
     return ProviderScope(
       key: ValueKey('split-${rightPane.serverId}:${rightPane.channelId}:${rightPane.peerId}'),
       overrides: [
@@ -2496,7 +2345,7 @@ class _SplitChatAreaState extends ConsumerState<_SplitChatArea> {
       ],
       child: Row(
         children: [
-          // ── Left Pane Chat (uses global providers) ──
+          // The left pane uses the global providers.
           Flexible(
             flex: leftFlex,
             child: GestureDetector(
@@ -2552,10 +2401,9 @@ class _SplitChatAreaState extends ConsumerState<_SplitChatArea> {
             ),
           ),
 
-          // ── Draggable Divider ──
           _SplitDivider(
             onDrag: (details) {
-              // Use delta-based dragging to avoid snap-to-center.
+              // Delta-based, or the divider snaps to centre.
               final renderBox = context.findRenderObject() as RenderBox;
               final totalWidth = renderBox.size.width;
               if (totalWidth > 0) {
@@ -2568,10 +2416,8 @@ class _SplitChatAreaState extends ConsumerState<_SplitChatArea> {
             },
           ),
 
-          // ── Right Pane Sidebar (fixed width, if server selected) ──
           _RightPaneSidebar(hollow: hollow),
 
-          // ── Right Pane Chat ──
           Flexible(
             flex: rightFlex,
             child: GestureDetector(
@@ -2651,8 +2497,8 @@ class _SplitChatAreaState extends ConsumerState<_SplitChatArea> {
   }
 }
 
-/// Channel sidebar for the right pane in split view (fixed width).
-/// Loads channels from FFI independently of the global channelListProvider.
+/// Channel sidebar for the right pane in split view, loading channels from FFI
+/// independently of the global channelListProvider.
 class _RightPaneSidebar extends ConsumerStatefulWidget {
   final HollowTheme hollow;
   const _RightPaneSidebar({required this.hollow});
@@ -2723,9 +2569,8 @@ class _RightPaneSidebarState extends ConsumerState<_RightPaneSidebar> {
   Future<void> _loadChannels(String serverId) async {
     _loadedServerId = serverId;
     try {
-      // Full mapping (not a name-only rebuild) so meCanSee filters here too —
-      // the split-view right pane must hide restricted channels like the main
-      // sidebar does.
+      // A full mapping, not a name-only rebuild, so meCanSee filters here too
+      // and the right pane hides restricted channels like the main sidebar.
       final all = await ChannelListNotifier.fetchChannels(serverId);
       final map = <String, ChannelInfo>{
         for (final e in all.entries)
@@ -2762,8 +2607,6 @@ class _RightPaneChatContent extends ConsumerWidget {
     final selectedServerId = ref.watch(selectedServerProvider);
 
     if (selectedChannelId != null && selectedServerId != null) {
-      // Get channel name from the sibling sidebar's loaded data.
-      // Use a FutureBuilder to load it if needed.
       return _RightChannelChat(
         serverId: selectedServerId,
         channelId: selectedChannelId,
@@ -2781,7 +2624,6 @@ class _RightPaneChatContent extends ConsumerWidget {
       );
     }
 
-    // Empty state
     return Container(
       color: hollow.background,
       child: Center(
@@ -2807,7 +2649,7 @@ class _RightPaneChatContent extends ConsumerWidget {
   }
 }
 
-/// Loads channel name from FFI and renders ChannelChatPane.
+/// Loads the channel name from FFI, then renders ChannelChatPane.
 class _RightChannelChat extends StatefulWidget {
   final String serverId;
   final String channelId;
@@ -2868,10 +2710,9 @@ void _showServerSettingsDialog(BuildContext context, ServerInfo server) {
     transitionDuration: HollowDurations.normal,
     pageBuilder: (context, anim1, anim2) {
       return Center(
-        // The zoom shrinks the logical viewport, so this 800x600 panel can be
-        // TALLER than the screen it opens on (1080p at 200% is ~960x504).
-        // The enforce clamp keeps it on-screen; the padding keeps a margin so
-        // it still reads as a dialog rather than a takeover.
+        // The zoom shrinks the logical viewport, so this panel can be TALLER
+        // than the screen it opens on. The clamp keeps it on-screen and the
+        // padding keeps it reading as a dialog rather than a takeover.
         child: Padding(
           padding: const EdgeInsets.all(HollowSpacing.lg),
           child: Material(
@@ -2971,11 +2812,9 @@ class _SplitDividerState extends State<_SplitDivider> {
   }
 }
 
-/// Full-screen "Unlocking…" overlay shown while the identity unlocks + the
-/// local DB loads after a PIN/password/biometric unlock. The Argon2id key
-/// derivation alone is ~1.5-3s on a phone, so this replaces a frozen-looking
-/// blank shell with clear feedback. Dismisses itself once the conversation
-/// list is populated from the local DB (see _bootstrap).
+/// Full-screen overlay while the identity unlocks and the local DB loads:
+/// Argon2id alone is ~1.5-3s on a phone, which reads as a frozen shell. It
+/// dismisses once the conversation list is populated.
 class _UnlockingOverlay extends StatelessWidget {
   final HollowTheme hollow;
   const _UnlockingOverlay({required this.hollow});
@@ -3021,8 +2860,8 @@ class _UnlockingOverlay extends StatelessWidget {
   }
 }
 
-/// Isolates the background image and scaffold from the main shell build.
-/// Only rebuilds when backgroundProvider changes.
+/// Isolates the background image and scaffold from the main shell build, so it
+/// rebuilds only when the background changes.
 class _ShellScaffold extends ConsumerWidget {
   final Widget body;
   const _ShellScaffold({required this.body});

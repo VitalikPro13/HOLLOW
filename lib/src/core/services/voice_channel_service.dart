@@ -21,39 +21,33 @@ void _vcLog(String msg) {
 
 /// Manages WebRTC peer connections for voice channel mesh audio.
 ///
-/// Each participant in the voice channel gets their own RTCPeerConnection.
-/// Audio tracks are captured once (shared across all PCs).
-/// ICE candidates and SDP are exchanged via MLS-encrypted targeted messages.
+/// One RTCPeerConnection per participant, over a single shared capture. SDP
+/// and ICE ride MLS-encrypted targeted messages.
 class VoiceChannelService {
   static const int maxVoicePcs = 15;
 
   final String localPeerId;
   Map<String, dynamic> iceServers;
 
-  /// One RTCPeerConnection per remote peer.
   final Map<String, RTCPeerConnection> _peerConnections = {};
 
   /// Pending ICE candidates per peer (received before remote description set).
   final Map<String, List<RTCIceCandidate>> _pendingCandidates = {};
 
-  /// Track whether remote description has been set per peer.
   final Map<String, bool> _remoteDescSet = {};
 
-  /// Guards against concurrent connectToPeer calls for the same peer (same
-  /// pattern as WebRTCService._connecting). The join announcement arrives
-  /// TWICE by design (MLS broadcast + plaintext member fan), and
-  /// _peerConnections[peerId] is only set after the native
-  /// createPeerConnection await — without this reservation the duplicate
-  /// VoiceChannelJoined event slips past the containsKey guard, tears down
-  /// the first PC mid-negotiation and leaves the offerer paired with a stale
-  /// answer (dead mic until the next renegotiation re-syncs SDP).
+  /// Guards concurrent connectToPeer calls for the same peer. The join
+  /// announcement arrives TWICE by design (MLS broadcast plus plaintext
+  /// member fan) and `_peerConnections[peerId]` is only set after the native
+  /// createPeerConnection await, so without this reservation the duplicate
+  /// event tears the first PC down mid-negotiation and leaves the offerer
+  /// paired with a stale answer: a dead mic until the next renegotiation.
   final Set<String> _connecting = {};
 
   /// Shared local audio stream (captured once, added to all PCs).
   MediaStream? _localAudioStream;
   bool _isMuted = false;
 
-  /// Current voice channel context.
   String? _serverId;
   String? _channelId;
 
@@ -61,7 +55,6 @@ class VoiceChannelService {
   int opusBitrate = 96000;
   bool opusStereo = false;
 
-  /// Device preferences.
   String? preferredAudioInputDeviceId;
   String? preferredAudioOutputDeviceId;
   String? preferredCameraDeviceId;
@@ -80,15 +73,13 @@ class VoiceChannelService {
   /// Dynamic mode: the native auto-level servo (ignores micGain/makeup).
   bool enhanceDynamic = true;
 
-  /// AI noise suppression — user preference; see the matching fields in
-  /// voice_service.dart (kept behavior-identical).
+  /// AI noise suppression preference; see the twin fields in voice_service.
   bool noiseSuppressAi = false;
 
-  /// Which engine (Helper.nsEngineRnnoise default / nsEngineDfn3), seeded
-  /// from noiseSuppressEngineProvider.
+  /// Which engine: RNNoise by default, or DFN3.
   int noiseSuppressEngine = Helper.nsEngineRnnoise;
 
-  /// TRUE when DFN can't run here and WebRTC's legacy NS was re-enabled in
+  /// TRUE when DFN cannot run here and WebRTC's legacy NS was re-enabled in
   /// the capture constraints as the fallback.
   bool _dfnFallbackNsOn = false;
 
@@ -101,9 +92,9 @@ class VoiceChannelService {
   /// Previous totalAudioEnergy per peer for delta calculation.
   final Map<String, double> _prevEnergy = {};
 
-  /// Are WE talking? Kept OUT of [_speakingPeers] deliberately — that set is
-  /// keyed by routable device ids and the UI holds master ids, so "are we in
-  /// the set" was never a reliable question. See [_pollAudioLevels].
+  /// Are WE talking? Kept OUT of [_speakingPeers] deliberately: that set is
+  /// keyed by routable device ids while the UI holds master ids, so "are we
+  /// in the set" was never a reliable question.
   bool _localSpeaking = false;
 
   /// Callback when speaking state changes: the REMOTE peers currently
@@ -114,76 +105,64 @@ class VoiceChannelService {
   /// Gossip mode: if true, only connect to gossipNeighbors (not all participants).
   bool gossipMode = false;
 
-  /// Set of peer IDs that are our gossip neighbors (gossip mode only).
   Set<String> gossipNeighbors = {};
 
   /// Track dedup: peer IDs whose audio we've already forwarded (prevent loops).
   final Set<String> _forwardedSources = {};
 
-  /// SFrame encryption service for voice channel E2EE.
   FrameCryptorService? frameCryptor;
 
-  /// SFrame heal hook: fired on every cryptor state transition, with the
-  /// participant collapsed to the mesh peerId ('screen:X' → X). The provider
-  /// runs the heal ladder off sustained failure states.
+  /// SFrame heal hook, fired on every cryptor state transition with the
+  /// participant collapsed to the mesh peerId ('screen:X' becomes X). The
+  /// provider runs the heal ladder off sustained failure states.
   void Function(String peerId, String kind, bool isReceiver,
       FrameCryptorState state)? onSframeCryptorState;
 
-  // ---------------------------------------------------------------
-  //  Camera (video) support
-  // ---------------------------------------------------------------
+  // Camera (video) support
 
   /// Shared local camera stream (captured once, added to all PCs).
   MediaStream? _localVideoStream;
   bool _isCameraOn = false;
-  /// Serializes startCamera/stopCamera so a rapid stop→start can't open a new
-  /// V4L2 capturer while the old one is still tearing down (libwebrtc
-  /// RaceChecker aborts on /dev/video0 — see the Linux settle in stopCamera).
+  /// Serializes startCamera/stopCamera so a rapid stop then start cannot open
+  /// a new V4L2 capturer while the old one is still tearing down; libwebrtc's
+  /// RaceChecker aborts on /dev/video0.
   Future<void> _cameraLock = Future<void>.value();
   bool _useFrontCamera = true;
 
-  /// Per-peer RTCVideoRenderer for incoming video tracks.
   final Map<String, RTCVideoRenderer> _remoteVideoRenderers = {};
 
-  /// Per-peer remote video streams.
   final Map<String, MediaStream> _remoteVideoStreams = {};
 
-  /// Tracks which remote video streams are synthetic (Dart-owned).
-  /// Streams from onTrack event.streams.first are owned by libwebrtc and
-  /// must NOT be disposed from Dart — only synthetic streams we created
-  /// via createLocalMediaStream are safe to dispose.
+  /// Which remote video streams are synthetic (Dart-owned). Streams from
+  /// onTrack belong to libwebrtc and must NOT be disposed from Dart; only
+  /// ones we created via createLocalMediaStream are safe to dispose.
   final Map<String, bool> _remoteVideoStreamSynthetic = {};
 
   /// Callback when a remote peer's video track arrives or is removed.
   void Function(String peerId, RTCVideoRenderer? renderer)? onRemoteVideoChanged;
 
-  /// Callback when a peer's audio connection reaches connected/stable state.
-  /// Used by the provider to send screen share offers after the connection is ready.
+  /// Fired when a peer's audio connection reaches connected/stable, so the
+  /// provider can send screen share offers.
   void Function(String peerId)? onPeerConnected;
 
   /// One hold-open watchdog per peer leg, created when that leg first
   /// connects. The mesh used to close a peer outright on `failed` with no
-  /// recovery attempt at all, so a member whose Wi-Fi hiccuped dropped out of
-  /// the channel and had to be re-invited by the join machinery.
-  ///
-  /// Per peer, not per channel: in a mesh, one member on hotel Wi-Fi is a
-  /// problem with that member's leg, and there is no reason for it to cost
-  /// anyone else their audio or their picture.
+  /// recovery attempt, so a member whose Wi-Fi hiccuped dropped out of the
+  /// channel. Per peer, not per channel: one member on hotel Wi-Fi is that
+  /// member's problem and must not cost anyone else their audio or picture.
   final Map<String, LinkWatchdog> _linkWatch = {};
 
   /// Peers we are deliberately tearing down. `closePeer` calls `pc.close()`,
-  /// which reports `closed` straight back into the state handler, and the
-  /// watchdog reads that as the remote end going away.
+  /// which reports `closed` straight back into the state handler, where the
+  /// watchdog would read it as the remote end going away.
   final Set<String> _closingPeers = {};
 
   /// When a rebuild of this peer's leg last began, on EITHER side.
   ///
-  /// The mesh's twin of the DM lane's `_mediaRestartAt`. Both ends watch the
-  /// same leg and both can decide it is broken, seconds apart: without a
-  /// window, the second one to notice tears down the connection the first one
-  /// had just rebuilt, and neither dials again (field-caught 2026-08-27).
-  /// Claimed when we rebuild, when we ask the peer to, and when we accept a
-  /// rebuild offer of theirs.
+  /// Both ends watch the same leg and both can decide it is broken seconds
+  /// apart: without a window the second one tears down what the first just
+  /// rebuilt, and neither dials again. Claimed when we rebuild, when we ask
+  /// the peer to, and when we accept a rebuild offer of theirs.
   final Map<String, DateTime> _legRebuiltAt = {};
 
   /// How long one rebuild owns the recovery of a leg. Comfortably longer than
@@ -192,32 +171,31 @@ class VoiceChannelService {
 
   /// Slow retries for legs whose whole hold-open window was spent.
   ///
-  /// A DM call that gives up hangs up, and the user can call again. A voice
-  /// channel has no such moment: the member is still sitting in the roster, so
-  /// a leg abandoned here would be silent forever. Keyed by peer.
+  /// A DM call that gives up hangs up and can be redialed. A voice channel
+  /// has no such moment: the member is still in the roster, so a leg
+  /// abandoned here would be silent forever.
   final Map<String, Timer> _legRedial = {};
 
   /// Whether [peerId] is still in the voice channel we are in. Injected by the
   /// provider, which owns the participant sets; null means "assume yes".
   bool Function(String peerId)? isChannelParticipant;
 
-  /// Deafen and the per-peer volumes live on the RECEIVER, not on the peer, so
-  /// a rebuilt leg arrives with a brand new receiver at full volume. Held here
-  /// so [_restorePeerAudioState] can put them back.
+  /// Deafen and per-peer volumes live on the RECEIVER, so a rebuilt leg
+  /// arrives with a brand new receiver at full volume. Held here so
+  /// [_restorePeerAudioState] can put them back.
   bool _isDeafened = false;
   final Map<String, double> _peerVolumes = {};
 
   /// Publish a peer leg's health for the UI.
   void Function(String peerId, LinkHealthSnapshot snapshot)? onLinkHealth;
 
-  /// Whether our relay link can carry a renegotiation offer right now.
-  /// Injected by the provider so the service never reaches into Riverpod.
+  /// Whether our relay link can carry a renegotiation offer right now,
+  /// injected so the service never reaches into Riverpod.
   bool Function()? canSignal;
 
   /// Peers that need camera renegotiation once their PC reaches stable state.
   final Set<String> _pendingCameraReneg = {};
 
-  /// Whether camera is currently on.
   bool get isCameraOn => _isCameraOn;
 
   /// Local camera stream (for local renderer in provider).
@@ -228,30 +206,24 @@ class VoiceChannelService {
     required this.iceServers,
   });
 
-  /// Whether this service is active (in a voice channel).
   bool get isActive => _serverId != null;
 
-  /// Number of active peer connections.
   int get peerCount => _peerConnections.length;
 
   /// Set of peer IDs we currently have audio PCs with.
   Set<String> get connectedPeerIds => _peerConnections.keys.toSet();
 
-  /// The live audio-mesh PC to [peerId], if any. Media forwarding step 3:
-  /// `watchScreenShare` probes it for the viewer's route hint (direct vs
-  /// relay) — read-only access, never store or close through this.
+  /// The live audio-mesh PC to [peerId], if any. Read-only: `watchScreenShare`
+  /// probes it for the viewer's route hint, and must never store or close
+  /// through this.
   RTCPeerConnection? pcFor(String peerId) => _peerConnections[peerId];
 
-  // ---------------------------------------------------------------
-  //  Lifecycle
-  // ---------------------------------------------------------------
+  // Lifecycle
 
-  /// Start capturing audio for voice channel.
   Future<void> startAudio(String serverId, String channelId) async {
     _serverId = serverId;
     _channelId = channelId;
 
-    // Initialize SFrame encryption service.
     frameCryptor = FrameCryptorService();
     await frameCryptor!.init(sharedKey: true);
     frameCryptor!.onCryptorStateChanged = (participantId, kind, isReceiver, state) {
@@ -263,18 +235,18 @@ class VoiceChannelService {
       onSframeCryptorState?.call(peerId, kind, isReceiver, state);
     };
 
-    // AI NS (DFN3): kick the engine and decide the WebRTC-NS fallback BEFORE
-    // building constraints (see the matching note in voice_service.dart).
+    // Kick the DFN3 engine and decide the WebRTC-NS fallback BEFORE building
+    // constraints (see the matching note in voice_service.dart).
     await _syncNoiseSuppressAiEngine();
     final audioConstraints = <String, dynamic>{
       'echoCancellation': true,
       // Legacy NS off while DFN3 owns suppression (unless fallback re-armed).
       'noiseSuppression': _wantWebrtcNs,
       'googNoiseSuppression': _wantWebrtcNs,
-      // AGC OFF — see the matching note in voice_service.dart. WebRTC's AGC was
-      // fighting our enhancement chain (conservative -18 dBFS target + desktop
-      // OS-mic-slider riding), leaving the mic quiet. We own loudness in the
-      // post-APM chain; AEC + NS stay on. project_voice_agc_loudness_rvox.
+      // AGC OFF, see the matching note in voice_service.dart: WebRTC's AGC
+      // was fighting our enhancement chain with a conservative -18 dBFS
+      // target, leaving the mic quiet. We own loudness in the post-APM
+      // chain; AEC and NS stay on. project_voice_agc_loudness_rvox.
       'autoGainControl': false,
       'googAutoGainControl': false,
     };
@@ -294,9 +266,9 @@ class VoiceChannelService {
       final tracks = _localAudioStream!.getAudioTracks();
       _vcLog('[HOLLOW-VC] Got local audio, tracks=${tracks.length}');
 
-      // Apply mic gain via the native post-APM capture processor (makeup
-      // gain + -3 dBFS limiter). Process-global, so always set it — at 1.0
-      // it's transparent. NOT setVolume(): that only scales remote tracks.
+      // Mic gain rides the native post-APM capture processor (makeup gain
+      // plus a -3 dBFS limiter). Process-global, so always set it; at 1.0 it
+      // is transparent. NOT setVolume(), which only scales remote tracks.
       try {
         await Helper.setCaptureGain(micGain);
         await Helper.setVoiceEnhance(voiceEnhance,
@@ -308,10 +280,9 @@ class VoiceChannelService {
         _vcLog('[HOLLOW-VC] Failed to apply capture gain: $e');
       }
 
-      // NOTE: do NOT bypass Apple's Voice-Processing IO here (tried
-      // 2026-07-02): it kills Apple's hardware AEC → echo everywhere and a
-      // persistent feedback howl on the loudspeaker route. See
-      // voice_service._captureLocalAudio for the full story.
+      // Do NOT bypass Apple's Voice-Processing IO: it kills Apple's hardware
+      // AEC, giving echo everywhere and a persistent feedback howl on the
+      // loudspeaker route. See voice_service._captureLocalAudio.
     } catch (e) {
       _vcLog('[HOLLOW-VC] Failed to capture audio: $e');
       // Proceed without audio — user can still hear others.
@@ -323,7 +294,6 @@ class VoiceChannelService {
       } catch (_) {}
     }
 
-    // Start VAD polling (local + remote peers, both via getStats).
     _startVadTimer();
   }
 
@@ -337,7 +307,6 @@ class VoiceChannelService {
     try {
       _addLocalAudioTracks(pc);
 
-      // Enable SFrame sender encryption on outgoing audio.
       await _enableSframeSender(peerId, pc);
 
       final offer = await pc.createOffer();
@@ -354,19 +323,16 @@ class VoiceChannelService {
         payload: payload,
       );
     } catch (e) {
-      // A throw here leaves a live PC (already in _peerConnections) stranded —
-      // dispose it so its libwebrtc thread-set can't leak.
+      // A throw here leaves a live PC (already in _peerConnections)
+      // stranded; dispose it so its libwebrtc thread-set cannot leak.
       _vcLog('[HOLLOW-VC] connectToPeer($peerId) failed, closing PC: $e');
       await closePeer(peerId);
       rethrow;
     }
   }
 
-  // ---------------------------------------------------------------
-  //  Signal handling
-  // ---------------------------------------------------------------
+  // Signal handling
 
-  /// Handle an incoming signal from a peer.
   Future<void> handleSignal(
     String peerId,
     String signalType,
@@ -417,7 +383,6 @@ class VoiceChannelService {
     try {
       _addLocalAudioTracks(pc);
 
-      // Enable SFrame sender encryption on outgoing audio.
       await _enableSframeSender(peerId, pc);
 
       await pc.setRemoteDescription(RTCSessionDescription(sdp, 'offer'));
@@ -438,8 +403,8 @@ class VoiceChannelService {
         payload: answerPayload,
       );
 
-      // If camera is on, send renegotiation to add video track now that
-      // the initial audio connection is established.
+      // With the camera on, renegotiate to add the video track now that the
+      // initial audio connection is established.
       _pendingCameraReneg.remove(peerId);
       if (_isCameraOn && _localVideoStream != null) {
         _vcLog('[HOLLOW-VC] Camera on — sending renegotiation to add video for $peerId (answerer)');
@@ -449,7 +414,7 @@ class VoiceChannelService {
       }
     } catch (e) {
       // setRemoteDescription on an unsupported-codec SDP is a classic throw
-      // point — dispose the stranded PC before propagating.
+      // point; dispose the stranded PC before propagating.
       _vcLog('[HOLLOW-VC] _handleSdpOffer($peerId) failed, closing PC: $e');
       await closePeer(peerId);
       rethrow;
@@ -464,10 +429,9 @@ class VoiceChannelService {
     final sdp = v['sdp'] as String? ?? '';
     if (sdp.isEmpty) return;
 
-    // A stable PC has no pending local offer — applying an answer would throw
-    // "Called in wrong state: stable" (duplicate/late answer, e.g. after a
-    // re-offer already completed). Skip it instead of surfacing a platform
-    // error through the zone handler.
+    // A stable PC has no pending local offer, and applying an answer would
+    // throw "Called in wrong state: stable" for a duplicate or late one.
+    // Skip it rather than surface a platform error through the zone handler.
     if (pc.signalingState == RTCSignalingState.RTCSignalingStateStable) {
       _vcLog('[HOLLOW-VC] Ignoring SDP answer from $peerId — PC already stable');
       return;
@@ -478,8 +442,8 @@ class VoiceChannelService {
     _remoteDescSet[peerId] = true;
     await _flushPendingCandidates(peerId);
 
-    // If camera is on, send renegotiation to add video track now that
-    // the initial audio connection is established (stable state).
+      // With the camera on, renegotiate to add the video track now that the
+      // initial audio connection is established.
     _pendingCameraReneg.remove(peerId); // Clear pending flag — we'll handle it now.
     if (_isCameraOn && _localVideoStream != null) {
       _vcLog('[HOLLOW-VC] Camera on — sending renegotiation to add video for $peerId');
@@ -500,7 +464,7 @@ class VoiceChannelService {
 
     if (_remoteDescSet[peerId] != true ||
         _peerConnections[peerId] == null) {
-      // SECURITY (Phase 6.25): Cap pending ICE candidates per peer.
+      // Cap pending ICE candidates per peer.
       final pending = _pendingCandidates.putIfAbsent(peerId, () => []);
       if (pending.length >= 100) {
         _vcLog('[HOLLOW-SECURITY] ICE candidate limit (100) reached for $peerId — dropping');
@@ -516,16 +480,14 @@ class VoiceChannelService {
     }
   }
 
-  // ---------------------------------------------------------------
-  //  Peer management
-  // ---------------------------------------------------------------
+  // Peer management
 
   /// Called when a remote peer joins our voice channel.
   /// Determines who should create the offer (glare prevention).
   Future<void> onPeerJoinedMyChannel(String peerId) async {
-    // BELT: never dial ourselves — a self id reaching here is an upstream
-    // participant-set bug (the self-ghost dialed our own master), and the
-    // dial can only mint dead PCs + "No session" storms.
+    // BELT: never dial ourselves. A self id reaching here is an upstream
+    // participant-set bug, and the dial can only mint dead PCs and "No
+    // session" storms.
     if (peerId == localPeerId) {
       _vcLog('[HOLLOW-VC] Ignoring self id in participant dial: $peerId');
       return;
@@ -534,8 +496,8 @@ class VoiceChannelService {
     if (gossipMode && !gossipNeighbors.contains(peerId)) {
       return; // Not a gossip neighbor — skip (audio forwarded via neighbors).
     }
-    // Already connected or mid-connect — skip (the join announcement arrives
-    // twice by design: MLS broadcast + plaintext fan; see _connecting).
+    // Already connected or mid-connect: the join announcement arrives twice
+    // by design (MLS broadcast plus plaintext fan; see _connecting).
     if (_peerConnections.containsKey(peerId)) return;
     if (_connecting.contains(peerId)) return;
     if (_peerConnections.length >= maxVoicePcs) {
@@ -560,14 +522,12 @@ class VoiceChannelService {
     await closePeer(peerId);
   }
 
-  /// Close connection to a specific peer.
   Future<void> closePeer(String peerId) async {
     _closingPeers.add(peerId);
     _linkWatch.remove(peerId)?.stop();
     // Whatever was last said about this leg is moot now, and a leg torn down
-    // AFTER its watchdog was already gone (a give-up, then a re-dial) has
-    // nothing left to retract it. Callers that mean to keep a flair up
-    // republish it straight after.
+    // AFTER its watchdog was already gone has nothing left to retract it.
+    // Callers that mean to keep a flair up republish it straight after.
     onLinkHealth?.call(peerId, const LinkHealthSnapshot());
     final pc = _peerConnections.remove(peerId);
     if (pc != null) {
@@ -580,7 +540,6 @@ class VoiceChannelService {
     _remoteDescSet.remove(peerId);
     _pendingCameraReneg.remove(peerId);
 
-    // Clean up video renderer/stream for this peer.
     final renderer = _remoteVideoRenderers.remove(peerId);
     if (renderer != null) {
       renderer.srcObject = null;
@@ -597,13 +556,11 @@ class VoiceChannelService {
       }
     }
 
-    // Phase 6.25 leak fixes: clean up per-peer state.
     _forwardedSources.remove(peerId);
     _prevEnergy.remove('in-$peerId');
     await frameCryptor?.disableForPeer(peerId);
   }
 
-  /// Close all connections and stop audio (leaving voice channel).
   /// Enable SFrame sender encryption on outgoing audio tracks for a peer.
   Future<void> _enableSframeSender(String peerId, RTCPeerConnection pc) async {
     if (frameCryptor == null || !frameCryptor!.isEnabled) {
@@ -623,11 +580,11 @@ class VoiceChannelService {
     }
   }
 
-  /// (Re)bind the SFrame receiver cryptor to the CURRENT inbound audio
-  /// receiver for [peerId]. Drops the old cryptor first (enableForReceiver
-  /// is idempotent per (peer, kind)) — required after the remote side swaps
-  /// its mic mid-call, harmless on the initial track. Skipped before the
-  /// key lands (the key-apply path binds receivers itself).
+  /// (Re)binds the SFrame receiver cryptor to the CURRENT inbound audio
+  /// receiver for [peerId]. enableForReceiver is idempotent per (peer, kind),
+  /// so the old cryptor is dropped first; required after the remote side
+  /// swaps its mic mid-call. Skipped before the key lands, where the
+  /// key-apply path binds receivers itself.
   Future<void> _rebindSframeReceiver(
       String peerId, RTCPeerConnection pc, RTCRtpReceiver? receiver) async {
     if (frameCryptor == null || !frameCryptor!.isEnabled) return;
@@ -656,7 +613,7 @@ class VoiceChannelService {
     if (frameCryptor == null || !frameCryptor!.isEnabled) return;
     try {
       final receivers = await pc.getReceivers();
-      // NEWEST audio receiver wins — mid-call mic switches leave dead
+      // NEWEST audio receiver wins: mid-call mic switches leave dead
       // transceivers earlier in the list.
       RTCRtpReceiver? target;
       for (final receiver in receivers) {
@@ -703,7 +660,6 @@ class VoiceChannelService {
     }
   }
 
-  /// Handle incoming remote video track from a peer.
   Future<void> _handleRemoteVideoTrack(
     String peerId,
     RTCTrackEvent event,
@@ -711,7 +667,6 @@ class VoiceChannelService {
   ) async {
     _vcLog('[HOLLOW-VC] Received video track from $peerId');
 
-    // Get or create MediaStream for the video track.
     MediaStream stream;
     bool isSynthetic;
     if (event.streams.isNotEmpty) {
@@ -724,7 +679,6 @@ class VoiceChannelService {
       isSynthetic = true;
     }
 
-    // Dispose any existing renderer for this peer.
     final oldRenderer = _remoteVideoRenderers.remove(peerId);
     if (oldRenderer != null) {
       oldRenderer.srcObject = null;
@@ -742,14 +696,12 @@ class VoiceChannelService {
       }
     }
 
-    // Create new renderer.
     final renderer = RTCVideoRenderer();
     await renderer.initialize();
 
-    // The peer may have LEFT while we were awaiting initialize() above —
-    // closePeer would already have run and cleared this peer's maps. Storing a
-    // renderer/stream now would orphan them (no later closePeer removes them).
-    // Dispose what we just built and bail.
+    // The peer may have LEFT while we awaited initialize(): closePeer would
+    // already have cleared this peer's maps, so storing a renderer now would
+    // orphan it. Dispose what we just built and bail.
     if (!_peerConnections.containsKey(peerId)) {
       _vcLog('[HOLLOW-VC] $peerId left during video track setup — discarding orphan renderer/stream');
       try {
@@ -768,7 +720,6 @@ class VoiceChannelService {
     _remoteVideoStreams[peerId] = stream;
     _remoteVideoStreamSynthetic[peerId] = isSynthetic;
 
-    // Enable SFrame decryption for the video track.
     await _enableSframeReceiverVideo(peerId, pc);
 
     // Notify provider after a short delay (renderer needs a frame to display).
@@ -776,12 +727,11 @@ class VoiceChannelService {
     onRemoteVideoChanged?.call(peerId, renderer);
   }
 
-  /// Set the SFrame key and enable encryption on all existing PCs.
-  /// Called when MLS epoch key arrives or changes.
+  /// Sets the SFrame key and enables encryption on all existing PCs, when
+  /// the MLS epoch key arrives or changes.
   Future<void> setSframeKey(int epoch, Uint8List key) async {
     if (frameCryptor == null) return;
     await frameCryptor!.rotateKey(epoch % 16, key); // sets key + updates all cryptor indices
-    // Enable on all existing peer connections.
     for (final entry in _peerConnections.entries) {
       final peerId = entry.key;
       final pc = entry.value;
@@ -850,7 +800,6 @@ class VoiceChannelService {
       _localAudioStream = null;
     }
 
-    // Dispose any remaining video renderers/streams.
     for (final renderer in _remoteVideoRenderers.values) {
       renderer.srcObject = null;
       await renderer.dispose();
@@ -890,10 +839,9 @@ class VoiceChannelService {
 
   void setMuted(bool muted) {
     // Tell the capture processor first (process-global, harmless without a
-    // stream): the dynamic servo FREEZES while muted so it can't adapt to
-    // room bleed (e.g. shared music on speakers) and bury the voice on
-    // unmute — the APM keeps processing real mic input while the track is
-    // disabled.
+    // stream): the dynamic servo FREEZES while muted so it cannot adapt to
+    // room bleed and bury the voice on unmute, since the APM keeps
+    // processing real mic input while the track is disabled.
     Helper.setCaptureMuted(muted).catchError((_) {});
     if (_localAudioStream == null) {
       _vcLog('[HOLLOW-VC] setMuted($muted) skipped — no local stream yet');
@@ -907,19 +855,18 @@ class VoiceChannelService {
         '${_localAudioStream!.getAudioTracks().length} track(s)');
   }
 
-  /// Mute/unmute all incoming remote audio (deafen).
+  /// Mutes or unmutes all incoming remote audio (deafen).
   ///
-  /// Every peer is handled independently: in a mesh, one connection that can't
-  /// be silenced (closing PC, receiver whose track never carried media and so
-  /// isn't in the native registry) must not abandon the peers after it —
-  /// deafen would silence some voices and leave the rest playing, and the
-  /// throw surfaced as a platform error in the crash log.
+  /// Every peer is handled independently: in a mesh, one connection that
+  /// cannot be silenced (a closing PC, a receiver whose track never carried
+  /// media and so is not in the native registry) must not abandon the peers
+  /// after it, leaving some voices playing while others go quiet.
   Future<void> setDeafened(bool deafened) async {
     _isDeafened = deafened;
     for (final entry in _peerConnections.entries) {
-      // Un-deafening restores the volume the user chose for THAT member, not a
-      // flat 1.0: a peer they had turned down came back at full volume, which
-      // reads as the slider forgetting itself.
+      // Un-deafening restores the volume the user chose for THAT member, not
+      // a flat 1.0: a peer they had turned down would come back at full
+      // volume, which reads as the slider forgetting itself.
       final volume = deafened ? 0.0 : (_peerVolumes[entry.key] ?? 1.0);
       try {
         final receivers = await entry.value.getReceivers();
@@ -936,8 +883,8 @@ class VoiceChannelService {
 
   Future<void> updateMicGain(double gain) async {
     micGain = gain;
-    // Live mid-session update — native processor reads the new gain
-    // atomically. Process-global, so works without a local stream too.
+    // Live mid-session update, process-global and atomic, so it works
+    // without a local stream too.
     await Helper.setCaptureGain(gain);
     _vcLog('[HOLLOW-VC] Updated capture gain: ${gain.toStringAsFixed(2)}');
   }
@@ -965,9 +912,9 @@ class VoiceChannelService {
     _vcLog('[HOLLOW-VC] Updated voice enhance dynamic: $enabled');
   }
 
-  /// Toggle AI noise suppression live. When in a session, re-captures
-  /// the mic (the WebRTC-NS constraint flipped) — mesh swap + renegotiation
-  /// happen internally, unlike the DM service's caller contract.
+  /// Toggles AI noise suppression live. In a session it re-captures the mic,
+  /// and the mesh swap plus renegotiation happen internally, unlike the DM
+  /// service's caller contract.
   Future<void> updateNoiseSuppressAi(bool enabled) async {
     noiseSuppressAi = enabled;
     _dfnFallbackNsOn = false;
@@ -977,9 +924,9 @@ class VoiceChannelService {
     await _recaptureMic(_capturedAudioInputDeviceId);
   }
 
-  /// Switch the AI-NS engine. Native swaps the engine handle in place — no
-  /// constraint flip, no re-capture, no mesh reneg — safe mid-session. See
-  /// voice_service.updateNoiseSuppressEngine (kept behavior-identical).
+  /// Switches the AI-NS engine. Native swaps the engine handle in place,
+  /// with no constraint flip, re-capture or mesh reneg, so it is safe
+  /// mid-session. Behaviour-identical to voice_service.
   Future<void> updateNoiseSuppressEngine(int engine) async {
     noiseSuppressEngine = engine;
     if (!noiseSuppressAi) return;
@@ -988,9 +935,9 @@ class VoiceChannelService {
     _vcLog('[HOLLOW-VC] Updated AI-NS engine: $engine');
   }
 
-  /// Post-enable safety net (schedule a few seconds after enabling): if the
-  /// engine reports it cannot run here while legacy NS is off, re-arm
-  /// WebRTC NS and re-capture. See voice_service.reconcileNoiseSuppressAi.
+  /// Post-enable safety net: if the engine reports it cannot run here while
+  /// legacy NS is off, re-arm WebRTC NS and re-capture. See
+  /// voice_service.reconcileNoiseSuppressAi.
   Future<void> reconcileNoiseSuppressAi() async {
     if (!noiseSuppressAi || _dfnFallbackNsOn) return;
     Map<String, dynamic> st;
@@ -1012,8 +959,8 @@ class VoiceChannelService {
     await _recaptureMic(_capturedAudioInputDeviceId);
   }
 
-  /// Push the AI-NS preference into the native engine and refresh the
-  /// fallback decision from the engine's latched status flags.
+  /// Pushes the AI-NS preference into the native engine and refreshes the
+  /// fallback decision from its latched status flags.
   Future<void> _syncNoiseSuppressAiEngine() async {
     try {
       await Helper.setNoiseSuppressAi(noiseSuppressAi,
@@ -1039,9 +986,9 @@ class VoiceChannelService {
     await _applyRemoteVolume(peerId, volume);
   }
 
-  /// Apply a playback volume WITHOUT recording it as the user's choice — the
-  /// deafen restore passes 0.0 through here, and remembering that would erase
-  /// the per-peer volume it is meant to be protecting.
+  /// Applies a playback volume WITHOUT recording it as the user's choice:
+  /// the deafen restore passes 0.0 through here, and remembering that would
+  /// erase the per-peer volume it is meant to protect.
   Future<void> _applyRemoteVolume(String peerId, double volume) async {
     final pc = _peerConnections[peerId];
     if (pc == null) return;
@@ -1054,9 +1001,9 @@ class VoiceChannelService {
     }
   }
 
-  /// Track ids of every connected peer's inbound audio (all the voice-channel
-  /// voices). Used by the Windows entire-screen-share anti-echo path to redirect
-  /// these tracks to an out-of-process renderer so they aren't re-captured.
+  /// Track ids of every connected peer's inbound audio, used by the Windows
+  /// entire-screen anti-echo path to redirect them to an out-of-process
+  /// renderer so they are not re-captured.
   Future<List<String>> getAllRemoteAudioTrackIds() async {
     final ids = <String>[];
     for (final pc in _peerConnections.values) {
@@ -1071,14 +1018,12 @@ class VoiceChannelService {
     return ids;
   }
 
-  // ---------------------------------------------------------------
-  //  Camera (video) controls
-  // ---------------------------------------------------------------
+  // Camera (video) controls
 
-  /// Start capturing camera and add video track to all existing PCs.
-  /// Returns the local video stream for the provider to create a renderer.
-  /// Public entry — serialized against stopCamera (shared [_cameraLock]) so a
-  /// stop→start can't race two V4L2 capturers on the same device.
+  /// Starts capturing the camera and adds the video track to all existing
+  /// PCs, returning the local stream for the provider's renderer. Serialized
+  /// against stopCamera (shared [_cameraLock]) so a stop then start cannot
+  /// race two V4L2 capturers on the same device.
   Future<MediaStream?> startCamera() async {
     final prev = _cameraLock;
     final completer = Completer<void>();
@@ -1096,8 +1041,8 @@ class VoiceChannelService {
   Future<MediaStream?> _startCameraInner() async {
     if (_isCameraOn) return _localVideoStream;
 
-    // LINUX: if the device is still open from an earlier startCamera this
-    // session (stopCamera kept it open to avoid the V4L2 reopen race), just
+    // LINUX: with the device still open from an earlier startCamera this
+    // session (stopCamera keeps it open to avoid the V4L2 reopen race),
     // resume the existing track instead of reopening /dev/video*.
     if (Platform.isLinux && _localVideoStream != null) {
       await _resumeLinuxCameraTrack();
@@ -1109,7 +1054,6 @@ class VoiceChannelService {
 
     final videoTrack = _localVideoStream!.getVideoTracks().first;
 
-    // Add video track to all existing PCs and trigger renegotiation.
     await _addCameraTrackToPeers(videoTrack);
 
     return _localVideoStream;
@@ -1130,8 +1074,8 @@ class VoiceChannelService {
     }
   }
 
-  /// Capture the camera into [_localVideoStream] for [_startCameraInner].
-  /// Returns false when getUserMedia fails (camera stays off).
+  /// Captures the camera into [_localVideoStream] for [_startCameraInner].
+  /// False when getUserMedia fails, leaving the camera off.
   Future<bool> _captureCameraStream() async {
     try {
       final videoConstraints = <String, dynamic>{
@@ -1139,8 +1083,8 @@ class VoiceChannelService {
         'height': {'ideal': 480},
         'frameRate': {'ideal': 30},
       };
-      // flutter_webrtc native (Windows/macOS/Linux) uses 'sourceId' in
-      // optional array — 'deviceId' is ignored by GetUserVideo().
+      // flutter_webrtc native uses 'sourceId' in the optional array;
+      // 'deviceId' is ignored by GetUserVideo().
       if (preferredCameraDeviceId != null) {
         videoConstraints['optional'] = [
           {'sourceId': preferredCameraDeviceId}
@@ -1163,14 +1107,13 @@ class VoiceChannelService {
     }
   }
 
-  /// Add the freshly enabled camera track to every mesh PC and renegotiate
-  /// (stable PCs only — the rest queue via [_pendingCameraReneg]).
+  /// Adds the freshly enabled camera track to every mesh PC and renegotiates
+  /// the stable ones; the rest queue via [_pendingCameraReneg].
   Future<void> _addCameraTrackToPeers(MediaStreamTrack videoTrack) async {
     for (final entry in _peerConnections.entries.toList()) {
       final peerId = entry.key;
       final pc = entry.value;
 
-      // Only renegotiate if the PC is in stable state (initial handshake done).
       final sigState = pc.signalingState;
       if (sigState != RTCSignalingState.RTCSignalingStateStable) {
         _vcLog('[HOLLOW-VC] Skipping camera reneg for $peerId — state: $sigState (will reneg after stable)');
@@ -1180,18 +1123,15 @@ class VoiceChannelService {
 
       await pc.addTrack(videoTrack, _localVideoStream!);
 
-      // All platforms: constrain the offer to universal codecs (VP8 first).
-      // Desktop builds otherwise advertise H.265/AV1 payload types that
-      // break the iOS answerer; macOS additionally needs VP8-first because
-      // its H.264 hw profile doesn't decode on Windows libwebrtc.
+      // Constrain the offer to universal codecs (VP8 first): desktop builds
+      // otherwise advertise H.265/AV1 payload types that break the iOS
+      // answerer, and Apple's H.264 profile does not decode on Windows.
       if (videoTrack.id != null) {
         await _preferVp8ForVideoTrackOnPc(pc, videoTrack.id!);
       }
 
-      // Enable SFrame encryption for the video sender.
       await _enableSframeSenderVideo(peerId, pc);
 
-      // Renegotiate to signal the new video track.
       await _sendRenegotiationOffer(peerId);
     }
   }
@@ -1216,30 +1156,26 @@ class VoiceChannelService {
     if (!_isCameraOn) return;
     _isCameraOn = false;
 
-    // Remove video senders from all PCs.
     await _removeVideoSendersFromPeers();
 
-    // Stop and dispose camera stream — EXCEPT on Linux, where closing the V4L2
-    // device and reopening it on the next startCamera races the libwebrtc
-    // CaptureThread and ABORTS the process (video_capture_v4l2.cc:417). On Linux
-    // we KEEP the device open (just pause the track via enabled=false) for the
-    // whole channel session; it's released once in closeAll(), where nothing
-    // reopens after. The track was already removed from all PCs above. Same
-    // reasoning as VoiceService._toggleVideoLinux.
+    // Stop and dispose the camera stream, EXCEPT on Linux, where closing the
+    // V4L2 device and reopening it on the next startCamera races the
+    // libwebrtc CaptureThread and ABORTS the process. There the device stays
+    // open with the track paused for the whole session and is released once
+    // in closeAll(), where nothing reopens after.
     await _releaseOrPauseCameraStream();
 
-    // LINUX V4L2 RACE: libwebrtc's StopCapture() doesn't join its CaptureThread,
-    // so dispose() returns while the OS thread still holds /dev/video0. Settle
-    // here (held inside the _cameraLock critical section) so the next
-    // startCamera's getUserMedia can't reopen the device mid-teardown and trip
-    // the RaceChecker abort. See the matching settle in VoiceService.toggleVideo.
+    // LINUX V4L2 RACE: StopCapture() does not join its CaptureThread, so
+    // dispose() returns while the OS thread still holds /dev/video0. Settle
+    // here, inside the _cameraLock critical section, so the next
+    // startCamera cannot reopen the device mid-teardown.
     if (Platform.isLinux) {
       await Future<void>.delayed(const Duration(milliseconds: 350));
     }
   }
 
-  /// Remove every PC's video sender and renegotiate the stable ones
-  /// (camera-off half of the addTrack/removeTrack cycle).
+  /// Removes every PC's video sender and renegotiates the stable ones, the
+  /// camera-off half of the addTrack/removeTrack cycle.
   Future<void> _removeVideoSendersFromPeers() async {
     for (final entry in _peerConnections.entries.toList()) {
       final peerId = entry.key;
@@ -1251,7 +1187,6 @@ class VoiceChannelService {
             await pc.removeTrack(sender);
           }
         }
-        // Renegotiate to signal video removal (only if stable).
         final sigState = pc.signalingState;
         if (sigState == RTCSignalingState.RTCSignalingStateStable) {
           await _sendRenegotiationOffer(peerId);
@@ -1262,8 +1197,8 @@ class VoiceChannelService {
     }
   }
 
-  /// Camera-off stream teardown: full stop+dispose everywhere except Linux,
-  /// where the V4L2 device stays open (track paused) for the session.
+  /// Camera-off stream teardown: a full stop and dispose everywhere except
+  /// Linux, where the V4L2 device stays open with the track paused.
   Future<void> _releaseOrPauseCameraStream() async {
     if (_localVideoStream == null) return;
     if (Platform.isLinux) {
@@ -1280,13 +1215,12 @@ class VoiceChannelService {
     }
   }
 
-  /// Local camera facing (true = front). UI reads this to mirror the local
-  /// preview only for the front camera.
+  /// Local camera facing (true = front); the UI mirrors only the front
+  /// preview.
   bool get useFrontCamera => _useFrontCamera;
 
-  /// Switch front/back camera (mobile). Returns the new facing (true =
-  /// front) from the native side — devices with >2 cameras make a blind
-  /// toggle drift out of sync.
+  /// Switches front/back camera and returns the new facing from the NATIVE
+  /// side: with more than two cameras a blind toggle drifts out of sync.
   Future<bool> switchCamera() async {
     if (!_isCameraOn || _localVideoStream == null) return _useFrontCamera;
     final videoTracks = _localVideoStream!.getVideoTracks();
@@ -1296,22 +1230,19 @@ class VoiceChannelService {
     return _useFrontCamera;
   }
 
-  // ---------------------------------------------------------------
-  //  Live device switching (Settings picker changed mid-session)
-  // ---------------------------------------------------------------
+  // Live device switching (Settings picker changed mid-session)
 
-  /// Device id the live audio stream was actually captured from (dedup guard
-  /// for duplicate provider listeners firing the same switch twice).
+  /// Device id the live audio stream was captured from; dedup guard against
+  /// duplicate provider listeners firing the same switch twice.
   String? _capturedAudioInputDeviceId;
   /// Device id the live camera stream was actually captured from.
   String? _capturedCameraDeviceId;
 
-  /// Live mid-session microphone switch across the whole mesh. Captures a
+  /// Live mid-session microphone switch across the whole mesh: captures a
   /// fresh stream, swaps every PC's audio sender via removeTrack + addTrack
-  /// (NEVER replaceTrack — silently fails on Windows libwebrtc), re-binds
-  /// SFrame per peer, and renegotiates each stable PC. VAD needs no attention
-  /// across the swap: it reads the level off whatever track the PCs are
-  /// currently sending.
+  /// (NEVER replaceTrack, which fails silently on Windows libwebrtc),
+  /// re-binds SFrame per peer and renegotiates each stable PC. VAD needs no
+  /// attention: it reads whatever track the PCs are currently sending.
   Future<void> setAudioInputDevice(String? deviceId) async {
     preferredAudioInputDeviceId = deviceId;
     if (_localAudioStream == null) return; // next session uses it
@@ -1319,9 +1250,8 @@ class VoiceChannelService {
     await _recaptureMic(deviceId);
   }
 
-  /// Shared live mic re-capture — device switch OR an NS-constraint flip
-  /// (the AI-noise-suppression toggle changes what getUserMedia must ask
-  /// for). Swaps every PC in the mesh + renegotiates internally.
+  /// Shared live mic re-capture, for a device switch OR an NS-constraint
+  /// flip. Swaps every PC in the mesh and renegotiates internally.
   Future<void> _recaptureMic(String? deviceId) async {
     // Capture the NEW mic first — if it fails, keep the old one working.
     final newStream = await _captureMicSwitchStream(deviceId);
@@ -1340,10 +1270,8 @@ class VoiceChannelService {
           makeupDb: enhanceMakeupDb, dynamicMode: enhanceDynamic);
     } catch (_) {}
 
-    // Swap the sender on every PC in the mesh.
     await _swapAudioSendersToTrack(newTrack, newStream);
 
-    // Release the old mic.
     if (oldStream != null) {
       await _disposeReplacedMicStream(oldStream);
     }
@@ -1351,8 +1279,8 @@ class VoiceChannelService {
     _vcLog('[HOLLOW-VC] Mic switched live to ${deviceId ?? "default"}');
   }
 
-  /// Capture a replacement mic stream for the live switch. Returns null on
-  /// getUserMedia failure or a trackless capture (old mic keeps working).
+  /// Captures a replacement mic stream for the live switch. Null on a
+  /// getUserMedia failure or a trackless capture, so the old mic keeps going.
   Future<MediaStream?> _captureMicSwitchStream(String? deviceId) async {
     final audioConstraints = <String, dynamic>{
       'echoCancellation': true,
@@ -1399,8 +1327,8 @@ class VoiceChannelService {
           }
         }
         await pc.addTrack(newTrack, newStream);
-        // A fresh sender needs a fresh cryptor — enableForSender is
-        // idempotent per (peer, kind), so drop the dead one first.
+          // A fresh sender needs a fresh cryptor: enableForSender is
+          // idempotent per (peer, kind), so drop the dead one first.
         await frameCryptor?.disableSender(peerId);
         await _enableSframeSender(peerId, pc);
         if (pc.signalingState == RTCSignalingState.RTCSignalingStateStable) {
@@ -1425,11 +1353,10 @@ class VoiceChannelService {
     } catch (_) {}
   }
 
-  /// Live mid-session camera device switch (desktop picker). NO-OP on Linux
-  /// — the V4L2 device must never be closed mid-session (see stopCamera);
-  /// there the new device applies on the next camera start. Returns the new
-  /// camera stream when a swap happened (the provider rebinds its local
-  /// preview renderer to it), null otherwise.
+  /// Live mid-session camera device switch. NO-OP on Linux, where the V4L2
+  /// device must never be closed mid-session, so the new device applies at
+  /// the next camera start. Returns the new stream when a swap happened, so
+  /// the provider can rebind its local preview renderer to it.
   Future<MediaStream?> setCameraDevice(String? deviceId) async {
     preferredCameraDeviceId = deviceId;
     if (!_isCameraOn) return null; // next enable uses it
@@ -1467,8 +1394,8 @@ class VoiceChannelService {
     }
   }
 
-  /// Capture a replacement camera stream for the live switch. Returns null
-  /// on getUserMedia failure or a trackless capture (old camera kept).
+  /// Captures a replacement camera stream for the live switch. Null on a
+  /// getUserMedia failure or a trackless capture, so the old camera stays.
   Future<MediaStream?> _captureCameraSwitchStream(String? deviceId) async {
     final videoConstraints = <String, dynamic>{
       'width': {'ideal': 640},
@@ -1497,7 +1424,7 @@ class VoiceChannelService {
 
   /// Camera-switch mesh pass: swap every PC's video sender to the new track
   /// (removeTrack + addTrack), re-apply VP8-first, re-bind SFrame video and
-  /// renegotiate stable PCs.
+  /// renegotiate the stable PCs.
   Future<void> _swapVideoSendersToTrack(
       MediaStreamTrack newTrack, MediaStream newStream) async {
     for (final entry in _peerConnections.entries.toList()) {
@@ -1553,9 +1480,7 @@ class VoiceChannelService {
     }
   }
 
-  // ---------------------------------------------------------------
-  //  Renegotiation (for adding/removing video tracks)
-  // ---------------------------------------------------------------
+  // Renegotiation, for adding and removing video tracks
 
   Future<void> _sendRenegotiationOffer(String peerId,
       {bool iceRestart = false}) async {
@@ -1568,8 +1493,8 @@ class VoiceChannelService {
       await pc.setLocalDescription(RTCSessionDescription(mungedSdp, offer.type));
 
       // `ice_restart` tells the answerer this re-offer carries no media
-      // change, so it must not run its camera-track safety net (which would
-      // otherwise invent a camera tile for us — see the flag's doc in types.rs).
+      // change, so it must not run its camera-track safety net, which would
+      // otherwise invent a camera tile for us.
       final payload = jsonEncode({'sdp': mungedSdp, 'ice_restart': iceRestart});
       await network_api.voiceChannelSendSignal(
         serverId: _serverId!,
@@ -1598,8 +1523,7 @@ class VoiceChannelService {
     if (sdp.isEmpty) return;
     // An ICE-restart re-offer changes no m-lines; running the camera safety
     // net below would materialise a renderer for the peer's INACTIVE video
-    // transceiver and show a phantom camera tile (field-observed 2026-08-15,
-    // caused by the "direct whenever direct is possible" repair).
+    // transceiver and show a phantom camera tile.
     final iceRestart = v['ice_restart'] as bool? ?? false;
 
     // Glare prevention: if we also have a pending offer, lower peerId wins.
@@ -1631,26 +1555,24 @@ class VoiceChannelService {
       payload: answerPayload,
     );
 
-    // After renegotiation, check if there's a remote video track we don't
-    // have a renderer for. onTrack may not fire when a transceiver is reused
-    // (track removed then re-added on the same m-line). NOT for an ICE
-    // restart: nothing about the media changed, so anything this found would
-    // be a transceiver that was already there and already idle.
+    // After renegotiation, check for a remote video track we have no
+    // renderer for: onTrack may not fire when a transceiver is reused. NOT
+    // for an ICE restart, where nothing about the media changed and anything
+    // found would be a transceiver that was already there and already idle.
     if (!iceRestart) {
       await _checkRemoteVideoTrack(peerId, pc);
     }
   }
 
-  /// Check for a remote video track on a PC and create a renderer if missing.
-  /// Safety net for when onTrack doesn't fire (e.g., first reneg after audio connect).
-  /// Does NOT clean up renderers when video is gone — renderers survive across
-  /// camera off/on cycles so the same stream can resume receiving frames.
+  /// Checks for a remote video track on a PC and creates a renderer if
+  /// missing, for when onTrack does not fire. Does NOT clean up renderers
+  /// when video is gone: they survive camera off/on cycles so the same
+  /// stream can resume receiving frames.
   Future<void> _checkRemoteVideoTrack(String peerId, RTCPeerConnection pc) async {
     try {
       final receivers = await pc.getReceivers();
       for (final receiver in receivers) {
         if (receiver.track?.kind == 'video') {
-          // We have a video track — do we have a renderer?
           if (!_remoteVideoRenderers.containsKey(peerId)) {
             _vcLog('[HOLLOW-VC] Found video track without renderer for $peerId — creating');
             final stream = await createLocalMediaStream('video-$peerId');
@@ -1687,12 +1609,11 @@ class VoiceChannelService {
     _vcLog('[HOLLOW-VC] Received renegotiation answer from $peerId');
     await pc.setRemoteDescription(RTCSessionDescription(sdp, 'answer'));
 
-    // Check if this peer had a pending camera renegotiation.
     await _checkPendingCameraReneg(peerId);
   }
 
-  /// Check and send pending camera renegotiation for a peer whose PC just
-  /// reached stable state.
+  /// Sends the pending camera renegotiation for a peer whose PC just reached
+  /// stable state.
   Future<void> _checkPendingCameraReneg(String peerId) async {
     if (!_pendingCameraReneg.remove(peerId)) return;
     if (!_isCameraOn || _localVideoStream == null) return;
@@ -1701,7 +1622,6 @@ class VoiceChannelService {
     if (pc == null) return;
 
     _vcLog('[HOLLOW-VC] Sending pending camera renegotiation for $peerId');
-    // Only add tracks if not already present (startCamera may have added them).
     final senders = await pc.getSenders();
     final hasVideo = senders.any((s) => s.track?.kind == 'video');
     if (!hasVideo) {
@@ -1711,9 +1631,7 @@ class VoiceChannelService {
     await _sendRenegotiationOffer(peerId);
   }
 
-  // ---------------------------------------------------------------
-  //  Voice Activity Detection (VAD)
-  // ---------------------------------------------------------------
+  // Voice activity detection
 
   void _startVadTimer() {
     _vadTimer?.cancel();
@@ -1730,19 +1648,19 @@ class VoiceChannelService {
   Future<void> _pollAudioLevels() async {
     final newSpeaking = <String>{};
 
-    // LOCAL: the native capture meter — one process-global read, no peer
-    // connection required, so it also lights up while you are alone in the
-    // channel. See [LocalSpeakingDetector] for why not getStats/`record`.
+    // LOCAL: the native capture meter, one process-global read needing no
+    // peer connection, so it also lights up while you are alone in the
+    // channel. See [LocalSpeakingDetector] for why not getStats.
     //
     // Reported as its OWN flag rather than as our peer id inside the set,
-    // mirroring the 1:1 call path: the set is keyed by ROUTABLE device ids
-    // and the UI often holds the MASTER id, so a membership test for
-    // ourselves silently missed and the self indicator never lit.
+    // mirroring the 1:1 path: the set is keyed by ROUTABLE device ids and
+    // the UI often holds the MASTER id, so a membership test for ourselves
+    // silently missed and the self indicator never lit.
     var newLocal = await _localSpeakingDetector.poll(muted: _isMuted);
 
     // REMOTE: one getStats pass per peer connection. Where the plugin has no
-    // capture meter (an app updated ahead of its native side) the same pass
-    // also carries the old outgoing-level guess.
+    // capture meter, the same pass also carries the old outgoing-level
+    // guess.
     var wantLocal = !_isMuted && !_localSpeakingDetector.hasMeter;
 
     for (final entry in _peerConnections.entries) {
@@ -1755,7 +1673,6 @@ class VoiceChannelService {
       }
     }
 
-    // Only notify if changed.
     if (newLocal != _localSpeaking ||
         !_setEquals(newSpeaking, _speakingPeers)) {
       _localSpeaking = newLocal;
@@ -1766,9 +1683,9 @@ class VoiceChannelService {
     }
   }
 
-  /// One-shot diagnostic, twin of the one in `voice_service.dart` — see its
-  /// comment. Logged once per session so a single test run settles whether
-  /// this platform's getStats carries an outgoing audio level at all.
+  /// One-shot diagnostic, twin of the one in `voice_service.dart`. Logged
+  /// once per session so a single test run settles whether this platform's
+  /// getStats carries an outgoing audio level at all.
   bool _vadStatsLogged = false;
 
   /// Our own speaking state, from the native capture meter (issue #37).
@@ -1793,24 +1710,19 @@ class VoiceChannelService {
         '${lines.isEmpty ? "no audio reports" : lines.join(" | ")}');
   }
 
-  /// One getStats pass over [pc]: that peer's inbound audio, plus — when
-  /// [wantLocal] — our own outgoing level from the same report set.
+  /// One getStats pass over [pc]: that peer's inbound audio, plus, when
+  /// [wantLocal], our own outgoing level from the same report set.
   ///
   /// Local detection deliberately rides the peer connection instead of a
-  /// second mic handle. The old path opened a `record` AudioRecorder purely
-  /// to read amplitude; `record_linux` shells out to `parecord`, which isn't
-  /// installed on PipeWire systems, so the constructor threw and every Linux
-  /// user's OWN speaking indicator stayed dark while remote peers' worked
-  /// (issue #37). Reading the level off the PC also puts voice channels on
-  /// the exact same detector and threshold as 1:1 calls
-  /// (`voice_service.dart::_pollVad`), which the two paths previously
-  /// disagreed on: `record` reports PEAK dBFS pre-processing, getStats
-  /// reports RMS post-processing, so the same voice tripped them differently.
+  /// second mic handle: the old `record` path shells out to `parecord` on
+  /// Linux, which PipeWire systems lack, so every Linux user's OWN indicator
+  /// stayed dark (issue #37). It also puts voice channels on the same
+  /// detector and threshold as 1:1 calls, which previously disagreed because
+  /// `record` reports PEAK dBFS pre-processing and getStats RMS post.
   ///
-  /// [localReported] distinguishes "this PC says we're silent" from "this PC
-  /// carried no outgoing audio report at all" — only the former ends the
-  /// search, so a receive-only or not-yet-flowing PC falls through to the
-  /// next one instead of pinning us silent.
+  /// [localReported] distinguishes "this PC says we are silent" from "this
+  /// PC carried no outgoing audio report at all": only the former ends the
+  /// search, so a receive-only PC falls through instead of pinning us silent.
   Future<({bool remote, bool local, bool localReported})> _checkAudioLevels(
     RTCPeerConnection pc,
     String peerId, {
@@ -1827,10 +1739,10 @@ class VoiceChannelService {
         switch (report.type) {
           case 'inbound-rtp':
             remote = _detectSpeech(report.values, 'in-$peerId');
-          // Local: media-source carries audioLevel on Android, outbound-rtp
-          // on desktop. Take either — same as the 1:1 call path. They keep
-          // SEPARATE energy keys so the totalAudioEnergy fallback of one
-          // can't consume the other's delta within a single poll.
+            // Local: media-source carries audioLevel on Android,
+            // outbound-rtp on desktop. Take either, keeping SEPARATE energy
+            // keys so one's totalAudioEnergy fallback cannot consume the
+            // other's delta within a single poll.
           case 'media-source':
             if (wantLocal) {
               local |= _detectSpeech(report.values, 'out-src');
@@ -1847,14 +1759,12 @@ class VoiceChannelService {
     return (remote: remote, local: local, localReported: localReported);
   }
 
-  /// Detect speech from an RTP stats report using totalAudioEnergy delta
-  /// or direct audioLevel.
+  /// Detects speech from an RTP stats report, by totalAudioEnergy delta or
+  /// direct audioLevel.
   bool _detectSpeech(Map<dynamic, dynamic> values, String key) {
-    // Try audioLevel first (0.0-1.0, instantaneous).
     final level = (values['audioLevel'] as num?)?.toDouble();
     if (level != null) return level > 0.01;
 
-    // Fall back to totalAudioEnergy delta.
     final energy =
         (values['totalAudioEnergy'] as num?)?.toDouble() ?? 0.0;
     final prev = _prevEnergy[key] ?? 0.0;
@@ -1868,12 +1778,7 @@ class VoiceChannelService {
     return a.containsAll(b);
   }
 
-  // ---------------------------------------------------------------
-  //  Internal
-  // ---------------------------------------------------------------
-
   Future<RTCPeerConnection> _createPeerConnection(String peerId) async {
-    // Close any existing connection to this peer.
     await closePeer(peerId);
 
     final pc = await createPeerConnection(iceServers);
@@ -1884,15 +1789,14 @@ class VoiceChannelService {
     pc.onIceCandidate = (candidate) => _onLocalIceCandidate(peerId, candidate);
     pc.onConnectionState = (state) =>
         _onPeerConnectionState(peerId, pc, state);
-    // Remote audio plays automatically via libwebrtc default sink.
-    // Enable SFrame receiver decryption on incoming audio/video.
-    // In gossip mode, also forward received tracks to other neighbors.
+    // Remote audio plays automatically via the libwebrtc default sink; in
+    // gossip mode received tracks are also forwarded to other neighbors.
     pc.onTrack = (RTCTrackEvent event) => _onPeerTrack(peerId, pc, event);
 
     return pc;
   }
 
-  /// onIceCandidate handler: relay each locally gathered candidate to the
+  /// onIceCandidate handler: relays each locally gathered candidate to the
   /// peer over the MLS-encrypted signal channel.
   void _onLocalIceCandidate(String peerId, RTCIceCandidate candidate) {
     if (candidate.candidate == null || candidate.candidate!.isEmpty) return;
@@ -1903,9 +1807,9 @@ class VoiceChannelService {
       'sdpMid': candidate.sdpMid,
       'sdpMLineIndex': candidate.sdpMLineIndex,
     });
-    // .catchError, not try/catch: fire-and-forget — a sync try/catch around
-    // the un-awaited Future catches nothing. Safe to swallow: ICE candidates
-    // are best-effort (the connection retries/renegotiates without this one).
+      // .catchError, not try/catch: a sync try/catch around the un-awaited
+      // Future catches nothing. Safe to swallow, since candidates are
+      // best-effort and the connection renegotiates without this one.
     network_api.voiceChannelSendSignal(
       serverId: _serverId!,
       channelId: _channelId!,
@@ -1915,8 +1819,8 @@ class VoiceChannelService {
     ).catchError((_) {});
   }
 
-  /// onConnectionState handler: fire onPeerConnected + a delayed ICE-route
-  /// log on connect; tear the PC down on failed/closed.
+  /// onConnectionState handler: fires onPeerConnected plus a delayed
+  /// ICE-route log on connect, and tears the PC down on failed or closed.
   void _onPeerConnectionState(
       String peerId, RTCPeerConnection pc, RTCPeerConnectionState state) {
     _vcLog('[HOLLOW-VC] Connection state with $peerId: $state');
@@ -1924,9 +1828,9 @@ class VoiceChannelService {
       onPeerConnected?.call(peerId);
       _logIceRoute(peerId, pc);
       scheduleIceRepair(peerId);
-      // Clear the flair explicitly: a leg we had given up on is republished as
-      // `lost`, and the FRESH watchdog that replaces it starts out believing
-      // it has already published "healthy", so it would never say so.
+      // Clear the flair explicitly: a leg we had given up on is republished
+      // as `lost`, and the FRESH watchdog that replaces it starts out
+      // believing it already published "healthy", so it would never say so.
       onLinkHealth?.call(peerId, const LinkHealthSnapshot());
       _startLinkWatch(peerId);
       // The leg is back: stop reaching for it, and put back the receive-side
@@ -1940,13 +1844,13 @@ class VoiceChannelService {
 
     final watch = _linkWatch[peerId];
     if (watch != null) {
-      // The leg has been up before, so trouble now earns the hold-open ladder:
-      // hold it, restart ICE, and only close the peer once the window is spent.
+      // The leg has been up before, so trouble now earns the hold-open
+      // ladder: hold it, restart ICE, close only once the window is spent.
       watch.noteTransportState(state);
       return;
     }
-    // Never connected: this is a setup failure for this leg, and the mesh's
-    // own join machinery is what retries it.
+    // Never connected: a setup failure for this leg, which the mesh's own
+    // join machinery retries.
     if (state == RTCPeerConnectionState.RTCPeerConnectionStateFailed ||
         state == RTCPeerConnectionState.RTCPeerConnectionStateClosed) {
       closePeer(peerId);
@@ -1969,10 +1873,10 @@ class VoiceChannelService {
       onGiveUp: () {
         _vcLog('[HOLLOW-VC] $peerId: hold-open window spent, closing the leg');
         unawaited(closePeer(peerId).then((_) {
-          // `closePeer` stops the watchdog, and a stopped watchdog publishes a
-          // HEALTHY snapshot — which would wipe the flair off a member we can
-          // no longer hear at all. Say what is true and keep saying it until
-          // the leg is actually back.
+          // `closePeer` stops the watchdog, and a stopped watchdog publishes
+          // a HEALTHY snapshot, which would wipe the flair off a member we
+          // can no longer hear. Keep saying what is true until the leg is
+          // actually back.
           onLinkHealth?.call(
               peerId, const LinkHealthSnapshot(health: LinkHealth.lost));
         }));
@@ -1983,18 +1887,17 @@ class VoiceChannelService {
     )..start();
   }
 
-  /// Rebuild the media leg to [peerId] without leaving the channel.
+  /// Rebuilds the media leg to [peerId] without leaving the channel.
   ///
-  /// The mesh's version of the DM lane's `_restartMediaSession`: drop the leg
-  /// and bring it up again from scratch, which is exactly what a member
-  /// joining does. `_createPeerConnection` closes any existing PC first, so
-  /// the fresh offer rebuilds BOTH ends, and both get new SFrame cryptors
-  /// created in the known-good order rather than repaired in place.
+  /// Drop the leg and bring it up from scratch, exactly as a member joining
+  /// does: `_createPeerConnection` closes any existing PC first, so the fresh
+  /// offer rebuilds BOTH ends and both get new SFrame cryptors in the
+  /// known-good order rather than repaired in place.
   ///
-  /// The mesh gives the offer to the lexicographically LOWER id (the glare
-  /// rule `onPeerJoinedMyChannel` dials by). That left the higher side with no
-  /// recovery at all: it closed its leg and then waited for an offer nobody
-  /// was going to send. It asks now, with [_sendLegRestart].
+  /// The mesh gives the offer to the lexicographically LOWER id, which left
+  /// the higher side with no recovery at all: it closed its leg and waited
+  /// for an offer nobody was going to send. It asks now, with
+  /// [_sendLegRestart].
   Future<void> _rebuildLeg(String peerId) async {
     if (_serverId == null || _channelId == null) return;
     if (_legRebuiltRecently(peerId)) {
@@ -2017,15 +1920,15 @@ class VoiceChannelService {
     return at != null && DateTime.now().difference(at) < _legRebuildWindow;
   }
 
-  /// Tear the leg down and offer a fresh one. Only ever called on the DIALING
-  /// side: two crossing rebuilds would ping-pong closing each other's fresh
-  /// peer connection, since `_createPeerConnection` closes what it finds.
+  /// Tears the leg down and offers a fresh one. Only ever called on the
+  /// DIALING side: two crossing rebuilds would ping-pong closing each other's
+  /// fresh peer connection, since `_createPeerConnection` closes what it finds.
   Future<void> _redialLeg(String peerId) async {
     _vcLog('[HOLLOW-VC] $peerId: rebuilding the leg (we dial)');
     await closePeer(peerId);
-    // `closePeer` stops the watchdog, and a stopped watchdog publishes HEALTHY
-    // — so without this the flair blinks off for the whole rebuild, exactly
-    // when the member is least able to hear us. The connect handler clears it.
+    // `closePeer` stops the watchdog, and a stopped watchdog publishes
+    // HEALTHY, so without this the flair blinks off for the whole rebuild,
+    // exactly when the member is least able to hear us.
     onLinkHealth?.call(
         peerId, const LinkHealthSnapshot(health: LinkHealth.reconnecting));
     if (_serverId == null || _channelId == null) return;
@@ -2062,8 +1965,8 @@ class VoiceChannelService {
   /// leg.
   Future<void> _handleLegRestart(String peerId) async {
     if (!shouldInitiateIceRepair(localPeerId, peerId)) {
-      // Only the dialing side may act on this. Honouring it here would mint a
-      // second dialer and put us straight back into the glare this avoids.
+      // Only the dialing side may act on this. Honouring it here would mint
+      // a second dialer and put us straight back into the glare this avoids.
       _vcLog('[HOLLOW-VC] Ignoring leg_restart from $peerId — they are the '
           'dialing side, not us');
       return;
@@ -2078,12 +1981,11 @@ class VoiceChannelService {
     await _redialLeg(peerId);
   }
 
-  /// Keep reaching for a leg whose hold-open window was spent.
+  /// Keeps reaching for a leg whose hold-open window was spent.
   ///
-  /// Slow on purpose: a leg only reaches here after the ladder has held it for
+  /// Slow on purpose: a leg only reaches here after the ladder held it for
   /// the full window, so the network is properly down rather than wobbling.
-  /// Stops on its own once the leg comes back (the watchdog owns it again) or
-  /// the member leaves the channel.
+  /// Stops on its own once the leg comes back or the member leaves.
   void _scheduleLegRedial(String peerId, {int attempt = 1}) {
     _legRedial.remove(peerId)?.cancel();
     final seconds = (10 * attempt).clamp(10, 60);
@@ -2098,8 +2000,8 @@ class VoiceChannelService {
       // by the ladder; this retry has nothing left to do.
       if (_linkWatch.containsKey(peerId)) return;
       if (canSignal?.call() == false) {
-        // Our own relay link is down, so the offer would be dropped before it
-        // left the machine. Wait rather than spend an attempt on nothing.
+        // Our own relay link is down, so the offer would be dropped before
+        // it left the machine. Wait rather than spend an attempt on nothing.
         _scheduleLegRedial(peerId, attempt: attempt);
         return;
       }
@@ -2111,33 +2013,33 @@ class VoiceChannelService {
     });
   }
 
-  /// Put back what a fresh receiver does not carry over.
+  /// Puts back what a fresh receiver does not carry over.
   ///
   /// Mute rides the shared local track and survives a rebuild untouched, but
-  /// deafen and any per-peer volume are set ON the receiver, which the rebuild
-  /// replaced — without this, un-deafening was the only way to get a rebuilt
-  /// leg back to the volume the user had chosen.
+  /// deafen and any per-peer volume are set ON the receiver, which the
+  /// rebuild replaced: without this, un-deafening was the only way to get a
+  /// rebuilt leg back to the volume the user had chosen.
   Future<void> _restorePeerAudioState(String peerId) async {
     double wanted() => _isDeafened ? 0.0 : (_peerVolumes[peerId] ?? 1.0);
     if (wanted() == 1.0) return;
     _vcLog('[HOLLOW-VC] Restoring playback volume ${wanted()} for $peerId');
     await _applyRemoteVolume(peerId, wanted());
-    // Re-assert once the track has actually carried a packet: a receiver whose
-    // track has never delivered media is not in the platform's registry yet,
-    // and `setVolume` on it is a TOLERATED no-op rather than an error, so the
-    // first attempt can vanish without a sound. Silently leaving a deafened
-    // member audible is the failure worth the second call.
+    // Re-assert once the track has actually carried a packet: a receiver
+    // whose track has never delivered media is not in the platform's
+    // registry yet, and `setVolume` on it is a TOLERATED no-op, so the first
+    // attempt can vanish without a sound. Silently leaving a deafened member
+    // audible is the failure worth the second call.
     await Future<void>.delayed(const Duration(milliseconds: 800));
     if (!_peerConnections.containsKey(peerId)) return;
     if (wanted() == 1.0) return;
     await _applyRemoteVolume(peerId, wanted());
   }
 
-  /// Hold the camera we send to ONE peer to [rung].
+  /// Holds the camera we send to ONE peer to [rung].
   ///
   /// Per peer, because in a mesh each leg has its own sender and its own
-  /// uplink problem. One member on a bad connection gets a smaller picture of
-  /// us; nobody else pays for it.
+  /// uplink problem: one member on a bad connection gets a smaller picture
+  /// of us and nobody else pays for it.
   Future<bool> applyVideoRungFor(String peerId, VideoRung rung) async {
     final pc = _peerConnections[peerId];
     if (pc == null) return false;
@@ -2166,8 +2068,8 @@ class VoiceChannelService {
     return false;
   }
 
-  /// Log which ICE route (TURN/STUN/LAN) the succeeded candidate pair took.
-  /// Diagnostics only.
+  /// Logs which ICE route the succeeded candidate pair took. Diagnostics
+  /// only.
   Future<void> _logIceRoute(String peerId, RTCPeerConnection pc) async {
     final route = await probeIceRoute(() => pc);
     _vcLog(route == null
@@ -2178,25 +2080,24 @@ class VoiceChannelService {
   /// Peers whose one-shot ICE repair has already been spent this session.
   final Set<String> _iceRepairDone = {};
 
-  /// Peers with a renegotiation we started in flight. The mesh has no
-  /// `_renegotiationInProgress` equivalent — glare is normally arbitrated
-  /// inline by signalingState + the peer-id tiebreak — but an ICE restart is a
-  /// NEW renegotiation source, so it gets an explicit busy flag rather than
-  /// leaning on that tiebreak.
+  /// Peers with a renegotiation we started in flight. Glare is normally
+  /// arbitrated inline by signalingState plus the peer-id tiebreak, but an
+  /// ICE restart is a NEW renegotiation source, so it gets an explicit busy
+  /// flag rather than leaning on that tiebreak.
   final Set<String> _renegInFlight = {};
 
-  /// Whether "Always relay calls" is on — injected by the provider so the
-  /// service never reaches into Riverpod. Forced-relay users must NEVER be
-  /// repaired to direct: that routing is a deliberate privacy choice.
+  /// Whether "Always relay calls" is on, injected so the service never
+  /// reaches into Riverpod. Forced-relay users must NEVER be repaired to
+  /// direct: that routing is a deliberate privacy choice.
   bool Function()? isForcedRelay;
 
-  /// One-shot "direct whenever direct is possible" repair for a mesh PC.
-  /// See `ice_repair.dart` for why the nomination race makes this necessary
-  /// and why exactly one attempt is the right budget.
+  /// One-shot "direct whenever direct is possible" repair for a mesh PC; see
+  /// `ice_repair.dart` for why the nomination race makes it necessary and why
+  /// exactly one attempt is the right budget.
   ///
-  /// This is the highest-value lane for the repair: a VC audio PC repaired to
-  /// direct is also what flips the screen-share `route` hint to `direct`,
-  /// which lets the sharer promote this viewer onto a peer branch (lever 2).
+  /// The highest-value lane for it: a VC audio PC repaired to direct is also
+  /// what flips the screen-share `route` hint to `direct`, which lets the
+  /// sharer promote this viewer onto a peer branch.
   void scheduleIceRepair(String peerId, {int attempt = 0}) {
     if (_iceRepairDone.contains(peerId)) return;
     if (isForcedRelay?.call() ?? false) return;
@@ -2257,18 +2158,18 @@ class VoiceChannelService {
   }
 
   /// Fired after a repair attempt settles (direct = true when it worked) so
-  /// the provider can refresh anything keyed on the route — notably the
-  /// screen-watch hint (lever 2 of the pair).
+  /// the provider can refresh anything keyed on the route, notably the
+  /// screen-watch hint.
   void Function(String peerId, bool direct)? onIceRouteRepaired;
 
   /// onTrack handler: bind SFrame receivers for the new audio/video track,
   /// then (gossip mode only) forward received audio to other neighbors.
   void _onPeerTrack(String peerId, RTCPeerConnection pc, RTCTrackEvent event) {
     if (event.track.kind == 'audio') {
-      // REBIND, not just enable: a remote mid-call mic switch lands as a
-      // NEW transceiver, and _enableSframeReceiver is idempotent per
-      // (peer, kind) — it would silently keep the cryptor on the dead
-      // receiver and the fresh track plays as ciphertext gibberish.
+      // REBIND, not just enable: a remote mid-call mic switch lands as a NEW
+      // transceiver, and _enableSframeReceiver is idempotent per
+      // (peer, kind), so it would silently keep the cryptor on the dead
+      // receiver and the fresh track would play as ciphertext.
       unawaited(_rebindSframeReceiver(peerId, pc, event.receiver));
     } else if (event.track.kind == 'video') {
       _handleRemoteVideoTrack(peerId, event, pc);
@@ -2285,13 +2186,11 @@ class VoiceChannelService {
 
     _vcLog('[HOLLOW-VC] Gossip: received audio track from $peerId — forwarding to ${gossipNeighbors.length - 1} neighbors');
 
-    // Track dedup: check if we already have audio from the original speaker.
-    // For now, use peerId as the source identifier. In multi-hop, the
-    // originator's ID would need to be signaled separately.
+    // Track dedup against the original speaker, keyed by peerId for now; a
+    // multi-hop version would have to signal the originator's id separately.
     if (_forwardedSources.contains(peerId)) return;
     _forwardedSources.add(peerId);
 
-    // Forward this track to all other gossip neighbor PCs.
     final stream = event.streams.isNotEmpty
         ? event.streams.first
         : null;
@@ -2381,8 +2280,8 @@ class VoiceChannelService {
     return null;
   }
 
-  /// No existing a=fmtp line for opus — insert [fmtpLine] right after the
-  /// opus rtpmap line and rejoin the SDP.
+  /// Inserts [fmtpLine] right after the opus rtpmap line and rejoins the
+  /// SDP, for an SDP with no existing a=fmtp line for opus.
   String _insertOpusFmtpLine(
       List<String> lines, String opusPt, String fmtpLine) {
     final rtpmapLine = 'a=rtpmap:$opusPt ';
@@ -2396,14 +2295,12 @@ class VoiceChannelService {
     return insertResult.join('\r\n');
   }
 
-  /// Constrain the transceiver carrying [trackId] on [pc] to VP8 only (plus
-  /// rtx/red/ulpfec). VP8 is software (libvpx) everywhere and is what
-  /// negotiation picks anyway; H.265/AV1 payload types kill the iOS
-  /// answerer, and even H264/VP9 entries make iOS's FIRST call fail
-  /// applying its own answer while its hardware codec path is cold ("Failed
-  /// to set local video description recv parameters" — first call black,
-  /// later calls fine). Also covers the older macOS issue (Apple H.264 hw
-  /// profile not decoding on Windows libwebrtc).
+  /// Constrains the transceiver carrying [trackId] on [pc] to VP8 only, plus
+  /// rtx/red/ulpfec. VP8 is software everywhere and is what negotiation picks
+  /// anyway; H.265/AV1 payload types kill the iOS answerer, and even H264/VP9
+  /// entries make iOS's FIRST call fail applying its own answer while its
+  /// hardware codec path is cold. Also covers Apple's H.264 profile not
+  /// decoding on Windows libwebrtc.
   Future<void> _preferVp8ForVideoTrackOnPc(
       RTCPeerConnection pc, String trackId) async {
     try {

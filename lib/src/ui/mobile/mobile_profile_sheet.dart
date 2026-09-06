@@ -96,9 +96,8 @@ class MobileProfileSheet extends ConsumerWidget {
     final localNicknames = ref.watch(localNicknameProvider);
     final localNick = localNicknames[peerId];
     final name = localNick ?? displayNameFor(profiles, peerId);
-    // The friend's OWN name (their profile display name), NOT folded through the
-    // local nickname — so the subtitle under a local nickname shows the real
-    // name, not a duplicate. Falls back to short peer ID when unset.
+    // The friend's OWN display name, never folded through the local nickname,
+    // or the subtitle under a nickname is a duplicate of it.
     final profileName = (profile != null && profile.displayName.isNotEmpty)
         ? profile.displayName
         : (peerId.length > 8 ? '${peerId.substring(0, 8)}...' : peerId);
@@ -110,16 +109,14 @@ class MobileProfileSheet extends ConsumerWidget {
     final isMe = peerId == myPeerId;
     final friends = ref.watch(friendsProvider);
     final friendInfo = friends[peerId];
-    // Verified account credential or nothing: the profile's own
-    // `twitch_username` is a self-declaration (`twitchLoginProvider`).
+    // The verified credential or nothing: the profile's own `twitch_username`
+    // is only a self-declaration.
     final verifiedTwitch = ref.watch(twitchLoginProvider(peerId));
     final board = ShowcaseBoard.decode(profile?.showcaseBoard);
 
-    // Cap the sheet below full screen (the barrier above stays tappable) and
-    // keep the drag handle OUTSIDE the scrollable — with a long showcase the
-    // inner scroll ate the drag-to-dismiss gesture and the full-height sheet
-    // left no barrier to tap, so the sheet couldn't be closed. Same shape as
-    // mobile_message_actions.dart.
+    // The sheet stays below full screen so the barrier is tappable, and the
+    // drag handle stays OUTSIDE the scrollable, or a long showcase leaves no
+    // way to dismiss it: the inner scroll eats the drag gesture.
     return SafeArea(
       child: ConstrainedBox(
         constraints: BoxConstraints(
@@ -128,7 +125,6 @@ class MobileProfileSheet extends ConsumerWidget {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            // Drag handle
             Padding(
               padding: const EdgeInsets.only(top: HollowSpacing.sm),
               child: Container(
@@ -144,13 +140,10 @@ class MobileProfileSheet extends ConsumerWidget {
       child: Column(
       mainAxisSize: MainAxisSize.min,
       children: [
-        // Banner — the sheet is device-wide, so the height TRACKS that width
-        // at 2.5:1, the one ratio every user banner surface, the banner
-        // cropper and Rust's 1200x480 storage share. LayoutBuilder rather
-        // than an AspectRatio because AnimatedGifImage needs a real number to
-        // decode against: only the HEIGHT is given as a target, so an older
-        // 3:1 banner still decodes at its own aspect instead of being
-        // squashed into this box before BoxFit.cover ever sees it.
+        // The height TRACKS the sheet's width at 2.5:1, the ratio every user
+        // banner surface shares. Only the HEIGHT is a target, so an older 3:1
+        // banner still decodes at its own aspect instead of being squashed
+        // before BoxFit.cover sees it.
         const SizedBox(height: HollowSpacing.sm),
         LayoutBuilder(
           builder: (context, constraints) {
@@ -184,7 +177,6 @@ class MobileProfileSheet extends ConsumerWidget {
           },
         ),
 
-        // Avatar + info overlapping banner
         Transform.translate(
           offset: const Offset(0, -36),
           child: Column(
@@ -199,7 +191,6 @@ class MobileProfileSheet extends ConsumerWidget {
               ),
               const SizedBox(height: HollowSpacing.sm),
 
-              // Name (with local nickname)
               if (localNick != null) ...[
                 Text(localNick, style: HollowTypography.heading.copyWith(
                   color: hollow.textPrimary,
@@ -214,7 +205,6 @@ class MobileProfileSheet extends ConsumerWidget {
 
               const SizedBox(height: HollowSpacing.xs),
 
-              // Online status
               Row(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
@@ -233,7 +223,7 @@ class MobileProfileSheet extends ConsumerWidget {
                 ],
               ),
 
-              // Role badge — every role shows, Member included (consistency)
+              // Every role shows, Member included.
               if (role != null && role!.isNotEmpty) ...[
                 const SizedBox(height: HollowSpacing.sm),
                 Container(
@@ -255,7 +245,6 @@ class MobileProfileSheet extends ConsumerWidget {
                 ),
               ],
 
-              // Labels
               if (labels != null && labels!.isNotEmpty) ...[
                 const SizedBox(height: HollowSpacing.sm),
                 Padding(
@@ -289,7 +278,6 @@ class MobileProfileSheet extends ConsumerWidget {
                 ),
               ],
 
-              // Twitch badge
               if (verifiedTwitch != null) ...[
                 const SizedBox(height: HollowSpacing.sm),
                 HollowPressable(
@@ -314,7 +302,6 @@ class MobileProfileSheet extends ConsumerWidget {
                 ),
               ],
 
-              // Status
               if (profile?.status != null && profile!.status.isNotEmpty) ...[
                 const SizedBox(height: HollowSpacing.sm),
                 Text(
@@ -327,7 +314,6 @@ class MobileProfileSheet extends ConsumerWidget {
                 ),
               ],
 
-              // About me
               if (profile?.aboutMe != null && profile!.aboutMe.isNotEmpty) ...[
                 const SizedBox(height: HollowSpacing.lg),
                 Padding(
@@ -344,7 +330,7 @@ class MobileProfileSheet extends ConsumerWidget {
                 ),
               ],
 
-              // Showcase boards — stacked (left side first) on mobile
+              // Stacked on mobile, left side first.
               if (!board.isEmpty) ...[
                 const SizedBox(height: HollowSpacing.lg),
                 Padding(
@@ -365,7 +351,6 @@ class MobileProfileSheet extends ConsumerWidget {
 
               const SizedBox(height: HollowSpacing.lg),
 
-              // Edit Showcase (self only)
               if (isMe) ...[
                 Padding(
                   padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.xl),
@@ -379,13 +364,11 @@ class MobileProfileSheet extends ConsumerWidget {
                 const SizedBox(height: HollowSpacing.sm),
               ],
 
-              // Action buttons
               if (!isMe) ...[
                 Padding(
                   padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.xl),
                   child: Column(
                     children: [
-                      // Message button
                       if (friendInfo?.status == 'accepted')
                         Padding(
                           padding: const EdgeInsets.only(bottom: HollowSpacing.sm),
@@ -405,9 +388,8 @@ class MobileProfileSheet extends ConsumerWidget {
                                   builder: (_) => MobileChatRoute(peerId: peerId),
                                 ),
                               ).then((_) {
-                                // Guarded: only clear if this chat is still the
-                                // selected one (the sheet is gone by now — use
-                                // the captured container, not ref).
+                                // The sheet is gone by now, so this uses the
+                                // captured container rather than `ref`.
                                 if (container.read(selectedPeerProvider) ==
                                     peerId) {
                                   container
@@ -422,7 +404,6 @@ class MobileProfileSheet extends ConsumerWidget {
                           ),
                         ),
 
-                      // Set nickname button
                       Padding(
                         padding: const EdgeInsets.only(bottom: HollowSpacing.sm),
                         child: HollowButton.outline(
@@ -436,8 +417,6 @@ class MobileProfileSheet extends ConsumerWidget {
                         ),
                       ),
 
-                      // Verify contact — mobile parity with the desktop
-                      // profile card and DM panel (Issue 1-D).
                       Builder(builder: (context) {
                         final master =
                             ref.watch(deviceLinkProvider).identityOf(peerId);
@@ -462,12 +441,11 @@ class MobileProfileSheet extends ConsumerWidget {
                         );
                       }),
 
-                      // Friend action
                       _FriendActionRow(peerId: peerId),
 
-                      // Block / Report — ghost in the band; .danger is
-                      // reserved for the confirm dialog's destructive action.
-                      // Blocking and reporting key on the MASTER identity.
+                      // Ghost, because `.danger` is reserved for the confirm
+                      // dialog's destructive action. Both key on the MASTER
+                      // identity.
                       const SizedBox(height: HollowSpacing.sm),
                       Builder(builder: (context) {
                         final master =
@@ -508,7 +486,6 @@ class MobileProfileSheet extends ConsumerWidget {
                 ),
               ],
 
-              // Peer ID
               Padding(
                 padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.xl),
                 child: HollowPressable(
@@ -550,9 +527,9 @@ class MobileProfileSheet extends ConsumerWidget {
     );
   }
 
-  /// The sheet is itself a route, so pop it before pushing the verify screen —
-  /// otherwise it stays mounted underneath and reappears on the way back.
-  /// Capture the root navigator FIRST: popping invalidates this context.
+  /// Pops this sheet before pushing the verify screen, or it stays mounted
+  /// underneath and reappears on the way back. The root navigator is captured
+  /// first, because popping invalidates this context.
   void _openVerify(BuildContext context, String masterId) {
     final navContext = Navigator.of(context, rootNavigator: true).context;
     Navigator.of(context).pop();
@@ -593,9 +570,8 @@ class _FriendActionRow extends ConsumerWidget {
     final friends = ref.watch(friendsProvider);
     final friendInfo = friends[peerId];
 
-    // A `declined` row (a sticky reject tombstone) is neither pending nor
-    // accepted — treat it like no row at all: show "Add Friend", so the
-    // person can be re-added and never renders as an accepted friend.
+    // A `declined` row is a sticky reject tombstone, neither pending nor
+    // accepted, so it reads as no row at all and the person can be re-added.
     if (friendInfo == null ||
         (friendInfo.status != 'pending' && friendInfo.status != 'accepted')) {
       return HollowButton.ghost(
@@ -650,7 +626,6 @@ class _FriendActionRow extends ConsumerWidget {
       );
     }
 
-    // Accepted — show friends indicator
     final hollow = HollowTheme.of(context);
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: HollowSpacing.xs),

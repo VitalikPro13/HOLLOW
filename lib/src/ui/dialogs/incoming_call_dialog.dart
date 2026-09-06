@@ -16,8 +16,7 @@ import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-/// Overlay that shows an incoming call card in the top-center of the screen.
-/// Watches [callProvider] and renders only when status is ringing + incoming.
+/// Incoming call card, rendered only while a call is ringing inbound.
 class IncomingCallOverlay extends ConsumerStatefulWidget {
   const IncomingCallOverlay({super.key});
 
@@ -37,7 +36,7 @@ class _IncomingCallOverlayState extends ConsumerState<IncomingCallOverlay>
   Timer? _countdownTimer;
   int _secondsLeft = 30;
 
-  // Cached display info so the card doesn't go blank during exit animation.
+  // Cached so the card does not go blank during its exit animation.
   String _cachedPeerId = '';
   String _cachedDisplayName = '';
   bool _cachedIsVideoCall = false;
@@ -88,12 +87,11 @@ class _IncomingCallOverlayState extends ConsumerState<IncomingCallOverlay>
   }
 
   Future<void> _startRingtone() async {
-    // Await the async provider to ensure it's loaded from SQLCipher.
     final ringtonePath = await ref.read(ringtonePathProvider.future);
     final volume = await ref.read(ringtoneVolumeProvider.future);
     final startSec = await ref.read(ringtoneStartProvider.future);
     final endSec = await ref.read(ringtoneEndProvider.future);
-    // The call may have been answered/declined while the providers loaded.
+    // The call may have been answered or declined while the providers loaded.
     if (!mounted || !_wasVisible) return;
 
     final hasCustom = ringtonePath != null &&
@@ -102,7 +100,7 @@ class _IncomingCallOverlayState extends ConsumerState<IncomingCallOverlay>
     final clipDuration = endSec - startSec;
 
     if (!hasCustom || clipDuration <= 0) {
-      // Bundled default ringtone: loop the whole file, no trim range applies.
+      // The bundled default loops the whole file: no trim range applies.
       _ringtonePlayer = AudioPlayer();
       await _ringtonePlayer!.setVolume(volume);
       await _ringtonePlayer!.setReleaseMode(ReleaseMode.loop);
@@ -112,11 +110,10 @@ class _IncomingCallOverlayState extends ConsumerState<IncomingCallOverlay>
 
     _ringtonePlayer = AudioPlayer();
     await _ringtonePlayer!.setVolume(volume);
-    // Play from the start offset, manually loop within the clip range.
+    // Looping is manual, within the clip range.
     await _ringtonePlayer!.play(DeviceFileSource(ringtonePath));
     await _ringtonePlayer!.seek(Duration(milliseconds: (startSec * 1000).round()));
 
-    // Listen for position to loop within the selected clip range.
     _ringtonePlayer!.onPositionChanged.listen((pos) {
       final posSeconds = pos.inMilliseconds / 1000.0;
       if (posSeconds >= endSec || posSeconds < startSec - 0.5) {
@@ -138,15 +135,14 @@ class _IncomingCallOverlayState extends ConsumerState<IncomingCallOverlay>
     final isVisible = call.status == CallStatus.ringing &&
         call.direction == CallDirection.incoming;
 
-    // Cache display info when call becomes visible so the card
-    // doesn't go blank during the exit animation.
+    // Cached while visible, so the card survives its exit animation.
     if (isVisible) {
       _cachedPeerId = call.peerId ?? '';
       final callerProfile = ref.watch(profileProvider.select((p) => p[_cachedPeerId]));
       _cachedDisplayName = displayNameForPeer(callerProfile, _cachedPeerId);
       _cachedIsVideoCall = call.isVideoCall;
-      // Warn when answering will pull the user out of a voice channel
-      // (issue #49 — accepting auto-leaves it).
+      // Answering auto-leaves a voice channel, so it is worth a warning
+      // (issue #49).
       final vc = ref.watch(voiceChannelProvider);
       _cachedVcChannelName =
           vc.isInVoiceChannel ? (vc.currentChannelName ?? 'voice') : null;
@@ -247,7 +243,6 @@ class _IncomingCallOverlayState extends ConsumerState<IncomingCallOverlay>
                         child: const Text('Decline'),
                       ),
                       const SizedBox(width: HollowSpacing.md),
-                      // Countdown timer
                       SizedBox(
                         width: 36,
                         height: 36,

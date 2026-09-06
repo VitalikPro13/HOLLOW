@@ -12,8 +12,6 @@ import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-// ── Initiate Recovery Pool dialog ──────────────────────────────
-
 /// Show the dialog to initiate a recovery pool for a server.
 void showInitiateRecoveryPoolDialog(
   BuildContext context, {
@@ -84,7 +82,6 @@ class _InitiateDialogState extends ConsumerState<_InitiateDialog> {
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
 
-    // After link is generated, show the link + copy button.
     if (_inviteLink != null) {
       return HollowDialog(
         title: 'Recovery Pool Started',
@@ -142,7 +139,6 @@ class _InitiateDialogState extends ConsumerState<_InitiateDialog> {
       );
     }
 
-    // Initial consent screen.
     return HollowDialog(
       title: 'Start Recovery Pool',
       content: Column(
@@ -205,8 +201,6 @@ class _InitiateDialogState extends ConsumerState<_InitiateDialog> {
   }
 }
 
-// ── Join Recovery Pool dialog ──────────────────────────────────
-
 /// Show the dialog to join a recovery pool via invite link.
 void showJoinRecoveryPoolDialog(
   BuildContext context, {
@@ -247,7 +241,6 @@ class _JoinDialogState extends ConsumerState<_JoinDialog> {
     final link = _controller.text.trim();
     if (link.isEmpty) return;
 
-    // Basic link format validation.
     if (!link.contains('server=') || !link.contains('token=')) {
       HollowToast.show(
         context,
@@ -261,8 +254,7 @@ class _JoinDialogState extends ConsumerState<_JoinDialog> {
     try {
       await crdt_api.joinRecoveryPool(inviteLink: link);
 
-      // Wait for a member to welcome us (confirms the pool is active).
-      // Timeout after 10 seconds if nobody responds.
+      // A welcome from a member is what confirms the pool is active.
       bool welcomed = false;
       for (int i = 0; i < 20; i++) {
         await Future.delayed(const Duration(milliseconds: 500));
@@ -277,7 +269,7 @@ class _JoinDialogState extends ConsumerState<_JoinDialog> {
       if (!mounted) return;
 
       if (welcomed) {
-        // Confirm the join — clears pending flag so dashboard shows.
+        // Clears the pending flag, which is what shows the dashboard.
         ref.read(recoveryPoolProvider.notifier).confirmJoin();
         Navigator.of(context).pop();
         HollowToast.show(
@@ -286,11 +278,10 @@ class _JoinDialogState extends ConsumerState<_JoinDialog> {
           type: HollowToastType.success,
         );
       } else {
-        // No one responded — pool may be dead. Clean up.
         final pool = ref.read(recoveryPoolProvider);
         if (pool != null) {
-          // Grab the notifier before the await — ref is unusable if the
-          // dialog is disposed mid-flight, but the cleanup must still run.
+          // Taken before the await: `ref` is unusable once the dialog is
+          // disposed mid-flight, and the cleanup must still run.
           final poolNotifier = ref.read(recoveryPoolProvider.notifier);
           try {
             await crdt_api.stopRecoveryPool(serverId: pool.serverId);

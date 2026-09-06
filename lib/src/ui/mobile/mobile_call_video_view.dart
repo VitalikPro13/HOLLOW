@@ -30,8 +30,8 @@ import 'package:hollow/src/ui/mobile/mobile_page_route.dart';
 import 'package:hollow/src/ui/shell/system_status_banner.dart';
 
 
-/// Full-screen call overlay that slides up from the bottom inside a DM chat.
-/// Handles all call states: ringing, connecting, active (audio + video).
+/// Full-screen call overlay that slides up from the bottom inside a DM chat,
+/// through every call state from ringing to active.
 class MobileCallScreen extends ConsumerStatefulWidget {
   final String peerId;
   const MobileCallScreen({super.key, required this.peerId});
@@ -44,8 +44,7 @@ class _MobileCallScreenState extends ConsumerState<MobileCallScreen> {
   Offset _pipOffset = const Offset(12, 12);
   bool _wakelockOn = false;
 
-  /// Last logged video-gate tuple — log only on change (diagnostics for the
-  /// "remote camera invisible on first enable" reports).
+  /// Last logged video-gate tuple, so the log only fires on a change.
   String? _lastVideoGateLog;
 
   @override
@@ -63,12 +62,11 @@ class _MobileCallScreenState extends ConsumerState<MobileCallScreen> {
     unawaited(WakelockPlus.toggle(enable: videoShown).catchError((_) {}));
   }
 
-  // Earpiece proximity (blank-on-ear-hold) is handled globally by
-  // CallProximityController so it works from any screen, not just here.
+  // Earpiece proximity is global, in CallProximityController, so it works from
+  // any screen.
 
-  // Call duration is rendered by CallDurationText (self-ticking leaf) —
-  // the old per-second setState rebuilt this ENTIRE Scaffold, re-running
-  // renderer probing and video tiles once a second for the whole call.
+  // Call duration is a self-ticking leaf: a per-second setState here would
+  // rebuild the whole Scaffold, re-probing renderers once a second.
 
   String _statusText(CallState call) {
     switch (call.status) {
@@ -85,10 +83,9 @@ class _MobileCallScreenState extends ConsumerState<MobileCallScreen> {
     }
   }
 
-  /// Whether to show the video area. Must have an active call with explicit
-  /// video enabled AND a real renderer with a source — otherwise the
-  /// onRemoteVideoTrack safety net can trigger a black rectangle over the
-  /// avatars even when no camera is actually sending.
+  /// Whether to show the video area. It needs a real renderer with a source as
+  /// well as the enabled flag, or the `onRemoteVideoTrack` safety net puts a
+  /// black rectangle over the avatars with no camera sending.
   bool _hasRealVideo(CallState call) {
     if (call.status != CallStatus.active) return false;
     final notifier = ref.read(callProvider.notifier);
@@ -114,7 +111,6 @@ class _MobileCallScreenState extends ConsumerState<MobileCallScreen> {
     final hollow = HollowTheme.of(context);
     final localPeerId = ref.read(identityProvider).peerId ?? '';
 
-    // Auto-pop when call ends.
     ref.listen<CallState>(callProvider, (prev, next) {
       if (next.status == CallStatus.idle &&
           prev?.status != CallStatus.idle) {
@@ -134,12 +130,10 @@ class _MobileCallScreenState extends ConsumerState<MobileCallScreen> {
           child: Column(
             children: [
               _buildTopBar(hollow, call),
-              // System-status notice, at the top under the participant name — a
-              // call is exactly when "relay restarting in 2 min" matters most.
-              // Top-anchored here (divider below) since it follows the name row.
+              // A call is when a relay maintenance notice matters most.
               const SystemStatusBanner(),
-              // Opt-in watching (issue #38): the peer's share never streams
-              // until this is tapped.
+              // Opt-in watching (issue #38): the share never streams until this
+              // is tapped.
               if (call.remoteScreenSharing && !call.watchingRemoteShare)
                 Padding(
                   padding: const EdgeInsets.only(top: HollowSpacing.xs),
@@ -236,7 +230,7 @@ class _MobileCallScreenState extends ConsumerState<MobileCallScreen> {
               ],
             ),
           ),
-          // Stop watching the remote share (opt-in watching, issue #38).
+          // Opt-in watching, issue #38.
           if (call.watchingRemoteShare)
             HollowPressable(
               semanticLabel: 'Stop watching screen share',
@@ -248,8 +242,7 @@ class _MobileCallScreenState extends ConsumerState<MobileCallScreen> {
               child: Icon(LucideIcons.eyeOff,
                   size: 22, color: hollow.textPrimary),
             ),
-          // Received share audio: volume + duck controls (opens the sheet).
-          // Top bar, not the controls row — that one already overflows at 6.
+          // In the top bar, because the controls row already overflows at six.
           // Watch-gated: audio only flows for a share we opted into.
           if (call.watchingRemoteShare)
             const ShareVolumeButton(
@@ -263,8 +256,7 @@ class _MobileCallScreenState extends ConsumerState<MobileCallScreen> {
 
   Widget _buildAudioView(
       HollowTheme hollow, CallState call, String localPeerId) {
-    // Speaking state via a scoped Consumer: VAD flips rebuild ONLY the avatar
-    // cluster, never this whole call Scaffold.
+    // Scoped so a VAD flip rebuilds only the avatar cluster, not the Scaffold.
     return Center(
       child: Consumer(builder: (context, ref, _) {
         final speaking = ref.watch(callSpeakingProvider);
@@ -307,9 +299,8 @@ class _MobileCallScreenState extends ConsumerState<MobileCallScreen> {
         localRenderer != null &&
         localRenderer.srcObject != null;
 
-    // Which source fills the screen: explicit pill focus first (same
-    // focusedDmSourceProvider the desktop switcher writes), then the old
-    // fixed priority (remote screen > remote camera > local camera).
+    // Explicit pill focus wins, then the fixed priority: remote screen, remote
+    // camera, local camera.
     var big = 'none'; // 'screen' | 'remoteCam' | 'localCam' | 'none'
     if (focused.peerId != null && focused.type != null) {
       final focusLocal = focused.peerId == localPeerId;
@@ -339,23 +330,22 @@ class _MobileCallScreenState extends ConsumerState<MobileCallScreen> {
     final showLocalPip =
         (showScreen || showRemoteFull) && localCamAvailable;
 
-    // Source switcher pill: one tab per active source. A local SCREEN share
-    // is excluded — the phone can't preview its own share (infinite mirror).
+    // A local SCREEN share is excluded: the phone cannot preview its own share
+    // without an infinite mirror.
     final sources = <({String peerId, String type})>[
       if (call.remoteScreenSharing)
         (peerId: widget.peerId, type: 'screen'),
       if (call.isVideoEnabled) (peerId: localPeerId, type: 'camera'),
       if (call.remoteVideoEnabled) (peerId: widget.peerId, type: 'camera'),
     ];
-    // Highlight what's ACTUALLY big (focus may have fallen back).
+    // What is ACTUALLY big, since focus may have fallen back.
     final String? effectiveFocusPeer = showScreen || showRemoteFull
         ? widget.peerId
         : (showLocalFull ? localPeerId : null);
     final String? effectiveFocusType =
         showScreen ? 'screen' : (big == 'none' ? null : 'camera');
 
-    // Diagnostics: log the gate decision whenever it changes, so device logs
-    // show exactly why the remote camera is (in)visible.
+    // Device logs are the only way to see why a remote camera is invisible.
     final gate = 'screen=$showScreen remoteFull=$showRemoteFull '
         'localFull=$showLocalFull pip=$showLocalPip '
         'remoteVideoEnabled=${call.remoteVideoEnabled} '
@@ -372,12 +362,12 @@ class _MobileCallScreenState extends ConsumerState<MobileCallScreen> {
       children: [
         if (showScreen)
           Positioned.fill(
-            // Pinch-zoom + pan for reading a desktop screen on a phone.
+            // Pinch-zoom and pan, for reading a desktop screen on a phone.
             child: InteractiveViewer(
               maxScale: 6,
               child: RepaintBoundary(
                 child: RTCVideoView(
-                  // Non-null: big == 'screen' requires screenAvailable.
+                  // Non-null: 'screen' requires screenAvailable.
                   screenRenderer!,
                   objectFit:
                       RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
@@ -415,9 +405,8 @@ class _MobileCallScreenState extends ConsumerState<MobileCallScreen> {
               ),
             ),
           ),
-        // Speaking ring on whatever is currently big. Its owner follows the
-        // source: our own camera when we're full-screen, otherwise the remote
-        // (their camera, their screen share, or their avatar placeholder).
+        // The ring's owner follows the big source: ours when our camera is
+        // full-screen, otherwise the remote peer.
         Positioned.fill(
           child: Consumer(builder: (context, ref, _) {
             final speaking = ref.watch(callSpeakingProvider);
@@ -427,9 +416,8 @@ class _MobileCallScreenState extends ConsumerState<MobileCallScreen> {
             );
           }),
         ),
-        // Held-open flair. Top-centre, above the video and clear of the PiP
-        // corner, so a soft picture or a silent couple of seconds reads as the
-        // network rather than as the app breaking.
+        // So a soft picture or a silent couple of seconds reads as the network
+        // rather than as the app breaking.
         Positioned(
           top: MediaQuery.viewPaddingOf(context).top + HollowSpacing.sm,
           left: HollowSpacing.md,
@@ -440,7 +428,6 @@ class _MobileCallScreenState extends ConsumerState<MobileCallScreen> {
             return Center(child: LinkHealthBanner(snapshot: health));
           }),
         ),
-        // Local PiP — portrait proportioned (3:4)
         if (showLocalPip)
           Positioned(
             right: _pipOffset.dx,
@@ -496,7 +483,6 @@ class _MobileCallScreenState extends ConsumerState<MobileCallScreen> {
               ),
             ),
           ),
-        // Source switcher pill (top center) when 2+ sources are active.
         if (sources.length >= 2)
           Positioned(
             top: HollowSpacing.sm,
@@ -517,7 +503,7 @@ class _MobileCallScreenState extends ConsumerState<MobileCallScreen> {
                       widget.peerId,
                   },
                   onSelect: (peerId, type) {
-                    // Tapping the unwatched share tab opts in (issue #38).
+                    // Tapping an unwatched tab opts in (issue #38).
                     if (type == 'screen' &&
                         call.remoteScreenSharing &&
                         !call.watchingRemoteShare) {
@@ -544,8 +530,7 @@ class _MobileCallScreenState extends ConsumerState<MobileCallScreen> {
     }
     final choice = await showMobileScreenShareSheet(context);
     if (choice == null || !mounted) return;
-    // Portrait phone capture: cap the long edge at 1920 (1080p-class).
-    // Android ignores the constraints and captures at native display size;
+    // Android ignores these constraints and captures at native display size;
     // the encoder cap in ScreenShareService does the actual downscaling.
     await notifier.startScreenShare(
       sourceId: 'screen',
@@ -556,11 +541,9 @@ class _MobileCallScreenState extends ConsumerState<MobileCallScreen> {
     );
   }
 
-  /// Speaker button that doubles as the audio-device picker: a plain
-  /// speaker/earpiece toggle while only the built-in routes exist, and the
-  /// route sheet as soon as a headset is attached (long-press always opens
-  /// it). The icon shows where audio ACTUALLY is, so a headset user can see
-  /// at a glance that the call isn't stuck on the phone.
+  /// Speaker button that doubles as the audio-device picker once a headset is
+  /// attached. The icon shows where audio ACTUALLY is, so a headset user can
+  /// see the call is not stuck on the phone.
   Widget _buildAudioRouteButton(
     HollowTheme hollow, {
     required double iconSize,
@@ -599,15 +582,12 @@ class _MobileCallScreenState extends ConsumerState<MobileCallScreen> {
   }
 
   Widget _buildControls(HollowTheme hollow, CallState call) {
-    // 6 buttons overflow narrow phones at 56px — same shrink as the voice
-    // channel screen's crowded mode.
+    // Six buttons overflow a narrow phone at 56px.
     const iconSize = 21.0;
     const buttonSize = 46.0;
     final canControl = call.status == CallStatus.active ||
         call.status == CallStatus.connecting;
 
-    // Same button order as the voice channel screen:
-    // mute, deafen, speaker, camera, share screen, hang up.
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.xl),
       child: Row(
@@ -675,8 +655,6 @@ class _MobileCallScreenState extends ConsumerState<MobileCallScreen> {
                 ? () => _handleScreenShareToggle(call)
                 : null,
           ),
-          // Flip camera (front/back) — only while the camera is on. Same
-          // pattern as the voice channel screen.
           if (call.isVideoEnabled)
             MobileControlButton(
               icon: LucideIcons.switchCamera,
@@ -704,10 +682,6 @@ class _MobileCallScreenState extends ConsumerState<MobileCallScreen> {
 
 }
 
-// ─────────────────────────────────────────────────
-// Thin call status strip (shown in chat when call screen is dismissed)
-// ─────────────────────────────────────────────────
-
 class MobileCallStatusStrip extends ConsumerWidget {
   final String peerId;
   const MobileCallStatusStrip({super.key, required this.peerId});
@@ -718,7 +692,7 @@ class MobileCallStatusStrip extends ConsumerWidget {
     final isCallWithThisPeer =
         call.peerId == peerId && call.status != CallStatus.idle;
 
-    // Don't show strip for incoming ringing — the IncomingCallOverlay handles that.
+    // Incoming ringing belongs to the IncomingCallOverlay.
     if (!isCallWithThisPeer) return const SizedBox.shrink();
     if (call.status == CallStatus.ringing &&
         call.direction == CallDirection.incoming) {

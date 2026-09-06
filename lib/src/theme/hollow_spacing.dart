@@ -1,4 +1,3 @@
-/// Hollow spacing scale — consistent spacing throughout the app.
 abstract final class HollowSpacing {
   static const double xxs = 2;
   static const double xs = 4;
@@ -10,7 +9,6 @@ abstract final class HollowSpacing {
   static const double xxxl = 48;
 }
 
-/// Hollow border radius values.
 abstract final class HollowRadius {
   static const double sm = 6;
   static const double md = 8;

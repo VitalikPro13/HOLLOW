@@ -23,7 +23,6 @@ import 'package:hollow/src/ui/components/status_dot.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Thin bar shown at the top of the screen during an active voice call.
-/// Displays call duration, mute toggle, and end call button.
 class ActiveCallBar extends ConsumerStatefulWidget {
   const ActiveCallBar({super.key});
 
@@ -70,7 +69,6 @@ class _ActiveCallBarState extends ConsumerState<ActiveCallBar> {
     final rec = ref.watch(recordingProvider);
     final linkHealth = ref.watch(callLinkHealthProvider);
 
-    // Surface recording lifecycle as toast notifications.
     ref.listen<RecordingState>(recordingProvider, (prev, next) {
       if (next.lastFinished != null &&
           next.lastFinished != prev?.lastFinished) {
@@ -92,7 +90,6 @@ class _ActiveCallBarState extends ConsumerState<ActiveCallBar> {
       }
     });
 
-    // Only show during active or connecting states.
     final isVisible =
         call.status == CallStatus.active ||
         call.status == CallStatus.connecting;
@@ -107,7 +104,6 @@ class _ActiveCallBarState extends ConsumerState<ActiveCallBar> {
       return const SizedBox.shrink();
     }
 
-    // Start duration timer when call becomes active.
     if (call.status == CallStatus.active && call.startedAt != null) {
       if (_durationTimer == null) {
         _duration = DateTime.now().difference(call.startedAt!);
@@ -146,9 +142,8 @@ class _ActiveCallBarState extends ConsumerState<ActiveCallBar> {
                   color: hollow.elevated,
                   borderRadius: BorderRadius.circular(hollow.radiusLg),
                   border: Border.all(
-                    // The bar's edge is the first thing read at a glance, and
-                    // a confident green outline around a call that is silently
-                    // reconnecting is the wrong signal.
+                    // The bar's edge is read first, and a confident green
+                    // outline around a reconnecting call is the wrong signal.
                     color: (linkHealth.health == LinkHealth.healthy
                             ? hollow.success
                             : hollow.warning)
@@ -169,9 +164,7 @@ class _ActiveCallBarState extends ConsumerState<ActiveCallBar> {
                       color: linkHealth.health == LinkHealth.healthy
                           ? hollow.success
                           : hollow.warning,
-                      // StatusDot carries meaning as SHAPE, never as colour
-                      // alone: a hollow dot for a link in trouble stays
-                      // readable without colour vision.
+                      // Meaning rides the SHAPE, never colour alone.
                       filled: linkHealth.health == LinkHealth.healthy,
                       size: 8,
                     ),
@@ -202,9 +195,8 @@ class _ActiveCallBarState extends ConsumerState<ActiveCallBar> {
                           fontFeatures: [const FontFeature.tabularFigures()],
                         ),
                       ),
-                      // The call is being held open through network trouble;
-                      // say so, or a couple of seconds of silence and a soft
-                      // picture read as the app misbehaving.
+                      // Say that the call is being held open, or the silence
+                      // and soft picture read as the app misbehaving.
                       if (linkHealth.hasFlair) ...[
                         const SizedBox(width: HollowSpacing.sm),
                         LinkHealthChip(snapshot: linkHealth),
@@ -219,8 +211,7 @@ class _ActiveCallBarState extends ConsumerState<ActiveCallBar> {
                     ],
                     const SizedBox(width: HollowSpacing.md),
                     Builder(builder: (context) {
-                      // PTT-aware mic (issue #38): gated while idle, live
-                      // on hold.
+                      // PTT-aware mic (issue #38): gated while idle.
                       final mic = micButtonVisual(ref,
                           isMuted: call.isMuted,
                           hollow: hollow,
@@ -265,7 +256,6 @@ class _ActiveCallBarState extends ConsumerState<ActiveCallBar> {
                         ),
                       ),
                     ),
-                    // Screen share indicator (desktop only).
                     if (Platform.isWindows ||
                         Platform.isLinux ||
                         Platform.isMacOS) ...[
@@ -297,15 +287,9 @@ class _ActiveCallBarState extends ConsumerState<ActiveCallBar> {
                         ),
                       ),
                     ],
-                    // Record button (Windows + macOS only). Shown; if the
-                    // backend isn't available the start call surfaces a clear
-                    // error toast instead of silently hiding it. On macOS < 13.0
-                    // the native recorder doesn't exist, so the button is
-                    // disabled with an explanatory tooltip (mirrors the
-                    // audio-share toggle). Hidden on Linux — there's no native
-                    // recorder there yet (the libwebrtc-capture + ffmpeg pipe
-                    // path was choppy/out-of-sync), so the button is omitted
-                    // entirely rather than shipping a broken capture.
+                    // Shown even when the backend is missing, so starting can
+                    // say why; disabled with a tooltip on macOS < 13.0. Omitted
+                    // on Linux, which has no native recorder yet.
                     if (Platform.isWindows || Platform.isMacOS) ...[
                       const SizedBox(width: HollowSpacing.xs),
                       HollowTooltip(

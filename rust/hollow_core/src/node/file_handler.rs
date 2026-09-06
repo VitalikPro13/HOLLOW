@@ -17,29 +17,21 @@ use super::gossip;
 use super::types::*;
 use super::ws_stream_transfer;
 
-/// Max automatic re-requests after a failed file decrypt/assembly before giving
-/// up and surfacing FileFailed to the UI. A transient truncation race (bytes not
-/// fully flushed on the sender/receiver under concurrent transfers) clears on the
-/// first or second retry; a genuinely corrupt source won't, so we cap it.
+/// Max automatic re-requests after a failed file decrypt or assembly before
+/// surfacing FileFailed to the UI. A transient truncation race clears on the first
+/// or second retry; a genuinely corrupt source will not, so it is capped.
 const FILE_DECRYPT_MAX_RETRIES: u32 = 3;
 
 // ── Auto-download configuration (issue #41) ─────────────────────────────────
 //
 // Pushed by Dart via `set_auto_download_config` at bootstrap and on every
-// settings change. `threshold_mb == 0` means auto-download is OFF. Overrides
-// are keyed `dm:{master}` / `server:{server_id}`: `false` = never auto here,
-// `true` = auto here even when the global is off (falls back to the 169 MB
-// default threshold in that case). Default-permissive (169 MB) when Dart never
-// pushed — matches the Dart-side default so old flows keep working.
+// settings change. `threshold_mb == 0` means auto-download is OFF. Overrides are
+// keyed `dm:{master}` / `server:{server_id}`. Default-permissive when Dart never
+// pushed, which matches the Dart-side default so old flows keep working.
 //
-// Pull paths (missing-file sweeps, share auto-start) are gated in Dart before
-// any request is made; pushed streams are declined at FileHeader time
-// (metadata kept for the card, no pending stream registered, late bytes
-// deleted). Since 0.9.4 there is ALSO sender-side pre-negotiation: receivers
-// advertise their effective threshold via `HavenMessage::AutoDownloadPref` and
-// senders consult `peer_auto_dl` in `send_dm_file_to_device`, sending a
-// metadata-only header instead of streaming bytes a gated receiver would
-// discard. The receive-side gate stays as the enforcement (old senders).
+// Pull paths are gated in Dart before any request is made; pushed streams are
+// declined at FileHeader time. Senders also pre-negotiate via
+// `HavenMessage::AutoDownloadPref`, but the receive-side gate is the enforcement.
 pub(crate) struct AutoDownloadConf {
     pub threshold_mb: u32,
     pub overrides: HashMap<String, bool>,
@@ -91,12 +83,10 @@ pub(crate) fn effective_auto_download_mb(context_key: &str) -> u32 {
     }
 }
 
-/// `true` when a filename matches a recorded voice message. The wire name is
-/// the recorder temp file's basename (`voice_{stamp}_{rand}.ogg` — see
-/// voice_message_recorder.dart), NOT the "Voice message.ogg" display name the
-/// UI shows (network_api.sendFile has no filename parameter). Matched as a
-/// LEGACY fallback for pre-0.9.4 senders that don't set the header's `voice`
-/// flag; keep the pattern in sync with the Dart twin `isVoiceMessageFile`.
+/// `true` when a filename matches a recorded voice message. The wire name is the
+/// recorder temp file's basename, NOT the "Voice message.ogg" display name the UI
+/// shows. A LEGACY fallback for pre-0.9.4 senders that do not set the header's
+/// `voice` flag; keep the pattern in sync with the Dart twin `isVoiceMessageFile`.
 pub(crate) fn is_voice_message_name(file_name: &str) -> bool {
     file_name == "Voice message.ogg"
         || (file_name.starts_with("voice_") && file_name.ends_with(".ogg"))
@@ -107,15 +97,12 @@ pub(crate) fn is_voice_message_name(file_name: &str) -> bool {
 /// over half an hour of speech and still nothing like a file push.
 pub(crate) const VOICE_NOTE_MAX_BYTES: u64 = 8 * 1024 * 1024;
 
-/// `true` = this header really is a recorded voice note, on every field at
-/// once.
+/// `true` = this header really is a recorded voice note, on every field at once.
 ///
-/// SECURITY (FILE-2): the exemption used to read `voice || name`, and both of
-/// those are strings the SENDER chooses. With no size bound and no look at
-/// the extension, a 34 MB header flagged `voice: true` with `ext: "exe"`
-/// landed on disk in a conversation the user had turned auto-download OFF
-/// for, and the Dart side then handed it to ffmpeg. Every field has to agree
-/// now, and the bytes have to be small enough to be a note.
+/// SECURITY (FILE-2): the exemption used to read `voice || name`, and both are
+/// strings the SENDER chooses. With no size bound and no look at the extension, a
+/// 34 MB header flagged `voice: true` with `ext: "exe"` landed on disk in a
+/// conversation the user had turned auto-download OFF for. Every field must agree.
 pub(crate) fn is_voice_note_exempt(size: u64, file_name: &str, ext: &str, voice: bool) -> bool {
     voice
         && is_voice_message_name(file_name)
@@ -123,10 +110,9 @@ pub(crate) fn is_voice_note_exempt(size: u64, file_name: &str, ext: &str, voice:
         && size <= VOICE_NOTE_MAX_BYTES
 }
 
-/// `true` = a PUSHED file transfer of `size` bytes may auto-register its
-/// stream in this conversation. Genuine voice notes are exempt — they are
-/// tiny and conversational — but only when the flag, the name, the extension
-/// and the size all say so (see `is_voice_note_exempt`).
+/// `true` = a PUSHED file transfer of `size` bytes may auto-register its stream in
+/// this conversation. Genuine voice notes are exempt, but only when the flag, the
+/// name, the extension and the size all say so (see `is_voice_note_exempt`).
 pub(crate) fn auto_download_allows(
     size: u64,
     file_name: &str,
@@ -141,11 +127,10 @@ pub(crate) fn auto_download_allows(
     mb > 0 && size <= mb * 1024 * 1024
 }
 
-/// Advertise our auto-download preference to one peer DEVICE (issue #41
-/// pre-negotiation). Counterparty devices get the effective threshold for the
-/// conversation with their identity (their per-conversation override applies);
-/// our own siblings get the global threshold (their mirrored pushes span every
-/// conversation, so no single override key applies).
+/// Advertise our auto-download preference to one peer DEVICE. Counterparty devices
+/// get the effective threshold for the conversation with their identity; our own
+/// siblings get the GLOBAL threshold, because their mirrored pushes span every
+/// conversation, so no single override key applies.
 pub(crate) fn advertise_auto_dl_pref_to_peer(
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
@@ -164,11 +149,9 @@ pub(crate) fn advertise_auto_dl_pref_to_peer(
     );
 }
 
-/// Re-advertise the auto-download preference to every connected DM-room peer
-/// and sibling after a settings change (NodeCommand::ReadvertiseAutoDlPref).
-/// Best-effort — a device we only share a server room with never receives an
-/// advert and keeps getting the pre-negotiation-free push (its own receive
-/// gate still enforces).
+/// Re-advertise the auto-download preference to every connected DM-room peer and
+/// sibling after a settings change. Best effort: a device we share only a server
+/// room with never receives an advert, and its own receive gate still enforces.
 pub(crate) fn advertise_auto_dl_pref_to_all(
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
@@ -203,25 +186,18 @@ pub(crate) fn advertise_auto_dl_pref_to_all(
 
 /// SECURITY (0.8.5): `true` = this REMOTE file-metadata write may proceed.
 ///
-/// `insert_file_metadata` is an UPSERT keyed on `file_id` — it deliberately
-/// overwrites name / ext / mime / size / dimensions so a minimal placeholder
-/// row (written by the FCM background-fetch node, which only sees the file_id)
-/// gets filled in when the real FileHeader arrives. With no owner check that
-/// same overwrite was reachable by anyone who could reach an ingest path:
+/// `insert_file_metadata` is an UPSERT keyed on `file_id`: it deliberately
+/// overwrites name, ext, mime, size and dimensions, so a minimal placeholder row
+/// written by the background-fetch node gets filled in when the real FileHeader
+/// arrives. With no owner check that same overwrite was reachable by anyone on an
+/// ingest path: a friend or server member could send a FileHeader carrying SOMEONE
+/// ELSE'S `file_id` and relabel their attachment, and a sync responder could do it
+/// through `file_meta`, whose blob the item's v2 signature does not bind.
 ///
-///   * a friend or server member could send a FileHeader carrying SOMEONE
-///     ELSE'S `file_id` and relabel their attachment (a display-spoofing
-///     primitive — make a file card read `invoice.pdf` over other bytes);
-///   * a sync responder could do it through `file_meta` on a batch item. The
-///     item's v2 signature binds `file_id`, NOT the file_meta blob hanging off
-///     it, so a batch that passes the backfill check can still carry a forged
-///     name / size / sender for that file.
-///
-/// Rule: a file card belongs to the identity that first created it. Writes are
-/// allowed when there is no row yet, or when the incoming sender resolves to
-/// the SAME master as the stored one (device→master collapse is required —
-/// the fetch path stores the friend's master while the live path stores the
-/// sending DEVICE, and both must be able to fill the same row in).
+/// Rule: a file card belongs to the identity that first created it. Writes pass
+/// when there is no row yet, or when the incoming sender resolves to the SAME
+/// master as the stored one (the device-to-master collapse is required, because
+/// the fetch path stores a master while the live path stores a device).
 pub(crate) fn file_meta_write_allowed(
     store: &crate::storage::MessageStore,
     file_id: &str,
@@ -240,13 +216,11 @@ pub(crate) fn file_meta_write_allowed(
     false
 }
 
-/// Handle NodeCommand::SendFile — the large file sending handler.
+/// Handle NodeCommand::SendFile.
 ///
-/// Image conversion (PNG/JPEG→WebP, GIF→animated WebP) is CPU work that used
-/// to run inline here — a multi-MB GIF froze the ENTIRE event loop (messages,
-/// CRDT, call signaling) for seconds. Convertible images now hop through
-/// `spawn_blocking` and re-enter via `NodeCommand::SendFileConverted`; all
-/// other files continue inline into `finish_send_file`.
+/// Image conversion is CPU work that used to run inline here, and a multi-MB GIF
+/// froze the ENTIRE event loop for seconds. Convertible images now hop through
+/// `spawn_blocking` and re-enter via `NodeCommand::SendFileConverted`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_send_file(
     peer_id: Option<String>,
@@ -284,7 +258,6 @@ pub(crate) async fn handle_send_file(
 ) {
     hollow_log!("[HOLLOW-FILE] SendFile: {file_path} mid={message_id}");
 
-    // 1. Read file from disk.
     let mut file_data = match tokio::fs::read(&file_path).await {
         Ok(d) => d,
         Err(e) => {
@@ -297,7 +270,6 @@ pub(crate) async fn handle_send_file(
         }
     };
 
-    // 2. Extract filename and extension.
     let path = std::path::Path::new(&file_path);
     let original_name = path.file_name()
         .unwrap_or_default()
@@ -308,9 +280,8 @@ pub(crate) async fn handle_send_file(
         .to_string_lossy()
         .to_lowercase();
 
-    // 2b. Channel moderation gates (posting permission + mute + media-only +
-    // slow mode). Posting permission was historically only enforced on the
-    // text send path — file sends bypassed it; this closes that gap too.
+    // 2b. Channel moderation gates. Posting permission was historically enforced
+    // only on the text path, so file sends bypassed it; this closes that gap.
     if let Some(reason) = channel_file_send_rejection(
         server_states, &server_id, &channel_id, local_peer_str, &original_ext,
         db_path, db_passphrase,
@@ -340,18 +311,11 @@ pub(crate) async fn handle_send_file(
         return;
     }
 
-    // 4. Convert to WebP if image.
-    //
-    // Phase 6.75: honor the user-configurable image quality tier.
-    // Lossless (100%) / Balanced (50%, default) / Small (30%).
-    // We read the setting from app_settings each send — a single
-    // SQLite KV lookup so the cost is negligible. Bypass rules:
-    //   - GIFs → animated WebP at all tiers (even lossless beats GIF)
-    //   - WebP inputs pass through untouched (already encoded)
-    // No size-based bypass: even tiny 20 KB PNGs routinely drop
-    // to 2-3 KB at Q=50 (~90% reduction), and "tiny × millions of
-    // messages" is still meaningful bandwidth. The encode cost on
-    // small files is trivial.
+    // 4. Convert to WebP if image, honouring the user's quality tier (read from
+    // app_settings per send: one KV lookup, so the cost is negligible). GIFs become
+    // animated WebP at every tier and WebP inputs pass through untouched. No
+    // size-based bypass: even a 20 KB PNG drops to 2-3 KB at Q=50, and the encode
+    // cost on small files is trivial.
     let mime = file_transfer::mime_from_ext(&original_ext);
     let is_image = file_transfer::is_image_mime(&mime);
 
@@ -362,8 +326,7 @@ pub(crate) async fn handle_send_file(
 
     if needs_convert {
         // CPU-heavy conversion: hop off the event loop and re-enter via
-        // SendFileConverted when done. The event loop keeps dispatching
-        // messages/CRDT/call signaling in the meantime.
+        // SendFileConverted, so messages, CRDT and call signaling keep flowing.
         spawn_image_conversion(
             peer_id, server_id, channel_id, message_id, message_text,
             vthumb, share_ref, original_name, is_image, voice,
@@ -378,10 +341,9 @@ pub(crate) async fn handle_send_file(
     let override_width = override_width.filter(|v| *v > 0);
     let override_height = override_height.filter(|v| *v > 0);
 
-    // Video (or any non-image) send with a Dart-extracted poster frame:
-    // encode the wire poster off the event loop — the same spawn_blocking
-    // re-entry hop the image conversion uses — then resume at
-    // finish_send_file via SendFileConverted.
+    // Video send with a Dart-extracted poster frame: encode the wire poster off the
+    // event loop, the same spawn_blocking hop the image conversion uses, then
+    // resume at finish_send_file via SendFileConverted.
     if !is_image && let Some(poster_bytes) = poster.filter(|p| !p.is_empty()) {
         spawn_video_poster_encode(
             peer_id, server_id, channel_id, message_id, message_text,
@@ -393,9 +355,8 @@ pub(crate) async fn handle_send_file(
         return;
     }
 
-    // Non-image (or non-convertible) files continue inline: use Dart-supplied
-    // dimensions if any (Phase 6.75 video preview passes the source video's
-    // dimensions through here).
+    // Non-image files continue inline, using Dart-supplied dimensions if any (the
+    // video preview path passes the source video's dimensions through here).
     let final_data = std::mem::take(&mut file_data);
     let final_ext = original_ext.clone();
     finish_send_file(
@@ -410,10 +371,9 @@ pub(crate) async fn handle_send_file(
     ).await;
 }
 
-/// Poster-encode hop for video sends: `encode_video_poster` decodes and
-/// re-encodes an image on the blocking pool (a lossless 480p ffmpeg frame is
-/// a real decode), then re-enters the event loop with the UNCHANGED file
-/// bytes plus the poster thumb and poster-derived dimension fallback.
+/// Poster-encode hop for video sends: `encode_video_poster` decodes and re-encodes
+/// on the blocking pool, then re-enters the event loop with the UNCHANGED file
+/// bytes plus the poster thumb and its dimension fallback.
 #[allow(clippy::too_many_arguments)]
 fn spawn_video_poster_encode(
     peer_id: Option<String>,
@@ -461,21 +421,19 @@ fn spawn_video_poster_encode(
 /// Max side of the blurred-placeholder thumbnail riding an IMAGE FileHeader
 /// (issue #41 carry-over). 32 px lossy WebP ≈ a few hundred bytes.
 const FILE_THUMB_MAX_DIM: u32 = 32;
-/// Max ENCODED size of a video poster riding the FileHeader `thumb` field
-/// (crisp preview frame, up to 400 px). The relay's offline rings are
-/// count-capped / byte-budgeted (1 MB per channel topic), so ~24 KB per
-/// video message is a comfortable share.
+/// Max ENCODED size of a video poster riding the FileHeader `thumb` field (a crisp
+/// frame up to 400 px). The relay's offline rings are byte-budgeted at 1 MB per
+/// channel topic, so ~24 KB per video message is a comfortable share.
 const VIDEO_POSTER_MAX_BYTES: usize = 24 * 1024;
 /// Receive-side cap on the base64 `thumb` field — bounds both the image
 /// blur thumb (a few hundred bytes) and the video poster (≤24 KB binary ≈
 /// 32 KB base64). Anything larger is a malformed/hostile header.
 pub(crate) const FILE_THUMB_MAX_B64_LEN: usize = 48 * 1024;
 
-/// Receive-side acceptance filter for the envelope-borne `thumb`: images get
-/// the tiny blur placeholder, videos the poster frame — anything else (or an
-/// oversized blob) is dropped before it can reach the DB/UI. ONE helper so
-/// every ingest path (Olm, MLS, sync batches, guest live, fetch node) stays
-/// in lockstep.
+/// Receive-side acceptance filter for the envelope-borne `thumb`: images get the
+/// tiny blur placeholder, videos the poster frame, and anything else or anything
+/// oversized is dropped before it reaches the DB or UI. ONE helper, so every
+/// ingest path stays in lockstep.
 pub(crate) fn accept_header_thumb(thumb: Option<String>, img: bool, mime: &str) -> Option<String> {
     thumb.filter(|t| {
         (img || mime.starts_with("video/"))
@@ -484,12 +442,10 @@ pub(crate) fn accept_header_thumb(thumb: Option<String>, img: bool, mime: &str) 
     })
 }
 
-/// Encode a video poster frame (any decodable image bytes) into the bounded
-/// lossy WebP that rides the FileHeader. Steps down through smaller max
-/// dimensions until the encoded size fits the wire budget. Returns
-/// `(base64, poster_w, poster_h)` — the dimensions are aspect-true to the
-/// source video, so they double as the header w/h fallback when the ffmpeg
-/// stderr probe yielded none.
+/// Encode a video poster frame into the bounded lossy WebP that rides the
+/// FileHeader, stepping down through smaller max dimensions until it fits the wire
+/// budget. The returned dimensions are aspect-true to the source video, so they
+/// double as the header w/h fallback when the ffmpeg probe yielded none.
 fn encode_video_poster(data: &[u8]) -> Option<(String, u32, u32)> {
     for max_dim in [400u32, 320, 256] {
         if let Ok((bytes, w, h)) = image_convert::convert_to_webp_preview(data, max_dim) {
@@ -505,10 +461,9 @@ fn encode_video_poster(data: &[u8]) -> Option<(String, u32, u32)> {
     None
 }
 
-/// Tiny blurred-placeholder thumbnail from the ORIGINAL image bytes (decoded
-/// once more on the blocking pool — the conversion path may produce animated
-/// WebP the `image` crate can't re-decode). None on any failure: the
-/// placeholder simply renders without a blur preview.
+/// Tiny blurred-placeholder thumbnail from the ORIGINAL image bytes, decoded once
+/// more on the blocking pool because the conversion path may produce animated WebP
+/// the `image` crate cannot re-decode. None on failure: no blur preview.
 fn generate_file_thumb(original_data: &[u8]) -> Option<String> {
     let (bytes, _, _) = image_convert::convert_to_webp_preview(original_data, FILE_THUMB_MAX_DIM).ok()?;
     if bytes.is_empty() || bytes.len() > FILE_THUMB_MAX_B64_LEN / 2 {
@@ -539,11 +494,10 @@ fn convert_image_data(
     override_width: Option<u32>,
     override_height: Option<u32>,
 ) -> (Vec<u8>, String, Option<u32>, Option<u32>) {
-    // ANIMATED sources first, decided from the BYTES. Branching on the
-    // extension is what froze an APNG (`.png` -> the still WebP path) and an
-    // animated WebP (`.webp` -> a decode+re-encode that keeps only frame 0).
-    // Re-encoding through the animation encoder drops metadata too, which is
-    // the whole reason the still paths re-encode.
+    // ANIMATED sources first, decided from the BYTES. Branching on the extension is
+    // what froze an APNG and flattened an animated WebP to frame 0. Re-encoding
+    // through the animation encoder drops metadata too, which is the whole reason
+    // the still paths re-encode.
     if image_convert::is_animated_image(&file_data) {
         match image_convert::convert_animation_to_webp(&file_data, webp_quality) {
             Ok((webp_data, w, h)) => {
@@ -591,11 +545,10 @@ fn convert_image_data(
     }
 }
 
-/// Channel moderation gates for a file send (posting permission + mute +
-/// media-only + slow mode). Returns Some(reason) when the send must be
-/// rejected with FileFailed. Async — the slow-mode check reads the
-/// MessageStore on the blocking pool (SQLCipher key derivation is expensive);
-/// the store lives entirely inside that closure (Connection is !Sync).
+/// Channel moderation gates for a file send (posting permission, mute, media-only,
+/// slow mode). Returns Some(reason) when the send must be rejected with FileFailed.
+/// Async: the slow-mode check reads the MessageStore on the blocking pool, and the
+/// store lives entirely inside that closure, because a Connection is !Sync.
 async fn channel_file_send_rejection(
     server_states: &HashMap<String, ServerState>,
     server_id: &Option<String>,
@@ -630,10 +583,9 @@ async fn channel_file_send_rejection(
     slow_mode_rejection(server, sid, cid, local_peer_str, now_ms, db_path, db_passphrase).await
 }
 
-/// Slow-mode gate for a channel file send. The Mod+ exemption short-circuits
-/// BEFORE any store access; the sender's own latest channel ts is read on the
-/// blocking pool via the shared message_ops helper. Store-open failure =
-/// allow (mirrors the original inline behavior).
+/// Slow-mode gate for a channel file send. The Mod+ exemption short-circuits BEFORE
+/// any store access; the sender's own latest channel ts is read on the blocking
+/// pool via the shared message_ops helper. Store-open failure allows.
 async fn slow_mode_rejection(
     server: &ServerState,
     sid: &str,
@@ -656,9 +608,8 @@ async fn slow_mode_rejection(
     None
 }
 
-/// The step-4 conversion dispatch: read the user's quality tier (a single
-/// SQLite KV lookup — negligible cost), hop the CPU-heavy image conversion
-/// onto the blocking pool, and re-enter the event loop via
+/// The step-4 conversion dispatch: read the user's quality tier, hop the CPU-heavy
+/// image conversion onto the blocking pool, and re-enter the event loop via
 /// NodeCommand::SendFileConverted when done.
 #[allow(clippy::too_many_arguments)]
 fn spawn_image_conversion(
@@ -763,7 +714,6 @@ pub(crate) async fn finish_send_file(
         return;
     }
 
-    // 5. Generate file ID.
     let file_id = file_transfer::generate_file_id();
     let file_size = final_data.len() as u64;
     let total_chunks = 0u32; // 0 = streamed transfer
@@ -793,7 +743,6 @@ pub(crate) async fn finish_send_file(
     let order_us = crate::chat_clock::next_send_stamp_us();
     let timestamp = order_us / 1000;
 
-    // 7. Save file metadata to DB.
     let ctx_type;
     let ctx_id;
     if let Some(ref sid) = server_id {
@@ -812,14 +761,10 @@ pub(crate) async fn finish_send_file(
         vthumb.as_ref(), thumb.as_deref(), store_full_file, &final_path,
     );
 
-    // Emit FileCompleted on the sender side too, so the
-    // sender's UI reloads the chat from the DB and picks
-    // up the real width/height/videoThumb/etc that Rust
-    // wrote to the local row. Without this, the sender's
-    // optimistic FileAttachment (built without dimensions
-    // by addFileMessage) is stuck with the wrong size.
-    // Receivers already get this via the stream-receive
-    // code path at swarm.rs:6898; sender path was missing.
+    // Emit FileCompleted on the sender side too, so the sender's UI reloads from the
+    // DB and picks up the real width/height/videoThumb Rust wrote. Without it the
+    // optimistic FileAttachment, built without dimensions, keeps the wrong size.
+    // Receivers already get this via the stream-receive path.
     if store_full_file {
         let _ = event_tx.send(NetworkEvent::FileCompleted {
             file_id: file_id.clone(),
@@ -827,17 +772,14 @@ pub(crate) async fn finish_send_file(
         }).await;
     }
 
-    // 8. Build and send the message with file_id.
     let signing_payload_text = if message_text.is_empty() {
         format!("[file:{}]", file_id)
     } else {
         message_text.clone()
     };
 
-    // Sign using the canonical payload format (must match
-    // verify_message_signature on the receive path).
-    // Previously this called sign_message with raw text,
-    // causing every file-message signature to fail verification.
+    // Sign using the canonical payload format, which must match
+    // verify_message_signature on the receive path.
     let (sig, pk) = sign_file_message(
         &peer_id, &server_id, &channel_id, &local_peer, timestamp,
         &signing_payload_text, &message_id, &file_id, order_us,
@@ -845,12 +787,10 @@ pub(crate) async fn finish_send_file(
     );
 
     if let Some(peer_str) = peer_id {
-        // DM path. The companion caption / "[file:...]" DM is a DirectMessage; for
-        // a sibling self-echo it must carry `convo` = the recipient master so our
-        // other device files it under the right thread (see message_ops fan-out).
-        //
-        // Store the text message (keyed by the recipient MASTER id — same as the
-        // DM-thread key the UI/receive path uses).
+        // DM path. The companion caption / "[file:...]" DM is a DirectMessage; a
+        // sibling self-echo must carry `convo` = the recipient master so our other
+        // device files it under the right thread. The text row is stored keyed by
+        // that same recipient MASTER id.
         persist_sent_dm_row(
             db_path, db_passphrase, &peer_str, &signing_payload_text,
             timestamp, sig.as_deref(), pk.as_deref(), &message_id, &file_id, order_us,
@@ -900,11 +840,10 @@ pub(crate) async fn finish_send_file(
     }
 }
 
-/// Sign the file message with the canonical signing payload for its context
-/// (DM = recipient, channel = "sid:cid"); no context → unsigned. The v2
-/// signature binds mid + file_id + order_us exactly as they ride the
-/// companion DirectMessage/ChannelMessage envelope (file sends carry no
-/// reply_to and no link preview).
+/// Sign the file message with the canonical signing payload for its context (DM =
+/// recipient, channel = "sid:cid"); no context means unsigned. The v2 signature
+/// binds mid, file_id and order_us exactly as they ride the companion envelope
+/// (file sends carry no reply_to and no link preview).
 #[allow(clippy::too_many_arguments)]
 fn sign_file_message(
     peer_id: &Option<String>,
@@ -1085,16 +1024,12 @@ fn build_dm_file_header(
 }
 
 /// ── Multi-device fan-out (Phase 6, Step 3) ──────────────────────
-/// `peer_str` is the recipient's MASTER id. The companion DM caption,
-/// FileHeader, and (online) WebRTC stream all key on per-DEVICE Olm
-/// sessions / room membership, so we must deliver to each of the
-/// recipient's devices AND our own siblings (so a file sent from one of
-/// our devices mirrors live to the other). Single-device recipients
-/// resolve to an empty device set → fall back to the master id = exact
-/// pre-multi-device behavior. The DELICATE offline-image caption ratchet
-/// rule (send exactly once via send_encrypted_text_to_peer, never
-/// send_encrypted_message) holds PER DEVICE — each device has its own Olm
-/// ratchet, so "exactly once per device" is the correct generalization.
+/// `peer_str` is the recipient's MASTER id. The companion DM caption, FileHeader
+/// and (online) WebRTC stream all key on per-DEVICE Olm sessions and room
+/// membership, so each of the recipient's devices AND our own siblings gets a
+/// delivery. The DELICATE offline-image caption ratchet rule (send exactly once
+/// via send_encrypted_text_to_peer, never send_encrypted_message) holds PER
+/// DEVICE, since each device has its own Olm ratchet.
 #[allow(clippy::too_many_arguments)]
 async fn send_dm_file_fanout(
     peer_str: &str,
@@ -1133,12 +1068,10 @@ async fn send_dm_file_fanout(
     }
 }
 
-/// Sender-side pre-negotiation (issue #41 carry-over): `true` when the target
-/// device ADVERTISED an auto-download preference this push would violate —
-/// stream nothing, send a metadata-only header instead. Voice notes are never
-/// gated (mirrors `auto_download_allows`). No advert = push as before (old
-/// client, or the advert hasn't arrived yet); the receiver's own gate still
-/// enforces in that case — this check only saves the wasted bytes.
+/// Sender-side pre-negotiation: `true` when the target device ADVERTISED an
+/// auto-download preference this push would violate, so stream nothing and send a
+/// metadata-only header instead. Voice notes are never gated. No advert means push
+/// as before, and the receiver's own gate still enforces.
 fn receiver_pref_declines(peer_auto_dl: &HashMap<String, u32>, peer_str: &str, msg: &DmFileMsg<'_>) -> bool {
     if is_voice_note_exempt(msg.file_size, msg.original_name, msg.final_ext, msg.voice) {
         return false;
@@ -1149,10 +1082,9 @@ fn receiver_pref_declines(peer_auto_dl: &HashMap<String, u32>, peer_str: &str, m
     }
 }
 
-/// Compute the per-device target set for a DM file send.
-/// Target set = persisted device list UNION devices currently in the DM
-/// room (live presence is authoritative — see message_ops::collect_target_devices;
-/// a stale/polluted stored list must not hide the connected device).
+/// Compute the per-device target set for a DM file send: the persisted device list
+/// UNION the devices currently in the DM room, because live presence is
+/// authoritative and a stale list must not hide the connected device.
 #[allow(clippy::too_many_arguments)]
 fn collect_dm_file_targets(
     peer_str: &str,
@@ -1164,22 +1096,18 @@ fn collect_dm_file_targets(
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     olm: &OlmManager,
 ) -> Vec<String> {
-    // LIVENESS-FILTERED (Step 7 ghost fix, mirrors message_ops::collect_target_devices):
-    // only target stored devices CURRENTLY IN A ROOM. A dead ghost id (from a
-    // re-link cycle) has a stale session but is in no room, so without this it
-    // would hit the offline room-send path → spurious push + unread on a phantom
-    // device. The live-room union below still catches any real online device the
-    // stored list missed; the single-device fallback preserves offline push.
+    // LIVENESS-FILTERED (mirrors message_ops::collect_target_devices): only target
+    // stored devices CURRENTLY IN A ROOM. A dead ghost id has a stale session but is
+    // in no room, so without this it takes the offline room-send path and fires a
+    // spurious push and unread on a phantom device.
     let mut file_set: std::collections::HashSet<String> =
         crate::node::resolver::devices_for(recipient_master)
             .into_iter()
             .filter(|d| ws_room_for_peer(ws_room_peers, d).is_some())
             .collect();
-    // Offline-but-real RECIPIENT devices (Step 9A push): a real device of the
-    // recipient that's offline but we hold an Olm session with → the offline
-    // image path buffers under it + pushes its token so a fully-quit phone gets
-    // the image preview. Mirrors message_ops::collect_target_devices. Only the
-    // recipient (not our own siblings — never push our own phone for our send).
+    // Offline-but-real RECIPIENT devices: a real device that is offline but we hold
+    // an Olm session with, so the offline image path buffers under it and pushes its
+    // token. Recipient only, never our own siblings.
     if !self_dm {
         for d in crate::node::resolver::devices_for(recipient_master) {
             if ws_room_for_peer(ws_room_peers, &d).is_none() && olm.has_session(&d) {
@@ -1224,10 +1152,9 @@ fn insert_dm_room_live_members(
     }
 }
 
-/// Deliver one DM file send to a single target DEVICE: the companion caption /
-/// "[file:...]" DirectMessage, the FileHeader, and the encrypted bytes —
-/// branching on live stream vs offline image (inline 0x08) vs offline file
-/// (metadata-only card) vs no-Olm-session.
+/// Deliver one DM file send to a single target DEVICE: the companion caption DM,
+/// the FileHeader and the encrypted bytes, branching on live stream, offline image
+/// (inline 0x08), offline file (metadata-only card) and no-Olm-session.
 #[allow(clippy::too_many_arguments)]
 async fn send_dm_file_to_device(
     peer_str: &str,
@@ -1263,25 +1190,18 @@ async fn send_dm_file_to_device(
     };
     let envelope_json = serde_json::to_string(&envelope)
         .unwrap_or_else(|_| msg.signing_payload_text.to_string());
-    // Encrypt and send the message + FileHeader + FileChunks via Olm.
     if olm.has_session(peer_str) {
-        // EXACT-device reachability (not identity-wide): in a fan-out one
-        // device may be online while a sibling is offline. ws_room_for_peer
-        // = exact membership.
+        // EXACT-device reachability, not identity-wide: in a fan-out one device may
+        // be online while a sibling is offline.
         let reachable = ws_room_for_peer(ws_room_peers, peer_str).is_some();
 
-        // Send the message (caption / "[file:...]") envelope.
-        //
-        // CRITICAL — Olm ratchet ordering: `send_encrypted_message` ALWAYS
-        // calls olm.encrypt() (advancing + persisting the ratchet) BEFORE it
-        // checks reachability, and DISCARDS the ciphertext if the peer is
-        // offline. For an OFFLINE IMAGE that wasted encryption burns a ratchet
-        // slot the receiver never sees — a permanent gap that breaks decrypt
-        // of the FileHeader/caption that follow. So when offline-and-image we
-        // must NOT call it here; the caption is sent exactly once inside
-        // send_offline_dm_image (which also actually delivers to the buffer),
-        // AFTER the inlined FileHeader. The online path and the non-image
-        // offline path are unchanged.
+        // CRITICAL, Olm ratchet ordering: `send_encrypted_message` ALWAYS calls
+        // olm.encrypt(), advancing and persisting the ratchet, BEFORE it checks
+        // reachability, and DISCARDS the ciphertext if the peer is offline. For an
+        // OFFLINE IMAGE that wasted encryption burns a ratchet slot the receiver
+        // never sees, a permanent gap that breaks decrypt of everything after it.
+        // So when offline-and-image the caption is sent exactly once inside
+        // send_offline_dm_image, AFTER the inlined FileHeader.
         if reachable {
             send_encrypted_message(
                 olm, crypto_store,
@@ -1289,12 +1209,10 @@ async fn send_dm_file_to_device(
                 ws_cmd_tx, ws_room_peers,
             ).await;
         } else if !msg.is_image {
-            // OFFLINE non-image: target the MASTER-pair DM room directly
-            // (0x04, text cap) so the relay's offline buffer holds the
-            // caption/"[file:...]" message. `send_encrypted_message` would
-            // encrypt and then DISCARD for a peer in no known room — a
-            // wasted ratchet slot and nothing buffered. Mirrors
-            // message_ops' offline text-DM path.
+            // OFFLINE non-image: target the MASTER-pair DM room directly (0x04, text
+            // cap) so the relay's offline buffer holds the caption.
+            // `send_encrypted_message` would encrypt and then DISCARD for a peer in
+            // no known room: a wasted ratchet slot and nothing buffered.
             crate::node::crypto_handler::send_encrypted_text_to_peer(
                 olm, crypto_store,
                 peer_str, dm_room_f.to_string(), &envelope_json, event_tx,
@@ -1305,12 +1223,10 @@ async fn send_dm_file_to_device(
         // Only send file data if peer is reachable right now.
         // If offline, the file_id is in the message — sync will request it later.
         if reachable && receiver_pref_declines(peer_auto_dl, peer_str, msg) {
-            // Sender-side pre-negotiation (issue #41 carry-over): this device
-            // ADVERTISED a threshold this push would violate — its gate would
-            // decline the header and discard every byte anyway. Send the
-            // metadata-only header instead (no AES material → no pending
-            // stream registers, the card renders with a manual Download
-            // button, and the explicit FileRequest pull works as usual).
+            // Sender-side pre-negotiation: this device ADVERTISED a threshold this
+            // push would violate, so its gate would decline the header and discard
+            // every byte. The metadata-only header renders the card with a manual
+            // Download button, and the explicit FileRequest pull still works.
             hollow_log!(
                 "[HOLLOW-FILE] Receiver pref gates {} ({} bytes) for {peer_str} — sending metadata-only header, no bytes",
                 msg.file_id, msg.file_size
@@ -1332,15 +1248,12 @@ async fn send_dm_file_to_device(
             ).await;
         } else if msg.is_image {
             if receiver_pref_declines(peer_auto_dl, peer_str, msg) {
-                // Sender-side pre-negotiation, offline-image variant: the
-                // device advertised a gating threshold before it went offline —
-                // don't inline the bytes into the relay buffer it would only
-                // discard. Buffer the companion envelope FIRST (caption or
-                // "[file:...]" sentinel — a metadata-only header creates no
-                // message row on receive, unlike the inline-bytes header),
-                // then the metadata-only card. Mirrors the non-image offline
-                // path's caption-then-meta order; both sends ride
-                // send_encrypted_text_to_peer so the Olm ratchet has no gap.
+                // Pre-negotiation, offline-image variant: the device advertised a
+                // gating threshold before it went offline, so do not inline bytes
+                // into a relay buffer it would only discard. The companion envelope
+                // is buffered FIRST (a metadata-only header creates no message row),
+                // then the card; both rides go through send_encrypted_text_to_peer,
+                // so the Olm ratchet has no gap.
                 hollow_log!(
                     "[HOLLOW-FILE] Receiver pref gates offline image {} for {peer_str} — buffering metadata-only card",
                     msg.file_id
@@ -1367,14 +1280,11 @@ async fn send_dm_file_to_device(
             ).await;
         }
     } else if ws_room_for_peer(ws_room_peers, peer_str).is_some() {
-        // No Olm session with this device yet (a freshly-appeared device before
-        // key exchange completes). The text-DM path queues + KeyRequests here
-        // (send_dm_to_device); a FILE can't ride the pending-envelope queue, so
-        // kick off the session (KeyRequest to a LIVE device) and let the normal
-        // heal paths deliver the content later (DM-sync backfill re-serves the
-        // message; the file re-serves on request/open). Without this the target
-        // device got NOTHING — no queue, no key exchange — until some other
-        // traffic happened to establish the session.
+        // No Olm session with this device yet. The text-DM path queues and
+        // KeyRequests here, but a FILE cannot ride the pending-envelope queue, so
+        // kick off the session and let the normal heal paths deliver the content
+        // later. Without this the target device got NOTHING, no queue and no key
+        // exchange, until unrelated traffic happened to establish the session.
         hollow_log!("[HOLLOW-FILE] No session for DM file target {peer_str} — sending KeyRequest");
         send_message_to_peer(
             ws_cmd_tx, ws_room_peers,
@@ -1403,7 +1313,6 @@ async fn stream_dm_file_live(
     webrtc_peers: &std::collections::HashSet<String>,
     pending_webrtc_sends: &mut HashMap<String, (String, ws_stream_transfer::StreamKind, String, PathBuf, u64)>,
 ) {
-    // AES-encrypt the file, write ciphertext to temp file.
     let encrypted = crate::vault::pipeline::aes_encrypt(msg.final_data);
     if let Ok(enc) = encrypted {
         // Per-device temp file: sibling devices may stream the same
@@ -1422,7 +1331,6 @@ async fn stream_dm_file_live(
                 ws_cmd_tx, ws_room_peers,
             ).await;
 
-            // Stream encrypted file bytes via WebRTC or WS relay.
             stream_to_peer(
                 ws_cmd_tx, ws_room_peers,
                 webrtc_peers, pending_webrtc_sends, event_tx,
@@ -1430,10 +1338,9 @@ async fn stream_dm_file_live(
                 msg.file_id, &temp_path, enc.ciphertext.len() as u64,
             ).await;
             hollow_log!("[HOLLOW-FILE] Streaming {} ({} bytes) to DM {peer_str}", msg.file_id, enc.ciphertext.len());
-            // Clean up the sender-side ciphertext temp once the WS-relay
-            // stream is queued (awaited). A WebRTC send still in flight owns
-            // the temp and removes it on WebRtcTransferComplete, so only
-            // delete when no such send is pending — mirrors the channel path.
+            // Clean up the sender-side ciphertext temp once the WS-relay stream is
+            // queued. A WebRTC send still in flight owns the temp and removes it on
+            // WebRtcTransferComplete, so only delete when no such send is pending.
             if !pending_webrtc_sends.contains_key(msg.file_id) {
                 let _ = tokio::fs::remove_file(&temp_path).await;
             }
@@ -1441,12 +1348,10 @@ async fn stream_dm_file_live(
     }
 }
 
-/// Peer is OFFLINE and this is an image: inline the AES-encrypted bytes INTO
-/// the FileHeader and send it via SendDirectImage (0x08) so the relay buffers
-/// it under the per-peer image cap. The FCM fetch node then writes the file
-/// to disk and renders a real image preview in the push notification — no
-/// live stream needed. Larger non-image files still fall back to
-/// request-on-open via DM-sync.
+/// Peer is OFFLINE and this is an image: inline the AES-encrypted bytes INTO the
+/// FileHeader and send via SendDirectImage (0x08), so the relay buffers it under
+/// the per-peer image cap and the FCM fetch node renders a real preview with no
+/// live stream. Larger non-image files still fall back to request-on-open.
 #[allow(clippy::too_many_arguments)]
 async fn send_offline_dm_image(
     peer_str: &str,
@@ -1459,15 +1364,11 @@ async fn send_offline_dm_image(
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
 ) {
     if let Ok(enc) = crate::vault::pipeline::aes_encrypt(msg.final_data) {
-        // Carry the signature on the offline-image FileHeader.
-        // For a CAPTIONLESS image this is the ONLY transmitted
-        // signature (the "[file:...]" companion DM is dropped
-        // to offline peers), and it's signed over the same
-        // "[file:<id>]" text the fetch node stores — so the
-        // row verifies instead of showing "Unsigned". For a
-        // CAPTIONED image the caption DM carries its own sig
-        // over the caption text and overwrites this via
-        // promote_file_sentinel_to_caption; harmless here.
+        // Carry the signature on the offline-image FileHeader. For a CAPTIONLESS
+        // image this is the ONLY transmitted signature, signed over the same
+        // "[file:...]" text the fetch node stores, so the row verifies instead of
+        // showing "Unsigned". A CAPTIONED image's caption DM carries its own and
+        // overwrites this.
         let header = build_dm_file_header(
             msg, msg.sig.clone(), msg.pk.clone(),
             Some(hex::encode(enc.key)), Some(hex::encode(enc.nonce)),
@@ -1477,13 +1378,10 @@ async fn send_offline_dm_image(
             ),
         );
         let header_json = serde_json::to_string(&header).unwrap_or_default();
-        // Target the MASTER-pair DM room directly (computed once by the
-        // fan-out as `dm_room_f`) — the offline peer is not a member of any
-        // known room, so a lookup would drop the message, and
-        // `dm_room_code` is pure now so it must NOT be recomputed from
-        // the per-device `peer_str` (that keys the room on the device,
-        // not the identity → the offline buffer/replay room mismatches).
-        // The relay buffers it under the image cap (mirrors offline text-DM).
+        // Target the MASTER-pair DM room directly (computed once by the fan-out):
+        // the offline peer is in no known room, so a lookup would drop the message,
+        // and `dm_room_code` must NOT be recomputed from the per-device `peer_str`,
+        // which would key the room on the device rather than the identity.
         crate::node::crypto_handler::send_encrypted_image_to_peer(
             olm, crypto_store,
             peer_str, dm_room_f.to_string(), &header_json, event_tx,
@@ -1491,15 +1389,11 @@ async fn send_offline_dm_image(
         ).await;
         hollow_log!("[HOLLOW-FILE] Inlined offline image {} ({} enc bytes) to DM {peer_str}", msg.file_id, enc.ciphertext.len());
 
-        // If this image has a CAPTION, send it now — exactly once,
-        // AFTER the FileHeader — straight to the DM room (0x04, text
-        // cap). We deliberately skipped the caption's normal send
-        // in send_dm_file_to_device (offline_image guard) to avoid a
-        // wasted Olm encryption that would corrupt the ratchet. The caption
-        // shares the FileHeader's message_id, so the fetch node merges
-        // them (real caption wins over the "[file:...]" sentinel) and
-        // the offline peer sees the captioned image. Encryption order
-        // on the wire is FileHeader (#N) then caption (#N+1) — no gap.
+        // If this image has a CAPTION, send it now, exactly once and AFTER the
+        // FileHeader, straight to the DM room. Its normal send was skipped in
+        // send_dm_file_to_device to avoid a wasted Olm encryption that would corrupt
+        // the ratchet. It shares the FileHeader's message_id, so the fetch node
+        // merges them and the offline peer sees the captioned image.
         if !msg.message_text.is_empty() {
             crate::node::crypto_handler::send_encrypted_text_to_peer(
                 olm, crypto_store,
@@ -1511,12 +1405,10 @@ async fn send_offline_dm_image(
     }
 }
 
-/// OFFLINE non-image file: send a METADATA-ONLY FileHeader to the DM room
-/// (0x04, text cap) so the relay's offline buffer carries the file card —
-/// never the bytes (RAM/bandwidth bomb). No aes_key/nonce → the receiver
-/// inserts metadata without registering a pending stream (same semantics as
-/// a DM-sync `file_meta` card) and fetches the bytes via the normal
-/// request-on-open path once both peers are online.
+/// OFFLINE non-image file: send a METADATA-ONLY FileHeader to the DM room (0x04,
+/// text cap) so the relay's offline buffer carries the file card, never the bytes.
+/// No aes_key/nonce means the receiver inserts metadata without registering a
+/// pending stream and fetches the bytes via the normal request-on-open path.
 async fn send_offline_dm_file_meta(
     peer_str: &str,
     dm_room_f: &str,
@@ -1566,10 +1458,9 @@ fn persist_sent_channel_row(
     }
 }
 
-/// Channel file send: persist the caption row, MLS-broadcast the text message
-/// and FileHeader over the channel topic, then distribute the encrypted bytes
-/// (share-backed skip / vault shards / gossip tree / small-server full
-/// replication).
+/// Channel file send: persist the caption row, MLS-broadcast the text message and
+/// FileHeader over the channel topic, then distribute the encrypted bytes (share
+/// skip, vault shards, gossip tree, or small-server full replication).
 #[allow(clippy::too_many_arguments)]
 async fn send_channel_file(
     sid: &str,
@@ -1623,28 +1514,20 @@ async fn send_channel_file(
         }),
     };
 
-    // Store the text message.
     persist_sent_channel_row(
         db_path, db_passphrase, sid, cid, local_peer, signing_payload_text,
         timestamp, sig.as_deref(), pk.as_deref(), message_id, file_id, order_us,
     );
 
-    // Send the TEXT MESSAGE ("[file:...]" / caption) via the MLS TOPIC
-    // broadcast — the SAME path normal channel text takes. It used to fan
-    // targeted per-member direct sends, which (a) silently skipped every
-    // OFFLINE member (no queue, no relay copy — the file card's message
-    // row only healed via channel sync) and (b) never entered the relay's
-    // per-channel offline ring, so catch-up replayed the FileHeader with
-    // no message row to hang it on and the chat showed NOTHING.
-    // Restricted channels (Option B) encrypt under the per-channel
-    // subgroup — the room sees ciphertext either way, identical to
-    // message_ops' text sends.
+    // Send the TEXT MESSAGE via the MLS TOPIC broadcast, the SAME path normal
+    // channel text takes. Targeted per-member direct sends silently skipped every
+    // OFFLINE member and never entered the relay's per-channel offline ring, so
+    // catch-up replayed the FileHeader with no message row to hang it on and the
+    // chat showed NOTHING. Restricted channels encrypt under the subgroup.
     //
-    // PUBLIC channels mirror message_ops' text branch instead: plaintext
-    // `PublicChannelMessage` (guests receive it too), carrying `file_meta` so
-    // guests can render the file card live — they can't decrypt the MLS
-    // FileHeader that follows. Members ignore `file_meta` (MLS header is
-    // their metadata source) and dedup the row by message_id.
+    // PUBLIC channels mirror message_ops' text branch: plaintext
+    // `PublicChannelMessage` carrying `file_meta`, so guests can render the file
+    // card live. Members ignore `file_meta` and dedup the row by message_id.
     let is_public_channel = server_states
         .get(sid)
         .is_some_and(|s| s.is_channel_public(cid));
@@ -1682,9 +1565,8 @@ async fn send_channel_file(
         broadcast_channel_caption_mls(mls, server_states, ws_cmd_tx, crypto_store, sid, cid, &envelope);
     }
 
-    // Send FileHeader + file bytes via stream to connected peers.
-    // Skip full-file streaming in erasure coding mode (6+ members) —
-    // vault shards are distributed separately via VaultUploadFile.
+    // Skip full-file streaming in erasure coding mode (6+ members): vault shards
+    // are distributed separately via VaultUploadFile.
     let member_count = server_states.get(sid)
         .map(|s| s.members.len())
         .unwrap_or(0);
@@ -1784,10 +1666,9 @@ fn broadcast_channel_caption_mls(
     }
 }
 
-/// AES material + sender-side ciphertext temp for a channel file send.
-/// Vault-only mode generates key+nonce WITHOUT encrypting (the vault upload
-/// path in crdt.rs does its own AES); share-backed sends skip writing the
-/// temp. Returns None after logging when AES setup fails (caller aborts).
+/// AES material and sender-side ciphertext temp for a channel file send. Vault-only
+/// mode generates key and nonce WITHOUT encrypting; share-backed sends skip writing
+/// the temp. None after logging when AES setup fails, and the caller aborts.
 async fn prepare_channel_file_ciphertext(
     use_vault_only: bool,
     has_share_ref: bool,
@@ -1825,12 +1706,10 @@ async fn prepare_channel_file_ciphertext(
     }
 }
 
-/// Broadcast the channel FileHeader via MLS over the CHANNEL TOPIC (0x07),
-/// mirroring the channel text path: subgroup-aware, and the relay tees topic
-/// frames into the per-channel offline ring — a 0x03 room broadcast never
-/// reached offline members' catch-up, so buffered channel images/files
-/// rendered captions with no file card. Live delivery semantics match text
-/// (subscribed members get it now; others via channel sync / catch-up).
+/// Broadcast the channel FileHeader via MLS over the CHANNEL TOPIC (0x07), like the
+/// channel text path: subgroup-aware, and the relay tees topic frames into the
+/// per-channel offline ring, which a 0x03 room broadcast never reached, so buffered
+/// channel files used to render a caption with no file card.
 #[allow(clippy::too_many_arguments)]
 async fn broadcast_channel_file_header(
     state: &ServerState,
@@ -1859,16 +1738,14 @@ async fn broadcast_channel_file_header(
         hollow_log!("[HOLLOW-MLS] FileHeader broadcast failed: {e}");
     }
     // PLUS the Olm copy to exactly the online member devices with no leaf in the
-    // group we just encrypted under. The old `else` measured OUR OWN encrypt,
-    // which says nothing about whether a member can decrypt: one with no leaf
-    // (a just-admitted parked joiner) saw the message caption with no file card
-    // at all, forever, and nothing here reported it. A fully formed group costs
-    // zero extra frames because the leaf-less set is then empty.
+    // group we just encrypted under. Measuring OUR OWN encrypt says nothing about
+    // whether a member can decrypt: one with no leaf, a just-admitted parked joiner,
+    // saw the caption with no file card at all, forever. A fully formed group costs
+    // zero extra frames, because the leaf-less set is then empty.
     //
     // `group_key` is the SUBGROUP id for a restricted channel, so leaf-less is
-    // measured against the group that actually carried the header. A member who
-    // does not qualify for a restricted channel is not a leaf-less member, it is
-    // somebody who must never receive the header, hence the visibility filter.
+    // measured against the group that actually carried the header; a member who does
+    // not qualify is not leaf-less, they must never receive it, hence the filter.
     let leafless = if use_subgroup {
         super::crypto_handler::leafless_member_devices_where(
             mls, &group_key, state, ws_room_peers, local_peer,
@@ -1954,14 +1831,11 @@ async fn gossip_broadcast_channel_file(
     hollow_log!("[HOLLOW-GOSSIP] File {file_id} broadcast initiated (bid={broadcast_id})");
 }
 
-/// Small server (<6 members, no gossip overlay): full replication to each
-/// ONLINE DEVICE of each member, then clean up the sender-side ciphertext
-/// temp once all WS-relay streams have been fully queued (ws_stream_send is
-/// awaited, so by here the bytes are read). If a WebRTC send is still in
-/// flight (entry present in pending_webrtc_sends), the temp is owned by that
-/// path and removed on WebRtcTransferComplete — don't delete it here. Without
-/// this the encrypted temp leaked forever, doubling on-disk usage for every
-/// server file send.
+/// Small server (<6 members, no gossip overlay): full replication to each ONLINE
+/// DEVICE of each member, then clean up the sender-side ciphertext temp once all
+/// WS-relay streams have been queued. A WebRTC send still in flight owns the temp
+/// and removes it on WebRtcTransferComplete, so it must not be deleted here.
+/// Without the cleanup the encrypted temp leaked forever.
 #[allow(clippy::too_many_arguments)]
 async fn replicate_channel_file_full(
     state: &ServerState,
@@ -1980,9 +1854,8 @@ async fn replicate_channel_file_full(
         if super::resolver::same_identity(member_peer_str, local_peer) { continue; }
         // A restricted channel's bytes go only to members who can SEE it. Full
         // replication used to push the ciphertext at every member device with no
-        // visibility check at all, so a plain Member ended up holding an
-        // Admin-only channel's file and only needed the header's AES key to read
-        // it. Membership is not entitlement here; the channel ladder is.
+        // visibility check at all, so a plain Member ended up holding an Admin-only
+        // channel's file. Membership is not entitlement here; the channel ladder is.
         if !super::crypto_handler::channel_readable_by(state, member_peer_str, cid) { continue; }
         for dev in super::crypto_handler::online_devices_for(ws_room_peers, member_peer_str) {
             stream_to_peer(
@@ -2002,16 +1875,11 @@ async fn replicate_channel_file_full(
 /// ascending device-id order so the walk is reproducible.
 ///
 /// Full replication (<6-member servers) means every member online at send time
-/// holds the bytes, which is the classic gap this closes: the sender went
-/// offline, another member has the file, but the request only ever targeted the
-/// sender (HOLLOW_PLAN line 2016). Membership alone is NOT entitlement here: a
+/// holds the bytes, which closes the gap where the sender went offline and the
+/// request still only targeted the sender. Membership alone is NOT entitlement: a
 /// restricted channel's bytes only ever went to members who can SEE it, so
-/// rerouting to anybody else would ask a non-qualifier to serve content it
-/// should never have been given. That predicate lives here and nowhere else;
-/// `file_asks` walks this list one holder at a time.
-///
-/// Best effort by design: a picked member without the bytes now answers
-/// `FileUnavailable` and the walk moves on.
+/// rerouting elsewhere would ask a non-qualifier to serve content it never had.
+/// Best effort: a picked member without the bytes answers `FileUnavailable`.
 pub(crate) fn channel_holder_candidates(
     state: &ServerState,
     channel_id: &str,
@@ -2034,22 +1902,17 @@ pub(crate) fn channel_holder_candidates(
     candidates
 }
 
-/// Handle NodeCommand::RequestFile — the explicit pull (the Download button,
-/// the chat-open sweep, a guest download).
+/// Handle NodeCommand::RequestFile: the explicit pull (the Download button, the
+/// chat-open sweep, a guest download).
 ///
-/// The request goes through the PENDING ASK TABLE (`node/file_asks.rs`) whenever
-/// we hold a row for the file, which is the normal case: that is what lets an
-/// unanswerable request be QUEUED instead of dropped on the floor, rotated to
-/// the next holder when one says it no longer has the bytes, and narrated to the
-/// card so the user is never left with a button that did nothing.
+/// The request goes through the PENDING ASK TABLE (`node/file_asks.rs`) whenever we
+/// hold a row for the file, which is what lets an unanswerable request be QUEUED
+/// instead of dropped, rotated to the next holder, and narrated to the card.
 ///
-/// CRITICAL — request from ONE device, NOT a fan-out. A DM file is fanned out at
-/// SEND time to the recipient's devices AND siblings, so MULTIPLE devices hold a
-/// copy, but each holder re-encrypts its stream with its OWN random AES key.
-/// Requesting from several means several streams arrive while the receiver kept
-/// only ONE FileHeader's AES key, so every other stream fails AES-GCM decrypt and
-/// auto-re-requests: an infinite FileHeader/stream/decrypt-fail loop (the "stuck
-/// loading forever, 16.2/16.2 KB" plus 4.5k log lines bug).
+/// CRITICAL: request from ONE device, NOT a fan-out. A DM file is fanned out at
+/// SEND time, so multiple devices hold a copy, but each re-encrypts its stream with
+/// its OWN random AES key while the receiver kept only ONE FileHeader's key: every
+/// other stream then fails AES-GCM decrypt and auto-re-requests, forever.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_request_file(
     file_id: String,
@@ -2127,10 +1990,9 @@ pub(crate) async fn handle_request_file(
         return;
     }
 
-    // No row of our own (a guest pull, a file we only know by id): today's
-    // behaviour verbatim, a single direct send to whichever device of the named
-    // identity is reachable. There is no context to queue against, so there is
-    // no ask to keep.
+    // No row of our own (a guest pull, a file we only know by id): a single direct
+    // send to whichever device of the named identity is reachable. There is no
+    // context to queue against, so there is no ask to keep.
     let offset = pending_ws_transfers
         .get(&file_id)
         .map(|s| s.bytes_received)
@@ -2302,10 +2164,9 @@ pub(crate) async fn handle_webrtc_transfer_failed(
     }
 }
 
-/// Decryption material for an in-flight multi-device link snapshot. The snapshot
-/// bytes are AES-256-GCM encrypted with a one-time random key generated for this
-/// link session; the receiver holds the key/nonce here keyed by link session id
-/// until the chunked transfer reassembles.
+/// Decryption material for an in-flight multi-device link snapshot. The bytes are
+/// AES-256-GCM encrypted with a one-time key generated for this link session; the
+/// receiver holds the key and nonce here until the chunked transfer reassembles.
 pub(crate) struct LinkSnapshotState {
     /// The link CODE the receiver typed — the passphrase the inbound `.hollow` blob
     /// is encrypted with. We stash the blob + this code for a next-launch import via
@@ -2387,11 +2248,9 @@ async fn handle_link_snapshot_stream(
         return;
     };
 
-    // The inbound bytes are a full `.hollow` backup blob encrypted with the
-    // link CODE. We DON'T import in-place (that path was fragile). Instead we
-    // STASH the blob + code and signal a restart; on next launch the bootstrap
-    // imports it via the exact same `import_backup` pipeline as a manual
-    // restore (the known-good, pre-node-start window).
+    // The inbound bytes are a full `.hollow` backup blob encrypted with the link
+    // CODE. Rather than import in place, STASH the blob and code and signal a
+    // restart, so the bootstrap imports it pre-node-start like a manual restore.
     let outcome: Result<(), String> = (|| {
         let blob = std::fs::read(&request.temp_path)
             .map_err(|e| format!("read link blob: {e}"))?;
@@ -2466,10 +2325,9 @@ async fn handle_file_stream_complete(
     }
 }
 
-/// Decrypt an assembled inbound file stream against its pending FileHeader
-/// key and write the plaintext to its final path. A GCM failure here is
-/// usually a transient assembly/truncation race under concurrent transfers —
-/// the bytes on the source are fine — so the caller holds the bytes and
+/// Decrypt an assembled inbound file stream against its pending FileHeader key and
+/// write the plaintext to its final path. A GCM failure here is usually a transient
+/// assembly race under concurrent transfers, so the caller holds the bytes and
 /// bounded-re-requests rather than giving up (see FILE_DECRYPT_MAX_RETRIES).
 async fn try_decrypt_file_stream(
     request: &ws_stream_transfer::StreamRequest,
@@ -2501,21 +2359,14 @@ async fn try_decrypt_file_stream(
     Ok(disk_path)
 }
 
-/// The ciphertext is intact (right size) but didn't decrypt against THIS
-/// pending stream's key. ROOT CAUSE: the bytes (fast WebRTC P2P) routinely
-/// BEAT the FileHeader (slower Olm/relay) — the logs show `FileHeader
-/// received` the line AFTER `decrypt failed`. So these bytes belong to a
-/// header that hasn't landed yet; the `pfs` we just popped was a STALE
-/// pending stream from a prior request (wrong key). Previously we deleted the
-/// bytes + immediately re-requested, which spawned ANOTHER crossed
-/// header/stream pair → an endless decrypt-fail loop that only a restart
-/// (serializing one clean pair) fixed.
+/// The ciphertext is intact but did not decrypt against THIS pending stream's key.
 ///
-/// FIX: PRESERVE the bytes as an early-arrival (keyed by file_id) and DO NOT
-/// re-request. The header that was already in flight arrives a moment later
-/// and its early-arrival path reprocesses these exact bytes against the
-/// CORRECT key → success, no loop. (`request.temp_path` is intentionally NOT
-/// removed here.)
+/// The bytes (fast WebRTC) routinely BEAT the FileHeader (slower Olm/relay), so
+/// they belong to a header that has not landed and the popped `pfs` is a STALE
+/// pending stream with the wrong key. Deleting the bytes and re-requesting spawned
+/// another crossed pair and looped forever, so instead the bytes are PRESERVED as
+/// an early arrival keyed by file_id and nothing is re-requested: the header in
+/// flight arrives and reprocesses them against the CORRECT key.
 #[allow(clippy::too_many_arguments)]
 fn hold_early_arrival_and_retry(
     file_id: &str,
@@ -2582,13 +2433,11 @@ async fn handle_shard_stream_complete(
         return;
     };
     if let Ok(shard_bytes) = tokio::fs::read(&request.temp_path).await {
-        // SECURITY (FILE-3): `store_shard` hashes the bytes it is handed
-        // against themselves, so a holder that returned someone else's bytes
-        // was indistinguishable from an honest one until reconstruction failed
-        // with no way to name the culprit. An erasure shard now has to match
-        // the hash the split stamped into its own header before it is allowed
-        // on disk. Replication-mode shards (k = m = 0) carry no erasure header
-        // at all — they ARE the ciphertext — so they skip this.
+        // SECURITY (FILE-3): `store_shard` hashes the bytes it is handed against
+        // themselves, so a holder that returned someone else's bytes was
+        // indistinguishable from an honest one until reconstruction failed. An
+        // erasure shard now has to match the hash the split stamped into its own
+        // header. Replication-mode shards (k = m = 0) carry no header and skip this.
         if pss.k > 0 || pss.m > 0 {
             let ok = match crate::vault::erasure::unpack_shard(&shard_bytes) {
                 Ok((meta, data)) => {
@@ -2631,13 +2480,12 @@ async fn handle_shard_stream_complete(
     let _ = std::fs::remove_file(&request.temp_path);
 }
 
-/// Try to reconstruct a pending vault download after a new shard landed:
-/// gather local shards, reconstruct when >= k are available, else re-register
-/// the pending download and keep waiting for more shards.
+/// Try to reconstruct a pending vault download after a new shard landed: gather
+/// local shards, reconstruct when >= k are available, else re-register the pending
+/// download and keep waiting for more shards.
 ///
-/// Takes the ContentStore by VALUE (last use in the shard arm): an owned
-/// store is Send across .await points, while a `&ContentStore` is not
-/// (ContentStore is !Sync — it wraps a rusqlite Connection).
+/// Takes the ContentStore by VALUE (last use in the shard arm): an owned store is
+/// Send across .await points, while a `&ContentStore` is not.
 async fn attempt_vault_reconstruction(
     content_store: crate::vault::content_store::ContentStore,
     pending_vault_downloads: &mut HashMap<String, (String, usize, usize)>,
@@ -2956,11 +2804,10 @@ pub(crate) async fn handle_envelope_file_header(
         }
     }
 
-    // AUTO-DOWNLOAD GATE (issue #41) — mirrors the DM/Olm arm: metadata above
-    // still renders the card, but a gated push registers no pending stream and
-    // late-arriving bytes are deleted instead of parked. An existing pending
-    // stream = a transfer we already accepted (the decrypt-fail retry
-    // re-requests WITHOUT a receipt).
+    // AUTO-DOWNLOAD GATE (#41), mirroring the DM/Olm arm: metadata above still
+    // renders the card, but a gated push registers no pending stream and late bytes
+    // are deleted rather than parked. An existing pending stream means a transfer we
+    // already accepted, since the decrypt-fail retry re-requests WITHOUT a receipt.
     let auto_ok = explicitly_requested
         || pending_file_streams.contains_key(&fid)
         || auto_download_allows(size, &name, &ext, &format!("server:{server_id}"), voice);
@@ -3245,9 +3092,8 @@ mod tests {
     use super::*;
 
     /// FILE-2 regression. The auto-download exemption is the one way a pushed
-    /// transfer writes bytes in a conversation the user gated, so it has to
-    /// name a real voice note and nothing else: the flag, the filename, the
-    /// extension and the size all have to agree.
+    /// transfer writes bytes in a conversation the user gated, so it has to name a
+    /// real voice note: flag, filename, extension and size all have to agree.
     #[test]
     fn voice_exemption_requires_flag_name_ext_and_size() {
         // The auto-download conf is process-global; this is the same lock the

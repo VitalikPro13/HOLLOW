@@ -41,8 +41,7 @@ String conferenceDenyMessage(String? reason) {
   }
 }
 
-/// Display name for a (possibly device-level) peer id: collapse device→master
-/// first, then resolve through the profile cache.
+/// Display name for a possibly device-level peer id, collapsed to master first.
 String conferenceDisplayName(WidgetRef ref, String peerId) {
   final master = ref.watch(deviceLinkProvider).identityOf(peerId);
   return displayNameFor(ref.watch(profileProvider), master);
@@ -65,8 +64,8 @@ Future<void> showConferenceRoomFormDialog(BuildContext context,
   );
 }
 
-/// Desktop center-tab surface for the Conferences feature: room manager,
-/// joiner lobby, and the in-meeting call surface (Archive/Share tab pattern).
+/// Desktop centre-tab surface for Conferences: room manager, joiner lobby and
+/// the in-meeting call surface.
 class ConferenceDashboard extends ConsumerStatefulWidget {
   const ConferenceDashboard({super.key});
 
@@ -87,8 +86,8 @@ class _ConferenceDashboardState extends ConsumerState<ConferenceDashboard> {
   Widget build(BuildContext context) {
     final conf = ref.watch(conferenceProvider);
 
-    // Internal view transitions (rooms ↔ lobby ↔ denied ↔ call) fade like
-    // every other panel — same switcher pattern the shell uses for tabs.
+    // Internal view transitions fade like every other panel, on the same
+    // switcher pattern the shell uses for tabs.
     return AnimatedSwitcher(
       duration: HollowDurations.normal,
       switchInCurve: HollowCurves.enter,
@@ -234,8 +233,6 @@ class _ConferenceDashboardState extends ConsumerState<ConferenceDashboard> {
     );
   }
 }
-
-// ── Room card ──────────────────────────────────────────────────────────────
 
 class _RoomCard extends ConsumerWidget {
   final ConferenceRoom room;
@@ -411,8 +408,6 @@ class _RoomCard extends ConsumerWidget {
   }
 }
 
-// ── Create/edit room dialog ────────────────────────────────────────────────
-
 class _RoomFormDialog extends ConsumerStatefulWidget {
   final ConferenceRoom? room;
   const _RoomFormDialog({this.room});
@@ -570,8 +565,6 @@ class _RoomFormDialogState extends ConsumerState<_RoomFormDialog> {
     );
   }
 }
-
-// ── Access code prompt ─────────────────────────────────────────────────────
 
 /// Paste-a-link join dialog: accepts a full invite link (either the
 /// hollow:// or web form) or a bare meeting id. Shared with mobile.
@@ -741,8 +734,6 @@ class _AccessCodeDialogState extends State<_AccessCodeDialog> {
   }
 }
 
-// ── Joiner lobby ───────────────────────────────────────────────────────────
-
 class _LobbyView extends ConsumerWidget {
   final ConferenceState conf;
   const _LobbyView({required this.conf});
@@ -760,8 +751,8 @@ class _LobbyView extends ConsumerWidget {
           children: [
             if (conf.hostPeerId != null)
               HollowAvatar(
-                // LobbyInfo carries the host's DEVICE id (the WS sender) —
-                // profiles/avatars are keyed by their MASTER.
+                // LobbyInfo carries the host's DEVICE id, and profiles are
+                // keyed by their MASTER.
                 peerId: ref
                     .watch(deviceLinkProvider)
                     .identityOf(conf.hostPeerId!),
@@ -781,8 +772,8 @@ class _LobbyView extends ConsumerWidget {
             ),
             const SizedBox(height: HollowSpacing.sm),
             Text(
-              // LobbyInfo is the host's reply to our knock — until it arrives
-              // the meeting hasn't started (we auto re-knock when it does).
+              // LobbyInfo is the host's reply to our knock, so until it arrives
+              // the meeting has not started.
               hostName != null && hostName.isNotEmpty
                   ? 'Waiting for the host to let you in…'
                   : "You'll join automatically once it begins.",
@@ -810,8 +801,6 @@ class _LobbyView extends ConsumerWidget {
     );
   }
 }
-
-// ── Joiner denied ──────────────────────────────────────────────────────────
 
 class _DeniedView extends ConsumerWidget {
   final ConferenceState conf;
@@ -872,8 +861,6 @@ class _DeniedView extends ConsumerWidget {
   }
 }
 
-// ── In-call surface ────────────────────────────────────────────────────────
-
 class _CallView extends ConsumerWidget {
   final ConferenceState conf;
   const _CallView({required this.conf});
@@ -896,8 +883,7 @@ class _CallView extends ConsumerWidget {
             child: Stack(
               children: [
                 _ConferenceCallArea(conf: conf, meetingName: meetingName),
-                // Meeting management drawer — the chat drawer's mirror twin
-                // on the LEFT edge: waiting room, participants, kick, search.
+                // The chat drawer's mirror twin on the LEFT edge.
                 Positioned(
                   left: 0,
                   top: 0,
@@ -968,12 +954,9 @@ class _CallView extends ConsumerWidget {
   }
 }
 
-// ── Meeting management drawer (waiting room + participants + kick) ──────────
-
-/// The chat drawer's mirror twin on the LEFT edge of the call surface:
-/// chevron toggle + slide-in panel with a search filter, the host's waiting
-/// room (admit/decline), and the participant roster (kick for the host).
-/// Auto-opens when a knock arrives so the host never misses one.
+/// The chat drawer's mirror twin on the LEFT edge of the call surface: search,
+/// the host's waiting room and the participant roster. Auto-opens on a knock,
+/// so the host never misses one.
 class _ManageDrawer extends ConsumerStatefulWidget {
   final ConferenceState conf;
   const _ManageDrawer({required this.conf});
@@ -1026,7 +1009,7 @@ class _ManageDrawerState extends ConsumerState<_ManageDrawer>
     final pending = ref.watch(
         conferenceProvider.select((s) => s.isHost ? s.waiting.length : 0));
 
-    // A knock deserves attention: pop the drawer open for the host.
+    // A knock deserves attention, so the drawer pops open for the host.
     ref.listen(
         conferenceProvider.select((s) => s.isHost ? s.waiting.length : 0),
         (prev, next) {
@@ -1157,8 +1140,7 @@ class _ManagePanelContentState extends ConsumerState<_ManagePanelContent> {
     final links = ref.watch(deviceLinkProvider);
 
     // The participant set is DEVICE-keyed, so seeding it with the MASTER id
-    // listed us twice (once as "You", once under our own display name, with a
-    // Kick button beside it). Take the id form the set actually uses.
+    // lists us twice, the second time with a Kick button.
     final selfId = vcState.selfParticipantId(
           conf.activeServerId,
           kConferenceChannelId,
@@ -1249,8 +1231,8 @@ class _WaitingRow extends ConsumerWidget {
       child: Row(
         children: [
           HollowAvatar(
-            // Collapse device→master: the knock arrives from a DEVICE id,
-            // but profiles/avatars are keyed by the person's master.
+            // The knock arrives from a DEVICE id, while profiles are keyed by
+            // the person's master.
             peerId: links.identityOf(entry.peerId),
             size: 28,
             semanticLabel: entry.displayName,
@@ -1351,8 +1333,8 @@ class _ParticipantRow extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final hollow = HollowTheme.of(context);
     final name = isSelf ? 'You' : conferenceDisplayName(ref, peerId);
-    // Self reads the dedicated local flag — the set is device-id keyed and a
-    // self membership test silently missed. See [vcLocalSpeakingProvider].
+    // Self reads the dedicated local flag: the set is device-id keyed, so a
+    // self membership test silently misses (see [vcLocalSpeakingProvider]).
     final speaking = isSelf
         ? ref.watch(vcLocalSpeakingProvider)
         : ref.watch(vcSpeakingProvider.select((s) => s.contains(peerId)));
@@ -1435,8 +1417,6 @@ class _ParticipantRow extends ConsumerWidget {
   }
 }
 
-// ── Call area (participants / video) ───────────────────────────────────────
-
 class _ConferenceCallArea extends ConsumerWidget {
   final ConferenceState conf;
   final String meetingName;
@@ -1449,12 +1429,10 @@ class _ConferenceCallArea extends ConsumerWidget {
     final inThisCall = vcState.currentServerId == serverId &&
         vcState.currentChannelId == kConferenceChannelId;
 
-    // Video active — reuse the voice-channel pane's full-bleed screen-share /
-    // camera-grid views wholesale (its right-side chat overlay is the ONE
-    // conference chat; it only falls back to channel chat when no video is
-    // up, and we never embed it in that state). The floating controls pill is
-    // HIDDEN — its Disconnect tears down only the voice leg and strands the
-    // meeting — and the conference's static controls bar sits below instead.
+    // Reuses the voice-channel pane's full-bleed views wholesale; its chat
+    // overlay is the ONE conference chat, and it falls back to channel chat
+    // only when no video is up. The floating controls pill is HIDDEN, because
+    // its Disconnect tears down the voice leg alone and strands the meeting.
     if (inThisCall && (vcState.showsShareSurface || vcState.isCameraActive)) {
       return Column(
         children: [
@@ -1490,8 +1468,8 @@ class _ParticipantsView extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final localPeerId = ref.watch(identityProvider).peerId ?? '';
-    // DEVICE-keyed set: seed it with the id form it actually uses, or we tile
-    // ourselves twice (see the roster above).
+    // DEVICE-keyed set: seeded with the id form it uses, or we tile ourselves
+    // twice (see the roster above).
     final selfId = vcState.selfParticipantId(
           conf.activeServerId,
           kConferenceChannelId,
@@ -1531,8 +1509,8 @@ class _ParticipantsView extends ConsumerWidget {
             _ConferenceControls(vcState: vcState),
           ],
         ),
-        // The SAME right-side chat drawer screen share uses — one conference
-        // chat everywhere (RAM-only 'conf:...' key in channelChatProvider).
+        // The SAME right-side chat drawer screen share uses: one conference
+        // chat everywhere, RAM-only under a 'conf:' key.
         Positioned(
           right: 0,
           top: 0,
@@ -1562,8 +1540,8 @@ class _ParticipantTile extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final hollow = HollowTheme.of(context);
-    // Membership select: only THIS tile rebuilds when its speaking flips.
-    // Self reads the dedicated local flag — see [vcLocalSpeakingProvider].
+    // Membership select, so only THIS tile rebuilds when its speaking flips.
+    // Self reads the dedicated local flag (see [vcLocalSpeakingProvider]).
     final speaking = isSelf
         ? ref.watch(vcLocalSpeakingProvider)
         : ref.watch(vcSpeakingProvider.select((s) => s.contains(peerId)));
@@ -1688,7 +1666,7 @@ class _ConferenceControls extends ConsumerWidget {
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
           Builder(builder: (context) {
-            // PTT-aware mic (issue #38): gated look while idle, live on hold.
+            // PTT-aware mic (issue #38): gated while idle, live on hold.
             final mic = micButtonVisual(ref,
                 isMuted: vcState.isMuted,
                 hollow: hollow,

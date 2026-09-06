@@ -1,19 +1,10 @@
-//! C-ABI entry point for the iOS Notification Service Extension (disposable-NSE
-//! Tier B). SPIKE: this proves a `#[unsafe(no_mangle)] extern "C"` symbol that forks an
-//! Olm session and decrypts a push message compiles + links into the iOS
-//! `staticlib` (`libhollow_core.a`) and is callable from Swift.
+//! C-ABI entry point for the iOS Notification Service Extension (Tier B).
 //!
-//! Design (see the disposable-NSE spike in `crypto::olm_manager` tests):
-//! the NSE runs in a separate, memory-limited (~24 MB) process when the app is
-//! force-killed. It must show the decrypted message TEXT without advancing the
-//! canonical Olm ratchet the app relies on. So it FORKS the session — builds an
-//! independent copy from the pickles — decrypts on the fork, and the fork is
-//! dropped (never written back). The app later re-decrypts the same message from
-//! the relay/peer on its untouched canonical session, advancing normally.
-//!
-//! This file is NOT wired into flutter_rust_bridge (it's a raw C ABI, not an frb
-//! API). Swift declares the prototype in a bridging header and links the same
-//! `libhollow_core.a` the Runner already force-loads.
+//! The NSE runs in a separate ~24 MB process when the app is force-killed, and it
+//! must show decrypted TEXT without advancing the canonical Olm ratchet the app
+//! relies on, so it decrypts on a FORK built from the pickles and drops it. Raw C
+//! ABI, not flutter_rust_bridge: Swift declares the prototypes in a bridging header
+//! and links the same `libhollow_core.a` the Runner already force-loads.
 
 use std::ffi::{c_char, CStr, CString};
 use std::ptr;
@@ -23,26 +14,18 @@ use crate::crypto::OlmManager;
 
 /// Decrypt a single Olm push message on a FORKED session, for the iOS NSE.
 ///
-/// All string inputs are NUL-terminated UTF-8 C strings owned by the caller:
-/// - `account_pickle_json`: the account pickle (JSON) — needed for first-contact
-///   PreKey messages (to create the inbound session) and harmless otherwise.
-/// - `session_pickle_json`: the existing per-peer session pickle (JSON), or an
-///   empty string `""` if there is no session yet (first contact).
-/// - `sender_identity_key_b64`: the sender's Curve25519 identity key (needed only
-///   for first-contact PreKey; pass `""` when a session already exists).
-/// - `message_type`: 0 = PreKey, 1 = Normal (the Olm message type).
-/// - `ciphertext`/`ciphertext_len`: the raw Olm ciphertext bytes.
+/// All string inputs are NUL-terminated UTF-8 owned by the caller:
+/// - `account_pickle_json`: account pickle, needed for a first-contact PreKey.
+/// - `session_pickle_json`: per-peer session pickle, `""` if there is none yet.
+/// - `sender_identity_key_b64`: only for first contact, `""` otherwise.
+/// - `message_type`: 0 = PreKey, 1 = Normal.
 ///
-/// Returns a heap-allocated NUL-terminated C string with the decrypted UTF-8
-/// plaintext on success, or NULL on any failure (no session, decrypt error,
-/// invalid input). The caller MUST free the returned pointer with
-/// [`hollow_push_string_free`]. The function NEVER mutates any on-disk state —
-/// it operates entirely on copies built from the pickle strings.
+/// Returns a heap C string with the plaintext, or NULL on any failure; the caller
+/// MUST free it with [`hollow_push_string_free`]. Never mutates on-disk state.
 ///
 /// # Safety
-/// All pointer arguments must be valid for the duration of the call. String
-/// pointers must be NUL-terminated. `ciphertext` must point to at least
-/// `ciphertext_len` readable bytes (or be non-null with len 0).
+/// Every pointer must be valid for the call, strings NUL-terminated, and
+/// `ciphertext` readable for `ciphertext_len` bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hollow_push_decrypt(
     account_pickle_json: *const c_char,
@@ -53,9 +36,7 @@ pub unsafe extern "C" fn hollow_push_decrypt(
     ciphertext: *const u8,
     ciphertext_len: usize,
 ) -> *mut c_char {
-    // Defensively convert every input; bail to NULL on anything malformed.
-    // All raw-pointer dereferences are confined to this one unsafe block
-    // (edition 2024 requires explicit unsafe even inside an `unsafe fn`).
+    // Bail to NULL on anything malformed; every raw-pointer read is confined here.
     let (account, session, peer_id, sender_idk, ct_owned) = unsafe {
         let account = match cstr(account_pickle_json) {
             Some(s) => s,
@@ -111,37 +92,21 @@ pub unsafe extern "C" fn hollow_push_string_free(ptr: *mut c_char) {
 /// iOS NSE entry point: connect to OUR relay, fetch the buffered ciphertext for
 /// `sender_peer_id`, decrypt it, and return the message text(s) as JSON.
 ///
-/// This is the privacy-preserving Tier B path. The APNs push itself carries NO
-/// content (only `{wake, sender}`) — Apple/Google never see message data. The NSE
-/// pulls the ciphertext from our relay (E2EE, fetch-peer mode) and decrypts it on
-/// device. It is the SAME pipeline the Dart Tier-2 fetch uses (`node::fetch`),
-/// invoked here because iOS does NOT wake the Dart background isolate when the app
-/// is force-killed — only the NSE runs.
+/// The APNs push carries NO content (only `{wake, sender}`), so Apple never sees
+/// message data; this is the same `node::fetch` pipeline Dart's Tier-2 fetch uses,
+/// invoked here because iOS does not wake the Dart isolate when the app is
+/// force-killed. Persisting the advanced session is single-writer-safe only
+/// because the NSE is then the SOLE process holding it, so the Swift side MUST
+/// check the App-Group heartbeat before calling.
 ///
-/// Ratchet safety: when the app is force-killed the NSE is the SOLE process
-/// holding the Olm session, so persisting the advanced session + inserting the
-/// message row (which `run_fetch` does) is single-writer-safe, exactly like the
-/// Android background isolate. The NSE MUST only call this when the app is not
-/// active (the Swift side checks an App-Group heartbeat first).
+/// Inputs (NUL-terminated UTF-8): `data_dir` must hold `messages.db` and the identity
+/// file, `license_key` may be "", `timeout_secs` should be ~15 of the NSE's ~30 s, and
+/// `server_room` is "" for a DM wake or the server_id of a CHANNEL wake, which
+/// decrypts via MLS or signed public plaintext instead of Olm.
 ///
-/// Inputs (NUL-terminated UTF-8 C strings):
-/// - `data_dir`: absolute path to the Hollow data dir the NSE can read/write
-///   (the App Group container or a copy). `messages.db` + the identity file must
-///   live under it.
-/// - `relay_domain`: e.g. "relay.anonlisten.com".
-/// - `sender_peer_id`: the peer whose DM triggered the push (from the push data).
-/// - `license_key`: license key or "" if none.
-/// - `timeout_secs`: overall fetch timeout (NSE has ~30s total; pass ~15).
-/// - `server_room`: "" for a DM wake. For a CHANNEL wake, the server_id from the
-///   push data — the fetch joins the server room and decrypts buffered channel
-///   messages via MLS (or signed public plaintext) instead of Olm DMs.
-///
-/// Returns a heap C string with a JSON array on success (may be `[]`), or NULL
-/// on hard failure (no identity/DB, connect error). Entries:
-/// `{"text","message_id","timestamp","has_image"}` plus, for channel wakes,
-/// `{"server_id","channel_id","server_name","channel_name","sender_name"}`
-/// resolved on-device from the local DB. Caller frees with
-/// [`hollow_push_string_free`].
+/// Returns a heap C string holding a JSON array (possibly `[]`), or NULL on hard
+/// failure. Entries carry `{"text","message_id","timestamp","has_image"}` plus, for
+/// channel wakes, names resolved from the local DB. Caller frees it.
 ///
 /// # Safety
 /// All string pointers must be valid NUL-terminated C strings for the call.
@@ -182,10 +147,9 @@ pub unsafe extern "C" fn hollow_push_fetch_and_decrypt(
     }
 }
 
-/// Pure-Rust core of the NSE fetch path. Mirrors `api::network::start_fetch_node`
-/// but takes an explicit `data_dir` (the NSE points at the App Group container)
-/// and builds its own single-threaded tokio runtime (no Dart isolate / global
-/// runtime in the extension process).
+/// Pure-Rust core of the NSE fetch path: like `api::network::start_fetch_node` but with
+/// an explicit `data_dir` (the App Group container) and its own single-threaded
+/// runtime, since the extension process has no Dart isolate.
 fn fetch_and_decrypt(
     data_dir: &str,
     relay_domain: &str,
@@ -206,10 +170,9 @@ fn fetch_and_decrypt(
         Some(id) => id,
         None => return Ok("[]".to_string()),
     };
-    // DB passphrase = MASTER-derived (must NOT change — a device-derived
-    // passphrase opens an empty DB). WS auth = DEVICE key (the relay keyed this
-    // device's push token + offline buffer by its device id; the fetch must auth
-    // as the device to receive its buffered ciphertext).
+    // DB passphrase is MASTER-derived (a device-derived one opens an empty DB) while
+    // WS auth is the DEVICE key, because the relay keyed this device's push token
+    // and offline buffer by its device id.
     let master_proto = id
         .keypair
         .to_protobuf_encoding()
@@ -226,7 +189,6 @@ fn fetch_and_decrypt(
         .ok_or("bad db path")?
         .to_string();
 
-    // Load Olm state from the DB.
     let mut olm = {
         let store = crate::storage::MessageStore::open(&db_path, &passphrase)?;
         match store.load_olm_account()? {
@@ -258,9 +220,8 @@ fn fetch_and_decrypt(
         relay_domain
     };
 
-    // Channel wake: load the MLS group state for the one server so buffered
-    // group ciphertext can be decrypted. Failure degrades gracefully — the NSE
-    // shows a content-free line and the app syncs on next open.
+    // Channel wake: load the one server's MLS group so buffered group ciphertext
+    // decrypts. Failure degrades to a content-free line, synced on next open.
     let mut mls: Option<crate::crypto::MlsManager> = match server_room {
         Some(room) => {
             let store = crate::storage::MessageStore::open(&db_path, &passphrase)?;
@@ -311,9 +272,8 @@ fn fetch_and_decrypt(
         crypto_store.save_account(account_json);
     }
 
-    // Channel wakes: resolve display metadata (server/channel names + sender
-    // display names) on-device so the NSE can render "Server • #channel" +
-    // "Name: text" without any extra round-trips.
+    // Channel wakes render "Server • #channel" and "Name: text", so resolve those
+    // names on-device rather than paying extra round-trips.
     let mut server_names: std::collections::HashMap<String, (String, std::collections::HashMap<String, String>)> =
         std::collections::HashMap::new();
     let mut sender_names: std::collections::HashMap<String, String> = std::collections::HashMap::new();
@@ -345,14 +305,12 @@ fn fetch_and_decrypt(
         }
     }
 
-    // Serialize to JSON by hand (avoid pulling a Serialize derive through the C
-    // boundary). Escape the text safely via serde_json::Value.
+    // Built by hand so no Serialize derive crosses the C boundary; serde_json escapes.
     let items: Vec<serde_json::Value> = results
         .into_iter()
         .map(|dm| {
             let mut obj = serde_json::json!({
-                // Emote tokens are unreadable hashes in a plain-text banner —
-                // the NSE shows ':name:' instead.
+                // Emote tokens are unreadable hashes in a plain-text banner.
                 "text": crate::node::emotes::emote_tokens_to_shortcodes(&dm.text),
                 "message_id": dm.message_id,
                 "timestamp": dm.timestamp,
@@ -378,9 +336,8 @@ fn fetch_and_decrypt(
     Ok(serde_json::Value::Array(items).to_string())
 }
 
-/// Core fork-and-decrypt, pure Rust (unit-testable). Builds a THROWAWAY
-/// `OlmManager` from the supplied pickles, decrypts the one message on it, and
-/// drops it — the canonical on-disk session is never touched.
+/// Core fork-and-decrypt, pure Rust. Builds a THROWAWAY `OlmManager` from the
+/// supplied pickles and drops it, so the canonical on-disk session is never touched.
 fn decrypt_forked(
     account_pickle_json: &str,
     session_pickle_json: &str,
@@ -390,8 +347,7 @@ fn decrypt_forked(
     ciphertext: &[u8],
 ) -> Result<String, String> {
     if session_pickle_json.is_empty() {
-        // First contact: no session yet. Create the inbound session on a fork of
-        // the account. PreKey only (type 0).
+        // First contact: create the inbound session on a fork. PreKey only.
         if message_type != 0 {
             return Err("no session and message is not a PreKey".into());
         }
@@ -400,7 +356,6 @@ fn decrypt_forked(
         return String::from_utf8(bytes).map_err(|e| format!("plaintext not UTF-8: {e}"));
     }
 
-    // Existing session: fork it and decrypt. This is the common case.
     let mut fork = OlmManager::from_pickles(
         account_pickle_json,
         vec![(peer_id.to_string(), session_pickle_json.to_string())],
@@ -422,8 +377,7 @@ mod tests {
     use super::*;
     use crate::crypto::OlmManager;
 
-    // Exercises the pure-Rust core of the C ABI (decrypt_forked) end to end,
-    // mirroring the olm_manager spike but through the NSE entry point.
+    // Exercises the pure-Rust core of the C ABI end to end.
     #[test]
     fn push_enrich_forked_decrypt_existing_session() {
         let mut alice = OlmManager::new();
@@ -441,14 +395,12 @@ mod tests {
         let acct = bob.account_pickle_json().unwrap();
         let sess = bob.session_pickle_json("alice").unwrap().unwrap();
 
-        // Alice sends the push message.
         let (mt, ctp) = alice.encrypt("bob", b"push body").unwrap();
 
-        // NSE entry point decrypts on a fork.
         let pt = decrypt_forked(&acct, &sess, "alice", "", mt, &ctp).unwrap();
         assert_eq!(pt, "push body");
 
-        // Canonical session is untouched: a fresh load decrypts the same msg.
+        // The canonical session is untouched: a fresh load decrypts the same message.
         let mut app = OlmManager::from_pickles(&acct, vec![("alice".into(), sess)]).unwrap();
         assert_eq!(app.decrypt("alice", mt, &ctp).unwrap(), b"push body");
     }

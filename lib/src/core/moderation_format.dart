@@ -26,9 +26,8 @@ String formatMuteRemaining(Duration d) {
 }
 
 /// When the local user may next post in a slow-mode channel, DERIVED from the
-/// loaded message list (my newest message's timestamp + the interval) — never
-/// from ephemeral widget state, so it survives channel switches and restarts
-/// and can't drift from the Rust-side gate. Null = no active cooldown.
+/// loaded message list, never from ephemeral widget state, so it survives
+/// channel switches and can't drift from the Rust gate. Null = no cooldown.
 DateTime? slowModeReadyAtFrom(List<ChannelChatMessage> messages, int slowSecs) {
   if (slowSecs <= 0) return null;
   DateTime? lastOwn;

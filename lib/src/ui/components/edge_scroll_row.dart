@@ -6,11 +6,9 @@ import 'hollow_pressable.dart';
 
 /// Make a vertical mouse wheel pan a horizontal scroller.
 ///
-/// The minimal half of what [EdgeScrollRow] does, for a scroller that must
-/// stay exactly as it is otherwise. No layout change, no gesture
-/// interception — only the wheel signal, and only while there is somewhere to
-/// scroll, so a strip that fits keeps passing wheel events to the page behind
-/// it.
+/// The minimal half of [EdgeScrollRow], for a scroller that must stay exactly
+/// as it is otherwise. Only the wheel signal, and only while there is somewhere
+/// to scroll, so a strip that fits keeps passing wheel events to the page.
 Widget wheelToScroll({
   required ScrollController controller,
   required Widget child,
@@ -32,31 +30,19 @@ Widget wheelToScroll({
 
 /// A horizontal strip that stays REACHABLE when it overflows.
 ///
-/// The trap this exists for: a plain `SingleChildScrollView(scrollDirection:
-/// Axis.horizontal)` scrolls fine by touch or trackpad, but on a desktop with
-/// a plain wheel mouse there is no affordance and no gesture — the
-/// overflowing items are simply unreachable. It showed up first as GIF
-/// favourites lists you could create but not scroll to, and again as Server
-/// Settings tabs once the panel got narrow.
+/// A plain horizontal `SingleChildScrollView` scrolls by touch or trackpad, but
+/// a desktop wheel mouse has no affordance and no gesture, so the overflowing
+/// items are simply unreachable. While the content overflows this adds arrows,
+/// vertical-wheel panning and an edge fade; nothing appears when it fits.
 ///
-/// So this adds, only while the content actually overflows:
-///   * arrow buttons on whichever side has more to show,
-///   * a vertical wheel that scrolls horizontally (the natural reflex),
-///   * a fade at each overflowing edge, so it LOOKS scrollable.
-///
-/// Nothing appears when everything fits, which is the common case.
-///
-/// The arrows are SIBLINGS of the scroller, not an overlay on top of it.
-/// Overlaid arrows cover the content underneath — fine for a chip you can
-/// scroll back to, not fine for the dock's reorder drop zones, which sit
-/// exactly at the two ends.
+/// The arrows are SIBLINGS of the scroller, never an overlay: overlaid arrows
+/// cover the content underneath, which the dock's reorder drop zones sit in.
 class EdgeScrollRow extends StatefulWidget {
   /// Eagerly-built children. Mutually exclusive with [builder].
   final List<Widget>? children;
 
-  /// Builds the scrollable itself, given the controller to attach. Use this
-  /// for a LAZY list — `EdgeScrollRow(children: …)` would materialize every
-  /// child, which a long friends list must not do.
+  /// Builds the scrollable itself. Use this for a LAZY list: [children]
+  /// materializes every child, which a long friends list must not do.
   final Widget Function(BuildContext context, ScrollController controller)?
       builder;
 
@@ -71,15 +57,11 @@ class EdgeScrollRow extends StatefulWidget {
   /// Purpose label for the arrows (they are icon-only controls).
   final String semanticLabel;
 
-  /// Centre the content while it FITS, then scroll normally once it does
-  /// not. For the dock's server strip, where a handful of icons centred
-  /// under the cursor is the whole look.
+  /// Centres the content while it FITS, then scrolls normally.
   ///
-  /// A bare `Center` around this widget cannot do it: the arrow slots make
-  /// the internal Row take the full width, so the Center has nothing to
-  /// centre. The centring therefore happens INSIDE the viewport — the
-  /// content is given a minimum width of the viewport and centres itself in
-  /// it, which collapses to a no-op the moment the content is wider.
+  /// A `Center` around this widget cannot do it, because the arrow slots make
+  /// the internal Row take the full width. The centring happens INSIDE the
+  /// viewport instead, and collapses to a no-op once the content is wider.
   final bool center;
 
   const EdgeScrollRow({
@@ -101,7 +83,7 @@ class EdgeScrollRow extends StatefulWidget {
     this.semanticLabel = 'items',
   })  : children = null,
         // Centring needs the viewport width, which only the children form
-        // controls. A custom builder centres its own content if it wants to.
+        // controls; a custom builder centres its own content.
         center = false;
 
   @override
@@ -111,17 +93,11 @@ class EdgeScrollRow extends StatefulWidget {
 class _EdgeScrollRowState extends State<EdgeScrollRow> {
   final _controller = ScrollController();
 
-  /// There is anything to scroll at all. Drives whether the arrow slots
-  /// EXIST — deliberately separate from whether each arrow can move.
-  ///
-  /// This split is load-bearing. Sibling arrows take width from the
-  /// scroller, so showing one shrinks the viewport and grows
-  /// maxScrollExtent, which can re-trigger the other — a flip-flop. Once
-  /// overflowing, BOTH slots stay occupied (the unusable direction just goes
-  /// dim), so an arrow changing state never changes the layout. Entering and
-  /// leaving overflow is then the only width change, and that is stable: the
-  /// content has to shrink past `width - 40` to hide the arrows, and past
-  /// `width` to bring them back.
+  /// Whether there is anything to scroll, which drives whether the arrow slots
+  /// EXIST. Deliberately separate from whether each arrow can move: sibling
+  /// arrows take width from the scroller, so one appearing would grow
+  /// maxScrollExtent and re-trigger the other. Both slots stay occupied while
+  /// overflowing, leaving entry and exit as the only width change.
   bool _overflowing = false;
   bool _canLeft = false;
   bool _canRight = false;
@@ -182,10 +158,8 @@ class _EdgeScrollRowState extends State<EdgeScrollRow> {
                 constraints: fill,
                 child: Row(
                   mainAxisSize: MainAxisSize.min,
-                  // With a minWidth of the viewport, the Row is at least
-                  // viewport-wide and centre distributes the slack. Once the
-                  // children exceed that there is no slack, so this quietly
-                  // becomes an ordinary scrolling row.
+                  // Centre distributes the viewport's slack; once the children
+                  // exceed it there is none, so this becomes an ordinary row.
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: widget.children!,
                 ),
@@ -197,9 +171,8 @@ class _EdgeScrollRowState extends State<EdgeScrollRow> {
     return LayoutBuilder(
       builder: (context, constraints) => _scrollView(
         fill: constraints.maxWidth.isFinite
-            // Minus the padding, which sits INSIDE the viewport — without
-            // that subtraction the content would always overflow by exactly
-            // the padding and the arrows would never switch off.
+            // Minus the padding, which sits INSIDE the viewport: without that
+            // the content always overflows by the padding.
             ? BoxConstraints(
                 minWidth:
                     (constraints.maxWidth - widget.padding.horizontal)
@@ -220,11 +193,9 @@ class _EdgeScrollRowState extends State<EdgeScrollRow> {
     return SizedBox(
       height: widget.height,
       child: NotificationListener<ScrollMetricsNotification>(
-        // THE resize hook. The controller listener above only fires when the
-        // offset moves; this fires when the EXTENTS change — narrowing the
-        // window, a larger-text setting, or the list growing. Without it a
-        // strip that starts out fitting never grows arrows, which is exactly
-        // how the Server Settings tabs stayed unreachable.
+        // THE resize hook: the controller listener above fires only when the
+        // offset moves, so without this a strip that starts out fitting never
+        // grows arrows when the window narrows or the list grows.
         onNotification: (_) {
           _syncSoon();
           return false;
@@ -281,9 +252,8 @@ class _EdgeScrollRowState extends State<EdgeScrollRow> {
         child: Container(
           width: 14,
           decoration: BoxDecoration(
-            // Fade FROM the surface colour, never from Colors.transparent —
-            // a transparent stop lerps through black and shows as a grey
-            // smear.
+            // Fade FROM the surface colour: a transparent stop lerps through
+            // black and shows as a grey smear.
             gradient: LinearGradient(
               colors: left
                   ? [hollow.surface, hollow.surface.withValues(alpha: 0)]
@@ -297,9 +267,8 @@ class _EdgeScrollRowState extends State<EdgeScrollRow> {
 }
 
 /// [wheelToScroll] plus the ScrollController it needs, so a stateless widget
-/// can gain wheel panning without becoming stateful. Prefer
-/// [EdgeScrollRow.builder] — this is for scrollers that cannot give up any
-/// width to arrows.
+/// can gain wheel panning. Prefer [EdgeScrollRow.builder]; this is for
+/// scrollers that cannot give up any width to arrows.
 class WheelScrollable extends StatefulWidget {
   final Widget Function(BuildContext context, ScrollController controller)
       builder;

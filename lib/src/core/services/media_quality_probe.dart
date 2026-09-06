@@ -3,25 +3,23 @@ import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'video_quality_ladder.dart';
 
 /// Reads one peer connection's `getStats()` and turns it into the two verdicts
-/// the resilience machinery needs: is this link degraded (drives the flair),
-/// and can it still carry the picture (drives the video ladder).
+/// the resilience machinery needs: is this link degraded (the flair), and can
+/// it still carry the picture (the video ladder).
 ///
-/// Stateful on purpose. Inbound loss is only reported as a running total, so a
-/// rate needs the previous sample to subtract from; a fresh probe per call
-/// would report a call's whole lifetime of loss as though it just happened.
+/// Stateful on purpose: inbound loss is only reported as a running total, so a
+/// rate needs the previous sample to subtract from, and a fresh probe would
+/// report a call's whole lifetime of loss as though it just happened.
 ///
-/// Every field is read defensively. Stats key names and types differ between
-/// the desktop, Android and iOS backends (`kind` vs `mediaType`, ints arriving
-/// as doubles, whole tables missing for the first seconds of a connection), so
-/// a missing value always means "no opinion" and never zero. A probe that
-/// invents a zero here would report a perfect link as catastrophic loss, or a
-/// dying one as fine.
+/// Every field is read defensively, because stats key names and types differ
+/// between the desktop, Android and iOS backends. A missing value means "no
+/// opinion" and never zero: a probe that invented a zero would report a
+/// perfect link as catastrophic loss, or a dying one as fine.
 class MediaQualityProbe {
   /// Cumulative counters from the previous sample, for the inbound rate.
   int? _prevPacketsLost;
   int? _prevPacketsReceived;
 
-  /// Forget the previous sample. For a rebuilt peer connection: its counters
+  /// Forgets the previous sample, for a rebuilt peer connection: its counters
   /// restart at zero, and subtracting the old ones yields a negative rate that
   /// reads as a suspiciously perfect link.
   void reset() {
@@ -29,7 +27,7 @@ class MediaQualityProbe {
     _prevPacketsReceived = null;
   }
 
-  /// Take one sample. Returns null when the connection is gone or stats are
+  /// Takes one sample. Null when the connection is gone or stats are
   /// unreadable, which `getStats()` signals by throwing once a PC is closed.
   Future<MediaQualitySample?> sample(RTCPeerConnection pc) async {
     final List<StatsReport> stats;
@@ -51,7 +49,7 @@ class MediaQualityProbe {
       final v = report.values;
       switch (report.type) {
         case 'remote-inbound-rtp':
-          // The far end's report card on what WE sent. The only loss figure
+          // The far end's report card on what WE sent, the only loss figure
           // that describes our uplink.
           final loss = _asDouble(v['fractionLost']);
           final kind = _kindOf(v);
@@ -102,7 +100,7 @@ class MediaQualityProbe {
 
     final dLost = lost - prevLost;
     final dReceived = received - prevReceived;
-    // A counter that went backwards means the PC was rebuilt under us; a
+    // A counter that went backwards means the PC was rebuilt under us, and a
     // window with no arrivals says nothing about loss either way.
     if (dLost < 0 || dReceived < 0) return null;
     final total = dLost + dReceived;
@@ -133,8 +131,8 @@ class MediaQualityProbe {
 
 /// One reading of a link's health.
 class MediaQualitySample {
-  /// Fraction of OUR audio the far end reported lost, 0..1. Null when the
-  /// remote report has not arrived yet.
+  /// Fraction of OUR audio the far end reported lost, 0..1. Null until the
+  /// remote report arrives.
   final double? audioLossOut;
 
   /// Fraction of THEIR audio we lost over the last interval, 0..1.
@@ -146,7 +144,7 @@ class MediaQualitySample {
   final double? rttMs;
   final int? availableOutgoingBps;
 
-  /// Whether a video sender is actually active. Without this, a governor would
+  /// Whether a video sender is actually active. Without it, a governor would
   /// keep adjusting a camera that is switched off.
   final bool isSendingVideo;
 
@@ -159,8 +157,8 @@ class MediaQualitySample {
     this.isSendingVideo = false,
   });
 
-  /// The worst loss figure in either direction. What the flair should key on:
-  /// the user does not care which way the packets went missing.
+  /// The worst loss figure in either direction. What the flair keys on: the
+  /// user does not care which way the packets went missing.
   double get worstLoss {
     var worst = 0.0;
     for (final l in [audioLossOut, audioLossIn]) {
@@ -171,18 +169,17 @@ class MediaQualitySample {
 
   /// Whether this reading should raise the "unstable connection" flair.
   ///
-  /// Audio loss, not video loss: the video ladder exists precisely so that
-  /// video loss gets absorbed by dropping quality, and flagging the call as
-  /// unstable every time the picture steps down would cry wolf. Once AUDIO is
-  /// losing packets, the user is hearing it, and the flair is telling them
-  /// something they already suspect.
+  /// Audio loss, not video loss: the video ladder exists precisely so video
+  /// loss is absorbed by dropping quality, and flagging the call unstable on
+  /// every quality step would cry wolf. Once AUDIO is losing packets the user
+  /// can hear it.
   bool get isDegraded => worstLoss >= 0.05 || (rttMs ?? 0) >= 500;
 
   /// This reading as the video ladder wants it.
   VideoSendSample get videoSample => VideoSendSample(
         // Video loss when the far end reports it, audio loss as the stand-in
-        // before the first video report lands: they share one uplink, so audio
-        // loss is evidence about the video's path too.
+        // before the first video report lands: they share one uplink, so
+        // audio loss is evidence about the video's path too.
         fractionLost: videoLossOut ?? audioLossOut ?? 0.0,
         availableOutgoingBps: availableOutgoingBps,
         roundTripMs: rttMs,

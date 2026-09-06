@@ -13,41 +13,33 @@ import 'package:hollow/src/core/providers/member_panel_provider.dart'
 import 'package:hollow/src/core/reduce_motion.dart';
 import 'package:hollow/src/ui/components/hover_scope.dart';
 
-/// Avatar frames (issue #54): decoration painted IN FRONT of an avatar, the
-/// way Steam and Discord do it, so hats, hands, ears and bird wings work.
+/// Avatar frames (issue #54): decoration painted IN FRONT of an avatar, so
+/// hats, hands, ears and wings work.
 ///
-/// **The hard rule is that a frame takes ZERO layout space.** The avatar's
-/// slot in every list stays exactly `size`; the art is a non-participating
-/// overlay in a box of `size * kFrameScale` centred on it, scaled to FIT
-/// ([BoxFit.contain]). Tall art is scaled DOWN, never allowed to grow the
-/// box. That is what stops somebody shipping metre-long rabbit ears that
-/// stretch across the chat, and it is asserted directly in
-/// `test/widget/avatar_frame_test.dart`: an avatar's rect with a frame is
-/// identical to one without.
+/// A frame takes ZERO layout space. The avatar's slot stays exactly `size` and
+/// the art is a non-participating overlay in a `size * kFrameScale` box scaled
+/// to FIT, so tall art is scaled DOWN and can never stretch a row. Asserted in
+/// `test/widget/avatar_frame_test.dart`.
 const double kFrameScale = 1.33;
 
 /// Below this the art is mush, so it is skipped entirely. [HollowAvatar] is
 /// used from 18px up; a frame on an 18px avatar reads as dirt on the screen.
 const double kFrameMinAvatarSize = 24.0;
 
-/// **One surface deliberately opts out.** Where a SPEAKING ring is drawn
-/// around the avatar itself (the inline call panel, mobile voice avatars),
-/// the frame is suppressed with `frameId: ''`. A built-in frame is a coloured
-/// ring in the same accent family the speaking cue uses, so a quiet person
-/// with a teal frame is pixel-for-pixel a talking person with none - a
-/// functional cue lost to decoration. Cues drawn as a TILE RIM (the VC grid,
-/// video PiPs) are a different shape in a different place and keep their
-/// frames.
+/// One surface deliberately opts out: where a SPEAKING ring is drawn around the
+/// avatar itself (inline call panel, mobile voice avatars) the frame is
+/// suppressed with `frameId: ''`, because a built-in frame is a coloured ring in
+/// the same accent family and would make a quiet person read as a talking one.
+/// Cues drawn as a TILE RIM keep their frames.
 
 /// How much the frame overhangs the avatar on each side.
 double frameOverhang(double size) => size * (kFrameScale - 1) / 2;
 
 /// Wraps [child] (an avatar of exactly [size]) with its frame art.
 ///
-/// [animate] un-gates playback for surfaces that are actually being looked
-/// at (the profile card, the settings preview). Everywhere else an animated
-/// frame holds frame 0 and plays only while hovered, which is also what
-/// bounds the decode cost - see [AvatarFrameCache].
+/// [animate] un-gates playback for surfaces being looked at directly.
+/// Everywhere else an animated frame holds frame 0 and plays only while
+/// hovered, which is what bounds the decode cost (see [AvatarFrameCache]).
 class AvatarFrame extends ConsumerStatefulWidget {
   final String id;
   final double size;
@@ -55,8 +47,8 @@ class AvatarFrame extends ConsumerStatefulWidget {
   /// The avatar's corner radius, so a built-in ring follows its shape.
   final double radius;
 
-  /// The person the art belongs to, used as the pull hint when we hold no
-  /// copy of it. Empty for previews of art we already have in hand.
+  /// The pull hint for art we hold no copy of; empty for a preview of art
+  /// already in hand.
   final String peerHint;
 
   final bool animate;
@@ -77,9 +69,8 @@ class AvatarFrame extends ConsumerStatefulWidget {
 }
 
 class _AvatarFrameState extends ConsumerState<AvatarFrame> {
-  /// Only used where no [HoverScope] encloses us (a picker tile, a preview).
-  /// Inside a row, the ROW's hover is what plays the frame - see
-  /// [_rowHovered].
+  /// Only used where no [HoverScope] encloses us; inside a row the ROW's hover
+  /// plays the frame.
   bool _selfHovering = false;
 
   /// The enclosing row's hover, or null when there is no enclosing row.
@@ -95,15 +86,10 @@ class _AvatarFrameState extends ConsumerState<AvatarFrame> {
   AvatarFrameArt? _art;
   int _frame = 0;
 
-  /// Armed for the CURRENT frame's delay, never a [Ticker]. A Ticker asks the
-  /// engine for a frame every vsync and then this only changes the picture
-  /// when one is actually due, so a 10fps frame animation was costing 240
-  /// rendered frames a second on a 240Hz display. Same fix, same reason, as
-  /// AnimatedGifImage: one rendered frame per animation frame.
-  ///
-  /// Losing the Ticker also loses TickerMode's automatic mute under a pushed
-  /// route, which costs nothing here: playback already requires hover AND
-  /// window focus, and a dialog on top takes both.
+  /// Armed for the CURRENT frame's delay, never a [Ticker]: a Ticker asks the
+  /// engine for a frame every vsync, so a 10fps animation costs 240 rendered
+  /// frames a second on a 240Hz display. Losing TickerMode's automatic mute
+  /// costs nothing, because playback already needs hover AND window focus.
   Timer? _timer;
 
   bool get _wantsPlayback =>
@@ -150,9 +136,8 @@ class _AvatarFrameState extends ConsumerState<AvatarFrame> {
     _art = null;
   }
 
-  /// Acquire (or drop) the fully decoded frame set as playback turns on and
-  /// off. A list row therefore costs ONE shared still image until the moment
-  /// the pointer is over it.
+  /// Acquires or drops the fully decoded frame set as playback turns on and
+  /// off, so a list row costs ONE shared still until the pointer is over it.
   void _syncArt(bool playing, Uint8List? bytes) {
     if (playing && bytes != null) {
       if (_heldId == widget.id) return;
@@ -193,8 +178,8 @@ class _AvatarFrameState extends ConsumerState<AvatarFrame> {
 
   @override
   Widget build(BuildContext context) {
-    // Read the row's hover FIRST: it decides whether we need a MouseRegion
-    // of our own at all.
+    // Read the row's hover FIRST: it decides whether we need a MouseRegion at
+    // all.
     _rowHovered = HoverScope.maybeOf(context);
 
     final hue = builtinFrameHue(widget.id);
@@ -209,8 +194,7 @@ class _AvatarFrameState extends ConsumerState<AvatarFrame> {
       }
     }
 
-    // Window focus gates playback the same way server icons and banners are
-    // gated: nothing animates in a window nobody is looking at.
+    // Nothing animates in a window nobody is looking at.
     final focused = _wantsPlayback ? ref.watch(windowFocusedProvider) : false;
     final playing = _wantsPlayback && focused;
     _syncArt(playing, bytes);
@@ -227,15 +211,15 @@ class _AvatarFrameState extends ConsumerState<AvatarFrame> {
     Widget stack = Stack(
       clipBehavior: Clip.none,
       children: [
-        // The ONLY non-positioned child, so the Stack is exactly the
-        // avatar's size and the overlay below cannot change the layout.
+        // The ONLY non-positioned child, so the Stack is exactly the avatar's
+        // size and the overlay below cannot change the layout.
         widget.child,
         Positioned(
           left: -overhang,
           top: -overhang,
           right: -overhang,
           bottom: -overhang,
-          // The art overhangs its neighbours: it must never eat their
+          // The art overhangs its neighbours, so it must never eat their
           // clicks, and it is decoration to a screen reader.
           child: IgnorePointer(
             child: ExcludeSemantics(
@@ -253,9 +237,8 @@ class _AvatarFrameState extends ConsumerState<AvatarFrame> {
       ],
     );
 
-    // A MouseRegion of our own ONLY where no row supplies hover, and only for
-    // an animated frame that is not already playing: inside a list the row's
-    // hover drives this, and a still frame adds no hit-testing at all.
+    // A MouseRegion of our own ONLY where no row supplies hover, so a still
+    // frame in a list adds no hit-testing at all.
     if (_rowHovered == null &&
         !widget.animate &&
         hue == null &&
@@ -299,9 +282,8 @@ class _AvatarFramePainter extends CustomPainter {
     }
     final color = ringColor;
     if (color == null) return;
-    // Built-in: one stroke hugging the avatar's own rounded square. Zero
-    // bytes on the wire, and it gives the widget tests something to render
-    // with no network.
+    // Built-in frames are zero bytes on the wire, which also gives the widget
+    // tests something to render with no network.
     final avatar = Rect.fromLTWH(
       overhang,
       overhang,
@@ -309,10 +291,8 @@ class _AvatarFramePainter extends CustomPainter {
       size.height - overhang * 2,
     );
     final width = (avatar.width * 0.07).clamp(1.5, 5.0);
-    // A stroke is centred on its path, so the path has to sit HALF a stroke
-    // outside the avatar for the ring's inner edge to land exactly on the
-    // avatar's edge. Inflating by the full width leaves a visible hairline of
-    // background between the two, which is what it did first.
+    // A stroke is centred on its path, so the path sits HALF a stroke outside
+    // the avatar; the full width leaves a hairline of background between them.
     final inset = width / 2;
     canvas.drawRRect(
       RRect.fromRectAndRadius(
@@ -349,27 +329,20 @@ class AvatarFrameArt {
   }
 }
 
-/// Shared, ID-keyed decode cache for frame art.
+/// Shared, ID-keyed decode cache for frame art, and the reason frames are
+/// affordable: a decoder per widget would be gigabytes, since one 512px
+/// 30-frame source is ~30 MB decoded and a member panel holds sixty avatars.
 ///
-/// **This class is the reason frames are affordable.** Decoding every frame
-/// of an animated WebP into a `ui.Image` costs ~30 MB for a 512px 30-frame
-/// source (512x512 RGBA is 1 MB a frame), and a member panel can hold sixty
-/// avatars, so the naive one-decoder-per-widget approach is gigabytes for
-/// decoration. Two tiers instead:
-///
-///  * [still] - frame 0 only, shared by ID, LRU-capped. This is what every
-///    list row renders, so N rows sharing a frame cost ONE image.
-///  * [acquire] / [release] - the full frame list, refcounted, decoded only
-///    while something is actually playing it and disposed the moment nothing
-///    is. The hover gate is what keeps that to one or two at a time.
+///  * [still] is frame 0 only, shared by ID and LRU-capped, so N rows sharing a
+///    frame cost ONE image.
+///  * [acquire] / [release] refcount the full frame list, decoded only while
+///    something plays it and disposed as soon as nothing does.
 class AvatarFrameCache {
   AvatarFrameCache._();
   static final AvatarFrameCache instance = AvatarFrameCache._();
 
-  /// Frame-0 images, decoded down to [_stillDecodeWidth]: 384x384 RGBA is
-  /// ~576 KB each, so this ceiling is ~27 MB and only if forty-eight
-  /// DIFFERENT frames are on screen at once. Uncapped, 512px art would have
-  /// made the same ceiling ~48 MB.
+  /// Frame-0 images decoded down to [_stillDecodeWidth], so the ceiling is
+  /// ~27 MB and only with forty-eight DIFFERENT frames on screen at once.
   static const int maxStills = 48;
 
   final Map<String, ui.Image> _stills = {};
@@ -378,10 +351,8 @@ class AvatarFrameCache {
   final Map<String, AvatarFrameArt> _art = {};
   final Map<String, Completer<AvatarFrameArt?>> _decodingArt = {};
 
-  /// Registered by widgets so a decode that finishes later repaints them.
-  /// Keyed by frame ID: a member panel showing sixty avatars across four
-  /// different frames must not rebuild all sixty when one of the four
-  /// finishes decoding.
+  /// Registered by widgets so a late decode repaints them. Keyed by frame ID so
+  /// sixty avatars across four frames do not all rebuild when one decodes.
   final Map<String, Set<VoidCallback>> _listeners = {};
 
   void addListener(String id, VoidCallback cb) =>
@@ -420,12 +391,10 @@ class AvatarFrameCache {
     _stillOrder.add(id);
   }
 
-  /// Frame art is stored at up to 512px, and a frame paints at most ~146
-  /// logical px (a 110px profile-card avatar in its `size * kFrameScale`
-  /// box). 384 covers that to a 2.6x device pixel ratio and quarters what a
-  /// native-resolution still would cost, which matters because [maxStills] of
-  /// them are held at once. `allowUpscaling: false` keeps a SMALLER source at
-  /// its own size, and a single-axis target preserves the art's aspect ratio.
+  /// A frame paints at most ~146 logical px, so 384 covers a 2.6x device pixel
+  /// ratio and quarters what a native-resolution still would cost, which matters
+  /// with [maxStills] of them held at once. A single-axis target preserves the
+  /// art's aspect ratio.
   static const int _stillDecodeWidth = 384;
 
   Future<void> _decodeStill(String id, Uint8List bytes) async {
@@ -451,8 +420,8 @@ class AvatarFrameCache {
     }
   }
 
-  /// Take a reference on [id]'s full frame list. Returns null if it never
-  /// decoded. Every non-null result must be matched by a [release].
+  /// Takes a reference on [id]'s full frame list, null if it never decoded.
+  /// Every non-null result must be matched by a [release].
   Future<AvatarFrameArt?> acquire(String id, Uint8List bytes) async {
     final held = _art[id];
     if (held != null) {
@@ -461,13 +430,11 @@ class AvatarFrameCache {
     }
     final inFlight = _decodingArt[id];
     if (inFlight != null) {
-      // Another widget is already decoding this exact frame: wait on ITS
-      // future rather than decoding the same bytes twice.
+      // Another widget is already decoding this frame; wait on ITS future
+      // rather than decoding the same bytes twice.
       await inFlight.future;
-      // Re-read the map instead of trusting what the completer carried. The
-      // decoder's own reference can have been released while we waited (its
-      // widget unmounted mid-decode), and that DISPOSES the images - taking a
-      // reference on that object would paint disposed frames.
+      // Re-read the map: the decoder's own reference can have been released
+      // while we waited, and that DISPOSES the images.
       final live = _art[id];
       if (live == null) return null;
       live.refs++;
@@ -505,7 +472,7 @@ class AvatarFrameCache {
     }
   }
 
-  /// Drop a reference taken by [acquire]; the frames are disposed as soon as
+  /// Drops a reference taken by [acquire]; frames are disposed as soon as
   /// nothing is playing them.
   void release(String id) {
     final art = _art[id];

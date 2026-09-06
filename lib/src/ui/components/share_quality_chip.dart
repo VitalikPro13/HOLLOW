@@ -4,22 +4,18 @@ import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 
-/// Quality label chip for a watched share tile. While [renderer] is
-/// delivering frames it shows what WE actually receive (e.g. "824p60" on a
-/// clamped stream — media forwarding step 1), live-updating when the sharer
-/// re-encodes (Source-quality toggle); before any frame arrives it falls
-/// back to the sharer's source label (e.g. "1080p60"). The fps suffix rides
-/// over from the source label — the frame rate isn't per-viewer clamped.
-/// Pass a null [renderer] (e.g. our own outgoing share) to always show the
-/// source label.
+/// Quality label for a watched share tile: what WE actually receive once frames
+/// arrive, and the sharer's source label until then. The fps suffix always
+/// comes from the source label, because frame rate is not clamped per viewer.
+/// A null [renderer] always shows the source label.
 class ShareQualityChip extends StatelessWidget {
   const ShareQualityChip({super.key, this.renderer, this.sourceLabel});
 
   final RTCVideoRenderer? renderer;
   final String? sourceLabel;
 
-  /// "824p60" from received 1465x824 + source label "1080p60". Uses the
-  /// SHORT edge (the "p" convention), which also makes rotation irrelevant.
+  /// Measures the SHORT edge, per the "p" convention, which also makes
+  /// rotation irrelevant.
   static String receivedLabel(int w, int h, String? sourceLabel) {
     if (w <= 0 || h <= 0) return sourceLabel ?? '';
     final p = w < h ? w : h;

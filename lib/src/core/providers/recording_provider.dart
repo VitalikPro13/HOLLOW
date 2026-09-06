@@ -75,9 +75,8 @@ class RecordingNotifier extends Notifier<RecordingState> {
   Future<void> startRecording() async {
     if (state.isMyRecording) return;
 
-    // Optimistic: flip the UI to "recording" immediately so the Stop button
-    // is active and the indicator pulses while native setup completes
-    // (ScreenCaptureKit can take ~1-2s).
+    // Optimistic: flip the UI to "recording" immediately so Stop is active while
+    // native setup completes (ScreenCaptureKit can take ~1-2s).
     final scope = _detectActiveScope();
     state = state.copyWith(
       isMyRecording: true,
@@ -88,9 +87,8 @@ class RecordingNotifier extends Notifier<RecordingState> {
     );
 
     try {
-      // Windows: point the recorder at the devices Hollow actually uses —
-      // the eConsole defaults recorded the wrong endpoints when the user
-      // routed calls to a non-default headset/mic (#53).
+      // Windows: point the recorder at the devices Hollow actually uses; the
+      // eConsole defaults recorded the wrong endpoints for a non-default headset (#53).
       await RecordingService.instance.start(
         renderDeviceId: ref.read(audioOutputDeviceProvider).valueOrNull,
         captureDeviceId: ref.read(audioInputDeviceProvider).valueOrNull,
@@ -108,9 +106,8 @@ class RecordingNotifier extends Notifier<RecordingState> {
       return;
     }
 
-    // Intentionally do NOT update myStartedAt here — that would jump the
-    // timer to the native-start moment (~3-5s after click) and the elapsed
-    // counter would visibly snap backwards. Keep the click-time anchor.
+    // Intentionally do NOT update myStartedAt here: it would jump the timer to
+    // the native-start moment and the elapsed counter would snap backwards.
     state = state.copyWith(
       myFilePath: RecordingService.instance.currentFilePath,
     );
@@ -118,9 +115,8 @@ class RecordingNotifier extends Notifier<RecordingState> {
     _broadcastRecordingState(true);
   }
 
-  /// Stop the local recording and finalize the MP4. Broadcasts a stop
-  /// signal to other participants and stores the resulting file in
-  /// [state.lastFinished] so the UI can show a "Saved to ..." toast.
+  /// Stop the local recording and finalize the MP4, broadcasting a stop signal
+  /// and storing the file in [state.lastFinished] for the "Saved to ..." toast.
   Future<void> stopRecording() async {
     if (!state.isMyRecording) return;
 
@@ -174,8 +170,6 @@ class RecordingNotifier extends Notifier<RecordingState> {
     state = state.copyWith(clearLastError: true);
   }
 
-  // ---------------------------------------------------------------------------
-
   RecordingScope _detectActiveScope() {
     final call = ref.read(callProvider);
     if (call.status == CallStatus.active || call.status == CallStatus.connecting) {
@@ -214,8 +208,7 @@ class RecordingNotifier extends Notifier<RecordingState> {
       final channelId = vc.currentChannelId;
       if (serverId == null || channelId == null) return;
       // Broadcast-class state signal (like camera_state): Rust fans ONE MLS
-      // broadcast (plaintext member fallback) to the whole group and ignores
-      // peerId — a per-peer loop would emit N duplicate broadcasts.
+      // broadcast to the whole group, so a per-peer loop would emit N duplicates.
       _send(() => network_api.voiceChannelSendSignal(
             serverId: serverId,
             channelId: channelId,

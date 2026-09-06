@@ -1,37 +1,26 @@
-//! Embedded peer-forwarder bridge (media forwarding step 3 phase 2).
+//! Embedded peer-forwarder bridge.
 //!
-//! Phase 1 put a headless str0m forwarder on the VPS with its own WS/Olm
-//! signaling loop. Phase 2 runs the SAME engine inside a desktop app so
-//! STUN-reachable watchers with spare upload serve the TURN-only viewers —
-//! the relay carries zero media in the common case. This module is the seam:
-//! it feeds the engine from the swarm's Olm dispatch (envelopes arrive
-//! already authenticated) and routes the engine's replies back out through
-//! the node's own send path via our OWN `fwd:{device_id}` room (the sharer
-//! and every assigned viewer join it before signaling us — deterministic-room
-//! rule, both directions).
+//! Runs the same str0m engine as the VPS forwarder inside a desktop app, so
+//! STUN-reachable watchers with spare upload serve the TURN-only viewers and the
+//! relay carries zero media in the common case. This module is the seam: it
+//! feeds the engine from the swarm's Olm dispatch (envelopes arrive already
+//! authenticated) and routes the engine's replies back out through our OWN
+//! `fwd:{device_id}` room (deterministic-room rule, both directions).
 //!
-//! Trust model on top of the engine's own admission:
-//! - `enabled` mirrors the Settings toggle (ON by default, desktop only).
-//! - EXPECTATIONS: a `fwd_stream_register` is only admitted when its origin
-//!   matches a `(originator, kind)` pair this client advertised `fwd_capable`
-//!   for on a live `vc_screen_watch`. A peer forwarder only ever forwards a
-//!   stream its user explicitly watches — everything else keeps hitting the
-//!   client ignore arm exactly as before phase 2.
-//! - The engine's own spoof guard (register origin == Olm-authed sender),
-//!   owner checks, allowlist, and caps all apply unchanged. NO token bucket
-//!   (removed 2026-08-07 with the VPS forwarder's — the silent-drop class the
-//!   relay refuses; refusals here are explicit FwdErrors).
+//! Trust model on top of the engine's own admission: `enabled` mirrors the
+//! Settings toggle, and a `fwd_stream_register` is admitted only when its origin
+//! matches a `(originator, kind)` pair this client advertised `fwd_capable` for
+//! on a live `vc_screen_watch`, so a peer forwarder only ever forwards a stream
+//! its user explicitly watches. The engine's spoof guard, owner checks,
+//! allowlist and caps apply unchanged; there is NO token bucket, because a
+//! silent drop is the class Hollow refuses. Refusals here are explicit
+//! FwdErrors.
 //!
-//! The forwarder's OWN display is downstream viewer #0: the sharer
-//! self-assigns us (`vc_screen_assign{forwarder: us}` sent to us), Dart sends
-//! `fwd_attach` addressed to our own peer id, and `ForwarderSendSignal`
-//! short-circuits it into the engine with no Olm round-trip; the engine's
-//! egress offer comes back the same way as a `ForwarderSignal` event
-//! `from_peer == us`. The leg itself is an ordinary UDP leg on the LAN
-//! address — same-machine packets never leave the host.
+//! The forwarder's OWN display is downstream viewer #0: `ForwarderSendSignal`
+//! addressed to our own peer id short-circuits into the engine with no Olm
+//! round-trip, and the leg is an ordinary UDP leg on the LAN address.
 //!
-//! This module is compiled only under
-//! `all(feature = "forwarder", not(android/ios))` (see node/mod.rs) — every
+//! Compiled only under `all(feature = "forwarder", not(android/ios))`; every
 //! swarm call site carries the same cfg with a no-op else.
 
 use std::collections::HashSet;
@@ -57,14 +46,10 @@ pub(crate) struct EmbeddedForwarder {
     stun_server: Option<String>,
     /// Feeder election: forwarders we are FEEDING, keyed by their peer id.
     ///
-    /// A feed leg is an ordinary egress leg whose "viewer" happens to be
-    /// another forwarder — the engine needs no new concept, because an egress
-    /// leg's SendOnly OFFER is exactly the shape an ingest leg ANSWERS. Only
-    /// the envelope LABELS differ, and this set is what tells the out-pump to
-    /// relabel (`fwd_egress_offer` -> `fwd_ingest_offer`) and to route through
-    /// the TARGET's room instead of our own.
-    ///
-    /// Shared with the out-pump task, which outlives any single borrow of self.
+    /// A feed leg is an ordinary egress leg whose "viewer" is another forwarder,
+    /// because an egress leg's SendOnly OFFER is exactly what an ingest leg
+    /// ANSWERS. Only the LABELS differ, and this set is what tells the out-pump
+    /// to relabel and to route through the TARGET's room. Shared with that task.
     feed_targets: Arc<RwLock<HashSet<String>>>,
 }
 
@@ -84,10 +69,9 @@ impl EmbeddedForwarder {
         format!("fwd:{}", self.device_peer_id)
     }
 
-    /// Settings toggle. Disabling tears the engine down (existing downstream
-    /// viewers lose their legs and heal via the normal re-watch ladder) and
-    /// leaves the fwd room; Dart stops advertising `fwd_capable` in the same
-    /// breath.
+    /// Settings toggle. Disabling tears the engine down (downstream viewers heal
+    /// via the normal re-watch ladder) and leaves the fwd room; Dart stops
+    /// advertising `fwd_capable` in the same breath.
     pub(crate) fn set_enabled(
         &mut self,
         enabled: bool,
@@ -107,10 +91,9 @@ impl EmbeddedForwarder {
         }
     }
 
-    /// Dart advertised (or withdrew) `fwd_capable` on a watch for
-    /// `(origin_peer, kind)`. First active expectation joins our own fwd room
-    /// so a sharer can reach us the moment it picks us; last one leaving
-    /// tears everything down.
+    /// Dart advertised (or withdrew) `fwd_capable` for `(origin_peer, kind)`.
+    /// The first active expectation joins our own fwd room so a sharer can reach
+    /// us the moment it picks us; the last one leaving tears everything down.
     pub(crate) fn set_expectation(
         &mut self,
         origin_peer: String,
@@ -234,12 +217,9 @@ impl EmbeddedForwarder {
     /// Feeder election: start (or stop) feeding `target_forwarder` with the
     /// stream identified by `origin`.
     ///
-    /// Driven by the stream OWNER over `vc_screen_assign{feed_target}` — we
-    /// only ever feed a stream we are already forwarding, to a forwarder the
-    /// owner named. Mechanically this is just an attach by `target_forwarder`:
-    /// the engine's own admission still applies (the stream must exist and the
-    /// target must be on ITS allowlist, which only the owner can set), so this
-    /// grants no authority the owner hadn't already granted.
+    /// Driven by the stream OWNER over `vc_screen_assign{feed_target}`: we only
+    /// feed a stream we already forward, to a forwarder the owner named, and the
+    /// engine's own admission still applies, so this grants no new authority.
     pub(crate) fn set_feed(
         &mut self,
         origin: Box<super::types::StreamOrigin>,
@@ -262,8 +242,7 @@ impl EmbeddedForwarder {
             hollow_log!("[HOLLOW-FWD] feeding forwarder {target_forwarder} (delegated by owner)");
             if let Some(tx) = &self.engine_tx {
                 // An attach BY the target: the engine builds a SendOnly egress
-                // leg and emits an offer addressed to it, which the out-pump
-                // relabels into an ingest offer.
+                // leg whose offer the out-pump relabels into an ingest offer.
                 let _ = tx.send(EngineCmd::Signal {
                     sender: target_forwarder,
                     envelope: MessageEnvelope::FwdAttach { origin },
@@ -283,10 +262,9 @@ impl EmbeddedForwarder {
         }
     }
 
-    /// True when `peer` is a forwarder we are currently feeding — used by the
-    /// receive path to route its `fwd_ingest_answer` into OUR engine (as the
-    /// egress answer it structurally is) instead of surfacing it to Dart as if
-    /// we had offered an ingest of our own.
+    /// True when `peer` is a forwarder we are currently feeding, so the receive
+    /// path routes its `fwd_ingest_answer` into OUR engine as the egress answer
+    /// it structurally is, rather than surfacing it to Dart as our own ingest.
     pub(crate) fn is_feed_target(&self, peer: &str) -> bool {
         self.feed_targets
             .read()
@@ -339,10 +317,8 @@ impl EmbeddedForwarder {
         tokio::spawn(async move {
             while let Some(OutSignal { to_peer, envelope }) = out_rx.recv().await {
                 // Feeder election: a reply addressed to a forwarder we FEED is
-                // structurally an egress reply but must speak the ingest
-                // dialect, and must ride the TARGET's room (the deterministic
-                // fwd-room rule applies per-forwarder). Everything else is
-                // unchanged.
+                // structurally an egress reply that must speak the ingest dialect
+                // and ride the TARGET's room.
                 let feeding = feed_targets
                     .read()
                     .map(|t| t.contains(&to_peer))
@@ -416,10 +392,9 @@ pub(crate) async fn handle_engine_out(
         }
         return;
     }
-    // Replies to our own viewers ride OUR room (they joined it to reach us);
-    // a feed offer rides the TARGET forwarder's room, because that is where a
-    // client speaks to that forwarder. Both are deterministic — never a
-    // ws_room_for_peer lookup (the one-way-loss rule).
+    // Replies to our own viewers ride OUR room (they joined it to reach us); a
+    // feed offer rides the TARGET forwarder's room. Both deterministic, never a
+    // `ws_room_for_peer` lookup (the one-way-loss rule).
     let room = if via_target_room {
         format!("fwd:{to_peer}")
     } else {
@@ -433,10 +408,9 @@ pub(crate) async fn handle_engine_out(
     .await;
 }
 
-/// Format a forwarder-sendable envelope the way the swarm's Olm receive arms
-/// do, so a self-delivered engine reply is indistinguishable to Dart from a
-/// remote forwarder's. SDP size never exceeds the cap here — our own engine
-/// produced it.
+/// Format a forwarder-sendable envelope the way the swarm's Olm receive arms do,
+/// so a self-delivered engine reply is indistinguishable to Dart from a remote
+/// forwarder's. SDP size never exceeds the cap: our own engine produced it.
 fn fwd_signal_event(envelope: &MessageEnvelope) -> Option<(&'static str, String)> {
     match envelope {
         MessageEnvelope::FwdIngestAnswer { origin, sdp } if sdp.len() <= MAX_SDP_SIZE => Some((
@@ -467,10 +441,9 @@ fn fwd_signal_event(envelope: &MessageEnvelope) -> Option<(&'static str, String)
     }
 }
 
-/// Harvest a STUN "host:port" from the relay's TURN credential URIs. Prefers
-/// an explicit `stun:` URI; falls back to a `turn:` host on the conventional
-/// STUN port 3478 (coturn answers unauthenticated bindings there). `turns:`
-/// (TLS) hosts are fine too — we only take the hostname.
+/// Harvest a STUN "host:port" from the relay's TURN credential URIs. Prefers an
+/// explicit `stun:` URI, falls back to a `turn:` host on port 3478 (coturn
+/// answers unauthenticated bindings there); a `turns:` host gives a hostname too.
 fn stun_from_turn_uris(uris: &[String]) -> Option<String> {
     let host_of = |uri: &str| -> Option<(String, Option<u16>)> {
         let rest = uri

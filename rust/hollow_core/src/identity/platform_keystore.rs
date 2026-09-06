@@ -6,15 +6,12 @@ fn dpapi_blob_path() -> Result<PathBuf, String> {
 
 /// Per-profile slot suffix: 16 hex chars of SHA-256 over the data dir path.
 ///
-/// One machine-global keychain slot CANNOT serve two profiles (issue #47 →
-/// #27): enabling protection in profile B overwrote A's wrapping key; A's
-/// next launch retrieved the FOREIGN key, failed decrypt, and funneled the
-/// user into mnemonic recovery — which rotates the device key, discards the
-/// MLS identity + groups, and leaves voice as undecryptable garbage audio.
-/// Each profile therefore gets its own suffixed slot; the legacy unsuffixed
-/// slot (and the Windows DPAPI blob) stay as retrieve fallbacks so existing
-/// installs keep unlocking, and the unlock path self-heals the slots with
-/// whichever candidate actually decrypts the identity file.
+/// One machine-global keychain slot CANNOT serve two profiles: enabling protection in
+/// profile B overwrote A's wrapping key, and A's next launch retrieved the FOREIGN key
+/// and funnelled the user into mnemonic recovery, which rotates the device key and
+/// discards the MLS identity and groups. Each profile gets its own suffixed slot; the
+/// legacy unsuffixed slot and the Windows DPAPI blob stay as retrieve fallbacks, and
+/// the unlock path self-heals the slots with whichever candidate actually decrypts.
 fn profile_slot_suffix() -> Option<String> {
     use sha2::{Digest, Sha256};
     let dir = super::keys::data_dir().ok()?;
@@ -251,9 +248,8 @@ mod mac {
 pub(crate) fn store_key(key: &[u8]) -> Result<(), String> {
     #[cfg(windows)]
     {
-        // Per-profile slot is authoritative; the legacy machine-global slot
-        // is kept written for older builds, and the per-profile DPAPI blob
-        // is the on-disk fallback.
+        // The per-profile slot is authoritative; the legacy machine-global slot is kept
+        // written for older builds and the DPAPI blob is the on-disk fallback.
         let targets = windows_targets();
         let (primary, rest) = targets.split_first().expect("targets never empty");
         win::cred_store(primary, key)?;
@@ -283,11 +279,9 @@ pub(crate) fn store_key(key: &[u8]) -> Result<(), String> {
     }
 }
 
-/// Every stored key candidate, most-authoritative first: per-profile slot,
-/// legacy machine-global slot, then (Windows) the per-profile DPAPI blob.
-/// The caller MUST verify a candidate actually decrypts before trusting it —
-/// with multiple profiles on one machine the legacy slot routinely holds a
-/// DIFFERENT profile's key (see `profile_slot_suffix`).
+/// Every stored key candidate, most-authoritative first. The caller MUST verify a
+/// candidate actually decrypts before trusting it: with several profiles on one
+/// machine the legacy slot routinely holds a DIFFERENT profile's key.
 pub(crate) fn retrieve_key_candidates() -> Result<Vec<Vec<u8>>, String> {
     #[allow(unused_mut)]
     let mut candidates: Vec<Vec<u8>> = Vec::new();
@@ -410,9 +404,8 @@ mod tests {
         assert_eq!(recovered, secret);
     }
 
-    /// Both round-trip tests below store/delete the SAME named Windows
-    /// credential — run in parallel they race (one deletes while the other
-    /// asserts; a real intermittent CI failure). Serialize them.
+    /// Both round-trip tests store and delete the SAME named Windows credential, so in
+    /// parallel they race: serialize them.
     #[cfg(windows)]
     fn cred_test_lock() -> std::sync::MutexGuard<'static, ()> {
         static CRED_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());

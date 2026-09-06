@@ -22,9 +22,9 @@ import 'package:hollow/src/ui/shell/conference_dashboard.dart'
         showJoinConferenceDialog;
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-/// Mobile v1 Conferences surface: room list + create/edit, joiner lobby
-/// states, and host waiting-room admit/deny. The call itself reuses
-/// [MobileVoiceChannelRoute] with the conference's virtual server id.
+/// Mobile conferences: the room list, the joiner's lobby states and the host's
+/// waiting room. The call itself reuses [MobileVoiceChannelRoute] with the
+/// conference's virtual server id.
 class MobileConferencesRoute extends ConsumerStatefulWidget {
   const MobileConferencesRoute({super.key});
 
@@ -78,7 +78,7 @@ class _MobileConferencesRouteState
     final hollow = HollowTheme.of(context);
     final conf = ref.watch(conferenceProvider);
 
-    // Push the call route when we (host or admitted joiner) enter the call.
+    // Pushes the call route once we enter, as host or admitted joiner.
     ref.listen(conferenceProvider.select((s) => s.lobbyStatus), (prev, next) {
       if (prev != ConferenceLobbyStatus.inCall &&
           next == ConferenceLobbyStatus.inCall &&
@@ -164,8 +164,6 @@ class _MobileConferencesRouteState
     }
     return _buildRoomList(hollow, conf);
   }
-
-  // ── Room list ──
 
   Widget _buildRoomList(HollowTheme hollow, ConferenceState conf) {
     if (conf.rooms.isEmpty) {
@@ -319,8 +317,6 @@ class _MobileConferencesRouteState
     }
   }
 
-  // ── Lobby / denied ──
-
   Widget _buildLobby(HollowTheme hollow, ConferenceState conf) {
     final hostName = conf.hostName;
     return Center(
@@ -331,8 +327,8 @@ class _MobileConferencesRouteState
           children: [
             if (conf.hostPeerId != null)
               HollowAvatar(
-                // LobbyInfo carries the host's DEVICE id (the WS sender) —
-                // profiles/avatars are keyed by their MASTER.
+                // LobbyInfo carries the host's DEVICE id, the WS sender, while
+                // profiles and avatars are MASTER-keyed.
                 peerId: ref
                     .watch(deviceLinkProvider)
                     .identityOf(conf.hostPeerId!),
@@ -352,8 +348,8 @@ class _MobileConferencesRouteState
             ),
             const SizedBox(height: HollowSpacing.sm),
             Text(
-              // LobbyInfo is the host's reply to our knock — until it arrives
-              // the meeting hasn't started (we auto re-knock when it does).
+              // LobbyInfo is the host's reply to our knock, so until it arrives
+              // the meeting has not started.
               hostName != null && hostName.isNotEmpty
                   ? 'Waiting for the host to let you in…'
                   : "You'll join automatically once it begins.",
@@ -427,8 +423,6 @@ class _MobileConferencesRouteState
         .read(conferenceProvider.notifier)
         .requestJoin(confId, accessCode: code);
   }
-
-  // ── In call ──
 
   Widget _buildInCall(HollowTheme hollow, ConferenceState conf) {
     return ListView(

@@ -39,8 +39,7 @@ import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/ui/app.dart' show hollowNavigatorKey;
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 
-/// Log to hollow_debug.log (visible in release builds); console-only when
-/// the FFI isn't up (tests).
+/// Log to hollow_debug.log; console-only when the FFI isn't up (tests).
 void _vcLog(String msg) {
   debugPrint(msg);
   try {
@@ -66,18 +65,15 @@ class VoiceChannelState {
   final String? currentChannelId;
   final String? currentChannelName;
 
-  /// Whether the local user's mic is muted.
   final bool isMuted;
 
   /// Whether the local user is deafened (muted + no audio output).
   final bool isDeafened;
 
-  /// Remote peer audio states (peer_id -> PeerAudioState).
   final Map<String, PeerAudioState> peerAudioStates;
 
-  // NOTE: speaking (VAD) state deliberately lives in vcSpeakingProvider, NOT
-  // here — it changes 1-4x/sec per talker and replacing this state object
-  // rebuilt every voiceChannelProvider watcher (shell, panes, tiles) per flip.
+  // Speaking (VAD) state lives in vcSpeakingProvider, not here: it flips
+  // 1-4x/sec per talker and would rebuild every voiceChannelProvider watcher.
 
   /// Per-peer volume overrides (peer_id -> 0.0-2.0).
   final Map<String, double> peerVolumes;
@@ -88,50 +84,39 @@ class VoiceChannelState {
   /// Gossip neighbors for the current voice channel (gossip mode only).
   final Set<String> gossipNeighbors;
 
-  /// When the local user joined the current voice channel.
   final DateTime? joinedAt;
 
-  /// Whether the local user is sharing their screen.
   final bool isScreenSharing;
 
   /// Quality label for the local screen share (e.g. "1080p60"). Null when not sharing.
   final String? screenShareLabel;
 
-  /// Remote peers currently sharing their screen (peer_id -> true).
   final Map<String, bool> peerScreenSharing;
 
-  /// Quality labels for remote peers' screen shares (peer_id -> label).
   final Map<String, String> peerScreenShareLabels;
 
   /// Which sharer is displayed full-bleed (null = none).
   final String? focusedScreenSharePeerId;
 
   /// Type of the focused source in mixed mode: 'screen' or 'camera'.
-  /// Only used when both screen share and camera are active.
   final String focusedSourceType;
 
-  /// Remote sharers we explicitly opted into watching (issue #38).
-  /// A remote share never streams to us until its peer id is in this set —
-  /// `peerScreenSharing` alone is just the badge.
+  /// Remote sharers we explicitly opted into watching (issue #38): a share
+  /// never streams to us until its peer id is here; the rest is just the badge.
   final Set<String> watchingScreenShares;
 
-  /// Shares we asked to receive at SOURCE quality (media forwarding step 1).
-  /// OFF by default: the sharer clamps our stream to our display resolution
-  /// unless the sharer's peer id is in this set. Cleared when we stop
-  /// watching that share — the opt-in is per watch session, never sticky.
+  /// Shares we asked to receive at SOURCE quality. OFF by default: the sharer
+  /// otherwise clamps to our display resolution, and the opt-in is never sticky.
 
-  /// Desktop-only: show all sources as a tile grid instead of one focused
-  /// source full-bleed.
+  /// Desktop-only: a tile grid of all sources instead of one full-bleed.
   final bool isGridView;
 
-  /// Whether the local user's camera is on.
   final bool isCameraOn;
 
   /// Local camera facing (true = front). Local previews mirror only the
   /// front camera — a mirrored back camera shows text reversed.
   final bool isFrontCamera;
 
-  /// Remote peers with camera on (peer_id -> true).
   final Map<String, bool> peerCameraOn;
 
   /// Mobile audio route: true = loudspeaker, false = earpiece.
@@ -163,19 +148,13 @@ class VoiceChannelState {
     this.isSpeakerOn = false,
   });
 
-  /// Get participants for a specific voice channel.
   Set<String> getParticipants(String serverId, String channelId) {
     return participants[serverId]?[channelId] ?? {};
   }
 
   /// The entry in a channel's participant set that is US, in the id form THAT
-  /// SET uses — or null when we're genuinely not in the channel.
-  ///
-  /// VC participant sets are keyed by the ROUTABLE DEVICE id, and a fresh
-  /// install ALWAYS has device != master, so a bare master membership test
-  /// never matches. Panes that read "self missing" from that and inserted the
-  /// master id on top of the device entry already present rendered the local
-  /// user TWICE. Ask this instead of comparing ids by hand.
+  /// SET uses, or null when we're genuinely not in the channel. The sets are
+  /// keyed by ROUTABLE DEVICE id, so a bare master test never matches.
   String? selfParticipantId(
     String serverId,
     String channelId, {
@@ -190,7 +169,6 @@ class VoiceChannelState {
     return null;
   }
 
-  /// Whether the local user is in any voice channel.
   bool get isInVoiceChannel => currentChannelId != null;
 
   /// Get audio state for a peer (returns default if unknown).
@@ -201,21 +179,16 @@ class VoiceChannelState {
   /// Get saved volume for a peer (default 1.0).
   double getPeerVolume(String peerId) => peerVolumes[peerId] ?? 1.0;
 
-  /// Whether we are actually receiving at least one remote share.
   bool get isWatchingAnyShare => watchingScreenShares.isNotEmpty;
 
-  /// Whether the share surface (focus/grid view) should be shown: we're
-  /// sharing ourselves or watching someone. A remote share we have NOT
-  /// opted into never flips this — it only shows the badge + Watch banner.
+  /// Whether the share surface shows: we're sharing, or watching an opted-in share.
   bool get showsShareSurface => isScreenSharing || isWatchingAnyShare;
 
-  /// Remote sharers we have not opted into watching yet.
   List<String> get unwatchedRemoteShares => [
         for (final e in peerScreenSharing.entries)
           if (e.value && !watchingScreenShares.contains(e.key)) e.key,
       ];
 
-  /// Whether any camera video is active (local or remote).
   bool get isCameraActive =>
       isCameraOn ||
       peerCameraOn.values.any((v) => v);
@@ -313,55 +286,42 @@ class VoiceChannelState {
   }
 }
 
-/// Sharer-side state for ONE forwarder serving our share (media forwarding
-/// step 3). Phase 1's single infra branch generalized: phase 2 runs several
-/// branches at once (the VPS forwarder + promoted viewer-peer forwarders),
-/// each with its own single ingest leg.
+/// Sharer-side state for ONE forwarder serving our share: the VPS forwarder
+/// or a promoted viewer-peer forwarder, each with its own single ingest leg.
 class _FwdBranch {
   _FwdBranch(this.forwarderId, {required this.isPeer});
 
   final String forwarderId;
 
-  /// True = a viewer-peer forwarder (phase 2): a watcher we promoted. Its
-  /// own display is downstream viewer #0 (rides the ingest through its
-  /// embedded engine, so its direct PC is closed on promote and restored on
-  /// demote), and its remote capacity is [VoiceChannelNotifier.maxPeerForwarderLegs].
+  /// True = a promoted viewer-peer forwarder: its own display is downstream
+  /// viewer #0, and its remote capacity is [VoiceChannelNotifier.maxPeerForwarderLegs].
   final bool isPeer;
 
-  /// REMOTE downstream viewers served through this branch. A peer branch's
-  /// own display is NOT in here (local leg, not upload-bounded) but IS on
-  /// the register allowlist and in the ingest cap.
+  /// REMOTE downstream viewers served through this branch; a peer branch's own
+  /// display is not here (local leg) but is on the allowlist and in the cap.
   final Set<String> viewers = {};
 
-  /// The single ingest leg to this forwarder.
   ScreenShareService? ingest;
 
-  /// Phase 3: the live ingest carries 2 simulcast layers (rid f/q) and the
-  /// engine selects per-viewer. Decided when the ingest leg is created (VPS
-  /// forwarder = always; peer forwarder = only if its watch advertised
-  /// `fwd_simulcast`) — drives the register's `low_viewers` set.
+  /// The ingest carries 2 simulcast layers (rid f/q) and the engine selects
+  /// per-viewer; decided at ingest creation, drives the register's low_viewers.
   bool simulcast = false;
 
-  /// Feeder election (§9.6): the forwarder this branch's HEAD has been asked
-  /// to feed — the head re-emits the copy it already receives into that
-  /// forwarder's ingest, so we upload ONE copy instead of two when a peer
-  /// branch and the VPS forwarder both serve viewers. Empty = not elected.
+  /// The forwarder this branch's HEAD was elected to feed, so we upload one
+  /// copy instead of two when a peer branch and the VPS both serve. Empty = none.
   String feedTarget = '';
 
   /// The head's feed leg reported up: we may stop supplying [feedTarget]
   /// ourselves. Until then we keep our own ingest there — make-before-break.
   bool feedUp = false;
 
-  /// Gives up on an elected feeder that never reports up (old forwarder
-  /// binary that ignores `feeder`, refusal, dead leg).
+  /// Gives up on an elected feeder that never reports up.
   Timer? feedTimeout;
 
-  /// A feed leg costs the head one of its remote-leg slots, exactly like a
-  /// downstream viewer — it IS an egress leg on its engine.
+  /// A feed leg is an egress leg: it costs the head one remote-leg slot.
   int get usedLegs => viewers.length + (feedTarget.isEmpty ? 0 : 1);
 
-  /// Tears the idle branch down ~30 s after its last viewer leaves (a quick
-  /// re-watch shouldn't pay a full re-register).
+  /// Tears the idle branch down ~30 s after its last viewer leaves.
   Timer? linger;
 }
 
@@ -369,22 +329,14 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
   static const int maxScreenShareOutgoing = 15;
   static const int maxScreenShareIncoming = 10;
 
-  /// Phase 3 (upload spreading): direct per-viewer PCs the sharer runs
-  /// before further step-3-capable DIRECT viewers are served through
-  /// branches instead — the "sharer sends 1-2 copies total" target: 1
-  /// direct copy + 1 branch ingest per branch, and each peer branch fans to
-  /// [maxPeerForwarderLegs] viewers. A SOFT threshold: when no branch rung
-  /// is available the viewer still gets a direct PC (capped by
-  /// [maxScreenShareOutgoing]). Old clients (empty route) always get direct
-  /// PCs — they can't receive `vc_screen_assign`.
+  /// Direct per-viewer PCs before further step-3-capable viewers go through
+  /// branches. SOFT: with no branch rung the viewer still gets a direct PC.
   static const int maxDirectShareCopies = 1;
 
   VoiceChannelService? _service;
 
-  /// Outgoing screen share services (one per peer we're sending to).
   final Map<String, ScreenShareService> _outgoingScreenShares = {};
 
-  /// Incoming screen share services (one per peer sharing their screen to us).
   final Map<String, ScreenShareService> _incomingScreenShares = {};
 
   /// Early ICE candidates that arrived before the service was created.
@@ -395,57 +347,34 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
   /// We only ever send a screen offer to peers in this set.
   final Set<String> _watchers = {};
 
-  /// Per-watcher display resolution from the screen_watch payload (media
-  /// forwarding step 1). Used to clamp THAT viewer's stream to what their
-  /// MONITOR can show, so one 4K viewer never drags a 1080p room up. Absent /
-  /// 0x0 = unknown (old client) = no clamp. There is no per-viewer opt-out
-  /// (see [ScreenShareService.effectiveViewerCap]).
+  /// Per-watcher display resolution from screen_watch: clamps THAT viewer's
+  /// stream to their monitor. Absent / 0x0 = unknown (old client) = no clamp.
   final Map<String, ({int w, int h})> _watcherDisplays = {};
 
-  /// Peers whose audio PC to us has reached connected — the precondition for
-  /// sending them a screen offer (Olm/MLS transport is warm by then).
+  /// Peers whose audio PC reached connected: the precondition for a screen offer.
   final Set<String> _audioConnectedPeers = {};
 
   /// Viewer-side "offer never came" timeouts, keyed by sharer peer id.
   final Map<String, Timer> _watchConnectTimers = {};
 
-  /// Media forwarding step 2: our share session's stream id — rides
-  /// `origin.stream` on every outgoing screen offer/ICE. Minted per
-  /// startScreenShare, cleared on stop, so a restarted share is
-  /// distinguishable from a stale session.
+  /// Our share session's stream id, riding `origin.stream`; minted per share.
   String? _shareSessionId;
 
-  /// Media forwarding step 2: the id we self-attribute shares under —
-  /// our ROUTABLE device peer id (the id VC signal receivers key us by).
+  /// The id we self-attribute shares under: our ROUTABLE device peer id.
   String? _shareOriginPeer;
 
-  /// Media forwarding step 2: per-ORIGINATOR record of who DELIVERED their
-  /// stream plus its wire metadata. On every direct leg (all of step 2)
-  /// `deliverer == originator`; step-3 forwarder legs set deliverer = the
-  /// forwarder's peer id. Used to echo `origin` on answers/ICE and to tear
-  /// down delivered streams when their deliverer disconnects.
+  /// Per-ORIGINATOR record of who DELIVERED their stream plus its wire metadata
+  /// (deliverer == originator on direct legs); echoed on answers/ICE.
   final Map<String, ({String deliverer, String kind, String stream})>
       _incomingShareOrigins = {};
 
-  // -- Media forwarding step 3: forwarder lane (phase 1 infra + phase 2
-  // viewer-peer forwarders) --
-
-  /// Sharer side: one active forwarder BRANCH per forwarder peer id — the
-  /// VPS infra forwarder and/or promoted viewer-peer forwarders (phase 2).
-  /// Each branch carries ONE ingest leg fanned to its viewers; branch
-  /// viewers hold no per-viewer PC and don't consume the 15-cap. Display
-  /// caps stay in [_watcherDisplays]; each ingest is encoded at the max over
-  /// its own audience (incl. a peer forwarder's own display).
+  /// Sharer side: one forwarder BRANCH per forwarder peer id, each with ONE
+  /// ingest leg; branch viewers hold no per-viewer PC and skip the 15-cap.
   final Map<String, _FwdBranch> _fwdBranches = {};
 
-  /// Sharer side: per-watcher route hint + phase-2 forwarding capability +
-  /// privacy flag from their screen_watch. Candidates = fwd_capable &&
-  /// route == 'direct'; relayPrivate viewers are only ever routed through
-  /// operator infrastructure (VPS forwarder / TURN), never a peer.
-  /// fwdSimulcast (phase 3) = their embedded engine can ingest a 2-layer
-  /// simulcast stream — only such peers get a simulcast ingest offer.
-  /// fwdFeed (§9.6) = their engine can also FEED another forwarder, so they
-  /// are eligible for feeder election when they head a branch.
+  /// Sharer side: per-watcher route hint, forwarding capability and privacy
+  /// flag from their screen_watch. Candidates = fwd_capable && route ==
+  /// 'direct'; relayPrivate viewers only ever route through operator infra.
   final Map<
           String,
           ({
@@ -457,44 +386,33 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
           })>
       _watcherRoutes = {};
 
-  /// Sharer side: forwarders that FAILED for a viewer this share session (a
-  /// `direct_failed` re-watch names the branch they were on) — never
-  /// re-assigned to the same viewer. Two failures ⇒ the viewer goes direct.
+  /// Forwarders that FAILED for a viewer this share session; never re-assigned
+  /// to the same viewer, and two failures mean the viewer goes direct.
   final Map<String, Set<String>> _viewerFwdFailures = {};
 
-  /// Phase 2: max REMOTE downstream viewers per viewer-peer forwarder (its
-  /// own display leg is local and free — Vitalik's "2–3 legs" policy).
+  /// Max REMOTE downstream viewers per viewer-peer forwarder (its display is free).
   static const int maxPeerForwarderLegs = 3;
 
-  /// Viewer side: forwarder assignments by ORIGINATOR
-  /// (`vc_screen_assign`) — which forwarder serves that origin's stream to
-  /// us. fwd_* frames are honored ONLY for assigned origins from the
-  /// assigned forwarder. Phase 2: `forwarder` may be a viewer-peer — or US
-  /// (self-assignment: our display rides our own embedded engine).
+  /// Viewer side: forwarder assignments by ORIGINATOR. fwd_* frames are honored
+  /// ONLY for assigned origins from the assigned forwarder, which may be US.
   final Map<String, ({String forwarder, String kind, String stream})>
       _screenAssignments = {};
 
-  /// Viewer side: forwarder→next-rung fallback attempts per origin this
-  /// watch session. Phase 2 ladder = peer forwarder → VPS forwarder →
-  /// direct+TURN, so up to TWO attempts before the watch timeout gives up.
+  /// Viewer side: forwarder fallback attempts per origin this watch session.
+  /// Ladder = peer forwarder -> VPS forwarder -> direct+TURN, so two attempts.
   final Map<String, int> _fwdFallbackCount = {};
 
-  /// Our ROUTABLE device peer id (VC signals key us by it) — cached for the
-  /// self-assignment check (`vc_screen_assign{forwarder: us}`).
+  /// Our ROUTABLE device peer id, cached for the self-assignment check.
   String? _myDevicePeerId;
 
   /// Origins whose SELF-attach already got its one bounded retry after an
-  /// `unknown_stream` (the local attach can race the sharer's register even
-  /// with register-first send ordering — e.g. an Olm re-key in between).
+  /// `unknown_stream` (the local attach can race the sharer's register).
   final Set<String> _selfAttachRetried = {};
 
-  /// Cached SFrame keys from MLS epoch changes — applied when the service is
-  /// (re)created. Keyed by `_sframeCacheKey(serverId, channelId)`:
-  ///   * channelId == null → the server-wide MLS group key (non-restricted voice
-  ///     channels). Applies to ANY non-restricted channel in that server.
-  ///   * channelId != null → a restricted channel's MLS SUBGROUP key (per-channel
-  ///     subgroups / "Option B"). Applies ONLY to that voice channel, so a
-  ///     non-qualifying member who never receives it can't decode the audio.
+  /// Cached SFrame keys from MLS epoch changes, applied when the service is
+  /// (re)created. channelId == null is the server-wide group key; a non-null one
+  /// is a restricted channel's MLS SUBGROUP key and applies ONLY to that voice
+  /// channel, so a non-qualifying member who never gets it cannot decode audio.
   final Map<String, ({int epoch, Uint8List key})> _sframeKeys = {};
 
   /// Cache key for an SFrame secret. A subgroup key is scoped to its channel; the
@@ -502,56 +420,42 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
   static String _sframeCacheKey(String serverId, String? channelId) =>
       '$serverId ${channelId ?? ''}';
 
-  // ── SFrame heal ladder (issue #27) ──────────────────────────────────────
-  // Sustained MissingKey/DecryptionFailed on a cryptor means we and the peer
-  // disagree on key material. Rather than playing garbage/silence forever:
-  //   step 1: re-apply the cached key + rebind that peer's receiver cryptors
-  //   step 2: ask Rust to re-export + re-emit the current MLS epoch key
-  //   step 3: (cooldown-guarded) MLS re-bootstrap — converges real epoch forks
+  // SFrame heal ladder (issue #27): sustained MissingKey/DecryptionFailed
+  // means we and the peer disagree on key material, so rather than playing
+  // garbage forever the ladder re-applies, re-exports, then re-bootstraps MLS.
 
   /// Cryptor keys ('peer|kind|rx/tx') currently in a failure state → first seen.
   final Map<String, DateTime> _sframeFailures = {};
 
-  /// Per-peer heal progress: last ladder step run and when.
   final Map<String, ({int step, DateTime at})> _sframeHealProgress = {};
 
   /// Global cooldown for step 3 (MLS group surgery is expensive).
   DateTime? _lastSframeEscalateAt;
 
-  /// Step-3 attempts per peer this session. After [_kMaxSframeEscalations]
-  /// the ladder gives up on that peer — an unhealable peer (e.g. a client
-  /// that never encrypts) must not put the server MLS group through
-  /// remove+re-add surgery every cooldown window forever.
+  /// Step-3 attempts per peer this session; after [_kMaxSframeEscalations] the
+  /// ladder gives up, or an unhealable peer churns the server MLS group forever.
   final Map<String, int> _sframeEscalations = {};
   static const int _kMaxSframeEscalations = 2;
 
   Timer? _sframeHealTimer;
 
-  /// MissingKey fast-path throttle (join-order epoch race): per-peer last
-  /// immediate heal ping, so a MissingKey storm collapses to one Rust
-  /// round-trip per peer per window.
+  /// MissingKey fast-path throttle: collapses a storm to one round-trip per peer.
   final Map<String, DateTime> _sframeMissingKeyPings = {};
 
-  /// Keyless watchdog (issue #47 → #27): with NO SFrame key no cryptors ever
-  /// exist, so no cryptor-state callbacks fire and the heal ladder never
-  /// arms — an identity that lost its MLS groups (e.g. after a
-  /// profile-switch mnemonic recovery) sat keyless, transmitting plaintext
-  /// against peers' ciphertext, audibly garbled forever. Ticks after join
-  /// until the first key lands, nudging Rust to re-emit / re-bootstrap.
+  /// Keyless watchdog (issue #47 -> #27): with NO SFrame key no cryptors exist,
+  /// so no cryptor-state callback ever arms the heal ladder and the identity
+  /// transmits plaintext against peers' ciphertext. Ticks until the first key.
   Timer? _sframeKeylessTimer;
   int _sframeKeylessTicks = 0;
 
-  /// Whether a channel is cryptographically isolated in its own MLS subgroup
-  /// (per-channel subgroups / "Option B"): restricted visibility AND not a public
-  /// channel. Mirrors Rust `ServerState::channel_uses_subgroup`. Such a channel's
-  /// voice SFrame key comes ONLY from its subgroup, never the server-wide group.
+  /// Whether a channel is cryptographically isolated in its own MLS subgroup:
+  /// restricted visibility AND not public. Mirrors Rust `channel_uses_subgroup`;
+  /// such a channel's SFrame key comes ONLY from its subgroup.
   bool _channelUsesSubgroup(String channelId) {
     final ch = ref.read(channelListProvider)[channelId];
     if (ch == null) return false;
-    // Label-gated channels are subgrouped too. The Rust handler stamps the
-    // tier to admin whenever a label gate turns on, but this is a KEY-DOMAIN
-    // decision — never rely on the stamp; mirror Rust's channel_uses_subgroup
-    // exactly.
+    // Label-gated channels are subgrouped too. This is a KEY-DOMAIN decision:
+    // never rely on the admin-tier stamp, mirror Rust's rule exactly.
     return !ch.isPublic &&
         (ch.visibility != 'everyone' || ch.visibilityLabels.isNotEmpty);
   }
@@ -568,52 +472,35 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
   ScreenContentProfile _screenShareProfile = ScreenContentProfile.motion;
   ScreenAudioReceiver? _screenAudioRenderer;
 
-  /// MOBILE share-audio capture — ONE central instance for the whole channel
-  /// (the Rust Opus encoder is a process-global singleton; the desktop
-  /// per-peer-exe pattern would feed it the same PCM N times). Packets fan
-  /// out to every outgoing-share peer at send time.
+  /// MOBILE share-audio capture: ONE instance for the whole channel, because the
+  /// Rust Opus encoder is a process-global singleton. Fans out at send time.
   MobileScreenAudioCapturer? _mobileShareAudioCapturer;
 
-  /// Entire-screen anti-echo (Windows): the out-of-process voice-render child
-  /// pid to EXCLUDE from the screen-audio capture (so the VC voices it plays
-  /// aren't re-captured while Hollow's own media is), and whether the redirect
-  /// is currently armed. Armed once per share (covers all peers), reset on stop.
+  /// Entire-screen anti-echo (Windows): the voice-render child pid to EXCLUDE
+  /// from screen-audio capture so the VC voices it plays aren't re-captured,
+  /// and whether the redirect is armed. Armed once per share, reset on stop.
   int _screenShareExcludePid = 0;
   bool _voiceRedirectActive = false;
 
-  /// Timer that polls for screen track ending (window closed).
   Timer? _screenTrackPoller;
 
-  /// Guard to prevent concurrent leaveChannel calls and actions during leave.
   bool _leaving = false;
 
-  /// Bumped by every join and every teardown. `onLocalJoined` is a long, fully
-  /// async bring-up (device prefs → audio start → SFrame key → dial existing
-  /// participants) and the user can leave or hop channels straight through it.
-  /// A run that resumes on a stale generation abandons its half-built service
-  /// instead of configuring one nobody owns any more — 0.8.5 crashed there
-  /// instead ("Null check operator used on a null value": the teardown had
-  /// nulled `_service` and the next `_service!` after an await threw).
+  /// Bumped by every join and every teardown. `onLocalJoined` is a long async
+  /// bring-up the user can leave or hop straight through; a run that resumes
+  /// on a stale generation must abandon its half-built service, not `_service!`.
   int _joinGen = 0;
 
-  /// In-flight teardown (set by the server-forced `onLocalLeft` path, which
-  /// can't be awaited by its synchronous caller). A subsequent `joinChannel`
-  /// awaits this so a new call's PCs can't start while the old call's mesh is
-  /// still tearing down its libwebrtc thread-sets (which would race the native
-  /// teardown → heap corruption on Linux).
+  /// In-flight teardown from the server-forced `onLocalLeft` path, which its
+  /// synchronous caller cannot await. A later `joinChannel` awaits this so new
+  /// PCs can't race the old mesh's native teardown (heap corruption on Linux).
   Future<void>? _teardownInFlight;
 
   /// Channel that was selected before joining the VC (restored on leave).
   String? preVcChannelId;
 
-  // ---------------------------------------------------------------
-  //  Camera (video) state
-  // ---------------------------------------------------------------
-
-  /// Local camera renderer (for self-view in grid).
   RTCVideoRenderer? _localCameraRenderer;
 
-  /// Remote camera renderers (peer_id -> RTCVideoRenderer), managed by service.
   final Map<String, RTCVideoRenderer> _remoteCameraRenderers = {};
 
   /// Device-provider listeners registered once (the join path re-runs).
@@ -621,20 +508,15 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
 
   @override
   VoiceChannelState build() {
-    // The service snapshots its ICE config at join time and nothing else ever
-    // reassigns it (unlike VoiceService/WebRtcService, which re-read on every
-    // service-getter access). Push updates in instead — otherwise a TURN
-    // credential refresh, or an "Always relay calls" flip made while sitting
-    // in a channel, would still hand DIRECT candidates to every peer who joins
-    // afterwards.
+    // The service snapshots its ICE config at join time, so updates are pushed in:
+    // a TURN refresh or an Always-relay flip mid-channel would otherwise be lost.
     ref.listen<Map<String, dynamic>>(iceConfigProvider, (_, next) {
       _service?.iceServers = next;
     });
     return const VoiceChannelState();
   }
 
-  /// Live camera device switch: the service swaps every mesh PC's sender and
-  /// returns the fresh capture stream — rebind the self-view to it.
+  /// Live camera device switch: rebind the self-view to the fresh capture stream.
   Future<void> _applyCameraDevice(String? deviceId) async {
     final service = _service;
     if (service == null) return;
@@ -650,31 +532,22 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
 
   VoiceChannelService? get service => _service;
 
-  /// Get the renderer for an incoming screen share from a specific peer.
   RTCVideoRenderer? getScreenShareRenderer(String peerId) =>
       _incomingScreenShares[peerId]?.remoteRenderer;
 
-  /// Get the local screen share renderer (self-preview of what we're sharing).
-  /// Uses a dedicated renderer tied to the capture stream, independent of
-  /// whether any peers are connected (works even when alone in the channel).
+  /// The local screen share self-preview renderer, tied to the capture stream
+  /// so it works even when alone in the channel.
   RTCVideoRenderer? get localScreenShareRenderer =>
       _localScreenPreviewRenderer;
 
-  /// Get the camera renderer for a peer (or self).
   RTCVideoRenderer? getCameraRenderer(String peerId) {
     final localPeerId = ref.read(identityProvider).peerId ?? '';
     if (peerId == localPeerId) return _localCameraRenderer;
     return _remoteCameraRenderers[peerId];
   }
 
-  /// Handle a peer joining a voice channel (from event).
-  /// Returns true only for a peer that was NOT already in this channel's
-  /// roster, which is what separates a real arrival from a re-announce.
-  ///
-  /// Two things re-announce: one join arrives TWICE by design (the MLS
-  /// broadcast and the plaintext fan), and a peer rejoining the relay room
-  /// gets told our voice presence again so its signal gate can be refilled.
-  /// Neither is someone walking in, and neither should sound like it.
+  /// Returns true only for a peer NOT already in this channel's roster: a join
+  /// arrives twice by design and a relay rejoin re-announces.
   bool onPeerJoined(String serverId, String channelId, String peerId) {
     final already =
         state.participants[serverId]?[channelId]?.contains(peerId) ?? false;
@@ -687,7 +560,6 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     return !already;
   }
 
-  /// Handle a peer leaving a voice channel (from event).
   void onPeerLeft(String serverId, String channelId, String peerId) {
     final updated = _deepCopyParticipants();
     updated[serverId]?[channelId]?.remove(peerId);
@@ -697,16 +569,13 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     if (updated[serverId]?.isEmpty ?? false) {
       updated.remove(serverId);
     }
-    // Clean up audio state for the leaving peer.
     final audioStates = Map.of(state.peerAudioStates)..remove(peerId);
     state = state.copyWith(participants: updated, peerAudioStates: audioStates);
   }
 
   /// Drop every REMOTE participant tracked under [serverId] (all channels).
   /// Conferences call this on meeting start/end/leave: a previous meeting's
-  /// members linger otherwise — their VoiceChannelLeave broadcast raced the
-  /// host's room-leave/group-drop and never arrived, and restarting reuses
-  /// the same `conf:x:main` key.
+  /// members linger otherwise, and restarting reuses the same `conf:x:main` key.
   void clearServerParticipants(String serverId) {
     if (!state.participants.containsKey(serverId)) return;
     final removed = state.participants[serverId]?.values
@@ -721,9 +590,8 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
 
   /// Join a voice channel. If already in one, leave it first.
   Future<void> joinChannel(String serverId, String channelId) async {
-    // Same reasoning as the DM call lane: while a voice session is live the
-    // relay socket retries every second instead of backing off toward thirty,
-    // so a member whose Wi-Fi blinks is back in seconds.
+    // While a voice session is live the relay socket retries every second
+    // instead of backing off toward thirty, so a blinking Wi-Fi is back fast.
     RealtimeSessionFlag.acquire('voice-channel');
     // Block if in a 1:1 call. Say so — a silent return reads as a dead
     // button (issue #49).
@@ -747,8 +615,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       return;
     }
 
-    // Wait for any server-forced teardown still in flight to finish, so we
-    // don't build new PCs while the old mesh is mid-dispose.
+    // Don't build new PCs while a forced teardown's mesh is mid-dispose.
     final pending = _teardownInFlight;
     if (pending != null) {
       debugPrint('[HOLLOW-VC] joinChannel waiting for in-flight teardown');
@@ -757,26 +624,22 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       } catch (_) {}
     }
 
-    // Leave current voice channel if in one.
     if (state.isInVoiceChannel) {
       await leaveChannel();
     }
 
-    // Send join signal via Rust FFI.
     await network_api.voiceChannelJoin(
       serverId: serverId,
       channelId: channelId,
     );
   }
 
-  /// True once this join has been superseded — the user left, was forced out,
-  /// or joined somewhere else while this bring-up was still walking its awaits.
+  /// True once this join has been superseded (left, forced out, or joined
+  /// elsewhere) while this bring-up was still walking its awaits.
   ///
   /// Closing [svc] here is only OUR job when another join replaced the field
-  /// without a teardown; a leave always closes whatever `_service` held (and
-  /// may still be inside that await), so `_service == null` means it is already
-  /// handled — closing again from here would be the double-dispose that
-  /// corrupts the heap on Linux.
+  /// without a teardown: `_service == null` means a leave already owns it, and
+  /// closing again is the double-dispose that corrupts the heap on Linux.
   Future<bool> _joinSuperseded(int gen, VoiceChannelService svc) async {
     if (gen == _joinGen && identical(_service, svc)) return false;
     debugPrint('[HOLLOW-VC] Join superseded mid-bring-up — dropping service');
@@ -793,7 +656,6 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
   Future<void> onLocalJoined(String serverId, String channelId) async {
     final gen = ++_joinGen;
 
-    // Resolve channel name: try provider first, then fall back to FFI.
     String? channelName = ref.read(channelListProvider)[channelId]?.name;
     if (channelName == null) {
       try {
@@ -815,24 +677,16 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       joinedAt: DateTime.now(),
     );
 
-    // You're in — the same cue peers hear when you arrive (#55). `duringCall`
-    // even though the mic isn't open yet: the clip outlives this line by half
-    // a second, by which point WebRTC owns the iOS audio session.
+    // `duringCall` even though the mic isn't open yet (#55): the clip outlives
+    // this line by half a second, by which point WebRTC owns the iOS session.
     SoundService.instance.play(HollowSound.joinVoice, duringCall: true);
 
     // Group voice channels default to the loudspeaker on mobile.
     _setSpeakerRoute(true);
 
-    // Initialize the WebRTC service.
-    //
-    // CRITICAL: the service's localPeerId is compared against ROUTABLE ids
-    // (VC participants + signal senders are WS-device-keyed). On a linked
-    // multi-device install identityProvider.peerId is the MASTER id — a
-    // different keyspace — which made BOTH sides of a VC elect themselves
-    // offerer ("lower peer_id offers" ran master-vs-device on one side and
-    // device-vs-device on the other): deterministic offer glare, crossed
-    // answers, mismatched DTLS, dead mic until the first camera reneg
-    // re-synced SDP. Single-device installs never hit it (master == device).
+    // CRITICAL: the service's localPeerId must be the ROUTABLE DEVICE id. VC
+    // participants and signal senders are device-keyed, so a master id here
+    // makes both sides elect themselves offerer: glare, crossed answers, dead mic.
     final localPeerId = await network_api.getLocalDevicePeerId() ??
         (ref.read(identityProvider).peerId ?? '');
     final iceConfig = ref.read(iceConfigProvider);
@@ -845,7 +699,6 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     );
     _service = svc;
 
-    // Load device preferences.
     svc.preferredAudioInputDeviceId =
         await ref.read(audioInputDeviceProvider.future);
     svc.preferredAudioOutputDeviceId =
@@ -853,12 +706,10 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     svc.preferredCameraDeviceId =
         await ref.read(cameraDeviceProvider.future);
 
-    // Load audio quality preset.
     final preset = await ref.read(audioQualityProvider.future);
     svc.opusBitrate = preset.bitrate;
     svc.opusStereo = preset.stereo;
 
-    // Load mic gain + voice enhancement.
     svc.micGain = await ref.read(micGainProvider.future);
     svc.voiceEnhance = await ref.read(voiceEnhanceProvider.future);
     svc.enhanceMakeupDb = enhanceStrengthToMakeupDb(
@@ -870,29 +721,24 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     svc.noiseSuppressEngine = noiseSuppressEngineToNative(
         await ref.read(noiseSuppressEngineProvider.future));
 
-    // Every preference above came from an await — bail before we open the mic
-    // if the channel we were joining is already behind us.
+    // Bail before opening the mic if the channel is already behind us.
     if (await _joinSuperseded(gen, svc)) return;
 
     _armSframeKeylessWatchdog();
 
-    // Wire VAD callback. Writes go to the dedicated vcSpeakingProvider (NOT
-    // VoiceChannelState) so a speaking flip only rebuilds the glow consumers,
-    // never every voiceChannelProvider watcher.
+    // VAD writes go to vcSpeakingProvider, not VoiceChannelState, so a speaking
+    // flip rebuilds only the glow consumers.
     svc.onSpeakingChanged = (speaking, localSpeaking) {
       ref.read(vcSpeakingProvider.notifier).set(speaking);
       ref.read(vcLocalSpeakingProvider.notifier).set(localSpeaking);
-      // Sidechain for share-audio ducking: anyone talking (self included)
-      // pulls received share audio down.
+      // Sidechain: anyone talking pulls received share audio down.
       ShareAudioLevel.setSpeaking(speaking.isNotEmpty || localSpeaking);
     };
 
-    // "Direct whenever direct is possible" (ICE repair, lever 1): the service
-    // owns the PCs and the reneg path, the provider owns policy. Forced-relay
-    // users are NEVER repaired — that routing is their deliberate choice.
+    // ICE repair, lever 1: the provider owns policy. Forced-relay users are
+    // NEVER repaired, that routing is their deliberate choice.
     svc.isForcedRelay = () => ref.read(alwaysRelayCallsProvider);
-    // Per-peer link health for the tiles: a member on a bad connection is
-    // labelled on their own tile, never as a channel-wide alarm.
+    // A member on a bad connection is labelled on their own tile only.
     svc.onLinkHealth = (peerId, snapshot) =>
         ref.read(vcLinkHealthProvider.notifier).setFor(peerId, snapshot);
     // See the DM twin: an ICE restart offer needs the relay to carry it, so a
@@ -900,17 +746,14 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     svc.canSignal = () =>
         ref.read(connectionStatusProvider).relayStatus ==
         RelayConnectionStatus.connected;
-    // A leg whose hold-open window was spent keeps being reached for while its
-    // member is still in the channel — the provider owns the participant sets,
-    // so it answers the question the service cannot.
+    // Only the provider owns the participant sets, so it answers this.
     svc.isChannelParticipant = (peerId) {
       final sid = state.currentServerId;
       final cid = state.currentChannelId;
       if (sid == null || cid == null) return false;
       return state.getParticipants(sid, cid).contains(peerId);
     };
-    // Lever 2 hand-off: a repaired audio PC changes our route hint, which is
-    // what lets the sharer promote us off the relay path.
+    // A repaired audio PC changes our route hint, which lets the sharer promote us.
     svc.onIceRouteRepaired = (peerId, direct) {
       if (!direct) return;
       if (state.watchingScreenShares.contains(peerId)) {
@@ -918,12 +761,10 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       }
     };
 
-    // Wire peer connected callback — send screen share offer once audio PC is ready.
     svc.onPeerConnected = (peerId) {
       if (_leaving || _stoppingScreenShare) return;
 
-      // Ensure the file-transfer data channel (WebRtcService) exists with
-      // this peer — needed for screen audio streaming on Windows.
+      // Screen audio on Windows rides the WebRtcService data channel.
       if (Platform.isWindows) {
         final webrtc = ref.read(webRtcProvider.notifier).service;
         if (!webrtc.hasPeerChannel(peerId)) {
@@ -934,19 +775,14 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
 
       _audioConnectedPeers.add(peerId);
 
-      // If we're watching this peer's share, our route hint was probed before
-      // this PC settled (or on a previous, now-replaced PC). Re-probe once —
-      // an upgrade to `direct` is what lets the sharer promote us off the
-      // relay path (lever 2 of the ICE repair pair).
+      // Our route hint was probed before this PC settled; re-probe once, an
+      // upgrade to `direct` lets the sharer promote us off the relay path.
       if (state.watchingScreenShares.contains(peerId)) {
         _scheduleRouteReprobe(peerId);
       }
 
-      // Opt-in watching (issue #38): only send our share to peers that asked
-      // via screen_watch — never unconditionally. Forwarder-served viewers
-      // (step 3) never get a direct per-viewer PC from this path either, and
-      // neither does a promoted peer forwarder (its display rides its own
-      // engine leg).
+      // Opt-in watching (issue #38): only peers that asked via screen_watch get
+      // our share, and forwarder-served viewers never get a direct PC here.
       if (state.isScreenSharing &&
           _screenCaptureStream != null &&
           _watchers.contains(peerId) &&
@@ -960,9 +796,8 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       }
     };
 
-    // Wire screen audio receiver — incoming Opus packets from peers
-    // (Windows sender → data channel → us). On Windows plays via out-of-process
-    // exe; macOS/Linux not yet implemented (macOS uses Process Tap instead).
+    // Incoming Opus share audio from peers. Windows plays it via an
+    // out-of-process exe; macOS/Linux not implemented (macOS uses Process Tap).
     {
       final webrtc = ref.read(webRtcProvider.notifier).service;
       webrtc.onScreenAudioReceived = (peerId, data) async {
@@ -979,9 +814,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       };
     }
 
-    // Share-audio playback level: seed the bus (carrying any live deafen
-    // state into a rejoin) and live-update it when the slider / duck toggle
-    // change mid-share.
+    // Seed the share-audio bus, carrying live deafen state into a rejoin.
     ShareAudioLevel.setDeafened(state.isDeafened);
     ShareAudioLevel.setVolumePercent(
         ref.read(shareAudioVolumeProvider).valueOrNull ??
@@ -996,42 +829,32 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       ShareAudioLevel.setDuckEnabled(next.valueOrNull ?? true);
     });
 
-    // Wire camera video callback.
     svc.onRemoteVideoChanged = (peerId, renderer) {
       if (renderer != null) {
         _remoteCameraRenderers[peerId] = renderer;
       } else {
         _remoteCameraRenderers.remove(peerId);
       }
-      // Update peerCameraOn state to trigger UI rebuild.
       final cameras = Map.of(state.peerCameraOn);
       cameras[peerId] = renderer != null;
       if (renderer == null) cameras.remove(peerId);
       state = state.copyWith(peerCameraOn: cameras);
     };
 
-    // Wire the SFrame heal ladder — cryptor failure states drive recovery
-    // instead of playing garbage/silence until the call is restarted.
+    // Cryptor failure states drive recovery instead of playing garbage.
     svc.onSframeCryptorState = _onSframeCryptorState;
 
     await svc.startAudio(serverId, channelId);
 
-    // The mic is live now — if the channel went away while it was opening,
-    // give it straight back.
+    // The mic is live: if the channel went away while it opened, give it back.
     if (await _joinSuperseded(gen, svc)) return;
 
-    // Apply the transmit gate now that capture exists: in push-to-talk mode
-    // the mic starts gated (capture-muted) while state.isMuted stays false —
-    // peers see us unmuted; the key gates actual transmission.
+    // In PTT mode the mic starts capture-muted while state.isMuted stays false:
+    // peers see us unmuted and the key gates actual transmission.
     _applyTxGate();
 
-    // Re-assert the speaker route now that the audio session actually
-    // exists. The early _setSpeakerRoute(true) above ran BEFORE the service
-    // was constructed — the platform audio bring-up (audioswitch activate on
-    // Android, VPIO unit start on iOS) lands after it and can clobber the
-    // route, leaving the channel on the earpiece despite the loudspeaker
-    // default. One immediate pass plus one delayed pass once the audio unit
-    // settles.
+    // Re-assert the speaker route: the platform audio bring-up lands after the
+    // early _setSpeakerRoute and can clobber it back to the earpiece.
     _setSpeakerRoute(state.isSpeakerOn);
     Future.delayed(const Duration(milliseconds: 1200), () {
       if (!_leaving && state.isInVoiceChannel) {
@@ -1039,9 +862,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       }
     });
 
-    // AI-NS fallback check for sessions that STARTED with the toggle on
-    // (the toggle listener only covers mid-session flips). Logs the engine
-    // status either way; re-captures internally if fallback is needed.
+    // AI-NS fallback check for sessions that STARTED with the toggle on.
     if (_service?.noiseSuppressAi == true) {
       unawaited(Future.delayed(const Duration(seconds: 4), () {
         return _service?.reconcileNoiseSuppressAi().catchError((_) {}) ??
@@ -1049,13 +870,11 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       }));
     }
 
-    // Update mic gain mid-session when user adjusts the slider.
     ref.listen(micGainProvider, (_, next) {
       final gain = next.valueOrNull ?? kMicGainDefault;
       _service?.updateMicGain(gain);
     });
 
-    // Live A/B of the voice-enhancement chain mid-session.
     ref.listen(voiceEnhanceProvider, (_, next) {
       final enabled = next.valueOrNull ?? true;
       _service?.updateVoiceEnhance(enabled);
@@ -1069,10 +888,8 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       _service?.updateVoiceEnhanceDynamic(enabled);
     });
 
-    // Live device switching mid-session (Settings > Audio & Video pickers).
-    // Registered ONCE — this join path re-runs per join and would stack
-    // duplicate listeners; the service methods also dedup by captured device.
-    // Guard on prev==next: AsyncNotifier listeners also fire on initial load.
+    // Registered ONCE: this join path re-runs per join and would stack duplicate
+    // listeners. Guard on prev==next because AsyncNotifier fires on initial load.
     if (!_deviceListenersWired) {
       _deviceListenersWired = true;
       ref.listen(audioInputDeviceProvider, (prev, next) {
@@ -1093,10 +910,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
                 .catchError((_) {}) ??
             Future.value());
       });
-      // AI noise suppression: flips the native DFN engine AND the WebRTC-NS
-      // capture constraint — the service re-captures the mesh mic, so this
-      // is heavy like a device switch and must never stack per join. The
-      // delayed pass re-arms legacy NS if DFN proves unable to run here.
+      // AI noise suppression re-captures the mesh mic, so it must not stack per join.
       ref.listen(noiseSuppressAiProvider, (prev, next) {
         if (prev?.valueOrNull == next.valueOrNull) return;
         final enabled = next.valueOrNull ?? false;
@@ -1110,8 +924,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
           }));
         }
       });
-      // AI-NS engine switch: live native handle swap (no re-capture, no
-      // mesh reneg), then the same delayed fallback pass as the toggle.
+      // Live native handle swap: no re-capture, no mesh reneg.
       ref.listen(noiseSuppressEngineProvider, (prev, next) {
         if (prev?.valueOrNull == next.valueOrNull) return;
         final engine = noiseSuppressEngineToNative(
@@ -1128,10 +941,8 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       });
     }
 
-    // Apply cached SFrame key (may have arrived before the service was created).
-    // A RESTRICTED channel (per-channel MLS subgroup) uses ONLY its subgroup key
-    // (serverId, channelId) — never the server-group key, which would defeat the
-    // cryptographic isolation. A non-restricted channel uses the server-group key.
+    // Apply cached SFrame key. A RESTRICTED channel uses ONLY its subgroup key,
+    // never the server-group key, which would defeat the cryptographic isolation.
     final usesSubgroup = _channelUsesSubgroup(channelId);
     final cached = _sframeKeys[_sframeCacheKey(serverId, channelId)] ??
         (usesSubgroup ? null : _sframeKeys[_sframeCacheKey(serverId, null)]);
@@ -1139,17 +950,13 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       debugPrint('[HOLLOW-VC] Applying cached SFrame key (epoch=${cached.epoch}) to new service');
       await svc.setSframeKey(cached.epoch, Uint8List.fromList(cached.key));
     } else if (usesSubgroup) {
-      // Subgroup key not delivered yet — the Welcome/Commit → MlsEpochChanged
-      // (channelId) will rotate it in. Until then this channel has no SFrame key.
+      // Not delivered yet: MlsEpochChanged(channelId) rotates it in later.
       debugPrint('[HOLLOW-VC] Restricted channel $channelId — awaiting subgroup SFrame key');
     }
 
-    // Connect to existing participants in this channel. Each dial is a full
-    // PC bring-up, so re-check between them rather than build a mesh into a
-    // channel we've already left. Self-skip covers BOTH id forms: the set is
-    // device-keyed (localPeerId here IS the device id), and the master compare
-    // is a belt against any legacy master-form self entry — the self-ghost bug
-    // was exactly a master-form self surviving a device-only skip.
+    // Each dial is a full PC bring-up, so re-check between them rather than
+    // build a mesh into a channel we've left. Self-skip covers BOTH id forms:
+    // a master-form self entry surviving a device-only skip was the ghost bug.
     final localMaster = ref.read(identityProvider).peerId ?? '';
     final existing = state.getParticipants(serverId, channelId);
     for (final peerId in existing) {
@@ -1163,22 +970,15 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
   Future<void> onRemotePeerJoined(String peerId,
       {bool isNewArrival = true}) async {
     if (_service == null || !state.isInVoiceChannel) return;
-    // Someone walked into the channel you're sitting in — the cue the feature
-    // request was actually about ("we can't know what's happening right now").
     // Deafened means silence, so channel chatter cues stay out; your own
-    // toggles still click, otherwise un-deafening feels like a dead button.
-    // [isNewArrival] false means this is a re-announce for someone already in
-    // the roster, which is not an arrival and must stay silent.
+    // toggles still click. [isNewArrival] false is a re-announce, not an arrival.
     if (isNewArrival && !state.isDeafened) {
       SoundService.instance.play(HollowSound.joinVoice, duringCall: true);
     }
     await _service!.onPeerJoinedMyChannel(peerId);
 
-    // If we're sharing our screen, send state to the late joiner so they
-    // know we're sharing (badge + Watch banner). The actual screen_offer is
-    // only sent if they opt in via screen_watch AND their audio PC reaches
-    // connected state (via onPeerConnected callback), ensuring MLS is ready
-    // and the peer can decrypt it.
+    // Tell a late joiner we're sharing (badge + Watch banner). The screen_offer
+    // only follows their screen_watch and a connected audio PC.
     if (state.isScreenSharing && _screenCaptureStream != null) {
       final json = <String, dynamic>{'enabled': true};
       if (state.screenShareLabel != null) {
@@ -1193,8 +993,6 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       );
     }
 
-    // If our camera is on, send camera_state to the late joiner.
-    // (Video track is already added in connectToPeer via _addLocalVideoTracks.)
     if (state.isCameraOn) {
       network_api.voiceChannelSendSignal(
         serverId: state.currentServerId!,
@@ -1205,8 +1003,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       );
     }
 
-    // If we're muted/deafened, tell the late joiner — audio_state is
-    // otherwise only sent on toggle, so they'd never see our badge.
+    // audio_state is otherwise only sent on toggle, so a late joiner would miss it.
     if (state.isMuted || state.isDeafened) {
       network_api.voiceChannelSendSignal(
         serverId: state.currentServerId!,
@@ -1223,9 +1020,8 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
 
   /// Called when a remote peer leaves a voice channel.
   ///
-  /// [inOurChannel] is false when they left some OTHER channel of a server we
-  /// can see — the teardown below is a harmless no-op for a peer we were never
-  /// connected to, but the leave cue must not fire for a channel we aren't in.
+  /// [inOurChannel] is false when they left another channel of a server we can
+  /// see: the teardown is a no-op, but the leave cue must not fire.
   Future<void> onRemotePeerLeft(String peerId,
       {bool inOurChannel = true}) async {
     if (_service == null) return;
@@ -1236,14 +1032,11 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     _watchers.remove(peerId);
     _watcherDisplays.remove(peerId);
     _audioConnectedPeers.remove(peerId);
-    // A gone peer can't heal — drop its ladder state.
     _sframeFailures.removeWhere((k, _) => k.startsWith('$peerId|'));
     _sframeHealProgress.remove(peerId);
     _sframeEscalations.remove(peerId);
     _sframeMissingKeyPings.remove(peerId);
-    // Clean up screen sharing for this peer.
     await _cleanupPeerScreenShare(peerId);
-    // Clean up camera state for this peer.
     await _cleanupPeerCamera(peerId);
   }
 
@@ -1255,7 +1048,6 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     String serverId,
     String channelId,
   ) async {
-    // Handle audio state signals locally (no WebRTC involved).
     if (signalType == 'audio_state') {
       _onRemoteAudioState(peerId, payload);
       return;
@@ -1268,12 +1060,10 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       ref.read(recordingProvider.notifier).onRemoteRecordingStop(peerId);
       return;
     }
-    // Handle camera state signals.
     if (signalType == 'camera_state') {
       _handleCameraState(peerId, payload);
       return;
     }
-    // Handle screen share signals.
     if (signalType == 'screen_offer') {
       await _handleScreenOffer(peerId, payload, serverId, channelId);
       return;
@@ -1294,12 +1084,10 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       await _handleScreenWatch(peerId, payload);
       return;
     }
-    // Media forwarding step 3: the sharer routed us to a forwarder.
     if (signalType == 'screen_assign') {
       await _handleScreenAssign(peerId, payload);
       return;
     }
-    // Feeder election (§9.6): a head we delegated reports its feed leg state.
     if (signalType == 'screen_feed_state') {
       final v = jsonDecode(payload);
       final origin = v['origin'];
@@ -1324,16 +1112,13 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     RealtimeSessionFlag.release('voice-channel');
     if (!state.isInVoiceChannel || _leaving) return;
     _leaving = true;
-    // Retire the current join immediately: a bring-up still walking its awaits
-    // must stop before the FFI round-trip below, not after it.
+    // Retire the join before the FFI round-trip, not after it.
     _joinGen++;
 
-    // Capture IDs before any state changes.
     final serverId = state.currentServerId!;
     final channelId = state.currentChannelId!;
 
-    // Send leave signal to Rust FIRST — before any cleanup that could throw.
-    // This ensures the server knows we left even if cleanup fails.
+    // Leave Rust FIRST, so a throwing cleanup can't leave us in the channel.
     try {
       await network_api.voiceChannelLeave(
         serverId: serverId,
@@ -1343,59 +1128,46 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       debugPrint('[HOLLOW-VC] voiceChannelLeave FFI error: $e');
     }
 
-    // Now clean up (best-effort — errors won't block leave).
     await _teardownCall();
 
     _leaving = false;
   }
 
-  /// Tear down all live call media: camera/screen renderers, screen audio, and
-  /// the WebRTC service (closes every PC + stops mic/camera streams). Idempotent
-  /// — safe to call when nothing is active. Shared by the user-initiated
-  /// `leaveChannel()` and the server-forced leave path in `onLocalLeft()`.
+  /// Tear down all live call media. Idempotent; shared by `leaveChannel()` and
+  /// the server-forced leave path in `onLocalLeft()`.
   Future<void> _teardownCall() async {
     _resetSframeHeal();
-    // Also covers the server-FORCED leave, which never goes through
-    // leaveChannel(): whatever join is mid-flight no longer owns this call.
+    // Whatever join is mid-flight no longer owns this call.
     _joinGen++;
     try {
-      // Dispose local camera renderer.
       if (_localCameraRenderer != null) {
         _localCameraRenderer!.srcObject = null;
         await _localCameraRenderer!.dispose();
         _localCameraRenderer = null;
       }
 
-      // Dispose remote camera renderers.
       for (final renderer in _remoteCameraRenderers.values) {
         renderer.srcObject = null;
         await renderer.dispose();
       }
       _remoteCameraRenderers.clear();
 
-      // Clean up screen sharing (stops the screen-audio capturer).
       _audioConnectedPeers.clear();
       await _cleanupAllScreenShares();
 
-      // Disarm the entire-screen anti-echo voice redirect AFTER the capturer is
-      // gone (idempotent — also disarmed by stopScreenShare; covers leaving the
-      // channel while sharing).
+      // AFTER the capturer is gone; idempotent with stopScreenShare.
       await _disarmVoiceRedirect();
 
-      // Stop out-of-process screen audio renderer.
       if (_screenAudioRenderer != null) {
         ShareAudioLevel.detach(_screenAudioRenderer!);
         await _screenAudioRenderer!.stop();
         _screenAudioRenderer = null;
       }
-      // Channel left — any outgoing-share servo hold is stale.
       ShareAudioLevel.setSendingShareAudio(false);
-      // Clear screen audio callback.
       try {
         ref.read(webRtcProvider.notifier).service.onScreenAudioReceived = null;
       } catch (_) {}
 
-      // Clean up WebRTC (closes all PCs + stops camera/audio streams).
       if (_service != null) {
         await _service!.closeAll();
         _service = null;
@@ -1404,31 +1176,23 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       debugPrint('[HOLLOW-VC] call teardown error: $e');
       _service = null;
     } finally {
-      // No legs left to have health, and a teardown that threw part-way must
-      // not leave a member's row wearing a flair for a channel we have left.
+      // A teardown that threw part-way must not leave a stale health flair.
       ref.read(vcLinkHealthProvider.notifier).clear();
     }
   }
 
   /// Called after the local leave event arrives to update state.
   ///
-  /// Two callers: (1) the user pressed leave → `leaveChannel()` already ran the
-  /// media teardown and nulled `_service`; or (2) Rust FORCED us out (lost channel
-  /// visibility / demoted / kicked) by emitting `VoiceChannelLeft` directly — in
-  /// that case `_service` is still live and the call is still running, so we MUST
-  /// run the teardown here. Detect the forced case by a non-null `_service`.
+  /// A non-null `_service` means Rust FORCED us out (lost visibility, demoted,
+  /// kicked) and the call is still running, so the media teardown must run here.
   void onLocalLeft() {
     _leaving = false;
-    // Covers both the user-initiated leave and a server-forced one — being
-    // kicked out of a channel is exactly when an audible cue earns its keep.
     if (state.isInVoiceChannel) {
       SoundService.instance.play(HollowSound.leaveVoice, duringCall: true);
     }
     if (_service != null) {
-      // Server-forced leave — the user-initiated path never ran. Hang up for real.
-      // This callback is synchronous (a Rust event), so we can't await the
-      // teardown here — record it as in-flight so a racing joinChannel waits for
-      // it before spinning up a new call's PCs.
+      // Server-forced leave: this callback is synchronous (a Rust event), so
+      // record the teardown in-flight for a racing joinChannel to await.
       debugPrint('[HOLLOW-VC] Forced leave — tearing down live call');
       final teardown = _teardownCall();
       _teardownInFlight = teardown;
@@ -1436,8 +1200,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
         if (identical(_teardownInFlight, teardown)) _teardownInFlight = null;
       });
     }
-    // Restore the default audio route (mobile) so the next call doesn't
-    // inherit a stale speakerphone state.
+    // So the next call doesn't inherit a stale speakerphone state.
     if (_isMobile) {
       unawaited(Helper.setSpeakerphoneOn(false).catchError((_) {}));
       ref.read(audioRouteProvider.notifier).reset();
@@ -1448,17 +1211,14 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     ref.read(vcLocalSpeakingProvider.notifier).reset();
   }
 
-  // --- Push-to-talk transmit gate (issue #38) ---------------------------
-  // PTT state deliberately lives OUTSIDE VoiceChannelState: key press and
-  // release must not rebuild every voiceChannelProvider watcher, and no
-  // audio_state signal fans out per press — peers see a PTT user as
-  // unmuted and the speaking indicator (level-gated) conveys talk state.
+  // Push-to-talk transmit gate (issue #38). PTT state lives OUTSIDE
+  // VoiceChannelState: a key press must not rebuild every watcher, and no
+  // audio_state fans out per press, so peers see a PTT user as unmuted.
   bool _pttMode = false;
   bool _pttTransmit = false;
 
-  /// The mic transmits only when EVERY gate is open: not manually muted or
-  /// deafened, and (in PTT mode) the key is held. Pure function of the four
-  /// flags, so a manual mute always wins over a held PTT key.
+  /// The mic transmits only when EVERY gate is open: not muted or deafened,
+  /// and in PTT mode the key held. A manual mute always wins over a held key.
   void _applyTxGate() {
     final gated =
         state.isMuted || state.isDeafened || (_pttMode && !_pttTransmit);
@@ -1506,15 +1266,12 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       isMuted: newDeafened ? true : state.isMuted,
       isDeafened: newDeafened,
     );
-    // Mute our mic when deafened (via the gate — PTT-aware).
     _applyTxGate();
-    // Silence all remote audio when deafened. Fire-and-forget, so it carries
-    // its own catch: a sync try/catch around an un-awaited future catches
-    // nothing and the rejection lands in the zone handler.
+    // Fire-and-forget, so it carries its own catch: a sync try/catch around an
+    // un-awaited future catches nothing and the rejection hits the zone handler.
     unawaited(_service?.setDeafened(newDeafened).catchError((_) {}) ??
         Future.value());
-    // setDeafened only zeroes WebRTC voice tracks — share audio rides its own
-    // data-channel player and must be silenced explicitly.
+    // setDeafened only zeroes WebRTC voice tracks; share audio has its own player.
     ShareAudioLevel.setDeafened(newDeafened);
     _broadcastAudioState();
   }
@@ -1528,10 +1285,9 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     unawaited(_applySpeakerRoute(speaker));
   }
 
-  /// "Speaker on" means the LOUDEST SENSIBLE route — which, whenever a headset
-  /// is attached, is the HEADSET. Forcing the built-in loudspeaker over one
-  /// leaves the user in silent headphones (iOS's port override outranks them
-  /// and drags capture to the built-in mic with it). See [AudioRoutes].
+  // "Speaker on" means the LOUDEST SENSIBLE route, which with a headset
+  // attached is the HEADSET: iOS's port override outranks headphones and
+  // drags capture to the built-in mic with it. See [AudioRoutes].
   Future<void> _applySpeakerRoute(bool speaker) async {
     await AudioRoutes.preferLoudRoute(speaker);
     try {
@@ -1547,17 +1303,13 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     _setSpeakerRoute(!state.isSpeakerOn);
   }
 
-  /// Switch this voice channel to an explicit output route (mobile route
-  /// sheet).
   Future<void> selectAudioRoute(AudioRoute route) async {
     if (!_isMobile || _leaving || !state.isInVoiceChannel) return;
-    // Keep isSpeakerOn meaning "hands-free" so proximity blanking and the
-    // control-row highlight stay consistent with the chosen route.
+    // Keep isSpeakerOn meaning "hands-free" for proximity blanking and the row.
     state = state.copyWith(isSpeakerOn: route.kind != AudioRouteKind.earpiece);
     await ref.read(audioRouteProvider.notifier).select(route);
   }
 
-  /// Set per-peer volume and apply it.
   void setPeerVolume(String peerId, double volume) {
     final volumes = Map.of(state.peerVolumes);
     volumes[peerId] = volume;
@@ -1581,24 +1333,15 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     state = state.copyWith(
         participants: updated, peerAudioStates: audioStates);
 
-    // Tear down WebRTC connection if they were in our channel (awaited so the
-    // peer's PC + thread-set is fully gone, not racing the next event).
+    // Awaited so the peer's PC + thread-set is gone before the next event.
     await _service?.closePeer(peerId);
-    // Clean up screen sharing for this peer.
     await _cleanupPeerScreenShare(peerId);
-    // Clean up camera state for this peer.
     await _cleanupPeerCamera(peerId);
   }
 
-  // ---------------------------------------------------------------
-  //  Audio state broadcasting
-  // ---------------------------------------------------------------
-
-  /// Send our mute/deafen state to all peers in the current voice channel.
   void _broadcastAudioState() {
     if (!state.isInVoiceChannel) return;
-    // The participant set is DEVICE-keyed (self included) — skip both our id
-    // forms (Rust's self-target belt would drop a miss, but noisily).
+    // The participant set is DEVICE-keyed (self included): skip both id forms.
     final localMaster = ref.read(identityProvider).peerId ?? '';
     final localDevice = _service?.localPeerId ?? _myDevicePeerId ?? '';
     final peers = state.getParticipants(
@@ -1619,7 +1362,6 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     }
   }
 
-  /// Handle a remote peer's audio state update.
   void _onRemoteAudioState(String peerId, String payload) {
     try {
       final v = jsonDecode(payload);
@@ -1632,20 +1374,13 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     } catch (_) {}
   }
 
-  // ---------------------------------------------------------------
-  //  Camera (video)
-  // ---------------------------------------------------------------
-
-  /// Toggle camera on/off.
   Future<void> toggleCamera() async {
     if (_service == null || !state.isInVoiceChannel || _leaving) return;
 
     if (!state.isCameraOn) {
-      // Turn camera ON.
       final stream = await _service!.startCamera();
       if (stream == null) return;
 
-      // Create local renderer for self-view.
       _localCameraRenderer = RTCVideoRenderer();
       await _localCameraRenderer!.initialize();
       _localCameraRenderer!.srcObject = stream;
@@ -1654,21 +1389,17 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
         isCameraOn: true,
         isFrontCamera: _service!.useFrontCamera,
       );
-      // After startCamera, never before: a camera that failed to open must not
-      // sound like it turned on.
+      // After startCamera: a failed camera must not sound like it turned on.
       SoundService.instance.play(HollowSound.toggle, duringCall: true);
       _broadcastCameraState(true);
 
-      // Camera on implies hands-off use — switch to the loudspeaker
-      // (parity with the DM call path).
+      // Camera on implies hands-off use.
       if (_isMobile && !state.isSpeakerOn) {
         _setSpeakerRoute(true);
       }
     } else {
-      // Turn camera OFF.
       await _service!.stopCamera();
 
-      // Dispose local renderer.
       if (_localCameraRenderer != null) {
         _localCameraRenderer!.srcObject = null;
         await _localCameraRenderer!.dispose();
@@ -1680,9 +1411,8 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       _broadcastCameraState(false);
     }
 
-    // Either camera flip restarts the platform audio unit (iOS VPIO
-    // especially), which can drop the active route — re-assert once it
-    // settles (parity with the DM toggleVideo path).
+    // Either camera flip restarts the platform audio unit (iOS VPIO especially),
+    // which can drop the active route, so re-assert once it settles.
     if (_isMobile) {
       Future.delayed(const Duration(milliseconds: 1200), () {
         if (!_leaving && state.isInVoiceChannel) {
@@ -1699,7 +1429,6 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     state = state.copyWith(isFrontCamera: front);
   }
 
-  /// Broadcast our camera state to all peers in the current voice channel.
   void _broadcastCameraState(bool enabled) {
     if (!state.isInVoiceChannel) return;
     // Device-keyed set: skip both our id forms (see _broadcastAudioState).
@@ -1720,7 +1449,6 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     }
   }
 
-  /// Clean up camera state for a peer that left.
   Future<void> _cleanupPeerCamera(String peerId) async {
     final renderer = _remoteCameraRenderers.remove(peerId);
     if (renderer != null) {
@@ -1733,7 +1461,6 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     }
   }
 
-  /// Handle a remote peer's camera state update.
   void _handleCameraState(String peerId, String payload) {
     try {
       final v = jsonDecode(payload);
@@ -1743,18 +1470,12 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
         cameras[peerId] = true;
       } else {
         cameras.remove(peerId);
-        // Don't dispose the renderer here — keep it alive so that when the
-        // peer turns camera back on, the same renderer/stream can resume
-        // receiving frames (onTrack won't fire again for transceiver reuse).
-        // The renderer is only disposed when the peer actually leaves.
+        // Keep the renderer alive so the stream can resume when the camera comes
+        // back: onTrack won't fire again for transceiver reuse. Disposed on leave.
       }
       state = state.copyWith(peerCameraOn: cameras);
     } catch (_) {}
   }
-
-  // ---------------------------------------------------------------
-  //  Screen sharing
-  // ---------------------------------------------------------------
 
   /// Start sharing our screen to all peers in the current voice channel.
   Future<void> startScreenShare(
@@ -1770,7 +1491,6 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     if (!state.isInVoiceChannel || _leaving) return;
     if (state.isScreenSharing) return;
 
-    // Block if already sharing in a DM call.
     final callState = ref.read(callProvider);
     if (callState.isScreenSharing) {
       debugPrint('[HOLLOW-VC] Cannot share screen — already sharing in DM call');
@@ -1786,9 +1506,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     _screenShareHwnd = windowHwnd;
     _screenShareProfile = profile;
 
-    // Media forwarding step 2: mint this share session's identity — the
-    // stream id rides `origin.stream` on every screen signal (a restart mints
-    // a new one), the origin peer is our routable device id.
+    // Mint this share session's identity; a restart mints a new stream id.
     final rng = Random.secure();
     _shareSessionId =
         List.generate(8, (_) => rng.nextInt(16).toRadixString(16)).join();
@@ -1798,31 +1516,27 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     // Capture screen ONCE. Source enumeration is desktop-only; mobile
     // captures THE screen (MediaProjection / ReplayKit broadcast).
     if (Platform.isAndroid) {
-      // Constraints are ignored by the Android plugin (MediaProjection
-      // captures at native display size; the consent dialog handles
-      // permission). The per-peer encoder cap does the downscaling.
+      // Constraints are ignored by the Android plugin (MediaProjection captures
+      // at native display size); the per-peer encoder cap does the downscaling.
       _screenCaptureStream = await navigator.mediaDevices.getDisplayMedia({
         'video': true,
         'audio': false,
       });
     } else if (Platform.isIOS) {
-      // 'broadcast' selects the ReplayKit Broadcast Upload Extension path and
-      // auto-presents the RPSystemBroadcastPickerView.
+      // 'broadcast' selects the ReplayKit Broadcast Upload Extension path.
       _screenCaptureStream = await navigator.mediaDevices.getDisplayMedia({
         'video': {'deviceId': 'broadcast'},
         'audio': false,
       });
     } else {
-      // A Wayland portal-first share MUST NOT re-enumerate: the native side
-      // resolves the sentinel id without a source list, and enumerating here
+      // A Wayland portal-first share MUST NOT re-enumerate: enumerating here
       // would pop an extra xdg-desktop-portal dialog.
       if (!DesktopCaptureSupport.isPortalSourceId(sourceId)) {
         await desktopCapturer.getSources(
             types: DesktopCaptureSupport.sourceTypes);
       }
-      // On Windows and Linux, audio goes via data channel (not a WebRTC audio
-      // track) so never request audio in getDisplayMedia — the old
-      // WASAPI→AudioSource path crashes on Windows and yields nothing on Linux.
+      // Windows and Linux carry share audio over a data channel, so never ask
+      // getDisplayMedia for audio: the WASAPI path crashes Windows.
       final getDisplayAudio =
           shareAudio && !Platform.isWindows && !Platform.isLinux;
 
@@ -1837,20 +1551,17 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
         },
         'audio': getDisplayAudio,
       });
-      // The portal grant now exists (or was just re-used) — the next share
-      // this run can offer "same as last time" without a portal prompt.
+      // The portal grant now exists: the next share can reuse it promptless.
       if (DesktopCaptureSupport.isPortalSourceId(sourceId)) {
         DesktopCaptureSupport.portalGrantLikely = true;
       }
     }
 
-    // Create local preview renderer so the sharer can see their own screen.
     _localScreenPreviewRenderer = RTCVideoRenderer();
     await _localScreenPreviewRenderer!.initialize();
     _localScreenPreviewRenderer!.srcObject = _screenCaptureStream;
 
-    // Build quality label (e.g. "1080p60", "4K30"). Use the SHORT side so a
-    // portrait mobile capture (1080x1920) reads "1080p", same as landscape.
+    // Use the SHORT side so a portrait capture (1080x1920) reads "1080p".
     const resLabels = {360: '360p', 480: '480p', 720: '720p', 1080: '1080p', 1440: '1440p', 2160: '4K'};
     final shortSide = height < width ? height : width;
     final qualityLabel = '${resLabels[shortSide] ?? '${shortSide}p'}$fps';
@@ -1861,23 +1572,16 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       screenShareLabel: qualityLabel,
       focusedScreenSharePeerId: localPeerId,
     );
-    // Past every early return and the capture itself — this only fires once
-    // the share is genuinely live.
     SoundService.instance.play(HollowSound.joinStream, duringCall: true);
 
-    // Sharing WITH audio: freeze the mic servo for the whole share so
-    // speaker bleed of the shared music can't re-calibrate the trim.
+    // Freeze the mic servo so speaker bleed can't re-calibrate the trim.
     if (shareAudio) {
       ShareAudioLevel.setSendingShareAudio(true);
     }
 
-    // ENTIRE-SCREEN anti-echo (Windows): in a voice channel we're already in a
-    // call with everyone, so the peers' voices play from hollow.exe and a
-    // whole-system capture would re-capture them. Redirect ALL peers' inbound
-    // audio to an out-of-process renderer (one child, mixed) and exclude THAT
-    // pid from the capture — keeps Hollow's own in-app media, drops the voices.
-    // Armed ONCE here (covers every peer); the per-peer capture below passes the
-    // resulting exclude pid. Only for an entire-screen share (no per-app target).
+    // ENTIRE-SCREEN anti-echo (Windows): a whole-system capture would re-capture
+    // the peers' voices, so redirect all inbound audio to an out-of-process
+    // renderer and exclude THAT pid. Armed once here, covering every peer.
     _screenShareExcludePid = 0;
     _voiceRedirectActive = false;
     final isEntireScreen = pid == 0 && windowHwnd == 0;
@@ -1899,13 +1603,11 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       }
     }
 
-    // Opt-in watching (issue #38): no fan-out here. Peers learn about the
-    // share via the screen_state broadcast below and request it with a
-    // screen_watch signal — _handleScreenWatch sends the per-peer offer.
+    // Opt-in watching (issue #38): no fan-out here. Peers learn from the
+    // screen_state broadcast and request the share with screen_watch.
 
-    // MOBILE: one central audio capture for the whole channel. Fanning at
-    // send time over _outgoingScreenShares.keys picks up late joiners
-    // automatically (their entry is added by _sendScreenShareToPeer).
+    // MOBILE: one central audio capture for the whole channel; fanning over
+    // _outgoingScreenShares.keys picks up late joiners automatically.
     if (shareAudio && (Platform.isAndroid || Platform.isIOS)) {
       final webrtc = ref.read(webRtcProvider.notifier).service;
       _mobileShareAudioCapturer = MobileScreenAudioCapturer();
@@ -1920,10 +1622,8 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       }
     }
 
-    // Broadcast screen_state(enabled: true) to all peers.
     _broadcastScreenState(true);
 
-    // Start track poller (detect window close).
     _startScreenTrackPoller();
   }
 
@@ -1953,21 +1653,17 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       _screenTrackPoller?.cancel();
       _screenTrackPoller = null;
 
-      // Stop the central mobile audio capture FIRST (it isn't owned by any
-      // per-peer service), then close all outgoing screen share PCs (which
-      // stops the desktop per-peer capturers) BEFORE disarming the redirect,
-      // so the brief window where the VC voices' in-process volume is
-      // restored isn't re-captured.
+      // Stop the central mobile capture first (no per-peer service owns it),
+      // then the outgoing PCs, BEFORE disarming the redirect: otherwise the
+      // window where VC voices play in-process is re-captured.
       await _stopMobileShareAudio();
       _watchers.clear();
       _watcherDisplays.clear();
       _watcherRoutes.clear();
       _viewerFwdFailures.clear();
-      // Step 3: unregister at every forwarder + close the ingest legs BEFORE
-      // the session ids clear (the unregister envelopes need the origin).
-      // The share is ending, so demoted peer forwarders get no direct offer.
+      // Unregister at every forwarder BEFORE the session ids clear, since the
+      // unregister envelopes need the origin.
       await _teardownAllBranches(unregister: true, demote: false);
-      // This share session is over — a restart mints a fresh origin.
       _shareSessionId = null;
       _shareOriginPeer = null;
       final sharePeers = _outgoingScreenShares.keys.toList();
@@ -1979,31 +1675,23 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
         await _dropShareCryptors(peerId);
       }
 
-      // Disarm the entire-screen anti-echo voice redirect (restore VC voices +
-      // kill the renderer child) now that the capturer is gone.
       await _disarmVoiceRedirect();
 
-      // Dispose local preview renderer.
       if (_localScreenPreviewRenderer != null) {
         _localScreenPreviewRenderer!.srcObject = null;
         await _localScreenPreviewRenderer!.dispose();
         _localScreenPreviewRenderer = null;
       }
 
-      // Stop capture stream. Both of these are async: forEach dropped every
-      // track.stop() future on the floor, and the dispose was not awaited at
-      // all, so the capture device outlived the share.
+      // Both are async: an unawaited stop/dispose outlives the share.
       for (final t in _screenCaptureStream?.getTracks() ?? []) {
         try { await t.stop(); } catch (_) {}
       }
       await _screenCaptureStream?.dispose();
       _screenCaptureStream = null;
 
-      // Broadcast screen_state(enabled: false).
       _broadcastScreenState(false);
 
-      // Update local state — if we were the focused sharer, clear focus
-      // and pick the next remote sharer if any.
       final localPeerId = ref.read(identityProvider).peerId ?? '';
       String? newFocus = state.focusedScreenSharePeerId;
       bool clearFocus = false;
@@ -2028,9 +1716,8 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     }
   }
 
-  /// Disarm the entire-screen anti-echo voice redirect if armed: restores the
-  /// VC voices to normal in-process playout and shuts the renderer child down.
-  /// Safe/no-op when not armed.
+  /// Disarm the entire-screen anti-echo voice redirect: restores in-process
+  /// playout and shuts the renderer child down. No-op when not armed.
   Future<void> _disarmVoiceRedirect() async {
     _screenShareExcludePid = 0;
     if (!_voiceRedirectActive) return;
@@ -2043,7 +1730,6 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     }
   }
 
-  /// Set which sharer is displayed full-bleed.
   void setFocusedScreenShare(String peerId) {
     state = state.copyWith(focusedScreenSharePeerId: peerId);
   }
@@ -2062,10 +1748,8 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     state = state.copyWith(isGridView: on);
   }
 
-  /// Media forwarding step 2 — the ORIGINATOR of a screen signal: who the
-  /// stream is FROM, vs [sender] who DELIVERED it. Equal on every direct leg
-  /// (and Rust drops any other combination on this lane); step-3 forwarder
-  /// legs ride the fwd_* namespace with deliverer = the forwarder.
+  /// The ORIGINATOR of a screen signal: who the stream is FROM, vs [sender]
+  /// who DELIVERED it. Equal on every direct leg; forwarder legs differ.
   String _origOf(String sender, Map<String, dynamic> v) {
     final origin = v['origin'];
     if (origin is Map) {
@@ -2075,9 +1759,8 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     return sender;
   }
 
-  /// Our own share's `origin` sub-object for outgoing screen offers/ICE.
-  /// Null until startScreenShare minted the session (old-wire shape: absent
-  /// origin = sender is the originator, so null is always safe).
+  /// Our own share's `origin` sub-object for outgoing screen offers/ICE. Null
+  /// until startScreenShare minted the session (absent origin = sender, so safe).
   Map<String, dynamic>? _myShareOrigin() {
     final stream = _shareSessionId;
     final peer = _shareOriginPeer;
@@ -2085,7 +1768,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     return {'peer': peer, 'kind': 'screen', 'stream': stream};
   }
 
-  /// Send our screen share to a specific peer (creates outgoing ScreenShareService).
+  /// Send our screen share to [peerId], creating its outgoing service.
   Future<void> _sendScreenShareToPeer(String peerId) async {
     if (_screenCaptureStream == null) return;
 
@@ -2115,10 +1798,8 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       );
     };
 
-    // Fast failover: a DIRECT outgoing share PC used to carry no disconnect
-    // handler at all, so a viewer that crashed left the encoder running and
-    // the slot occupied until presence or a re-watch noticed. Free the slot
-    // and let the viewer's own re-watch re-establish (receiver-initiates).
+    // Fast failover: without a disconnect handler a crashed viewer left the
+    // encoder running and the slot occupied. Free it; the viewer re-watches.
     service.onDisconnected = () {
       if (_outgoingScreenShares[peerId] != service) return; // superseded
       _vcLog('[HOLLOW-VC] Direct share leg to $peerId died — releasing its '
@@ -2128,9 +1809,8 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       unawaited(_dropShareCryptors(peerId));
     };
 
-    // Close+remove any prior outgoing service for this peer before overwriting
-    // the map entry — otherwise the old ScreenShareService (with its live PC +
-    // thread-set) is orphaned and can never be closed (leak).
+    // Close any prior outgoing service before overwriting the map entry, or
+    // the old PC + thread-set is orphaned and can never be closed.
     final priorOutgoing = _outgoingScreenShares.remove(peerId);
     if (priorOutgoing != null) {
       await priorOutgoing.close();
@@ -2139,8 +1819,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     _outgoingScreenShares[peerId] = service;
 
     try {
-      // Per-viewer cap: the share quality clamped to what THIS viewer's
-      // display can show (media forwarding step 1).
+      // Clamp to what THIS viewer's display can show.
       final (effMaxW, effMaxH) = _effectiveCapFor(peerId);
       final sdp = await service.createOfferFromStream(
         _screenCaptureStream!,
@@ -2150,13 +1829,11 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
         profile: _screenShareProfile,
       );
 
-      // Enable SFrame E2EE on the outgoing screen share PC.
       if (service.pc != null && _service?.frameCryptor != null) {
         await _enableSframeOnScreenSharePc(
             service.pc!, _service!.frameCryptor!, peerId, isSender: true);
       }
 
-      // Flush any ICE candidates that arrived before this service was created.
       final earlyKey = 'outgoing:$peerId';
       final early = _earlyScreenIce.remove(earlyKey);
       if (early != null && early.isNotEmpty) {
@@ -2184,13 +1861,9 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
         }),
       );
 
-      // Start screen audio capture via the data channel on the data-channel-audio
-      // DESKTOP platforms: Windows (WASAPI), Linux (PulseAudio monitor), and
-      // macOS 13.0+ (ScreenCaptureKit) — each peer gets its own capturer exe.
-      // MOBILE is deliberately NOT here: it runs ONE central capture in
-      // startScreenShare (the Rust encoder is a process-global singleton) that
-      // fans packets to _outgoingScreenShares.keys, this peer included.
-      // Sends Opus packets via the existing WebRtcService data channel.
+      // Desktop share audio runs one capturer exe per peer (Windows WASAPI,
+      // Linux PulseAudio monitor, macOS 13+ ScreenCaptureKit). MOBILE is
+      // deliberately absent: it runs ONE central capture in startScreenShare.
       final dcAudio = Platform.isWindows ||
           Platform.isLinux ||
           (Platform.isMacOS && MacOsScreenAudioSupport.hasSckAudio);
@@ -2208,12 +1881,8 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
           },
         );
 
-        // Late-joiner anti-echo: if the voice redirect is already armed (entire-
-        // screen+audio share started earlier), redirect THIS peer's voice too so
-        // it doesn't play from hollow.exe and get re-captured. voiceRedirectStart
-        // is incremental — it only AddSinks track ids not already redirected, and
-        // the child pid (hence excludePid) is unchanged, so the capturer needs no
-        // restart. No-op if this peer's tracks are already redirected.
+        // Late-joiner anti-echo: redirect THIS peer's voice too. voiceRedirectStart
+        // is incremental, so no capturer restart and a no-op if already redirected.
         if (_voiceRedirectActive) {
           try {
             final ids =
@@ -2229,8 +1898,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
         }
       }
     } catch (e) {
-      // A throw mid-setup leaves a half-built service (live PC) in the map.
-      // Tear it down so its thread-set can't leak.
+      // A half-built service left in the map leaks its thread-set.
       debugPrint('[HOLLOW-VC] _sendScreenShareToPeer($peerId) failed: $e');
       await _outgoingScreenShares.remove(peerId)?.close();
       await _dropShareCryptors(peerId);
@@ -2238,9 +1906,8 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     }
   }
 
-  /// Handle incoming screen share offer from a peer.
-  /// Uses the serverId/channelId from the signal dispatch (not from state)
-  /// because the signal may arrive before onLocalJoined sets the state.
+  /// Handle an incoming screen share offer. Uses the serverId/channelId from
+  /// the dispatch, since the signal can arrive before onLocalJoined sets state.
   Future<void> _handleScreenOffer(
     String peerId,
     String payload,
@@ -2251,11 +1918,8 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     final sdp = v['sdp'] as String? ?? '';
     if (sdp.isEmpty) return;
 
-    // Media forwarding step 2: everything about WHO the stream is from keys
-    // on the ORIGINATOR; [peerId] (the deliverer) keeps transport routing
-    // (answers/ICE go back to whoever delivered the offer). Equal on every
-    // direct leg today. rawOrigin is echoed verbatim on answer/ICE so the
-    // sharer's Rust guard (origin.peer == themselves) accepts it.
+    // Everything about WHO the stream is from keys on the ORIGINATOR; [peerId]
+    // (the deliverer) keeps transport routing. rawOrigin is echoed verbatim.
     final originPeer = _origOf(peerId, v);
     final rawOrigin =
         v['origin'] is Map ? Map<String, dynamic>.from(v['origin'] as Map) : null;
@@ -2269,8 +1933,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       return;
     }
 
-    // A direct offer supersedes any forwarder assignment for this origin
-    // (revert-to-direct / fallback-ladder outcome).
+    // A direct offer supersedes any forwarder assignment for this origin.
     final staleAssignment = _screenAssignments.remove(originPeer);
     if (staleAssignment != null) {
       _maybeLeaveFwdRoom(staleAssignment.forwarder);
@@ -2299,17 +1962,14 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     );
   }
 
-  /// Shared construction of an incoming share leg — direct offers
-  /// (_handleScreenOffer) and forwarder egress offers (step 3) build the
-  /// SAME service, keyed by ORIGINATOR everywhere (attribution, SFrame
-  /// cryptor `'screen:$originPeer'`, renderer lookup), with the DELIVERER
-  /// kept only for transport routing. Returns the answer SDP, or null when
-  /// the incoming cap rejected the stream.
+  /// Shared construction of an incoming share leg: direct and forwarder-egress
+  /// offers build the SAME service, keyed by ORIGINATOR everywhere (SFrame
+  /// cryptor `'screen:$originPeer'`, renderer lookup), with the DELIVERER kept
+  /// only for transport. Returns null when the incoming cap rejected the stream.
   ///
-  /// Forwarder legs differ in exactly two transport properties: STUN-only
-  /// ICE (never forced-relay TURN — the forwarder IS the relay replacement)
-  /// and COMPLETE SDPs (no trickle lane, so no onIceCandidate wiring and no
-  /// early-ICE flush).
+  /// Forwarder legs differ in two transport properties: STUN-only ICE (never
+  /// forced-relay TURN, the forwarder IS the relay replacement) and COMPLETE
+  /// SDPs, so no trickle lane and no early-ICE flush.
   Future<String?> _attachIncomingShare({
     required String originPeer,
     required String delivererPeer,
@@ -2325,9 +1985,8 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       return null;
     }
 
-    // Mark the originator as sharing (screen_offer may arrive before screen_state).
-    // No auto-focus: watchScreenShare already focused this share when the
-    // user opted in — the offer landing must not steal focus.
+    // Mark the originator as sharing (the offer can precede screen_state). No
+    // auto-focus: watchScreenShare already focused it when the user opted in.
     final sharing = Map.of(state.peerScreenSharing);
     sharing[originPeer] = true;
     state = state.copyWith(peerScreenSharing: sharing);
@@ -2336,8 +1995,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
         viaForwarder ? _forwarderLegIceConfig() : ref.read(iceConfigProvider);
     final localPeerId = ref.read(identityProvider).peerId ?? '';
 
-    // Close existing incoming service for this originator if any (and drop
-    // its cryptors so the new PC's receivers re-enable cleanly).
+    // Drop the old cryptors too, so the new PC's receivers re-enable cleanly.
     final priorIncoming = _incomingScreenShares.remove(originPeer);
     if (priorIncoming != null) {
       await priorIncoming.close();
@@ -2350,7 +2008,6 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       forwarderLeg: viaForwarder,
     );
 
-    // Set preferred audio output.
     service.preferredAudioOutputDeviceId =
         await ref.read(audioOutputDeviceProvider.future);
 
@@ -2374,10 +2031,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
 
     service.onRemoteTrackReady = () {
       debugPrint('[HOLLOW-VC] Screen share track ready from $originPeer');
-      // The share we asked for is live — stop the "offer never came" timer.
       _watchConnectTimers.remove(originPeer)?.cancel();
-      // Force a state rebuild so the UI picks up the renderer.
-      // Also auto-focus if no one is focused yet (only fires for watched shares).
       state = state.copyWith(
         focusedScreenSharePeerId:
             state.focusedScreenSharePeerId ?? originPeer,
@@ -2385,9 +2039,8 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     };
 
     if (viaForwarder) {
-      // Forwarder died / dropped our leg mid-stream: the feed dies, the
-      // fallback ladder re-requests the direct path (availability helper,
-      // never authority — the share must survive its assist).
+      // Forwarder died mid-stream: the ladder re-requests the direct path. The
+      // forwarder is an availability helper, never authority.
       service.onDisconnected = () {
         if (_incomingScreenShares[originPeer] != service) return;
         _vcLog('[HOLLOW-VC] Forwarder leg for $originPeer disconnected — '
@@ -2395,11 +2048,8 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
         _fallbackToDirect(originPeer);
       };
     } else {
-      // Fast failover: a DIRECT incoming leg used to carry no handler at all,
-      // so a sharer crash (or a dead PC on a live sharer) left a frozen tile
-      // until presence noticed. Re-request — receiver-initiates, the lane's
-      // heal doctrine — but only while the originator is still advertising the
-      // share, so a deliberate stop-sharing stays a clean end.
+      // Fast failover on a dead direct leg (receiver-initiates, the lane's heal
+      // doctrine), but only while the originator still advertises the share.
       service.onDisconnected = () {
         if (_incomingScreenShares[originPeer] != service) return;
         _rerequestDirectShare(originPeer);
@@ -2415,15 +2065,13 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
 
     final answerSdp = await service.handleOffer(offerSdp);
 
-    // Enable SFrame E2EE on the incoming screen share PC — keyed on the
-    // ORIGINATOR, whose sender key encrypted the frames.
+    // Keyed on the ORIGINATOR, whose sender key encrypted the frames.
     if (service.pc != null && _service?.frameCryptor != null) {
       await _enableSframeOnScreenSharePc(
           service.pc!, _service!.frameCryptor!, originPeer, isSender: false);
     }
 
     if (!viaForwarder) {
-      // Flush any ICE candidates that arrived before this service was created.
       final earlyKey = 'incoming:$originPeer';
       final early = _earlyScreenIce.remove(earlyKey);
       if (early != null && early.isNotEmpty) {
@@ -2441,7 +2089,6 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     return answerSdp;
   }
 
-  /// Handle incoming screen share answer.
   Future<void> _handleScreenAnswer(String peerId, String payload) async {
     final v = jsonDecode(payload);
     final sdp = v['sdp'] as String? ?? '';
@@ -2454,7 +2101,6 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     }
   }
 
-  /// Handle incoming screen share ICE candidate.
   Future<void> _handleScreenIce(String peerId, String payload) async {
     final v = jsonDecode(payload);
     final candidate = v['candidate'] as String? ?? '';
@@ -2462,17 +2108,14 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     final sdpMLineIndex = v['sdpMLineIndex'] as int?;
     final role = v['role'] as String? ?? '';
 
-    // Route to the correct service based on role.
     final ScreenShareService? service;
     final String queueKey;
     if (role == 'incoming') {
-      // Their incoming = our outgoing (sharer side: transport-keyed by the
-      // viewer the leg goes to).
+      // Sharer side: transport-keyed by the viewer the leg goes to.
       service = _outgoingScreenShares[peerId];
       queueKey = 'outgoing:$peerId';
     } else {
-      // Their outgoing = our incoming — keyed by the stream's ORIGINATOR
-      // (media forwarding step 2; equals the sender on every direct leg).
+      // Viewer side: keyed by the stream's ORIGINATOR.
       final originPeer = _origOf(peerId, v);
       service = _incomingScreenShares[originPeer];
       queueKey = 'incoming:$originPeer';
@@ -2480,7 +2123,6 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     if (service != null) {
       await service.handleIceCandidate(candidate, sdpMid, sdpMLineIndex);
     } else {
-      // Service not created yet — queue for later flush.
       _earlyScreenIce.putIfAbsent(queueKey, () => []).add({
         'candidate': candidate,
         'sdpMid': sdpMid,
@@ -2489,7 +2131,6 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     }
   }
 
-  /// Handle screen share state change from a peer.
   void _handleScreenState(String peerId, String payload) {
     final v = jsonDecode(payload);
     final enabled = v['enabled'] as bool? ?? false;
@@ -2499,8 +2140,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
 
     final sharing = Map.of(state.peerScreenSharing);
     final labels = Map.of(state.peerScreenShareLabels);
-    // Only on a real edge: a late-joiner catch-up screen_state re-announces a
-    // share that was already up, and that must not sound like a new one.
+    // Only on a real edge: a catch-up screen_state re-announces a live share.
     final wasSharing = sharing[peerId] ?? false;
     if (enabled != wasSharing && !state.isDeafened) {
       SoundService.instance.play(
@@ -2516,12 +2156,10 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     } else {
       sharing.remove(peerId);
       labels.remove(peerId);
-      // The share is gone — forget any watch state for it.
       _watchConnectTimers.remove(peerId)?.cancel();
       final watching = state.watchingScreenShares.contains(peerId)
           ? ({...state.watchingScreenShares}..remove(peerId))
           : state.watchingScreenShares;
-      // Clean up incoming service.
       _cleanupPeerScreenShare(peerId);
       // If the leaving sharer was focused, switch to another WATCHED share.
       if (state.focusedScreenSharePeerId == peerId) {
@@ -2554,8 +2192,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     );
   }
 
-  /// Sharer side of opt-in watching (issue #38): a peer asked to start or
-  /// stop receiving our share.
+  /// Sharer side of opt-in watching (issue #38): a peer asked to start or stop.
   Future<void> _handleScreenWatch(String peerId, String payload) async {
     final v = jsonDecode(payload);
     final want = v['want'] as bool? ?? false;
@@ -2572,8 +2209,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
         'fwd_simulcast=$fwdSimulcast fwd_feed=$fwdFeed');
 
     if (want) {
-      // Raced against our stop — nothing to send; the peer's badge clears
-      // via our screen_state{disabled} broadcast.
+      // Raced our stop; the peer's badge clears via screen_state{disabled}.
       if (!state.isScreenSharing || _screenCaptureStream == null) return;
       _watchers.add(peerId);
       _watcherDisplays[peerId] =
@@ -2586,19 +2222,12 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
         fwdFeed: fwdFeed,
       );
 
-      // Media forwarding step 3: a relay-routed NEW-client viewer (non-empty
-      // route = step-3-capable; old viewers must never receive
-      // vc_screen_assign) is served THROUGH a forwarder — one ingest copy,
-      // no per-viewer PC, no 15-cap slot. Phase 2 ladder: viewer-peer
-      // forwarder → VPS infra forwarder → direct+TURN. A "direct_failed"
-      // re-watch marks the branch it was on as failed and descends one rung.
+      // A relay-routed step-3-capable viewer (non-empty route; old viewers must
+      // never receive vc_screen_assign) is served THROUGH a forwarder: one
+      // ingest copy, no per-viewer PC, no 15-cap slot.
       if (route == 'relay' || route == 'direct_failed') {
-        // A branch HEAD reporting direct_failed is our own promoted
-        // forwarder whose display path failed — DEMOTE the branch (its
-        // viewers revert and re-ladder; the head falls through to the
-        // direct path below), never re-ladder the head onto another
-        // forwarder (field-hit 2026-08-06: the sharer put its own peer
-        // forwarder's display onto the VPS).
+        // A branch HEAD reporting direct_failed is our own promoted forwarder
+        // whose display failed: DEMOTE the branch, never re-ladder the head.
         if (route == 'direct_failed') {
           final headed = _fwdBranches[peerId];
           if (headed != null) {
@@ -2614,20 +2243,12 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
           await _removeViewerFromBranch(current, peerId);
         }
         if (route == 'relay') {
-          // Re-sent watch (cap / Source-quality change): the ingest is
-          // encoded at max(effectiveViewerCap) over the branch audience.
-          //
-          // `_fwdBranches[peerId]` FIRST, and it is load-bearing: a branch
-          // HEAD is deliberately NOT in its own `viewers` set (its display
-          // rides the branch ingest through its own engine), so `_branchOf`
-          // never finds it. Without that lookup a head's re-watch fell all
-          // the way through to a fresh DIRECT offer — which collides with the
-          // branch ingest's sender cryptor on `screen:<head>`
-          // (`enableForSender` is idempotent per participant, so the new PC
-          // got no cryptor of its own), and the head could not decrypt a
-          // single frame: instant black screen, then a heal storm and an MLS
-          // epoch churn as the ladder escalated. Field-hit 2026-08-15 by
-          // toggling Source quality on a promoted forwarder.
+          // Re-sent watch (cap / Source change): the ingest is encoded at
+          // max(effectiveViewerCap) over the branch audience. The
+          // `_fwdBranches[peerId]` lookup is load-bearing: a branch HEAD is not
+          // in its own `viewers` set, and without it a head's re-watch falls
+          // through to a DIRECT offer that collides with the branch ingest's
+          // sender cryptor on `screen:<head>` - black screen, then a heal storm.
           final branch = _fwdBranches[peerId] ?? current;
           if (branch != null) {
             await _reofferIngest(branch);
@@ -2639,13 +2260,9 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
           await _assignViewerToForwarder(peerId, target);
           return;
         }
-        // No rung left — fall through to the direct path.
       }
-      // Phase 3: a SPREAD direct viewer re-watching (cap / Source-quality
-      // change) stays on its branch — refresh the register's layer set and
-      // the ingest cap instead of bouncing it off and back on (one blink
-      // per bounce). Only when the direct-copy budget has headroom again
-      // does it fall through to the stale-removal + direct path below.
+      // A SPREAD direct viewer re-watching stays on its branch: refresh the
+      // register's layer set and the ingest cap instead of bouncing it (a blink).
       if (route == 'direct') {
         final riding = _branchOf(peerId);
         if (riding != null &&
@@ -2659,23 +2276,15 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       if (stale != null) {
         await _removeViewerFromBranch(stale, peerId);
       }
-      // Opportunistic rebalancer (the v1 watch-ORDER gap, field-named
-      // 2026-08-07): when the relay-routed viewers watched BEFORE any
-      // direct fwd-capable watcher existed they landed on the VPS rung and
-      // STAYED there — the sharer paid 2 uploads (direct copy + VPS ingest)
-      // where a promotion pays 1 with relay at zero. A direct fwd-capable
-      // watch arriving while the VPS branch carries viewers now promotes
-      // this watcher and migrates those viewers (one blink each). When it
-      // fires, the promotion self-assign also serves THIS watcher's display,
-      // so the direct path below must not run.
+      // Opportunistic rebalancer: relay-routed viewers that watched before any
+      // direct fwd-capable watcher existed stayed on the VPS rung forever,
+      // costing 2 uploads where a promotion costs 1. The promotion self-assign
+      // also serves THIS watcher, so the direct path below must not run.
       if (await _maybeRebalanceOntoCandidate(peerId)) return;
       final existing = _outgoingScreenShares[peerId];
       if (existing != null) {
-        // Already streaming to this viewer — a re-sent watch is a cap change
-        // (Source-quality toggle): try a live setParameters first (works
-        // since the plugin round-trip poison was fixed — phase 3);
-        // renegotiate when the sender still rejects it: fresh offer with the
-        // new cap riding the init sendEncodings. Brief stream restart.
+        // A re-sent watch is a cap change: try live setParameters first, and
+        // renegotiate when the sender rejects it (brief stream restart).
         final (effW, effH) = _effectiveCapFor(peerId);
         final ok = await existing.updateResolutionCap(effW, effH);
         if (!ok) {
@@ -2685,12 +2294,9 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
         }
         return;
       }
-      // Phase 3 — upload spreading: a step-3-capable DIRECT viewer past the
-      // direct-copy budget is served through a branch (peer branch with
-      // capacity → promote a fwd-capable direct watcher, preferring one
-      // whose direct copy then CLOSES → an already-running VPS branch).
-      // This is what turns "one PC per viewer" into "1-2 copies total" and
-      // makes the 15-cap effectively dynamic.
+      // Upload spreading: a step-3-capable DIRECT viewer past the direct-copy
+      // budget is served through a branch, which is what turns "one PC per
+      // viewer" into "1-2 copies total" and makes the 15-cap dynamic.
       if (route == 'direct' &&
           _outgoingScreenShares.length >= maxDirectShareCopies) {
         final target = _pickSpreadTargetFor(peerId);
@@ -2720,9 +2326,8 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       if (branch != null) {
         await _removeViewerFromBranch(branch, peerId);
       }
-      // Phase 2: a peer FORWARDER that stopped watching can't keep serving
-      // (its display is downstream viewer #0 — no watch, no consent, no
-      // engine expectation). Its viewers revert to direct and re-ladder.
+      // A peer FORWARDER that stopped watching can't keep serving: no watch, no
+      // consent. Its viewers revert to direct and re-ladder.
       final headed = _fwdBranches[peerId];
       if (headed != null) {
         _vcLog('[HOLLOW-VC] Peer forwarder $peerId stopped watching — '
@@ -2738,16 +2343,12 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     }
   }
 
-  /// The resolution cap for [peerId]'s outgoing share PC: the share's chosen
-  /// quality clamped to that viewer's reported display (media forwarding
-  /// step 1) — unless they explicitly asked for source quality.
+  /// The resolution cap for [peerId]'s outgoing share PC: the share quality
+  /// clamped to that viewer's reported display, unless they asked for source.
   ///
-  /// [honorSource] false sizes by the DISPLAY alone, ignoring the Source
-  /// request. Used for SHARED streams (branch/VPS ingest legs): a Source
-  /// request is a sharer-pays-only favour to one consenting viewer, so it may
-  /// never inflate an ingest everyone else on that branch has to receive —
-  /// one pixel-peeper must not push the whole branch to 4K. Direct per-viewer
-  /// PCs keep honouring it (the default).
+  /// [honorSource] false sizes by the DISPLAY alone. Used for SHARED ingest
+  /// legs: a Source request is a favour to one consenting viewer and may never
+  /// inflate a stream everyone else on that branch has to receive.
   (int, int) _effectiveCapFor(String peerId) {
     final d = _watcherDisplays[peerId];
     return ScreenShareService.effectiveViewerCap(
@@ -2758,44 +2359,26 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     );
   }
 
-  // -- Media forwarding step 3: forwarder lane --
-
-  /// ICE config for forwarder legs (ingest + egress attach): NO ice servers
-  /// at all — host candidates only.
+  /// ICE config for forwarder legs (ingest + egress attach): NO ice servers,
+  /// host candidates only.
   ///
-  /// DELIBERATELY not [iceConfigProvider]: "Always relay calls" forces
-  /// `iceTransportPolicy: relay` there, and a forced-TURN leg to the
-  /// forwarder would blackhole it — the forwarder IS the relay replacement
-  /// (same operator infra as TURN, so nothing new is disclosed). Also NOT
-  /// [shareIceConfigProvider]: that is the Hollow Share FILE lane with its
-  /// own bandwidth doctrine.
+  /// DELIBERATELY not [iceConfigProvider]: "Always relay calls" forces a relay
+  /// policy there and a forced-TURN leg would blackhole it - the forwarder IS
+  /// the relay replacement. Not [shareIceConfigProvider] either (file lane).
   ///
-  /// CRITICAL — the list must stay EMPTY. The forwarder answers on a fixed
-  /// PUBLIC address, so a server-reflexive candidate buys nothing: our host
-  /// candidate plus our own outbound checks are sufficient, and the forwarder
-  /// learns our NAT mapping as a peer-reflexive candidate from those checks.
-  /// Configuring STUN servers here actively BREAKS the leg: libwebrtc's UDP
-  /// port withholds its candidates while it waits on the configured STUN
-  /// servers, so on a host whose DNS answers IPv6-first without a routable
-  /// IPv6 path (the D6 test VM: ULA address, IPv6-only default gateway) the
-  /// allocator produced ZERO candidates, never activated ICE, and the leg
-  /// silently timed out — three field tests, 2026-08-06. The D2 spike used an
-  /// empty list and connected first try.
+  /// CRITICAL - the list must stay EMPTY. Configuring STUN servers BREAKS the
+  /// leg: libwebrtc withholds its host candidates while it waits on them, so a
+  /// host with IPv6-first DNS and no routable IPv6 path produced ZERO candidates.
   Map<String, dynamic> _forwarderLegIceConfig() => const {'iceServers': []};
 
-  /// The viewer's `route` hint for screen_watch: one immediate stats pass on
-  /// the audio PC to [peerId]. ADVISORY — a wrong hint is corrected by the
-  /// fallback ladder; "" (unknown) keeps today's direct path.
+  /// The viewer's `route` hint for screen_watch: one immediate stats pass.
+  /// ADVISORY - a wrong hint is corrected by the ladder; "" keeps direct.
   Future<String> _routeHintTo(String peerId) async {
-    // Already served through the forwarder for this sharer: stay put — a
-    // re-watch (Source toggle) must not bounce us to direct mid-stream.
-    // (_fallbackToDirect bypasses this with an explicit "direct_failed".)
+    // Already served through the forwarder: a re-watch (Source toggle) must not
+    // bounce us to direct mid-stream. _fallbackToDirect bypasses this.
     if (_screenAssignments.containsKey(peerId)) return 'relay';
-    // Lab escape hatch (phase-2 field verification): report "relay" WITHOUT
-    // the Always-relay privacy semantics. A genuinely NAT-restricted viewer
-    // can't be simulated on a LAN test rig any other way — Always-relay now
-    // steers to the VPS rung by design (relay_private), so it no longer
-    // exercises the peer-forwarder path. Unset in production = inert.
+    // Lab escape hatch: report "relay" WITHOUT the Always-relay privacy
+    // semantics, which a LAN rig cannot otherwise simulate. Unset = inert.
     if (Platform.environment['HOLLOW_FORCE_RELAY_ROUTE'] == '1') {
       _vcLog('[HOLLOW-VC] route hint forced to relay (HOLLOW_FORCE_RELAY_ROUTE)');
       return 'relay';
@@ -2820,15 +2403,12 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     return null;
   }
 
-  /// Phase-2 static selection for a relay-routed [viewer]: an existing peer
-  /// branch with capacity → a promotable candidate (fwd-capable watcher on a
-  /// direct route) → the VPS infra forwarder → null (= direct+TURN).
-  /// Forwarders that already failed for this viewer are skipped; after two
-  /// failed rungs the viewer always goes direct (both sides bound the
-  /// ladder — the viewer's own counter caps at two as well).
+  /// Static selection for a relay-routed [viewer]: an existing peer branch with
+  /// capacity, a promotable candidate, the VPS forwarder, or null (direct+TURN).
+  /// Forwarders that already failed for this viewer are skipped, and after two
+  /// failed rungs the viewer always goes direct.
   String? _pickForwarderFor(String viewer) {
-    // A branch HEAD's own display rides its branch's engine or a direct
-    // offer — never ANOTHER forwarder (no chains in v1).
+    // No chains: a branch HEAD never rides ANOTHER forwarder.
     if (_fwdBranches.containsKey(viewer)) return null;
     final failed = _viewerFwdFailures[viewer] ?? const <String>{};
     if (failed.length >= 2) return null;
@@ -2845,7 +2425,6 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
         if (b.usedLegs >= maxPeerForwarderLegs) continue;
         return b.forwarderId;
       }
-      // Promote a fresh candidate.
       for (final entry in _watcherRoutes.entries) {
         final cand = entry.key;
         if (cand == viewer || failed.contains(cand)) continue;
@@ -2862,18 +2441,12 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     return null;
   }
 
-  /// Phase-3 upload spreading: pick a branch for a DIRECT viewer past the
-  /// direct-copy budget. Differs from [_pickForwarderFor] (the relay-routed
-  /// ladder) in two deliberate ways:
-  /// - Promotion prefers a watcher that already HOLDS a direct copy (its
-  ///   copy closes on promotion — strictly fewer encodes), then the viewer
-  ///   ITSELF (its own display rides its engine instead of a new PC), then
-  ///   any other capable watcher.
-  /// - The VPS rung only applies to a branch that is ALREADY serving
-  ///   (marginal upload = zero). Never open a fresh VPS branch for a
-  ///   STUN-capable viewer: that trades zero relay bytes for `B + B·k` of
-  ///   relay while saving nothing on the first viewer — the direct-PC
-  ///   fallback is strictly better there (threshold is SOFT).
+  /// Upload spreading: pick a branch for a DIRECT viewer past the direct-copy
+  /// budget. Differs from [_pickForwarderFor] in two deliberate ways:
+  /// - Promotion prefers a watcher that already HOLDS a direct copy (it closes
+  ///   on promotion), then the viewer ITSELF, then any other capable watcher.
+  /// - The VPS rung only applies to a branch ALREADY serving. A fresh VPS
+  ///   branch would trade zero relay bytes for `B + B.k` and save nothing.
   String? _pickSpreadTargetFor(String viewer) {
     final failed = _viewerFwdFailures[viewer] ?? const <String>{};
     if (failed.length >= 2) return null;
@@ -2914,16 +2487,11 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     return null;
   }
 
-  /// Opportunistic rebalancer: [candidate] just watched with a direct route
-  /// and `fwd_capable` while the VPS infra branch is serving viewers — promote
-  /// it and migrate those viewers onto the new peer branch (relay media → 0,
-  /// sharer upload 2 copies → 1). Static-policy v1 only ran this scan when a
-  /// RELAY viewer asked (`_pickForwarderFor`), so watch order decided the
-  /// topology forever. Costs one blink per migrated viewer. Honors the same
-  /// invariants as the pick: relay_private viewers never leave operator
-  /// infrastructure, per-viewer failed-forwarder memory is respected, and the
-  /// peer branch caps at [maxPeerForwarderLegs] remote legs — any overflow or
-  /// privacy-bound viewer simply stays on the VPS branch.
+  /// Opportunistic rebalancer: [candidate] just watched direct + `fwd_capable`
+  /// while the VPS branch is serving, so promote it and migrate those viewers
+  /// (relay media to 0, sharer upload 2 copies to 1), one blink each. Honors the
+  /// same invariants as the pick: relay_private viewers never leave operator
+  /// infrastructure, failed-forwarder memory is respected, the branch caps.
   Future<bool> _maybeRebalanceOntoCandidate(String candidate) async {
     if (!state.isScreenSharing || _screenCaptureStream == null) return false;
     final r = _watcherRoutes[candidate];
@@ -2931,8 +2499,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       return false;
     }
     if (!_watchers.contains(candidate)) return false;
-    // Already a branch head, or currently riding a branch — not a fresh
-    // promotion target (no chains in v1).
+    // No chains: an existing head or branch rider is not a promotion target.
     if (_fwdBranches.containsKey(candidate)) return false;
     if (_branchOf(candidate) != null) return false;
     final vpsId = ref.read(forwarderInfoProvider).peerId;
@@ -2951,15 +2518,10 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
         'migrating ${migrate.length}/${vps.viewers.length} viewer(s) off the '
         'VPS branch');
     for (final viewer in migrate) {
-      // MAKE-BEFORE-BREAK: assign to the peer branch and only remove the
-      // viewer from the VPS branch LOCALLY. An eager `fwd_stream_auth`
-      // removal lets the VPS kill the old egress leg before the assign
-      // reaches the viewer — the leg death reads as a branch failure and
-      // fights the migration with a direct_failed re-watch (which would
-      // permanently mark the fresh candidate failed for that viewer). The
-      // viewer retires its own VPS leg on assign receipt; the stale
-      // allowlist entry dies with the empty branch's linger unregister (or
-      // the next register refresh) and is authorization, not liveness.
+      // MAKE-BEFORE-BREAK: assign to the peer branch and remove the viewer from
+      // the VPS branch LOCALLY only. An eager `fwd_stream_auth` removal lets the
+      // VPS kill the old egress before the assign lands, which reads as branch
+      // failure and permanently marks the fresh candidate failed for that viewer.
       await _assignViewerToForwarder(viewer, candidate);
       vps.viewers.remove(viewer);
     }
@@ -2975,36 +2537,28 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     return true;
   }
 
-  /// FEEDER ELECTION (§9.6) — the mixed-branch case costs us TWO upload
-  /// copies: one ingest into the peer branch, one into the VPS forwarder.
-  /// A peer branch head already receives the stream, so it can re-emit that
-  /// copy into the VPS forwarder's ingest and we drop to ONE.
+  /// FEEDER ELECTION: a mixed-branch case costs TWO upload copies, one ingest
+  /// per forwarder. A peer branch head already receives the stream, so it can
+  /// re-emit that copy into the VPS ingest and we drop to ONE.
   ///
-  /// The delegation is owner-authored end to end: we name the feeder in OUR
-  /// register at the VPS (the only way its engine will admit a non-owner
-  /// ingest), we put it on that stream's allowlist, and we tell the head over
-  /// the originator-authenticated assign. The grant is SUPPLY ONLY — the
-  /// feeder can never change the allowlist or unregister the stream.
+  /// The delegation is owner-authored end to end (our register names the
+  /// feeder, our allowlist admits it, the assign is originator-authenticated)
+  /// and is SUPPLY ONLY: a feeder can never change the allowlist or unregister.
   ///
-  /// Conservative privacy gate for v1: skipped entirely while any
-  /// `relay_private` viewer rides the VPS branch. Their DOWNLINK would still
-  /// come from operator infrastructure, but the ciphertext would TRANSIT a
-  /// member's machine, and the promise we made is about transit too. Revisit
-  /// only with an explicit decision.
+  /// Skipped while any `relay_private` viewer rides the VPS branch: their
+  /// ciphertext would TRANSIT a member's machine, and the promise covers transit.
   Future<void> _maybeElectFeeder() async {
     if (!state.isScreenSharing || _screenCaptureStream == null) return;
     final vpsId = ref.read(forwarderInfoProvider).peerId;
     if (vpsId.isEmpty) return;
     final vps = _fwdBranches[vpsId];
     if (vps == null || vps.isPeer || vps.viewers.isEmpty) return;
-    // Already delegated (to anyone) — nothing to do.
     if (_feederFor(vps).isNotEmpty) return;
     // Privacy: a forced-relay viewer's media must not transit a member.
     if (vps.viewers
         .any((v) => _watcherRoutes[v]?.relayPrivate ?? false)) {
       return;
     }
-    // A peer branch head that advertised feed capability and has a spare leg.
     _FwdBranch? head;
     for (final b in _fwdBranches.values) {
       if (!b.isPeer || b.feedTarget.isNotEmpty) continue;
@@ -3021,20 +2575,15 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
         'feed the VPS forwarder (2 upload copies → 1)');
     head.feedTarget = vpsId;
     head.feedUp = false;
-    // BOTH registers must land before the head starts feeding — same
-    // same-socket ordering rule as promotion's register-before-assign:
-    //  - at the VPS: the `feeder` delegation, or it refuses the head's ingest
-    //    offer with not_authorized;
-    //  - at the HEAD: the VPS on its allowlist, because the feed leg is an
-    //    egress leg whose "viewer" IS the VPS, and `admit_attach` gates purely
-    //    on the allowlist.
+    // BOTH registers must land before the head starts feeding: the VPS needs
+    // the `feeder` delegation or it refuses the ingest, and the HEAD needs the
+    // VPS on its allowlist because `admit_attach` gates purely on that.
     await _registerStreamAtForwarder(vps);
     await _registerStreamAtForwarder(head);
     await _sendFeedAssign(head.forwarderId, vpsId);
 
-    // Never leave a half-elected branch: if the feed doesn't come up we keep
-    // supplying the VPS ourselves (which we are still doing — make-before-
-    // break) and remember the failure so we don't retry it all session.
+    // Never leave a half-elected branch: without the feed we keep supplying the
+    // VPS ourselves and remember the failure so we don't retry it all session.
     head.feedTimeout?.cancel();
     final headId = head.forwarderId;
     head.feedTimeout = Timer(const Duration(seconds: 10), () {
@@ -3064,8 +2613,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
           signalType: 'screen_assign',
           payload: jsonEncode({
             'origin': origin,
-            // The head stays assigned to ITSELF (its display rides its own
-            // engine) — this assign only carries the feed delegation.
+            // The head stays assigned to ITSELF; this assign only carries the feed.
             'forwarder': headId,
             'feed_target': target,
           }),
@@ -3073,9 +2621,8 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
         .catchError((_) {});
   }
 
-  /// Undo a delegation: clear it locally, re-register at the fed forwarder
-  /// without the `feeder` field, tell the head to stop, and make sure OUR own
-  /// ingest to that forwarder is back up.
+  /// Undo a delegation: clear it locally, re-register without `feeder`, tell the
+  /// head to stop, and make sure OUR own ingest to that forwarder is back up.
   Future<void> _revokeFeed(_FwdBranch head) async {
     final target = head.feedTarget;
     if (target.isEmpty) return;
@@ -3084,10 +2631,8 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     head.feedTarget = '';
     head.feedUp = false;
     await _sendFeedAssign(head.forwarderId, '');
-    // Drop the fed forwarder from the head's allowlist again...
     await _registerStreamAtForwarder(head);
-    // ...and clear the `feeder` delegation at the fed forwarder, then make
-    // sure OUR own ingest to it is back (it may have been closed at handover).
+    // Our own ingest may have been closed at handover.
     final fed = _fwdBranches[target];
     if (fed != null) {
       await _registerStreamAtForwarder(fed);
@@ -3114,10 +2659,8 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     head.feedTimeout = null;
     final fed = _fwdBranches[forwarderId];
     if (fed == null) return;
-    // MAKE-BEFORE-BREAK: our ingest stayed up the whole time; only now that
-    // the feeder's copy is admitted do we close ours. The far engine already
-    // replaced its ingest leg with the feeder's on admission and asked the new
-    // supplier for a keyframe, so the audience sees one keyframe, not a gap.
+    // MAKE-BEFORE-BREAK: our ingest stayed up until the feeder's copy was
+    // admitted, so the audience sees one keyframe, not a gap.
     final ours = fed.ingest;
     if (ours != null) {
       _vcLog('[HOLLOW-VC] Feed to $forwarderId is up — closing our own ingest '
@@ -3129,20 +2672,14 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
   }
 
   /// Sharer side: serve [viewerPeer] through [forwarderPeerId] instead of a
-  /// per-viewer PC. Creates the branch on first use — for a PEER forwarder
-  /// that promotion also self-assigns it (its display switches from its
-  /// direct PC to its embedded engine's egress leg) and closes our direct PC
-  /// to it (ONE upload copy for the whole branch). Registers the stream
-  /// (idempotent full-allowlist replace), ensures the branch's single ingest
-  /// leg, then assigns the viewer.
+  /// per-viewer PC. For a PEER forwarder, promotion also self-assigns it and
+  /// closes our direct PC to it - ONE upload copy for the whole branch.
   Future<void> _assignViewerToForwarder(
       String viewerPeer, String forwarderPeerId) async {
     final origin = _myShareOrigin();
     if (origin == null) return;
-    // Phase-3 self-promotion (upload spreading): the viewer IS the branch —
-    // its display is downstream viewer #0 through its own engine, so it
-    // never goes into `viewers` (that set = REMOTE legs) and the
-    // isNewPeerBranch block's self-assign is the ONLY assign it gets.
+    // Self-promotion: the viewer IS the branch, so it never goes into `viewers`
+    // (that set is REMOTE legs) and gets its only assign below.
     final selfPromotion = viewerPeer == forwarderPeerId;
     var branch = _fwdBranches[forwarderPeerId];
     final isNewPeerBranch =
@@ -3150,10 +2687,8 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     if (branch == null) {
       branch = _FwdBranch(forwarderPeerId,
           isPeer: _watchers.contains(forwarderPeerId));
-      // Decide simulcast AT CREATION so the very first register already
-      // carries the low_viewers set — the viewer's attach races the second
-      // (post-ingest) register on a different socket, and layer choice is
-      // attach-time.
+      // Decide simulcast AT CREATION so the first register already carries the
+      // low_viewers set: the viewer's attach races the second register.
       branch.simulcast = !branch.isPeer ||
           (_watcherRoutes[forwarderPeerId]?.fwdSimulcast ?? false);
       _fwdBranches[forwarderPeerId] = branch;
@@ -3170,20 +2705,14 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     if (!selfPromotion) {
       branch.viewers.add(viewerPeer);
     }
-    // Register BEFORE any assignment leaves: the register and the assigns
-    // ride the SAME relay socket in order, so the engine provably knows the
-    // stream before the promoted forwarder's INSTANT local self-attach can
-    // race it (field-hit 2026-08-06: assign-first lost that race —
-    // unknown_stream — and the forwarder's own display laddered away).
-    // Registers (idempotently) inside _ensureIngestLeg too; when the leg is
-    // already live this call still refreshes the allowlist with the new viewer.
+    // Register BEFORE any assignment leaves: both ride the SAME relay socket in
+    // order, so the engine provably knows the stream before a promoted
+    // forwarder's instant local self-attach can race it (unknown_stream).
     await _registerStreamAtForwarder(branch);
     await _ensureIngestLeg(branch);
     if (isNewPeerBranch) {
-      // Self-assignment (switches the forwarder's display onto its own
-      // engine), then close our per-viewer PC to it — the viewer side
-      // retires its direct service deliberately on the assign, so the close
-      // lands on an already-superseded leg.
+      // Self-assignment switches the forwarder's display onto its own engine,
+      // so the close below lands on an already-superseded leg.
       if (state.isInVoiceChannel) {
         network_api
             .voiceChannelSendSignal(
@@ -3200,17 +2729,10 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       if (direct != null) {
         await direct.close();
         await _dropShareCryptors(forwarderPeerId);
-        // CRYPTOR COLLISION (field-hit 2026-08-07: 10-15 s black on BOTH
-        // viewers at every peer promotion): the ingest leg's sender cryptor
-        // is keyed 'screen:<forwarderId>' — the SAME (participant, kind) as
-        // the direct per-viewer PC we just closed. enableForSender is
-        // idempotent per that key, so the enable inside _ensureIngestLeg
-        // no-op'd against the direct PC's cryptor, and the drop above then
-        // removed the participant entirely — the branch carried PLAINTEXT
-        // (both viewers DecryptionFailed) until an epoch change happened to
-        // re-run the sweep. Re-enable NOW, after the drop, so the cryptor
-        // genuinely binds the INGEST sender (drop+re-enable rule). The VPS
-        // branch never collides — the infra forwarder was never a viewer.
+        // CRYPTOR COLLISION: the ingest leg's sender cryptor is keyed
+        // 'screen:<forwarderId>', the SAME (participant, kind) as the direct PC
+        // just closed. enableForSender is idempotent per key, so re-enable NOW,
+        // after the drop, or the branch carries PLAINTEXT until the next epoch.
         final ingestPc = branch.ingest?.pc;
         final fc = _service?.frameCryptor;
         if (ingestPc != null && fc != null) {
@@ -3220,8 +2742,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       }
     }
     if (selfPromotion) {
-      // The isNewPeerBranch block above already self-assigned; a second
-      // assign would make the viewer tear down and re-attach its own leg.
+      // A second assign would make the viewer tear down and re-attach its leg.
       _vcLog('[HOLLOW-VC] Self-promoted $forwarderPeerId — its display '
           'rides its own branch (0 remote viewer(s) yet)');
       return;
@@ -3239,23 +2760,16 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     _vcLog('[HOLLOW-VC] Viewer $viewerPeer assigned to '
         '${branch.isPeer ? "peer" : "infra"} forwarder '
         '(${branch.viewers.length} viewer(s) on that branch)');
-    // The mixed-branch case (a peer branch AND the VPS branch both serving)
-    // is exactly when a delegated feeder takes us from 2 upload copies to 1.
+    // A mixed-branch case is exactly when a feeder takes 2 upload copies to 1.
     unawaited(_maybeElectFeeder());
   }
 
-  /// A branch's ingest cap: max(effectiveViewerCap) over ITS audience —
-  /// remote viewers plus, on a peer branch, the forwarder's own display
-  /// (step-1 machinery reused).
+  /// A branch's ingest cap: max(effectiveViewerCap) over ITS audience, remote
+  /// viewers plus a peer branch's own display.
   ///
-  /// Sizing is by DISPLAYS ONLY — Source-quality requests are deliberately
-  /// EXCLUDED here (`honorSource: false`). A branch ingest is a SHARED
-  /// stream: honouring one viewer's Source request would inflate it to the
-  /// full source resolution on every other branch viewer's bandwidth (and on
-  /// the branch head's upload), which is the opposite of what the branch is
-  /// for. Source stays fully honoured on direct per-viewer PCs, where the
-  /// sharer alone pays for it. A branch viewer who asks for Source simply
-  /// stays on the full (f) layer.
+  /// Sized by DISPLAYS ONLY (`honorSource: false`): a branch ingest is SHARED,
+  /// so honouring one viewer's Source request would inflate it on every other
+  /// branch viewer's bandwidth. Source stays honoured on direct per-viewer PCs.
   (int, int) _ingestCap(_FwdBranch branch) {
     var w = 0, h = 0;
     final audience = <String>{
@@ -3274,29 +2788,21 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
   }
 
   /// (Re-)register our stream + current allowlist at the branch's forwarder.
-  /// Idempotent by contract (a re-register replaces the allowlist), so every
-  /// path that is about to offer an ingest calls this first: an ingest offer
-  /// for a stream the forwarder doesn't know is refused outright with
-  /// `unknown_stream`, and a registration can legitimately be missing
-  /// (dropped first send, forwarder restart, our own room churn). A peer
-  /// forwarder is on its OWN allowlist — its display leg attaches through
-  /// the same engine admission as everyone else.
+  /// Idempotent by contract, so every path about to offer an ingest calls it
+  /// first: an ingest offer for a stream the forwarder doesn't know is refused
+  /// with `unknown_stream`, and a registration can legitimately be missing.
   ///
-  /// With a simulcast ingest (phase 3) the register also names the viewers
-  /// the engine should serve the LOW layer (rid q) — everyone whose display
-  /// the q layer already covers. Layer choice applies at attach time.
+  /// With a simulcast ingest the register also names the viewers to serve the
+  /// LOW layer (rid q); layer choice applies at attach time.
   Future<void> _registerStreamAtForwarder(_FwdBranch branch) async {
     final origin = _myShareOrigin();
     if (origin == null) return;
     final audience = [
       ...branch.viewers,
       if (branch.isPeer) branch.forwarderId,
-      // Feeder election, direction matters: a feed leg is an EGRESS leg on the
-      // FEEDER's engine whose "viewer" is the forwarder being fed. So the FED
-      // forwarder must be allowlisted HERE, on the feeder's own registration —
-      // `admit_attach` gates purely on the allowlist and knows nothing about
-      // feeds. (The reverse is NOT needed: at the fed forwarder the head only
-      // OFFERS an ingest, which `admit_ingest_offer` authorises via `feeder`.)
+      // Direction matters: a feed leg is an EGRESS leg on the FEEDER's engine
+      // whose "viewer" is the forwarder being fed, so the FED forwarder must be
+      // allowlisted HERE - `admit_attach` knows nothing about feeds.
       if (branch.feedTarget.isNotEmpty) branch.feedTarget,
     ];
     await network_api
@@ -3309,17 +2815,15 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
             if (branch.simulcast)
               'low_viewers':
                   audience.where((v) => _wantsLowLayer(branch, v)).toList(),
-            // The delegation itself. Only this owner-authored register can set
-            // it, which is the whole security anchor of feeder election.
+            // Only this owner-authored register can set it: the security anchor.
             if (_feederFor(branch).isNotEmpty) 'feeder': _feederFor(branch),
           }),
         )
         .catchError((_) {});
   }
 
-  /// The peer branch head elected to feed [branch]'s forwarder, if any.
-  /// (Stored on the FEEDING branch as `feedTarget`; this reads it back from
-  /// the fed branch's side.)
+  /// The peer branch head elected to feed [branch]'s forwarder, if any (stored
+  /// on the FEEDING branch as `feedTarget`; this reads it from the fed side).
   String _feederFor(_FwdBranch branch) {
     for (final b in _fwdBranches.values) {
       if (b.isPeer && b.feedTarget == branch.forwarderId) return b.forwarderId;
@@ -3327,9 +2831,8 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     return '';
   }
 
-  /// Phase-3 layer choice for one branch viewer: ride the LOW layer (half
-  /// the ingest cap per axis) when it already covers everything their
-  /// display can show. Source-quality viewers always ride the full layer.
+  /// Layer choice for one branch viewer: ride the LOW layer when it already
+  /// covers their display. Source-quality viewers always ride the full layer.
   bool _wantsLowLayer(_FwdBranch branch, String viewerPeer) {
     final (fw, fh) = _ingestCap(branch);
     final (vw, vh) = _effectiveCapFor(viewerPeer);
@@ -3342,13 +2845,9 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     if (_screenCaptureStream == null) return;
     final origin = _myShareOrigin();
     if (origin == null) return;
-    // Phase 3: offer a 2-layer simulcast ingest when the engine on the other
-    // end can select layers — the VPS forwarder always can (deployed with
-    // this contract BEFORE clients ship); a peer forwarder only when its
-    // watch advertised `fwd_simulcast` (an old embedded engine would fan
-    // both layers interleaved = garbage on every viewer). Recomputed here
-    // (first decided at branch creation) so a rebuilt ingest tracks the
-    // forwarder's current watch flags.
+    // Offer a 2-layer simulcast ingest only when the far engine can select
+    // layers (the VPS always can; a peer forwarder only if its watch said so),
+    // or an old engine would fan both layers interleaved = garbage.
     branch.simulcast = !branch.isPeer ||
         (_watcherRoutes[branch.forwarderId]?.fwdSimulcast ?? false);
     // Never offer an ingest for a stream the forwarder might not hold.
@@ -3360,8 +2859,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       forwarderLeg: true,
     );
     branch.ingest = service;
-    // Forwarder died / dropped the ingest mid-stream: revert this branch's
-    // audience to direct per-viewer PCs.
+    // Forwarder dropped the ingest: revert this branch's audience to direct.
     service.onDisconnected = () {
       if (branch.ingest != service) return;
       _vcLog('[HOLLOW-VC] Ingest leg to ${branch.forwarderId} disconnected — '
@@ -3403,13 +2901,10 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     }
   }
 
-  /// Re-offer a branch's ingest at the current cap (a branch viewer's cap or
-  /// Source-quality changed): live setParameters first (works since the
-  /// scalabilityMode-""/ssrc-0 round-trip poison was fixed in the plugin —
-  /// phase 3), renegotiate when the sender still rejects it.
+  /// Re-offer a branch's ingest at the current cap: live setParameters first,
+  /// renegotiate when the sender still rejects it.
   Future<void> _reofferIngest(_FwdBranch branch) async {
-    // Cap changes move viewers across the f/q layer threshold — refresh the
-    // engine's low set (attach-time only: live legs keep their layer).
+    // Attach-time only: live legs keep the layer they were given.
     await _registerStreamAtForwarder(branch);
     final svc = branch.ingest;
     if (svc != null) {
@@ -3424,8 +2919,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     await _ensureIngestLeg(branch);
   }
 
-  /// Remove a viewer from its branch; the LAST one starts the ~30 s linger
-  /// (a quick re-watch shouldn't pay a full re-register round).
+  /// Remove a viewer from its branch; the LAST one starts the ~30 s linger.
   Future<void> _removeViewerFromBranch(
       _FwdBranch branch, String viewerPeer) async {
     if (!branch.viewers.remove(viewerPeer)) return;
@@ -3454,10 +2948,8 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
   }
 
   /// Tear down one branch: ingest leg + registration (when [unregister]),
-  /// fwd-room release, and — for an idle PEER branch with [demote] — restore
-  /// the forwarder's own viewing to a direct per-viewer PC (revert-to-direct
-  /// assign + offer), since without downstream viewers the engine detour
-  /// buys nothing.
+  /// fwd-room release, and for an idle PEER branch with [demote] a revert to a
+  /// direct per-viewer PC, since without viewers the engine detour buys nothing.
   Future<void> _teardownBranch(
     _FwdBranch branch, {
     required bool unregister,
@@ -3468,9 +2960,8 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     branch.feedTimeout?.cancel();
     branch.feedTimeout = null;
     _fwdBranches.remove(branch.forwarderId);
-    // Feeder election: this branch's head was feeding another forwarder —
-    // tell it to stop, and make sure the FED forwarder gets its supply back
-    // from us (its viewers are still there; only the feeder is going away).
+    // This branch's head was feeding another forwarder: tell it to stop and
+    // resume supplying the FED forwarder ourselves.
     if (branch.feedTarget.isNotEmpty) {
       final target = branch.feedTarget;
       final wasUp = branch.feedUp;
@@ -3497,8 +2988,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
         head.feedTarget = '';
         head.feedUp = false;
         await _sendFeedAssign(feeder, '');
-        // Drop the dead forwarder from the head's allowlist (hygiene — the
-        // entry is authorization, not liveness, so a stale one is harmless).
+        // Hygiene: the entry is authorization, not liveness.
         await _registerStreamAtForwarder(head);
       }
     }
@@ -3549,9 +3039,8 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     }
   }
 
-  /// Leave a forwarder's relay room once neither side needs it (no sharer
-  /// branch AND no viewer assignment references it). NEVER for our OWN fwd
-  /// room — the embedded engine's bridge owns that membership (phase 2).
+  /// Leave a forwarder's relay room once neither side references it. NEVER for
+  /// our OWN fwd room - the embedded engine's bridge owns that membership.
   void _maybeLeaveFwdRoom(String? forwarderPeerId) {
     if (forwarderPeerId == null || forwarderPeerId.isEmpty) return;
     if (forwarderPeerId == _myDevicePeerId) return;
@@ -3564,13 +3053,11 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
         .catchError((_) {});
   }
 
-  /// Feeder side of feeder election: which forwarder we are currently feeding
-  /// for a given originator's stream (empty = none).
+  /// Feeder side: which forwarder we currently feed for an originator (empty = none).
   final Map<String, String> _feedingFor = {};
 
   /// Handle the `feed_target` on an incoming assign. Returns true when this
-  /// assign CHANGED our delegation (set or cleared it) — the caller uses that
-  /// to leave its own routing alone.
+  /// assign CHANGED our delegation, so the caller leaves its routing alone.
   bool _handleFeedDelegation(
       String originPeer, dynamic origin, String feedTarget) {
     final current = _feedingFor[originPeer] ?? '';
@@ -3616,8 +3103,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
   }
 
   /// Tell the stream's owner whether our feed leg is up. `up:false` makes the
-  /// owner resume supplying that forwarder itself — the make-before-break
-  /// handover only completes on `up:true`.
+  /// owner resume supplying that forwarder; handover completes on `up:true`.
   void _sendFeedState(String originPeer, String forwarderId, bool up) {
     if (!state.isInVoiceChannel) return;
     final assignment = _screenAssignments[originPeer];
@@ -3643,13 +3129,9 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
   /// Viewer side of `vc_screen_assign`: the sharer routed us to a forwarder.
   /// Join its room and attach; the egress offer arrives as a ForwarderSignal.
   ///
-  /// Phase 2 trust model: the assignment is authenticated as coming from the
-  /// STREAM'S ORIGINATOR (Rust's `inbound_origin_ok` — origin must name the
-  /// sender) and only honored for a share we explicitly watch, so the sharer
-  /// may name ANY forwarder for its own stream — the VPS infra forwarder, a
-  /// viewer-peer forwarder, or US (self-assignment: we were promoted, and
-  /// our display switches to our own embedded engine's egress leg). The
-  /// fwd_* signal-source gate stays per-assignment in _handleFwdEgressOffer.
+  /// Trust model: the assignment is authenticated as coming from the STREAM'S
+  /// ORIGINATOR (Rust's `inbound_origin_ok`) and only honored for a share we
+  /// explicitly watch, so the sharer may name ANY forwarder for its own stream.
   Future<void> _handleScreenAssign(String peerId, String payload) async {
     final v = jsonDecode(payload);
     final origin = v['origin'];
@@ -3662,18 +3144,13 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       return;
     }
 
-    // FEEDER ELECTION (§9.6), feeder side: the stream's OWNER delegated us to
-    // re-emit the copy we already receive into another forwarder's ingest — or
-    // revoked that delegation. Honoured only for a stream we are actually
-    // forwarding (our engine's own admission still applies), and never under
-    // Always-relay: a forced-relay user neither serves nor relays for anyone.
+    // FEEDER ELECTION, feeder side: the stream's OWNER delegated us to re-emit
+    // our copy into another forwarder's ingest. Honoured only for a stream we
+    // actually forward, and never under Always-relay.
     final feedChanged = _handleFeedDelegation(originPeer, origin, feedTarget);
-    // A delegation-carrying assign leaves our OWN routing untouched (the
-    // sharer re-sends the forwarder we already have, which for a branch head
-    // is itself). Return here so a feed set/revoke can't retire and re-attach
-    // a perfectly good display leg — one needless blink per election, and
-    // worse during a revoke, when the branch is already under stress. Scoped
-    // to delegation events so ordinary assign handling is unchanged.
+    // A delegation-carrying assign leaves our OWN routing untouched: returning
+    // here stops a feed set/revoke retiring and re-attaching a good display leg
+    // (one needless blink, and worse during a revoke).
     if (feedChanged &&
         forwarder == (_screenAssignments[originPeer]?.forwarder ?? '')) {
       return;
@@ -3682,17 +3159,14 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       // Revert-to-direct: forget the assignment; the direct offer follows.
       final prev = _screenAssignments.remove(originPeer);
       _maybeLeaveFwdRoom(prev?.forwarder);
-      // The promised direct offer can be withheld (the sharer gates offers
-      // on a warm audio PC) — re-arm the watch timeout so a no-show walks
-      // the ladder or gives up visibly instead of stranding the tile.
+      // The promised direct offer can be withheld (the sharer gates on a warm
+      // audio PC), so re-arm the timeout instead of stranding the tile.
       _armWatchNoShowTimer(originPeer);
       return;
     }
     // Privacy hard gate: with "Always relay calls" on, a PEER forwarder leg
-    // would expose our address to another member — only the operator-run
-    // infra forwarder (same trust domain as TURN) is acceptable. The sharer
-    // normally honors our relay_private flag; this catches buggy or
-    // malicious sharers, at the cost of one ladder attempt.
+    // would expose our address to another member. Only the operator-run infra
+    // forwarder is acceptable; this catches a buggy or malicious sharer.
     if (ref.read(alwaysRelayCallsProvider)) {
       final advertised = ref.read(forwarderInfoProvider).peerId;
       if (advertised.isEmpty || forwarder != advertised) {
@@ -3711,9 +3185,8 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       kind: origin is Map ? (origin['kind'] as String? ?? 'screen') : 'screen',
       stream: origin is Map ? (origin['stream'] as String? ?? '') : '',
     );
-    // Promotion replaces our existing direct leg for this origin: retire it
-    // OURSELVES (map-first so its onDisconnected guard no-ops when the
-    // sharer's side closes) — the engine egress offer re-populates it.
+    // Promotion replaces our existing direct leg: retire it OURSELVES, map-first
+    // so its onDisconnected guard no-ops when the sharer's side closes.
     final prevService = _incomingScreenShares.remove(originPeer);
     if (prevService != null) {
       await prevService.close();
@@ -3732,26 +3205,21 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
           payload: jsonEncode({'origin': origin}),
         )
         .catchError((_) {});
-    // Forwarder→forwarder REASSIGNMENT (opportunistic rebalance: VPS → peer):
-    // release the OLD forwarder's room once nothing references it — a
-    // lingering fwd-room membership is exactly the stale-room shape behind
-    // the targeted-signal blackhole. (Never our own room; the helper guards.)
+    // Forwarder-to-forwarder reassignment: release the OLD forwarder's room once
+    // nothing references it - a lingering membership blackholes targeted signals.
     if (prevAssignment != null && prevAssignment.forwarder != forwarder) {
       _maybeLeaveFwdRoom(prevAssignment.forwarder);
     }
-    // The attach can die silently (forwarder restart, lost control frame) and
-    // our old delivery leg is already retired — arm the no-show timer so
-    // dead air walks the ladder instead of stranding the tile.
+    // The attach can die silently and our old delivery leg is already retired:
+    // arm the no-show timer so dead air walks the ladder.
     _armWatchNoShowTimer(originPeer);
     _vcLog('[HOLLOW-VC] Assigned to ${isSelf ? "OUR OWN engine" : "forwarder"} '
         'for $originPeer — attaching');
   }
 
-  /// Arm (or re-arm) the 20 s "nothing rendered" watchdog for a share we're
-  /// watching: a promised delivery — direct offer after a revert, or a
-  /// forwarder egress after an assign — can silently never arrive, and by
-  /// then our previous leg is already retired. No-op when a renderer is
-  /// already live; the fired timer re-checks and self-defuses.
+  /// Arm (or re-arm) the 20 s "nothing rendered" watchdog for a share we watch:
+  /// a promised delivery can silently never arrive after our previous leg was
+  /// retired. No-op when a renderer is already live; the fired timer re-checks.
   void _armWatchNoShowTimer(String originPeer) {
     if (!state.watchingScreenShares.contains(originPeer)) return;
     if (getScreenShareRenderer(originPeer) != null) return;
@@ -3769,10 +3237,9 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     });
   }
 
-  /// Client-bound fwd_* signals (NetworkEvent.forwarderSignal). Gated hard:
-  /// ingest answers only from OUR registered forwarder; egress offers only
-  /// for origins we were assigned AND are watching, from that assignment's
-  /// forwarder.
+  /// Client-bound fwd_* signals. Gated hard: ingest answers only from OUR
+  /// registered forwarder; egress offers only for origins we were assigned AND
+  /// are watching, from that assignment's forwarder.
   Future<void> handleForwarderSignal(
       String fromPeer, String signalType, String payload) async {
     Map<String, dynamic> v;
@@ -3793,9 +3260,8 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       case 'fwd_error':
         await _handleFwdError(fromPeer, v);
       case 'fwd_feed_up':
-        // Feeder election: the forwarder we were delegated to feed ADMITTED
-        // our ingest. Tell the stream's owner so it can stop supplying that
-        // forwarder itself (make-before-break completes here).
+        // The forwarder we were delegated to feed ADMITTED our ingest: tell the
+        // owner so it can stop supplying that forwarder itself.
         final origin = v['origin'];
         final originPeer =
             origin is Map ? (origin['peer'] as String? ?? '') : '';
@@ -3806,9 +3272,8 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     }
   }
 
-  /// The forwarder's egress offer for a stream we were assigned: identical
-  /// attribution/SFrame/renderer path as a direct offer (D1's originator
-  /// keys), with the forwarder as the DELIVERER. Replies a COMPLETE SDP.
+  /// The forwarder's egress offer for an assigned stream: same originator-keyed
+  /// path as a direct offer, with the forwarder as DELIVERER. Replies a full SDP.
   Future<void> _handleFwdEgressOffer(
       String fromPeer, Map<String, dynamic> v) async {
     final origin = v['origin'];
@@ -3839,18 +3304,13 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
         .catchError((_) {});
   }
 
-  /// FwdError: walk the fallback ladder — the forwarder is an availability
-  /// helper, never authority. Sharer side reverts its forwarder audience to
-  /// direct offers; viewer side re-watches with route "direct_failed".
+  /// FwdError: walk the fallback ladder; the forwarder is never authority.
   Future<void> _handleFwdError(String fromPeer, Map<String, dynamic> v) async {
     final origin = v['origin'];
     final originPeer = origin is Map ? (origin['peer'] as String? ?? '') : '';
     final code = v['code'] as String? ?? '';
-    // FEEDER side: the forwarder we were delegated to feed refused us. The
-    // most likely cause is a forwarder binary older than feeder election (it
-    // ignores the `feeder` field, so our ingest is "not the owner"). Report
-    // DOWN so the owner resumes supplying it itself — it never stopped, so
-    // this costs nothing but the wasted attempt.
+    // FEEDER side: most likely a forwarder binary older than feeder election.
+    // Report DOWN so the owner resumes supplying it itself.
     if (_feedingFor[originPeer] == fromPeer) {
       _vcLog('[HOLLOW-VC] Fed forwarder $fromPeer refused our ingest ($code) — '
           'reporting the feed down');
@@ -3866,9 +3326,8 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       await _revertBranchViewersToDirect(branch);
       return;
     }
-    // Viewer side: our attach was refused. A SELF-assigned display hitting
-    // unknown_stream is (only ever) the local attach racing our sharer's
-    // register — one bounded retry before laddering.
+    // Viewer side: a SELF-assigned display hitting unknown_stream is the local
+    // attach racing our sharer's register - one bounded retry before laddering.
     final assignment = _screenAssignments[originPeer];
     if (assignment != null && assignment.forwarder == fromPeer) {
       if (code == 'unknown_stream' &&
@@ -3900,12 +3359,9 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     }
   }
 
-  /// Sharer-side fallback: [branch]'s forwarder refused or lost our ingest —
-  /// tear that branch down and serve its viewers a direct per-viewer PC
-  /// (revert-to-direct assign + offer, up to the 15-cap). The dead forwarder
-  /// is remembered per viewer so a later re-watch never bounces them back
-  /// onto it; a demoted PEER forwarder gets its own direct feed back via the
-  /// teardown's demote path.
+  /// Sharer-side fallback: [branch]'s forwarder refused or lost our ingest, so
+  /// tear it down and serve its viewers direct PCs. The dead forwarder is
+  /// remembered per viewer so a later re-watch never bounces them back onto it.
   Future<void> _revertBranchViewersToDirect(_FwdBranch branch) async {
     final origin = _myShareOrigin();
     final viewers = List.of(branch.viewers);
@@ -3932,11 +3388,9 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     }
   }
 
-  /// Whether this client may serve as a viewer-peer forwarder (phase 2):
-  /// desktop only, never mobile, gated on the "Peer media forwarding"
-  /// Settings toggle (ON by default) — and NEVER while "Always relay calls"
-  /// is on: serving means members connect straight to this machine, which is
-  /// exactly the address exposure that setting promises away.
+  /// Whether this client may serve as a viewer-peer forwarder: desktop only,
+  /// gated on the "Peer media forwarding" toggle, and NEVER under "Always relay
+  /// calls" - serving is exactly the address exposure that setting promises away.
   bool _canForwardShares() {
     if (kIsWeb) return false;
     if (!(Platform.isWindows || Platform.isLinux || Platform.isMacOS)) {
@@ -3946,11 +3400,9 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     return ref.read(peerForwardingProvider);
   }
 
-  /// Build a want=true screen_watch payload for [sharerPeer] — shared by the
-  /// initial watch, the Source-quality re-watch, and the fallback ladder so
-  /// the phase-2 capability flag can never drift between them. Advertising
-  /// capability also arms the embedded engine's expectation for this origin
-  /// (the abuse gate: we only ever forward streams we watch).
+  /// Build a want=true screen_watch payload for [sharerPeer], shared by every
+  /// send site so the capability flags can never drift. Advertising capability
+  /// also arms the engine's expectation (we only forward streams we watch).
   Map<String, dynamic> _watchPayload(String sharerPeer,
       {required String route}) {
     final (viewerW, viewerH) = largestDisplayResolution();
@@ -3961,8 +3413,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
               originPeer: sharerPeer, kind: 'screen', active: true)
           .catchError((_) {});
     }
-    // Baseline for the route re-probe (lever 2) — recorded here so every send
-    // site is covered without each one remembering to.
+    // Recorded here so every send site is covered without remembering to.
     _lastRouteHintSent[sharerPeer] = route;
     return {
       'want': true,
@@ -3970,39 +3421,30 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       'viewer_height': viewerH,
       'route': route,
       'fwd_capable': canFwd,
-      // Privacy: forced-relay viewers must only ever be routed through
-      // OPERATOR infrastructure (TURN / the infra forwarder) — the sharer
-      // skips the peer-forwarder rungs for them.
+      // Privacy: forced-relay viewers only ever route through OPERATOR
+      // infrastructure, so the sharer skips the peer-forwarder rungs.
       'relay_private': ref.read(alwaysRelayCallsProvider),
-      // Phase 3: this build's embedded engine ingests 2-layer rid simulcast
-      // and selects layers per viewer. The sharer offers a simulcast ingest
-      // only to forwarders that said so — an old engine would interleave
-      // both layers down one egress stream.
+      // The sharer offers a simulcast ingest only to forwarders that said so:
+      // an old engine would interleave both layers down one egress stream.
       'fwd_simulcast': canFwd,
-      // §9.6: our engine can also FEED another forwarder (re-emit the copy we
-      // already receive into its ingest), so the sharer may elect us when we
-      // head a branch. Same capability gate as forwarding itself.
+      // Our engine can also FEED another forwarder, so the sharer may elect us
+      // when we head a branch. Same capability gate as forwarding itself.
       'fwd_feed': canFwd,
     };
   }
 
-  /// The last `route` hint we actually SENT per sharer — the baseline the
-  /// re-probe compares against so a repeat watch only goes out when the answer
-  /// genuinely changed. Written by [_watchPayload] so every send site (initial
-  /// watch, Source toggle, ladder, re-probe) records itself.
+  /// The last `route` hint we actually SENT per sharer: the baseline the
+  /// re-probe compares against so a repeat watch only goes out on a real change.
   final Map<String, String> _lastRouteHintSent = {};
 
   /// Timers for the one-shot post-connect route re-probe, keyed by sharer.
   final Map<String, Timer> _routeReprobeTimers = {};
 
-  /// A FRESH route probe for [peerId], deliberately bypassing
-  /// [_routeHintTo]'s sticky "already assigned ⇒ relay" short-circuit.
-  ///
-  /// That short-circuit is right for a re-watch (a Source toggle must not
-  /// bounce a working stream off its branch) but it is exactly wrong here: a
-  /// viewer parked on the VPS branch BECAUSE the ICE race handed it a relay
-  /// pair would report `relay` forever and could never be promoted. The
-  /// privacy/lab short-circuits are kept — those are policy, not measurement.
+  /// A FRESH route probe for [peerId], bypassing [_routeHintTo]'s sticky
+  /// "already assigned means relay" short-circuit: right for a re-watch, but a
+  /// viewer parked on the VPS because the ICE race handed it a relay pair would
+  /// report `relay` forever. The privacy/lab short-circuits stay - those are
+  /// policy, not measurement.
   Future<String> _probeRouteFresh(String peerId) async {
     if (Platform.environment['HOLLOW_FORCE_RELAY_ROUTE'] == '1') return 'relay';
     if (ref.read(alwaysRelayCallsProvider)) return 'relay';
@@ -4016,17 +3458,10 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     return '';
   }
 
-  /// Lever 2 of the "direct whenever direct is possible" pair: the watch
-  /// `route` hint is probed ONCE, so a direct-capable viewer that lost the ICE
-  /// nomination race stays `route=relay` for the whole session — the sharer
-  /// keeps it on the VPS branch and the opportunistic rebalancer never sees a
-  /// candidate. (Field-observed twice; the manual VC leave/rejoin that "fixed"
-  /// it was precisely this re-probe done by hand.)
-  ///
-  /// Re-probe once the audio PC has had time to settle, and re-send the watch
-  /// only if the verdict actually changed. The sharer side needs no new code:
-  /// a fresh `route=direct fwd_capable` watch already feeds
-  /// `_maybeRebalanceOntoCandidate`.
+  /// Lever 2 of "direct whenever direct is possible": the watch `route` hint is
+  /// probed ONCE, so a direct-capable viewer that lost the ICE nomination race
+  /// would stay `route=relay` all session and never be promoted. Re-probe once
+  /// the audio PC settled, and re-send the watch only if the verdict changed.
   void _scheduleRouteReprobe(String sharerPeer,
       {Duration delay = const Duration(seconds: 10)}) {
     if (!_canReprobeRoute(sharerPeer)) return;
@@ -4038,9 +3473,8 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       if (fresh.isEmpty) return;
       final previous = _lastRouteHintSent[sharerPeer];
       if (fresh == previous) return;
-      // Only an upgrade is worth acting on. A downgrade (direct → relay) on a
-      // live stream would bounce a working path for no gain; the ladder
-      // already handles genuine failures.
+      // Only an upgrade is worth acting on: a downgrade would bounce a working
+      // path for no gain, and the ladder handles genuine failures.
       if (fresh != 'direct') return;
       if (!_canReprobeRoute(sharerPeer)) return;
       _vcLog('[HOLLOW-VC] Route re-probe for $sharerPeer: '
@@ -4060,9 +3494,8 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     });
   }
 
-  /// Guard shared by the schedule and the fire: still in the VC, still
-  /// watching this sharer, and not a forced-relay client (whose route is
-  /// policy, never measurement).
+  /// Guard shared by the schedule and the fire: still in the VC, still watching
+  /// this sharer, and not a forced-relay client (whose route is policy).
   bool _canReprobeRoute(String sharerPeer) =>
       state.isInVoiceChannel &&
       state.currentServerId != null &&
@@ -4070,11 +3503,9 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       state.watchingScreenShares.contains(sharerPeer) &&
       !ref.read(alwaysRelayCallsProvider);
 
-  /// Viewer-side fallback: drop the assignment, detach, and re-watch with
-  /// route "direct_failed" — the sharer descends its ladder (another
-  /// forwarder rung, or today's direct+TURN path). Two attempts per watch
-  /// session (peer forwarder + VPS forwarder); after that the normal 20 s
-  /// watch timeout gives up with the toast.
+  /// Viewer-side fallback: drop the assignment, detach, and re-watch with route
+  /// "direct_failed" so the sharer descends its ladder. Two attempts per watch
+  /// session; after that the 20 s watch timeout gives up with the toast.
   void _fallbackToDirect(String originPeer) {
     final prev = _screenAssignments.remove(originPeer);
     if (prev != null) {
@@ -4125,18 +3556,14 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
   }
 
   /// Re-requests per originator for a dead DIRECT incoming leg. Separate from
-  /// the forwarder ladder's [_fwdFallbackCount]: this path never claims a
-  /// forwarder failed.
+  /// [_fwdFallbackCount]: this path never claims a forwarder failed.
   final Map<String, int> _directRerequestCount = {};
 
   /// A direct incoming share leg died while we still want the share.
   ///
   /// Deliberately NOT [_fallbackToDirect]: that re-watches with
-  /// `route: "direct_failed"`, which tells the sharer to DESCEND its ladder
-  /// onto a forwarder — the wrong conclusion when nothing about the forwarder
-  /// lane failed. Here the honest signal is a plain re-watch with a freshly
-  /// probed route: if the sharer is alive it simply re-offers, and if it
-  /// crashed the request lands nowhere and the share ends as it should.
+  /// `route: "direct_failed"`, telling the sharer to descend onto a forwarder,
+  /// the wrong conclusion when nothing about the forwarder lane failed.
   void _rerequestDirectShare(String originPeer) {
     if (!state.watchingScreenShares.contains(originPeer)) return;
     // The originator stopped sharing: a clean end, not a failure.
@@ -4172,8 +3599,6 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
   }
 
   /// Viewer side of opt-in watching (issue #38): request [peerId]'s share.
-  /// Optimistically marks us as watching + focuses the share; the sharer
-  /// replies with a screen_offer which _handleScreenOffer now accepts.
   Future<void> watchScreenShare(String peerId) async {
     if (!state.isInVoiceChannel) return;
     if (state.peerScreenSharing[peerId] != true) return;
@@ -4190,9 +3615,8 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       focusedSourceType: 'screen',
     );
 
-    // Ship our display resolution so the sharer clamps our stream to what
-    // we can actually show (media forwarding step 1), plus our route hint
-    // (step 3) and phase-2 forwarding capability.
+    // Ship our display resolution so the sharer clamps our stream to what we
+    // can show, plus our route hint and forwarding capability.
     final route = await _routeHintTo(peerId);
     network_api
         .voiceChannelSendSignal(
@@ -4207,15 +3631,12 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
         )
         .catchError((_) {});
 
-    // The route hint above is one immediate stats pass, and TURN often wins
-    // the nomination race by a single RTT on a path where direct works. Take
-    // one more look once the audio PC has settled; an upgrade to `direct`
-    // re-sends the watch and lets the sharer promote us (lever 2).
+    // TURN often wins the nomination race by a single RTT on a path where
+    // direct works, so take one more look once the audio PC settled.
     _scheduleRouteReprobe(peerId);
 
-    // If no offer produces a live track in time, revert so the tile/banner
-    // doesn't spin forever (sharer at cap, signal lost, ...). A forwarder
-    // assignment that never delivered walks the fallback ladder first.
+    // If no offer produces a live track in time, revert so the tile doesn't
+    // spin forever. A dead forwarder assignment walks the ladder first.
     _watchConnectTimers.remove(peerId)?.cancel();
     _watchConnectTimers[peerId] = Timer(const Duration(seconds: 20), () {
       _watchConnectTimers.remove(peerId);
@@ -4243,8 +3664,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
 
     final watching = {...state.watchingScreenShares}..remove(peerId);
 
-    // Focus repair BEFORE closing the service so the UI never renders a
-    // focused share whose renderer is being torn down.
+    // Before closing the service, so the UI never renders a torn-down renderer.
     if (state.focusedScreenSharePeerId == peerId &&
         state.focusedSourceType == 'screen') {
       final localPeerId = ref.read(identityProvider).peerId ?? '';
@@ -4284,9 +3704,8 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       await _dropShareCryptors(peerId);
     }
 
-    // Step 3: detach from the forwarder if this origin was served through it.
-    // Phase 2: the watch ending also withdraws our forwarding offer for this
-    // origin (the embedded engine stops accepting/serving its stream).
+    // Detach from the forwarder if this origin was served through it; the watch
+    // ending also withdraws our forwarding offer for that origin.
     network_api
         .setForwarderExpectation(
             originPeer: peerId, kind: 'screen', active: false)
@@ -4334,7 +3753,6 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     HollowToast.show(overlayContext, message, type: type, overlayState: overlay);
   }
 
-  /// Broadcast our screen share state to all peers.
   void _broadcastScreenState(bool enabled) {
     if (!state.isInVoiceChannel) return;
     // Device-keyed set: skip both our id forms (see _broadcastAudioState).
@@ -4360,9 +3778,8 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
   }
 
   /// Drop the SFrame cryptors bound to a (now closing) screen share PC for
-  /// [peerId]. enableFor* is idempotent per (participant, kind) — without this
-  /// a RESTARTED share silently keeps cryptors bound to the dead PC's
-  /// senders/receivers and the new PC's tracks go out/come in untransformed.
+  /// [peerId]. enableFor* is idempotent per (participant, kind), so without this
+  /// a RESTARTED share keeps cryptors bound to the dead PC and goes untransformed.
   Future<void> _dropShareCryptors(String peerId) async {
     try {
       await _service?.frameCryptor?.disableForPeer('screen:$peerId');
@@ -4371,32 +3788,24 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     }
   }
 
-  /// Clean up screen share services for a specific peer.
   Future<void> _cleanupPeerScreenShare(String peerId) async {
-    // Forget watch bookkeeping both ways (viewer + sharer side).
     _watchConnectTimers.remove(peerId)?.cancel();
     _routeReprobeTimers.remove(peerId)?.cancel();
     _lastRouteHintSent.remove(peerId);
     _watchers.remove(peerId);
     _watcherDisplays.remove(peerId);
     _watcherRoutes.remove(peerId);
-    // Phase 2 viewer side: their share ending ends our watch of it — the
-    // forwarding offer and the ladder counter go with it.
+    // Their share ending ends our watch, the forwarding offer and the counter.
     network_api
         .setForwarderExpectation(
             originPeer: peerId, kind: 'screen', active: false)
         .catchError((_) {});
     _fwdFallbackCount.remove(peerId);
     _directRerequestCount.remove(peerId);
-    // Step 3 sharer side: drop the peer from its branch; a vanished PEER
-    // FORWARDER takes its whole branch down (its viewers revert to direct
-    // and re-ladder). PRESENCE-FLAP TOLERANCE (field-hit 2026-08-06, run 2:
-    // the relay's ghost-socket eviction after an app restart broadcasts
-    // PeerLeft while the SAME peer's live socket is still in the room — that
-    // spurious signal tore down a working branch): when the branch has a
-    // live ingest leg, the LEG is the truth — a genuinely dead forwarder
-    // kills it within seconds and the leg's onDisconnected reverts then.
-    // Only a branch with no leg to speak for it is torn down on presence.
+    // A vanished PEER FORWARDER takes its whole branch down, but PRESENCE CAN
+    // FLAP: the relay's ghost-socket eviction broadcasts PeerLeft while the
+    // same peer's live socket is still in the room. When the branch has a live
+    // ingest leg the LEG is the truth, and its onDisconnected reverts instead.
     final memberBranch = _branchOf(peerId);
     if (memberBranch != null) {
       await _removeViewerFromBranch(memberBranch, peerId);
@@ -4410,10 +3819,8 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
             'its ingest leg is alive (ghost-eviction flap tolerance)');
       }
     }
-    // Incoming shares are ORIGINATOR-keyed (media forwarding step 2): drop
-    // the share this peer originated AND any share this peer was DELIVERING
-    // (step-3 forwarder legs; on direct legs deliverer == originator so the
-    // set collapses to the one key).
+    // Incoming shares are ORIGINATOR-keyed: drop the share this peer originated
+    // AND any share it was DELIVERING (equal on direct legs).
     final originsToDrop = <String>{
       if (_incomingScreenShares.containsKey(peerId)) peerId,
       ..._incomingShareOrigins.entries
@@ -4421,12 +3828,9 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
           .map((e) => e.key),
     };
     for (final origin in originsToDrop) {
-      // PRESENCE-FLAP TOLERANCE (same field lesson as the branch above): if
-      // the stream this peer DELIVERS to us is still rendering, the media
-      // leg is the truth — a spurious PeerLeft (relay ghost eviction after
-      // the deliverer's app restart) must not tear down a working share. A
-      // genuinely dead deliverer kills the leg within seconds and its
-      // onDisconnected walks the ladder.
+      // PRESENCE-FLAP TOLERANCE: if the stream this peer DELIVERS is still
+      // rendering, the media leg is the truth. A genuinely dead deliverer kills
+      // the leg within seconds and its onDisconnected walks the ladder.
       if (origin != peerId &&
           _incomingScreenShares[origin]?.remoteRenderer != null &&
           state.watchingScreenShares.contains(origin)) {
@@ -4440,15 +3844,9 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
         await incoming.close();
         await _dropShareCryptors(origin);
       }
-      // Phase 2 ladder: [peerId] was only the DELIVERER of this stream — the
-      // originator is still sharing and we still watch it, so losing the
-      // deliverer must never strand the watch. Walk the fallback ladder (the
-      // direct_failed re-watch lets the sharer descend to its next rung:
-      // another forwarder, or a direct offer). Field-hit in run 2 of the
-      // 2026-08-06 verification: this teardown was silent AND the sharer's
-      // own revert offer was audio-PC-gated — "Connecting to screen
-      // share..." forever. The re-watch rides the relay, so it heals even
-      // while the direct audio PC to the sharer is down.
+      // [peerId] was only the DELIVERER: the originator is still sharing, so
+      // losing the deliverer must never strand the watch. The re-watch rides the
+      // relay, so it heals even while the direct audio PC to the sharer is down.
       if (origin != peerId &&
           state.watchingScreenShares.contains(origin) &&
           state.peerScreenSharing[origin] == true) {
@@ -4456,14 +3854,12 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       }
     }
     // Close outgoing screen share to this peer (viewer-keyed transport leg).
-    // _dropShareCryptors is idempotent, so a double drop when this peer's own
-    // incoming share was also just torn down is a harmless no-op.
+    // _dropShareCryptors is idempotent, so a double drop is harmless.
     final outgoing = _outgoingScreenShares.remove(peerId);
     if (outgoing != null) {
       await outgoing.close();
       await _dropShareCryptors(peerId);
     }
-    // Update peerScreenSharing map + watching set.
     final watching = state.watchingScreenShares.contains(peerId)
         ? ({...state.watchingScreenShares}..remove(peerId))
         : state.watchingScreenShares;
@@ -4495,7 +3891,6 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     }
   }
 
-  /// Clean up all screen share services.
   Future<void> _cleanupAllScreenShares() async {
     _screenTrackPoller?.cancel();
     _screenTrackPoller = null;
@@ -4512,14 +3907,11 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     _watchers.clear();
     _watcherDisplays.clear();
 
-    // Step 3: leaving the channel drops every forwarder relationship — the
-    // branches (sharer side) and all assignments (viewer side). Presence in
-    // the fwd room is the forwarder's own cleanup signal too. Phase 2: our
-    // engine expectations are withdrawn per watched origin.
+    // Leaving the channel drops every forwarder relationship; presence in the
+    // fwd room is the forwarder's own cleanup signal too.
     _watcherRoutes.clear();
     _viewerFwdFailures.clear();
-    // Feeder election: stop feeding anyone (our engine's legs go with the
-    // teardown below, but the far forwarder should learn it now).
+    // Stop feeding anyone: the far forwarder should learn it now.
     for (final entry in _feedingFor.entries) {
       network_api
           .setForwarderFeed(
@@ -4621,9 +4013,8 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
 
   /// Handle MLS epoch change — rotate SFrame key for voice E2EE.
   ///
-  /// `channelId == null` is the server-wide group key (non-restricted voice
-  /// channels); `channelId != null` is a restricted channel's MLS subgroup key
-  /// (per-channel subgroups), which applies only to that voice channel.
+  /// `channelId == null` is the server-wide group key; a non-null one is a
+  /// restricted channel's MLS subgroup key and applies only to that channel.
   Future<void> onEpochChanged(
       String serverId, int epoch, Uint8List sframeKey,
       {String? channelId}) async {
@@ -4634,14 +4025,12 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     if (state.currentServerId != serverId) return;
     if (!state.isInVoiceChannel || _service == null) return;
 
-    // Only apply a key that belongs to the channel we're actually in: a subgroup
-    // key (channelId set) must match the current channel; the server-group key
-    // (channelId null) applies to whatever non-restricted channel we're in.
+    // Only apply a key that belongs to the channel we're in: a subgroup key must
+    // match the current channel; the server-group key applies to unrestricted ones.
     if (channelId != null && state.currentChannelId != channelId) return;
-    // Mirror guard: a SERVER-GROUP epoch change (e.g. someone joining the
-    // server) must never clobber a restricted channel's SUBGROUP key — that
-    // would re-key this VC onto material every non-qualifying member holds
-    // (and desync anyone who applies the events in a different order).
+    // A SERVER-GROUP epoch change must never clobber a restricted channel's
+    // SUBGROUP key: that would re-key this VC onto material every non-qualifying
+    // member holds.
     if (channelId == null &&
         state.currentChannelId != null &&
         _channelUsesSubgroup(state.currentChannelId!)) {
@@ -4653,9 +4042,8 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
         '— rotating SFrame key');
     await _service!.setSframeKey(epoch, sframeKey);
 
-    // If a screen share started before the FIRST key arrived, its PC has no
-    // cryptors yet — enable them now (idempotent for already-enabled PCs;
-    // rotateKey above already re-indexed existing share cryptors).
+    // A share started before the FIRST key has no cryptors yet - enable them
+    // now (idempotent; rotateKey already re-indexed existing share cryptors).
     final fc = _service?.frameCryptor;
     if (fc != null && fc.isEnabled) {
       for (final e in _outgoingScreenShares.entries) {
@@ -4670,13 +4058,9 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
               isSender: false);
         }
       }
-      // FORWARDER BRANCH INGEST LEGS TOO (media forwarding step 3) — they
-      // live outside the two maps above, and an ingest sender that misses a
-      // rotation keeps encrypting under the OLD index: every viewer behind
-      // that forwarder goes MissingKey/black while the heals bump epochs and
-      // dig the hole deeper. Field-diagnosed 2026-08-06 (the "black on every
-      // promotion" afternoon): the epoch sweep re-keyed 3 PCs and never the
-      // branch ingest.
+      // FORWARDER BRANCH INGEST LEGS TOO: they live outside the two maps above,
+      // and an ingest sender that misses a rotation keeps encrypting under the
+      // OLD index - every viewer behind that forwarder goes MissingKey/black.
       for (final b in _fwdBranches.values) {
         final ingestPc = b.ingest?.pc;
         if (ingestPc != null) {
@@ -4687,9 +4071,8 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     }
   }
 
-  /// Cryptor state transition from the service (participant already collapsed
-  /// to the mesh peerId). Failure states arm the heal timer; recovery states
-  /// clear the tracking.
+  /// Cryptor state transition from the service. Failure states arm the heal
+  /// timer; recovery states clear the tracking.
   void _onSframeCryptorState(
       String peerId, String kind, bool isReceiver, FrameCryptorState st) {
     final key = '$peerId|$kind|${isReceiver ? 'rx' : 'tx'}';
@@ -4697,13 +4080,9 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       _sframeFailures.putIfAbsent(key, () => DateTime.now());
       _sframeHealTimer ??= Timer.periodic(
           const Duration(seconds: 2), (_) => _sframeHealTick());
-      // MissingKey on a RECEIVER = "the frame wants a key slot I don't hold" —
-      // the join-order epoch race signature (our MLS group is silently stale;
-      // slots are additive so nothing else produces it on a live stream).
-      // Fire the cheap heal NOW instead of waiting for ladder step 2 (~6 s):
-      // Rust re-emits the current key AND probes the authority, which answers
-      // a stale epoch with a commit catch-up within ~1 RTT. Throttled per
-      // peer; the normal ladder keeps running unchanged as the backstop.
+      // MissingKey on a RECEIVER means "the frame wants a key slot I don't hold":
+      // the join-order epoch race signature. Fire the cheap heal now instead of
+      // waiting for ladder step 2; the normal ladder stays the backstop.
       if (st == FrameCryptorState.FrameCryptorStateMissingKey && isReceiver) {
         final last = _sframeMissingKeyPings[peerId];
         if (last == null ||
@@ -4715,7 +4094,6 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
         }
       }
     } else {
-      // Ok / KeyRatcheted / New — this cryptor recovered.
       final wasFailing = _sframeFailures.remove(key) != null;
       if (wasFailing &&
           !_sframeFailures.keys.any((k) => k.startsWith('$peerId|'))) {
@@ -4762,16 +4140,14 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     }
     _sframeKeylessTicks++;
     if (_sframeKeylessTicks > 24) {
-      // ~2 min without a key (group authority offline). Stop nagging — a
-      // later MlsEpochChanged still applies normally via onEpochChanged.
+      // ~2 min without a key: stop nagging, a later epoch change still applies.
       _sframeKeylessTimer?.cancel();
       _sframeKeylessTimer = null;
       return;
     }
     debugPrint('[HOLLOW-VC] SFrame keyless after join '
         '(tick $_sframeKeylessTicks) — nudging Rust for the group key');
-    // Rust's group-less heal branch re-requests the MLS bootstrap (rate
-    // limited by MLS_BOOTSTRAP_TIMEOUT); peerId is unused on that branch.
+    // Rust's group-less heal branch re-requests the MLS bootstrap; peerId unused.
     _sframeHealRust('', escalate: false);
   }
 
@@ -4786,7 +4162,6 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       return;
     }
     final now = DateTime.now();
-    // Earliest failure per peer.
     final failingPeers = <String, DateTime>{};
     _sframeFailures.forEach((k, t) {
       final peer = k.substring(0, k.indexOf('|'));
@@ -4814,8 +4189,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
           now.difference(prog.at) >= const Duration(seconds: 8)) {
         final attempts = _sframeEscalations[peerId] ?? 0;
         if (attempts >= _kMaxSframeEscalations) {
-          // Unhealable peer (still failing after repeated group surgery) —
-          // stop; further escalation would just churn the server MLS group.
+          // Further escalation would just churn the server MLS group.
           debugPrint('[HOLLOW-VC] SFrame heal for $peerId exhausted '
               '($attempts escalations) — giving up on this peer');
           _sframeHealProgress[peerId] = (step: 4, at: DateTime.now());
@@ -4832,9 +4206,8 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
           _sframeHealRust(peerId, escalate: true);
           _sframeHealProgress[peerId] = (step: 3, at: DateTime.now());
         } else {
-          // Escalation on cooldown — keep cycling the cheap re-emit. This is
-          // also what re-keys US promptly after the authority's heal removed
-          // and re-added our leaves (the !has_group branch re-bootstraps).
+          // Escalation on cooldown - keep cycling the cheap re-emit, which is
+          // also what re-keys US after the authority re-added our leaves.
           _sframeHealRust(peerId, escalate: false);
           _sframeHealProgress[peerId] = (step: 2, at: DateTime.now());
         }
@@ -4842,8 +4215,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     }
   }
 
-  /// Heal step 1: re-apply the cached key for the current channel and rebind
-  /// the failing peer's receiver cryptors.
+  /// Heal step 1: re-apply the cached key and rebind the peer's receiver cryptors.
   Future<void> _sframeHealReapply(String peerId) async {
     final sid = state.currentServerId;
     final cid = state.currentChannelId;
@@ -4856,10 +4228,8 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       await svc.setSframeKey(cached.epoch, Uint8List.fromList(cached.key));
     }
     await svc.rebindReceiversFor(peerId);
-    // Share-PC cryptors live under 'screen:$peerId' — the voice rebind above
-    // can't reach them (setKeyIndexForPeer prefix-matches '$peerId:'), so
-    // re-run the idempotent share enable on both directions' PCs; it ends
-    // with setKeyIndexForPeer('screen:$peerId', …) which is the actual heal.
+    // Share-PC cryptors live under 'screen:$peerId', which the voice rebind
+    // above cannot reach (setKeyIndexForPeer prefix-matches '$peerId:').
     final fc = svc.frameCryptor;
     if (fc != null) {
       final incomingPc = _incomingScreenShares[peerId]?.pc;
@@ -4872,9 +4242,8 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
         await _enableSframeOnScreenSharePc(outgoingPc, fc, peerId,
             isSender: true);
       }
-      // A heal aimed at a peer we serve THROUGH a branch must reach the
-      // branch's ingest sender as well (same key-index rule as the epoch
-      // sweep — the ingest lives outside the two maps above).
+      // A peer served THROUGH a branch needs the branch's ingest sender healed
+      // too - it lives outside the two maps above.
       final ingestPc = _fwdBranches[peerId]?.ingest?.pc;
       if (ingestPc != null) {
         await _enableSframeOnScreenSharePc(ingestPc, fc, peerId,
@@ -4896,7 +4265,6 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
   }
 
   /// Handle voice channel mode change (mesh <-> gossip).
-  /// Called by event_provider when Rust emits VoiceChannelModeChanged.
   Future<void> onModeChanged(
     String serverId,
     String channelId,
@@ -4919,35 +4287,28 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     );
 
     if (_service == null) return;
-    // Self-skip must use the ROUTABLE DEVICE id — the participant set and the
-    // gossip neighbor list are device-keyed (self included). The master id is
-    // kept as a belt against any legacy master-form entry.
+    // Self-skip must use the ROUTABLE DEVICE id: participant sets and gossip
+    // neighbor lists are device-keyed. The master id is a legacy belt.
     final localPeerId = _service!.localPeerId;
     final localMaster = ref.read(identityProvider).peerId ?? '';
     bool isLocal(String id) => id == localPeerId || id == localMaster;
 
     if (mode == 'gossip' && oldMode == 'mesh') {
-      // Mesh → Gossip: close audio PCs to non-neighbor peers,
-      // keep PCs to gossip neighbors.
       final existing = state.getParticipants(serverId, channelId);
       for (final peerId in existing) {
         if (isLocal(peerId)) continue;
         if (!neighborSet.contains(peerId)) {
-          // Not a gossip neighbor — close audio PC.
           debugPrint('[HOLLOW-VC] Gossip: closing non-neighbor $peerId');
           await _service!.onPeerLeftMyChannel(peerId);
         }
       }
-      // Ensure we have PCs to all gossip neighbors.
       for (final peerId in neighborSet) {
         if (isLocal(peerId)) continue;
         await _service!.onPeerJoinedMyChannel(peerId);
       }
-      // Set gossip mode on the service for track forwarding.
       _service!.gossipMode = true;
       _service!.gossipNeighbors = neighborSet;
     } else if (mode == 'mesh' && oldMode == 'gossip') {
-      // Gossip → Mesh: create audio PCs to all participants.
       _service!.gossipMode = false;
       _service!.gossipNeighbors = {};
       final existing = state.getParticipants(serverId, channelId);
@@ -4956,9 +4317,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
         await _service!.onPeerJoinedMyChannel(peerId);
       }
     } else if (mode == 'gossip') {
-      // Gossip neighbor update (mode didn't change, just neighbor list).
       _service!.gossipNeighbors = neighborSet;
-      // Close PCs to peers no longer in neighbor set.
       final currentPeers = _service!.connectedPeerIds;
       for (final peerId in currentPeers) {
         if (!neighborSet.contains(peerId)) {
@@ -4966,7 +4325,6 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
           await _service!.onPeerLeftMyChannel(peerId);
         }
       }
-      // Connect to new neighbors.
       for (final peerId in neighborSet) {
         if (isLocal(peerId)) continue;
         await _service!.onPeerJoinedMyChannel(peerId);
@@ -4988,10 +4346,9 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
   Future<void> _enableSframeOnScreenSharePc(
       RTCPeerConnection pc, FrameCryptorService frameCryptor,
       String peerId, {required bool isSender}) async {
-    // No key material (MLS-less server) → leave the share PC untransformed on
-    // BOTH sides. A keyless sender cryptor would silently DROP every frame,
-    // and this unguarded enable used to flip the service's enabled flag on
-    // the sharer only — the asymmetry behind issue #27.
+    // No key material (MLS-less server): leave the share PC untransformed on
+    // BOTH sides. A keyless sender cryptor silently DROPS every frame, and a
+    // one-sided enable was the asymmetry behind issue #27.
     if (!frameCryptor.isEnabled) {
       debugPrint('[HOLLOW-VC] No SFrame key yet — share PC stays untransformed (peer=$peerId)');
       return;

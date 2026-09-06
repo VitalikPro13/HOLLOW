@@ -5,22 +5,15 @@ import 'package:hollow/src/rust/api/updater.dart' as updater_api;
 
 /// Shut the node down and restart the app.
 ///
-/// Two traps make the obvious approaches fail, both found the hard way:
-/// - Spawning a fresh copy BEFORE exiting dies on Windows: the native
-///   runner's `SendAppLinkToInstance()` runs pre-Flutter in the child, finds
-///   our still-alive window (same exe path), forwards, and exits.
-/// - A waiter process can't be spawned from Dart either: detached mode kills
-///   powershell instantly (no console, and Dart exposes no CREATE_NO_WINDOW),
-///   while a detached cmd batch wedges its `tasklist | find` loop in a
-///   half-alive console (frozen `find "<pid>"` window).
+/// The waiter is spawned by RUST (`spawn_relaunch_waiter`, updater.rs) with
+/// CREATE_NO_WINDOW: it idles until our pid is gone, then starts the exe.
+/// Neither obvious alternative works. Spawning a fresh copy BEFORE exiting
+/// dies on Windows, where the native runner's `SendAppLinkToInstance()` finds
+/// our still-alive window and forwards; and Dart cannot spawn the waiter
+/// itself (detached powershell dies instantly, a detached cmd batch wedges).
 ///
-/// So the waiter is spawned by Rust (`spawn_relaunch_waiter`, updater.rs)
-/// with CREATE_NO_WINDOW: it idles until our pid is gone, then starts the
-/// exe. On mobile there is no self-relaunch — we just exit and the user
-/// reopens the app.
-///
-/// Never returns (ends in `exit(0)`); never throws — a relaunch failure
-/// still exits, matching the old best-effort behavior.
+/// Mobile has no self-relaunch: it exits and the user reopens. Never returns
+/// (ends in `exit(0)`) and never throws.
 Future<Never> relaunchApp() async {
   try {
     if (Platform.isWindows || Platform.isMacOS || Platform.isLinux) {

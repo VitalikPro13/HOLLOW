@@ -10,15 +10,12 @@ import 'package:hollow/src/core/reduce_motion.dart';
 
 /// Whether [bytes] actually carry more than one frame.
 ///
-/// Mirrors Rust's `image_convert::is_animated_image` — GIF magic, a WebP VP8X
-/// chunk with the animation bit set, or a PNG carrying an `acTL` chunk (APNG).
-/// Keep the two in step: the pickers gate their cropper on this, and Rust
-/// decides on the same question when routing an upload.
+/// Mirrors Rust's `image_convert::is_animated_image`, and must stay in step
+/// with it: the pickers gate their cropper on this and Rust routes uploads on
+/// the same question.
 ///
-/// Deciding from the BYTES rather than a filename is the rule. The pickers
-/// used to branch on a `.gif` extension, so an animated WebP or an APNG went
-/// through the still cropper and came out frozen, with no error and no
-/// warning.
+/// Decide from the BYTES, never a filename. A `.gif` extension branch sends an
+/// animated WebP or an APNG through the still cropper, frozen and silent.
 bool isAnimatedImageBytes(Uint8List bytes) {
   if (bytes.length >= 6 &&
       bytes[0] == 0x47 && // G
@@ -47,10 +44,9 @@ bool isAnimatedImageBytes(Uint8List bytes) {
 
 /// Whether [bytes] are a PNG carrying an `acTL` (animation control) chunk.
 ///
-/// Walks the chunk table by length rather than searching for the literal
-/// bytes, which can occur by chance inside compressed pixel data. `acTL` is
-/// required to precede the first `IDAT`, so the walk stops there instead of
-/// scanning a whole multi-megabyte file.
+/// Walks the chunk table by length rather than searching for the literal bytes,
+/// which occur by chance inside compressed pixel data. `acTL` must precede the
+/// first `IDAT`, so the walk stops there.
 bool _isApng(Uint8List b) {
   const sig = <int>[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
   if (b.length < sig.length + 12) return false;
@@ -70,16 +66,12 @@ bool _isApng(Uint8List b) {
   return false;
 }
 
-/// Renders an animated GIF from raw bytes with proper frame delay handling.
+/// Renders an animated image from raw bytes, or a static one when there is only
+/// a single frame.
 ///
-/// Unlike Flutter's built-in Image.memory which can play GIFs too fast
-/// (treating 0ms/10ms delays literally), this widget:
-/// - Defaults frame delays < 20ms to 100ms (matching browser behavior)
-/// - Drives animation from a per-frame Timer, so a 10fps GIF costs 10
-///   frames a second rather than one per vsync (see [_AnimatedGifImageState._timer])
-/// - Properly loops the animation
-///
-/// For non-GIF images (PNG, WebP, JPEG), shows a static image.
+/// `Image.memory` plays a GIF too fast because it takes 0ms and 10ms delays
+/// literally; this defaults anything under 20ms to 100ms, as browsers do, and
+/// drives playback from a per-frame Timer (see [_AnimatedGifImageState._timer]).
 class AnimatedGifImage extends StatefulWidget {
   final Uint8List bytes;
   final double? width;
@@ -87,9 +79,8 @@ class AnimatedGifImage extends StatefulWidget {
   final BoxFit fit;
   final Widget? errorWidget;
 
-  /// When false, playback pauses on frame 0 (used by surfaces that only
-  /// animate while actually watched, e.g. the server banner gates on window
-  /// focus). Reduce-motion is enforced internally regardless of this flag.
+  /// False pauses playback on frame 0, for surfaces that animate only while
+  /// watched. Reduce motion is enforced internally whatever this says.
   final bool animate;
 
   const AnimatedGifImage({
@@ -111,25 +102,15 @@ class _AnimatedGifImageState extends State<AnimatedGifImage> {
   int _currentFrame = 0;
   bool _failed = false;
 
-  /// Playback is driven by a [Timer] armed for the CURRENT frame's display
-  /// duration, NOT by a [Ticker].
-  ///
-  /// A Ticker is a standing request for a frame every vsync, and the engine
-  /// then renders one whether or not the picture changed. A 10fps avatar was
-  /// therefore costing 240 frames a second on a 240Hz monitor: measured, the
-  /// idle Home screen ran at fps=240 with raster=1.81ms per frame, which is
-  /// 43% of a CPU core to show two small looping images. Arming a timer for
-  /// exactly as long as the current frame is shown produces one frame per GIF
-  /// frame, which is all there ever was to draw.
-  ///
-  /// It also retires the fast-forward bug this widget used to have: there is
-  /// no accruing `elapsed` to fall behind and then catch up on
-  /// (feedback_gif_ticker_mute_fast_forward). A missed deadline just means
-  /// the next frame shows a little late, once.
+  /// Armed for the CURRENT frame's display duration, NOT a [Ticker]: a Ticker
+  /// is a standing request for a frame every vsync, so a 10fps image costs 240
+  /// rendered frames a second on a 240Hz monitor. With no accruing `elapsed`
+  /// there is also nothing to fast-forward
+  /// (feedback_gif_ticker_mute_fast_forward).
   Timer? _timer;
 
-  /// Mirrors [TickerMode], which is how Flutter tells widgets under a pushed
-  /// route to stop animating. A Ticker got that for free; a Timer has to ask.
+  /// Mirrors [TickerMode], which a Ticker would get for free and a Timer has
+  /// to ask for.
   bool _tickerModeEnabled = true;
 
   /// devicePixelRatio the frames were decoded at, so an interface-zoom change
@@ -140,9 +121,8 @@ class _AnimatedGifImageState extends State<AnimatedGifImage> {
   @override
   void initState() {
     super.initState();
-    // The decode target comes from MediaQuery.devicePixelRatio, which cannot
-    // be read in initState, so the first decode runs from
-    // didChangeDependencies instead.
+    // MediaQuery.devicePixelRatio cannot be read in initState, so the first
+    // decode runs from didChangeDependencies.
     ReduceMotionController.instance.effective.addListener(_syncPlayback);
   }
 
@@ -160,8 +140,8 @@ class _AnimatedGifImageState extends State<AnimatedGifImage> {
       _tickerModeEnabled = enabled;
       _syncPlayback();
     }
-    // UiScale folds the interface zoom INTO devicePixelRatio, so this single
-    // number is the whole logical-to-physical conversion for the decode.
+    // UiScale folds the interface zoom INTO devicePixelRatio, so this is the
+    // whole logical-to-physical conversion for the decode.
     final dpr = MediaQuery.of(context).devicePixelRatio;
     if (!_decodeStarted || (dpr - _decodedDpr).abs() > 0.01) {
       _decodedDpr = dpr;
@@ -174,9 +154,8 @@ class _AnimatedGifImageState extends State<AnimatedGifImage> {
     if (!_shouldPlay) {
       _timer?.cancel();
       _timer = null;
-      // Reduce motion is a request to SHOW THE STILL, so rewind to it. Being
-      // muted under a dialog is not — that pauses where it stands and picks
-      // up from the same frame, with no blink when the dialog closes.
+      // Reduce motion is a request to SHOW THE STILL, so rewind; being muted
+      // under a dialog only pauses in place, with no blink on close.
       if (ReduceMotionController.instance.isReduced && _currentFrame != 0) {
         setState(() => _currentFrame = 0);
       }
@@ -229,12 +208,10 @@ class _AnimatedGifImageState extends State<AnimatedGifImage> {
   Future<void> _decode() async {
     _decodeStarted = true;
     try {
-      // Decode at the size actually painted, not the size the file happens to
-      // be. An animated image holds EVERY frame as a live GPU texture, so a
-      // 512px source in a 32px slot costs ~256x the texture memory it needs,
-      // multiplied by the frame count. allowUpscaling: false caps the target
-      // at the intrinsic size, so a source SMALLER than its slot is never
-      // blown up into a bigger texture than the file itself.
+      // Decode at the size actually painted: every frame is a live GPU
+      // texture, so a 512px source in a 32px slot costs ~256x the memory it
+      // needs, times the frame count. `allowUpscaling: false` also stops a
+      // small source being blown up past its own size.
       final codec = await ui.instantiateImageCodec(
         widget.bytes,
         targetWidth: _targetPx(widget.width),
@@ -265,7 +242,6 @@ class _AnimatedGifImageState extends State<AnimatedGifImage> {
 
       setState(() => _frames = frames);
 
-      // Start animation if multi-frame (unless gated: hold frame 0).
       if (frames.length > 1 && _shouldPlay) {
         _scheduleNext();
       }
@@ -306,13 +282,9 @@ class _AnimatedGifImageState extends State<AnimatedGifImage> {
       width: widget.width,
       height: widget.height,
       fit: widget.fit,
-      // Explicit, not inherited: stored animated avatars are 512px and the
-      // profile card paints them at 110, so this path now ALWAYS downscales.
-      // `low` is plain bilinear, which undersamples past ~1.33x and aliases
-      // the hard edges this art is made of; `medium` is triangle + mipmap and
-      // is the correct filter for a downscale. It happens to be RawImage's
-      // default today — pinning it means a framework default can't silently
-      // move under us. Matches AvatarFrame, which sets the same.
+      // Pinned, not inherited: this path always downscales (512px art painted
+      // at 110), and `low` is bilinear, which aliases hard edges past ~1.33x.
+      // `medium` is triangle plus mipmap, the correct downscale filter.
       filterQuality: FilterQuality.medium,
     );
   }
@@ -324,9 +296,8 @@ class _GifFrame {
   const _GifFrame({required this.image, required this.duration});
 }
 
-/// Loads a GIF from disk and renders it with [AnimatedGifImage] for correct
-/// frame delay handling (< 20ms → 100ms, matching browser behavior).
-/// For non-GIF paths, falls back to [Image.file].
+/// Loads an image from disk and renders it through [AnimatedGifImage], falling
+/// back to [Image.file] for a still.
 class GifFileImage extends StatefulWidget {
   final String diskPath;
   final double? width;

@@ -2,27 +2,15 @@ import '../rust/api/network.dart' as network_api;
 
 /// One DM call's setup timeline, from the press (or the ring) to media flowing.
 ///
-/// ## Why this exists
-///
 /// "Should we pre-gather ICE for calls?" cannot be answered by reading the
-/// code, because gathering runs CONCURRENTLY with the SDP round trip. The
-/// caller sets its local description (gathering starts), sends the offer, and
-/// then waits. If gathering finishes inside that wait it cost nothing, and
-/// pre-gathering would save nothing at all. If it runs past the answer, the
-/// overhang is real and pre-gathering would buy exactly that much.
+/// code, because gathering runs CONCURRENTLY with the SDP round trip: if it
+/// finishes inside that wait it cost nothing. [gatherExposedMs] is that
+/// subtraction, and it is the whole point of the file.
 ///
-/// [gatherExposedMs] is that subtraction, and it is the whole point of the
-/// file. Everything else is here so the number can be trusted in context.
-///
-/// ## Why it is not a PerfSentinel
-///
-/// Sentinels are quiet by default and log only anomalies. This logs EVERY
-/// call on purpose: the interesting result is the spread across networks and
-/// machines, not an outlier. A call is a rare user-initiated event, so two
-/// lines per call is not a stream.
-///
-/// Never carries anything that fingerprints a person: the call id is random
-/// and per-call, and already appears in the log next to it.
+/// Not a PerfSentinel: sentinels log only anomalies, and the interesting
+/// result here is the spread across networks and machines. A call is a rare
+/// user-initiated event, so two lines per call is not a stream. Nothing
+/// logged fingerprints a person.
 class CallSetupTrace {
   CallSetupTrace({
     required this.callId,
@@ -34,10 +22,8 @@ class CallSetupTrace {
     _origin = _clockMs();
   }
 
-  // -- Mark names --
-  //
-  // Ordered roughly as they occur. Both sides share names so a caller log and
-  // a callee log can be read side by side.
+  // Mark names, roughly in the order they occur. Both sides share names so a
+  // caller log and a callee log can be read side by side.
 
   /// Outgoing: the user pressed Call. Incoming: the invite arrived (ring on).
   static const kStart = 'start';
@@ -57,23 +43,20 @@ class CallSetupTrace {
   /// Our offer/answer handed to the relay.
   static const kSdpSent = 'sdp-sent';
 
-  /// The peer's answer (caller) or offer (callee) arrived. For the caller
-  /// this is when connectivity checks become possible, so it is the deadline
-  /// gathering has to beat in order to be free.
+  /// The peer's answer (caller) or offer (callee) arrived. For the caller this
+  /// is the deadline gathering has to beat in order to be free.
   static const kRemoteSdp = 'remote-sdp';
 
   static const kCandHost = 'cand-host';
   static const kCandSrflx = 'cand-srflx';
   static const kCandRelay = 'cand-relay';
 
-  /// Every local candidate type in the ordering they are gathered. The LAST
-  /// one to arrive is what "gathering is done enough to connect" means; see
-  /// [candsReadyMs].
+  /// Every local candidate type in the order gathered. The LAST to arrive is
+  /// what "gathering is done enough to connect" means; see [candsReadyMs].
   static const kCandTypes = [kCandHost, kCandSrflx, kCandRelay];
 
-  /// The peer's first ICE candidate reached us. Its ABSENCE on a call that
-  /// got an SDP answer means the connection had to survive on candidates
-  /// travelling one way only.
+  /// The peer's first ICE candidate reached us. Its ABSENCE on a call that got
+  /// an SDP answer means candidates travelled one way only.
   static const kRemoteCand = 'remote-cand';
 
   /// Queued candidates were thrown away because the peer connection was
@@ -93,8 +76,7 @@ class CallSetupTrace {
   bool _finished = false;
 
   /// Insertion-ordered so the emitted line reads as a timeline. First write
-  /// wins: `cand-srflx` fires once per candidate and we want the first, and a
-  /// retried step must not overwrite when it originally happened.
+  /// wins: `cand-srflx` fires per candidate and a retried step must not move.
   final Map<String, int> _marks = <String, int>{};
 
   /// Record [name] at the current time, unless it is already recorded.
@@ -124,10 +106,8 @@ class CallSetupTrace {
 
   /// setLocalDescription to ICE gathering state `complete`.
   ///
-  /// Reported, but NOT the basis of any verdict. Gathering "complete" also
-  /// waits on transports nothing will use (extra TURN URIs, TCP/TLS variants,
-  /// dead interfaces), and connectivity checks never wait for it. Reading a
-  /// cost off this number overstates it, sometimes by hundreds of ms.
+  /// Reported, but NOT the basis of any verdict: "complete" also waits on
+  /// transports nothing will use, so reading a cost off it overstates it.
   int? get gatherDoneMs {
     final sld = _marks[kSld];
     final done = _marks[kGatherDone];
@@ -148,8 +128,7 @@ class CallSetupTrace {
 
   /// setLocalDescription to the last usable local candidate.
   ///
-  /// This, not [gatherDoneMs], is what pre-gathering could shorten: once the
-  /// host/srflx/relay set is in hand there is nothing left to wait for.
+  /// This, not [gatherDoneMs], is what pre-gathering could shorten.
   int? get candsReadyMs {
     final sld = _marks[kSld];
     final last = _lastCandidateAt;
@@ -160,16 +139,12 @@ class CallSetupTrace {
   /// **The number this file exists for.** How much of candidate gathering was
   /// NOT already paid for by waiting on the peer's SDP.
   ///
-  /// Zero means the whole usable candidate set was in hand before the answer
-  /// arrived, so pre-gathering would have saved nothing on this call. A
-  /// positive value is the upper bound on what pre-gathering could return.
+  /// Zero means pre-gathering would have saved nothing on this call; a positive
+  /// value is the upper bound on what it could return. Measured against the last
+  /// CANDIDATE, not gathering `complete` (see [gatherDoneMs]).
   ///
-  /// Measured against the last CANDIDATE, not against gathering `complete` —
-  /// see [gatherDoneMs] for why that distinction decides the answer.
-  ///
-  /// Caller-only: the callee has no comparable wait after its local
-  /// description (it answers and the checks begin), so all of its gathering is
-  /// on the critical path by construction.
+  /// Caller-only: all of the callee's gathering is on the critical path by
+  /// construction.
   int? get gatherExposedMs {
     if (!outgoing) return null;
     final last = _lastCandidateAt;
@@ -190,8 +165,7 @@ class CallSetupTrace {
       parts.add('${e.key}=+${e.value - prev}');
       prev = e.value;
     }
-    // Latch AFTER reading the marks so an abort still reports how far the
-    // call actually got.
+    // Latch AFTER reading the marks so an abort still reports how far it got.
     _finished = true;
 
     _sink('[CALL-SETUP] $dir call=$callId $reason '
@@ -212,12 +186,9 @@ class CallSetupTrace {
     network_api.logFromDart(message: line).catchError((_) {});
   }
 
-  // -- Ambient current trace --
-  //
   // Exactly one DM call exists at a time, and the marks come from two layers:
   // the provider owns signalling, the service owns the peer connection.
-  // Threading a trace object through VoiceService's whole surface to reach
-  // four callbacks would be worse than a well-scoped static.
+  // Threading a trace through VoiceService would be worse than a scoped static.
 
   static CallSetupTrace? _current;
 

@@ -51,7 +51,6 @@ class _MobileArchiveViewerRouteState
 
   @override
   void dispose() {
-    // Reset search/filter state on exit.
     WidgetsBinding.instance.addPostFrameCallback((_) {
       try {
         ref.read(archiveFilterSenderProvider.notifier).state = null;
@@ -77,8 +76,6 @@ class _MobileArchiveViewerRouteState
     }
     return _buildChannelViewer(hollow);
   }
-
-  // ── DM Viewer ──────────────────────────────────────────────────
 
   Widget _buildDmViewer(HollowTheme hollow) {
     final peerId = widget.peerId!;
@@ -212,8 +209,6 @@ class _MobileArchiveViewerRouteState
           : null,
     );
   }
-
-  // ── Channel Viewer ─────────────────────────────────────────────
 
   Widget _buildChannelViewer(HollowTheme hollow) {
     final key = '${widget.serverId}:${widget.channelId}';
@@ -392,8 +387,6 @@ class _MobileArchiveViewerRouteState
           : null,
     );
   }
-
-  // ── Shared helpers ─────────────────────────────────────────────
 
   void _toggleSearch() {
     final open = ref.read(archiveMessageSearchOpenProvider);

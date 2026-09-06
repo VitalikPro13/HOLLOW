@@ -29,15 +29,13 @@ class VersionInfo {
   final String urlMacos;
 
   /// The Flatpak bundle (`url_linux`) and the portable tarball
-  /// (`url_linux_targz`): a Linux install downloads the one matching its own
-  /// kind, never the other.
+  /// (`url_linux_targz`): a Linux install downloads only the one matching its kind.
   final String urlLinux;
   final String urlLinuxTargz;
 
-  /// SHA-256 (hex) of each platform's download, written into the signed
-  /// manifest by `hollow-manifest fill-hashes`. Rust refuses to hand a zip
-  /// to `apply_update` unless the bytes it downloaded hash to this, so a
-  /// release entry without one cannot be installed by the updater.
+  /// SHA-256 (hex) of each platform's download, written into the signed manifest
+  /// by `hollow-manifest fill-hashes`. Rust refuses to apply bytes that don't
+  /// hash to this, so an entry without one cannot be installed by the updater.
   final String sha256Windows;
   final String sha256Macos;
   final String sha256Linux;
@@ -235,9 +233,8 @@ class UpdateNotifier extends Notifier<UpdateState> {
       await for (final progress in stream) {
         if (state.status != UpdateStatus.downloading) break;
 
-        // Rust reports a failed or refused download (checksum mismatch, bad
-        // URL, transport error) as a final item carrying the reason. The
-        // partial file is already gone by then.
+        // Rust reports a failed or refused download (checksum mismatch, bad URL,
+        // transport error) as a final item carrying the reason.
         final failure = progress.error;
         if (failure != null) {
           state = state.copyWith(
@@ -265,11 +262,9 @@ class UpdateNotifier extends Notifier<UpdateState> {
         downloadedZipPath: destPath,
       );
 
-      // appDir = the directory that CONTAINS the app unit.
-      // Windows/Linux: the folder holding the executable.
-      // macOS: the folder holding the `.app` bundle (e.g. /Applications).
-      //   resolvedExecutable = .../Hollow.app/Contents/MacOS/Hollow
-      //   → up 3 dirs = Hollow.app, up 4 = its containing folder.
+      // appDir = the directory that CONTAINS the app unit: the executable's folder
+      // on Windows/Linux, the folder holding the `.app` bundle on macOS (so
+      // resolvedExecutable goes up 3 dirs to the bundle, 4 to its container).
       final String appDir;
       if (Platform.isMacOS) {
         appDir = File(Platform.resolvedExecutable) // .../MacOS/Hollow
@@ -281,11 +276,9 @@ class UpdateNotifier extends Notifier<UpdateState> {
       } else {
         appDir = File(Platform.resolvedExecutable).parent.path;
       }
-      // The update script copies into appDir with its errors swallowed —
-      // probe writability here so a read-only location (portable copy on a
-      // locked USB stick, Program Files) fails visibly instead of silently.
-      // A flatpak never writes to its own /app: the host's `flatpak install`
-      // deploys the bundle, so there is nothing to probe there.
+      // The update script copies into appDir with its errors swallowed, so probe
+      // writability here: a read-only location must fail visibly. A flatpak never
+      // writes to its own /app, so there is nothing to probe there.
       final flatpak = Platform.isLinux && isFlatpakInstall;
       if (!flatpak && !_dirWritable(appDir)) {
         state = state.copyWith(
@@ -296,9 +289,8 @@ class UpdateNotifier extends Notifier<UpdateState> {
         );
         return;
       }
-      // The Linux tarball update renames the whole bundle folder aside and
-      // moves the new one into its place, which needs the PARENT folder too
-      // (a root-owned /opt extract must fail here, loudly, not half-apply).
+      // The Linux tarball update renames the whole bundle folder aside, which needs
+      // the PARENT folder too: a root-owned /opt extract must fail loudly here.
       if (Platform.isLinux &&
           !flatpak &&
           !_dirWritable(Directory(appDir).parent.path)) {
@@ -345,9 +337,8 @@ class UpdateNotifier extends Notifier<UpdateState> {
     if (scriptPath == null) return;
 
     if (Platform.isLinux) {
-      // Rust starts the script so that it outlives this process: a detached
-      // session for the tarball swap, the HOST (through flatpak-spawn) for a
-      // flatpak relaunch, because everything inside the sandbox dies with us.
+      // Rust starts the script so it outlives this process: a detached session for
+      // the tarball swap, the HOST via flatpak-spawn for a flatpak relaunch.
       try {
         await updater_api.launchUpdateScript(scriptPath: scriptPath);
       } catch (e) {

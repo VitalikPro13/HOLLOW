@@ -17,18 +17,13 @@ class ChannelChatMessage {
   final Map<String, List<String>> reactions;
   /// File attachment (null if text-only message).
   final FileAttachment? fileAttachment;
-  /// OG link preview for the first URL in the message (Phase 6.75).
-  /// Null when the message has no URL, when the OG fetch failed, or when
-  /// the message was sent before link previews existed.
+  /// OG link preview for the first URL. Null when there is no URL, the fetch
+  /// failed, or the message predates link previews.
   final network_api.LinkPreviewRef? linkPreview;
 
   /// Signature verdict for a message loaded from an IMPORTED ARCHIVE, computed
-  /// by the Rust archive loader (`archive::loader::verify_one_message`, v2
-  /// payload). Null for live messages — those verify through
-  /// `verifyMessageProofV2`, which reads the row out of the local DB. The
-  /// archive has no such row, and Dart cannot rebuild a v2 payload on its own
-  /// (it would need the link-preview digest), so the loader's verdict is
-  /// carried instead of re-deriving one.
+  /// by the Rust archive loader. Null for live messages, which verify through
+  /// `verifyMessageProofV2` against the local DB row an archive does not have.
   final bool? archiveSignatureValid;
 
   ChannelChatMessage({

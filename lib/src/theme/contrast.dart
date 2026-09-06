@@ -3,11 +3,8 @@ import 'dart:ui';
 
 import 'package:flutter/painting.dart' show HSLColor;
 
-/// WCAG 2.x contrast utilities.
-///
-/// Used to keep foreground colors (text, icons, accent-as-text) legible on
-/// their background, and by the dev-time contrast assertion test that guards
-/// the palette against regressions.
+/// WCAG 2.x contrast utilities, used to keep foreground colours legible on
+/// their background and by the test that guards the palette from regressions.
 abstract final class Contrast {
   /// Relative luminance per WCAG 2.x (sRGB → linearized).
   static double relativeLuminance(Color c) {
@@ -30,12 +27,9 @@ abstract final class Contrast {
     return (lighter + 0.05) / (darker + 0.05);
   }
 
-  /// Returns [foreground] adjusted in lightness (HSL) until it clears
-  /// [targetRatio] against [background], preserving hue + saturation.
-  ///
-  /// If the background is dark, lightness is raised; if light, lowered. Used to
-  /// keep a user-chosen accent legible as foreground text/icons regardless of
-  /// the hue they pick (a dark blue/purple/red would otherwise fail).
+  /// Returns [foreground] adjusted in lightness until it clears [targetRatio]
+  /// against [background], preserving hue and saturation. This is what keeps a
+  /// user-chosen accent legible as text whatever hue they pick.
   static Color ensureContrast(
     Color foreground,
     Color background, {
@@ -45,7 +39,6 @@ abstract final class Contrast {
 
     final hsl = HSLColor.fromColor(foreground);
     final bgLum = relativeLuminance(background);
-    // On a dark bg, brighten toward white; on a light bg, darken toward black.
     final goUp = bgLum < 0.5;
 
     var best = foreground;
@@ -58,9 +51,9 @@ abstract final class Contrast {
       if (ratio(candidate, background) >= targetRatio) {
         best = candidate;
         if (goUp) {
-          hi = mid; // can we get away with less brightening?
+          hi = mid;
         } else {
-          lo = mid; // less darkening?
+          lo = mid;
         }
       } else {
         if (goUp) {

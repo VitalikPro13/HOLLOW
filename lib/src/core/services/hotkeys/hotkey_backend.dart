@@ -3,31 +3,27 @@ import 'hotkey_binding.dart';
 /// Edge callback: [pressed] true on key-down transition, false on release.
 typedef HotkeyEdgeCallback = void Function(HotkeyAction action, bool pressed);
 
-/// A hotkey backend observes the configured bindings and reports EDGES only
-/// (per-action pressed-state transitions). Exactly ONE backend instance is
-/// live at a time — poller platforms never also register the in-app handler,
-/// so a binding can't double-fire (pollers see keys while focused too).
+/// A hotkey backend observes the configured bindings and reports EDGES only.
+/// Exactly ONE instance is live at a time: poller platforms never also
+/// register the in-app handler, or a binding would double-fire.
 abstract class HotkeyBackend {
-  /// Start observing. [isTextEditing] gates BARE bindings (no modifiers):
-  /// while it returns true they are treated as released — plain Space must
-  /// stay typable in Hollow's own composer. Poller backends consult it only
-  /// while the window has focus (an unfocused window can't be typing).
+  /// Starts observing. [isTextEditing] gates BARE bindings (no modifiers) so
+  /// plain Space stays typable in the composer; pollers consult it only while
+  /// the window has focus, since an unfocused window cannot be typing.
   void start(
     Map<HotkeyAction, HotkeyBinding> bindings,
     HotkeyEdgeCallback onEdge,
     bool Function() isTextEditing,
   );
 
-  /// Stop observing and release any held state (no release edges fire —
-  /// the controller resets its own action state alongside).
+  /// Stops observing and releases held state. No release edges fire.
   void stop();
 
   /// Whether this backend sees keys while the window is unfocused.
   bool get isSystemWide;
 
-  /// Whether this backend can observe [binding] at all (e.g. the Win32
-  /// poller needs a virtual-key mapping, X11 a keysym). Bindings a
-  /// system-wide backend can't handle fall back to the in-app backend —
-  /// focused-only beats silently dead.
+  /// Whether this backend can observe [binding] at all (the Win32 poller
+  /// needs a virtual-key mapping, X11 a keysym). What a system-wide backend
+  /// cannot handle falls back to the in-app one: focused beats silently dead.
   bool canHandle(HotkeyBinding binding);
 }

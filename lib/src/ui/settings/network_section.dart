@@ -17,10 +17,9 @@ import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/settings/settings_shared.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-/// Network category of the desktop Settings dialog: relay selection (applied
-/// via explicit Apply & Restart), offline delivery, and the anti-censorship
-/// tunnel. The relay selection state lives on the dialog state (it must
-/// survive switching categories) and arrives here as values + callbacks.
+/// Network category of the desktop Settings dialog: relay selection, offline
+/// delivery and the anti-censorship tunnel. The relay selection state lives on
+/// the dialog so it survives switching categories, and arrives as callbacks.
 class NetworkSettingsView extends ConsumerWidget {
   final String selectedRelay;
   final String initialRelay;
@@ -134,10 +133,8 @@ class NetworkSettingsView extends ConsumerWidget {
       ),
       const GifProxySettingsCard(),
       const LinkPreviewSettingsCard(),
-      // Anti-censorship (VLESS+REALITY) tunnel — hidden from the UI: the
-      // current REALITY transport is non-functional. Kept in the codebase
-      // (widget below + Rust proxy_tunnel) for a future transport attempt.
-      // Desktop-only for now (the tunnel runs as a bundled subprocess).
+      // Hidden: the current REALITY transport is non-functional. Kept, widget
+      // and Rust side, for a future transport attempt.
       // if (!Platform.isAndroid && !Platform.isIOS) const _AntiCensorshipCard(),
     ]);
   }
@@ -271,10 +268,9 @@ class NetworkSettingsView extends ConsumerWidget {
   }
 }
 
-/// GIF search card: content rating, plus the two ways to change WHERE
-/// results come from — a self-hosted copy of `gifs/`, or the user's own
-/// Klipy API key (direct mode). Everything applies immediately; the next
-/// search reads the new source. Shared by desktop and mobile settings.
+/// GIF search card: content rating and the two ways to change WHERE results
+/// come from, a self-hosted copy of `gifs/` or the user's own Klipy API key.
+/// Everything applies immediately and the next search reads the new source.
 class GifProxySettingsCard extends ConsumerStatefulWidget {
   const GifProxySettingsCard({super.key});
 
@@ -429,7 +425,7 @@ class _GifProxySettingsCardState extends ConsumerState<GifProxySettingsCard> {
             onPressed: () {
               setState(() => _expanded = !_expanded);
               // Re-read what the last searches were refused, so the blocked
-              // host hints below are current whenever the section opens.
+              // host hints are current whenever the section opens.
               if (_expanded) ref.invalidate(gifBlockedHostsProvider);
             },
             child: const Text('Advanced (own API key, self-hosting)'),
@@ -624,12 +620,11 @@ class _GifProxySettingsCardState extends ConsumerState<GifProxySettingsCard> {
   }
 }
 
-/// Anti-censorship (VLESS+REALITY) proxy card in the Network category.
-/// For users behind DPI censorship (Russia/TSPU, China/GFW): the relay
-/// connection is tunnelled through a local `shoes` REALITY client so the
-/// traffic looks like ordinary HTTPS to a real website. Enabling / editing
-/// requires a node restart (same model as changing the relay). Desktop-only for
-/// now — the tunnel runs as a bundled subprocess.
+/// Anti-censorship (VLESS+REALITY) proxy card, for users behind DPI
+/// censorship: the relay connection is tunnelled through a local `shoes`
+/// REALITY client so the traffic looks like ordinary HTTPS. Enabling or editing
+/// needs a node restart, and it is desktop-only because the tunnel is a
+/// bundled subprocess.
 class _AntiCensorshipCard extends ConsumerStatefulWidget {
   const _AntiCensorshipCard();
 
@@ -668,9 +663,8 @@ class _AntiCensorshipCardState extends ConsumerState<_AntiCensorshipCard> {
     _publicKey.text = cfg.publicKey;
     _shortId.text = cfg.shortId;
     _sni.text = cfg.sni;
-    // Collapse Advanced by default — the baked-in config already works. Only
-    // auto-open if the user has customised away from the official defaults
-    // (i.e. they're self-hosting a different relay).
+    // Collapsed by default, because the baked-in config already works; only a
+    // customised config opens it.
     _expanded = cfg.server != kDefaultProxyServer ||
         cfg.uuid != kDefaultProxyUuid ||
         cfg.publicKey != kDefaultProxyPublicKey ||
@@ -701,9 +695,8 @@ class _AntiCensorshipCardState extends ConsumerState<_AntiCensorshipCard> {
     await ref.read(proxyConfigProvider.notifier).save(_current);
     try {
       await network_api.notifyShutdown();
-      // stopNode() runs the node teardown, which kills the shoes tunnel
-      // subprocess (proxy_tunnel::stop). Without this the old shoes.exe is
-      // orphaned across the restart. Boot-time sweep is the backstop.
+      // The node teardown is what kills the shoes tunnel subprocess; without
+      // this the old one is orphaned across the restart.
       await network_api.stopNode();
       await Future.delayed(const Duration(milliseconds: 200));
     } catch (_) {}
@@ -718,12 +711,10 @@ class _AntiCensorshipCardState extends ConsumerState<_AntiCensorshipCard> {
     final hollow = HollowTheme.of(context);
     final asyncCfg = ref.watch(proxyConfigProvider);
 
-    // Hydrate controllers once from the loaded persisted config.
     if (!_loaded && asyncCfg.hasValue) {
       _hydrate(asyncCfg.value!);
     }
 
-    // Enabling with an incomplete config is not applicable — the button gates on it.
     final canApply = _dirty && (!_enabled || _current.isComplete);
 
     return SettingsCard(
@@ -748,8 +739,6 @@ class _AntiCensorshipCardState extends ConsumerState<_AntiCensorshipCard> {
           onChanged: (v) => setState(() => _enabled = v),
         ),
         const SizedBox(height: HollowSpacing.sm),
-        // Advanced — the raw config. Collapsed by default; normal users never
-        // open it (the baked-in defaults already work).
         Align(
           alignment: Alignment.centerLeft,
           child: HollowButton.ghost(
@@ -923,8 +912,8 @@ class _LinkPreviewSettingsCardState
               'link, so the site learns nothing. Cards other people attach '
               'still show up.',
           value: enabled,
-          // Swallow taps mid-save rather than disabling the row — the write
-          // is a single settings key and finishes in a frame or two.
+          // Swallow taps mid-save rather than disabling the row: the write is a
+          // single settings key and finishes in a frame or two.
           onChanged: (v) {
             if (!_busy) _setEnabled(v);
           },

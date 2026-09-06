@@ -9,9 +9,9 @@ import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/label_visuals.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-/// Multi-select picker for ACCESS labels (a channel's Custom visibility /
-/// posting gate). Returns the chosen label-id set — empty set = clear the
-/// gate back to tier mode — or null on cancel.
+/// Multi-select picker for a channel's ACCESS labels. Returns the chosen
+/// label-id set, where empty clears the gate back to tier mode, or null on
+/// cancel.
 Future<Set<String>?> showAccessLabelPicker({
   required BuildContext context,
   required String serverId,
@@ -104,8 +104,8 @@ class _AccessLabelPickerDialogState
               ),
             )
           else
-            // Same grouped-card language as the bulk-access sections so the
-            // chips don't float loose on the dialog background.
+            // The same grouped-card language as the bulk-access sections, so
+            // the chips do not float loose on the dialog background.
             Container(
               width: double.infinity,
               padding: const EdgeInsets.all(HollowSpacing.lg),

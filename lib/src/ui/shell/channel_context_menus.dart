@@ -21,20 +21,12 @@ import 'package:hollow/src/ui/shell/server_context_menus.dart'
     show markServerRead, promptForName;
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-/// Right-click menus for the channel sidebar (issue #61, phase 2).
-///
-/// Before this, everything except "create channel" lived in Server Settings >
-/// Channels on desktop, while mobile could already long-press a channel and
-/// rename, re-gate or delete it. These menus close that gap by driving the
-/// same FFI and the same dialogs the settings editor uses.
+/// Right-click menus for the channel sidebar (issue #61), driving the same FFI
+/// and dialogs the settings editor uses.
 ///
 /// The drag-and-drop editor in `channels_tab.dart` stays the surface for
-/// reordering and bulk layout work. Nothing here duplicates it: these menus
-/// only make the small, single-item edits that you want mid-conversation.
-
-// ---------------------------------------------------------------------------
-// Layout writes
-// ---------------------------------------------------------------------------
+/// reordering and bulk layout work; these menus only make the single-item edits
+/// you want mid-conversation.
 
 /// Applies a layout edit through the ONE mutation path.
 ///
@@ -48,12 +40,12 @@ void _mutateLayout(WidgetRef ref, String serverId,
       .mutate(serverId, ref.read(channelListProvider), mutator);
 }
 
-/// Index of the item AFTER the last one belonging to the category at
-/// [categoryIndex] — the insertion point for "create channel here".
+/// Index of the item AFTER the last one in the category at [categoryIndex],
+/// which is where "create channel here" inserts.
 ///
-/// Forward-scan to the next category or separator, mirroring how the sidebar
-/// and `channels_tab` both decide what a category contains. Categories are
-/// addressed by INDEX, never by name: duplicate names are legal.
+/// The forward scan mirrors how the sidebar and `channels_tab` decide what a
+/// category contains. Categories are addressed by INDEX, never by name,
+/// because duplicate names are legal.
 int _categoryEnd(List<LayoutItem> layout, int categoryIndex) {
   var i = categoryIndex + 1;
   while (i < layout.length &&
@@ -63,10 +55,6 @@ int _categoryEnd(List<LayoutItem> layout, int categoryIndex) {
   }
   return i;
 }
-
-// ---------------------------------------------------------------------------
-// Channel tile menu
-// ---------------------------------------------------------------------------
 
 /// The right-click menu for one channel row.
 void showChannelTileMenu({
@@ -81,22 +69,19 @@ void showChannelTileMenu({
     context: context,
     anchor: anchor,
     // menuRef is deliberately NOT named `ref`: it belongs to the menu route's
-    // Consumer and dies with the menu. Actions run AFTER the menu closes, so
-    // they must capture the caller's longer-lived `ref` instead. Shadowing it
-    // here made every action throw "used after dispose" in an async gap, which
-    // reads as a button that silently does nothing.
+    // Consumer and dies with the menu, while actions run AFTER the menu closes
+    // and must capture the caller's longer-lived `ref`. Shadowing it makes
+    // every action throw "used after dispose" in an async gap.
     builder: (context, menuRef) => _channelTileEntries(
         context, menuRef, ref, serverId, channel, canManage),
   );
 }
 
-/// Rows for one channel. Rebuilt on every provider change the menu is open
-/// for, so the checked tier and the trailing summary always describe the
-/// channel as it is NOW, not as it was when the menu opened.
+/// Rows for one channel, rebuilt on every provider change while the menu is
+/// open so the checked tier describes the channel as it is NOW.
 ///
-/// [menuRef] watches live state for display and dies with the menu; [ref] is
-/// the caller's ref and is what every action must use, because actions run
-/// after the menu has closed.
+/// [menuRef] watches live state for display and dies with the menu; every
+/// action must use [ref], the caller's, because actions run after it closes.
 List<HollowMenuEntry> _channelTileEntries(
   BuildContext context,
   WidgetRef menuRef,
@@ -105,16 +90,16 @@ List<HollowMenuEntry> _channelTileEntries(
   ChannelInfo fallback,
   bool canManage,
 ) {
-  // Live row, falling back to the snapshot the tile was drawn from if the
-  // channel has just been deleted out from under the menu.
+  // Falls back to the snapshot the tile was drawn from when the channel has
+  // just been deleted out from under the menu.
   final channel =
       menuRef.watch(channelListProvider)[fallback.channelId] ?? fallback;
   menuRef.watch(notificationSettingsProvider);
   final notifier = ref.read(notificationSettingsProvider.notifier);
   final isMuted = notifier.channelOverride(serverId, channel.channelId) ==
       ChannelNotificationLevel.nothing;
-  // A voice channel carries no messages, so read state and notification
-  // muting are meaningless for it, and it has no posting gate to set.
+  // A voice channel carries no messages, so read state, notification muting
+  // and the posting gate are all meaningless for it.
   final isVoice = channel.channelType == ChannelType.voice;
 
   return <HollowMenuEntry>[
@@ -215,7 +200,7 @@ String? _accessTrailing(String tier, List<String> labels) {
   };
 }
 
-/// The Visibility / Who-can-post submenu: the three tiers plus the label gate.
+/// The Visibility and Who-can-post submenu: three tiers plus the label gate.
 List<HollowMenuEntry> _accessSubmenu({
   required BuildContext context,
   required WidgetRef ref,
@@ -229,8 +214,8 @@ List<HollowMenuEntry> _accessSubmenu({
 
   HollowMenuItem tier(String value, String label) => HollowMenuItem(
         label: label,
-        // A label gate outranks the tier, so no tier reads as selected while
-        // one is set.
+        // A label gate outranks the tier, so none reads as selected while one
+        // is set.
         isChecked: !gated && current == value,
         onTap: () => _setAccessTier(
           context,
@@ -272,17 +257,16 @@ Future<void> _setAccessTier(
 }) async {
   final labels =
       forVisibility ? channel.visibilityLabels : channel.postingLabels;
-  // Dropping a label gate WIDENS access, so it gets a confirm — same rule the
-  // settings editor and the mobile sheet apply.
+  // Dropping a label gate WIDENS access, so it confirms first, like the
+  // settings editor and the mobile sheet.
   if (labels.isNotEmpty) {
     final ok = await _confirmClearLabelGate(context, channel.name, tier);
     if (!ok) return;
   }
 
-  // Optimistic FIRST: the setter only queues a CRDT op, so anything reading
-  // the channel back before the op lands sees the old value. Without this the
-  // sidebar, this menu and the settings editor disagree until an unrelated
-  // event happens to reload the list.
+  // Optimistic FIRST: the setter only QUEUES a CRDT op, so a read back before
+  // it lands returns the old value and the sidebar, this menu and the settings
+  // editor disagree until something unrelated reloads the list.
   final notifier = ref.read(channelListProvider.notifier);
   final previous = ref.read(channelListProvider)[channel.channelId];
   notifier.updateChannel(
@@ -335,8 +319,8 @@ Future<void> _editAccessLabels(
   );
   if (picked == null) return;
 
-  // A non-empty label gate implies the Admin+ tier, matching what the
-  // settings editor writes.
+  // A non-empty label gate implies the Admin+ tier, as the settings editor
+  // writes it.
   final notifier = ref.read(channelListProvider.notifier);
   final previous = ref.read(channelListProvider)[channel.channelId];
   final labels = picked.toList();
@@ -483,14 +467,10 @@ void _confirmDeleteChannel(
   );
 }
 
-// ---------------------------------------------------------------------------
-// Category header menu
-// ---------------------------------------------------------------------------
-
 /// The right-click menu for a category header.
 ///
-/// [categoryIndex] indexes the PARSED layout. Categories are identified by
-/// position, never by name, because two categories may legally share one.
+/// [categoryIndex] indexes the PARSED layout: categories are identified by
+/// position, never by name, because two may legally share one.
 void showCategoryMenu({
   required BuildContext context,
   required WidgetRef ref,
@@ -506,8 +486,8 @@ void showCategoryMenu({
   showHollowMenu(
     context: context,
     anchor: anchor,
-    // `_` not `ref`: actions below must capture the CALLER's ref, which
-    // outlives the menu route. See _channelTileEntries.
+    // `_` not `ref`: actions below capture the CALLER's ref, which outlives the
+    // menu route (see _channelTileEntries).
     builder: (context, _) => <HollowMenuEntry>[
       HollowMenuItem(
         icon: isCollapsed ? LucideIcons.chevronDown : LucideIcons.chevronRight,
@@ -547,8 +527,8 @@ void showCategoryMenu({
   );
 }
 
-/// Creates a channel and PLACES it in the category, rather than letting it
-/// land unsorted at the bottom the way the sidebar's "+" does.
+/// Creates a channel and PLACES it in the category, rather than leaving it
+/// unsorted at the bottom the way the sidebar's "+" does.
 void _createChannelInCategory(BuildContext context, WidgetRef ref,
     String serverId, int categoryIndex) {
   showCreateChannelDialog(
@@ -560,9 +540,9 @@ void _createChannelInCategory(BuildContext context, WidgetRef ref,
             layout[categoryIndex] is! CategoryItem) {
           return layout; // Category moved or vanished; leave it where it fell.
         }
-        // The brand-new channel is already in the normalised layout, appended
-        // at the end as an unplaced channel. MOVE it rather than adding a
-        // second reference to the same id.
+        // The new channel is already appended to the normalised layout as an
+        // unplaced one, so MOVE it rather than adding a second reference to the
+        // same id.
         layout.removeWhere(
             (item) => item is ChannelItem && item.channelId == channelId);
         layout.insert(_categoryEnd(layout, categoryIndex),
@@ -594,24 +574,23 @@ void _renameCategory(BuildContext context, WidgetRef ref, String serverId,
   );
 }
 
-/// Stamps one visibility/posting choice onto every channel in the category.
+/// Stamps one visibility choice onto every channel in the category.
 ///
-/// The forward-scan matches the settings editor's, and the dialog plus the
-/// per-channel writes are the same shared implementation, so the two surfaces
-/// cannot disagree about what "the category" means or what applying does.
+/// The scan, the dialog and the per-channel writes are the settings editor's,
+/// so the two surfaces cannot disagree about what "the category" means.
 Future<void> _bulkCategoryAccess(BuildContext context, WidgetRef ref,
     String serverId, String layoutJson, int categoryIndex,
     String categoryName) {
   final channels = ref.read(channelListProvider);
-  // Normalised, so an unplaced channel that the sidebar draws under this
-  // category is treated as being in it.
+  // Normalised, so an unplaced channel the sidebar draws under this category
+  // counts as being in it.
   final layout = effectiveLayout(layoutJson, channels);
   final channelIds = <String>[];
   for (var i = categoryIndex + 1; i < layout.length; i++) {
     final item = layout[i];
     if (item is CategoryItem || item is SeparatorItem) break;
     if (item is ChannelItem) {
-      // Public channels have no access gates (plaintext by design).
+      // Public channels have no access gates: they are plaintext by design.
       final info = channels[item.channelId];
       if (info != null && !info.isPublic) channelIds.add(item.channelId);
     }
@@ -659,10 +638,6 @@ void _confirmDeleteCategory(BuildContext context, WidgetRef ref,
     ),
   );
 }
-
-// ---------------------------------------------------------------------------
-// Sidebar background menu
-// ---------------------------------------------------------------------------
 
 /// The right-click menu for empty space in the channel list.
 void showChannelSidebarMenu({
@@ -722,8 +697,7 @@ void _createCategory(BuildContext context, WidgetRef ref, String serverId) {
     confirmLabel: 'Create',
     onSubmit: (name) async {
       // Appended AFTER every channel, so a new category starts empty at the
-      // bottom. Before normalisation this landed on top of an empty layout and
-      // appeared to swallow every channel below it.
+      // bottom instead of appearing to swallow everything below it.
       _mutateLayout(ref, serverId, (layout) => layout..add(CategoryItem(name)));
     },
   );

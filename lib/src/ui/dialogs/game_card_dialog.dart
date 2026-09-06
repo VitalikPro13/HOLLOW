@@ -15,17 +15,13 @@ import 'package:hollow/src/ui/components/showcase_image_stats.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:url_launcher/url_launcher.dart';
 
-/// The tap-a-game detail card. PURE DISPLAY off replicated data — nothing is
-/// fetched: key art, cover, and company logos come from the replicated asset
-/// bundle; store/social links open only on explicit tap (a user action).
-/// Person-first, NOT a store listing — no price, no screenshots, no join
-/// funnels.
+/// The tap-a-game detail card. PURE DISPLAY off replicated data: art and logos
+/// come from the replicated bundle, and a store or social link opens only on an
+/// explicit tap. Person-first, not a store listing.
 ///
-/// Layout mirrors the profile dialog's panel ensemble: a center panel (key
-/// art hero + cover + title + the owner's blurb + description) flanked by a
-/// right details panel (platforms with store links, release/achievements,
-/// requirements, credits, copyright). The right panel only appears when it
-/// has content, so a details-less block still opens a clean card.
+/// The layout mirrors the profile dialog's panel ensemble, and the right
+/// details panel appears only when it has content, so a details-less block
+/// still opens a clean card.
 void showGameCardDialog(
   BuildContext context, {
   required String name,
@@ -50,13 +46,11 @@ void showGameCardDialog(
   );
 }
 
-/// Width of the center panel (matches the profile dialog's center card).
+/// Matches the profile dialog's center card.
 const double _kCenterWidth = 560.0;
 
-/// Width of the flanking details panel.
 const double _kSideWidth = 300.0;
 
-/// Gap between panels.
 const double _kPanelGap = HollowSpacing.md;
 
 class _GameCardDialog extends StatefulWidget {
@@ -91,9 +85,9 @@ class _GameCardDialogState extends State<_GameCardDialog> {
   GameDetails get details => widget.details;
   Map<String, Uint8List> get assets => widget.assets;
 
-  /// The game's own dominant color, probed from the cover at open (render
-  /// time — old boards get it too). Null until resolved / when the art is
-  /// effectively colorless; the theme accent stands in.
+  /// Probed from the cover at render time, so old boards get it too. Null until
+  /// resolved, or when the art is effectively colourless, and the theme accent
+  /// stands in.
   Color? _gameAccent;
 
   @override
@@ -111,8 +105,8 @@ class _GameCardDialogState extends State<_GameCardDialog> {
     }
   }
 
-  /// The shared panel surface — same recipe as the profile dialog's card,
-  /// with the border tinted toward the game's own color once probed.
+  /// The profile dialog's card recipe, with the border tinted toward the game's
+  /// own colour once probed.
   BoxDecoration _surface(HollowTheme hollow) => BoxDecoration(
         color: hollow.elevated.withValues(alpha: 0.92),
         borderRadius: BorderRadius.circular(hollow.radiusLg),
@@ -140,17 +134,16 @@ class _GameCardDialogState extends State<_GameCardDialog> {
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
     final screenSize = MediaQuery.sizeOf(context);
-    // Status-bar/notch + home-indicator insets: showHollowDialog strips
-    // viewInsets and deliberately adds NO SafeArea, so respect it here — on
-    // phones the card otherwise ran under the notch and the hero's X close
-    // button landed in the unreachable strip.
+    // showHollowDialog strips viewInsets and deliberately adds NO SafeArea, so
+    // the notch and home-indicator insets are respected here or the hero's
+    // close button lands in the unreachable strip.
     final safe = MediaQuery.paddingOf(context);
     final maxHeight =
         (screenSize.height - safe.vertical - HollowSpacing.xl * 2)
             .clamp(0.0, double.infinity);
 
-    // Proportional scaling, exactly like the profile dialog: shrink the
-    // ensemble before giving up its shape; only tiny windows stack.
+    // Like the profile dialog: shrink the ensemble before giving up its shape,
+    // and stack only on a tiny window.
     final sides = _hasSidePanel ? 1 : 0;
     final columnsWidth = _kCenterWidth + _kSideWidth * sides;
     final gaps = _kPanelGap * sides;
@@ -204,10 +197,9 @@ class _GameCardDialogState extends State<_GameCardDialog> {
         ],
       );
     } else {
-      // Panels are top-aligned and size to their OWN content — never
-      // stretched to each other's height (the old IntrinsicHeight coupling
-      // left a dead band of empty surface under About whenever the details
-      // panel ran taller).
+      // Panels size to their OWN content and are never stretched to each
+      // other's height, which leaves a dead band of surface under the shorter
+      // one.
       content = Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -238,8 +230,6 @@ class _GameCardDialogState extends State<_GameCardDialog> {
   }
 }
 
-// ── Center panel: hero + identity + the owner's words ─────────────────
-
 class _CenterPanel extends StatelessWidget {
   final String name;
   final int? year;
@@ -248,7 +238,7 @@ class _CenterPanel extends StatelessWidget {
   final Uint8List? artBytes;
   final GameDetails details;
 
-  /// The game's probed dominant color (theme accent until/unless resolved).
+  /// The probed dominant colour, or the theme accent until it resolves.
   final Color accent;
 
   const _CenterPanel({
@@ -261,8 +251,8 @@ class _CenterPanel extends StatelessWidget {
     required this.accent,
   });
 
-  /// Genre/theme/mode tags, deduped case-insensitively in that priority
-  /// order ("Adventure" often rides both genres and themes).
+  /// Genre, theme and mode tags, deduped case-insensitively in that priority
+  /// order, because one word often rides two of them.
   List<String> get _tags {
     final seen = <String>{};
     final out = <String>[];
@@ -284,15 +274,15 @@ class _CenterPanel extends StatelessWidget {
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        // Hero band with the portrait cover jutting out of it; the title
-        // block sits beside the cover, below the art.
+        // The portrait cover juts out of the hero band, with the title block
+        // beside it and below the art.
         Stack(
           children: [
             Column(
               children: [
                 _Hero(artBytes: artBytes, coverBytes: coverBytes),
-                // Reserved band the title row bottoms out in; the cover
-                // overlaps upward into the hero.
+                // Reserved band the title row bottoms out in, so the cover can
+                // overlap upward into the hero.
                 SizedBox(height: hasCover ? 64 : 56),
               ],
             ),
@@ -327,8 +317,8 @@ class _CenterPanel extends StatelessWidget {
                     const SizedBox(width: HollowSpacing.md),
                   ],
                   Expanded(
-                    // Lift the title block toward the key art so it reads
-                    // as the cover's counterpart, not a stray footer.
+                    // Lifted toward the key art so it reads as the cover's
+                    // counterpart, not a stray footer.
                     child: Padding(
                       padding: const EdgeInsets.only(bottom: 10),
                       child:
@@ -338,9 +328,8 @@ class _CenterPanel extends StatelessWidget {
                 ],
               ),
             ),
-            // Dismiss affordance over the art — same chip structure as the
-            // profile popup's corner button (fixed 26×26, NO pressable
-            // padding: hover paint must stay inside the circle).
+            // The profile popup's corner-button chip: a fixed size with NO
+            // pressable padding, so hover paint stays inside the circle.
             Positioned(
               top: HollowSpacing.xs + 2,
               right: HollowSpacing.xs + 2,
@@ -373,10 +362,8 @@ class _CenterPanel extends StatelessWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              // Reception strip: critic score, Steam's own verdict, and how
-              // long the game runs — the three things a person actually
-              // cites when recommending a game. All baked text; tinted with
-              // the game's probed color.
+              // The three things a person cites when recommending a game. All
+              // baked text, tinted with the game's probed colour.
               if (details.metacritic != null ||
                   details.steamReviews != null ||
                   details.timeToBeat != null) ...[
@@ -384,8 +371,8 @@ class _CenterPanel extends StatelessWidget {
                 const SizedBox(height: HollowSpacing.md),
               ],
 
-              // The owner's blurb — a centered pull-quote flanked by
-              // proper “ ” marks that flow with the text.
+              // The owner's blurb, a centred pull-quote flanked by proper
+              // marks that flow with the text.
               if (blurb.isNotEmpty) ...[
                 Padding(
                   padding: const EdgeInsets.symmetric(
@@ -446,9 +433,8 @@ class _CenterPanel extends StatelessWidget {
                 ),
               ],
 
-              // Genre / theme / mode tags as a quiet footer row —
-              // Steam-style, and they keep the panel's floor from ending on
-              // a wall of prose.
+              // A quiet footer row, so the panel's floor does not end on a
+              // wall of prose.
               if (_tags.isNotEmpty) ...[
                 const SizedBox(height: HollowSpacing.md),
                 Wrap(
@@ -467,8 +453,8 @@ class _CenterPanel extends StatelessWidget {
   }
 }
 
-/// A small descriptive tag ("Dark Fantasy", "Co-operative"). Pure display —
-/// washed with the game's own color, text stays a theme token.
+/// A small descriptive tag, washed with the game's own colour while the text
+/// stays a theme token.
 class _TagChip extends StatelessWidget {
   final String label;
   final Color accent;
@@ -497,9 +483,8 @@ class _TagChip extends StatelessWidget {
   }
 }
 
-/// Landscape key art hero. Falls back to a blurred blow-up of the portrait
-/// cover (older blocks / games without IGDB artwork), then to a quiet
-/// placeholder.
+/// Landscape key art hero, falling back to a blurred blow-up of the portrait
+/// cover and then to a quiet placeholder.
 class _Hero extends StatelessWidget {
   final Uint8List? artBytes;
   final Uint8List? coverBytes;
@@ -554,8 +539,8 @@ class _Hero extends StatelessWidget {
         fit: StackFit.expand,
         children: [
           image,
-          // Settle the art into the panel so the overlapping cover and the
-          // title band underneath read as one composition.
+          // Settles the art into the panel, so the overlapping cover and the
+          // title band read as one composition.
           DecoratedBox(
             decoration: BoxDecoration(
               gradient: LinearGradient(
@@ -638,10 +623,9 @@ class _TitleBlock extends StatelessWidget {
   }
 }
 
-/// Metacritic's own score bands: green ≥75, yellow 50-74, red <50. The raw
-/// band hues are legible on NEITHER theme as-is — every use runs through
-/// [Contrast.ensureContrast] against the actual panel color (the old badge
-/// hardcoded them and vanished in dark mode).
+/// Metacritic's own score bands. The raw hues are legible on NEITHER theme, so
+/// every use runs through [Contrast.ensureContrast] against the actual panel
+/// colour.
 Color _scoreBandColor(int score) => score >= 75
     ? const Color(0xFF66CC33)
     : score >= 50
@@ -655,10 +639,9 @@ String _compactCount(int n) {
   return '$n';
 }
 
-/// The reception strip under the hero: up to three equal tiles (critic
-/// score / Steam verdict / time to beat), washed with the game's probed
-/// color. Values are theme text tokens; the Metacritic number is the only
-/// colored value and is contrast-corrected against the panel.
+/// The reception strip under the hero: up to three equal tiles washed with the
+/// game's probed colour. The Metacritic number is the only coloured value, and
+/// it is contrast-corrected against the panel.
 class _StatStrip extends StatelessWidget {
   final GameDetails details;
   final Color accent;
@@ -715,10 +698,9 @@ class _StatStrip extends StatelessWidget {
     }
 
     if (tiles.isEmpty) return const SizedBox.shrink();
-    // IntrinsicHeight bounds the row so stretch can equalize tile heights —
-    // a BARE stretch here sits in the dialog's unbounded-height scroll
-    // context, which hands the tiles a tight INFINITE height and kills the
-    // whole center panel with a layout exception.
+    // IntrinsicHeight bounds the row so stretch can equalise tile heights: a
+    // bare stretch sits in the dialog's unbounded-height scroll context, which
+    // hands the tiles an infinite height and throws.
     return IntrinsicHeight(
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -787,8 +769,8 @@ class _StatTile extends StatelessWidget {
             ],
           ),
           const SizedBox(height: 4),
-          // Long verdicts ("Overwhelmingly Positive") scale down instead of
-          // ellipsizing — the verdict IS the datum.
+          // Long verdicts scale down rather than ellipsize: the verdict IS the
+          // datum.
           FittedBox(
             fit: BoxFit.scaleDown,
             alignment: Alignment.centerLeft,
@@ -838,8 +820,6 @@ class _SectionLabel extends StatelessWidget {
   }
 }
 
-// ── Right panel: baked metadata ────────────────────────────────────────
-
 class _DetailsPanel extends StatelessWidget {
   final String name;
   final GameDetails details;
@@ -884,9 +864,8 @@ class _DetailsPanel extends StatelessWidget {
       );
     }
 
-    // Release date + series ride the title row, genres/themes/modes are the
-    // center panel's tag footer, the reception numbers live in the stat
-    // strip — the Info section carries only what ISN'T shown elsewhere.
+    // The Info section carries only what is NOT shown elsewhere: the title row,
+    // the tag footer and the stat strip already have the rest.
     final facts = <Widget>[
       if (details.achievements != null && details.achievements! > 0)
         _FactRow(
@@ -925,9 +904,9 @@ class _DetailsPanel extends StatelessWidget {
       );
     }
 
-    // System requirements: store-page utility, not showcase material —
-    // demoted to a collapsed expander at the panel's floor (it used to be a
-    // wall of text that dictated the whole dialog's height).
+    // Store-page utility rather than showcase material, so it is a collapsed
+    // expander at the panel's floor instead of a wall of text that dictates the
+    // dialog's height.
     if (details.hasRequirements) {
       if (children.isNotEmpty) {
         children.add(const SizedBox(height: HollowSpacing.lg));
@@ -967,8 +946,8 @@ class _DetailsPanel extends StatelessWidget {
   }
 }
 
-/// Which store a platform chip opens: desktop → Steam, consoles/mobile →
-/// their own store. Chips without a baked URL render plain (not tappable).
+/// Which store a platform chip opens. A chip with no baked URL renders plain
+/// and is not tappable.
 String? _storeUrl(String slug, Map<String, String> stores) => switch (slug) {
       'pc' || 'mac' || 'linux' =>
         stores['steam'] ?? stores['gog'] ?? stores['epicgames'] ?? stores['itch'],
@@ -978,8 +957,8 @@ String? _storeUrl(String slug, Map<String, String> stores) => switch (slug) {
       _ => null,
     };
 
-/// A platform chip; tappable when a store URL was baked (opens the browser —
-/// a user action, never a display-time fetch).
+/// A platform chip, tappable when a store URL was baked. Opening the browser is
+/// a user action, never a display-time fetch.
 class _PlatformChip extends StatelessWidget {
   final String slug;
   final String gameName;
@@ -1042,7 +1021,7 @@ class _PlatformChip extends StatelessWidget {
   }
 }
 
-/// Label left, value right — both on one baseline (no ragged wrapping).
+/// Label left, value right, both on one baseline.
 class _FactRow extends StatelessWidget {
   final IconData icon;
   final String label;
@@ -1087,10 +1066,9 @@ class _FactRow extends StatelessWidget {
   }
 }
 
-/// The whole System Requirements block behind a closed-by-default expander:
-/// header row = section label + chevron, body = the Min/Rec tabs. Nobody
-/// opens a friend's showcase to spec-check their GPU, but the answer is one
-/// tap away for whoever does.
+/// The System Requirements block behind a closed-by-default expander: nobody
+/// opens a friend's showcase to spec-check a GPU, but the answer is one tap
+/// away for whoever does.
 class _SysReqSection extends StatefulWidget {
   final String min;
   final String rec;
@@ -1136,8 +1114,8 @@ class _SysReqSectionState extends State<_SysReqSection> {
   }
 }
 
-/// Minimum / Recommended requirements behind selection chips (chips =
-/// selection state per the design system; `.filled` is for actions).
+/// Minimum and Recommended requirements behind selection chips, which are the
+/// design system's selection state; `.filled` is for actions.
 class _Requirements extends StatefulWidget {
   final String min;
   final String rec;
@@ -1232,20 +1210,16 @@ class _ReqTab extends StatelessWidget {
   }
 }
 
-/// One deduped credit: logo + name + role + social/link icon buttons. Logos
-/// are transparent PNGs from the replicated bundle.
+/// One deduped credit: logo, name, role and link buttons, the logos being
+/// transparent PNGs from the replicated bundle.
 ///
-/// Visibility (the old "drawn straight on the panel" rule made black
-/// wordmarks vanish in dark mode): a one-shot pixel probe classifies each
-/// logo — single-ink marks are re-tinted to the theme's text color (reads
-/// as an intentional press-kit treatment, works on BOTH themes), colorful
-/// marks draw as-is unless their luminance sits too close to the panel's,
-/// in which case they get a small neutral plate.
+/// A one-shot pixel probe classifies each logo, because drawn straight on the
+/// panel a black wordmark vanishes in dark mode: single-ink marks are re-tinted
+/// to the theme's text colour, and a colourful mark whose luminance sits too
+/// close to the panel's gets a small neutral plate.
 ///
-/// Logo slot: fixed 56×32 so names align down the credits column, but the
-/// image keeps its NATURAL aspect inside it (BoxFit.contain, left-anchored)
-/// — wide wordmark logos render wide, square marks render square, nothing
-/// gets crushed into a 30px box.
+/// The logo slot is fixed so names align down the column, but the image keeps
+/// its NATURAL aspect inside it rather than being crushed to fit.
 class _CompanyRow extends StatelessWidget {
   final GameCompany company;
   final Map<String, Uint8List> assets;
@@ -1264,10 +1238,9 @@ class _CompanyRow extends StatelessWidget {
         final stats = snap.data;
         if (stats == null) return plain(); // probe pending — resolves in ms
 
-        // Opaque logos (black-on-WHITE wordmarks etc.) carry their own
-        // background and are legible on any panel — draw untouched. An
-        // srcIn tint on one would paint the whole rectangle a single color
-        // (the FromSoftware white-slab bug).
+        // An opaque logo carries its own background and is legible on any
+        // panel, and an srcIn tint on one would paint the whole rectangle a
+        // single colour.
         if (!stats.hasTransparency) return plain();
 
         if (stats.isMonochrome) {
@@ -1361,8 +1334,8 @@ class _CompanyRow extends StatelessWidget {
   }
 }
 
-/// A single tap-to-open credit link. Opens the browser (user action) — never
-/// a display-time fetch.
+/// A single tap-to-open credit link. Opening the browser is a user action,
+/// never a display-time fetch.
 class _LinkButton extends StatelessWidget {
   final String kind;
   final String url;

@@ -7,10 +7,8 @@ import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-// ── Shared searchable participant list ──────────────────────────
-
-/// Size preset — desktop dialog vs mobile bottom sheet keep their exact
-/// pre-dedup dimensions.
+/// Size preset: the desktop dialog and the mobile sheet keep their own
+/// dimensions.
 class _FilterListStyle {
   final EdgeInsets searchPadding;
   final double searchIconSize;
@@ -57,9 +55,8 @@ const _mobileStyle = _FilterListStyle(
   fontSize: 14,
 );
 
-/// Search field + "All participants" row + sender rows. [onPick] receives
-/// null for "All participants". [wrapList] bounds the ListView (dialog:
-/// Flexible within the 360px container; sheet: 40%-screen ConstrainedBox).
+/// Search field, "All participants" row and sender rows. [onPick] receives null
+/// for "All participants", and [wrapList] must bound the ListView.
 class _SenderFilterList extends StatefulWidget {
   final List<String> senderIds;
   final String? selectedSender;
@@ -180,8 +177,6 @@ class _SenderFilterListState extends State<_SenderFilterList> {
   }
 }
 
-// ── Peer filter button (opens showDialog) — desktop ─────────────
-
 class ArchiveFilterButton extends StatelessWidget {
   final List<String> senderIds;
   final String? selectedSender;
@@ -214,7 +209,7 @@ class ArchiveFilterButton extends StatelessWidget {
           ),
         );
         if (picked != null) {
-          // Use '_clear_' sentinel to mean "All participants".
+          // '_clear_' is the sentinel for "All participants".
           onSenderFilterChanged?.call(picked == '_clear_' ? null : picked);
         }
       },
@@ -285,8 +280,6 @@ class ArchiveFilterDialog extends StatelessWidget {
     );
   }
 }
-
-// ── Filter bottom sheet — mobile ───────────────────────────────
 
 void showArchiveFilterSheet(
   BuildContext context, {

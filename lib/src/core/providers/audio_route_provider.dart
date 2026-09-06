@@ -66,10 +66,9 @@ class AudioRouteNotifier extends Notifier<AudioRouteState> {
     return const AudioRouteState();
   }
 
-  /// The OS moves the route by itself — a headset plugged in mid-call, a
-  /// bluetooth device connecting, audioswitch auto-switching. Both platforms
-  /// post `onDeviceChange` for those, so the picker (and the speaker button's
-  /// icon) stay truthful without polling.
+  /// The OS moves the route by itself (a headset plugged in mid-call, bluetooth
+  /// connecting, audioswitch auto-switching). Both platforms post `onDeviceChange`,
+  /// so the picker stays truthful without polling.
   void _attachDeviceChangeListener() {
     if (!AudioRoutes.isSupported || _listenerAttached) return;
     final devices = webrtc.navigator.mediaDevices;

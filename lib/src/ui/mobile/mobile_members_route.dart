@@ -83,8 +83,8 @@ class _MobileMembersRouteState extends ConsumerState<MobileMembersRoute> {
                   onToggleBanned: () => setState(() => _showBanned = !_showBanned),
                   onUnban: _unban,
                   onRefreshBanned: _loadBanned,
-                  // Provider-backed so a fresh mute shows without leaving the
-                  // route (ServerUpdated invalidates it on the CrdtStore ramp).
+                  // Provider-backed, so a fresh mute shows without leaving the
+                  // route.
                   mutedMembers: ref
                           .watch(mutedMembersProvider(widget.serverId))
                           .valueOrNull ??
@@ -212,7 +212,7 @@ class _MemberList extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final hollow = HollowTheme.of(context);
-    // Multi-device: online if any of the member's devices is visible.
+    // Online if any of the member's devices is visible.
     final onlineIdentities = ref.watch(onlineIdentitiesProvider);
     final myPeerId = ref.watch(identityProvider).peerId ?? '';
 
@@ -229,7 +229,6 @@ class _MemberList extends ConsumerWidget {
             canKick: canKick,
           ),
 
-        // Muted members section
         if (canKick && mutedMembers.isNotEmpty) ...[
           const SizedBox(height: HollowSpacing.lg),
           Padding(
@@ -264,7 +263,6 @@ class _MemberList extends ConsumerWidget {
               ),
         ],
 
-        // Banned members section
         if (canKick && bannedPeers.isNotEmpty) ...[
           const SizedBox(height: HollowSpacing.lg),
           Padding(
@@ -395,7 +393,7 @@ class _MemberRow extends ConsumerWidget {
               ),
             ),
             // Verified accounts only: a member-level handle is whatever the
-            // joiner typed, so it draws nothing (`twitchLoginProvider`).
+            // joiner typed, so it draws nothing.
             if (verifiedTwitch != null)
               GestureDetector(
                 onTap: () => launchUrl(
@@ -588,8 +586,8 @@ class _MemberRow extends ConsumerWidget {
         label: label);
   }
 
-  // Kick / ban / role changes all run the shared confirms, so this route and
-  // the desktop surfaces cannot drift on wording, gating or invalidation.
+  // Kick, ban and role changes run the shared confirms, so this route and the
+  // desktop surfaces cannot drift on wording, gating or invalidation.
   Future<void> _changeRole(
       BuildContext context, WidgetRef ref, String newRole) {
     Navigator.pop(context);

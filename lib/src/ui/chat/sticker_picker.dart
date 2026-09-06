@@ -28,13 +28,11 @@ import 'emote_image.dart';
 import 'gif_picker.dart' show GifMenuItem, showGifMenu;
 import 'sticker_pack_card.dart' show kStickerPackExtension;
 
-/// Pick an image file and process it at STICKER bounds (≤512px, ≤512 KB,
-/// alpha preserved, animation kept). Returns null on cancel; toasts on a
-/// processing failure. Shared with the server-settings authoring UI.
+/// Picks an image file and processes it at STICKER bounds (≤512px, ≤512 KB,
+/// alpha and animation preserved). Null on cancel, a toast on failure.
 ///
-/// Unlike `pickAndNameEmote` there is NO name prompt: an emote is typed as
-/// `:name:` so its name is its identity, while a sticker is only ever picked
-/// visually. Naming is optional and happens later, on the pack.
+/// No name prompt, unlike `pickAndNameEmote`: an emote is typed as `:name:` so
+/// its name is its identity, while a sticker is only ever picked visually.
 Future<stickers_api.ProcessedSticker?> pickAndProcessSticker(
     BuildContext context) async {
   final result = await FilePicker.platform.pickFiles(
@@ -55,9 +53,8 @@ Future<stickers_api.ProcessedSticker?> pickAndProcessSticker(
   }
 }
 
-/// Plain-language result of a `.hollow-pack` import. Partial imports are
-/// normal (a pack can run into the vault caps), so this always reports what
-/// actually landed rather than claiming success.
+/// Plain-language result of a `.hollow-pack` import. Partial imports are normal
+/// (the vault caps), so this reports what landed rather than claiming success.
 String _importSummary(stickers_api.StickerPackImportResult r) {
   final where = r.pack.isEmpty ? 'your stickers' : '“${r.pack}”';
   if (r.added == 0 && r.skipped > 0 && r.rejected == 0) {
@@ -70,23 +67,17 @@ String _importSummary(stickers_api.StickerPackImportResult r) {
   return parts.join(' · ');
 }
 
-/// The sticker picker (issue #29, asset-rail Phase 5): the user's own vault,
-/// the server's pack, the KLIPY sticker catalog, and recents.
+/// The sticker picker (issue #29): the user's own vault, the server's pack, the
+/// KLIPY catalog and recents.
 ///
-/// A pick hands the caller an `[a:s:hash:w:h]` wire token — opaque to the
-/// caller, exactly like emoji and GIF picks. Unlike emoji and GIF picks the
-/// host SENDS it rather than staging it (issue #36: one sticker per message,
-/// Telegram/Discord style), and the panel stays open so a vertical mosaic is
-/// just repeated clicks.
+/// A pick hands the caller an `[a:s:hash:w:h]` wire token. The host SENDS it
+/// rather than staging it (issue #36, one block asset per message) and the
+/// panel stays open, so a vertical mosaic is repeated clicks. [serverId] adds
+/// the Server tab and feeds the KLIPY content-rating clamp; omitting
+/// [onSharePack] hides "Share to this chat".
 ///
-/// [serverId] adds the Server tab and feeds the KLIPY content-rating clamp.
-/// [onSharePack] lets "Share to this chat" put a `.hollow-pack` straight into
-/// the open conversation; omit it and that action hides itself.
-///
-/// PLACEMENT IS PROVISIONAL. This ships behind its own composer button while
-/// the button row gets rethought, so everything lives in [StickerPickerBody]
-/// and the overlay below is a thin host — folding this panel into the emoji
-/// or GIF picker later is a change of host, not of picker.
+/// PLACEMENT IS PROVISIONAL: everything lives in [StickerPickerBody] and this
+/// overlay is a thin host, so a later move is a change of host, not of picker.
 void showStickerPicker({
   required BuildContext context,
   required Offset anchorPosition,
@@ -98,7 +89,7 @@ void showStickerPicker({
   late OverlayEntry entry;
   final anim = PopupAnimationController();
 
-  // Removal guard — same rapid-double-fire protection as the other pickers.
+  // Rapid-double-fire guard, as in the other pickers.
   var removed = false;
   void teardown() {
     if (removed) return;
@@ -111,9 +102,8 @@ void showStickerPicker({
   }
 
   entry = OverlayEntry(
-    // wrapEntry: the barrier must stop taking clicks the instant the
-    // exit starts, or a dismiss immediately followed by another click
-    // eats the second one.
+    // The barrier must stop taking clicks the instant the exit starts, or a
+    // dismiss followed straight away by a click eats the second one.
     builder: (ctx) => anim.wrapEntry(_StickerPickerOverlay(
       anchorPosition: anchorPosition,
       anim: anim,
@@ -122,9 +112,8 @@ void showStickerPicker({
       onSharePack: onSharePack == null
           ? null
           : (path, name) async {
-              // Sending closes the panel: the message lands behind it, and
-              // leaving a picker floating over your own new message reads as
-              // "did that work?".
+              // Sending closes the panel, or it floats over the message that
+              // just landed behind it.
               teardown();
               await onSharePack(path, name);
             },
@@ -168,8 +157,8 @@ class _StickerPickerOverlay extends StatelessWidget {
     if (left + pickerWidth > screenSize.width - 8) {
       left = screenSize.width - pickerWidth - 8;
     }
-    // Flips below the anchor when there is no room above; the growth origin
-    // flips with it so the animation always starts at the opening control.
+    // The growth origin flips with the panel, so the animation always starts
+    // at the opening control.
     var flippedBelow = false;
     if (top < 8) {
       flippedBelow = true;
@@ -211,9 +200,8 @@ class _StickerPickerOverlay extends StatelessWidget {
                 ),
                 child: ClipRRect(
                   borderRadius: BorderRadius.circular(hollow.radiusMd),
-                  // Deliberately NOT dismissing on pick: each pick SENDS, and
-                  // a vertical mosaic is several sticker messages in a row, so
-                  // the panel stays open the way the emoji picker does.
+                  // Deliberately NOT dismissing on pick: each pick SENDS, and a
+                  // vertical mosaic is several sticker messages in a row.
                   child: StickerPickerBody(
                     onSelect: onSelect,
                     onSharePack: onSharePack,
@@ -229,23 +217,16 @@ class _StickerPickerOverlay extends StatelessWidget {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Picker body (reusable: overlay on desktop, bottom sheet on mobile)
-// ---------------------------------------------------------------------------
-
-/// Browse modes. Mine/Server/Recent are entirely local — only KLIPY talks to
-/// the proxy, and only while that tab is showing.
+/// Browse modes. Only KLIPY talks to the proxy, and only while its tab shows.
 enum StickerPickerTab { mine, server, klipy, recent }
 
-/// Marks "the inline name field is CREATING a pack" rather than renaming one.
-/// A newline can never survive `clean_label`, so this cannot collide with a
-/// real pack name — and `""` could not serve, because that IS the Ungrouped
-/// pack.
+/// Marks the inline name field as CREATING a pack rather than renaming one. A
+/// newline cannot survive `clean_label`, so it cannot collide with a real name,
+/// and `""` could not serve because that IS the Ungrouped pack.
 const String _kNewPackSentinel = '\n<new>';
 
-/// One grid entry, whatever its source. Local stickers already have their
-/// bytes (or will pull them over the asset rail); KLIPY rows carry the
-/// catalog item until they are picked.
+/// One grid entry, whatever its source. A KLIPY row carries the catalog item
+/// until it is picked; a local one pulls its bytes over the asset rail.
 @immutable
 class _Cell {
   final String hash;
@@ -272,12 +253,12 @@ class _Cell {
 class StickerPickerBody extends ConsumerStatefulWidget {
   final void Function(String token) onSelect;
 
-  /// Drops a written `.hollow-pack` into the open conversation. Null hides
-  /// the "Share to this chat" action — there is nowhere to send it.
+  /// Drops a written `.hollow-pack` into the open conversation. Null hides the
+  /// "Share to this chat" action.
   final Future<void> Function(String path, String fileName)? onSharePack;
 
-  /// Server the composer belongs to, when there is one: adds the Server tab
-  /// and clamps the KLIPY content rating for servers not flagged NSFW.
+  /// Server the composer belongs to: adds the Server tab and clamps the KLIPY
+  /// content rating for servers not flagged NSFW.
   final String? serverId;
 
   const StickerPickerBody({
@@ -298,13 +279,11 @@ class _StickerPickerBodyState extends ConsumerState<StickerPickerBody> {
 
   late StickerPickerTab _tab = _restoreTab();
 
-  /// Reopen on the tab the user left (issue #36), falling back to the old
-  /// default when there is nothing to restore.
+  /// Reopens on the tab the user left (issue #36).
   ///
-  /// The saved tab is not always reachable: `server` is meaningless in a DM
-  /// or a conference, where there is no Server tab to select and choosing it
-  /// would render an empty body with no chip lit. Resolve that here rather
-  /// than at the write site — the tab is legitimate where it was saved.
+  /// A saved tab is not always reachable: `server` renders an empty body with
+  /// no chip lit in a DM or a conference. Resolved here rather than at the
+  /// write site, where the tab was legitimate.
   StickerPickerTab _restoreTab() {
     final fallback = widget.serverId != null
         ? StickerPickerTab.server
@@ -329,22 +308,17 @@ class _StickerPickerBodyState extends ConsumerState<StickerPickerBody> {
   /// Selected pack on the Mine tab; null = all.
   String? _packFilter;
 
-  /// Non-null while the inline name field is open — the pack being renamed,
-  /// or [_kNewPackSentinel] while creating one. Inline rather than a dialog
-  /// because the picker is a raw OverlayEntry: a dialog route renders BEHIND
-  /// it (the same trap the GIF picker's list names hit).
-  ///
-  /// The sentinel is a string no `clean_label` could ever produce, so it can
-  /// never collide with a real pack name — `""` could not be used, since that
-  /// is the legitimate Ungrouped pack.
+  /// Non-null while the inline name field is open: the pack being renamed, or
+  /// [_kNewPackSentinel] while creating one. Inline rather than a dialog because
+  /// the picker is a raw OverlayEntry, and a dialog route renders BEHIND it.
   String? _renamingPack;
   final _packNameController = TextEditingController();
 
-  /// Search only ever drives the KLIPY tab — the local tabs filter in place.
+  /// Search only ever drives the KLIPY tab; local tabs filter in place.
   bool get _networkView => _tab == StickerPickerTab.klipy;
 
   /// Rating for the next KLIPY request: the user's setting, clamped for a
-  /// server that is not flagged NSFW. `ref.read` — called from callbacks.
+  /// server not flagged NSFW.
   String get _rating {
     final rating = ref.read(gifRatingProvider);
     final sid = widget.serverId;
@@ -378,8 +352,8 @@ class _StickerPickerBodyState extends ConsumerState<StickerPickerBody> {
       _error = null;
     });
     ref.read(stickerLastTabProvider.notifier).noteTab(tab.name);
-    // Bumps the seq either way, so a KLIPY reply still in flight can never
-    // land on a local tab (the GIF picker's late-reply bug, avoided here).
+    // Bumps the seq either way, so a KLIPY reply still in flight can never land
+    // on a local tab.
     if (tab == StickerPickerTab.klipy) {
       _runQuery();
     } else {
@@ -410,9 +384,8 @@ class _StickerPickerBodyState extends ConsumerState<StickerPickerBody> {
       _loading = true;
       _error = null;
     });
-    // The debounce re-checks the seq BEFORE issuing the request — a
-    // superseded query must never reach the proxy (its rate valve counts
-    // every hit), not merely have its result dropped.
+    // The debounce re-checks the seq BEFORE issuing: a superseded query must
+    // never reach the proxy, whose rate valve counts every hit.
     Future<gifs_api.GifPage?> run() async {
       if (q.isNotEmpty) {
         await Future.delayed(const Duration(milliseconds: 250));
@@ -435,8 +408,6 @@ class _StickerPickerBodyState extends ConsumerState<StickerPickerBody> {
       });
     });
   }
-
-  // ── Picking ─────────────────────────────────────────────────────────
 
   Future<void> _pick(_Cell cell) async {
     if (_pickingKey != null) return;
@@ -468,19 +439,16 @@ class _StickerPickerBodyState extends ConsumerState<StickerPickerBody> {
     ref
         .read(stickerRecentsProvider.notifier)
         .noteUsed(RecentSticker(hash: hash, w: w, h: h));
-    // Built in Dart, not through `stickers_api.stickerToken` — that is a
-    // SYNC FFI call, and a sync bridge call throws outright when the bridge
-    // is not up. The grammar is dual-defined anyway (assetTokenRegex here,
-    // parse_asset_token in Rust); the GIF picker composes its token the same
-    // way.
+    // Built in Dart rather than through `stickers_api.stickerToken`, a SYNC FFI
+    // call that throws outright when the bridge is not up. The grammar is
+    // dual-defined anyway (assetTokenRegex here, parse_asset_token in Rust).
     widget.onSelect('[a:s:$hash:$w:$h]');
   }
 
-  /// Save a KLIPY sticker into the personal vault. Downloading it IS the
-  /// import: the transcode produces a content-addressed local blob, so from
-  /// then on it never touches the network again — the same rule FFZ emotes
-  /// follow. The STORED dimensions come from the transcode, not from the
-  /// catalog row (the encoder may have scaled it down).
+  /// Saves a KLIPY sticker into the personal vault. The download IS the import:
+  /// the transcode produces a content-addressed local blob that never touches
+  /// the network again. Stored dimensions come from the transcode, not from the
+  /// catalog row, because the encoder may have scaled it down.
   Future<void> _saveToVault(_Cell cell, String pack) async {
     final remote = cell.remote;
     if (remote == null) return;
@@ -538,8 +506,6 @@ class _StickerPickerBodyState extends ConsumerState<StickerPickerBody> {
     }
   }
 
-  // ── Build ───────────────────────────────────────────────────────────
-
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
@@ -553,8 +519,7 @@ class _StickerPickerBodyState extends ConsumerState<StickerPickerBody> {
             hintText: _networkView ? 'Search KLIPY' : 'Search your stickers…',
             isDense: true,
             prefixIcon: const Icon(LucideIcons.search, size: 14),
-            // Desktop only: on mobile the autofocus summons the keyboard
-            // right over the sheet.
+            // On mobile the autofocus summons the keyboard over the sheet.
             autofocus: !(Platform.isAndroid || Platform.isIOS),
           ),
         ),
@@ -654,9 +619,9 @@ class _StickerPickerBodyState extends ConsumerState<StickerPickerBody> {
     return _grid(hollow, cells);
   }
 
-  /// Every pack that should show a chip: the ones with rows, UNIONed with the
-  /// ones the user declared but has not filled yet. Sorted, `""` (Ungrouped)
-  /// first so the default group never moves as packs are added.
+  /// Every pack that should show a chip: the ones with rows, unioned with the
+  /// declared but still empty ones. `""` (Ungrouped) sorts first, so the default
+  /// group never moves as packs are added.
   List<String> _visiblePacks(List<stickers_api.PersonalSticker> all) {
     final packs = <String>{
       for (final s in all) s.pack,
@@ -679,9 +644,8 @@ class _StickerPickerBodyState extends ConsumerState<StickerPickerBody> {
 
     final List<_Cell> cells;
     if (filter == null) {
-      // "All" DEDUPES by hash: a sticker may sit in several packs at once
-      // (the table is keyed on (pack, hash)), and showing it once per pack
-      // reads as a duplicate rather than as membership.
+      // "All" DEDUPES by hash: a sticker may sit in several packs at once, and
+      // one row per pack reads as a duplicate rather than as membership.
       final seen = <String>{};
       cells = [
         for (final s in all)
@@ -729,10 +693,9 @@ class _StickerPickerBodyState extends ConsumerState<StickerPickerBody> {
         ),
         Padding(
           padding: const EdgeInsets.all(HollowSpacing.sm),
-          // Two EQUAL halves. Both labels are Flexible because HollowButton
-          // drops its child straight into a mainAxisSize.min Row, so an
-          // unwrapped Text takes its natural width and overflows however
-          // narrow the button gets — and the upload label is variable-length.
+          // Both labels are Flexible: HollowButton drops its child into a
+          // mainAxisSize.min Row, so an unwrapped Text takes its natural width
+          // and overflows however narrow the button gets.
           child: Row(
             children: [
               Expanded(
@@ -756,8 +719,8 @@ class _StickerPickerBodyState extends ConsumerState<StickerPickerBody> {
                 ),
               ),
               const SizedBox(width: HollowSpacing.xs),
-              // Packs are shared as FILES, so "add a pack" is a file picker —
-              // there is nothing to browse, and nothing to discover.
+              // Packs are shared as FILES, so "add a pack" is a file picker:
+              // there is nothing to browse.
               Expanded(
                 child: HollowButton.ghost(
                   icon: const Icon(LucideIcons.packagePlus, size: 14),
@@ -822,10 +785,9 @@ class _StickerPickerBodyState extends ConsumerState<StickerPickerBody> {
     );
   }
 
-  /// The "+" chip. Creating a pack is just naming one — it starts empty and
-  /// lives in [stickerPacksProvider] until a sticker lands in it, because a
-  /// pack is a COLUMN on the sticker rows and an empty one has nowhere to
-  /// exist in the database.
+  /// The "+" chip. A pack is a COLUMN on the sticker rows, so an empty one has
+  /// nowhere to exist in the database and lives in [stickerPacksProvider] until
+  /// a sticker lands in it.
   Widget _newPackChip(HollowTheme hollow) {
     return HollowPressable(
       onTap: () {
@@ -849,11 +811,9 @@ class _StickerPickerBodyState extends ConsumerState<StickerPickerBody> {
 
   /// Inline pack name field, shared by create and rename.
   ///
-  /// Renaming ONTO an existing pack MERGES into it — Rust does that rather
-  /// than failing a unique constraint, and it is the only sane reading of the
-  /// action. Creating refuses a duplicate instead: silently merging into a
-  /// pack the user did not mean to open would lose the distinction they were
-  /// trying to draw.
+  /// Renaming ONTO an existing pack MERGES into it, which is what Rust does
+  /// instead of failing a unique constraint. Creating refuses a duplicate
+  /// instead, since a silent merge loses the distinction the user was drawing.
   Widget _packNameField(HollowTheme hollow) {
     final creating = _renamingPack == _kNewPackSentinel;
 
@@ -878,8 +838,8 @@ class _StickerPickerBodyState extends ConsumerState<StickerPickerBody> {
       if (to == from) return;
       try {
         await stickers_api.renamePersonalStickerPack(from: from, to: to);
-        // Keep the declared list in step, or an emptied pack would come back
-        // under its OLD name on the next open.
+        // Keep the declared list in step, or an emptied pack comes back under
+        // its OLD name on the next open.
         ref.read(stickerPacksProvider.notifier).rename(from, to);
         ref.invalidate(personalStickersProvider);
         if (mounted && _packFilter == from) {
@@ -961,8 +921,7 @@ class _StickerPickerBodyState extends ConsumerState<StickerPickerBody> {
           danger: true,
           onTap: () async {
             // Forget the declared name FIRST: a pack with no rows has nothing
-            // for Rust to delete, and leaving the name behind would resurrect
-            // an empty chip the user just removed.
+            // for Rust to delete, and the name would resurrect the chip.
             ref.read(stickerPacksProvider.notifier).forget(pack);
             try {
               await stickers_api.removePersonalStickerPack(pack: pack);
@@ -982,10 +941,9 @@ class _StickerPickerBodyState extends ConsumerState<StickerPickerBody> {
     );
   }
 
-  /// Write the pack to a temp `.hollow-pack` and drop it straight into the
-  /// conversation the picker is open on — no save dialog, no file manager.
-  /// This is the intended way to hand somebody a pack; "Save to file" is the
-  /// escape hatch for sharing it anywhere else.
+  /// Writes the pack to a temp `.hollow-pack` and drops it into the open
+  /// conversation. The intended way to hand somebody a pack; "Save to file" is
+  /// the escape hatch for anywhere else.
   Future<void> _sharePackToChat(String pack) async {
     final share = widget.onSharePack;
     if (share == null) return;
@@ -1003,21 +961,18 @@ class _StickerPickerBodyState extends ConsumerState<StickerPickerBody> {
     }
   }
 
-  /// A pack name is free-form, so it has to be scrubbed before it can be a
-  /// filename on any of the six platforms.
+  /// A pack name is free-form, so it is scrubbed before becoming a filename.
   String _packFileName(String pack) {
     final safe = pack.replaceAll(RegExp(r'[^A-Za-z0-9 _-]'), '_').trim();
     return '${safe.isEmpty ? 'stickers' : safe}.$kStickerPackExtension';
   }
 
-  /// Write a pack out as a `.hollow-pack` file. Sharing it is then just
-  /// sending a file — there is no pack link and deliberately so: Hollow has
-  /// nowhere to host bytes, and a live vault link would tell the author who
-  /// added them. See `api/stickers.rs` for the full argument.
+  /// Writes a pack out as a `.hollow-pack` file. There is deliberately no pack
+  /// LINK: Hollow hosts no bytes, and a live vault link would tell the author
+  /// who added them (see `api/stickers.rs`).
   ///
-  /// Mobile takes the temp-file detour because `saveFile` REQUIRES `bytes:`
-  /// on Android and iOS and throws without it, while Rust writes to a path —
-  /// the same shape the archive export uses.
+  /// Mobile takes the temp-file detour because `saveFile` REQUIRES `bytes:` on
+  /// Android and iOS and throws without it, while Rust writes to a path.
   Future<void> _exportPack(String pack) async {
     final fileName = _packFileName(pack);
     final isMobile = Platform.isAndroid || Platform.isIOS;
@@ -1061,14 +1016,14 @@ class _StickerPickerBodyState extends ConsumerState<StickerPickerBody> {
     }
   }
 
-  /// Import a `.hollow-pack` picked from disk. The Rust side re-hashes and
-  /// re-decodes every blob, so nothing the file claims is taken on trust.
+  /// Imports a `.hollow-pack` picked from disk. Rust re-hashes and re-decodes
+  /// every blob, so nothing the file claims is taken on trust.
   Future<void> _importPack() async {
     try {
       final result = await FilePicker.platform.pickFiles(
         type: FileType.custom,
-        // A pack IS a ZIP, and one that has been through a mail client or a
-        // file manager often comes back renamed, so both extensions open.
+        // A pack IS a ZIP and often comes back renamed from a mail client, so
+        // both extensions open.
         allowedExtensions: const [kStickerPackExtension, 'zip'],
         dialogTitle: 'Add a sticker pack',
       );
@@ -1210,8 +1165,8 @@ class _StickerPickerBodyState extends ConsumerState<StickerPickerBody> {
           label: 'Save to my stickers',
           onTap: () => _saveToVault(cell, _packFilter ?? ''),
         ),
-      // Building a pack IS this action — a sticker can sit in several packs
-      // at once, so adding never moves it out of where it already is.
+      // A sticker can sit in several packs at once, so adding never moves it
+      // out of where it already is.
       if (removable)
         GifMenuItem(
           icon: LucideIcons.folderPlus,
@@ -1225,8 +1180,8 @@ class _StickerPickerBodyState extends ConsumerState<StickerPickerBody> {
           onTap: () =>
               ref.read(stickerRecentsProvider.notifier).remove(cell.hash),
         ),
-      // Two different destructive actions, and conflating them is how people
-      // lose artwork: leaving ONE pack is not deleting the sticker.
+      // Two different destructive actions: leaving ONE pack is not deleting the
+      // sticker.
       if (removable && inPack)
         GifMenuItem(
           icon: LucideIcons.folderMinus,
@@ -1327,8 +1282,8 @@ class _StickerPickerBodyState extends ConsumerState<StickerPickerBody> {
     }
   }
 
-  /// Drop the sticker from EVERY pack it is in. The blob stays cached — it is
-  /// content-addressed and a message already sent still points at it.
+  /// Drops the sticker from EVERY pack. The blob stays cached, because it is
+  /// content-addressed and a sent message still points at it.
   Future<void> _deleteEverywhere(_Cell cell) async {
     final all = ref.read(personalStickersProvider).valueOrNull ??
         const <stickers_api.PersonalSticker>[];
@@ -1350,10 +1305,6 @@ class _StickerPickerBodyState extends ConsumerState<StickerPickerBody> {
   }
 }
 
-// ---------------------------------------------------------------------------
-// One grid cell
-// ---------------------------------------------------------------------------
-
 class _StickerCell extends ConsumerStatefulWidget {
   final _Cell cell;
   final bool picking;
@@ -1361,8 +1312,8 @@ class _StickerCell extends ConsumerStatefulWidget {
   final VoidCallback onTap;
   final void Function(Offset globalPosition) onMenu;
 
-  /// One-tap "save to my stickers", shown as a corner badge. Null on any grid
-  /// where saving is meaningless (the vault itself, recents, a server's set).
+  /// One-tap "save to my stickers" corner badge. Null where saving is
+  /// meaningless (the vault itself, recents, a server's set).
   final VoidCallback? onSave;
 
   const _StickerCell({
@@ -1447,9 +1398,8 @@ class _StickerCellState extends ConsumerState<_StickerCell> {
             fit: StackFit.expand,
             children: [
               _image(hollow),
-              // One-tap save on a KLIPY cell, the way the GIF grid's star
-              // works — saving used to be buried in the right-click menu,
-              // which is not a gesture that exists on a phone.
+              // One-tap save, because a right-click menu is not a gesture that
+              // exists on a phone.
               if (widget.onSave != null && (_hovering || _touch))
                 Positioned(
                   right: 0,
@@ -1475,8 +1425,7 @@ class _StickerCellState extends ConsumerState<_StickerCell> {
     );
   }
 
-  /// Touch has no hover, so the badge is always up on a phone. Desktop keeps
-  /// it hover-only to leave the grid clean.
+  /// Touch has no hover, so the badge is always up on a phone.
   bool get _touch => Platform.isAndroid || Platform.isIOS;
 
   Widget _saveBadge(HollowTheme hollow) {
@@ -1485,17 +1434,15 @@ class _StickerCellState extends ConsumerState<_StickerCell> {
       semanticLabel: 'Save this sticker to my stickers',
       borderRadius: BorderRadius.circular(hollow.radiusSm),
       padding: const EdgeInsets.all(3),
-      // Never animates from transparent — a null background just paints
-      // nothing until the hover fill takes over.
+      // Never animates from transparent (feedback_hover_state_patterns).
       backgroundColor: Colors.black.withValues(alpha: 0.55),
       child: const Icon(LucideIcons.bookmarkPlus, size: 12, color: Colors.white),
     );
   }
 
   Widget _image(HollowTheme hollow) {
-    // LOCAL: the bytes are (or will be) a content-addressed blob — the same
-    // widget the chat uses, so a missing hash pulls itself over the asset
-    // rail and flips in when it lands.
+    // LOCAL: a content-addressed blob, so a missing hash pulls itself over the
+    // asset rail and flips in when it lands.
     if (widget.cell.remote == null) {
       return ChatAssetImage(
         kind: 's',
@@ -1506,9 +1453,7 @@ class _StickerCellState extends ConsumerState<_StickerCell> {
       );
     }
 
-    // REMOTE: a catalog thumbnail. Stills by default; the hovered cell (or
-    // every visible one under autoplay) swaps to the animated variant, and
-    // AnimatedGifImage freezes itself under reduce-motion.
+    // REMOTE: a catalog thumbnail, still until hovered or autoplayed.
     final focused = ref.watch(windowFocusedProvider);
     final wantsAnim =
         focused && (ref.watch(gifAutoplayProvider) || _hovering);

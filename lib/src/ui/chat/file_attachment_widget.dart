@@ -27,16 +27,14 @@ import 'package:hollow/src/ui/chat/sticker_pack_card.dart';
 import 'package:hollow/src/ui/chat/video_message_bubble.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-/// File extensions that trigger the video bubble (Phase 6.75 video preview).
+/// File extensions that route to the video bubble.
 const _videoExtensions = {'mp4', 'webm', 'mov', 'mkv', 'avi', 'm4v'};
 
-/// File extensions that trigger the audio bubble (Phase 6.75 audio preview).
+/// File extensions that route to the audio bubble.
 const _audioExtensions = {'mp3', 'ogg', 'wav', 'flac', 'm4a', 'aac', 'wma'};
 
-/// Renders a file attachment inline in a message bubble.
-///
-/// - Images: inline preview (rounded, max 300x250).
-/// - Other files: card with icon + name + size + progress.
+/// Renders a file attachment inline in a message bubble: an image preview, a
+/// media bubble, or a card with icon, name, size and progress.
 class FileAttachmentWidget extends ConsumerWidget {
   final FileAttachment attachment;
 
@@ -49,12 +47,11 @@ class FileAttachmentWidget extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final hollow = HollowTheme.of(context);
 
-    // Watch live transfer progress.
     final transfer = ref.watch(
       fileTransferProvider.select((s) => s[attachment.fileId]),
     );
 
-    // Use attachment's own state if it's already complete (e.g., sender's optimistic message).
+    // The attachment's own state wins for a sender's optimistic message.
     final isComplete = attachment.isComplete || (transfer?.isComplete ?? false);
     final diskPath = attachment.diskPath ?? transfer?.diskPath;
     final isDownloading = !isComplete && (transfer?.isDownloading ?? false);
@@ -62,18 +59,15 @@ class FileAttachmentWidget extends ConsumerWidget {
     final progress = (transfer != null && transfer.progress > 0)
         ? transfer.progress
         : attachment.progress;
-    // Compute bytes received from progress ratio × total size.
-    // This works for both WSS (MB-based chunks) and WebRTC (64KB-based chunks).
+    // From the progress ratio, so WSS and WebRTC chunk sizes both work.
     final totalBytes = (transfer != null && transfer.sizeBytes > 0)
         ? transfer.sizeBytes
         : attachment.sizeBytes;
     final bytesReceived = (progress * totalBytes).round();
 
-    // Why the bytes are not here yet (tmp.txt item 1). ONE helper decides the
-    // caption and the control for every surface below. Only the peer the
-    // state is about is watched — a file bubble must not rebuild when an
-    // unrelated profile changes — and a name asked for any other id falls
-    // back to its short form, which is what an absent profile gives anyway.
+    // ONE helper decides the caption and the control for every surface below.
+    // Only the peer the state is about is watched, so a file bubble does not
+    // rebuild when an unrelated profile changes.
     final statusPeer = transfer?.availability?.peerId ?? '';
     final statusProfile = statusPeer.isEmpty
         ? null
@@ -88,49 +82,37 @@ class FileAttachmentWidget extends ConsumerWidget {
       return _buildExpiredCard(hollow, status);
     }
 
-    // Manual download entry (issue #41): the same flow as the hover-bar
-    // Download button — share-backed files rejoin their share swarm, regular
-    // files go out as a FileRequest to a holder. Self-contained: the file's
-    // own metadata row carries the conversation context.
+    // The same flow as the hover-bar Download button (issue #41).
     void onDownload() => _startManualDownload(context, ref);
 
-    // Share-backed file with no seeders and not yet downloaded.
     if (status.control == FileCardControl.retry) {
       return _buildUnavailableCard(hollow, status, onDownload);
     }
 
-    // Phase 6.75: Video preview takes priority over generic file rendering.
-    // Two cases handled by VideoMessageBubble:
-    //  (a) vault video — videoThumb is set, attachment is the .webp thumbnail
-    //  (b) direct P2P video — DM or <6 server, file is on disk locally
-    // The bubble owns EVERY state — poster from the header thumb, download
-    // button while the bytes aren't local, progress, then play — so the video
-    // keeps one face instead of hopping between a placeholder and the bubble.
+    // The video bubble owns EVERY state, poster through download and progress
+    // to play, so a video keeps one face instead of hopping between a
+    // placeholder and the bubble.
     if (_isVideoAttachment()) {
       return VideoMessageBubble(
           attachment: attachment, onDownload: onDownload, status: status);
     }
 
-    // Phase 6.75: Audio preview — inline playback card. The bubble owns its
-    // undownloaded state: the play button becomes a download button (issue
-    // #41 carry-over).
+    // The audio bubble owns its undownloaded state too (issue #41).
     if (_isAudioAttachment()) {
       return AudioMessageBubble(
           attachment: attachment, onDownload: onDownload, status: status);
     }
 
-    // A shared sticker pack is an ordinary file on the wire — only its face
-    // in the feed differs, so it gets an "add this pack" card instead of a
-    // generic row. Nothing about the transfer changes (issue #36).
+    // A shared sticker pack is an ordinary file on the wire; only its face in
+    // the feed differs (issue #36).
     if (isStickerPackFile(attachment.fileName)) {
       return StickerPackCard(
-        // Gate on isComplete: a half-written pack would fail to parse and
-        // show a bogus error rather than "Downloading…".
+        // A half-written pack fails to parse and shows a bogus error rather
+        // than "Downloading…".
         diskPath: isComplete ? diskPath : null,
         fileName: attachment.fileName,
-        // Without these the card said "Downloading…" under every pack that
-        // was never fetched — old rows, and anything the auto-download gate
-        // held back (issue #54).
+        // Without these the card reads "Downloading…" under every pack that was
+        // never fetched, including anything the auto-download gate held back.
         isDownloading: isDownloading,
         progress: progress,
         onDownload: onDownload,
@@ -144,15 +126,13 @@ class FileAttachmentWidget extends ConsumerWidget {
     return _buildFileCard(hollow, isComplete, isDownloading, progress, bytesReceived, vaultPhase, status, onDownload);
   }
 
-  /// Start a manual download for this attachment — the pressable placeholder
-  /// twin of the hover-bar Download button (issue #41). Routes by what the
-  /// file actually is:
-  ///  - share-backed (>34 MB): rejoin the share swarm via the PERSISTED share
-  ///    ref (a direct FileRequest response would be rejected by our own size
-  ///    cap and cannot resume a share);
-  ///  - guest public channel: receipt-gated RequestPublicFile;
-  ///  - everything else: FileRequest to the DM peer / file sender (Rust
-  ///    resolves devices and reroutes to another holder when offline).
+  /// Starts a manual download, the placeholder twin of the hover-bar Download
+  /// button (issue #41).
+  ///
+  /// A share-backed file rejoins its swarm through the PERSISTED share ref,
+  /// because a FileRequest response would hit our own size cap and cannot
+  /// resume a share. A guest in a public channel goes through the
+  /// receipt-gated RequestPublicFile; everything else is a FileRequest.
   Future<void> _startManualDownload(BuildContext context, WidgetRef ref) async {
     final transfer = ref.read(fileTransferProvider)[attachment.fileId];
     if (transfer?.isDownloading == true) {
@@ -173,9 +153,8 @@ class FileAttachmentWidget extends ConsumerWidget {
       final isChannel = contextType == 'channel' && contextId.contains(':');
       final serverId = isChannel ? contextId.split(':').first : '';
 
-      // A FileRequest answers itself on the card: it turns into "Requesting..."
-      // and then says what came back. The other two branches have no such
-      // state, so they keep their toast.
+      // A FileRequest answers itself on the card; the other two branches have
+      // no such state, so they keep their toast.
       var announce = true;
 
       if (shareRoot != null && shareKey != null) {
@@ -190,7 +169,7 @@ class FileAttachmentWidget extends ConsumerWidget {
             );
       } else if (isChannel &&
           !ref.read(serverListProvider).containsKey(serverId)) {
-        // Not a member of this server — guest viewing a public channel.
+        // A guest viewing a public channel.
         await crdt_api.requestPublicFile(
           serverId: serverId,
           fileId: attachment.fileId,
@@ -217,17 +196,15 @@ class FileAttachmentWidget extends ConsumerWidget {
     }
   }
 
-  /// True when this attachment should be rendered as a video bubble.
-  /// Either it's a vault video (videoThumb is set) or its extension matches
-  /// a video format (DM / <6 server direct P2P video).
+  /// True for a vault video, or for a direct P2P video by extension.
   bool _isVideoAttachment() {
     if (attachment.videoThumb != null) return true;
-    // Don't claim images even if their ext somehow matches.
+    // Never claim an image, whatever its extension says.
     if (attachment.isImage) return false;
     return _videoExtensions.contains(attachment.fileExt.toLowerCase());
   }
 
-  /// True when this attachment should be rendered as an audio bubble.
+  /// True when the attachment renders as an audio bubble.
   bool _isAudioAttachment() {
     if (attachment.isImage) return false;
     return _audioExtensions.contains(attachment.fileExt.toLowerCase());
@@ -333,13 +310,12 @@ class FileAttachmentWidget extends ConsumerWidget {
     );
   }
 
-  /// Max preview box for images/videos in the chat feed.
+  /// Max preview box for image and video previews in the feed.
   static const _previewMaxWidth = 300.0;
   static const _previewMaxHeight = 250.0;
 
-  /// Display box for the preview/placeholder, aspect-corrected from the
-  /// attachment's intrinsic dimensions (full box when unknown). Shared by the
-  /// image preview and the undownloaded-video placeholder route.
+  /// Display box for the preview or placeholder, at the attachment's intrinsic
+  /// aspect, or the full box when the dimensions are unknown.
   ({double w, double h}) _displayBoxSize() {
     double displayWidth = _previewMaxWidth;
     double displayHeight = _previewMaxHeight;
@@ -356,8 +332,8 @@ class FileAttachmentWidget extends ConsumerWidget {
     return (w: displayWidth, h: displayHeight);
   }
 
-  /// Decoded envelope-borne placeholder thumbnail (issue #41 carry-over) —
-  /// a ~32 px WebP, so the per-build decode cost is negligible.
+  /// Decoded envelope-borne placeholder thumbnail (issue #41), a ~32 px WebP,
+  /// so decoding it per build costs nothing worth caching.
   Uint8List? _thumbBytes() {
     final b64 = attachment.thumbB64;
     if (b64 == null || b64.isEmpty) return null;
@@ -379,7 +355,6 @@ class FileAttachmentWidget extends ConsumerWidget {
     if (isComplete && diskPath != null && File(diskPath).existsSync()) {
       final isGif = attachment.fileExt.toLowerCase() == 'gif';
 
-      // Show the actual image — tap to open fullscreen.
       return HollowFocusRing(
         enabled: true,
         onActivate: () => _showFullscreen(context, diskPath, isGif: isGif),
@@ -405,11 +380,10 @@ class FileAttachmentWidget extends ConsumerWidget {
                     : Image.file(
                         File(diskPath),
                         fit: BoxFit.contain,
-                        // Decode at bubble size, not the photo's full
-                        // resolution — a 12 MP camera image otherwise decodes
-                        // on first paint (a visible beat on phones). ResizeImage
-                        // never upscales, so small images are untouched;
-                        // fullscreen view decodes full-res separately.
+                        // Decode at bubble size: a 12 MP camera image decoded
+                        // on first paint is a visible beat on phones.
+                        // ResizeImage never upscales, and the fullscreen view
+                        // decodes full-res separately.
                         cacheWidth: (maxWidth *
                                 MediaQuery.devicePixelRatioOf(context))
                             .ceil(),
@@ -423,16 +397,13 @@ class FileAttachmentWidget extends ConsumerWidget {
       );
     }
 
-    // Show placeholder with progress or downloading indicator.
     return _buildPlaceholder(hollow, displayWidth, displayHeight, isDownloading, progress, bytesReceived, vaultPhase, status, onDownload: onDownload);
   }
 
   Widget _buildPlaceholder(
       HollowTheme hollow, double width, double height, bool isDownloading, double progress, int bytesReceived, String? vaultPhase, FileCardStatus status, {VoidCallback? onDownload}) {
-    // Placeholder box shell: when the header carried a tiny thumbnail (issue
-    // #41 carry-over), it renders BLURRED under the content with a
-    // theme-correct scrim so the download button / progress labels keep
-    // contrast; otherwise the flat surface box as before.
+    // A header thumbnail (issue #41) renders BLURRED under the content behind a
+    // scrim, so the download button and progress labels keep their contrast.
     final thumbBytes = _thumbBytes();
     Widget shell(Widget child) => Container(
           width: width,
@@ -464,14 +435,13 @@ class FileAttachmentWidget extends ConsumerWidget {
                 ),
         );
 
-    // Idle (not downloading, no partial progress) + a download hook = the
-    // pressable placeholder (issue #41): image dimensions box with a download
-    // button in it instead of a dead rectangle. When the card knows why the
-    // bytes are missing it says so here too, and the circle stops taking taps
-    // that would do nothing (tmp.txt item 1).
+    // Idle with a download hook gives the pressable placeholder (issue #41): an
+    // image-sized box with a download button rather than a dead rectangle. When
+    // the card knows why the bytes are missing, the circle stops taking taps
+    // that would do nothing.
     if (!isDownloading && !(progress > 0 && progress < 1) && onDownload != null) {
-      // Same circle, three faces: the button, its busy spinner, or the reason
-      // there is nothing to press.
+      // One circle, three faces: the button, its spinner, or the reason there
+      // is nothing to press.
       final Widget circleContent = switch (status.control) {
         FileCardControl.busy => Padding(
             padding: const EdgeInsets.all(12),
@@ -517,8 +487,8 @@ class FileAttachmentWidget extends ConsumerWidget {
               Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  // Media-type hint: image and video previews share this
-                  // placeholder shape, so say which one this is.
+                  // Image and video previews share this placeholder shape, so
+                  // the glyph says which one this is.
                   Icon(
                     _isVideoAttachment() ? LucideIcons.video : LucideIcons.image,
                     size: 12,
@@ -537,8 +507,8 @@ class FileAttachmentWidget extends ConsumerWidget {
           ],
         ),
       );
-      // A queued or dead ask has nothing to press: no tap target, and no
-      // Download label for a screen reader to offer.
+      // A queued or dead ask has no tap target and no Download label for a
+      // screen reader to offer.
       if (status.control == FileCardControl.busy ||
           status.control == FileCardControl.none) {
         return body;
@@ -621,11 +591,10 @@ class FileAttachmentWidget extends ConsumerWidget {
   Widget _buildFileCard(HollowTheme hollow, bool isComplete, bool isDownloading, double progress, int bytesReceived, String? vaultPhase, FileCardStatus status, VoidCallback onDownload) {
     final idle = !isComplete && !isDownloading && vaultPhase == null;
     final showDownload = idle && status.control == FileCardControl.download;
-    // The button's own busy state (tmp.txt item 1): same footprint, a spinner,
-    // no tap target, so a second press cannot queue a second ask.
+    // Same footprint, a spinner and no tap target, so a second press cannot
+    // queue a second ask.
     final showBusy = idle && status.control == FileCardControl.busy;
-    // The caption is the card's answer for the tap, so it replaces the size
-    // line rather than crowding in beside it.
+    // The caption replaces the size line rather than crowding in beside it.
     final showCaption = idle && status.caption != null;
     return Container(
       constraints: const BoxConstraints(maxWidth: 280),
@@ -674,9 +643,8 @@ class FileAttachmentWidget extends ConsumerWidget {
                                 ? '${_formatSize(bytesReceived)} / ${attachment.formattedSize}'
                                 : isDownloading
                                     ? 'Downloading... ${attachment.formattedSize}'
-                                    // The name column ellipsizes, so long
-                                    // filenames hide their extension — repeat
-                                    // it next to the size (issue #41 feedback).
+                                    // The name column ellipsizes, so a long
+                                    // filename hides its extension.
                                     : attachment.fileExt.isEmpty
                                         ? attachment.formattedSize
                                         : '${attachment.formattedSize} · .${attachment.fileExt.toLowerCase()}',
@@ -716,7 +684,6 @@ class FileAttachmentWidget extends ConsumerWidget {
               ],
             ),
           ),
-          // Thin progress bar at the bottom of the card.
           if (isDownloading || (!isComplete && progress > 0))
             SizedBox(
               height: 3,
@@ -743,7 +710,7 @@ class FileAttachmentWidget extends ConsumerWidget {
     };
   }
 
-  /// Open image in fullscreen overlay with blur backdrop.
+  /// Opens the image in a fullscreen overlay.
   static void _showFullscreen(BuildContext context, String diskPath, {bool isGif = false}) {
     showHollowDialog(
       context: context,
@@ -752,7 +719,7 @@ class FileAttachmentWidget extends ConsumerWidget {
   }
 }
 
-/// Fullscreen image view with blur backdrop and close button.
+/// Fullscreen image view over a blurred backdrop.
 class _FullscreenImageView extends StatelessWidget {
   final String diskPath;
   final bool isGif;
@@ -768,7 +735,6 @@ class _FullscreenImageView extends StatelessWidget {
       child: Center(
         child: Stack(
           children: [
-            // Image
             Padding(
               padding: const EdgeInsets.all(HollowSpacing.xxl),
               child: ClipRRect(
@@ -785,7 +751,6 @@ class _FullscreenImageView extends StatelessWidget {
               ),
             ),
 
-            // Close button (top-right)
             Positioned(
               top: HollowSpacing.lg,
               right: HollowSpacing.lg,

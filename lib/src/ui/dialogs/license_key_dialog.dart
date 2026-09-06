@@ -43,7 +43,7 @@ class _LicenseKeyContentState extends State<_LicenseKeyContent> {
   }
 
   void _onChanged(String value) {
-    // Auto-format: uppercase, strip non-alphanumeric, insert dashes.
+    // Uppercased and re-dashed as the user types.
     final raw = value.toUpperCase().replaceAll(RegExp(r'[^A-Z0-9]'), '');
     final limited = raw.length > 16 ? raw.substring(0, 16) : raw;
 
@@ -73,7 +73,7 @@ class _LicenseKeyContentState extends State<_LicenseKeyContent> {
       return;
     }
 
-    // Basic format check: XXXX-XXXX-XXXX-XXXX (19 chars with dashes).
+    // Shape check only; the relay is the authority on validity.
     final parts = key.split('-');
     if (parts.length != 4 || parts.any((p) => p.length != 4)) {
       setState(() => _error = 'Invalid key format (expected XXXX-XXXX-XXXX-XXXX)');
@@ -116,7 +116,6 @@ class _LicenseKeyContentState extends State<_LicenseKeyContent> {
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  // Icon
                   Container(
                     width: 56,
                     height: 56,

@@ -37,14 +37,12 @@ class _WelcomeContent extends StatefulWidget {
 class _WelcomeContentState extends State<_WelcomeContent> {
   final _relayController = TextEditingController(text: kDefaultRelayDomain);
   bool _showAdvanced = false;
-  // Busy state for "Restore from Backup" — importBackup decrypts + restores
-  // the whole DB and can take seconds.
+  // importBackup decrypts and restores the whole DB, which takes seconds.
   bool _restoring = false;
 
   // Profiles (issue #47). Erasing the active profile drops you here, and
-  // without this the only way on was to build a new identity inside the folder
-  // you just emptied: no route back to Default or Portable, and no sign of
-  // which folder a restored backup would land in.
+  // without this the only way on is a new identity inside the folder you just
+  // emptied, with no route back to Default or Portable.
   bool _showProfiles = false;
   bool _switching = false;
   late final bool _isDesktop =
@@ -53,16 +51,14 @@ class _WelcomeContentState extends State<_WelcomeContent> {
   late final List<ProfileRow> _allProfiles =
       _isDesktop ? listProfileRows(readProfileRegistrySync()) : const [];
 
-  /// The other profiles worth offering: ones that already hold an identity.
-  /// A first-ever launch has none, and sees the dialog exactly as before.
+  /// The profiles that already hold an identity. A first-ever launch has none.
   late final List<ProfileRow> _otherProfiles = _allProfiles
       .where((r) =>
           !sameProfilePath(r.path, _currentRoot) && profileHasIdentity(r.path))
       .toList();
 
-  /// What to call the profile being set up. An unlisted root (an environment
-  /// override, a folder added on another machine) falls back to its folder
-  /// name rather than claiming to be Default.
+  /// What to call the profile being set up. An unlisted root falls back to its
+  /// folder name rather than claiming to be Default.
   String get _currentProfileName {
     for (final row in _allProfiles) {
       if (sameProfilePath(row.path, _currentRoot)) return row.name;
@@ -78,7 +74,7 @@ class _WelcomeContentState extends State<_WelcomeContent> {
     setState(() => _switching = true);
     try {
       final registry = readProfileRegistrySync();
-      // Pin explicitly even for Default: the pin has to beat portable
+      // Pinned explicitly even for Default: the pin has to beat portable
       // auto-detection on the way back to the OS root.
       await saveProfileRegistry(registry.copyWith(activePath: row.path));
       await relaunchApp();
@@ -103,8 +99,8 @@ class _WelcomeContentState extends State<_WelcomeContent> {
 
   Future<void> _onRestoreFromBackup() async {
     if (_restoring) return;
-    // iOS/Android don't recognize the custom `.hollow` extension as a UTI/MIME,
-    // so a `FileType.custom` filter hides the backup file. Use `any` on mobile.
+    // Mobile does not recognise the custom `.hollow` extension, so a
+    // `FileType.custom` filter hides the backup file.
     final isMobile = Platform.isAndroid || Platform.isIOS;
     final result = await FilePicker.platform.pickFiles(
       dialogTitle: 'Select backup file',
@@ -115,7 +111,6 @@ class _WelcomeContentState extends State<_WelcomeContent> {
     final path = result.files.single.path;
     if (path == null) return;
 
-    // Ask for passphrase.
     final passphrase = await showDialog<String>(
       context: context,
       builder: (ctx) {
@@ -155,9 +150,8 @@ class _WelcomeContentState extends State<_WelcomeContent> {
     );
     if (passphrase == null || passphrase.isEmpty || !mounted) return;
 
-    // Busy state while the decrypt + restore runs — this is the first-run
-    // screen, and a large backup takes seconds; frozen silence here reads
-    // as a hang.
+    // A large backup takes seconds, and frozen silence on the first-run screen
+    // reads as a hang.
     setState(() => _restoring = true);
     try {
       await storage_api.importBackup(backupPath: path, passphrase: passphrase);
@@ -177,8 +171,7 @@ class _WelcomeContentState extends State<_WelcomeContent> {
     final radius = BorderRadius.circular(hollow.radiusLg);
     final screenWidth = MediaQuery.sizeOf(context).width;
     final isCompact = screenWidth < 600;
-    // Phones: full width minus padding; never force a 360px minimum that
-    // exceeds the screen.
+    // Never force a minimum wider than the screen.
     final minWidth = isCompact
         ? (screenWidth - HollowSpacing.xl * 2).clamp(0.0, 480.0)
         : 360.0;
@@ -223,7 +216,6 @@ class _WelcomeContentState extends State<_WelcomeContent> {
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
-        // Icon
         Container(
           width: 56,
           height: 56,
@@ -240,7 +232,6 @@ class _WelcomeContentState extends State<_WelcomeContent> {
 
         const SizedBox(height: HollowSpacing.lg),
 
-        // Title
         Text(
           'Welcome to Hollow',
           style: HollowTypography.heading.copyWith(
@@ -250,7 +241,6 @@ class _WelcomeContentState extends State<_WelcomeContent> {
 
         const SizedBox(height: HollowSpacing.xs),
 
-        // Subtitle
         Text(
           'Choose how to set up your identity',
           style: HollowTypography.body.copyWith(
@@ -258,10 +248,9 @@ class _WelcomeContentState extends State<_WelcomeContent> {
           ),
         ),
 
-        // Which folder this is setting up. Shown only once more than one
-        // profile is in play, so a first-ever launch is untouched. It is also
-        // the answer to "where did my restored backup go": everything on this
-        // screen lands in the folder named here.
+        // Which folder this is setting up, shown only once more than one
+        // profile is in play. It is also the answer to where a restored backup
+        // went: everything on this screen lands in the folder named here.
         if (_otherProfiles.isNotEmpty) ...[
           const SizedBox(height: HollowSpacing.sm),
           Column(
@@ -300,7 +289,6 @@ class _WelcomeContentState extends State<_WelcomeContent> {
 
         const SizedBox(height: HollowSpacing.xl),
 
-        // Option cards
         _OptionCard(
           icon: LucideIcons.userPlus,
           title: 'Create New Identity',
@@ -311,13 +299,11 @@ class _WelcomeContentState extends State<_WelcomeContent> {
 
         const SizedBox(height: HollowSpacing.sm),
 
-        // NOTE (Step 9C/C6): the "Restore from Recovery Phrase" option was REMOVED.
-        // A 24-word phrase alone only regenerates the master keypair (your peer id)
-        // — it carries NO synced data, and leaving a stale messages.db on disk caused
-        // a "Loading… forever" mismatch. To bring a device fully online use "Link a
-        // device" (live snapshot from an online device) or "Restore from Backup" (a
-        // .hollow file). The mnemonic-restore FFI still exists for the in-app
-        // recovery dialogs (Identity Locked / Recover Identity in hollow_shell).
+        // There is deliberately no "Restore from Recovery Phrase" here: the
+        // phrase regenerates the master keypair alone, carries NO synced data,
+        // and leaves a stale database on disk. Bringing a device online is
+        // "Link a device" or "Restore from Backup"; the mnemonic FFI stays for
+        // the in-app recovery dialogs.
 
         _OptionCard(
           icon: LucideIcons.smartphone,
@@ -346,7 +332,7 @@ class _WelcomeContentState extends State<_WelcomeContent> {
 
         const SizedBox(height: HollowSpacing.lg),
 
-        // Advanced section — relay domain for self-hosters.
+        // Relay domain, for self-hosters.
         HollowFocusRing(
           enabled: true,
           onActivate: () => setState(() => _showAdvanced = !_showAdvanced),
@@ -396,8 +382,8 @@ class _WelcomeContentState extends State<_WelcomeContent> {
 
   /// The other identities on this computer, collapsed behind one row.
   ///
-  /// Desktop only, for the same reason the Settings card is: mobile data roots
-  /// are sandboxed and the iOS push extension opens one fixed App Group path.
+  /// Desktop only: mobile data roots are sandboxed and the iOS push extension
+  /// opens one fixed App Group path.
   Widget _buildProfilesSection(HollowTheme hollow) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,

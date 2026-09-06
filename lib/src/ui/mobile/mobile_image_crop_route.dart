@@ -11,11 +11,9 @@ import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/mobile/mobile_page_route.dart';
 
-/// Shows a full-screen mobile crop route. Returns cropped PNG bytes or null.
+/// Shows a full-screen mobile crop route, returning cropped PNG bytes or null.
 ///
-/// Uses the standard mobile crop pattern: fixed crop frame in center,
-/// user drags and pinch-zooms the image underneath. The image is always
-/// clamped so the crop frame never shows empty space.
+/// The image is always clamped so the fixed crop frame never shows empty space.
 Future<Uint8List?> showMobileImageCrop({
   required BuildContext context,
   required Uint8List imageBytes,
@@ -56,19 +54,16 @@ class _MobileImageCropRouteState extends State<MobileImageCropRoute> {
   bool _cropping = false;
   bool _layoutDone = false;
 
-  // Crop frame (fixed position within the available area)
   Rect _cropFrame = Rect.zero;
 
-  // Image base display size (at scale 1.0, fills crop frame)
+  // The size at scale 1.0, which fills the crop frame.
   double _baseW = 0;
   double _baseH = 0;
 
-  // Current transform state
   double _scale = 1.0;
   double _offsetX = 0;
   double _offsetY = 0;
 
-  // Gesture tracking
   double _startScale = 1.0;
   double _startOffsetX = 0;
   double _startOffsetY = 0;
@@ -79,10 +74,9 @@ class _MobileImageCropRouteState extends State<MobileImageCropRoute> {
   @override
   void initState() {
     super.initState();
-    // Lock orientation while cropping — a rotation re-runs _initLayout and
-    // would silently discard the user's crop position. Redundant with the
-    // app-wide portrait lock (main.dart) but kept so the crop stays safe if
-    // that lock is ever relaxed.
+    // A rotation re-runs `_initLayout` and silently discards the user's crop
+    // position. Redundant with the app-wide portrait lock, but kept so the crop
+    // stays safe if that lock is ever relaxed.
     if (_isMobilePlatform) {
       SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
     }
@@ -90,9 +84,8 @@ class _MobileImageCropRouteState extends State<MobileImageCropRoute> {
   }
 
   Future<void> _decodeImage() async {
-    // Cap the decode size: a full-res camera photo decoded as raw RGBA can
-    // exceed 100 MB and OOM budget phones. 2048px is plenty for avatar /
-    // banner crops (the Rust processor downsizes further anyway).
+    // A full-res camera photo decoded as raw RGBA can exceed 100 MB and OOM a
+    // budget phone; the Rust processor downsizes further anyway.
     final codec = await ui.instantiateImageCodec(
       widget.imageBytes,
       targetWidth: 2048,
@@ -115,7 +108,6 @@ class _MobileImageCropRouteState extends State<MobileImageCropRoute> {
     final availH = constraints.maxHeight;
     final ar = widget.aspectRatio;
 
-    // Crop frame: largest rect with target aspect that fits with padding
     const padded = 32.0;
     final maxCropW = availW - padded * 2;
     final maxCropH = availH - padded * 2;
@@ -136,7 +128,6 @@ class _MobileImageCropRouteState extends State<MobileImageCropRoute> {
       cropH,
     );
 
-    // Base image size: scale so image fills the crop frame at scale 1.0
     final imgW = _decodedImage!.width.toDouble();
     final imgH = _decodedImage!.height.toDouble();
     final fillScale = max(cropW / imgW, cropH / imgH);
@@ -144,7 +135,6 @@ class _MobileImageCropRouteState extends State<MobileImageCropRoute> {
     _baseW = imgW * fillScale;
     _baseH = imgH * fillScale;
 
-    // Center image over crop frame
     _offsetX = _cropFrame.left - (_baseW - cropW) / 2;
     _offsetY = _cropFrame.top - (_baseH - cropH) / 2;
     _scale = 1.0;
@@ -154,7 +144,7 @@ class _MobileImageCropRouteState extends State<MobileImageCropRoute> {
     final w = _baseW * _scale;
     final h = _baseH * _scale;
 
-    // Image left edge must be <= crop left, image right edge must be >= crop right
+    // The image must cover the frame on both edges.
     final maxOffX = _cropFrame.left;
     final minOffX = _cropFrame.right - w;
     _offsetX = _offsetX.clamp(minOffX, maxOffX);
@@ -173,15 +163,14 @@ class _MobileImageCropRouteState extends State<MobileImageCropRoute> {
 
   void _onScaleUpdate(ScaleUpdateDetails d) {
     setState(() {
-      // Apply scale (clamped so image always covers crop frame)
+      // Clamped so the image always covers the crop frame.
       final newScale = (_startScale * d.scale).clamp(1.0, 8.0);
 
-      // Zoom around the focal point
       final focalDx = d.focalPoint.dx - _startFocal.dx;
       final focalDy = d.focalPoint.dy - _startFocal.dy;
 
       if (newScale != _scale) {
-        // Adjust offset so the focal point stays fixed on the same image pixel
+        // Keeps the focal point on the same image pixel.
         final scaleRatio = newScale / _scale;
         final focalOnImage = Offset(
           d.focalPoint.dx - _offsetX,
@@ -192,14 +181,11 @@ class _MobileImageCropRouteState extends State<MobileImageCropRoute> {
         _scale = newScale;
       }
 
-      // Apply pan
       _offsetX = _startOffsetX + focalDx + (_offsetX - _startOffsetX);
       _offsetY = _startOffsetY + focalDy + (_offsetY - _startOffsetY);
 
-      // But actually, let's simplify: just compute from start state
       _scale = newScale;
       final scaleChange = _scale / _startScale;
-      // Focal point relative to start image position
       final focalRelX = _startFocal.dx - _startOffsetX;
       final focalRelY = _startFocal.dy - _startOffsetY;
       _offsetX = _startFocal.dx - focalRelX * scaleChange + focalDx;
@@ -210,7 +196,6 @@ class _MobileImageCropRouteState extends State<MobileImageCropRoute> {
   }
 
   void _onScaleEnd(ScaleEndDetails d) {
-    // Ensure clamped after gesture ends
     setState(() => _clampOffset());
   }
 
@@ -222,11 +207,7 @@ class _MobileImageCropRouteState extends State<MobileImageCropRoute> {
       final imgW = _decodedImage!.width.toDouble();
       final imgH = _decodedImage!.height.toDouble();
 
-      // The crop frame in image-pixel coordinates:
-      // display position of a pixel = offset + pixelInBase * scale
-      // so pixelInBase = (displayPos - offset) / scale
-      // and imagePixel = pixelInBase * (imgW / baseW)
-
+      // The crop frame, converted from display to image-pixel coordinates.
       final toBaseX = 1.0 / _scale;
       final toBaseY = 1.0 / _scale;
       final baseToImgX = imgW / _baseW;
@@ -239,7 +220,6 @@ class _MobileImageCropRouteState extends State<MobileImageCropRoute> {
 
       var srcRect = Rect.fromLTWH(srcLeft, srcTop, srcW, srcH);
 
-      // Safety clamp
       srcRect = Rect.fromLTRB(
         srcRect.left.clamp(0, imgW),
         srcRect.top.clamp(0, imgH),
@@ -275,9 +255,8 @@ class _MobileImageCropRouteState extends State<MobileImageCropRoute> {
   @override
   void dispose() {
     if (_isMobilePlatform) {
-      // Re-assert the app-wide portrait lock (main.dart) — restoring
-      // DeviceOrientation.values here would unlock rotation for the rest
-      // of the session.
+      // Re-asserts the app-wide portrait lock: restoring
+      // `DeviceOrientation.values` here would unlock rotation for the session.
       SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
     }
     _decodedImage?.dispose();
@@ -293,7 +272,6 @@ class _MobileImageCropRouteState extends State<MobileImageCropRoute> {
       body: SafeArea(
         child: Column(
           children: [
-            // Header
             Padding(
               padding: const EdgeInsets.fromLTRB(
                 HollowSpacing.xs, HollowSpacing.sm,
@@ -324,7 +302,6 @@ class _MobileImageCropRouteState extends State<MobileImageCropRoute> {
               ),
             ),
 
-            // Image + crop overlay
             Expanded(
               child: _imageLoaded && _decodedImage != null
                   ? LayoutBuilder(
@@ -340,7 +317,6 @@ class _MobileImageCropRouteState extends State<MobileImageCropRoute> {
                           onScaleEnd: _onScaleEnd,
                           child: Stack(
                             children: [
-                              // Image positioned by our manual transform
                               Positioned(
                                 left: _offsetX,
                                 top: _offsetY,
@@ -354,7 +330,6 @@ class _MobileImageCropRouteState extends State<MobileImageCropRoute> {
                                 ),
                               ),
 
-                              // Fixed crop overlay
                               Positioned.fill(
                                 child: IgnorePointer(
                                   child: CustomPaint(
@@ -383,7 +358,6 @@ class _MobileImageCropRouteState extends State<MobileImageCropRoute> {
                     ),
             ),
 
-            // Bottom actions
             Padding(
               padding: const EdgeInsets.all(HollowSpacing.lg),
               child: Row(
@@ -424,21 +398,18 @@ class _CropOverlayPainter extends CustomPainter {
   void paint(Canvas canvas, Size size) {
     final fullRect = Rect.fromLTWH(0, 0, size.width, size.height);
 
-    // Dark overlay outside crop
     final overlayPaint = Paint()..color = overlayColor;
     canvas.save();
     canvas.clipRect(cropRect, clipOp: ui.ClipOp.difference);
     canvas.drawRect(fullRect, overlayPaint);
     canvas.restore();
 
-    // Border around crop
     final borderPaint = Paint()
       ..color = borderColor
       ..style = PaintingStyle.stroke
       ..strokeWidth = 2;
     canvas.drawRect(cropRect, borderPaint);
 
-    // Rule-of-thirds grid
     final gridPaint = Paint()
       ..color = borderColor.withValues(alpha: 0.3)
       ..style = PaintingStyle.stroke
@@ -458,7 +429,6 @@ class _CropOverlayPainter extends CustomPainter {
       );
     }
 
-    // Corner brackets
     final bracketPaint = Paint()
       ..color = borderColor
       ..style = PaintingStyle.stroke

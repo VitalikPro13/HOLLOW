@@ -48,17 +48,15 @@ class AnnotationPainter extends CustomPainter {
         if (s.points.length < 2) return;
         final a = s.points.first;
         final b = s.points.last;
-        // Shaft.
         final shaft = Path()
           ..moveTo(a.dx, a.dy)
           ..lineTo(b.dx, b.dy);
         _drawPath(canvas, shaft, paint, s.style);
-        // Head — always solid, regardless of stroke style.
+        // The head is always solid, whatever the stroke style.
         _drawArrowHead(canvas, a, b, s.width, s.color);
         break;
       case AnnotationTool.eraser:
-        // The eraser draws nothing — it just modifies the stroke list. We
-        // could optionally show a "ghost" trail; keeping it invisible.
+        // The eraser draws nothing; it only modifies the stroke list.
         break;
     }
   }
@@ -77,7 +75,7 @@ class AnnotationPainter extends CustomPainter {
       canvas.drawPath(source, paint);
       return;
     }
-    // Dotted / dashed: walk the path's metrics and emit short subpaths.
+    // Dotted and dashed walk the path's metrics and emit short subpaths.
     final dashLength = style == LineStyle.dotted ? paint.strokeWidth : 10.0;
     final gapLength = style == LineStyle.dotted ? paint.strokeWidth * 2 : 6.0;
     final dashed = Path();

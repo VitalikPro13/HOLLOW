@@ -75,8 +75,8 @@ class _AutoDownloadSlider extends ConsumerWidget {
       label: off ? 'Off' : '$threshold MB',
       minLabel: 'Off',
       maxLabel: '2 GB',
-      // Anything dragged below the 34 MB floor snaps to Off (0) — the
-      // 1–33 MB range has no meaning (34 MB is the direct-transfer cap).
+      // Below the 34 MB direct-transfer cap the range has no meaning, so
+      // anything dragged there snaps to Off.
       onChanged: (value) => ref
           .read(autoDownloadThresholdProvider.notifier)
           .setThreshold(value.round() < 34 ? 0 : value.round()),
@@ -84,8 +84,8 @@ class _AutoDownloadSlider extends ConsumerWidget {
   }
 }
 
-/// Downloaded-files cache cap slider. Applies immediately; enforced after
-/// each download completes + via "Evict now".
+/// Downloaded-files cache cap slider. Enforced after each download completes
+/// and on "Evict now".
 class _FilesCacheCapSlider extends ConsumerWidget {
   const _FilesCacheCapSlider();
 
@@ -135,9 +135,8 @@ class _VaultCacheCapSlider extends ConsumerWidget {
   }
 }
 
-/// Asset blob cache cap slider (emotes, stickers, GIFs). Applies immediately;
-/// enforced whenever new asset bytes land. Assets still used by your personal
-/// set or a server are never evicted.
+/// Asset blob cache cap slider, enforced whenever new asset bytes land. Assets
+/// still used by your personal set or a server are never evicted.
 class _AssetCacheCapSlider extends ConsumerWidget {
   const _AssetCacheCapSlider();
 
@@ -165,8 +164,7 @@ class _AssetCacheCapSlider extends ConsumerWidget {
   }
 }
 
-/// Image quality tier selector — a row of three pill chips matching the
-/// screen share dialog's resolution/FPS selector style. Phase 6.75.
+/// Image quality tier selector, in the screen share dialog's chip style.
 class _ImageQualitySelector extends ConsumerWidget {
   const _ImageQualitySelector();
 
@@ -232,17 +230,15 @@ class _ImageQualitySelector extends ConsumerWidget {
 class _DataLocationRow extends StatelessWidget {
   const _DataLocationRow();
 
-  /// The on-disk data directory shown in the FILES section. Portable mode and
-  /// a pinned profile (Settings > Profile switcher) override the default with
-  /// the resolved root; otherwise it mirrors the Rust core's
-  /// `dirs::data_dir()/hollow` per platform (profile_registry.dart). Desktop
-  /// only — mobile uses a sandboxed app container.
+  /// The on-disk data directory shown in the FILES section. Portable mode and a
+  /// pinned profile override it with the resolved root; otherwise it mirrors the
+  /// Rust core's `dirs::data_dir()/hollow`. Desktop only.
   static String _dataLocationPath() {
     if (isPortableMode || isPinnedProfile) return hollowDataDir;
     return defaultDesktopDataRoot();
   }
 
-  /// Open the data directory in the OS file manager.
+  /// Opens the data directory in the OS file manager.
   Future<void> _openDataFolder(BuildContext context) async {
     final dir = _dataLocationPath();
     try {

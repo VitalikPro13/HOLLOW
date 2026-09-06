@@ -98,17 +98,14 @@ class _DownloadManagerOverlayState
     const cardWidth = 340.0;
     const maxHeight = 420.0;
 
-    // Position: card appears near the anchor.
     final screenSize = MediaQuery.of(context).size;
     double left = widget.anchor.dx;
 
-    // Clamp horizontal.
     if (left < 8) left = 8;
     if (left + cardWidth > screenSize.width - 8) {
       left = screenSize.width - cardWidth - 8;
     }
 
-    // Vertical positioning.
     double? top;
     double? bottom;
     if (widget.anchorBottom) {
@@ -121,7 +118,6 @@ class _DownloadManagerOverlayState
 
     return Stack(
       children: [
-        // Dismiss barrier.
         Positioned.fill(
           child: GestureDetector(
             onTap: _dismiss,
@@ -130,7 +126,6 @@ class _DownloadManagerOverlayState
           ),
         ),
 
-        // Card with animation.
         Positioned(
           left: left,
           top: top,
@@ -163,7 +158,6 @@ class _DownloadManagerOverlayState
                   child: Column(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      // ── Header ──
                       Padding(
                         padding: const EdgeInsets.fromLTRB(
                           HollowSpacing.md,
@@ -213,7 +207,6 @@ class _DownloadManagerOverlayState
 
                       Container(height: 1, color: hollow.border),
 
-                      // ── Entry list or empty state ──
                       if (entries.isEmpty && shareItems.isEmpty)
                         Padding(
                           padding: const EdgeInsets.symmetric(
@@ -292,29 +285,23 @@ class _DownloadManagerOverlayState
   }
 }
 
-// ── File entry tile ──────────────────────────────────────────
-
 class _SavedFileTile extends ConsumerWidget {
   final DownloadManagerEntry entry;
 
   const _SavedFileTile({required this.entry});
 
-  /// Reveal the file in the OS file explorer and bring it to the foreground.
-  /// Windows: `explorer.exe /select,path` + `SetForegroundWindow` via PowerShell
-  /// (explorer.exe alone reuses existing windows without focus).
-  /// macOS: `open -R` already activates Finder.
-  /// Linux: xdg-open on the parent dir.
+  /// Reveals the file in the OS file explorer and brings it to the foreground.
+  /// On Windows `explorer.exe` alone reuses an existing window without focusing
+  /// it, so the foreground has to be claimed separately.
   Future<void> _revealInFolder(BuildContext context) async {
     final path = entry.savedPath;
     if (path == null) return;
     try {
       if (Platform.isWindows) {
-        // Launch Explorer with the file selected.
         await Process.start('explorer.exe', ['/select,$path']);
-        // Windows has a foreground lock that blocks SetForegroundWindow from
-        // background processes (causing the yellow taskbar flash). Beat the
-        // lock via input-queue attachment + a synthetic Alt keypress, which
-        // Windows treats as user intent and releases the lock. See
+        // Windows blocks SetForegroundWindow from a background process, which
+        // is the yellow taskbar flash. A synthetic Alt keypress reads as user
+        // intent and releases that lock. See
         // https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setforegroundwindow
         const activateScript = r'''
 Add-Type @"
@@ -358,7 +345,6 @@ if ($p) {
       } else if (Platform.isMacOS) {
         await Process.run('open', ['-R', path]);
       } else {
-        // Linux: open parent directory.
         final parent = File(path).parent.path;
         await launchUrl(Uri.file(parent));
       }
@@ -387,7 +373,6 @@ if ($p) {
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.center,
         children: [
-          // Thumbnail / file icon.
           ClipRRect(
             borderRadius: BorderRadius.circular(hollow.radiusSm),
             child: SizedBox(
@@ -419,7 +404,6 @@ if ($p) {
           ),
           const SizedBox(width: HollowSpacing.sm),
 
-          // Name + path.
           Expanded(
             child: Column(
               mainAxisSize: MainAxisSize.min,
@@ -452,7 +436,6 @@ if ($p) {
 
           const SizedBox(width: HollowSpacing.xs),
 
-          // Reveal-in-folder hint icon.
           Icon(
             LucideIcons.folderOpen,
             size: 12,
@@ -477,8 +460,6 @@ if ($p) {
     );
   }
 }
-
-// ── Share download tile ─────────────────────────────────────
 
 class _ShareDownloadTile extends StatelessWidget {
   final ShareItemState item;
@@ -581,8 +562,6 @@ class _ShareDownloadTile extends StatelessWidget {
     );
   }
 }
-
-// ── Rebalance tile ───────────────────────────────────────────
 
 class _RebalanceTile extends StatelessWidget {
   final DownloadManagerEntry entry;

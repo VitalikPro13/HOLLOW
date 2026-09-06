@@ -1,17 +1,16 @@
-/// Base for web-form invite links. The server id rides the FRAGMENT
-/// (`#server=...`), which never leaves the browser — the website (and any
-/// link-preview bot that fetches the URL) sees only `/join`, so no log of
-/// which servers exist is ever accumulated anywhere.
+/// Base for web-form invite links. The server id rides the FRAGMENT, which
+/// never leaves the browser, so the website and any link-preview bot see only
+/// `/join` and no log of which servers exist accumulates anywhere.
 const String hollowWebJoinBase = 'https://hollow.anonlisten.com/join';
 
-/// Canonical shareable server invite. Works everywhere: new Hollow clients
-/// render it as a Join card, browsers bounce it to hollow:// via the /join
-/// redirect page, and people without Hollow land on a download page.
+/// Canonical shareable server invite. Hollow renders it as a Join card, a
+/// browser bounces it to hollow://, and anyone without Hollow gets a download
+/// page.
 String webServerInviteLink(String serverId) =>
     '$hollowWebJoinBase#server=$serverId';
 
-/// Canonical shareable conference invite. Same fragment rule as server
-/// invites: the conf id never reaches any server log.
+/// Canonical shareable conference invite, on the same fragment rule: the conf
+/// id never reaches any server log.
 String webConferenceInviteLink(String confId) =>
     '$hollowWebJoinBase#conf=$confId';
 
@@ -20,12 +19,12 @@ final _webJoinRegex =
     RegExp(r'https://hollow\.anonlisten\.com/join[^\s<>"' "'" r')\]}]*');
 final _inviteIdRegex = RegExp(r'^[A-Za-z0-9_-]{1,128}$');
 
-/// A Hollow Shop support code. Longer floor than an invite id: these are
-/// typed out of a receipt email, and a two-character "code" is a typo.
+/// A Hollow Shop support code. Longer floor than an invite id, because these
+/// are typed out of a receipt email and a two-character code is a typo.
 final _redeemCodeRegex = RegExp(r'^[A-Za-z0-9_-]{8,128}$');
 
-/// Cheap gate for per-row bubble builds — avoids running the extractor (and
-/// its regexes) on the overwhelmingly common no-link message.
+/// Cheap gate for per-row bubble builds, so the extractor's regexes never run
+/// on the overwhelmingly common no-link message.
 bool mightContainHollowLinks(String text) =>
     text.contains('hollow://') || text.contains('hollow.anonlisten.com/join');
 
@@ -41,8 +40,8 @@ enum HollowLinkType {
 class HollowLink {
   final HollowLinkType type;
 
-  /// Canonical hollow:// form — web-form https links are normalized to this,
-  /// so consumers (room join, share dialog, recovery prefill) can rely on it.
+  /// Canonical hollow:// form; web-form https links normalise to it, so every
+  /// consumer can rely on the one shape.
   final String fullUrl;
   final String id;
 
@@ -53,18 +52,9 @@ class HollowLink {
   });
 }
 
-/// Classify a single URL. Handled forms:
-///
-///   `hollow://share/PAYLOAD`
-///   `hollow://join?server=ID`
-///   `hollow://join?room=CODE`
-///   `hollow://conference/ID`
-///   `hollow://recovery?server=&token=`
-///   `hollow://redeem/CODE`            (Hollow Shop support code)
-///   https://hollow.anonlisten.com/join#server=|room=|conf=
-///
-/// The web form carries its id in the FRAGMENT (canonical; a `?query` is
-/// tolerated). Returns null if unrecognized.
+/// Classifies a single URL: the `hollow://` share, join, conference, recovery
+/// and redeem forms, plus the web `/join` link. The web form carries its id in
+/// the FRAGMENT, with a `?query` tolerated. Null when unrecognised.
 HollowLink? classifyHollowLink(String url) {
   final uri = Uri.tryParse(url);
   if (uri == null) return null;
@@ -94,7 +84,7 @@ HollowLink? classifyHollowLink(String url) {
       }
     } else if (uri.host == 'redeem') {
       // The shop builds these with encodeURIComponent, so the code arrives
-      // percent-encoded; `pathSegments` decodes it.
+      // percent-encoded and `pathSegments` decodes it.
       final segments = uri.pathSegments;
       final code = segments.isEmpty ? '' : segments.first;
       if (_redeemCodeRegex.hasMatch(code)) {
@@ -121,7 +111,7 @@ HollowLink? classifyHollowLink(String url) {
   if (uri.scheme == 'https' &&
       uri.host == 'hollow.anonlisten.com' &&
       uri.path == '/join') {
-    // Query first, then fragment on top — the fragment is canonical and wins.
+    // The fragment is canonical, so it goes on top of the query.
     final params = <String, String>{...uri.queryParameters};
     if (uri.fragment.isNotEmpty) {
       try {
@@ -156,14 +146,14 @@ HollowLink? classifyHollowLink(String url) {
   return null;
 }
 
-/// Resolve a pasted invite input — canonical `hollow://` link, web-form
-/// `https://hollow.anonlisten.com/join` link (`#fragment` canonical, `?query`
-/// tolerated), or a raw id — to the id it carries. Only a link of the wanted
-/// [type] is unwrapped (a conference link pasted into a server-join field is
-/// not silently treated as a server id); anything unrecognized falls back to
-/// the trimmed input so plain ids keep working. Every join/browse input bar
-/// must go through this instead of hand-parsing `Uri.queryParameters` — the
-/// web form carries its id in the FRAGMENT, which query parsing never sees.
+/// Resolves a pasted invite input, in any of its link forms or as a raw id, to
+/// the id it carries.
+///
+/// Only a link of the wanted [type] is unwrapped, so a conference link pasted
+/// into a server-join field is not silently read as a server id; anything else
+/// falls back to the trimmed input. EVERY join or browse input bar goes through
+/// this rather than hand-parsing `Uri.queryParameters`, which never sees the
+/// FRAGMENT the web form carries its id in.
 String inviteIdFromInput(String input, HollowLinkType type) {
   final trimmed = input.trim();
   final link = classifyHollowLink(trimmed);
@@ -180,8 +170,7 @@ List<HollowLink> extractHollowLinks(String text) {
       final url = match.group(0)!;
       final link = classifyHollowLink(url);
       if (link == null) continue;
-      // Dedup by canonical form so the same invite in hollow:// and web form
-      // renders one card.
+      // Dedup by canonical form, so one invite in two link forms is one card.
       if (!seen.add(link.fullUrl)) continue;
       results.add(link);
     }

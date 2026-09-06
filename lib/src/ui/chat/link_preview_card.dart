@@ -16,23 +16,16 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:video_player/video_player.dart';
 import 'package:visibility_detector/visibility_detector.dart';
 
-/// File extensions we will hand to a player. A social adapter is supposed to
-/// give us a direct media file; anything else (a watch page, a playlist, an
-/// embed URL) opens in the browser instead of being fed to the decoder.
+/// Extensions we will hand to a player. Anything else (a watch page, a
+/// playlist, an embed URL) opens in the browser rather than the decoder.
 const _kPlayableVideoExtensions = {'.mp4', '.webm', '.m4v', '.mov'};
 
-/// Whether [url] points at a direct video file we can actually play inline.
+/// Whether [url] points at a direct video file we can play inline.
 ///
-/// This is what separates X from YouTube, and the difference is the source,
-/// not the player: FxEmbed hands back a real `.mp4` on video.twimg.com, while
-/// YouTube has no direct URL at all — its player pulls signed, short-lived
-/// DASH segments, so inline playback would need a WebView or a
-/// signature-extraction library. TikTok's key-free oEmbed returns no media
-/// URL either.
-///
-/// Those hosts still set `video_url`, to the media PAGE rather than a file,
-/// so the card keeps its "there's a video here" affordance — this predicate
-/// is what turns that into "open the page" instead of "hand it to a decoder".
+/// The difference is the source, not the player: some adapters hand back a real
+/// `.mp4`, while YouTube and TikTok expose no direct URL at all. Those hosts
+/// still set `video_url` to the media PAGE, so the card keeps its "there is a
+/// video here" affordance and this predicate turns it into "open the page".
 bool isDirectPlayableVideo(String? url) {
   if (url == null || url.isEmpty) return false;
   final uri = Uri.tryParse(url);
@@ -45,32 +38,23 @@ bool isDirectPlayableVideo(String? url) {
 
 /// Rendered link preview card inside a chat bubble.
 ///
-/// Two layouts, chosen by the SENDER via `preview.kind` (issue #45):
+/// Two layouts chosen by the SENDER through `preview.kind` (issue #45): the
+/// compact row for a plain OpenGraph page, and the large card the social
+/// adapters emit, where the post's text IS the content.
 ///
-///  * **compact** (`kind == null`) — the original row: 80px thumb on the left,
-///    title, description clipped to 3 lines. What a plain OpenGraph page gets.
-///  * **large** (`kind == "large"`) — image across the top, fitted (never
-///    cropped, never stretched) into the card width by
-///    [_LinkPreviewCardState._maxMediaHeight], then site, author, and up to 6
-///    lines of body. What the social adapters emit, because a post's text IS
-///    the content and a 3-line clip throws most of it away.
-///
-/// **Rendering never touches the network.** Every byte of the card travelled
-/// with the message; receivers do not fetch the previewed URL to draw it.
+/// RENDERING NEVER TOUCHES THE NETWORK. Every byte of the card travelled with
+/// the message, and a receiver never fetches the previewed URL to draw it.
 /// That is a privacy property, not a cache optimization.
 ///
-/// Tapping PLAY on a post with a direct video is the one request this widget
-/// can make, and it is a deliberate exception: an explicit gesture, the same
-/// trust as clicking through to the link, and `video_url` is inside the v2
-/// signature so the button can only ever reach what the author's own client
-/// found. The domain stays visible next to it either way. Nothing autoplays.
-///
-/// Phase 6.75, extended for issue #45.
+/// Tapping PLAY is the one request this widget can make: an explicit gesture
+/// carrying the same trust as clicking the link, and `video_url` sits inside
+/// the v2 signature, so the button can only reach what the author's own client
+/// found. Nothing autoplays, and the domain stays visible either way.
 class LinkPreviewCard extends ConsumerStatefulWidget {
   final network_api.LinkPreviewRef preview;
 
-  /// Owning message id. Used only to key the single-playback slot, so the
-  /// same link posted twice doesn't leave two cards fighting over it.
+  /// Owning message id, used only to key the single-playback slot so the same
+  /// link posted twice does not leave two cards fighting over it.
   final String? messageId;
 
   const LinkPreviewCard({super.key, required this.preview, this.messageId});
@@ -86,12 +70,9 @@ class _LinkPreviewCardState extends ConsumerState<LinkPreviewCard> {
 
   /// Tallest the media area may be, whatever shape the source is.
   ///
-  /// Aspect alone does not bound a card: a 16:9 thumbnail across 400px is
-  /// 225px tall, but the SAME rule on a 9:16 reel poster is 700px, and the
-  /// bubble became a monolith you had to scroll past (Instagram, TikTok —
-  /// anything vertical). Landscape media still spans the card; portrait now
-  /// gives up width instead of taking height. Same fit rule the video bubble
-  /// uses in `_resolveDisplaySize`.
+  /// Aspect alone does not bound a card: the rule that makes a 16:9 thumbnail
+  /// 225px tall makes a 9:16 reel poster 700px, a monolith to scroll past. So
+  /// portrait media gives up width instead of taking height.
   static const double _maxMediaHeight = 360;
 
   VideoPlayerController? _controller;
@@ -112,9 +93,8 @@ class _LinkPreviewCardState extends ConsumerState<LinkPreviewCard> {
     super.dispose();
   }
 
-  /// Pause before disposing, and drop our reference first so a listener
-  /// firing mid-teardown can't touch a disposed controller. Mirrors
-  /// `_VideoMessageBubbleState._disposeController`.
+  /// Pauses before disposing and drops our reference first, so a listener
+  /// firing mid-teardown cannot touch a disposed controller.
   void _disposeController() {
     final c = _controller;
     _controller = null;
@@ -135,8 +115,8 @@ class _LinkPreviewCardState extends ConsumerState<LinkPreviewCard> {
     final uri = Uri.tryParse(url);
     if (uri == null) return;
 
-    // Claim the playback slot first: every other video/audio surface is
-    // listening and will stand down before we start decoding.
+    // Claim the playback slot first, so every other surface stands down before
+    // we start decoding.
     ref.read(currentlyPlayingVideoProvider.notifier).state = _playKey;
     setState(() => _videoState = _CardVideoState.preparing);
 
@@ -153,8 +133,8 @@ class _LinkPreviewCardState extends ConsumerState<LinkPreviewCard> {
       if (!mounted) return;
       setState(() => _videoState = _CardVideoState.playing);
     } catch (_) {
-      // Unreachable host, codec the backend won't take, dead CDN link: fall
-      // back to the browser rather than leaving a dead spinner on screen.
+      // Unreachable host, unsupported codec, dead CDN link: fall back to the
+      // browser rather than leave a dead spinner on screen.
       if (!mounted) return;
       setState(() => _videoState = _CardVideoState.poster);
       _handleTap();
@@ -173,7 +153,6 @@ class _LinkPreviewCardState extends ConsumerState<LinkPreviewCard> {
   Widget build(BuildContext context) {
     final hollow = Theme.of(context).extension<HollowTheme>()!;
 
-    // Stand down when another video, or any audio, takes the slot.
     ref.listen<String?>(currentlyPlayingVideoProvider, (prev, next) {
       if (next != _playKey && _videoState != _CardVideoState.poster) {
         _stopPlayback();
@@ -188,8 +167,8 @@ class _LinkPreviewCardState extends ConsumerState<LinkPreviewCard> {
     final card = ConstrainedBox(
       constraints: const BoxConstraints(maxWidth: _maxWidth),
       child: HollowPressable(
-        // While the video is up, the card must not also open the browser —
-        // taps belong to the player's own play/pause.
+        // While the video is up, taps belong to the player's play/pause, not to
+        // the card's open-in-browser.
         onTap: _videoState == _CardVideoState.poster ? _handleTap : null,
         borderRadius: BorderRadius.circular(hollow.radiusMd),
         padding: EdgeInsets.zero,
@@ -211,7 +190,6 @@ class _LinkPreviewCardState extends ConsumerState<LinkPreviewCard> {
       ),
     );
 
-    // Only cards that can actually play need visibility tracking.
     if (!_canPlayInline) return card;
     return VisibilityDetector(
       key: ValueKey('lp_card_$_playKey'),
@@ -219,8 +197,6 @@ class _LinkPreviewCardState extends ConsumerState<LinkPreviewCard> {
       child: card,
     );
   }
-
-  // ── Compact (plain OpenGraph) ─────────────────────────────────────────
 
   Widget _buildCompact(HollowTheme hollow) {
     return Padding(
@@ -256,8 +232,6 @@ class _LinkPreviewCardState extends ConsumerState<LinkPreviewCard> {
     );
   }
 
-  // ── Large (social post) ───────────────────────────────────────────────
-
   Widget _buildLarge(HollowTheme hollow) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -271,8 +245,8 @@ class _LinkPreviewCardState extends ConsumerState<LinkPreviewCard> {
             mainAxisSize: MainAxisSize.min,
             children: [
               _headerText(hollow),
-              // The author IS the title on an adapter card, so showing both
-              // would just print the same line twice.
+              // The author IS the title on an adapter card, so both would print
+              // the same line twice.
               if (preview.author != null && preview.author!.isNotEmpty)
                 Padding(
                   padding: const EdgeInsets.only(bottom: 2),
@@ -295,7 +269,7 @@ class _LinkPreviewCardState extends ConsumerState<LinkPreviewCard> {
                     color: hollow.textSecondary,
                     height: 1.35,
                   ),
-                  // Six, not three: a post's body is the point of the card.
+                  // A post's body is the point of the card.
                   maxLines: 6,
                   overflow: TextOverflow.ellipsis,
                 ),
@@ -307,32 +281,24 @@ class _LinkPreviewCardState extends ConsumerState<LinkPreviewCard> {
   }
 
   /// Media area: the poster at the sender's aspect ratio, FITTED into the card
-  /// rather than stretched across it, and — for a post carrying a direct video
-  /// — the inline player once tapped.
+  /// rather than stretched across it, plus the inline player once tapped.
   ///
-  /// The fit is the whole point (see [_maxMediaHeight]): whichever dimension
-  /// would overflow is the one that gives, so a landscape thumbnail still
-  /// spans the card and a portrait one narrows and centres. Nothing is
-  /// cropped — the box matches the source aspect, so `BoxFit.cover` has
-  /// nothing to cut.
-  ///
-  /// A post whose `video_url` is not a direct file (YouTube, TikTok) still
-  /// gets a play badge, but tapping it opens the browser. See
-  /// [isDirectPlayableVideo] for why that distinction is about the source
-  /// rather than the player.
+  /// Whichever dimension would overflow is the one that gives (see
+  /// [_maxMediaHeight]), and the box matches the source aspect, so nothing is
+  /// cropped. A post whose `video_url` is not a direct file still gets a play
+  /// badge, but tapping it opens the browser ([isDirectPlayableVideo]).
   Widget _buildWideImage(HollowTheme hollow) {
     final bytes = _thumbBytes();
     if (bytes == null) {
-      // No image: a play row would have nothing to sit on, so the header
-      // inside the body block carries the card on its own.
+      // With no image a play row has nothing to sit on, so the body block's
+      // header carries the card alone.
       return const SizedBox.shrink();
     }
 
     final w = preview.thumbW;
     final h = preview.thumbH;
-    // Clamp extremes. Height is bounded by _maxMediaHeight now, so what this
-    // still buys is a floor on WIDTH: an unclamped 1:8 sliver would render
-    // 45px wide once contained, which is not a preview of anything.
+    // A floor on WIDTH: an unclamped 1:8 sliver renders 45px wide once
+    // contained, which is not a preview of anything.
     final ratio = (w != null && h != null && w > 0 && h > 0)
         ? (w / h).clamp(0.6, 2.4).toDouble()
         : 16 / 9;
@@ -348,13 +314,11 @@ class _LinkPreviewCardState extends ConsumerState<LinkPreviewCard> {
     final hasVideo = preview.videoUrl != null && preview.videoUrl!.isNotEmpty;
     return LayoutBuilder(
       builder: (context, constraints) {
-        // Unbounded width would make `cardWidth` infinite and the fit
-        // meaningless; fall back to the card's own cap.
+        // Unbounded width makes `cardWidth` infinite and the fit meaningless.
         final cardWidth = constraints.maxWidth.isFinite
             ? constraints.maxWidth
             : _maxWidth;
         final inset = HollowSpacing.sm * 2;
-        // Contain: whichever dimension would overflow is the one that gives.
         // A narrowed poster is inset, so it competes for slightly less width.
         final tall = ratio < cardWidth / _maxMediaHeight;
         final width = tall
@@ -366,12 +330,10 @@ class _LinkPreviewCardState extends ConsumerState<LinkPreviewCard> {
           child: hasVideo ? _buildVideoArea(hollow, image) : image,
         );
 
-        // Full-width media bleeds to the card edges and inherits its rounding.
         if (!tall) return media;
 
-        // A narrowed poster would otherwise sit square-cornered and flush
-        // against the card's rounded top, reading like a clipping bug rather
-        // than a deliberate fit. Inset and round it instead.
+        // Square-cornered and flush against the card's rounded top, a narrowed
+        // poster reads as a clipping bug rather than a deliberate fit.
         return Padding(
           padding: const EdgeInsets.fromLTRB(
             HollowSpacing.sm, HollowSpacing.sm, HollowSpacing.sm, 0,
@@ -387,9 +349,8 @@ class _LinkPreviewCardState extends ConsumerState<LinkPreviewCard> {
     );
   }
 
-  /// The media area's contents for a post that carries a video: poster with a
-  /// play affordance, the spinner while the controller warms up, then the
-  /// player itself. Sized by the caller.
+  /// The media area for a post carrying a video: poster, spinner while the
+  /// controller warms up, then the player. Sized by the caller.
   Widget _buildVideoArea(HollowTheme hollow, Widget image) {
     return switch (_videoState) {
       _CardVideoState.poster => _buildPoster(hollow, image),
@@ -413,22 +374,18 @@ class _LinkPreviewCardState extends ConsumerState<LinkPreviewCard> {
       _CardVideoState.playing => InlineVideoPlayer(
           controller: _controller!,
           hollow: hollow,
-          // No fullscreen: that viewer takes a disk path, and this is a
-          // remote URL we deliberately never download.
+          // No fullscreen: that viewer takes a disk path, and this remote URL
+          // is deliberately never downloaded.
         ),
     };
   }
 
-  /// Poster with the play button. Inline-capable posts start the player;
+  /// Poster with the play button. Inline-capable posts start the player and
   /// everything else hands off to the browser.
   ///
-  /// The WHOLE poster is the hit target, not just the glyph. A 42px circle
-  /// floating in a 400px-wide image is a dart-throw, and missing it fell
-  /// through to the card's own tap and threw you out to the browser — the
-  /// most annoying possible failure for "I wanted to watch this here". The
-  /// glyph is now pure decoration; the tap surface is the image. Same shape
-  /// as `InlineVideoPlayer`, which makes its whole frame the play/pause
-  /// target rather than a small button.
+  /// The WHOLE poster is the hit target and the glyph is decoration: missing a
+  /// 42px circle falls through to the card's own tap and throws the reader out
+  /// to the browser. `InlineVideoPlayer` uses the same shape.
   Widget _buildPoster(HollowTheme hollow, Widget image) {
     final inline = _canPlayInline;
     return Semantics(
@@ -437,8 +394,7 @@ class _LinkPreviewCardState extends ConsumerState<LinkPreviewCard> {
           ? 'Play video from ${preview.domain}'
           : 'Open video on ${preview.domain}',
       child: GestureDetector(
-        // Opaque: the poster swallows the tap so it never reaches the card's
-        // open-in-browser handler underneath.
+        // Opaque, so the tap never reaches the card's open-in-browser handler.
         behavior: HitTestBehavior.opaque,
         onTap: inline ? _startPlayback : _handleTap,
         child: Stack(
@@ -449,7 +405,7 @@ class _LinkPreviewCardState extends ConsumerState<LinkPreviewCard> {
               child: ExcludeSemantics(
                 child: Container(
                   decoration: BoxDecoration(
-                    // Scrim so the glyph stays readable over a bright poster.
+                    // Scrim, or the glyph vanishes on a bright poster.
                     color: Colors.black.withValues(alpha: 0.45),
                     shape: BoxShape.circle,
                   ),
@@ -467,8 +423,6 @@ class _LinkPreviewCardState extends ConsumerState<LinkPreviewCard> {
       ),
     );
   }
-
-  // ── Shared pieces ─────────────────────────────────────────────────────
 
   Widget _headerText(HollowTheme hollow) {
     final header = _headerLine();
@@ -500,10 +454,9 @@ class _LinkPreviewCardState extends ConsumerState<LinkPreviewCard> {
     );
   }
 
-  /// Decoded-thumbnail cache keyed by the base64 payload. Decoding per build
-  /// minted a NEW byte buffer each time, so `MemoryImage` never matched
-  /// Flutter's image cache and the WebP was re-decoded on every rebuild.
-  /// A stable byte identity makes the ImageCache hit.
+  /// Decoded-thumbnail cache keyed by the base64 payload. A fresh buffer per
+  /// build never matches `MemoryImage` in Flutter's image cache, so the WebP is
+  /// re-decoded every rebuild; a stable byte identity makes the cache hit.
   static final Map<String, Uint8List> _thumbBytesCache = {};
 
   Uint8List? _thumbBytes() {
@@ -535,9 +488,8 @@ class _LinkPreviewCardState extends ConsumerState<LinkPreviewCard> {
     );
   }
 
-  /// Header line: "Site Name · domain", or just "domain" if no site name.
-  /// The domain always shows, on both layouts — a card whose text and image
-  /// came from a post still has to say plainly where tapping it goes.
+  /// Header line: "Site Name · domain", or just the domain. The domain always
+  /// shows, on both layouts, so the card says where tapping it goes.
   String _headerLine() {
     if (preview.siteName.isNotEmpty && preview.siteName != preview.domain) {
       return preview.domain.isNotEmpty
@@ -551,10 +503,9 @@ class _LinkPreviewCardState extends ConsumerState<LinkPreviewCard> {
     final uri = Uri.tryParse(preview.url);
     if (uri == null) return;
     try {
-      // mode: externalApplication opens in the default browser on desktop.
       await launchUrl(uri, mode: LaunchMode.externalApplication);
     } catch (_) {
-      // Silently swallow — user can still copy-paste the URL manually.
+      // Swallowed: the URL is still there to copy by hand.
     }
   }
 }

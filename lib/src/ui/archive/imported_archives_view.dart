@@ -44,8 +44,8 @@ class ImportedArchivesView extends ConsumerWidget {
           width: 280,
           child: Container(
             decoration: BoxDecoration(
-              // Transparency-aware (same fix as the guest sidebar, #44) —
-              // opaqueBackground is for fixed chrome bars only.
+              // Transparency-aware (#44): opaqueBackground is for fixed chrome
+              // bars only.
               color: hollow.surface,
               border: Border(right: BorderSide(color: hollow.border)),
             ),
@@ -58,8 +58,6 @@ class ImportedArchivesView extends ConsumerWidget {
   }
 }
 
-// ── Left Panel: Archive list ────────────────────────────────────
-
 class _ImportedArchiveList extends ConsumerStatefulWidget {
   const _ImportedArchiveList();
 
@@ -70,19 +68,16 @@ class _ImportedArchiveList extends ConsumerStatefulWidget {
 
 class _ImportedArchiveListState extends ConsumerState<_ImportedArchiveList> {
   bool _dragging = false;
-  // Gates the Load button AND drag-drop while verifyArchive runs (Ed25519
-  // over the whole archive — seconds for a large one); a re-drop mid-verify
-  // would otherwise double-fire with zero feedback.
+  // Gates the Load button AND drag-drop while verifyArchive runs, which takes
+  // seconds on a large archive; a re-drop mid-verify double-fires silently.
   bool _loading = false;
 
   Future<void> _loadArchive(String path) async {
     if (_loading) return;
     setState(() => _loading = true);
     try {
-      // Quick verify first.
       await archive_api.verifyArchive(archivePath: path);
       await ref.read(importedArchivePathsProvider.notifier).addPath(path);
-      // Invalidate the verify provider so it re-fetches.
       ref.invalidate(importedArchiveVerifyProvider(path));
       if (mounted) {
         HollowToast.show(context, 'Archive loaded',
@@ -129,7 +124,6 @@ class _ImportedArchiveListState extends ConsumerState<_ImportedArchiveList> {
 
     return Column(
       children: [
-        // ── Load button ──
         Padding(
           padding: const EdgeInsets.all(HollowSpacing.md),
           child: HollowPressable(
@@ -173,7 +167,6 @@ class _ImportedArchiveListState extends ConsumerState<_ImportedArchiveList> {
           ),
         ),
 
-        // ── Archive list with drag-drop ──
         Expanded(
           child: _wrapDropTarget(
             child: Stack(
@@ -232,7 +225,6 @@ class _ImportedArchiveListState extends ConsumerState<_ImportedArchiveList> {
                   },
                 ),
 
-                // Drag overlay
                 if (_dragging)
                   Positioned.fill(
                     child: Container(
@@ -284,8 +276,6 @@ class _ImportedArchiveListState extends ConsumerState<_ImportedArchiveList> {
   }
 }
 
-// ── Archive entry card ──────────────────────────────────────────
-
 class _ArchiveEntryCard extends ConsumerWidget {
   final String path;
   final bool isSelected;
@@ -305,9 +295,9 @@ class _ArchiveEntryCard extends ConsumerWidget {
           ref.read(selectedImportedArchiveProvider.notifier).state = path;
         },
         borderRadius: BorderRadius.circular(hollow.radiusSm),
-        // Selection bg lives ON the pressable so it fills the exact same
-        // rounded rect the hover highlight paints — an inner Container was
-        // inset by the pressable padding and read as a mismatched outline.
+        // The selection fill lives ON the pressable so it covers the same
+        // rounded rect the hover highlight paints; an inner Container is inset
+        // by the pressable's padding and reads as a mismatched outline.
         backgroundColor:
             isSelected ? hollow.accent.withValues(alpha: 0.12) : null,
         padding: const EdgeInsets.symmetric(
@@ -368,7 +358,6 @@ class _ArchiveEntryCard extends ConsumerWidget {
                       ? LucideIcons.server
                       : LucideIcons.hash;
 
-              // Resolve display name for DMs, channel name for channels, or server name.
               final peerProfile = ref.watch(profileProvider.select(
                   (p) => result.peerId != null ? p[result.peerId!] : null));
               final servers = ref.watch(serverListProvider);
@@ -484,8 +473,6 @@ class _ArchiveEntryCard extends ConsumerWidget {
   }
 }
 
-// ── Right Panel: POV Viewer ─────────────────────────────────────
-
 class _ImportedArchiveViewer extends ConsumerWidget {
   const _ImportedArchiveViewer();
 
@@ -545,7 +532,6 @@ class _ArchivePovViewerState extends ConsumerState<_ArchivePovViewer> {
   @override
   void initState() {
     super.initState();
-    // Reset shared state for the new archive.
     WidgetsBinding.instance.addPostFrameCallback((_) {
       ref.read(archiveFilterSenderProvider.notifier).state = null;
       ref.read(archiveMessageSearchOpenProvider.notifier).state = false;
@@ -590,7 +576,6 @@ class _ArchivePovViewerState extends ConsumerState<_ArchivePovViewer> {
 
     return Column(
       children: [
-        // ── Verification banner ──
         ArchiveVerificationBanner(
           archiveSigValid: prep.archiveSigValid,
           archiveSigText: prep.archiveSigText,
@@ -598,7 +583,6 @@ class _ArchivePovViewerState extends ConsumerState<_ArchivePovViewer> {
           msgSigText: prep.msgSigText,
         ),
 
-        // ── Channel selector for server archives ──
         if (prep.isServer && data.channels.length > 1)
           ArchiveChannelSelector(
             channels: data.channels,
@@ -606,14 +590,12 @@ class _ArchivePovViewerState extends ConsumerState<_ArchivePovViewer> {
             onChannelSelected: (channelId) {
               ref.read(importedArchiveSelectedChannelProvider.notifier).state =
                   channelId;
-              // Reset filter/search when switching channels.
               ref.read(archiveFilterSenderProvider.notifier).state = null;
               ref.read(archiveMessageSearchQueryProvider.notifier).state = '';
               ref.read(archiveSearchMatchIndexProvider.notifier).state = 0;
             },
           ),
 
-        // ── Header with toolbar ──
         ArchiveToolbar(
           leading: headerLeading,
           title: prep.headerTitle,
@@ -666,7 +648,6 @@ class _ArchivePovViewerState extends ConsumerState<_ArchivePovViewer> {
           },
         ),
 
-        // ── Messages ──
         Expanded(
           child: isDm
               ? _ImportedDmMessageList(
@@ -691,8 +672,6 @@ class _ArchivePovViewerState extends ConsumerState<_ArchivePovViewer> {
     );
   }
 }
-
-// ── Imported DM Message List ────────────────────────────────────
 
 class _ImportedDmMessageList extends ConsumerStatefulWidget {
   final List<ChatMessage> messages;
@@ -847,8 +826,6 @@ class _ImportedDmMessageListState
     }
   }
 }
-
-// ── Imported Channel Message List ───────────────────────────────
 
 class _ImportedChannelMessageList extends ConsumerStatefulWidget {
   final List<ChannelChatMessage> messages;

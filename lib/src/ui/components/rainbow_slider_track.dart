@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 
-/// Custom slider track that renders a rainbow hue gradient (0°-360°).
-/// Used by the accent color picker on both desktop and mobile.
+/// Slider track rendering a full hue gradient, for the accent colour picker.
 class RainbowSliderTrackShape extends SliderTrackShape {
   @override
   Rect getPreferredRect({

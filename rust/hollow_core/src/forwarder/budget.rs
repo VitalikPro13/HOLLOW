@@ -1,12 +1,8 @@
-//! Pure admission + budget policy for the media forwarder.
+//! Pure admission + budget policy for the media forwarder: plain functions over
+//! plain arguments, so the policy is unit-testable without any I/O.
 //!
-//! Everything here is a pure function over plain arguments so the policy is
-//! unit-testable without any I/O (the media plane itself is outside harness
-//! scope by doctrine — D6 field verification covers it).
-//!
-//! Iron rule (locked decision 5): the budget REFUSES NEW work — new streams,
-//! new legs — with explicit `FwdError` codes. It NEVER evicts or degrades an
-//! existing leg.
+//! Iron rule: the budget REFUSES NEW work, new streams and new legs, with explicit
+//! `FwdError` codes. It NEVER evicts or degrades an existing leg.
 
 use std::time::{Duration, Instant};
 
@@ -17,8 +13,8 @@ pub(crate) enum FwdErrorCode {
     Full,
     /// The global egress bandwidth budget is exhausted.
     OverBudget,
-    /// Sender isn't allowed to do that (spoofed origin, not the stream owner,
-    /// viewer not on the allowlist).
+    /// Sender is not allowed to do that (spoofed origin, not the owner, not on the
+    /// allowlist).
     NotAuthorized,
     /// The referenced stream isn't registered.
     UnknownStream,
@@ -48,8 +44,8 @@ pub(crate) struct BudgetCfg {
     pub max_egress_bps: u64,
 }
 
-/// Kill legs that never reached ICE `Connected` after this long (DoS bound:
-/// an attacker registering streams and never connecting must not pin ports).
+/// Kill legs that never reached ICE `Connected` after this long: an attacker
+/// registering streams and never connecting must not pin ports.
 pub(crate) const UNCONNECTED_LEG_TTL: Duration = Duration::from_secs(60);
 
 /// May `sender` register one more stream?
@@ -69,9 +65,8 @@ pub(crate) fn can_register(
 
 /// May one more egress leg attach to a stream?
 ///
-/// `current_egress_bps` is the forwarder-wide egress estimate; admission
-/// refuses NEW legs once the budget is exhausted but never touches existing
-/// ones (a stream mid-flight pushing past the cap keeps flowing).
+/// `current_egress_bps` is the forwarder-wide estimate; admission refuses NEW legs
+/// once the budget is exhausted but never touches existing ones.
 pub(crate) fn can_attach(
     stream_leg_count: u32,
     current_egress_bps: u64,

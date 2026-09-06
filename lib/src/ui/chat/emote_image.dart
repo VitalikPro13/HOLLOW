@@ -6,14 +6,14 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/providers/emote_provider.dart';
 import '../../theme/hollow_theme.dart';
 
-/// Where to pull unknown emote bytes from — chat panes wrap their message
-/// area in an [EmoteScope] so every token/reaction below (bubbles, reaction
-/// bars, pinned overlays) knows its pull source without threading params.
+/// Where to pull unknown emote bytes from. Chat panes wrap their message area
+/// in one, so every token and reaction below knows its pull source without
+/// threading parameters.
 class EmoteScope extends InheritedWidget {
-  /// Server room to ask (channel context).
+  /// Server room to ask, in a channel.
   final String? serverId;
 
-  /// DM counterpart master id to ask (DM context).
+  /// DM counterpart master id to ask, in a DM.
   final String? peerHint;
 
   const EmoteScope({
@@ -31,16 +31,14 @@ class EmoteScope extends InheritedWidget {
       serverId != oldWidget.serverId || peerHint != oldWidget.peerHint;
 }
 
-/// Inline custom-emote image, keyed by content hash. Renders the cached WebP
-/// (animated WebP animates natively); while the bytes are missing it shows
-/// the `:name:` text fallback and fires a once-per-session network pull via
-/// the surrounding [EmoteScope].
+/// Inline custom-emote image, keyed by content hash. Missing bytes render the
+/// `:name:` text fallback and fire a once-per-session pull through the
+/// surrounding [EmoteScope].
 class EmoteImage extends ConsumerWidget {
   final String name;
   final String hash;
   final double size;
 
-  /// Style for the `:name:` fallback while bytes are loading.
   final TextStyle? fallbackStyle;
 
   const EmoteImage({
@@ -106,9 +104,8 @@ String emoteTokensToShortcodes(String text) => text
         assetTokenRegex, (m) => m.group(1) == 'g' ? '[GIF]' : '[Sticker]');
 
 /// Grammar shared with Rust (`node/emotes.rs::parse_asset_token`):
-/// `[a:kind:hash:w:h]`, kind = `s` (sticker) | `g` (GIF), hash = 64 hex,
-/// w/h = pixel dimensions 1..=4096 (the regex admits up to 9999 — the
-/// parser enforces the 4096 bound). Keep in sync with the Rust side.
+/// `[a:kind:hash:w:h]`, kind `s` or `g`, hash 64 hex, w/h 1..=4096. The regex
+/// admits up to 9999 and the parser enforces the bound. Keep both in sync.
 final assetTokenRegex = RegExp(
     r'\[a:(s|g):([0-9a-f]{64}):([1-9][0-9]{0,3}):([1-9][0-9]{0,3})\]');
 
@@ -122,18 +119,16 @@ final assetTokenRegex = RegExp(
   return (kind: m.group(1)!, hash: m.group(2)!, w: w, h: h);
 }
 
-/// Chat media box for a block-rendered asset: fit inside [maxW]x[maxH]
-/// preserving the aspect, and NEVER upscale past the asset's own pixels.
-/// Same rule (and same numbers) as image attachments — see
-/// `file_attachment_widget._buildImagePreview`, 300x250.
+/// Chat media box for a block-rendered asset: fits inside [maxW]x[maxH] at the
+/// source aspect and NEVER upscales past the asset's own pixels, the same rule
+/// and numbers as image attachments.
 Size fitAssetBox(int srcW, int srcH,
     {required double maxW, required double maxH}) {
   if (srcW <= 0 || srcH <= 0) return Size(maxW, maxH);
   final aspect = srcW / srcH;
   var w = math.min(maxW, srcW.toDouble());
   var h = w / aspect;
-  // w <= srcW, so h <= srcH here: clamping height can only shrink further,
-  // never upscale.
+  // w <= srcW here, so clamping height can only shrink further.
   if (h > maxH) {
     h = maxH;
     w = h * aspect;
@@ -144,22 +139,17 @@ Size fitAssetBox(int srcW, int srcH,
 /// Longest side a chat sticker is drawn at when it stands alone.
 const double kStickerChatBox = 160;
 
-/// The chat media caps for each asset kind — GIFs match image attachments so
-/// a GIF-with-caption reads exactly like a photo-with-caption.
+/// The chat media caps per asset kind. GIFs match image attachments, so a GIF
+/// with a caption reads like a photo with a caption.
 Size assetChatBox(String kind, int srcW, int srcH) => kind == 'g'
     ? fitAssetBox(srcW, srcH, maxW: 300, maxH: 250)
     : fitAssetBox(srcW, srcH, maxW: kStickerChatBox, maxH: kStickerChatBox);
 
-/// One asset parsed out of an `[a:kind:hash:w:h]` token.
 typedef ChatAsset = ({String kind, String hash, int w, int h});
 
-/// Corner rounding for one sticker in a VERTICAL run — consecutive
-/// sticker-only messages that tile into each other. Only the run's outer
-/// edges are rounded; a rounded corner at a seam would carve a notch out of
-/// the tiling exactly where it is supposed to vanish.
-///
-/// Horizontal runs are gone (issue #36, one sticker per message), so the only
-/// seams left are the ones between messages.
+/// Corner rounding for one sticker in a VERTICAL run of tiled sticker-only
+/// messages. Only the run's outer edges round: a rounded corner at a seam
+/// carves a notch exactly where the join should vanish.
 BorderRadius stickerRunRadius({
   required bool tileTop,
   required bool tileBottom,
@@ -174,14 +164,10 @@ BorderRadius stickerRunRadius({
   );
 }
 
-/// One asset token drawn as a block at its chat media box.
-///
-/// Stickers are capped at ONE per message (issue #36), so there is no
-/// horizontal run and nothing ever shrinks to make room for a neighbour: a
-/// sticker is always drawn at [kStickerChatBox], a GIF at the photo box.
-/// [tileTop]/[tileBottom] say the neighbouring MESSAGE continues a vertical
-/// sticker run, which squares the seam corners and bleeds the media across
-/// the join (see [_seamBleed]).
+/// One asset token drawn as a block at its chat media box (issue #36, one per
+/// message, so nothing shrinks for a neighbour). [tileTop] and [tileBottom] say
+/// the neighbouring MESSAGE continues a vertical sticker run, which squares the
+/// seam corners and bleeds the media across the join (see [_seamBleed]).
 class ChatAssetBlock extends StatelessWidget {
   final ChatAsset asset;
   final bool tileTop;
@@ -194,26 +180,14 @@ class ChatAssetBlock extends StatelessWidget {
     this.tileBottom = false,
   });
 
-  /// How far the media overruns its layout box on a tiled edge, in this
-  /// subtree's logical pixels — exactly ONE device pixel.
+  /// How far the media overruns its layout box on a tiled edge: exactly ONE
+  /// device pixel, in this subtree's logical pixels.
   ///
-  /// Two tiles that abut *exactly* still show a seam, and that is not a
-  /// layout bug: each rounded-clip edge is antialiased, so where they meet
-  /// the compositor gives `1-αβ` coverage rather than 1, leaving up to 25%
-  /// of the background showing through. Whether it shows at all depends on
-  /// where the shared edge lands within a device pixel, which is why the line
-  /// appeared at 105%, vanished at 115% and came back at 125% — at some zooms
-  /// the edge lands on a pixel boundary (α=0) and at others dead centre
-  /// (α=0.5, worst case).
-  ///
-  /// Overlapping by a full device pixel puts that antialiased edge INSIDE the
-  /// neighbour's opaque body instead of against the background, so it
-  /// composites to solid at every zoom. The cost is ~0.6% of vertical stretch
-  /// on a 160px sticker, across artwork that is continuous by construction.
-  ///
-  /// `devicePixelRatioOf` is the right measure at any zoom because
-  /// `UiScaleBox` folds the zoom factor INTO the ratio it publishes — one of
-  /// our logical pixels really does cover `dpr * scale` device pixels here.
+  /// Two tiles that abut exactly still show a seam, because each rounded-clip
+  /// edge is antialiased and the compositor leaves background showing at some
+  /// zooms. A device pixel of overlap puts that edge inside the neighbour's
+  /// opaque body. `devicePixelRatioOf` is the right measure because `UiScaleBox`
+  /// folds the zoom factor into the ratio it publishes.
   static double _seamBleed(BuildContext context) =>
       1.0 / MediaQuery.devicePixelRatioOf(context);
 
@@ -237,8 +211,7 @@ class ChatAssetBlock extends StatelessWidget {
     final overTop = tileTop ? bleed : 0.0;
     final overBottom = tileBottom ? bleed : 0.0;
 
-    // The LAYOUT box is untouched — only the paint overruns — so the rows
-    // above and below keep their exact positions and nothing reflows.
+    // Only the paint overruns; the LAYOUT box is untouched, so no row moves.
     return SizedBox(
       width: box.width,
       height: box.height,
@@ -256,27 +229,24 @@ class ChatAssetBlock extends StatelessWidget {
   }
 }
 
-/// Renders a generalized asset token (sticker/GIF) from the content-addressed
-/// blob cache. The token's w/h reserve the EXACT final box before bytes
-/// arrive — a sized placeholder flips to the image with zero reflow.
+/// Renders an asset token from the content-addressed blob cache. The token's
+/// w/h reserve the EXACT final box before bytes arrive, so the placeholder
+/// flips to the image with no reflow.
 class ChatAssetImage extends ConsumerWidget {
-  /// Token kind: 's' (sticker) or 'g' (GIF).
+  /// 's' for a sticker, 'g' for a GIF.
   final String kind;
   final String hash;
 
-  /// w/h aspect ratio from the token.
   final double aspect;
 
-  /// Exact display height.
   final double height;
 
-  /// Exact display width. Null = inline mode: the width follows [aspect],
-  /// clamped at 4:1 so a wide asset can't swallow the line. Block callers
-  /// pass a box from [assetChatBox].
+  /// Null means inline mode, where the width follows [aspect] clamped at 4:1 so
+  /// a wide asset cannot swallow the line. Block callers pass [assetChatBox].
   final double? width;
 
-  /// Corner rounding. [ChatAssetBlock] squares the edges that sit against a
-  /// tiled neighbouring message so the seam stays invisible.
+  /// [ChatAssetBlock] squares the edges against a tiled neighbouring message,
+  /// so the seam stays invisible.
   final BorderRadius? borderRadius;
 
   const ChatAssetImage({
@@ -291,7 +261,6 @@ class ChatAssetImage extends ConsumerWidget {
 
   String get _label => kind == 'g' ? 'GIF' : 'sticker';
 
-  /// The db/request kind string for the pull path.
   String get _dbKind => kind == 'g' ? 'gif' : 'sticker';
 
   @override
@@ -341,10 +310,8 @@ class ChatAssetImage extends ConsumerWidget {
       child: content,
     );
 
-    // The two states have to READ differently, for a screen reader and for
-    // the probe alike: "GIF" is a picture that arrived, "GIF loading" is a
-    // reserved box still waiting on the asset rail. One label for both said
-    // a placeholder was the picture.
+    // The two states must READ differently for a screen reader and the probe
+    // alike: one label for both says a placeholder is the picture.
     return Semantics(
       image: bytes != null,
       label: bytes == null ? '$_label loading' : _label,
@@ -353,11 +320,9 @@ class ChatAssetImage extends ConsumerWidget {
   }
 }
 
-/// Inline spans for one-line message previews (notification cards/banners):
-/// plain text with each emote token swapped for an [EmoteImage] and each
-/// asset token (GIF/sticker) for a line-sized [ChatAssetImage]. Chat bubbles
-/// use the full message parser instead — this is for surfaces that would
-/// otherwise print the raw token.
+/// Inline spans for one-line message previews, with each emote and asset token
+/// swapped for a line-sized image. For surfaces that would otherwise print the
+/// raw token; chat bubbles use the full message parser.
 List<InlineSpan> emotePreviewSpans(String text, TextStyle style) {
   final spans = <InlineSpan>[];
   final matches = [
@@ -394,7 +359,7 @@ List<InlineSpan> emotePreviewSpans(String text, TextStyle style) {
         ),
       ));
     } else {
-      // Regex-matched but parse-rejected (out-of-range dims): raw text.
+      // Regex-matched but parse-rejected (out-of-range dims).
       spans.add(TextSpan(text: token));
     }
     last = m.end;

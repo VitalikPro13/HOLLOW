@@ -13,25 +13,22 @@ pub(crate) enum CrdtStoreCmd {
     SaveStateSnapshot { server_id: String, state: Box<crate::crdt::server_state::ServerState> },
     SaveBlob { server_id: String, key: String, value: String },
     DeleteServer(String),
-    /// Insert-or-replace one parked-join row (pending joins, rung 1). Goes
-    /// through the actor for the same reason every other CRDT write does: the
-    /// join handler runs ON the event loop, and `MessageStore::open` there is
-    /// a fresh SQLCipher handle + full schema re-parse under a file lock.
+    /// Insert-or-replace one parked-join row (pending joins, rung 1). Through
+    /// the actor for the same reason every other CRDT write is: the join handler
+    /// runs ON the event loop, and `MessageStore::open` there is a fresh handle.
     UpsertPendingJoin(Box<crate::storage::messages::PendingJoinRow>),
     DeletePendingJoin(String),
     PruneOps(usize),
-    /// READ-ONLY: newest stored message timestamp (ms) per channel, for the
-    /// relay catch-up window. Answered on the actor's long-lived connection so
-    /// the caller never opens a transient SQLCipher handle — see
-    /// `channel_watermarks`.
+    /// READ-ONLY: newest stored message timestamp (ms) per channel, for the relay
+    /// catch-up window. Answered on the actor's long-lived connection so the
+    /// caller never opens a transient SQLCipher handle.
     ChannelWatermarks {
         server_id: String,
         channel_ids: Vec<String>,
         reply: tokio::sync::oneshot::Sender<HashMap<String, i64>>,
     },
     /// READ-ONLY: one parked-join row, for the "Request again" action. Answered
-    /// on the actor's connection for the same reason the watermark read is: the
-    /// caller is the swarm event loop and must not open a SQLCipher handle.
+    /// on the actor's connection: the caller is the swarm event loop.
     LoadPendingJoin {
         server_id: String,
         reply: tokio::sync::oneshot::Sender<Option<crate::storage::messages::PendingJoinRow>>,
@@ -48,11 +45,8 @@ enum PendingState {
 /// A fire-and-forget persistence actor for CRDT state.
 ///
 /// Owns a `rusqlite::Connection` (which is `!Send`) inside a `spawn_blocking`
-/// task.  The swarm task sends save commands via an mpsc channel.
-/// Uses batch-drain: `blocking_recv()` waits for the first command, then
-/// `try_recv()` drains remaining queued commands.  After draining, only the
-/// LATEST `SaveState` per `server_id` is flushed — naturally batching many
-/// CRDT ops into one DB write per server.
+/// task. After each batch drain only the LATEST `SaveState` per `server_id` is
+/// flushed, which batches many CRDT ops into one DB write per server.
 pub(crate) struct CrdtStore {
     cmd_tx: mpsc::UnboundedSender<CrdtStoreCmd>,
 }
@@ -78,14 +72,11 @@ impl CrdtStore {
             while let Some(cmd) = cmd_rx.blocking_recv() {
                 backlog.observe(cmd_rx.len());
 
-                // Collect the whole drain FIRST, then split reads from writes.
-                // Read-only commands are answered OUTSIDE the transaction:
-                // `begin_transaction` is `BEGIN IMMEDIATE`, i.e. a RESERVED
-                // write lock, and on iOS the DB lives in the App Group
-                // container where being suspended while holding a lock is
-                // exactly what RunningBoard kills the process for
-                // (EXC_CRASH 0xdead10cc). A batch that is all reads never
-                // opens a transaction at all.
+                // Collect the whole drain FIRST, then split reads from writes:
+                // `begin_transaction` is BEGIN IMMEDIATE, a RESERVED write lock,
+                // and on iOS the DB is in the App Group container where being
+                // suspended holding a lock is what RunningBoard kills the process
+                // for (EXC_CRASH 0xdead10cc). An all-read batch opens none.
                 let mut writes = Vec::new();
                 let mut queued = Some(cmd);
                 loop {
@@ -127,8 +118,7 @@ impl CrdtStore {
                     Self::process_cmd(&store, cmd, &mut pending_states, &mut pending_blobs);
                 }
 
-                // Flush batched state saves (one write per server; snapshots
-                // serialize HERE — once per drain, on this blocking thread)
+                // One write per server; snapshots serialize HERE, on this thread.
                 for (sid, pending) in pending_states.drain() {
                     let json = match pending {
                         PendingState::Json(j) => j,
@@ -170,7 +160,6 @@ impl CrdtStore {
                 }
             }
             CrdtStoreCmd::SaveState { server_id, state_json } => {
-                // Keep only the latest state per server (batch)
                 pending_states.insert(server_id, PendingState::Json(state_json));
             }
             CrdtStoreCmd::SaveStateSnapshot { server_id, state } => {
@@ -215,8 +204,7 @@ impl CrdtStore {
 
     /// Fire-and-forget: persist the latest server state from a lean snapshot,
     /// serializing on the actor thread at drain time. Prefer this on per-op
-    /// paths — the event loop pays a cheap clone instead of a full JSON
-    /// serialize (which embeds the server avatar) per op.
+    /// paths: the event loop pays a clone instead of a full JSON serialize.
     pub fn save_state_snapshot(&self, server_id: String, state: &crate::crdt::server_state::ServerState) {
         let _ = self.cmd_tx.send(CrdtStoreCmd::SaveStateSnapshot {
             server_id,
@@ -269,19 +257,12 @@ impl CrdtStore {
     }
 
     /// Newest stored message timestamp (ms) per channel, for every channel in
-    /// `channel_ids` that has one. Channels with no messages are simply absent
-    /// from the map.
+    /// `channel_ids` that has one; channels with no messages are absent.
     ///
-    /// The ONE read on this actor, and it exists for a reason: the caller used
-    /// to run `MessageStore::open()` per channel on the swarm event loop, and a
-    /// fresh handle re-reads and re-parses the whole schema while holding a
-    /// file lock. On iOS that lock is on the App Group container, so a
-    /// suspension landing inside the window got the process killed
-    /// (`EXC_CRASH 0xdead10cc`). Here it is one round trip on a warm
-    /// connection, off the event loop, outside any transaction.
-    ///
-    /// Returns an empty map if the actor is gone (caller falls back to the
-    /// full retention window, which is what a missing watermark means anyway).
+    /// The ONE read on this actor, and it exists for a reason: a per-channel
+    /// `MessageStore::open()` on the event loop re-parses the whole schema under
+    /// a file lock, and on iOS a suspension inside that window kills the process
+    /// (`EXC_CRASH 0xdead10cc`). An empty map means the actor is gone.
     pub async fn channel_watermarks(
         &self,
         server_id: String,
@@ -305,13 +286,10 @@ mod tests {
     use crate::storage::MessageStore;
 
     /// The relay catch-up watermark must come back off the actor's long-lived
-    /// connection, batched, and WITHOUT the caller opening a DB handle — that
-    /// per-channel transient open on the event loop is what got the iOS app
-    /// killed for holding an App Group file lock across a suspend
-    /// (`EXC_CRASH 0xdead10cc`, TestFlight 0.9.5(50)).
-    ///
-    /// A file-backed DB on purpose: `:memory:` gives every connection its own
-    /// empty database, so it could not tell whether the actor sees our writes.
+    /// connection, batched, WITHOUT the caller opening a DB handle: that
+    /// transient open on the event loop is what got the iOS app killed for
+    /// holding an App Group file lock across a suspend (`EXC_CRASH 0xdead10cc`).
+    /// File-backed on purpose: `:memory:` gives each connection its own database.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn channel_watermarks_answers_from_the_actor_connection() {
         let dir = tempfile::tempdir().expect("tmp");

@@ -33,11 +33,7 @@ import 'package:hollow/src/ui/dialogs/create_server_dialog.dart';
 import 'package:hollow/src/ui/shell/server_context_menus.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-/// Vertical server icon strip (72px wide) — like Discord's left column.
-///
-/// Shows the Hollow home icon, server icons from [serverListProvider],
-/// and an "add server" button at the bottom.
-/// Width of the server rail at 100% panel zoom. Every icon row inside it is
+/// Width of the server rail at 100% panel zoom; every icon row inside it is
 /// laid out for exactly this much.
 const double kServerStripWidth = 72.0;
 
@@ -49,8 +45,8 @@ class ServerStrip extends ConsumerStatefulWidget {
 }
 
 class _ServerStripState extends ConsumerState<ServerStrip> {
-  /// Tracks server IDs that existed on first build — these skip the
-  /// entrance animation so the strip doesn't bounce on app startup.
+  /// Servers that existed on first build skip the entrance animation, so the
+  /// strip does not bounce on startup.
   Set<String>? _initialServerIds;
 
   @override
@@ -61,14 +57,11 @@ class _ServerStripState extends ConsumerState<ServerStrip> {
     _initialServerIds ??= ref.read(serverStripLayoutProvider.notifier).allServerIds();
 
     final stripLayout = ref.watch(serverStripLayoutProvider);
-    // Panel zoom (issue #54). Unlike the two lists, this rail is a fixed 72px
-    // of icons sized to fill it, so zooming the CONTENT alone just pushes each
-    // icon row out of a column that got narrower — the rail has to widen with
-    // them. PanelScale then lays the column out at (72 * scale) / scale = 72,
-    // which is exactly the width the rows were written for.
+    // Panel zoom (issue #54). Unlike the two lists, this rail is a fixed width
+    // of icons sized to fill it, so the rail has to widen with them or zooming
+    // the content alone pushes every icon row out of a narrower column.
     final panelScale = ref.watch(panelScaleProvider);
 
-    // DM unread count for Home button (pre-computed, notification-filtered).
     final dmUnreadTotal = ref.watch(dmUnreadBadgeProvider);
     final archiveOpen = ref.watch(archiveTabOpenProvider);
     final shareOpen = ref.watch(shareTabOpenProvider);
@@ -77,8 +70,8 @@ class _ServerStripState extends ConsumerState<ServerStrip> {
     final helpOpen = ref.watch(helpPanelOpenProvider);
     final shopOpen = ref.watch(shopTabOpenProvider);
     final shopAvailable = ref.watch(shopAvailableProvider);
-    // Home is only "selected" when nothing is covering the chat area — any
-    // centre tab counts, including the two this strip has no button for.
+    // Home is selected only when nothing covers the chat area; every centre
+    // tab counts, including the two this strip has no button for.
     final homeSelected =
         selectedServerId == null && !ref.watch(anyShellTabOpenProvider);
 
@@ -86,7 +79,7 @@ class _ServerStripState extends ConsumerState<ServerStrip> {
       isSelected: homeSelected,
       unreadCount: selectedServerId != null ? dmUnreadTotal : 0,
       child: _ServerIcon(
-        // Right click: the "mark all DMs as read" escape hatch (#61 phase 4).
+        // Right click is the "mark all DMs as read" escape hatch (#61).
         onContextMenu: (position) => showHomeMenu(
           context: context,
           ref: ref,
@@ -168,9 +161,8 @@ class _ServerStripState extends ConsumerState<ServerStrip> {
       ),
     );
 
-    // Browse public channels, Conferences and Help live only on the dock's
-    // FriendsBar/BottomBar, so Classic mode had no way to reach any of them —
-    // this strip is Classic's only permanent rail (#58 sweep).
+    // This strip is Classic mode's only permanent rail, so anything living on
+    // the dock's bars alone would be unreachable there (#58).
     Widget guestIcon = _ServerIconWithIndicator(
       isSelected: guestOpen,
       child: _ServerIcon(
@@ -214,8 +206,8 @@ class _ServerStripState extends ConsumerState<ServerStrip> {
       ),
     );
 
-    // Hollow Shop. Absent entirely on store builds (Apple 3.1.1 / Play):
-    // no gallery, no prices, no button.
+    // Absent entirely on store builds (Apple 3.1.1 / Play): no gallery, no
+    // prices, no button.
     Widget shopIcon = _ServerIconWithIndicator(
       isSelected: shopOpen,
       child: _ServerIcon(
@@ -248,7 +240,6 @@ class _ServerStripState extends ConsumerState<ServerStrip> {
       ),
     );
 
-    // Short divider
     Widget divider = Container(
       width: 32,
       height: 2,
@@ -258,7 +249,6 @@ class _ServerStripState extends ConsumerState<ServerStrip> {
       ),
     );
 
-    // Add server button
     Widget addButton = Padding(
       padding: const EdgeInsets.only(bottom: HollowSpacing.md),
       child: _ServerIcon(
@@ -288,11 +278,9 @@ class _ServerStripState extends ConsumerState<ServerStrip> {
           right: BorderSide(color: hollow.border),
         ),
       ),
-      // Panel zoom (issue #54) — the strip keeps its 72px slot, its icons grow.
-      // minContentHeight: unlike the two lists, this column has a fixed stack
-      // of icons top and bottom that cannot shrink, so the zoom is capped at
-      // what the window can show (measured: the chrome needs ~505 logical px,
-      // and this leaves the server list about one icon of room at the cap).
+      // Panel zoom (issue #54): the strip keeps its slot and its icons grow.
+      // The fixed stack of icons top and bottom cannot shrink, so
+      // minContentHeight caps the zoom at what the window can show.
       child: PanelScale(
         minContentHeight: 560,
         child: Column(
@@ -315,19 +303,17 @@ class _ServerStripState extends ConsumerState<ServerStrip> {
             divider,
             const SizedBox(height: HollowSpacing.sm),
 
-            // Server icon list. No scrollbar gutter here: this rail is 72px
-            // of centred icons, and reserving 10px of it would shove every one
-            // of them off centre. Discord's rail has no scrollbar either.
+            // No scrollbar gutter: this rail is centred icons, and reserving
+            // part of its width would shove every one of them off centre.
             Expanded(
               child: ScrollConfiguration(
                 behavior:
                     ScrollConfiguration.of(context).copyWith(scrollbars: false),
                 child: ListView.builder(
-                  // Items interleaved with reorder gaps: gap0, item0, gap1, item1, ..., gapN
+                  // Items interleaved with reorder gaps, gap first.
                   itemCount: stripLayout.length * 2 + 1,
                   padding: const EdgeInsets.symmetric(vertical: HollowSpacing.xs),
                   itemBuilder: (context, rawIndex) {
-                    // Even indices = gap, odd indices = item
                     if (rawIndex.isEven) {
                       final gapIndex = rawIndex ~/ 2;
                       return _VerticalReorderGap(
@@ -361,11 +347,11 @@ class _ServerStripState extends ConsumerState<ServerStrip> {
                         ),
                     };
 
-                    // Animate newly created servers
                     final isNew = switch (item) {
                       ServerStripItem(:final serverId) =>
                         !_initialServerIds!.contains(serverId),
-                      // A parked join can sit here for days; it never bounces.
+                      // A parked join can sit here for days, so it never
+                      // bounces.
                       PendingStripItem() => false,
                       FolderStripItem() => false,
                     };
@@ -415,9 +401,9 @@ class _ServerStripState extends ConsumerState<ServerStrip> {
         ? 0
         : ref.watch(unreadProvider
             .select((s) => s.serverMentionCount(serverId)));
-    // Admitted, but no member has been online with us long enough to add our
-    // MLS leaf yet. The server is real and browsable; the flair says why it
-    // is not fully wired up.
+    // Admitted, but no member has been online long enough to add our MLS leaf.
+    // The server is real and browsable; the flair says why it is not fully
+    // wired up.
     final awaitingSetup = ref.watch(
         awaitingSetupProvider.select((s) => s.contains(serverId)));
     final name = server?.name ?? '';
@@ -476,8 +462,7 @@ class _ServerStripState extends ConsumerState<ServerStrip> {
           child: AnimatedScale(
             scale: isMergeTarget ? 1.08 : 1.0,
             duration: HollowDurations.fast,
-            // Right click opens the server menu (issue #61, phase 4): mark
-            // read, invite, settings, folder membership, leave.
+            // Right click opens the server menu (issue #61).
             child: ContextMenuTarget(
               semanticLabel: 'Server actions',
               onOpen: (anchor) => showServerIconMenu(
@@ -507,15 +492,13 @@ class _ServerStripState extends ConsumerState<ServerStrip> {
     );
   }
 
-  /// A parked join: we asked, everybody was offline, and Rust is holding the
-  /// request until somebody answers.
+  /// A parked join: we asked, everybody was offline, and Rust holds the request
+  /// until somebody answers.
   ///
-  /// Deliberately unlike every other tile on this rail. It is dimmed, it is
-  /// NOT selectable (there is no server behind it to open), and it carries a
-  /// glyph rather than a letter, because an invite link gives us an id and
-  /// nothing else: no name, no icon, no initial to draw. Clicking it opens the
-  /// same menu the right click does, since a tile that swallows a click reads
-  /// as broken.
+  /// Deliberately unlike every other tile here. It is NOT selectable, since
+  /// there is no server behind it, and it carries a glyph rather than a letter,
+  /// because an invite link gives us an id and nothing else to draw. A click
+  /// opens the same menu the right click does, so the tile never reads as dead.
   Widget _buildPendingIcon({required String serverId}) {
     final info = ref.watch(pendingJoinsProvider)[serverId];
     final rejected = info?.isRejected ?? false;
@@ -534,8 +517,8 @@ class _ServerStripState extends ConsumerState<ServerStrip> {
         onOpen: open,
         child: _ServerIconWithIndicator(
           isSelected: false,
-          // AnimatedOpacity, never the Opacity widget: this is composited on
-          // the GPU and the tile crossfades when a rejection lands.
+          // AnimatedOpacity, never the Opacity widget: this one is composited
+          // on the GPU.
           child: AnimatedOpacity(
             opacity: rejected ? 0.4 : 0.55,
             duration: HollowDurations.fast,
@@ -667,9 +650,8 @@ class _ServerStripState extends ConsumerState<ServerStrip> {
 
   /// Selects [serverId] and opens its settings panel.
   ///
-  /// Selecting first is not optional: the settings panel reads the SELECTED
-  /// server, so flipping the flag alone would open the settings of whatever
-  /// was already on screen.
+  /// Selecting FIRST is not optional: the panel reads the selected server, so
+  /// flipping the flag alone opens the settings of whatever was on screen.
   Future<void> _openServerSettings(String serverId) async {
     if (ref.read(selectedServerProvider) != serverId) {
       await _selectServer(serverId);
@@ -678,7 +660,7 @@ class _ServerStripState extends ConsumerState<ServerStrip> {
   }
 
   Future<void> _selectServer(String serverId) async {
-    // Fetch data from DB first — no provider writes yet, so no rebuilds.
+    // Read the DB first, with no provider writes yet, so nothing rebuilds.
     final channels = await ChannelListNotifier.fetchChannels(serverId);
     final layout = await ChannelLayoutNotifier.fetchLayout(serverId);
 
@@ -693,10 +675,10 @@ class _ServerStripState extends ConsumerState<ServerStrip> {
           ?? channels.keys.first;
     }
 
-    // Batch all provider writes synchronously — single rebuild with
-    // consistent server + channels + selectedChannel state. Closing EVERY
-    // centre tab is part of that: one left open covers the channel we just
-    // selected (issue #28).
+    // Every provider write batches in ONE synchronous block, so the rebuild
+    // sees consistent server, channel and selection state. Closing EVERY centre
+    // tab belongs in that block: one left open covers the channel just selected
+    // (issue #28).
     setShellTab(ref.read, null);
     ref.read(selectedPeerProvider.notifier).state = null;
     ref.read(serverSettingsOpenProvider.notifier).state = false;
@@ -713,7 +695,7 @@ class _ServerStripState extends ConsumerState<ServerStrip> {
   }
 }
 
-/// Thin vertical drop zone between items for reordering.
+/// Thin vertical drop zone between items, for reordering.
 class _VerticalReorderGap extends StatelessWidget {
   final int index;
   final HollowTheme hollow;
@@ -765,7 +747,6 @@ class _StripDragData {
   });
 }
 
-/// Deterministic color from an ID string (same logic as HollowAvatar).
 /// Extract 1–2 letter initials from a server name.
 String _initialsFromName(String name) {
   final words = name.trim().split(RegExp(r'\s+'));
@@ -775,14 +756,14 @@ String _initialsFromName(String name) {
   return name.substring(0, name.length.clamp(0, 2)).toUpperCase();
 }
 
-/// Wraps a server icon with a Discord-style left-edge selection indicator
-/// and an optional unread count badge (bottom-right).
+/// Wraps a server icon with a left-edge selection indicator and an optional
+/// unread count badge.
 class _ServerIconWithIndicator extends StatefulWidget {
   final bool isSelected;
   final int unreadCount;
   final int mentionCount;
 
-  /// Admitted to the server, waiting for a member to finish the MLS setup.
+  /// Admitted, but waiting for a member to finish the MLS setup.
   final bool awaitingSetup;
 
   final Widget child;
@@ -808,7 +789,6 @@ class _ServerIconWithIndicatorState
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
 
-    // Indicator height: selected=36, hovering=20, default=0.
     final indicatorHeight =
         widget.isSelected ? 36.0 : (_hovering ? 20.0 : 0.0);
 
@@ -820,7 +800,6 @@ class _ServerIconWithIndicatorState
         height: 48,
         child: Row(
           children: [
-            // Left-edge pill indicator
             AnimatedContainer(
               duration: HollowDurations.fast,
               curve: HollowCurves.enter,
@@ -835,9 +814,9 @@ class _ServerIconWithIndicatorState
               ),
             ),
             const Spacer(),
-            // Stack for unread badge overlay. Clip.none is load-bearing: an
-            // avatar frame paints OUTSIDE the 48px icon box, and a clipping
-            // badge stack cuts it off (feedback_badge_stack_clips_avatar_frame).
+            // Clip.none is load bearing: an avatar frame paints OUTSIDE the
+            // icon box, and a clipping badge stack cuts it off
+            // (feedback_badge_stack_clips_avatar_frame).
             Stack(
               clipBehavior: Clip.none,
               children: [
@@ -891,17 +870,15 @@ class _ServerIconWithIndicatorState
   }
 }
 
-/// A single icon in the server strip.
-/// Rounded square by default, animates to pill shape on hover or when selected.
+/// A single icon in the server strip, animating to a pill on hover or select.
 class _ServerIcon extends StatefulWidget {
   final Widget child;
   final Color backgroundColor;
   final VoidCallback? onTap;
 
-  /// Right click, with the position already resolved to OVERLAY space — the
-  /// caller opens a menu there. Only the Home button uses it; server and
-  /// folder icons carry their own GestureDetector because they also need to
-  /// sit inside the drag machinery.
+  /// Right click, with the position already resolved to OVERLAY space. Only the
+  /// Home button uses it: server and folder icons carry their own detector,
+  /// because they also sit inside the drag machinery.
   final void Function(Offset overlayPosition)? onContextMenu;
 
   final String? tooltip;
@@ -931,11 +908,9 @@ class _ServerIconState extends State<_ServerIcon> {
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
 
-    // Stay pill-shaped when selected or hovering.
     final radius =
         (_hovering || widget.isSelected) ? 16.0 : hollow.radiusLg;
 
-    // Hover brightens the background slightly.
     final effectiveBg = _hovering && !widget.isSelected
         ? Color.lerp(widget.backgroundColor, hollow.accent, 0.15)!
         : widget.backgroundColor;
@@ -979,13 +954,14 @@ class _ServerIconState extends State<_ServerIcon> {
       icon = HollowTooltip(message: widget.tooltip!, child: icon);
     }
 
-    // Tooltips don't surface to screen readers — give tappable icons a name.
+    // Tooltips do not surface to screen readers, so a tappable icon needs a
+    // name of its own.
     final label = widget.semanticLabel ?? widget.tooltip;
     if (label != null && widget.onTap != null) {
       icon = Semantics(button: true, label: label, child: icon);
     }
 
-    // ABOVE the focus ring, so Menu / Shift+F10 reach it while the icon is
+    // ABOVE the focus ring, so Menu and Shift+F10 reach it while the icon is
     // keyboard-focused (issue #61).
     final onContextMenu = widget.onContextMenu;
     if (onContextMenu != null) {
@@ -1000,8 +976,7 @@ class _ServerIconState extends State<_ServerIcon> {
   }
 }
 
-/// Plays a scale-bounce animation when first built.
-/// Used for newly created server icons.
+/// Plays a scale-bounce on first build, for a newly created server icon.
 class _ScaleBounceEntry extends StatefulWidget {
   final Widget child;
 

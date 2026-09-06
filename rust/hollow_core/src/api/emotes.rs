@@ -1,14 +1,11 @@
 //! Custom emotes — import/processing, personal set, server sets, and the
 //! FrankerFaceZ browse tab.
 //!
-//! PRIVACY MODEL (mirrors `showcase.rs`): FFZ is a catalog touched ONLY at
-//! authoring time, ONLY through OUR website's write-through cache endpoint
-//! (the website holds the single upstream identity; users never contact
-//! FFZ or its CDN). The moment an emote is picked it is re-processed into a
-//! content-addressed Hollow WebP blob and replicates purely P2P — viewers
-//! never make an HTTP request for any emote, ever. `ffz_import_emote`
-//! refuses any URL that is not on our own CDN, so it can never be abused
-//! as a generic fetcher.
+//! PRIVACY MODEL: FFZ is a catalog touched ONLY at authoring time and ONLY through
+//! our website's write-through cache, which holds the single upstream identity, so
+//! users never contact FFZ. A picked emote is re-processed into a content-addressed
+//! Hollow WebP blob and replicates purely P2P, so viewers never make an HTTP request
+//! for any emote, and `ffz_import_emote` refuses any URL that is not on our own CDN.
 
 use flutter_rust_bridge::frb;
 use sha2::{Digest, Sha256};

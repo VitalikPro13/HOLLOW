@@ -4,11 +4,7 @@ import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
-/// Custom Hollow text field — flat design, no Material floating label.
-///
-/// Focus: border transitions to accent color over 150ms.
-/// Error: border turns red, optional shake animation.
-/// Optional prefix icon. Cursor in accent color.
+/// Custom Hollow text field: flat, with no Material floating label.
 class HollowTextField extends StatefulWidget {
   final TextEditingController? controller;
   final String? hintText;
@@ -55,14 +51,11 @@ class HollowTextField extends StatefulWidget {
   State<HollowTextField> createState() => _HollowTextFieldState();
 }
 
-/// ONE stable instance for every field. A fresh `MaterialTextSelectionControls()`
-/// per build changes the controls IDENTITY on every keystroke (this state
-/// setState's on each text change), which makes EditableText tear down and
-/// recreate its TextSelectionOverlay entries mid-build. Inside a route that
-/// happens to survive; inside a raw OverlayEntry (emoji picker) the recreated
-/// entry is re-inserted after dispose → "Null check operator used on a null
-/// value" in _OverlayEntryWidgetState.initState = the whole app crashes on
-/// the second keystroke. See crash.log 2026-07-10.
+/// ONE stable instance for every field, never constructed in `build`. A fresh
+/// one changes the controls IDENTITY on every keystroke, which makes
+/// EditableText recreate its TextSelectionOverlay entries mid-build; inside a
+/// raw OverlayEntry the recreated entry is re-inserted after dispose and the
+/// app crashes on the second keystroke.
 final TextSelectionControls _selectionControls = MaterialTextSelectionControls();
 
 class _HollowTextFieldState extends State<HollowTextField>
@@ -71,7 +64,6 @@ class _HollowTextFieldState extends State<HollowTextField>
   bool _isFocused = false;
   int _charCount = 0;
 
-  // Shake animation for error state.
   AnimationController? _shakeController;
   Animation<double>? _shakeAnimation;
 
@@ -96,7 +88,6 @@ class _HollowTextFieldState extends State<HollowTextField>
   @override
   void didUpdateWidget(HollowTextField oldWidget) {
     super.didUpdateWidget(oldWidget);
-    // Trigger shake when error appears.
     if (widget.errorText != null && oldWidget.errorText == null) {
       _triggerShake();
     }
@@ -134,7 +125,7 @@ class _HollowTextFieldState extends State<HollowTextField>
     final hasError = widget.errorText != null;
     final radius = widget.borderRadius ?? hollow.radiusMd;
 
-    // Border color: error > focused > default.
+    // Precedence: error, then focused, then default.
     final borderColor = hasError ? hollow.error : hollow.border;
     final focusBorderColor = hasError ? hollow.error : hollow.accent;
 
@@ -201,7 +192,6 @@ class _HollowTextFieldState extends State<HollowTextField>
       ),
     );
 
-    // Wrap with shake animation if available.
     if (_shakeAnimation != null) {
       field = AnimatedBuilder(
         animation: _shakeController!,
@@ -215,7 +205,6 @@ class _HollowTextFieldState extends State<HollowTextField>
       );
     }
 
-    // Wrap with focus glow.
     final glowColor = hasError ? hollow.error : hollow.accent;
     field = AnimatedContainer(
       duration: HollowDurations.fast,
@@ -235,7 +224,6 @@ class _HollowTextFieldState extends State<HollowTextField>
       child: field,
     );
 
-    // Counter / error row below field.
     if ((widget.maxLength != null && widget.showCounter) || hasError) {
       final nearLimit = widget.maxLength != null &&
           _charCount >= widget.maxLength! * 0.8;

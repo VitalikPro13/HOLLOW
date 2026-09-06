@@ -28,17 +28,16 @@ import 'package:hollow/src/ui/components/status_dot.dart';
 import 'package:hollow/src/ui/dialogs/screen_share_dialog.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-/// Voice channel pane — shows channel text chat with an inline call strip
-/// showing connected participants and voice controls. When screen sharing
-/// is active, switches to a full-bleed screen share view with a chat overlay.
+/// Voice channel pane: channel text chat with an inline call strip, switching
+/// to a full-bleed share view with a chat overlay while sharing.
 class VoiceChannelPane extends ConsumerStatefulWidget {
   final String serverId;
   final String channelId;
   final String channelName;
 
-  /// Hide the floating bottom controls pill. The conference surface embeds
-  /// this pane with its own STATIC controls bar below (the pill's Disconnect
-  /// tears down only the voice leg, stranding the meeting state).
+  /// Hides the floating controls pill. The conference surface brings its own
+  /// static bar, because the pill's Disconnect tears down only the voice leg
+  /// and strands the meeting state.
   final bool hideControlsPill;
 
   const VoiceChannelPane({
@@ -58,11 +57,11 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
   bool _overlaysVisible = true;
   bool _chatOverlayPinned = false;
 
-  /// Which video tile is fullscreen (null = grid view).
+  /// Which video tile is fullscreen; null is the grid view.
   String? _focusedVideoPeerId;
 
-  /// Sharers whose "X is sharing — Watch" banner was dismissed this session.
-  /// Cleared per-peer when their share ends (a re-share banners again).
+  /// Sharers whose Watch banner was dismissed this session, cleared per peer
+  /// when their share ends so a re-share banners again.
   final Set<String> _dismissedShareBanners = {};
 
   void _resetOverlayTimer() {
@@ -86,8 +85,7 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
   @override
   void didUpdateWidget(covariant VoiceChannelPane oldWidget) {
     super.didUpdateWidget(oldWidget);
-    // Fresh channel = fresh banner state (re-opening a channel must offer
-    // Watch again even if it was dismissed last time).
+    // Re-opening a channel must offer Watch again even after a dismissal.
     if (oldWidget.channelId != widget.channelId ||
         oldWidget.serverId != widget.serverId) {
       _dismissedShareBanners.clear();
@@ -107,11 +105,10 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
     final isInThisChannel = vcState.currentServerId == widget.serverId &&
         vcState.currentChannelId == widget.channelId;
 
-    // A dismissed "Watch" banner returns if that peer stops and re-shares.
+    // A dismissed banner returns if that peer stops and re-shares.
     _dismissedShareBanners
         .removeWhere((p) => vcState.peerScreenSharing[p] != true);
 
-    // Not in this voice channel — show channel text chat (no join prompt).
     if (!isInThisChannel) {
       return ChannelChatPane(
         serverId: widget.serverId,
@@ -120,19 +117,15 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
       );
     }
 
-    // Share surface — we're sharing ourselves or WATCHING someone (opt-in,
-    // issue #38). A remote share we haven't opted into never flips the view.
+    // A remote share we have not opted into never flips the view (issue #38).
     if (vcState.showsShareSurface) {
       return _buildScreenShareView(hollow, vcState);
     }
 
-    // Camera video active — grid view.
     if (vcState.isCameraActive) {
       return _buildCameraGridView(hollow, vcState);
     }
 
-    // Normal: channel text chat, with a floating "X is sharing — Watch"
-    // banner when someone shares and we haven't opted in.
     final chat = ChannelChatPane(
       serverId: widget.serverId,
       channelId: widget.channelId,
@@ -151,8 +144,7 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
           left: 0,
           right: 0,
           child: Center(
-            // Dismissal is never a dead end: the banner collapses to a
-            // compact chip that re-expands on tap.
+            // Dismissal is never a dead end: it collapses to a chip.
             child: unwatched.isNotEmpty
                 ? _UnwatchedShareBanner(
                     sharerIds: unwatched,
@@ -202,21 +194,15 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
     );
   }
 
-  // ---------------------------------------------------------------------------
-  // Camera grid view
-  // ---------------------------------------------------------------------------
-
   Widget _buildCameraGridView(HollowTheme hollow, VoiceChannelState vcState) {
     final localPeerId = ref.read(identityProvider).peerId ?? '';
 
-    // Build list of peers with cameras on.
     final cameraPeers = <String>[];
     if (vcState.isCameraOn) cameraPeers.add(localPeerId);
     for (final entry in vcState.peerCameraOn.entries) {
       if (entry.value) cameraPeers.add(entry.key);
     }
 
-    // If focused peer no longer has camera on, clear focus.
     if (_focusedVideoPeerId != null &&
         !cameraPeers.contains(_focusedVideoPeerId)) {
       _focusedVideoPeerId = null;
@@ -227,7 +213,6 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
       onEnter: (_) => _resetOverlayTimer(),
       child: Stack(
         children: [
-          // Layer 0: video grid or fullscreen
           Positioned.fill(
             child: Container(
               color: Colors.black,
@@ -239,7 +224,6 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
             ),
           ),
 
-          // Layer 1 (right): chat overlay
           Positioned(
             right: 0,
             top: 0,
@@ -248,7 +232,6 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.center,
               children: [
-                // Toggle button
                 ChatOverlayToggleButton(
                   overlaysVisible: _overlaysVisible,
                   pinned: _chatOverlayPinned,
@@ -257,7 +240,6 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
                   onHoverEnter: _pinOverlays,
                   onHoverExit: _resetOverlayTimer,
                 ),
-                // Chat panel — slides in/out
                 _OverlaySlider(
                   visible: _chatOverlayPinned,
                   onHoverEnter: _pinOverlays,
@@ -283,7 +265,6 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
             ),
           ),
 
-          // Layer 2 (bottom center): floating controls pill
           if (!widget.hideControlsPill)
             Positioned(
               bottom: HollowSpacing.lg,
@@ -310,7 +291,7 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
     );
   }
 
-  /// Build the N-tile camera grid layout (delegates to the shared grid).
+  /// The N-tile camera grid, delegating to the shared grid builder.
   Widget _buildVideoGrid(
     HollowTheme hollow,
     VoiceChannelState vcState,
@@ -324,7 +305,6 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
     ]);
   }
 
-  /// Single video tile in the grid.
   Widget _buildVideoTile(
     HollowTheme hollow,
     VoiceChannelState vcState,
@@ -336,16 +316,16 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
     final isLocal = peerId == localPeerId;
     final renderer = ref.read(voiceChannelProvider.notifier)
         .getCameraRenderer(peerId);
-    // Remote camera keys are ROUTABLE device ids — collapse to the MASTER
-    // for the profile/avatar lookups (both are master-keyed).
+    // Remote camera keys are ROUTABLE device ids; profile and avatar lookups
+    // are master-keyed.
     final displayId = ref.watch(deviceLinkProvider).identityOf(peerId);
     final peerProfile =
         ref.watch(profileProvider.select((p) => p[displayId]));
     final name = isLocal ? 'You' : displayNameForPeer(peerProfile, displayId);
-    // Our own tile reads the dedicated local flag; remote tiles membership-
-    // select so a tile only rebuilds when ITS peer's bit flips. Testing the
-    // set for OURSELVES silently missed — it is keyed by routable device ids
-    // while this tile may hold the master id.
+    // Our own tile reads the dedicated local flag: the speaking set is keyed by
+    // routable DEVICE ids while this tile may hold the master, so testing the
+    // set for ourselves silently misses. Remote tiles membership-select, so a
+    // tile rebuilds only when ITS peer's bit flips.
     final isSpeaking = isLocal
         ? ref.watch(vcLocalSpeakingProvider)
         : ref.watch(vcSpeakingProvider.select((s) => s.contains(peerId)));
@@ -368,7 +348,6 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
         child: Stack(
           fit: StackFit.expand,
           children: [
-            // Video or avatar fallback
             if (renderer != null)
               RepaintBoundary(
                 child: RTCVideoView(
@@ -400,7 +379,6 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
                 ),
               ),
 
-            // Name label overlay (bottom-left)
             if (renderer != null)
               Positioned(
                 left: 6,
@@ -424,10 +402,8 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
                 ),
               ),
 
-            // Per-peer link flair (top-right). A member on a bad connection is
-            // labelled on THEIR tile: in a mesh their leg is their own, and a
-            // channel-wide alarm would be both wrong and alarming. Never on
-            // our own tile, where the whole flair would just be us.
+            // A member on a bad connection is labelled on THEIR tile: in a mesh
+            // their leg is their own, so a channel-wide alarm would be wrong.
             if (!isLocal)
               Positioned(
                 right: 6,
@@ -445,7 +421,7 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
     );
   }
 
-  /// Fullscreen view: one tile full-bleed, others as PiP thumbnails.
+  /// One tile full-bleed, the others as PiP thumbnails.
   Widget _buildFullscreenCamera(
     HollowTheme hollow,
     VoiceChannelState vcState,
@@ -463,8 +439,7 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
       child: Stack(
         clipBehavior: Clip.hardEdge,
         children: [
-          // Main video (full area) — Contain to show the whole frame
-          // letterboxed rather than cropping the subject.
+          // Contain, so the whole frame is letterboxed rather than cropped.
           Positioned.fill(
             child: renderer != null
                 ? RepaintBoundary(
@@ -478,7 +453,6 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
                 : Container(color: hollow.elevated),
           ),
 
-          // "Click to exit" hint (top-left)
           Positioned(
             left: 8,
             top: 8,
@@ -505,7 +479,6 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
             ),
           ),
 
-          // PiP thumbnails (bottom center)
           if (others.isNotEmpty)
             Positioned(
               bottom: 64,
@@ -554,8 +527,7 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
                                 color: hollow.elevated,
                                 child: Center(
                                   child: HollowAvatar(
-                                    // Master-keyed avatar (routable id no-ops
-                                    // for single-device peers).
+                                    // Avatars are master-keyed.
                                     peerId: ref
                                         .watch(deviceLinkProvider)
                                         .identityOf(peerId),
@@ -575,10 +547,6 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
     );
   }
 
-  // ---------------------------------------------------------------------------
-  // Screen share full-bleed view
-  // ---------------------------------------------------------------------------
-
   Widget _buildScreenShareView(HollowTheme hollow, VoiceChannelState vcState) {
     final localPeerId = ref.read(identityProvider).peerId ?? '';
     final focusedPeerId = vcState.focusedScreenSharePeerId;
@@ -591,7 +559,6 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
       onEnter: (_) => _resetOverlayTimer(),
       child: Stack(
         children: [
-          // Layer 0: grid of all sources, or the focused source full-bleed.
           Positioned.fill(
             child: vcState.isGridView
                 ? Container(
@@ -606,8 +573,7 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
                         hollow, vcState, focusedPeerId, isLocalFocused),
           ),
 
-          // Layer 0.5 (bottom right): own-share feedback PiP while focused on
-          // something else (issue #38 — "see my share while watching theirs").
+          // Own-share feedback while focused on something else (issue #38).
           if (!vcState.isGridView &&
               vcState.isScreenSharing &&
               !(isLocalFocused && !isCameraFocused))
@@ -617,7 +583,6 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
               child: _buildSelfSharePip(hollow),
             ),
 
-          // Layer 1 (top): source switcher tabs (multiple sources)
           if (sources.length > 1 || vcState.isGridView)
             Positioned(
               top: HollowSpacing.md,
@@ -634,7 +599,6 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
               ),
             ),
 
-          // Layer 2 (right): chat overlay
           Positioned(
             right: 0,
             top: 0,
@@ -643,7 +607,6 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.center,
               children: [
-                // Toggle button
                 ChatOverlayToggleButton(
                   overlaysVisible: _overlaysVisible,
                   pinned: _chatOverlayPinned,
@@ -652,7 +615,6 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
                   onHoverEnter: _pinOverlays,
                   onHoverExit: _resetOverlayTimer,
                 ),
-                // Chat panel — slides in/out
                 _OverlaySlider(
                   visible: _chatOverlayPinned,
                   onHoverEnter: _pinOverlays,
@@ -678,7 +640,6 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
             ),
           ),
 
-          // Layer 3 (bottom center): floating controls pill
           if (!widget.hideControlsPill)
             Positioned(
               bottom: HollowSpacing.lg,
@@ -712,7 +673,6 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
     bool isLocalFocused,
   ) {
     if (isLocalFocused && vcState.isScreenSharing) {
-      // We are the focused sharer — show self-preview with stop button.
       final localRenderer =
           ref.read(voiceChannelProvider.notifier).localScreenShareRenderer;
       return Stack(
@@ -812,8 +772,8 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
       );
     }
 
-    // Focused on a share we haven't opted into — Watch placeholder, never a
-    // dead "Connecting..." (opt-in watching, issue #38).
+    // A share we have not opted into gets a Watch placeholder, never a dead
+    // "Connecting..." (issue #38).
     if (!vcState.watchingScreenShares.contains(focusedPeerId)) {
       final displayId =
           ref.watch(deviceLinkProvider).identityOf(focusedPeerId);
@@ -844,7 +804,6 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
       );
     }
 
-    // Remote peer is focused — show their screen.
     final renderer = ref
         .read(voiceChannelProvider.notifier)
         .getScreenShareRenderer(focusedPeerId);
@@ -889,8 +848,7 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
               children: [
                 if (remoteLabel != null || renderer != null) ...[
                   const SizedBox(width: HollowSpacing.xs),
-                  // Shows the RECEIVED resolution once frames flow (live —
-                  // flips to the source resolution when Source is toggled).
+                  // The RECEIVED resolution once frames flow.
                   ShareQualityChip(
                     renderer: renderer,
                     sourceLabel: remoteLabel,
@@ -903,7 +861,7 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
     );
   }
 
-  /// Full-bleed camera content (used in mixed mode when camera source is focused).
+  /// Full-bleed camera content, for a focused camera source in mixed mode.
   Widget _buildFocusedCameraContent(
     HollowTheme hollow,
     String focusedPeerId,
@@ -912,7 +870,7 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
     final isLocal = focusedPeerId == localPeerId;
     final renderer = ref.read(voiceChannelProvider.notifier)
         .getCameraRenderer(focusedPeerId);
-    // Routable device id → master for the display lookups.
+    // Display lookups are master-keyed.
     final displayId = ref.watch(deviceLinkProvider).identityOf(focusedPeerId);
     final focusedProfile =
         ref.watch(profileProvider.select((p) => p[displayId]));
@@ -952,9 +910,8 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
     );
   }
 
-  /// All video sources in display order: own share, watched remote shares,
-  /// unwatched remote shares (placeholder + Watch), then cameras. Feeds both
-  /// the switcher pill and the grid view (issue #38).
+  /// All video sources in display order, feeding both the switcher pill and the
+  /// grid view (issue #38).
   List<({String peerId, String type, bool isLocal, bool watched})>
       _collectSources(VoiceChannelState vcState, String localPeerId) {
     return [
@@ -978,9 +935,8 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
     ];
   }
 
-  /// Lay out N tiles: 1-2 side by side, 3-4 two columns, 5+ three columns;
-  /// an underfull last row is centered (flex spacers). The ONE grid builder —
-  /// used by both the camera grid and the all-sources grid view.
+  /// Lays out N tiles, centring an underfull last row. The ONE grid builder,
+  /// used by both the camera grid and the all-sources grid.
   Widget _buildTileGrid(List<Widget> tiles) {
     final n = tiles.length;
     if (n == 0) return const SizedBox.shrink();
@@ -1004,8 +960,8 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
     return Column(children: rows);
   }
 
-  /// The all-sources grid (issue #38): every share and camera at once —
-  /// own share preview included; unwatched shares as Watch placeholders.
+  /// The all-sources grid (issue #38): every share and camera at once, with
+  /// unwatched shares as Watch placeholders.
   Widget _buildSourceTileGrid(
     HollowTheme hollow,
     VoiceChannelState vcState,
@@ -1040,7 +996,7 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
     final profiles = ref.watch(profileProvider);
     final name = src.isLocal ? 'You' : displayNameFor(profiles, displayId);
 
-    // Unwatched share — placeholder tile; only the Watch button acts.
+    // On a placeholder tile only the Watch button acts.
     if (!src.watched) {
       return Container(
         margin: const EdgeInsets.all(2),
@@ -1122,7 +1078,6 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
                   ],
                 ),
               ),
-            // Name + type label (bottom-left).
             Positioned(
               left: 6,
               bottom: 6,
@@ -1150,7 +1105,6 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
                 ),
               ),
             ),
-            // Corner action (top-right): stop sharing (own) / stop watching.
             Positioned(
               top: 4,
               right: 4,
@@ -1188,7 +1142,7 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
     );
   }
 
-  /// Own-share feedback PiP (bottom right of the focus view).
+  /// Own-share feedback PiP.
   Widget _buildSelfSharePip(HollowTheme hollow) {
     final renderer =
         ref.read(voiceChannelProvider.notifier).localScreenShareRenderer;
@@ -1287,8 +1241,8 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
                 final isFocused = !vcState.isGridView &&
                     peerId == vcState.focusedScreenSharePeerId &&
                     sourceType == vcState.focusedSourceType;
-                // Routable device id → master for the name/avatar lookups;
-                // focus tracking stays keyed on the routable id.
+                // Name and avatar lookups are master-keyed; focus tracking
+                // stays on the routable device id.
                 final displayId =
                     ref.watch(deviceLinkProvider).identityOf(peerId);
                 final name = displayNameFor(profiles, displayId);
@@ -1298,8 +1252,7 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
                       horizontal: HollowSpacing.xs),
                   child: HollowPressable(
                     onTap: () {
-                      // Tapping an unwatched share opts in (issue #38);
-                      // watchScreenShare also focuses it.
+                      // Tapping an unwatched share opts in (issue #38).
                       if (isUnwatched) {
                         notifier.watchScreenShare(peerId);
                         notifier.setGridView(false);
@@ -1321,7 +1274,7 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
                     child: Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        // Source type icon (eye = unwatched share).
+                        // An eye means an unwatched share.
                         Icon(
                           isUnwatched
                               ? LucideIcons.eye
@@ -1357,7 +1310,6 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
                   ),
                 );
               }),
-              // Divider + grid toggle (issue #38 — all sources at once).
               Container(
                 width: 1,
                 height: 18,
@@ -1393,10 +1345,6 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
     );
   }
 }
-
-// ---------------------------------------------------------------------------
-// Floating controls pill (bottom center during screen share)
-// ---------------------------------------------------------------------------
 
 class _VoiceControlsPill extends ConsumerStatefulWidget {
   final String serverId;
@@ -1495,10 +1443,8 @@ class _VoiceControlsPillState extends ConsumerState<_VoiceControlsPill> {
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            // Status dot
             StatusDot(color: hollow.success, size: 8),
             const SizedBox(width: HollowSpacing.sm),
-            // Duration
             Text(
               _formatDuration(_duration),
               style: HollowTypography.caption.copyWith(
@@ -1508,7 +1454,7 @@ class _VoiceControlsPillState extends ConsumerState<_VoiceControlsPill> {
               ),
             ),
             const SizedBox(width: HollowSpacing.lg),
-            // Mute (PTT-aware: gated mic while idle, accent while held)
+            // PTT-aware: a gated mic while idle, accent while held.
             Builder(builder: (context) {
               final mic = micButtonVisual(ref,
                   isMuted: vcState.isMuted,
@@ -1527,7 +1473,6 @@ class _VoiceControlsPillState extends ConsumerState<_VoiceControlsPill> {
               );
             }),
             const SizedBox(width: HollowSpacing.xs),
-            // Deafen
             HollowTooltip(
               message: vcState.isDeafened ? 'Undeafen' : 'Deafen',
               child: HollowPressable(
@@ -1546,7 +1491,6 @@ class _VoiceControlsPillState extends ConsumerState<_VoiceControlsPill> {
               ),
             ),
             const SizedBox(width: HollowSpacing.xs),
-            // Camera toggle
             HollowTooltip(
               message: vcState.isCameraOn ? 'Turn off camera' : 'Turn on camera',
               child: HollowPressable(
@@ -1566,7 +1510,6 @@ class _VoiceControlsPillState extends ConsumerState<_VoiceControlsPill> {
               ),
             ),
             const SizedBox(width: HollowSpacing.xs),
-            // Screen share (desktop only)
             if (Platform.isWindows || Platform.isMacOS || Platform.isLinux)
               HollowTooltip(
                 message: vcState.isScreenSharing
@@ -1588,14 +1531,12 @@ class _VoiceControlsPillState extends ConsumerState<_VoiceControlsPill> {
                   ),
                 ),
               ),
-            // Received share audio: volume + duck controls — only when we're
-            // actually receiving a share (watch-gated, issue #38).
+            // Only while actually receiving a share (watch-gated, issue #38).
             if (vcState.isWatchingAnyShare) ...[
               const SizedBox(width: HollowSpacing.xs),
               const ShareVolumeButton(),
             ],
             const SizedBox(width: HollowSpacing.sm),
-            // Disconnect
             HollowTooltip(
               message: 'Disconnect',
               child: HollowPressable(
@@ -1616,15 +1557,10 @@ class _VoiceControlsPillState extends ConsumerState<_VoiceControlsPill> {
 
 }
 
-// ---------------------------------------------------------------------------
-// Overlay slider — animated slide-in/out panel for screen share chat overlay.
-// ---------------------------------------------------------------------------
-
-/// The screen-share-style right-side chat drawer — chevron toggle + slide-in
-/// 360px [ChannelChatPane] — packaged for reuse OUTSIDE VoiceChannelPane. The
-/// conference call surface embeds it so meetings get the exact same chat as
-/// screen share (same slider, same pane). Pinned state is self-contained and
-/// hover pinning is a no-op (static hosts have no auto-hiding overlays).
+/// The screen-share right-side chat drawer, packaged for reuse OUTSIDE
+/// VoiceChannelPane so the conference surface gets the same slider and pane.
+/// Pinned state is self-contained and hover pinning is a no-op, since a static
+/// host has no auto-hiding overlay.
 class VcChatOverlay extends StatefulWidget {
   final String serverId;
   final String channelId;
@@ -1795,12 +1731,8 @@ class _OverlaySliderState extends State<_OverlaySlider>
   }
 }
 
-// ---------------------------------------------------------------------------
-// "X is sharing — Watch" banner (opt-in watching, issue #38)
-// ---------------------------------------------------------------------------
-
-/// Floating card shown over the channel chat while remote shares exist that
-/// we haven't opted into. One row per sharer: avatar + name + Watch + dismiss.
+/// Floating card over the channel chat while remote shares exist that we have
+/// not opted into (issue #38), one row per sharer.
 class _UnwatchedShareBanner extends ConsumerWidget {
   final List<String> sharerIds;
   final Map<String, String> labels;

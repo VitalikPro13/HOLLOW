@@ -8,43 +8,33 @@ void _fcLog(String msg) {
   network_api.logFromDart(message: msg);
 }
 
-/// Reusable service managing SFrame encryption for WebRTC audio/video.
-///
-/// Wraps flutter_webrtc's FrameCryptor + KeyProvider APIs.
-/// One instance per call session (1:1 DM) or voice channel session (server).
+/// Reusable service managing SFrame encryption for WebRTC audio and video,
+/// wrapping flutter_webrtc's FrameCryptor and KeyProvider. One instance per
+/// call session or voice channel session.
 class FrameCryptorService {
   KeyProvider? _keyProvider;
 
-  /// Sender-side frame cryptors: "peerId:kind" -> FrameCryptor.
-  /// Kind is 'audio' or 'video'. Allows separate cryptors per track type per peer.
+  /// Sender-side frame cryptors, keyed "peerId:kind" where kind is 'audio' or
+  /// 'video', so each track type has its own cryptor per peer.
   final Map<String, FrameCryptor> _senderCryptors = {};
 
-  /// Receiver-side frame cryptors: "peerId:kind" -> FrameCryptor.
   final Map<String, FrameCryptor> _receiverCryptors = {};
 
   /// Serializes every mutation of the cryptor maps.
   ///
-  /// ## The bug this exists for (field-caught 2026-08-27)
+  /// [enableForReceiver] and [enableForSender] check their map, then `await`
+  /// the native create, then insert: a check-then-act across a suspension
+  /// point, so two callers arriving together BOTH pass the guard, BOTH create
+  /// a native cryptor on the same receiver, and the map keeps only the second.
+  /// The orphan stays attached natively and the two fight over the same frames.
   ///
-  /// [enableForReceiver] and [enableForSender] check their map for an existing
-  /// cryptor, then `await` the native create, then insert. That is a
-  /// check-then-act across a suspension point: two callers arriving together
-  /// BOTH pass the guard, BOTH create a native cryptor on the same
-  /// receiver, and the map keeps only the second. The first is orphaned but
-  /// still attached natively, and the two fight over the same frames.
-  ///
-  /// It is not hypothetical. The SFrame heal ping fires two paths at once by
-  /// design (`rebindSframeReceivers()` un-awaited, plus the provider re-applying
-  /// the key), and the recovery log shows the signature plainly: two
-  /// "Receiver decryption enabled" lines for the same key with no drop between
-  /// them, followed by DecryptionFailed and MissingKey.
-  ///
-  /// Serializing is the fix rather than a smarter guard, because the real
+  /// The heal ping fires two paths at once by design, so this is not
+  /// hypothetical. Serializing rather than a smarter guard, because the real
   /// invariant is that a cryptor ladder (drop, re-create, set index) must not
   /// interleave with another ladder halfway through.
   Future<void> _mutations = Future<void>.value();
 
-  /// Run [op] after every previously queued mutation has finished.
+  /// Runs [op] after every previously queued mutation has finished.
   ///
   /// CRITICAL: never call this from inside another [_serialize] block. The
   /// public methods take the lock and delegate to `_*Unlocked` internals for
@@ -57,19 +47,16 @@ class FrameCryptorService {
     return result;
   }
 
-  /// Whether key material has been set (rotateKey / setSharedKey / setKey).
-  /// Enable paths gate on this: cryptors are only useful once a key exists.
+  /// Whether key material has been set. Enable paths gate on it: a cryptor is
+  /// only useful once a key exists.
   bool _enabled = false;
 
-  /// Current key index (set by rotateKey / setSharedKey). New cryptors use this index.
+  /// Current key index; new cryptors use it.
   int currentKeyIndex = 0;
 
-  /// Fired on every cryptor state transition (both directions). Drives the
-  /// SFrame heal ladder: sustained MissingKey / DecryptionFailed /
+  /// Fired on every cryptor state transition, in both directions. Drives the
+  /// SFrame heal ladder: sustained MissingKey, DecryptionFailed or
   /// InternalError means the peer and we disagree on key material.
-  /// [participantId] is the cryptor's participant (e.g. peerId or
-  /// 'screen:$peerId'), [kind] the track kind key ('audio', 'video',
-  /// 'screen_video', ...), [isReceiver] whether it's a decryptor.
   void Function(String participantId, String kind, bool isReceiver,
       FrameCryptorState state)? onCryptorStateChanged;
 
@@ -79,10 +66,9 @@ class FrameCryptorService {
       state == FrameCryptorState.FrameCryptorStateEncryptionFailed ||
       state == FrameCryptorState.FrameCryptorStateInternalError;
 
-  /// Initialize the KeyProvider. Call once per session before enabling encryption.
-  ///
-  /// [sharedKey]: true = all participants use the same key (server voice channels).
-  ///              false = per-participant keys (DM calls).
+  /// Initializes the KeyProvider, once per session before enabling encryption.
+  /// [sharedKey] true means all participants use the same key (server voice
+  /// channels), false means per-participant keys (DM calls).
   Future<void> init({bool sharedKey = true}) async {
     final options = KeyProviderOptions(
       sharedKey: sharedKey,
@@ -96,7 +82,8 @@ class FrameCryptorService {
     _fcLog('[HOLLOW-SFRAME] KeyProvider initialized (sharedKey=$sharedKey)');
   }
 
-  /// Set the encryption key for a participant (or shared key if sharedKey mode).
+  /// Sets the encryption key for a participant, or the shared key in
+  /// sharedKey mode.
   Future<void> setKey(String participantId, int index, Uint8List key) async {
     if (_keyProvider == null) return;
     try {
@@ -108,12 +95,13 @@ class FrameCryptorService {
       _enabled = true; // key material present — cryptors may be created
       _fcLog('[HOLLOW-SFRAME] Key set for $participantId at index $index (${key.length} bytes)');
     } finally {
-      // SECURITY (Phase 6.25): Clear key material from memory.
+      // Clear key material from memory.
       key.fillRange(0, key.length, 0);
     }
   }
 
-  /// Set a shared key (for server voice channels where all members share the MLS epoch key).
+  /// Sets a shared key, for server voice channels where all members share the
+  /// MLS epoch key.
   Future<void> setSharedKey(int index, Uint8List key) async {
     if (_keyProvider == null) return;
     try {
@@ -121,14 +109,13 @@ class FrameCryptorService {
       _enabled = true; // key material present — cryptors may be created
       _fcLog('[HOLLOW-SFRAME] Shared key set at index $index (${key.length} bytes)');
     } finally {
-      // SECURITY (Phase 6.25): Clear key material from memory.
+      // Clear key material from memory.
       key.fillRange(0, key.length, 0);
     }
   }
 
-  /// Enable frame encryption for an RTP sender (our outgoing audio/video).
-  ///
-  /// [kind] distinguishes audio vs video cryptors for the same peer.
+  /// Enables frame encryption for an RTP sender. [kind] distinguishes audio
+  /// from video cryptors for the same peer.
   Future<void> enableForSender(String peerId, RTCRtpSender sender,
           {String kind = 'audio'}) =>
       _serialize(() => _enableForSenderUnlocked(peerId, sender, kind: kind));
@@ -159,9 +146,8 @@ class FrameCryptorService {
     }
   }
 
-  /// Enable frame decryption for an RTP receiver (incoming audio/video from peer).
-  ///
-  /// [kind] distinguishes audio vs video cryptors for the same peer.
+  /// Enables frame decryption for an RTP receiver. [kind] distinguishes audio
+  /// from video cryptors for the same peer.
   Future<void> enableForReceiver(String peerId, RTCRtpReceiver receiver,
           {String kind = 'audio'}) =>
       _serialize(() => _enableForReceiverUnlocked(peerId, receiver, kind: kind));
@@ -192,19 +178,17 @@ class FrameCryptorService {
     }
   }
 
-  /// Rotate the encryption key (e.g., on MLS epoch change).
+  /// Rotates the encryption key, on an MLS epoch change.
   Future<void> rotateKey(int newIndex, Uint8List newKey) async {
     if (_keyProvider == null) return;
     currentKeyIndex = newIndex;
     await _keyProvider!.setSharedKey(key: newKey, index: newIndex);
-    // CRITICAL: key material present ⇒ cryptors may be created. This flag was
-    // historically only set in enableForSender, and every VC enable path
-    // guards on it — so voice-channel SFrame never engaged until a screen
-    // share flipped it on ONE side, and the first MLS epoch change then made
-    // that side encrypt while the other had no decryptor (issue #27:
-    // ciphertext straight into the Opus decoder = garbage noise).
+    // CRITICAL: key material present means cryptors may be created. This flag
+    // was historically only set in enableForSender while every VC enable path
+    // guards on it, so voice-channel SFrame never engaged until a screen share
+    // flipped it on ONE side, and the first epoch change then made that side
+    // encrypt while the other had no decryptor (issue #27).
     _enabled = true;
-    // Update key index on all active cryptors.
     for (final cryptor in _senderCryptors.values) {
       await cryptor.setKeyIndex(newIndex);
     }
@@ -214,11 +198,10 @@ class FrameCryptorService {
     _fcLog('[HOLLOW-SFRAME] Key rotated to index $newIndex');
   }
 
-  /// Dispose the SENDER cryptor for (peerId, kind) so a REPLACEMENT RTP
-  /// sender (mid-call device switch swaps the sender via removeTrack +
-  /// addTrack) can be re-enabled. Without this, [enableForSender] — which is
-  /// idempotent per key — silently keeps the cryptor bound to the removed
-  /// sender and the new track goes out unencrypted-side undecryptable.
+  /// Disposes the SENDER cryptor for (peerId, kind) so a REPLACEMENT RTP
+  /// sender can be re-enabled. Without this, [enableForSender], idempotent per
+  /// key, silently keeps the cryptor bound to the removed sender and the new
+  /// track goes out undecryptable.
   Future<void> disableSender(String peerId, {String kind = 'audio'}) =>
       _serialize(() => _disableSenderUnlocked(peerId, kind: kind));
 
@@ -236,11 +219,10 @@ class FrameCryptorService {
     }
   }
 
-  /// Dispose the RECEIVER cryptor for (peerId, kind) — the receive-side
-  /// mirror of [disableSender]. A remote mid-call device switch lands as a
-  /// NEW inbound transceiver via renegotiation; without dropping the old
-  /// cryptor, [enableForReceiver] (idempotent per key) silently skips the
-  /// new receiver and the fresh track plays as ciphertext gibberish.
+  /// Disposes the RECEIVER cryptor for (peerId, kind), the mirror of
+  /// [disableSender]. A remote mid-call device switch lands as a NEW inbound
+  /// transceiver, and without dropping the old cryptor [enableForReceiver]
+  /// skips the new receiver and the fresh track plays as ciphertext.
   Future<void> disableReceiver(String peerId, {String kind = 'audio'}) =>
       _serialize(() => _disableReceiverUnlocked(peerId, kind: kind));
 
@@ -258,7 +240,8 @@ class FrameCryptorService {
     }
   }
 
-  /// Set the key index on all cryptors for a specific peer (e.g. newly created screen share cryptors).
+  /// Sets the key index on all cryptors for one peer, such as newly created
+  /// screen-share cryptors.
   Future<void> setKeyIndexForPeer(String peerId, int index) =>
       _serialize(() => _setKeyIndexForPeerUnlocked(peerId, index));
 
@@ -275,16 +258,14 @@ class FrameCryptorService {
     }
   }
 
-  /// Re-bind BOTH directions for one peer as a single atomic ladder.
+  /// Re-binds BOTH directions for one peer as a single atomic ladder, for a
+  /// transport rebuilt underneath us by an ICE restart: the cryptors are
+  /// idempotent per (peer, kind), so a plain re-enable is a no-op on a stale
+  /// binding and the old one has to be dropped first.
   ///
-  /// For a transport that was rebuilt underneath us (an ICE restart): the
-  /// cryptors are idempotent per (peer, kind), so a plain re-enable is a no-op
-  /// on a stale binding and the old one has to be dropped first.
-  ///
-  /// Runs under one lock for the whole ladder, not one per step. Taking the
-  /// lock five times would let another path (the heal ping, a mic switch)
-  /// interleave between the drop and the re-create, which is how a receiver
-  /// ends up with two competing native cryptors or none at all.
+  /// One lock for the whole ladder, not one per step: taking it five times
+  /// would let the heal ping or a mic switch interleave between the drop and
+  /// the re-create, leaving a receiver with two competing cryptors or none.
   Future<void> reassert({
     required String peerId,
     RTCRtpSender? sender,
@@ -301,16 +282,16 @@ class FrameCryptorService {
         if (receiver != null) {
           await _enableForReceiverUnlocked(peerId, receiver, kind: kind);
         }
-        // A freshly created cryptor defaults to index 0. DM calls do use 0, but
-        // stating it is the rule everywhere else (`feedback_sframe_key_index`)
-        // and a silent MissingKey is the failure this whole method exists to
-        // stop.
+        // A freshly created cryptor defaults to index 0. DM calls do use 0,
+        // but stating it is the rule everywhere else
+        // (`feedback_sframe_key_index`), and a silent MissingKey is the
+        // failure this whole method exists to stop.
         await _setKeyIndexForPeerUnlocked(peerId, keyIndex);
         _fcLog('[HOLLOW-SFRAME] Re-asserted $peerId:$kind '
             '(sender=${sender != null} receiver=${receiver != null})');
       });
 
-  /// Disable and clean up cryptors for a specific peer (audio, video, and screen share).
+  /// Disables and cleans up cryptors for one peer: audio, video, screen share.
   Future<void> disableForPeer(String peerId) async {
     for (final kind in ['audio', 'video', 'screen_audio', 'screen_video']) {
       final key = '$peerId:$kind';
@@ -327,10 +308,8 @@ class FrameCryptorService {
     }
   }
 
-  /// Whether frame encryption is currently active.
   bool get isEnabled => _enabled;
 
-  /// Dispose all cryptors and the key provider.
   Future<void> dispose() async {
     for (final cryptor in _senderCryptors.values) {
       try { await cryptor.setEnabled(false); } catch (_) {}

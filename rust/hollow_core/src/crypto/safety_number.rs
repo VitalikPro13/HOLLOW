@@ -1,44 +1,10 @@
-//! Safety numbers — out-of-band identity verification (Issue 1-D).
-//!
-//! A safety number is a 60-digit value that two people compare over an
-//! authenticated channel (in person, a video call, an existing trusted app). If
-//! both sides read the same number, they are talking to each other and not to a
-//! machine in the middle.
-//!
-//! ## Why Hollow's is better than Signal's
-//!
-//! Signal must derive its number from a server-supplied identity key, so the
-//! number CHURNS every time a contact reinstalls — which trains users to click
-//! through the warning. Hollow's `peer_id` IS the Ed25519 public key (identity
-//! multihash, inlined, not hashed), so the number is a pure function of the two
-//! MASTER peer_ids:
-//!
-//!   - Stable across reinstalls and across adding/removing devices.
-//!   - Changes ONLY when the master identity changes — i.e. it is genuinely a
-//!     different person. That is the correct semantic.
-//!   - Nothing extra to store, sync, or keep in step.
-//!
-//! Because of that stability, verification is NOT reset by a reinstall. The
-//! separate device-set alert ([`crate::node::security_alerts`]) covers "a new
-//! device appeared", which is the signal that actually carries information once
-//! key exchange is authenticated. The two are complementary, not redundant.
-//!
-//! ## Derivation
-//!
-//! Per identity, following Signal's numeric-fingerprint construction:
-//!
-//! ```text
-//! h = SHA-512( VERSION || CONTEXT || pubkey )
-//! repeat ITERATIONS times:  h = SHA-512( h || pubkey )
-//! digits = 6 chunks of 5 bytes from h[..30], each read big-endian and
-//!          reduced mod 100000 → "%05d"
-//! ```
-//!
-//! The iteration count is a deliberate slowdown: finding a key whose displayed
-//! digits collide with a target costs ITERATIONS hashes per attempt.
-//!
-//! The full number sorts the two 30-digit halves and concatenates, so both ends
-//! compute the identical string without agreeing on an order.
+//! Safety numbers: 60 digits two people compare over an authenticated channel to
+//! prove there is no machine in the middle. Derived purely from the two MASTER
+//! peer_ids (a Hollow peer_id inlines the Ed25519 key), so unlike Signal's the
+//! number survives a reinstall and moves only when the person does, and the
+//! separate device-set alert covers "a new device appeared". `ITERATIONS` is a
+//! deliberate slowdown: a key whose digits collide with a target costs that many
+//! hashes per attempt.
 
 use sha2::{Digest, Sha512};
 
@@ -56,17 +22,9 @@ const DIGITS_PER_IDENTITY: usize = 30;
 /// Extract the raw 32-byte Ed25519 public key from a `12D3KooW…` peer_id.
 ///
 /// Hollow peer_ids are libp2p identity multihashes with the protobuf public key
-/// inlined verbatim:
-///
-/// ```text
-/// base58btc( [0x00, 0x24] || [0x08, 0x01, 0x12, 0x20] || pubkey[32] )
-///             ^ id mh, len   ^ protobuf: Ed25519, 32-byte field
-/// ```
-///
-/// So this is a decode, not a lookup — no network, no DB, no trust assumption.
-/// Returns `None` for anything that is not a well-formed Ed25519 peer_id
-/// (truncated, RSA/secp256k1, or a SHA-256 multihash from a key too large to
-/// inline).
+/// inlined verbatim, so this is a decode, not a lookup: no network, no DB, no
+/// trust assumption. Returns `None` for anything that is not a well-formed
+/// Ed25519 peer_id (truncated, another key type, or a hashed multihash).
 pub(crate) fn pubkey_from_peer_id(peer_id: &str) -> Option<[u8; 32]> {
     let decoded = bs58::decode(peer_id)
         .with_alphabet(bs58::Alphabet::BITCOIN)
@@ -100,10 +58,9 @@ fn fingerprint_digits(pubkey: &[u8; 32]) -> String {
         hash = hasher.finalize();
     }
 
-    // 6 chunks × 5 bytes = 30 bytes → 6 × 5 digits = 30 digits.
     let mut out = String::with_capacity(DIGITS_PER_IDENTITY);
     for chunk in hash[..30].chunks_exact(5) {
-        // 5 bytes big-endian into the low 40 bits of a u64 — no overflow.
+        // 5 bytes fit the low 40 bits of a u64, so the shift cannot overflow.
         let mut v: u64 = 0;
         for b in chunk {
             v = (v << 8) | u64::from(*b);
@@ -115,18 +72,11 @@ fn fingerprint_digits(pubkey: &[u8; 32]) -> String {
 
 /// The 60-digit safety number for a pair of MASTER peer_ids.
 ///
-/// SYMMETRIC: `safety_number(a, b) == safety_number(b, a)`. Both ends display
-/// the identical string, so "do these match?" is the whole comparison — there is
-/// no "yours / theirs" ordering for users to get wrong.
-///
-/// CALLERS MUST PASS MASTERS. A device peer_id would produce a number that
-/// changes when the contact links or drops a device, which is exactly the
-/// churn this design exists to avoid. The FFI layer resolves device → master
-/// before calling in, so this stays a pure function.
-///
-/// Returns `Err` if either id is not a well-formed Ed25519 peer_id, rather than
-/// inventing a number for an unparseable input — a safety number that does not
-/// correspond to a real key would assert safety that is not there.
+/// SYMMETRIC: `safety_number(a, b) == safety_number(b, a)`, so there is no
+/// "yours / theirs" ordering for users to get wrong. CALLERS MUST PASS MASTERS;
+/// a device peer_id would produce a number that churns when the contact links or
+/// drops a device. Returns `Err` for an unparseable id rather than inventing a
+/// number that asserts safety that is not there.
 pub(crate) fn safety_number(peer_a: &str, peer_b: &str) -> Result<String, String> {
     let key_a = pubkey_from_peer_id(peer_a)
         .ok_or_else(|| format!("Not a valid Ed25519 peer_id: {peer_a}"))?;
@@ -135,26 +85,22 @@ pub(crate) fn safety_number(peer_a: &str, peer_b: &str) -> Result<String, String
 
     let a = fingerprint_digits(&key_a);
     let b = fingerprint_digits(&key_b);
-    // Sort the halves so the result is order-independent. Equal length, digits
-    // only — lexicographic and numeric order agree.
+    // Sorting the halves is what makes the result order-independent.
     Ok(if a <= b { format!("{a}{b}") } else { format!("{b}{a}") })
 }
 
 /// Strip everything that is not a digit.
 ///
-/// Used on BOTH sides of a comparison so a number pasted with the display's
-/// spaces, a newline, or a stray non-breaking space still matches. Comparing
-/// raw strings would show "mismatch" for two identical numbers formatted
-/// differently — a false alarm on a security screen is not acceptable.
+/// Applied to BOTH sides of a comparison, so a number pasted with the display's
+/// spacing never reads as a mismatch.
 pub(crate) fn normalize_safety_number(input: &str) -> String {
     input.chars().filter(char::is_ascii_digit).collect()
 }
 
 /// Constant-time equality for two safety numbers, after normalization.
 ///
-/// Not strictly required (the number is public to both parties), but this is a
-/// crypto comparison and the project rule is that comparisons of key-derived
-/// material are constant-time. Length is compared first and leaks only the
+/// The number is public to both parties, but key-derived material is compared in
+/// constant time by project rule. Length is checked first and leaks only the
 /// length, which the format already fixes at 60.
 pub(crate) fn safety_numbers_match(a: &str, b: &str) -> bool {
     let a = normalize_safety_number(a);
@@ -206,16 +152,12 @@ mod tests {
         assert!(pubkey_from_peer_id(&broken).is_none());
     }
 
-    /// KNOWN-ANSWER TEST. Pins the wire format of the derivation.
-    ///
-    /// If this fails, the construction changed and every previously-verified
-    /// contact would silently re-derive to a different number — users would be
-    /// told their contacts changed identity when nothing happened. Change the
-    /// value here ONLY together with a `VERSION` bump and a migration plan.
+    /// KNOWN-ANSWER TEST pinning the derivation: a change here would silently
+    /// re-derive every verified contact's number and tell users their contacts
+    /// changed identity. Change the value ONLY with a `VERSION` bump.
     #[test]
     fn safety_number_known_answer() {
         let (a, b) = fixture_peers();
-        // Sanity-check the inputs the answer was computed from.
         assert_eq!(a, "12D3KooWK99VoVxNE7XzyBwXEzW7xhK7Gpv85r9F3V3fyKSUKPH5");
         assert_eq!(b, "12D3KooWJWoaqZhDaoEFshF7Rh1bpY9ohihFhzcW6d69Lr2NASuq");
 
@@ -263,7 +205,6 @@ mod tests {
         let (a, _) = fixture_peers();
         let n = safety_number(&a, &a).unwrap();
         assert_eq!(n.len(), 60);
-        // Both halves are the same fingerprint.
         assert_eq!(&n[..30], &n[30..]);
     }
 
@@ -299,7 +240,6 @@ mod tests {
         let ac = safety_number(&a, &c).unwrap();
         assert!(!safety_numbers_match(&ab, &ac));
 
-        // A single digit off must NOT match.
         let mut tweaked = ab.clone();
         let last = tweaked.pop().unwrap();
         tweaked.push(if last == '0' { '1' } else { '0' });

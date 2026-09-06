@@ -11,17 +11,15 @@ abstract final class BrandIcons {
   static const IconData kofi = IconData(0xeff6, fontFamily: _kFontFamily);
   static const IconData github = IconData(0xee42, fontFamily: _kFontFamily);
 
-  // Showcase game-card platform chips (SimpleIcons — codepoints verified
-  // against the bundled full SimpleIcons.ttf via fontTools). Windows, Xbox
-  // and Nintendo were REMOVED from Simple Icons (trademark purge) — those
-  // three are custom-painted in ui/components/platform_icons.dart instead.
+  // Showcase game-card platform chips (SimpleIcons, codepoints verified against
+  // the bundled full SimpleIcons.ttf). Windows, Xbox and Nintendo were REMOVED
+  // from Simple Icons, so those three are custom-painted in platform_icons.dart.
   static const IconData playstation = IconData(0xf273, fontFamily: _kFontFamily);
   static const IconData linux = IconData(0xf05b, fontFamily: _kFontFamily);
   static const IconData apple = IconData(0xeadb, fontFamily: _kFontFamily);
   static const IconData android = IconData(0xea9d, fontFamily: _kFontFamily);
 
-  // Showcase game-card credit links (SimpleIcons — codepoints verified
-  // against the bundled full SimpleIcons.ttf).
+  // Showcase game-card credit links (SimpleIcons, codepoints verified).
   static const IconData facebook = IconData(0xed9c, fontFamily: _kFontFamily);
   static const IconData instagram = IconData(0xef66, fontFamily: _kFontFamily);
   static const IconData discord = IconData(0xed04, fontFamily: _kFontFamily);

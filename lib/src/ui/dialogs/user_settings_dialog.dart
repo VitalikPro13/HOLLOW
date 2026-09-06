@@ -34,14 +34,13 @@ import 'package:hollow/src/ui/settings/storage_settings_cards.dart';
 import 'package:hollow/src/ui/settings/updates_section.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-/// Tracks whether the settings dialog is currently open.
 bool _settingsDialogOpen = false;
 
-/// Shows the user settings dialog, or closes it if already open (toggle).
+/// Shows the user settings dialog, or closes it if already open.
+///
 /// Reads providers through the enclosing [ProviderScope], so any context under
-/// the app works — including the navigator context from non-widget callers
-/// like the tray menu (which passes `toggle: false` so a click while the
-/// dialog is already up just returns to it instead of closing it).
+/// the app works, including a non-widget caller like the tray menu. That caller
+/// passes `toggle: false` so a second click returns to the dialog.
 void showUserSettingsDialog(BuildContext context,
     {bool openSystemTab = false,
     bool openUpdatesTab = false,
@@ -86,15 +85,12 @@ void showUserSettingsDialog(BuildContext context,
       );
     },
   ).then((_) {
-    // Reset flag when dialog closes (Cancel, Save, barrier tap, or toggle).
     _settingsDialogOpen = false;
   });
 }
 
-/// Settings category — one entry per side-rail item. The old monolithic
-/// "System" and "Security" tabs were split into focused categories so each
-/// view fits without a giant scroll (the System tab alone used to hold 8
-/// sections). Each category's cards live in its own module under
+/// One entry per side-rail item, each narrow enough that its view fits without
+/// a giant scroll. Every category's cards live in their own module under
 /// `lib/src/ui/settings/`.
 enum _SettingsCategory {
   profile,
@@ -142,9 +138,8 @@ extension _SettingsCategoryMeta on _SettingsCategory {
         _SettingsCategory.about => 'About',
       };
 
-  /// Lowercase keywords used by the rail search filter so a query can match a
-  /// category even when the user types the name of a setting that lives inside
-  /// it (e.g. "theme" → Appearance, "relay" → Network).
+  /// Lowercase keywords, so the rail search matches a category even when the
+  /// query names a setting inside it.
   String get searchTerms => switch (this) {
         _SettingsCategory.profile =>
           'profile display name status about me avatar banner twitch connection',
@@ -198,57 +193,51 @@ class _UserSettingsContent extends ConsumerStatefulWidget {
 }
 
 class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
-  // Track live fields for the preview card.
   String _liveDisplayName = '';
   String _liveStatus = '';
 
-  // Pending avatar/banner (null = no change, empty = clear). These are the
-  // bytes the PREVIEW paints — for an animated pick that is the animation.
+  // Null is no change, empty is clear. These are the bytes the PREVIEW paints,
+  // which for an animated pick is the animation.
   Uint8List? _pendingAvatarBytes;
   Uint8List? _pendingBannerBytes;
   bool _avatarChanged = false;
   bool _bannerChanged = false;
   // An animated pick splits in two: the animation is cached on the asset rail
-  // under a hash and only the STILL companion rides the profile push. Null on
-  // a still pick, which is also what CLEARS a previous animation on save.
+  // under a hash and only the STILL companion rides the profile push. Null on a
+  // still pick, which is what CLEARS a previous animation on save.
   Uint8List? _pendingAvatarStill;
   Uint8List? _pendingBannerStill;
   String? _pendingAvatarAnim;
   String? _pendingBannerAnim;
-  // In-flight WebP processing (never-throwing futures — errors are handled
-  // inside). The preview stages the raw CROPPED bytes instantly; processing
-  // swaps in the WebP when done. Save AWAITS these so an early "Save Profile"
-  // can never commit while the final bytes are still being encoded.
+  // In-flight WebP processing; these futures never throw. Save AWAITS them, so
+  // an early tap cannot commit while the final bytes are still encoding.
   Future<void>? _avatarProcessing;
   Future<void>? _bannerProcessing;
-  // Stale-completion guards: any newer pick/clear/GIF bumps the generation so
-  // a late processing result can't clobber it.
+  // Any newer pick or clear bumps the generation, so a late processing result
+  // cannot clobber it.
   int _avatarPickGen = 0;
   int _bannerPickGen = 0;
-  // Drives the small processing spinner on the previews.
   bool _avatarBusy = false;
   bool _bannerBusy = false;
   bool _savingProfile = false;
 
-  // Pending avatar frame (issue #54). null + !_frameChanged = no change;
-  // '' = clear. The picker stores an upload's blob immediately, so only the
-  // ID is pending here.
+  // Pending avatar frame (issue #54): null with `!_frameChanged` is no change,
+  // '' is clear. The picker stores an upload's blob immediately, so only the id
+  // is pending here.
   String? _pendingFrameId;
   bool _frameChanged = false;
 
-  // Active category + rail search filter.
   late _SettingsCategory _activeTab;
   final _searchController = TextEditingController();
   String _searchQuery = '';
 
-  // Relay selection (Network category — applied via explicit Apply & Restart).
+  // Applied only by an explicit Apply and Restart.
   late String _initialRelayDomain;
   late String _selectedRelay;
   bool _showAddRelay = false;
   final _newRelayController = TextEditingController();
 
-  // Whether the profile has unsaved edits (Profile keeps an explicit Save —
-  // everything else auto-saves on change). Tracks text fields + image changes.
+  // Profile keeps an explicit Save; every other category auto-saves on change.
   bool _profileDirty = false;
 
   @override
@@ -277,20 +266,15 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
     if (!_profileDirty && mounted) setState(() => _profileDirty = true);
   }
 
-  /// Shared prologue for the avatar/banner pickers: pick an image file and,
-  /// for ANIMATED input, hand the raw bytes straight to [onAnimatedPicked]
-  /// (skipping the crop dialog is what preserves animation). Returns null when
-  /// nothing further should happen; otherwise the raw bytes still needing the
-  /// crop dialog.
+  /// Shared prologue for the avatar and banner pickers. Returns null when
+  /// nothing further should happen, otherwise the raw bytes still needing the
+  /// crop dialog; ANIMATED input goes straight to [onAnimatedPicked], because
+  /// skipping the cropper is what preserves the animation.
   ///
-  /// There is deliberately no SOURCE size check here. Rust rejects on what it
-  /// PRODUCES — a 1.98 MB GIF that converts to 971 KB is a fine avatar, and
-  /// refusing it on the file size was refusing something that fits.
-  ///
-  /// The animated test reads the BYTES, never the extension. Branching on
-  /// `.gif` sent animated WebP and APNG through the cropper, which rasterises
-  /// to a still PNG — the upload succeeded and the avatar simply never moved,
-  /// with nothing shown to explain it.
+  /// Deliberately no SOURCE size check: Rust rejects on what it PRODUCES, and a
+  /// large GIF that converts small is a fine avatar. The animated test reads the
+  /// BYTES, never the extension, or animated WebP and APNG go through the
+  /// cropper and silently arrive as a still.
   Future<Uint8List?> _pickImageRaw({
     required void Function(Uint8List rawBytes) onAnimatedPicked,
   }) async {
@@ -314,7 +298,6 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
     );
     if (raw == null || !mounted) return;
 
-    // Open crop dialog (1:1 aspect for avatar)
     final cropped = await showImageCropDialog(
       context: context,
       imageBytes: raw,
@@ -323,15 +306,15 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
     );
     if (cropped == null || !mounted) return;
 
-    // Instant feedback: stage the cropped PNG for the preview NOW; the WebP
-    // encode (a real wall-clock wait) runs in the background and swaps in.
+    // Stage the cropped PNG for the preview now; the WebP encode is a real
+    // wall-clock wait and swaps in behind it.
     final prevBytes = _pendingAvatarBytes;
     final prevChanged = _avatarChanged;
     final gen = ++_avatarPickGen;
     setState(() {
       _pendingAvatarBytes = cropped;
-      // A still pick drops any previous animation (null here becomes the
-      // explicit clear at save time).
+      // A still pick drops any previous animation: null here becomes the
+      // explicit clear at save time.
       _pendingAvatarStill = null;
       _pendingAvatarAnim = null;
       _avatarChanged = true;
@@ -348,7 +331,7 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
         });
       } catch (e) {
         if (!mounted || gen != _avatarPickGen) return;
-        // Revert the optimistic staging — the pick failed.
+        // The pick failed, so revert the optimistic staging.
         setState(() {
           _pendingAvatarBytes = prevBytes;
           _avatarChanged = prevChanged;
@@ -362,8 +345,8 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
 
   void _clearAvatar() {
     setState(() {
-      // Uint8List(0) is the CLEAR sentinel — a late processing result must
-      // never overwrite it.
+      // Uint8List(0) is the CLEAR sentinel, which a late processing result must
+      // never overwrite.
       _avatarPickGen++;
       _avatarBusy = false;
       _pendingAvatarBytes = Uint8List(0);
@@ -380,8 +363,7 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
     );
     if (raw == null || !mounted) return;
 
-    // Open crop dialog (2.5:1 aspect for the user banner, matching the
-    // profile dialog's 560x224 header and Rust's 1200x480 storage)
+    // 2.5:1, matching the profile dialog's header and Rust's banner storage.
     final cropped = await showImageCropDialog(
       context: context,
       imageBytes: raw,
@@ -435,11 +417,11 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
   }
 
   /// An ANIMATED pick: Rust crops, walks the quality ladder and caches the
-  /// result on the asset rail, handing back the hash, the animation (for the
-  /// preview) and the still companion that rides the profile push.
+  /// result on the asset rail, handing back the hash, the animation for the
+  /// preview and the still companion that rides the profile push.
   ///
-  /// The failure toast shows Rust's message verbatim because those messages
-  /// are the useful ones: "about 9s fits at 1200x480" beats "too large".
+  /// The failure toast shows Rust's message verbatim, because a message naming
+  /// the length that would fit beats "too large".
   void _processAnimated(Uint8List rawBytes, {required bool avatar}) {
     final gen = avatar ? ++_avatarPickGen : ++_bannerPickGen;
     setState(() {
@@ -458,8 +440,8 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
         if (!mounted || gen != (avatar ? _avatarPickGen : _bannerPickGen)) {
           return;
         }
-        // Seed the rail cache so every surface paints it immediately: the
-        // blob is already stored, this just skips the round trip back out.
+        // The blob is already stored; seeding skips the round trip back out so
+        // every surface paints it immediately.
         ref.read(profileAnimProvider.notifier).seed(media.hash, media.bytes);
         setState(() {
           if (avatar) {
@@ -507,7 +489,6 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
     super.dispose();
   }
 
-  /// Save the Profile category. Profile keeps an explicit Save button (text
   Future<void> _pickFrame() async {
     final saved = ref.read(
         profileProvider.select((p) => p[widget.localPeerId]?.avatarFrame)) ??
@@ -533,15 +514,15 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
     });
   }
 
-  /// fields + cropped images benefit from a single commit); every other
-  /// category auto-saves on change. Does NOT close the dialog — the user can
-  /// keep browsing other categories afterward.
+  /// Commits the Profile category, which keeps an explicit Save because its
+  /// text fields and cropped images want a single commit. Does NOT close the
+  /// dialog.
   Future<void> _saveProfile() async {
     if (_savingProfile) return;
     setState(() => _savingProfile = true);
     try {
-      // A Save tapped during image processing must WAIT for the final WebP
-      // (or the failure revert) — not silently commit half-staged state.
+      // A Save tapped during image processing WAITS for the final WebP, or for
+      // the failure revert, rather than committing half-staged state.
       final avatarWait = _avatarProcessing;
       if (avatarWait != null) await avatarWait;
       final bannerWait = _bannerProcessing;
@@ -552,18 +533,17 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
       final status = widget.statusController.text.trim();
       final aboutMe = widget.aboutMeController.text.trim();
 
-      // The legacy `twitch_username` field is carried through UNCHANGED. It is
-      // a self-declaration, no new client renders it, and the verified mark it
-      // was standing in for lives in `support_creds` now; writing it here from
-      // a connected account would only keep an unverifiable claim alive on the
-      // wire for the sake of old builds that already have one.
+      // The legacy `twitch_username` is carried through UNCHANGED: it is a
+      // self-declaration, and the verified mark it stood in for lives in
+      // `support_creds` now. Writing it from a connected account would keep an
+      // unverifiable claim alive on the wire.
       await ref.read(profileProvider.notifier).updateMyProfile(
             displayName: displayName,
             status: status,
             aboutMe: aboutMe,
-            // The STILL is what rides the push; the animation is already on
-            // the rail and travels as its hash. An empty hash on a still pick
-            // is what drops a previous animation.
+            // The STILL rides the push; the animation is already on the rail
+            // and travels as its hash. An empty hash on a still pick drops a
+            // previous animation.
             avatarBytes: _avatarChanged
                 ? (_pendingAvatarStill ?? _pendingAvatarBytes)
                 : null,
@@ -589,7 +569,7 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
       });
       HollowToast.show(context, 'Profile saved', type: HollowToastType.success);
     } catch (e) {
-      // Keep the dirty flags — the edits are intact and Save is retryable.
+      // Keep the dirty flags: the edits are intact and Save is retryable.
       if (mounted) {
         HollowToast.show(context, 'Failed to save profile: $e',
             type: HollowToastType.error);
@@ -599,14 +579,11 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
     }
   }
 
-  // ── Relay selection handlers (Network category) ──────────────────
-
   Future<void> _applyRelayAndRestart() async {
     await ref.read(relayDomainProvider.notifier).setDomain(_selectedRelay);
     await ref.read(savedRelayListProvider.notifier).addRelay(_selectedRelay);
-    // Shared waiter-script relaunch (app_relaunch.dart) — a directly-spawned
-    // copy dies against the native single-instance forwarder while we're
-    // still shutting down.
+    // Only via the shared waiter: a directly-spawned copy dies against the
+    // native single-instance forwarder while this one is still shutting down.
     await relaunchApp();
   }
 
@@ -637,8 +614,8 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
     });
   }
 
-  /// Categories matching the current search query. When the query is empty,
-  /// all categories are shown.
+  /// Categories matching the current search query, or all of them when it is
+  /// empty.
   List<_SettingsCategory> get _filteredCategories {
     if (_searchQuery.isEmpty) return _SettingsCategory.values;
     final q = _searchQuery.toLowerCase();
@@ -653,22 +630,21 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
     final radius = BorderRadius.circular(hollow.radiusLg);
     final screen = MediaQuery.of(context).size;
 
-    // Responsive dialog — grows with the window but stays comfortable. The old
-    // fixed 680x540 box was the main source of the "everything's cramped"
-    // feeling; this gives the rail + cards room to breathe.
+    // Grows with the window rather than sitting at a fixed size, which left the
+    // rail and the cards cramped.
     final dialogWidth = screen.width * 0.9 < 920.0 ? screen.width * 0.9 : 920.0;
     final dialogHeight = screen.height * 0.86 < 680.0 ? screen.height * 0.86 : 680.0;
 
-    // The comfortable minimum must still yield to the viewport. A minimum
-    // LARGER than the max wins in BoxConstraints (min is normalised up), so a
-    // flat `minHeight: 420` in a short viewport pushes the close button off
-    // screen — which is how you lock yourself out at a high interface scale.
+    // The comfortable minimum must still yield to the viewport: in
+    // BoxConstraints a min LARGER than the max wins, so a flat minimum in a
+    // short viewport pushes the close button off screen and locks the user out
+    // at a high interface scale.
     final dialogMinWidth = dialogWidth < 360.0 ? dialogWidth : 360.0;
     final dialogMinHeight = dialogHeight < 420.0 ? dialogHeight : 420.0;
 
     final filtered = _filteredCategories;
-    // If the active category was filtered out, fall back to the first match so
-    // the content area never goes blank while typing.
+    // Falls back to the first match so the content area never goes blank while
+    // the user is typing.
     final activeForContent =
         filtered.contains(_activeTab) ? _activeTab : (filtered.isNotEmpty ? filtered.first : _activeTab);
 
@@ -702,21 +678,17 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
               child: Row(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  // ── Left: searchable category rail ──
-                  // Own traversal group so Tab cycles the categories on their
-                  // own, separate from the content pane (a11y 2.6).
+                  // Own traversal group, so Tab cycles the categories
+                  // separately from the content pane.
                   FocusTraversalGroup(
                     policy: ReadingOrderTraversalPolicy(),
                     child: _buildRail(hollow, filtered, activeForContent),
                   ),
 
-                  // Vertical divider.
                   Container(width: 1, color: hollow.border),
 
-                  // ── Right: content area (cards) + close button ──
-                  // Own traversal group (a11y 2.6): Tab stays WITHIN the active
-                  // settings pane instead of leaking back into the category
-                  // rail as you move down a section.
+                  // Own traversal group, so Tab stays WITHIN the active pane
+                  // instead of leaking back into the category rail.
                   Expanded(
                     child: FocusTraversalGroup(
                       policy: ReadingOrderTraversalPolicy(),
@@ -773,7 +745,6 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
               ),
             ),
           ),
-          // Search filter.
           Padding(
             padding: const EdgeInsets.fromLTRB(
               HollowSpacing.sm,
@@ -827,10 +798,9 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
     );
   }
 
-  /// Builds the scrollable card content for the active category. Each
-  /// category's cards live in a per-category module under
-  /// `lib/src/ui/settings/`; Profile and Network get the dialog-scoped edit
-  /// state passed down so it survives switching categories.
+  /// Builds the scrollable card content for the active category. Profile and
+  /// Network take the dialog-scoped edit state, so it survives a category
+  /// switch.
   Widget _buildCategoryContent(HollowTheme hollow, _SettingsCategory cat) {
     final Widget body = switch (cat) {
       _SettingsCategory.profile => _buildProfileSection(),

@@ -1,8 +1,7 @@
-/// Power-role hierarchy shared by every member-management surface
-/// (server settings Members tab, profile-card Manage Member dialog).
+/// Power-role hierarchy shared by every member-management surface.
 ///
-/// Dart-side checks are advisory UI gating only — the authoritative gate is
-/// Rust `op_allowed` (`can_change_role`), which validates `op.author`.
+/// Dart-side checks are advisory UI gating only; the authoritative gate is Rust
+/// `op_allowed` (`can_change_role`), which validates `op.author`.
 library;
 
 /// Whether [actorRole] can change [targetRole] to a different role.

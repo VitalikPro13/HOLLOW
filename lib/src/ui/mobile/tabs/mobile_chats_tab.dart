@@ -155,7 +155,7 @@ class _MobileChatsTabState extends ConsumerState<MobileChatsTab> {
       return;
     }
 
-    // Already in THIS voice channel — open text chat + voice route on top.
+    // Already in THIS voice channel.
     if (vcState.currentServerId == serverId &&
         vcState.currentChannelId == channel.channelId) {
       if (!mounted) return;
@@ -189,7 +189,7 @@ class _MobileChatsTabState extends ConsumerState<MobileChatsTab> {
       return;
     }
 
-    // Already in a DIFFERENT voice channel — confirm switch.
+    // Already in a DIFFERENT voice channel.
     if (vcState.isInVoiceChannel) {
       if (!mounted) return;
       final confirmed = await showHollowDialog<bool>(
@@ -218,7 +218,8 @@ class _MobileChatsTabState extends ConsumerState<MobileChatsTab> {
       if (confirmed != true || !mounted) return;
     }
 
-    // Join and push: text chat first (so back arrow reveals it), then voice on top.
+    // Text chat is pushed first, so the back arrow reveals it under the voice
+    // route.
     ref.read(voiceChannelProvider.notifier).joinChannel(serverId, channel.channelId);
     if (!mounted) return;
     final nav = Navigator.of(context, rootNavigator: true);
@@ -253,9 +254,9 @@ class _MobileChatsTabState extends ConsumerState<MobileChatsTab> {
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
-    // Master-collapsed + deduped accepted friends — so a friend stranded under a
-    // DEVICE id (nickname-added, pre-re-key) doesn't appear as a phantom duplicate
-    // chat. Messages/unreads/profiles all key on the master.
+    // Master-collapsed and deduped, or a friend stranded under a DEVICE id
+    // appears as a phantom duplicate chat; messages, unreads and profiles all
+    // key on the master.
     final friends = ref.watch(sortedFriendsProvider);
     final online = ref.watch(onlineIdentitiesProvider);
     final lastMessages = ref.watch(lastDmMessageProvider);
@@ -264,11 +265,8 @@ class _MobileChatsTabState extends ConsumerState<MobileChatsTab> {
     final profiles = ref.watch(profileProvider);
     final unread = ref.watch(unreadProvider);
 
-    // Build unified list items
     final items = <_ConversationItem>[];
 
-    // DM conversations (accepted friends, not hidden). `friends` is already the
-    // accepted, master-collapsed list from sortedFriendsProvider.
     for (final friend in friends) {
       if (hiddenDms.contains(friend.peerId)) continue;
       final last = lastMessages[friend.peerId];
@@ -283,7 +281,6 @@ class _MobileChatsTabState extends ConsumerState<MobileChatsTab> {
       ));
     }
 
-    // Servers
     for (final server in servers.values) {
       items.add(_ConversationItem(
         type: _ItemType.server,
@@ -295,23 +292,19 @@ class _MobileChatsTabState extends ConsumerState<MobileChatsTab> {
       ));
     }
 
-    // Sort: items with unread first, then by timestamp (DMs) or name (servers)
     items.sort((a, b) {
       final aHasUnread = a.unreadCount > 0 ? 0 : 1;
       final bHasUnread = b.unreadCount > 0 ? 0 : 1;
       if (aHasUnread != bHasUnread) return aHasUnread.compareTo(bHasUnread);
 
-      // Both have or lack unreads — sort DMs by timestamp, servers by name
       final aTime = a.timestamp ?? DateTime(2000);
       final bTime = b.timestamp ?? DateTime(2000);
       if (aTime != bTime) return bTime.compareTo(aTime); // newest first
       return a.name.compareTo(b.name);
     });
 
-    // Parked join requests, pinned above the conversations and deliberately
-    // outside the sort. They have no name to sort by and no activity to rank,
-    // and burying one under a month of chats is how a user forgets they ever
-    // asked to join.
+    // Parked join requests are pinned above the conversations and deliberately
+    // outside the sort: they have no name and no activity to rank by.
     final pendingJoins = ref.watch(pendingJoinsProvider);
     var pendingInsertAt = 0;
     for (final info in pendingJoins.values) {
@@ -325,8 +318,8 @@ class _MobileChatsTabState extends ConsumerState<MobileChatsTab> {
       );
     }
 
-    // Pinned "Saved messages" (a DM with your own master identity) — always
-    // the very first row, deliberately excluded from the unread/recency sort.
+    // "Saved messages" is a DM with your own master identity, pinned first and
+    // deliberately outside the unread and recency sort.
     final savedId = ref.watch(savedMessagesPeerIdProvider);
     if (savedId != null) {
       items.insert(
@@ -376,12 +369,11 @@ class _MobileChatsTabState extends ConsumerState<MobileChatsTab> {
           itemBuilder: (context, index) {
             final item = items[index];
             // Keyed by item identity: this list mixes DMs and servers and
-            // reorders constantly — without keys, Flutter re-parents row
-            // State across DIFFERENT conversations when positions shift
-            // (a joined server then shows another server's channel list).
+            // reorders constantly, and without keys Flutter re-parents row
+            // State across DIFFERENT conversations.
             if (item.type == _ItemType.pendingJoin) {
-              // Tap AND long press open the same sheet: there is no server to
-              // navigate into, so a tap that did nothing would read as broken.
+              // Tap and long press open the same sheet: there is no server to
+              // navigate into, and a tap that did nothing would read as broken.
               void openSheet() => showPendingJoinSheet(
                     context: context,
                     ref: ref,
@@ -404,8 +396,8 @@ class _MobileChatsTabState extends ConsumerState<MobileChatsTab> {
                 isSavedMessages: isSaved,
                 formatTime: _formatTime,
                 onTap: () => _openDmChat(item.id),
-                // No context sheet for Saved messages (mute/hide/remove-friend
-                // actions don't apply to a conversation with yourself).
+                // No context sheet for Saved messages: none of its actions
+                // apply to a conversation with yourself.
                 onLongPress: isSaved
                     ? null
                     : () => _showDmSheet(context, item.id, item.name),
@@ -503,7 +495,7 @@ class _HeaderShimmerLine extends StatelessWidget {
       child: ValueListenableBuilder<double>(
         valueListenable: SharedTickers.instance.ambient,
         builder: (context, value, _) {
-          // 45s cycle, we use a sub-range for a ~10s ping-pong sweep
+          // A sub-range of the 45s cycle, for a ~10s ping-pong sweep.
           final sub = (value * 4.5) % 1.0;
           final pingPong = sub < 0.5 ? sub * 2.0 : 2.0 - sub * 2.0;
           final curved = Curves.easeInOut.transform(pingPong);
@@ -562,15 +554,11 @@ class _ConversationItem {
   });
 }
 
-// ─────────────────────────────────────────────────
-// Parked join request row
-// ─────────────────────────────────────────────────
-
 /// A join we asked for that nobody has answered yet.
 ///
-/// Greyed on purpose: it is not a conversation, there is nothing to open, and
-/// the only thing we know about the server is the id from the invite link. No
-/// spinner either — the wait is for another person to open their app.
+/// Greyed on purpose: there is nothing to open, and all we know about the
+/// server is the id from the invite link. No spinner either, because the wait
+/// is for another person to open their app.
 class _PendingJoinRow extends ConsumerWidget {
   final String serverId;
   final VoidCallback onTap;
@@ -647,10 +635,6 @@ class _PendingJoinRow extends ConsumerWidget {
   }
 }
 
-// ─────────────────────────────────────────────────
-// DM conversation row
-// ─────────────────────────────────────────────────
-
 class _DmRow extends ConsumerWidget {
   final String peerId;
   final String name;
@@ -694,8 +678,8 @@ class _DmRow extends ConsumerWidget {
       ),
       child: Row(
         children: [
-          // Avatar + status dot (Saved messages: bookmark, no presence — it's
-          // a conversation with yourself).
+          // Saved messages gets a bookmark and no presence, being a
+          // conversation with yourself.
           if (isSavedMessages)
             const SavedMessagesAvatar(size: 44)
           else
@@ -727,7 +711,6 @@ class _DmRow extends ConsumerWidget {
             ),
           ),
           const SizedBox(width: HollowSpacing.md),
-          // Name + last message
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -744,8 +727,8 @@ class _DmRow extends ConsumerWidget {
                 if (lastMessage != null) ...[
                   const SizedBox(height: 2),
                   Text(
-                    // Saved messages: every message is yours — the "You:"
-                    // prefix would be pure noise.
+                    // Every Saved message is yours, so the "You:" prefix would
+                    // be noise.
                     lastMessage!.isMe && !isSavedMessages
                         ? 'You: ${lastMessage!.text}'
                         : lastMessage!.text,
@@ -760,7 +743,6 @@ class _DmRow extends ConsumerWidget {
             ),
           ),
           const SizedBox(width: HollowSpacing.sm),
-          // Timestamp + unread badge
           Column(
             crossAxisAlignment: CrossAxisAlignment.end,
             mainAxisSize: MainAxisSize.min,
@@ -798,10 +780,6 @@ class _DmRow extends ConsumerWidget {
     );
   }
 }
-
-// ─────────────────────────────────────────────────
-// DM context bottom sheet
-// ─────────────────────────────────────────────────
 
 class _DmContextSheet extends ConsumerWidget {
   final String peerId;
@@ -844,7 +822,6 @@ class _DmContextSheet extends ConsumerWidget {
               maxLines: 1, overflow: TextOverflow.ellipsis),
         ),
         const SizedBox(height: HollowSpacing.sm),
-        // Mute / Unmute
         _SheetAction(
           icon: isDmMuted ? LucideIcons.bell : LucideIcons.bellOff,
           label: isDmMuted ? 'Unmute Notifications' : 'Mute Notifications',
@@ -857,7 +834,6 @@ class _DmContextSheet extends ConsumerWidget {
                 type: HollowToastType.success);
           },
         ),
-        // Export Archive
         _SheetAction(
           icon: LucideIcons.fileOutput,
           label: 'Export Archive',
@@ -867,7 +843,6 @@ class _DmContextSheet extends ConsumerWidget {
                 isDm: true, peerId: peerId, name: name, messageCount: 0);
           },
         ),
-        // Hide / Unhide from Archive
         _SheetAction(
           icon: isHidden ? LucideIcons.eye : LucideIcons.eyeOff,
           label: isHidden ? 'Show in Archive' : 'Hide from Archive',
@@ -880,7 +855,6 @@ class _DmContextSheet extends ConsumerWidget {
             onDismiss();
           },
         ),
-        // Copy Peer ID
         _SheetAction(
           icon: LucideIcons.copy,
           label: 'Copy Peer ID',
@@ -896,10 +870,6 @@ class _DmContextSheet extends ConsumerWidget {
     );
   }
 }
-
-// ─────────────────────────────────────────────────
-// Server row with accordion channel expansion
-// ─────────────────────────────────────────────────
 
 class _ServerRow extends ConsumerWidget {
   final String serverId;
@@ -930,7 +900,6 @@ class _ServerRow extends ConsumerWidget {
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
-        // Server header row
         HollowPressable(
           onTap: onTap,
           onLongPress: onLongPress,
@@ -941,7 +910,6 @@ class _ServerRow extends ConsumerWidget {
           ),
           child: Row(
             children: [
-              // Server icon
               Container(
                 width: 44,
                 height: 44,
@@ -953,7 +921,7 @@ class _ServerRow extends ConsumerWidget {
                 child: ServerIconImage(
                   serverId: serverId,
                   size: 44,
-                  // No hover on touch — an expanded row counts as watched.
+                  // No hover on touch, so an expanded row counts as watched.
                   isSelected: isExpanded,
                   borderRadius: BorderRadius.zero,
                   fallback: Center(
@@ -967,7 +935,6 @@ class _ServerRow extends ConsumerWidget {
                 ),
               ),
               const SizedBox(width: HollowSpacing.md),
-              // Server name + member count
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -994,13 +961,12 @@ class _ServerRow extends ConsumerWidget {
               ),
               const SizedBox(width: HollowSpacing.sm),
               // Admitted after a parked join, still waiting for a member to
-              // finish the MLS setup. Same flair as both desktop shells.
+              // finish the MLS setup.
               if (ref.watch(awaitingSetupProvider
                   .select((s) => s.contains(serverId)))) ...[
                 const AwaitingSetupBadge(),
                 const SizedBox(width: HollowSpacing.sm),
               ],
-              // Unread badge + expand chevron
               if (unreadCount > 0) ...[
                 Container(
                   padding: const EdgeInsets.symmetric(
@@ -1033,7 +999,6 @@ class _ServerRow extends ConsumerWidget {
             ],
           ),
         ),
-        // Expanded channel list
         AnimatedCrossFade(
           firstChild: const SizedBox.shrink(),
           secondChild: _ChannelList(
@@ -1048,10 +1013,6 @@ class _ServerRow extends ConsumerWidget {
     );
   }
 }
-
-// ─────────────────────────────────────────────────
-// Channel list inside expanded server (loads on demand)
-// ─────────────────────────────────────────────────
 
 class _ChannelList extends ConsumerStatefulWidget {
   final String serverId;
@@ -1080,8 +1041,8 @@ class _ChannelListState extends ConsumerState<_ChannelList> {
   @override
   void didUpdateWidget(covariant _ChannelList oldWidget) {
     super.didUpdateWidget(oldWidget);
-    // If this State gets reused for a DIFFERENT server, the cached display
-    // items belong to the old one — reset and reload.
+    // A State reused for a DIFFERENT server still holds the old one's cached
+    // display items.
     if (oldWidget.serverId != widget.serverId) {
       setState(() {
         _displayItems = [];
@@ -1110,9 +1071,8 @@ class _ChannelListState extends ConsumerState<_ChannelList> {
     Map<String, ChannelInfo> allChannels,
     String layoutJson,
   ) {
-    // Hide channels the local user can't see. `meCanSee` is computed
-    // Rust-side with the full predicate (tier + label gates + grants) —
-    // matches desktop's visibleChannelsProvider without a hand-rolled ladder.
+    // `meCanSee` is Rust's full access predicate (tier, label gates, grants);
+    // never re-implement the ladder here.
     final channels = <String, ChannelInfo>{
       for (final e in allChannels.entries)
         if (e.value.meCanSee) e.key: e.value,
@@ -1121,13 +1081,10 @@ class _ChannelListState extends ConsumerState<_ChannelList> {
     final items = <_DisplayItem>[];
     String? currentCategory;
 
-    // Normalised, the same way the desktop sidebar, the sidebar's context
-    // menus and the Channels settings editor all do it: the stored layout,
-    // minus channels that are gone (or hidden from this user), plus the
-    // channels missing from it appended in list order. Appending those in a
-    // SEPARATE loop, as this used to, put them outside the pass that tracks
-    // the open category — so a channel drawn under a trailing category was
-    // not in it and stayed on screen when the category was collapsed.
+    // Channel LISTS render the normalised layout, never the stored one. The
+    // appended channels must come out of this same call: tracked in a separate
+    // loop they fall outside the pass that follows the open category, and a
+    // channel under a trailing category survives collapsing it.
     final layout = effectiveLayoutFrom(parseLayoutJson(layoutJson), channels);
     for (final entry in layout) {
       switch (entry) {
@@ -1147,7 +1104,6 @@ class _ChannelListState extends ConsumerState<_ChannelList> {
       }
     }
 
-    // Compute isLastInGroup: last channel before a category/separator/end
     for (int i = 0; i < items.length; i++) {
       if (items[i] is _ChannelDisplayItem) {
         final next = i + 1 < items.length ? items[i + 1] : null;
@@ -1174,8 +1130,8 @@ class _ChannelListState extends ConsumerState<_ChannelList> {
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
-    // This tree only needs THIS server's participant map — mute/camera/share
-    // state changes elsewhere must not rebuild the whole channel tree.
+    // Only THIS server's participant map, so mute, camera and share changes
+    // elsewhere do not rebuild the whole channel tree.
     final voiceParticipantsByChannel = ref.watch(
         voiceChannelProvider.select((s) => s.participants[widget.serverId]));
     final unread = ref.watch(unreadProvider);
@@ -1189,11 +1145,9 @@ class _ChannelListState extends ConsumerState<_ChannelList> {
     ref.listen(channelListProvider, (prev, next) {
       if (prev != next) _loadChannels();
     });
-    // Live visibility/posting OR role changes must refresh THIS list even when no
-    // server is "selected" (the common Chats-tab case where channelListProvider is
-    // stale). `serverChannelsProvider` is a per-server FutureProvider invalidated
-    // by the ServerUpdated handler, so it fires for any server; role/permission
-    // changes re-run the visibility filter. Matches desktop's always-live shell.
+    // Visibility, posting and role changes must refresh THIS list even when no
+    // server is selected, which is the common Chats-tab case where
+    // `channelListProvider` is stale.
     ref.listen(serverChannelsProvider(widget.serverId), (prev, next) {
       _loadChannels();
     });
@@ -1287,7 +1241,6 @@ class _ChannelListState extends ConsumerState<_ChannelList> {
   }
 }
 
-// Display item types for layout-aware rendering
 sealed class _DisplayItem {}
 
 class _CategoryDisplayItem extends _DisplayItem {
@@ -1401,12 +1354,11 @@ class _TreeChannelRow extends StatelessWidget {
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
     final lineColor = hollow.textSecondary.withValues(alpha: 0.7);
-    // Tree connector aligned under the server avatar center (44/2 + lg padding)
+    // Aligned under the server avatar's centre.
     const double treeLeft = HollowSpacing.lg + 22;
 
     return Stack(
       children: [
-        // Tree lines
         Positioned(
           left: treeLeft,
           top: 0,
@@ -1417,7 +1369,6 @@ class _TreeChannelRow extends StatelessWidget {
             child: ColoredBox(color: lineColor),
           ),
         ),
-        // Branch connector
         Positioned(
           left: treeLeft,
           top: 18,
@@ -1427,7 +1378,6 @@ class _TreeChannelRow extends StatelessWidget {
             child: ColoredBox(color: lineColor),
           ),
         ),
-        // Vertical line segment for last item (only goes to the branch)
         if (isLast)
           Positioned(
             left: treeLeft,
@@ -1438,7 +1388,6 @@ class _TreeChannelRow extends StatelessWidget {
               child: ColoredBox(color: lineColor),
             ),
           ),
-        // Actual channel row
         _ChannelRow(
           channel: channel,
           serverId: serverId,
@@ -1566,7 +1515,7 @@ class _ChannelRow extends StatelessWidget {
               overflow: TextOverflow.ellipsis,
             ),
           ),
-          // Public indicator (#44) — mirrors the desktop sidebar row.
+          // Public indicator (#44).
           if (channel.isPublic) ...[
             const SizedBox(width: HollowSpacing.xs),
             Semantics(
@@ -1628,10 +1577,6 @@ class _ChannelRow extends StatelessWidget {
   }
 }
 
-// ─────────────────────────────────────────────────
-// New conversation dialog (Create/Join Server, Add Friend)
-// ─────────────────────────────────────────────────
-
 void showNewConversationDialog(BuildContext context) {
   showHollowDialog(
     context: context,
@@ -1663,7 +1608,7 @@ class _NewConversationDialogState
     final input = _joinController.text.trim();
     if (input.isEmpty) return;
 
-    // Invite link (hollow:// or web /join#server=) or raw server ID.
+    // Accepts a hollow:// link, a web /join#server= link or a raw server id.
     final serverId = inviteIdFromInput(input, HollowLinkType.serverInvite);
 
     Navigator.of(context).pop();
@@ -1712,7 +1657,6 @@ class _NewConversationDialogState
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  // Header
                   Row(
                     children: [
                       Expanded(
@@ -1735,7 +1679,6 @@ class _NewConversationDialogState
                   ),
                   const SizedBox(height: HollowSpacing.xl),
 
-                  // Join Server
                   const _SectionLabel(
                     icon: LucideIcons.logIn,
                     label: 'Join a Server',
@@ -1751,7 +1694,6 @@ class _NewConversationDialogState
 
                   const SizedBox(height: HollowSpacing.xl),
 
-                  // Create Server
                   const _SectionLabel(
                     icon: LucideIcons.plusCircle,
                     label: 'Create a Server',
@@ -1867,10 +1809,6 @@ class _InputRow extends StatelessWidget {
   }
 }
 
-// ─────────────────────────────────────────────────
-// Server long-press context sheet
-// ─────────────────────────────────────────────────
-
 class _ServerContextSheet extends ConsumerWidget {
   final String serverId;
   final String serverName;
@@ -1895,7 +1833,6 @@ class _ServerContextSheet extends ConsumerWidget {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          // Handle
           Container(
             width: 36,
             height: 4,
@@ -1905,7 +1842,6 @@ class _ServerContextSheet extends ConsumerWidget {
             ),
           ),
           const SizedBox(height: HollowSpacing.md),
-          // Server name header
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.lg),
             child: Text(
@@ -1916,7 +1852,6 @@ class _ServerContextSheet extends ConsumerWidget {
             ),
           ),
           const SizedBox(height: HollowSpacing.lg),
-          // Actions
           _SheetAction(
             icon: LucideIcons.settings,
             label: 'Server Settings',

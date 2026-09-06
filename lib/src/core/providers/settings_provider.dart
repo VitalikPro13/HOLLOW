@@ -7,8 +7,7 @@ import 'package:hollow/src/core/services/sound_service.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 
-/// Whether closing the window minimizes to system tray instead of quitting.
-/// Default: true (minimize to tray).
+/// Whether closing the window minimizes to the tray instead of quitting. Default true.
 final minimizeToTrayProvider =
     AsyncNotifierProvider<MinimizeToTrayNotifier, bool>(
         MinimizeToTrayNotifier.new);
@@ -29,16 +28,11 @@ class MinimizeToTrayNotifier extends AsyncNotifier<bool> {
   }
 }
 
-/// Reduce-motion preference (tri-state Auto/On/Off).
-///
-/// - Auto (default): follow the OS "Reduce Motion" accessibility flag.
-/// - On: always reduce motion.
-/// - Off: never reduce motion.
+/// Reduce-motion preference: Auto (default, follow the OS flag), On, or Off.
 ///
 /// Effective reduce-motion (OS flag OR override) is owned by
-/// [ReduceMotionController]; this provider just persists the user's choice and
-/// pushes it into the controller. The legacy `disable_animations` bool is
-/// migrated on first read: true → On, otherwise → Auto.
+/// [ReduceMotionController]; this provider persists the choice and pushes it
+/// there. The legacy `disable_animations` bool migrates on first read.
 final reduceMotionProvider =
     AsyncNotifierProvider<ReduceMotionNotifier, ReduceMotionMode>(
         ReduceMotionNotifier.new);
@@ -76,9 +70,8 @@ class ReduceMotionNotifier extends AsyncNotifier<ReduceMotionMode> {
 
 /// Whether to reduce transparency / blur effects (accessibility).
 ///
-/// When on, glassmorphism dialog blur drops to sigma 0 and the opt-in
-/// background-image panel renders fully opaque. Persisted under
-/// `reduce_transparency`. Default: false.
+/// Dialog blur drops to sigma 0 and the background-image panel renders fully
+/// opaque. Persisted as `reduce_transparency`. Default: false.
 final reduceTransparencyProvider =
     AsyncNotifierProvider<ReduceTransparencyNotifier, bool>(
         ReduceTransparencyNotifier.new);
@@ -170,17 +163,11 @@ class CameraDeviceNotifier extends AsyncNotifier<String?> {
   }
 }
 
-/// Outgoing image quality tier.
+/// Outgoing image quality tier, driving the Rust WebP encoder. Persisted as
+/// `image_quality`. Default: balanced.
 ///
-/// Controls the Rust-side WebP encoder in `image_convert::convert_to_webp_with_quality`.
-/// Persisted as `image_quality` in `app_settings`. Default: balanced.
-///
-/// Lossless is only worth picking if you share pixel art, diagrams, or
-/// screenshots with tiny text. For normal photos/artwork, Balanced is
-/// indistinguishable from lossless at render sizes and ~95% smaller.
-/// Small is for very tight bandwidth / quota-constrained situations.
-///
-/// Phase 6.75 image quality tiers.
+/// Lossless is only worth picking for pixel art, diagrams or tiny text; for
+/// photos Balanced is indistinguishable at render sizes and ~95% smaller.
 enum ImageQuality {
   lossless('Lossless (100%)', 'Pixel-perfect: for art, diagrams, screenshots'),
   balanced('Balanced (50%)', 'Indistinguishable, ~95% smaller'),
@@ -250,18 +237,16 @@ class AudioQualityNotifier extends AsyncNotifier<AudioQualityPreset> {
   }
 }
 
-/// Microphone input gain — the LINEAR multiplier applied post-APM by the
-/// native capture processor. With voice enhancement ON it is the chain's
-/// input trim (2.0x = "100%" = unity trim); with enhancement OFF it is the
-/// legacy flat makeup gain. Ignored entirely while Dynamic mode auto-levels.
-/// See [kMicGainDisplayUnit] for the % mapping.
+/// Microphone input gain, the LINEAR multiplier applied post-APM by the
+/// native capture processor. With voice enhancement ON it is the chain's input
+/// trim (2.0x = "100%"); with it OFF, the legacy flat makeup gain. Ignored
+/// while Dynamic mode auto-levels. See [kMicGainDisplayUnit] for the % mapping.
 final micGainProvider =
     AsyncNotifierProvider<MicGainNotifier, double>(MicGainNotifier.new);
 
-/// Mic gain bounds (actual linear multiplier). The slider goes BOTH ways
-/// around the default: down to 34% (0.68x — floor is non-zero so the slider
-/// can't mute the mic) and up to 200% (4.0x — the limiter still prevents
-/// clipping).
+/// Mic gain bounds (linear multiplier). The slider goes both ways around the
+/// default: down to 34% (0.68x, a non-zero floor so it can't mute the mic) and
+/// up to 200% (4.0x, where the limiter still prevents clipping).
 const double kMicGainMin = 0.68;
 const double kMicGainMax = 4.0;
 
@@ -269,20 +254,17 @@ const double kMicGainMax = 4.0;
 /// kMicGainDisplayUnit * 100), so 0.68x→34%, 2.0x→100%, 4.0x→200%.
 const double kMicGainDisplayUnit = 2.0;
 
-/// Default gain: 50% (0.5x trim into the enhancement chain). Device-tested
-/// 2026-07-02: unity trim overdrives the chain on decent mics ("insanity");
-/// a good hot mic wanted 34%, so 50% is the sane manual starting point.
-/// (Dynamic mode, the default, ignores this and auto-levels instead.)
+/// Default gain: 50% (0.5x trim into the enhancement chain). Unity trim
+/// overdrives the chain on decent mics, and a good hot mic wanted 34%.
+/// Dynamic mode, the default, ignores this and auto-levels instead.
 const double kMicGainDefault = 1.0;
 
 class MicGainNotifier extends AsyncNotifier<double> {
   @override
   Future<double> build() async {
-    // v2 key: the 2026-07-02 rescale changed both the range and the meaning
-    // (with voice enhancement the gain is an input TRIM around unity at
-    // "100%"). Reading the old 'mic_gain' key would pin pre-rescale users at
-    // its old clamp floor ("stuck at 50%"), so everyone restarts at the
-    // 100% default instead.
+    // v2 key: the rescale changed both the range and the meaning, so reading the
+    // old 'mic_gain' key would pin pre-rescale users at its old clamp floor.
+    // Everyone restarts at the 100% default instead.
     final val = await storage_api.loadSetting(key: 'mic_gain_v2');
     if (val == null || val.isEmpty) return kMicGainDefault;
     return (double.tryParse(val) ?? kMicGainDefault)
@@ -299,11 +281,10 @@ class MicGainNotifier extends AsyncNotifier<double> {
   }
 }
 
-/// Received screen-share audio volume, in UI percent (0–200). Playback gain
-/// is percent/200: 100% = the −6 dB calibration that sits mastered content
-/// just under the voice chain's −16 LUFS target, 200% = the source's
-/// original loudness (never amplified past unity, so it can't clip).
-/// Applied by [ShareAudioLevel] together with voice-activity ducking.
+/// Received screen-share audio volume, in UI percent (0-200). Playback gain is
+/// percent/200: 100% = the -6 dB calibration that sits mastered content just
+/// under the voice chain's -16 LUFS target, 200% = the source's own loudness
+/// (never past unity, so it can't clip). Applied with voice-activity ducking.
 const double kShareAudioVolumeDefault = 100.0;
 
 final shareAudioVolumeProvider =
@@ -353,12 +334,10 @@ class ShareAudioDuckNotifier extends AsyncNotifier<bool> {
   }
 }
 
-/// Voice enhancement — the native EQ + compressor + limiter chain applied to
-/// the mic AFTER WebRTC's AGC (highpass + presence EQ, -18 dBFS 3:1
-/// compressor with makeup, -1 dBFS limiter). Default ON: this is what makes
-/// any mic land at a consistent, full loudness with zero setup. OFF falls
-/// back to the flat makeup-gain + limiter path. All parameters are static —
-/// the toggle exists so the two paths can be A/B'd live mid-call.
+/// Voice enhancement: the native EQ + compressor + limiter chain applied to the
+/// mic AFTER WebRTC's AGC. Default ON, which is what makes any mic land at a
+/// consistent full loudness with no setup; OFF falls back to flat makeup gain
+/// + limiter. All parameters are static, so the two paths can be A/B'd live.
 final voiceEnhanceProvider =
     AsyncNotifierProvider<VoiceEnhanceNotifier, bool>(VoiceEnhanceNotifier.new);
 
@@ -379,10 +358,9 @@ class VoiceEnhanceNotifier extends AsyncNotifier<bool> {
   }
 }
 
-/// Voice-enhancement strength, in UI percent. Drives the chain's compressor
-/// makeup gain live: 100% = +12 dB, 0% = no loudness boost (EQ + compression
-/// still apply), 150% = +18 dB (the -1 dBFS limiter still caps peaks).
-/// Default 30% (+3.6 dB) — the device-tested golden clarity setting.
+/// Voice-enhancement strength, in UI percent, driving the compressor makeup
+/// gain live: 100% = +12 dB, 0% = no loudness boost, 150% = +18 dB (the -1 dBFS
+/// limiter still caps peaks). Default 30%, the device-tested clarity setting.
 const double kEnhanceStrengthMin = 0.0;
 const double kEnhanceStrengthMax = 150.0;
 const double kEnhanceStrengthDefault = 30.0;
@@ -417,11 +395,9 @@ class VoiceEnhanceStrengthNotifier extends AsyncNotifier<double> {
   }
 }
 
-/// Dynamic mode — the "always sounds good" auto-level. A slow speech-gated
-/// RMS meter in the native chain servos the input trim so ANY mic converges
-/// to the calibrated speech level (the setting that sounded right on real
-/// hardware), with the golden 30% strength. Locks the manual gain/strength
-/// sliders while active. Default ON.
+/// Dynamic mode, the auto-level: a slow speech-gated RMS meter servos the input
+/// trim so any mic converges to the calibrated speech level, at 30% strength.
+/// Locks the manual gain/strength sliders while active. Default ON.
 final voiceEnhanceDynamicProvider =
     AsyncNotifierProvider<VoiceEnhanceDynamicNotifier, bool>(
         VoiceEnhanceDynamicNotifier.new);
@@ -443,14 +419,10 @@ class VoiceEnhanceDynamicNotifier extends AsyncNotifier<bool> {
   }
 }
 
-/// AI noise suppression — removes keyboard/fan/music/room noise from the
-/// outgoing mic at the HEAD of the capture chain (post-AEC, the Krisp
-/// slot). Independent of the Voice Enhancement toggle. While ON, WebRTC's
-/// legacy NS is disabled in the capture constraints (double suppression =
-/// artifacts); the services fall back to WebRTC NS automatically when the
-/// engine can't run on this device. Default OFF while the feature matures
-/// (flip after field validation). The engine is picked by
-/// [noiseSuppressEngineProvider].
+/// AI noise suppression: removes keyboard/fan/room noise from the outgoing mic
+/// at the HEAD of the capture chain (post-AEC). While ON, WebRTC's legacy NS is
+/// disabled in the capture constraints (double suppression = artifacts) and the
+/// services fall back to it when the engine can't run. Default OFF.
 final noiseSuppressAiProvider =
     AsyncNotifierProvider<NoiseSuppressAiNotifier, bool>(
         NoiseSuppressAiNotifier.new);
@@ -473,11 +445,9 @@ class NoiseSuppressAiNotifier extends AsyncNotifier<bool> {
 }
 
 /// AI noise-suppression engine ('rnnoise' | 'dfn3'). RNNoise is the default
-/// everywhere (instant init, ~1 MB, trivial CPU — the engine that actually
-/// runs on every device); DeepFilterNet3 stays available behind the
-/// advanced selector on desktop (higher suppression quality, 0.5 s desktop
-/// / ~15 s mobile model load, ~10x the CPU). Switching while a call is live
-/// swaps the engine in place — no re-capture, no renegotiation.
+/// everywhere (instant init, ~1 MB, trivial CPU); DeepFilterNet3 stays behind
+/// the desktop advanced selector (better quality, slow model load, ~10x CPU).
+/// Switching mid-call swaps the engine in place: no re-capture, no reneg.
 const kNoiseSuppressEngineRnnoise = 'rnnoise';
 const kNoiseSuppressEngineDfn3 = 'dfn3';
 
@@ -654,9 +624,8 @@ class AutoDownloadThresholdNotifier extends AsyncNotifier<int> {
 }
 
 /// Per-conversation auto-download overrides (issue #41). Keys are
-/// `dm:{master}` / `server:{server_id}`; `false` = never auto-download there,
-/// `true` = auto-download there even when the global threshold is 0 (Off).
-/// Absent = follow the global setting. Persisted as one JSON object.
+/// `dm:{master}` / `server:{server_id}`; false = never here, true = here even
+/// when the global threshold is 0. Absent = follow the global. One JSON object.
 final autoDownloadOverridesProvider =
     AsyncNotifierProvider<AutoDownloadOverridesNotifier, Map<String, bool>>(
         AutoDownloadOverridesNotifier.new);
@@ -735,21 +704,17 @@ int _effectiveAutoDownloadMb(
   return global;
 }
 
-/// Ceiling for a recorded voice note, in bytes. Hollow records Opus at a
-/// speech bitrate, so 8 MiB is many minutes of talking and still far under the
-/// size a sender would need to smuggle a real payload in under a voice name.
+/// Ceiling for a recorded voice note, in bytes. Opus at speech bitrate makes
+/// 8 MiB many minutes of talking and still far under a smuggled payload.
 /// Mirrors the Rust twin's cap on the same exemption.
 const int kVoiceNoteMaxBytes = 8 * 1024 * 1024;
 
 /// True when [fileName] is a recorded voice message. Voice notes are exempt
-/// from the auto-download gate on every path (they behave like text). Matches
-/// both the UI display name and the recorder's temp basename that actually
-/// rides the wire (`voice_{stamp}_{rand}.ogg`) — keep in sync with the Rust
-/// twin `file_handler::is_voice_message_name`.
+/// from the auto-download gate on every path. Matches both the UI display name
+/// and the recorder's wire basename; keep in sync with the Rust twin.
 ///
-/// A name is not evidence on its own: the sender picks it. Anything that acts
-/// on the answer (auto-download, or handing bytes to a decoder before the user
-/// asks) must use [isGenuineVoiceNote] instead.
+/// A name is not evidence: the sender picks it. Anything that ACTS on the
+/// answer must use [isGenuineVoiceNote] instead.
 bool isVoiceMessageFile(String fileName) {
   return fileName == 'Voice message.ogg' ||
       (fileName.startsWith('voice_') && fileName.endsWith('.ogg'));
@@ -758,11 +723,9 @@ bool isVoiceMessageFile(String fileName) {
 /// True when an attachment is a genuine recorded voice note, and may therefore
 /// skip the auto-download gate the way text does.
 ///
-/// Every fact has to agree: the header's own voice flag, the recorder's name
-/// shape, the `ogg` extension, and a size a voice note could plausibly have.
-/// The name alone lets a sender label any bytes `voice_x.ogg` and have them
-/// pulled and opened without a tap, which is the whole point of the gate.
-/// Mirrors the Rust twin's exemption; keep the two in sync.
+/// Every fact has to agree: the header's voice flag, the recorder's name shape,
+/// the `ogg` extension and a plausible size. The name alone lets a sender label
+/// any bytes `voice_x.ogg` and have them pulled and opened without a tap.
 bool isGenuineVoiceNote({
   required bool voice,
   required String name,
@@ -802,10 +765,9 @@ class VaultCacheCapNotifier extends AsyncNotifier<int> {
   }
 }
 
-/// Downloaded-files cache size cap in MB. Files downloaded in DMs/channels live
-/// in `~/hollow/files/`; oldest bytes are LRU-evicted when the directory exceeds
-/// this limit (signed headers are kept, so messages stay re-downloadable).
-/// Default: 5120 MB (5 GB). Surfaced + enforced by the Storage Manager.
+/// Downloaded-files cache cap in MB. Oldest bytes in `~/hollow/files/` are
+/// LRU-evicted past the limit; signed headers are kept, so messages stay
+/// re-downloadable. Default: 5120 MB. Surfaced by the Storage Manager.
 final filesCacheCapProvider =
     AsyncNotifierProvider<FilesCacheCapNotifier, int>(
         FilesCacheCapNotifier.new);
@@ -831,10 +793,9 @@ class FilesCacheCapNotifier extends AsyncNotifier<int> {
   }
 }
 
-/// Asset blob cache cap in MB (emotes, stickers, GIFs, banners — the
-/// content-addressed blobs inside the encrypted DB). LRU-evicted past the
-/// cap; hashes still referenced by a personal set or a server's CRDT state
-/// are never evicted. Default: 512 MB.
+/// Asset blob cache cap in MB (emotes, stickers, GIFs, banners). LRU-evicted
+/// past the cap; hashes still referenced by a personal set or a server's CRDT
+/// state are never evicted. Default: 512 MB.
 final assetCacheCapProvider =
     AsyncNotifierProvider<AssetCacheCapNotifier, int>(
         AssetCacheCapNotifier.new);
@@ -860,22 +821,18 @@ class AssetCacheCapNotifier extends AsyncNotifier<int> {
   }
 }
 
-// ── Official REALITY tunnel defaults (Hollow's shared Xray on the VPS) ────────
-// Baked in like `kDefaultRelayDomain` so a normal user just flips the toggle —
-// no copy-paste. The fields stay editable for anyone self-hosting their own
-// relay + Xray. Update these if the server's keys/SNI are rotated.
+// Official REALITY tunnel defaults, baked in like `kDefaultRelayDomain` so a
+// user just flips the toggle. Editable for self-hosters; update on key rotation.
 const kDefaultProxyServer = '141.227.186.209:443';
 const kDefaultProxyUuid = 'bfe68ae0-4435-41ec-950a-aacc1caa2771';
 const kDefaultProxyPublicKey = 'zWJevNXCtw-PMBsUrrJWmYNZlXeSP5ojVDH8aoCA_xQ';
 const kDefaultProxyShortId = '5294730d0b4e9be7';
 const kDefaultProxySni = 'www.microsoft.com';
 
-/// Anti-censorship proxy (VLESS+REALITY tunnel via the bundled `shoes` client).
-/// For users behind DPI censorship (Russia/TSPU, China/GFW): routes the relay
-/// WSS connection through a local REALITY tunnel that looks like ordinary HTTPS.
-/// Pre-filled with the official Hollow config (above); editable for self-hosters.
-/// Changes take effect on the NEXT node start (toggling requires a restart, like
-/// the relay domain) — pushed to Rust via `setProxyConfig` before start_node.
+/// Anti-censorship proxy (VLESS+REALITY tunnel via the bundled `shoes` client)
+/// for users behind DPI censorship: routes the relay WSS through a local tunnel
+/// that looks like ordinary HTTPS. Changes take effect on the NEXT node start,
+/// pushed to Rust via `setProxyConfig` before start_node.
 @immutable
 class ProxyConfig {
   final bool enabled;
@@ -929,9 +886,8 @@ final proxyConfigProvider =
 class ProxyConfigNotifier extends AsyncNotifier<ProxyConfig> {
   @override
   Future<ProxyConfig> build() async {
-    // Absent DB key (fresh install) → fall back to the baked-in official config
-    // so the fields are pre-filled and the toggle "just works". A present value
-    // (even empty — a self-hoster who cleared a field) is respected as-is.
+    // Absent DB key (fresh install) falls back to the baked-in official config. A
+    // present value, even empty (a self-hoster who cleared a field), is respected.
     final cfg = ProxyConfig(
       enabled: (await storage_api.loadSetting(key: 'proxy_enabled')) == 'true',
       server:
@@ -943,8 +899,7 @@ class ProxyConfigNotifier extends AsyncNotifier<ProxyConfig> {
           kDefaultProxyShortId,
       sni: (await storage_api.loadSetting(key: 'proxy_sni')) ?? kDefaultProxySni,
     );
-    // Push the persisted config into Rust so a launch with proxy pre-enabled
-    // brings the tunnel up. Safe pre-node-start (seeds a global). Best-effort.
+    // Push the persisted config so a launch with proxy pre-enabled brings it up.
     await _push(cfg);
     return cfg;
   }
@@ -1018,26 +973,18 @@ class InvisibleModeNotifier extends Notifier<bool> {
 final invisibleModeProvider =
     NotifierProvider<InvisibleModeNotifier, bool>(InvisibleModeNotifier.new);
 
-/// "Always relay calls" — force every real-time peer connection through the
-/// TURN relay so co-participants never learn this device's IP address.
+/// "Always relay calls": force every real-time peer connection through the TURN
+/// relay so co-participants never learn this device's IP address.
 ///
-/// On a direct (host / server-reflexive) ICE path both sides see each other's
-/// addresses; DTLS + SFrame protect content, not network addresses. Turning
-/// this on makes [IceConfigNotifier] emit `iceTransportPolicy: 'relay'`, so
-/// only relay candidates are gathered.
-///
-/// Default OFF — direct paths are the whole point of P2P, and forcing every
-/// call onto the relay costs latency, quality and relay bandwidth. Same
-/// default Signal ships for its equivalent setting.
-///
-/// Synchronous state — loaded eagerly during bootstrap, persisted on toggle.
+/// On a direct ICE path both sides see each other's addresses; DTLS + SFrame
+/// protect content, not network addresses. Default OFF, because direct paths
+/// are the point of P2P and forcing the relay costs latency and bandwidth.
 class AlwaysRelayCallsNotifier extends Notifier<bool> {
   @override
   bool build() => false;
 
-  /// Load persisted value from DB. Called during bootstrap, BEFORE the node
-  /// starts — a peer connection built before this lands would use the wrong
-  /// policy.
+  /// Load persisted value from DB during bootstrap, BEFORE the node starts: a
+  /// peer connection built before this lands would use the wrong policy.
   Future<void> load() async {
     try {
       final val = await storage_api.loadSetting(key: 'always_relay_calls');
@@ -1062,12 +1009,10 @@ final alwaysRelayCallsProvider =
     NotifierProvider<AlwaysRelayCallsNotifier, bool>(
         AlwaysRelayCallsNotifier.new);
 
-/// UI sound effects — join/leave voice, screen share start/stop, mute/deafen/
-/// camera, message notification (issue #55). Default ON.
+/// UI sound effects (issue #55). Default ON.
 ///
-/// Synchronous state loaded from bootstrap, and mirrored into [SoundService]'s
-/// statics on every change: the sounds fire from inside notifiers (including
-/// teardown paths) where re-entering the provider container is not safe.
+/// Mirrored into [SoundService]'s statics on every change: sounds fire from
+/// inside notifiers where re-entering the provider container is not safe.
 class SoundEffectsEnabledNotifier extends Notifier<bool> {
   @override
   bool build() => true;
@@ -1130,32 +1075,25 @@ final soundEffectsVolumeProvider =
         SoundEffectsVolumeNotifier.new);
 
 /// Description shown under the "Always relay calls" toggle on desktop AND
-/// mobile — one source of truth so the two can't drift.
+/// mobile, so the two can't drift.
 ///
-/// The Hollow Share sentence is NOT optional: Share deliberately stays
-/// peer-to-peer even with this on (HOLLOW_PLAN §7A), and a privacy switch with
-/// an undisclosed carve-out is exactly the kind of overclaim worth avoiding.
+/// The Hollow Share sentence is NOT optional: Share stays peer-to-peer even
+/// with this on (HOLLOW_PLAN §7A), and an undisclosed carve-out is an overclaim.
 const String alwaysRelayCallsDescription =
     'Routes calls, video, screen share and file transfers through the relay so '
     'other participants never see your IP address. May reduce quality and '
     'increase latency. Restart is required.';
 
-/// Peer media forwarding (media forwarding step 3 phase 2): this desktop may
-/// serve as a blind packet forwarder for screen shares it watches, carrying
-/// the stream to viewers who can't connect directly — the collective-hosting
-/// principle applied to live media. ON by default (Vitalik decision
-/// 2026-08-06); desktop only, never mobile. The forwarder relays SFrame
-/// CIPHERTEXT it can already decrypt as a watcher — serving costs upload
-/// bandwidth (up to 3 extra stream copies), never privacy.
-///
-/// Synchronous state — loaded eagerly during bootstrap, pushed to Rust
-/// (`set_peer_forwarding_enabled`) after the node starts and on every toggle.
+/// Peer media forwarding: this desktop may serve as a blind packet forwarder for
+/// screen shares it watches, carrying the stream to viewers who can't connect
+/// directly. ON by default; desktop only. It relays SFrame CIPHERTEXT it can
+/// already decrypt as a watcher, so serving costs upload bandwidth, never
+/// privacy. Pushed to Rust after node start and on every toggle.
 class PeerForwardingNotifier extends Notifier<bool> {
   @override
   bool build() => true;
 
-  /// Load persisted value from DB. Default-ON: only an explicit 'false'
-  /// disables (absent key = first run = enabled).
+  /// Load persisted value. Default-ON: only an explicit 'false' disables.
   Future<void> load() async {
     try {
       final val = await storage_api.loadSetting(key: 'peer_media_forwarding');
@@ -1165,8 +1103,7 @@ class PeerForwardingNotifier extends Notifier<bool> {
     }
   }
 
-  /// Push the current value into the node (call after node start, and after
-  /// [load] — the Rust side defaults to disabled until told).
+  /// Push the current value into the node; Rust defaults to disabled until told.
   Future<void> pushToNode() async {
     try {
       await network_api.setPeerForwardingEnabled(enabled: state);
@@ -1175,9 +1112,8 @@ class PeerForwardingNotifier extends Notifier<bool> {
     }
   }
 
-  /// Persist + push. Does NOT swallow the save failure — call sites await
-  /// and toast. Disabling mid-serve tears active forwarding down (downstream
-  /// viewers heal to another path automatically).
+  /// Persist + push. Does NOT swallow a save failure: call sites await and toast.
+  /// Disabling mid-serve tears active forwarding down (viewers heal elsewhere).
   Future<void> setEnabled(bool value) async {
     state = value;
     await storage_api.saveSetting(
@@ -1237,22 +1173,18 @@ final offlineInboxRetentionProvider =
     NotifierProvider<OfflineInboxRetentionNotifier, int>(
         OfflineInboxRetentionNotifier.new);
 
-/// Offline inbox ("offline message delivery") — ON by default at 3 days
-/// (2026-07-04: users won't discover the toggle and will assume offline
-/// delivery is broken; turning it off is the explicit choice). While enabled,
-/// the relay keeps encrypted DM text + file cards addressed to this device for
-/// the chosen retention (instead of the 24h push baseline) and replays them on
-/// the next connect, deleting delivered entries. Text and file metadata only —
-/// never file bytes; content stays E2EE (the relay holds ciphertext it cannot
-/// read or forge). The relay registry is RAM-only, so the FFI is re-applied on
-/// every app start; Rust's ws_client then re-registers on every reconnect.
+/// Offline inbox ("offline message delivery"), ON by default at 3 days: users
+/// won't discover the toggle and would assume offline delivery is broken.
+/// While enabled the relay keeps encrypted DM text + file cards for this device
+/// for the chosen retention and replays them on connect. Text and metadata
+/// only, never bytes; the relay holds ciphertext it cannot read or forge. Its
+/// registry is RAM-only, so the FFI is re-applied on every app start.
 class OfflineInboxNotifier extends Notifier<bool> {
   @override
   bool build() => true;
 
-  /// Load persisted value + re-register with the relay. Called during
-  /// bootstrap (fire-and-forget), after the node has started. Never-touched
-  /// setting = default ON.
+  /// Load persisted value + re-register with the relay during bootstrap, after
+  /// the node started. A never-touched setting defaults ON.
   Future<void> load() async {
     try {
       final val = await storage_api.loadSetting(key: 'offline_inbox_enabled');
@@ -1283,10 +1215,6 @@ class OfflineInboxNotifier extends Notifier<bool> {
 
 final offlineInboxProvider =
     NotifierProvider<OfflineInboxNotifier, bool>(OfflineInboxNotifier.new);
-
-// ---------------------------------------------------------------------------
-// Voice input mode + hotkeys (issue #38)
-// ---------------------------------------------------------------------------
 
 /// Voice input mode values for [voiceInputModeProvider].
 const String kVoiceInputActivity = 'activity';

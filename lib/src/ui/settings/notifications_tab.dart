@@ -9,10 +9,8 @@ import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_focus_ring.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-/// Notifications settings tab in Server Settings.
-///
-/// Shows server-wide default (All / Mentions / Nothing) and
-/// per-channel overrides (Default / All / Mentions / Nothing).
+/// Notifications tab in Server Settings: the server-wide default and the
+/// per-channel overrides.
 class NotificationsTab extends ConsumerWidget {
   final String serverId;
 
@@ -23,8 +21,8 @@ class NotificationsTab extends ConsumerWidget {
     final hollow = HollowTheme.of(context);
     final notifState = ref.watch(notificationSettingsProvider);
     final notifNotifier = ref.read(notificationSettingsProvider.notifier);
-    // Only channels the local user can see — listing restricted channel
-    // names to a non-privileged member would leak their existence.
+    // Only channels the local user can see: listing a restricted channel's name
+    // to a non-privileged member would leak its existence.
     final allChannels =
         ref.watch(serverChannelsProvider(serverId)).valueOrNull ?? {};
     final channels = <String, ChannelInfo>{
@@ -39,7 +37,6 @@ class NotificationsTab extends ConsumerWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // Server-wide setting
           Text(
             'SERVER NOTIFICATIONS',
             style: HollowTypography.caption.copyWith(
@@ -68,7 +65,6 @@ class NotificationsTab extends ConsumerWidget {
 
           const SizedBox(height: HollowSpacing.xxl),
 
-          // Per-channel overrides
           Text(
             'CHANNEL OVERRIDES',
             style: HollowTypography.caption.copyWith(
@@ -144,7 +140,7 @@ class NotificationsTab extends ConsumerWidget {
   }
 }
 
-/// Server-level notification picker: All / Mentions / Nothing.
+/// Server-level notification picker.
 class _NotificationLevelSelector extends StatelessWidget {
   final NotificationLevel value;
   final ValueChanged<NotificationLevel> onChanged;
@@ -187,7 +183,7 @@ class _NotificationLevelSelector extends StatelessWidget {
   }
 }
 
-/// A single level chip (selectable pill).
+/// A single level chip.
 class _LevelChip extends StatelessWidget {
   final String label;
   final IconData icon;
@@ -259,7 +255,7 @@ class _LevelChip extends StatelessWidget {
   }
 }
 
-/// Per-channel override selector — Hollow-styled PopupMenuButton.
+/// Per-channel override selector.
 class _ChannelOverrideDropdown extends StatelessWidget {
   final ChannelNotificationLevel value;
   final ValueChanged<ChannelNotificationLevel> onChanged;

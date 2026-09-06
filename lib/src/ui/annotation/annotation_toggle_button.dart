@@ -4,13 +4,12 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'annotation_overlay.dart';
 
-/// Small icon button that toggles the [AnnotationOverlay]. Designed to sit
-/// in the title bar next to the window controls.
+/// Small icon button that toggles the [AnnotationOverlay], sitting in the title
+/// bar next to the window controls.
 ///
-/// On hover an inline text label appears to the left of the icon. We
-/// deliberately avoid [Tooltip] because the title bar lives above the
-/// [Navigator] and lacks an Overlay ancestor — using Tooltip there blanks
-/// the entire window.
+/// The hover label is inline rather than a [Tooltip]: the title bar lives above
+/// the [Navigator] with no Overlay ancestor, and a Tooltip there blanks the
+/// entire window.
 class AnnotationToggleButton extends StatefulWidget {
   final double size;
   final Color? color;
@@ -26,8 +25,8 @@ class _AnnotationToggleButtonState extends State<AnnotationToggleButton> {
 
   @override
   Widget build(BuildContext context) {
-    // Default to a theme foreground colour so the icon/label stay visible on
-    // BOTH themes — hardcoded white vanished on the light-theme title bar.
+    // A theme foreground colour, so the icon and label stay visible on BOTH
+    // themes; hardcoded white vanishes on the light title bar.
     final hollow = HollowTheme.of(context);
     final color = widget.color ?? hollow.textSecondary;
     return MouseRegion(
@@ -40,8 +39,8 @@ class _AnnotationToggleButtonState extends State<AnnotationToggleButton> {
           duration: const Duration(milliseconds: 150),
           curve: Curves.easeOut,
           height: widget.size,
-          // Zero-alpha rest color, not Colors.transparent (transparent BLACK
-          // — the lerp flashed dark on hover/unhover, worst in light mode).
+          // Zero-alpha rest colour, not Colors.transparent, which is
+          // transparent BLACK and makes the hover lerp flash dark.
           color: _hovered
               ? hollow.elevated
               : hollow.elevated.withValues(alpha: 0.0),

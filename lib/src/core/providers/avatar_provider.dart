@@ -8,15 +8,13 @@ import 'banner_provider.dart' show reuseIfUnchanged;
 /// IDENTITY across reloads (see [reuseIfUnchanged]).
 final _lastAvatar = <String, Uint8List>{};
 
-/// Lazy avatar cache: peer_id → avatar bytes.
-/// Avatars are loaded on-demand when HollowAvatar mounts, not at startup.
+/// Lazy avatar cache (peer_id -> bytes), loaded when HollowAvatar mounts.
 class AvatarNotifier extends Notifier<Map<String, Uint8List>> {
   final _loading = <String>{};
 
-  /// Negative cache: peers we KNOW have no avatar. Without it every rebuild
-  /// of every row showing an avatar-less peer fired a fresh FFI SQLCipher
-  /// query. Cleared per-peer by [invalidate] (ProfileUpdated), so a newly
-  /// set avatar still comes through.
+  /// Negative cache: peers we KNOW have no avatar. Without it every rebuild of
+  /// every row showing an avatar-less peer fired a fresh FFI SQLCipher query.
+  /// Cleared per-peer by [invalidate] (ProfileUpdated).
   final _missing = <String>{};
 
   @override
@@ -32,11 +30,9 @@ class AvatarNotifier extends Notifier<Map<String, Uint8List>> {
     try {
       final bytes = await storage_api.getAvatar(peerId: peerId);
       if (bytes != null && bytes.isNotEmpty) {
-        // Reuse the previous instance when nothing changed: an ANIMATED
-        // avatar re-decodes every frame on `!identical` bytes, and
-        // ProfileUpdated invalidates this cache on every profile save
-        // whether or not the avatar was touched. Same rule (and the same
-        // bug) as the banner - see [reuseIfUnchanged].
+        // Reuse the previous instance when nothing changed: an ANIMATED avatar
+        // re-decodes on `!identical` bytes, and ProfileUpdated invalidates this cache
+        // on every profile save whether or not the avatar was touched.
         state = {
           ...state,
           peerId: reuseIfUnchanged(_lastAvatar, peerId, bytes),
@@ -57,9 +53,8 @@ class AvatarNotifier extends Notifier<Map<String, Uint8List>> {
   }
 
   void invalidate(String peerId) {
-    // Deliberately NOT clearing `_lastAvatar`: the whole point is that the
-    // reload can recognise unchanged bytes and hand back the instance the
-    // widgets are already rendering.
+    // Deliberately NOT clearing `_lastAvatar`: the point is that the reload can
+    // recognise unchanged bytes and hand back the instance widgets are rendering.
     if (state.containsKey(peerId)) {
       final next = Map<String, Uint8List>.from(state);
       next.remove(peerId);

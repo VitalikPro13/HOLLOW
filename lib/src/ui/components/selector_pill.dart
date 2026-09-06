@@ -3,9 +3,8 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_focus_ring.dart';
 
-/// Small selection pill chip (accent-tinted when active) shared by the
-/// Settings image-quality selector and the screen-share resolution/FPS
-/// pickers. Padding and whether the fill animates differ per call site.
+/// Small selection pill, accent-tinted when active. Padding and whether the
+/// fill animates differ per call site.
 class SelectorPill extends StatelessWidget {
   final String label;
   final bool active;

@@ -42,9 +42,9 @@ class _MobileShellState extends ConsumerState<MobileShell> {
     MobileSettingsTab(),
   ];
 
-  /// Subscribe the node to a channel's relay topic so live MLS topic-broadcasts
-  /// are delivered (the relay only routes a topic message to subscribed sockets).
-  /// Includes unread channels of the same server so @mentions still arrive.
+  /// Subscribes the node to a channel's relay topic; the relay only routes a
+  /// topic message to subscribed sockets. Unread channels of the same server
+  /// are included so mentions still arrive.
   void _subscribeActiveChannel(String serverId, String channelId) {
     final unread = ref.read(unreadProvider);
     final prefix = '$serverId:';
@@ -53,17 +53,16 @@ class _MobileShellState extends ConsumerState<MobileShell> {
         .map((e) => e.key.substring(prefix.length))
         .toList();
     final topics = <String>{channelId, ...unreadChannels}.toList();
-    // Node-safe: a buffered cold-start push tap fires before start_node()
-    // completes — the helper retries until the node is up and never throws.
+    // A buffered cold-start push tap fires before `start_node()` completes, so
+    // the helper retries until the node is up and never throws.
     subscribeChannelTopics(serverId: serverId, channelIds: topics);
   }
 
   @override
   void initState() {
     super.initState();
-    // Push notification taps land here: open the sender's DM chat or the
-    // tapped channel. Buffered taps from cold start are delivered immediately
-    // on registration.
+    // Push taps land here, including the buffered cold-start ones, which are
+    // delivered on registration.
     if (Platform.isAndroid || Platform.isIOS) {
       PushNotificationService.registerOpenChatHandler(_openChatFromPush);
       PushNotificationService.registerOpenChannelHandler(_openChannelFromPush);
@@ -72,20 +71,14 @@ class _MobileShellState extends ConsumerState<MobileShell> {
 
   Future<void> _openChatFromPush(String peerId) async {
     if (!mounted) return;
-    // Resolve device→master. A DM push `sender` is the friend's DEVICE id, but
-    // every DM thread / provider keys on the friend's MASTER id. On iOS a
-    // force-killed tap arrives via FCM `data['sender']` (the raw device id,
-    // bypassing the Dart handler's master resolution), so without this the chat
-    // opens a separate empty thread keyed on the device id. (Covers all 3 tap
-    // entry points; a single-device / unknown peer resolves to itself.)
+    // A DM push `sender` is the friend's DEVICE id while every thread and
+    // provider keys on the MASTER, so without this the tap opens a separate
+    // empty thread.
     //
-    // Resolve via the PERSISTED-links FFI: a buffered cold-start tap fires the
-    // instant this shell mounts, BEFORE the node's event loop has warmed the
-    // in-memory resolver from the DB — the plain `identityFor` then resolves the
-    // device id to itself with no error (the 2026-06-20 attempt failed exactly
-    // here). `identityForPersisted` falls back to reading `device_links`
-    // straight from SQLCipher, which the NSE proves is warm at tap time. Fall
-    // back to the provider mirror if the FFI call itself fails.
+    // It must go through the PERSISTED-links FFI: a buffered cold-start tap
+    // fires before the node's in-memory resolver is warm, and plain
+    // `identityFor` then resolves the device id to itself with no error.
+    // `identityForPersisted` reads `device_links` straight from SQLCipher.
     String masterId;
     try {
       masterId = await network_api.identityForPersisted(peerId: peerId);
@@ -94,15 +87,13 @@ class _MobileShellState extends ConsumerState<MobileShell> {
     }
     if (masterId.isEmpty) masterId = peerId;
     if (!mounted) return;
-    // Already viewing this chat — nothing to do.
     if (ref.read(selectedPeerProvider) == masterId) return;
     ref.read(selectedPeerProvider.notifier).state = masterId;
     ref.read(selectedServerProvider.notifier).state = null;
     ref.read(unreadProvider.notifier).markDmSeen(masterId, null);
-    // A chat route may already be open (tap arrived while reading another
-    // conversation) — pop it instead of stacking a second chat on top. The
-    // selection is written above, BEFORE the pop, so the popped route's
-    // guarded cleanup no-ops instead of clobbering it.
+    // A tap that arrives while another conversation is open pops that route
+    // rather than stacking on it. The selection is written BEFORE the pop, so
+    // the popped route's guarded cleanup no-ops instead of clobbering it.
     final nav = Navigator.of(context, rootNavigator: true);
     nav.popUntil(
         (r) => r.settings.name != MobileChatRoute.routeName || r.isFirst);
@@ -112,7 +103,7 @@ class _MobileShellState extends ConsumerState<MobileShell> {
       builder: (_) => MobileChatRoute(peerId: masterId),
     ))
         .then((_) {
-      // Guarded: another chat may have replaced this one before it popped.
+      // Another chat may have replaced this one before it popped.
       if (mounted && ref.read(selectedPeerProvider) == masterId) {
         ref.read(selectedPeerProvider.notifier).state = null;
       }
@@ -121,12 +112,12 @@ class _MobileShellState extends ConsumerState<MobileShell> {
 
   Future<void> _openChannelFromPush(String serverId, String channelId) async {
     if (!mounted) return;
-    // Already viewing this channel — nothing to do.
+    // Already viewing this channel.
     if (ref.read(selectedServerProvider) == serverId &&
         ref.read(selectedChannelProvider) == channelId) {
       return;
     }
-    // Resolve the channel name from the local DB for the route header.
+    // The route header needs a name, which only the local DB has.
     var channelName = '';
     try {
       final channels = await ChannelListNotifier.fetchChannels(serverId);
@@ -135,10 +126,8 @@ class _MobileShellState extends ConsumerState<MobileShell> {
     if (!mounted) return;
     ref.read(selectedServerProvider.notifier).state = serverId;
     ref.read(selectedChannelProvider.notifier).state = channelId;
-    // Subscribe to the channel's relay topic so live MLS topic-broadcasts arrive
-    // (without this the channel only fetched messages on open, never real-time).
     _subscribeActiveChannel(serverId, channelId);
-    // Pop any chat route already on the stack — see _openChatFromPush.
+    // Pop any chat route already on the stack, as in _openChatFromPush.
     final nav = Navigator.of(context, rootNavigator: true);
     nav.popUntil(
         (r) => r.settings.name != MobileChatRoute.routeName || r.isFirst);
@@ -165,12 +154,9 @@ class _MobileShellState extends ConsumerState<MobileShell> {
     final currentTab = ref.watch(mobileTabProvider);
     final bg = ref.watch(backgroundProvider);
 
-    // Refresh archive data whenever the user switches TO the Archive tab (index 2).
-    // The list providers are non-autoDispose FutureProviders that cache their first
-    // result for the app lifetime, so without this the Archive tab shows stale
-    // conversation/message counts until the next app launch. This mirrors desktop,
-    // which invalidates these providers in its archive-open handlers (bottom_bar /
-    // server_strip). Applies to both Android and iOS — single mobile codebase.
+    // The archive list providers are non-autoDispose and cache their first
+    // result for the app lifetime, so without this refresh the tab shows counts
+    // from launch until the next one.
     ref.listen<int>(mobileTabProvider, (prev, next) {
       if (next == 2 && prev != 2) {
         ref.invalidate(archiveDmListProvider);
@@ -200,8 +186,7 @@ class _MobileShellState extends ConsumerState<MobileShell> {
                 ],
               ),
             ),
-            // System-status notice pinned just above the bottom nav bar — the
-            // mobile "tab screens" surface. Self-hides when nothing to announce.
+            // Self-hides when there is nothing to announce.
             const SystemStatusBanner(anchor: StatusBannerAnchor.bottom),
           ],
         ),
@@ -211,9 +196,8 @@ class _MobileShellState extends ConsumerState<MobileShell> {
       ),
     );
 
-    // Reading-order Tab/traversal for external keyboards + Switch Access on
-    // mobile (a11y 2.6) — follows the visual layout instead of widget-tree
-    // order. Cheap and harmless when no keyboard is attached.
+    // Traversal follows the visual layout rather than widget-tree order, for
+    // external keyboards and Switch Access (a11y 2.6).
     scaffold = FocusTraversalGroup(
       policy: ReadingOrderTraversalPolicy(),
       child: scaffold,
@@ -248,10 +232,9 @@ class _MobileShellState extends ConsumerState<MobileShell> {
     return Stack(
       children: [
         scaffold,
-        // No in-app banner here: the only mobile in-app notification is the
-        // compact MobileInChatBanner (with countdown) shown WHILE inside a chat
-        // for other conversations. Outside a chat, we rely on OS notifications
-        // (backgrounded) — no on-screen banner.
+        // No in-app banner here: the only mobile in-app notification is
+        // MobileInChatBanner, shown while inside a chat. Outside one, mobile
+        // relies on OS notifications.
         const MobileActiveCallPill(),
         const MobileVoiceChannelPill(),
       ],

@@ -8,24 +8,18 @@ import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/ui/components/profile_card_body.dart';
 import 'package:hollow/src/ui/dialogs/profile_dialog.dart';
 
-// showLocalNicknameDialog historically lived here; it moved to the shared
-// profile card body alongside the rest of the profile UI.
 export 'package:hollow/src/ui/components/profile_card_body.dart'
     show showLocalNicknameDialog;
 
 /// Shows a profile card for [peerId].
 ///
-/// Normally the COMPACT density of [ProfileCardBody] — the fast inspection
-/// card, anchored next to whatever was clicked, with an expand affordance on
-/// its banner that opens the full [ProfileDialog]. When the user has set
-/// [ProfileCardStyle.expanded] (Settings > Appearance), one click goes
-/// straight to the full profile instead (issue #54).
+/// The COMPACT density of [ProfileCardBody], anchored next to whatever was
+/// clicked, unless the user has chosen [ProfileCardStyle.expanded], in which
+/// case one click goes straight to the full profile (issue #54).
 ///
-/// [anchorOf] is a FUNCTION, not a point: the window can be resized (or
-/// maximized) while the card is open, and a point captured at click time
-/// leaves the card stranded in the middle of the chat. It is re-read after any
-/// viewport change, so the card follows the thing it belongs to. Call sites
-/// with nothing to follow (a menu action) pass a constant closure.
+/// [anchorOf] is a FUNCTION, not a point: the window can be resized while the
+/// card is open, and a point captured at click time leaves the card stranded.
+/// Call sites with nothing to follow pass a constant closure.
 void showProfileCardPopup({
   required BuildContext context,
   required WidgetRef ref,
@@ -68,8 +62,7 @@ void showProfileCardPopup({
   overlay.insert(entry);
 }
 
-/// Width of the compact anchored card. Anchor offsets at call sites
-/// (e.g. member panel) are derived from this.
+/// Width of the compact anchored card; call-site anchor offsets derive from it.
 const double kProfileCardPopupWidth = 300.0;
 
 class _ProfileCardOverlay extends ConsumerStatefulWidget {
@@ -104,8 +97,8 @@ class _ProfileCardOverlayState extends ConsumerState<_ProfileCardOverlay>
   late final Animation<double> _scaleAnim;
   late final Animation<double> _fadeAnim;
 
-  /// Where the card is pinned right now. Seeded at open, re-read from
-  /// [_ProfileCardOverlay.anchorOf] after the viewport changes size.
+  /// Seeded at open, re-read from [_ProfileCardOverlay.anchorOf] after the
+  /// viewport changes size.
   late Offset _anchor;
   Size? _lastViewport;
 
@@ -114,8 +107,7 @@ class _ProfileCardOverlayState extends ConsumerState<_ProfileCardOverlay>
     super.initState();
     _anchor = widget.anchorOf();
     // A raw OverlayEntry is not a route, so nothing else gives this card an
-    // Escape key. Without it a card can be left stranded on screen with no
-    // keyboard way out.
+    // Escape key, and it would strand with no keyboard way out.
     HardwareKeyboard.instance.addHandler(_onKey);
     _controller = AnimationController(
       vsync: this,
@@ -138,14 +130,10 @@ class _ProfileCardOverlayState extends ConsumerState<_ProfileCardOverlay>
     _lastViewport = viewport;
   }
 
-  /// Re-reads the anchor AFTER the frame: this runs during build, and the
-  /// source widget has not been laid out at the new window size yet — reading
-  /// its render box now returns the position it had BEFORE the resize, which
-  /// is exactly the bug (issue #54).
-  ///
-  /// Twice, because a resize can also start a panel animation (the member
-  /// panel folds itself away on a narrow window): the first read lands
-  /// mid-slide, the second one after it settles.
+  /// Re-reads the anchor AFTER the frame: during build the source has not been
+  /// laid out at the new window size, so its render box still reports the
+  /// pre-resize position (issue #54). Twice, because a resize can also start a
+  /// panel animation and the first read lands mid-slide.
   void _reanchor() {
     _applyAnchor();
     Future.delayed(const Duration(milliseconds: 280), _applyAnchor);
@@ -160,9 +148,8 @@ class _ProfileCardOverlayState extends ConsumerState<_ProfileCardOverlay>
       } catch (_) {
         return;
       }
-      // Zero means the source has no render box any more — the row was
-      // scrolled out, or the whole panel folded away. A card pointing at
-      // something that is no longer there should leave, not float.
+      // Zero means the source has no render box any more, and a card pointing
+      // at something that is gone should leave rather than float.
       if (next == Offset.zero) {
         _dismiss();
         return;
@@ -186,9 +173,8 @@ class _ProfileCardOverlayState extends ConsumerState<_ProfileCardOverlay>
     super.dispose();
   }
 
-  /// One dismiss only: [onDismiss] removes AND disposes the overlay entry, so
-  /// a second run (barrier tap during the fade, both re-anchor attempts
-  /// finding the source gone) would tear down an entry that is already gone.
+  /// One dismiss only: [onDismiss] removes AND disposes the overlay entry, so a
+  /// second run would tear down an entry that is already gone.
   bool _dismissing = false;
 
   void _dismiss() {
@@ -217,37 +203,30 @@ class _ProfileCardOverlayState extends ConsumerState<_ProfileCardOverlay>
 
     const cardWidth = kProfileCardPopupWidth;
 
-    // Position: card appears near the anchor
     final screenSize = MediaQuery.of(context).size;
     double left = _anchor.dx;
 
-    // Clamp horizontal
     if (left < 8) left = 8;
     if (left + cardWidth > screenSize.width - 8) {
       left = screenSize.width - cardWidth - 8;
     }
 
-    // Vertical positioning. The card height is variable; estimate a generous
-    // max so we can keep it on-screen. When opening downward would push the
-    // card off the bottom, flip it to open UPWARD from the anchor instead
-    // (and clamp to the top edge if even that doesn't fit).
+    // The card's height is variable, so a generous estimate decides whether to
+    // open downward or flip and open upward from the anchor.
     const estimatedCardHeight = 400.0;
     double? top;
     double? bottom;
-    // How far up the card may be pushed before its TOP leaves the window.
-    // Without this ceiling a short window (or one the user just shrank) lifts
-    // the card clean off the top edge, which is how a card ends up half
-    // painted behind the title bar (issue #54).
+    // How far up the card may be pushed before its TOP leaves the window:
+    // without the ceiling a short window paints it behind the title bar
+    // (issue #54).
     final maxBottom =
         (screenSize.height - estimatedCardHeight - 8).clamp(8.0, double.infinity);
     if (widget.anchorBottom) {
-      // anchor.dy is where the card's bottom should be
       bottom = (screenSize.height - _anchor.dy).clamp(8.0, maxBottom);
     } else {
       final wouldOverflowBottom =
           _anchor.dy + estimatedCardHeight > screenSize.height - 8;
       if (wouldOverflowBottom) {
-        // Open upward: card's bottom sits at the anchor.
         bottom = (screenSize.height - _anchor.dy).clamp(8.0, maxBottom);
       } else {
         top = _anchor.dy;
@@ -257,7 +236,6 @@ class _ProfileCardOverlayState extends ConsumerState<_ProfileCardOverlay>
 
     return Stack(
       children: [
-        // Dismiss barrier
         Positioned.fill(
           child: GestureDetector(
             onTap: _dismiss,
@@ -266,7 +244,6 @@ class _ProfileCardOverlayState extends ConsumerState<_ProfileCardOverlay>
           ),
         ),
 
-        // Card with animation
         Positioned(
           left: left,
           top: top,

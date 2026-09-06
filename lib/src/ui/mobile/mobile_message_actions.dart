@@ -27,8 +27,8 @@ void showMobileMessageActions({
   VoidCallback? onPin,
   bool isPinned = false,
   String? serverId,
-  /// What the file row offers, mirroring the card (tmp.txt item 1). The
-  /// caller reads it from `fileBarAction()` as the sheet opens.
+  /// What the file row offers, mirroring the card. The caller reads it from
+  /// `fileBarAction()` as the sheet opens.
   FileBarAction fileAction = FileBarAction.download,
   VoidCallback? onStopWaiting,
 }) {
@@ -36,8 +36,8 @@ void showMobileMessageActions({
   showModalBottomSheet(
     context: context,
     backgroundColor: hollow.surface,
-    // The full emoji grid / long action lists can exceed the default sheet
-    // cap on short phones — let the sheet size itself and scroll internally.
+    // The emoji grid and long action lists exceed the default sheet cap on
+    // short phones.
     isScrollControlled: true,
     shape: RoundedRectangleBorder(
       borderRadius: BorderRadius.vertical(top: Radius.circular(hollow.radiusXl)),
@@ -134,8 +134,7 @@ class _MessageActionsSheetState extends State<_MessageActionsSheet> {
             ),
             const SizedBox(height: HollowSpacing.sm),
 
-            // Scrolls when the content (emoji grid, long action lists) is
-            // taller than the sheet cap on short phones.
+            // Scrolls when the content is taller than the sheet cap.
             Flexible(
               child: SingleChildScrollView(
                 child: AnimatedSize(
@@ -157,17 +156,15 @@ class _MessageActionsSheetState extends State<_MessageActionsSheet> {
     );
   }
 
-  /// The file row, mirroring the card (tmp.txt item 1): Save File, Try again,
-  /// a stop control, or nothing at all once retention has removed the file.
-  /// Null means the sheet offers no file row.
+  /// The file row mirroring the card: Save File, Try again, a stop control, or
+  /// nothing once retention has removed the file. Null offers no file row.
   Widget? _fileActionRow() {
     final action = widget.fileAction;
     final download = widget.onDownload;
     if (download == null || action == FileBarAction.none) return null;
     if (action == FileBarAction.stopWaiting) {
       final stop = widget.onStopWaiting;
-      // A surface with no stop hook offers nothing rather than a control
-      // that cannot fire.
+      // A surface with no stop hook offers nothing, never a dead control.
       if (stop == null) return null;
       return _ActionRow(
         icon: LucideIcons.download,
@@ -194,7 +191,6 @@ class _MessageActionsSheetState extends State<_MessageActionsSheet> {
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
-        // Message preview
         _MessagePreview(
           senderName: widget.senderName,
           messageText: widget.messageText,
@@ -202,7 +198,6 @@ class _MessageActionsSheetState extends State<_MessageActionsSheet> {
         ),
         const SizedBox(height: HollowSpacing.md),
 
-        // Quick reactions row
         if (widget.onReaction != null) ...[
           _QuickReactionsRow(
             onReaction: (emoji) {
@@ -215,7 +210,6 @@ class _MessageActionsSheetState extends State<_MessageActionsSheet> {
           Divider(height: 1, color: hollow.border),
         ],
 
-        // Action rows
         if (widget.onReply != null)
           _ActionRow(
             icon: LucideIcons.reply,
@@ -277,7 +271,6 @@ class _MessageActionsSheetState extends State<_MessageActionsSheet> {
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
-        // Back button
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.md),
           child: Row(
@@ -305,7 +298,6 @@ class _MessageActionsSheetState extends State<_MessageActionsSheet> {
         ),
         const SizedBox(height: HollowSpacing.md),
 
-        // Full picker: Unicode + server + personal + FFZ emotes.
         SizedBox(
           height: MediaQuery.sizeOf(context).height * 0.5,
           child: EmojiPickerBody(
@@ -364,10 +356,6 @@ class _MessageActionsSheetState extends State<_MessageActionsSheet> {
     );
   }
 }
-
-// ─────────────────────────────────────────────────
-// Message preview at top of sheet
-// ─────────────────────────────────────────────────
 
 class _MessagePreview extends StatelessWidget {
   final String senderName;
@@ -434,10 +422,6 @@ class _MessagePreview extends StatelessWidget {
   }
 }
 
-// ─────────────────────────────────────────────────
-// Quick reactions row (top 6 + "More..." pill)
-// ─────────────────────────────────────────────────
-
 class _QuickReactionsRow extends StatelessWidget {
   final void Function(String emoji) onReaction;
   final VoidCallback onMoreTap;
@@ -490,10 +474,6 @@ class _QuickReactionsRow extends StatelessWidget {
   }
 }
 
-// ─────────────────────────────────────────────────
-// Single action row
-// ─────────────────────────────────────────────────
-
 class _ActionRow extends StatelessWidget {
   final IconData icon;
   final String label;
@@ -531,7 +511,7 @@ class _ActionRow extends StatelessWidget {
                 icon: icon,
                 size: 18,
                 color: c,
-                // The sheet's own surface, so the slash cuts the glyph.
+                // The sheet's own surface, so the slash cuts the glyph cleanly.
                 backgroundColor: hollow.surface,
               )
             else

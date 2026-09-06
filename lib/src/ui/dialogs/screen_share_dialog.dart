@@ -18,7 +18,6 @@ import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_focus_ring.dart';
 import 'package:hollow/src/ui/components/hollow_toggle.dart';
 
-/// Resolution presets for screen sharing.
 enum ScreenShareResolution {
   p360(640, 360, '360p'),
   p480(854, 480, '480p'),
@@ -32,7 +31,6 @@ enum ScreenShareResolution {
   const ScreenShareResolution(this.width, this.height, this.label);
 }
 
-/// FPS presets for screen sharing.
 enum ScreenShareFps {
   fps5(5, '5 FPS'),
   fps15(15, '15 FPS'),
@@ -44,7 +42,6 @@ enum ScreenShareFps {
   const ScreenShareFps(this.value, this.label);
 }
 
-/// Result from the screen share dialog.
 class ScreenShareSelection {
   final String sourceId;
   final int width;
@@ -53,15 +50,14 @@ class ScreenShareSelection {
   final bool shareAudio;
   final int pid;
 
-  /// What the shared content mostly is — drives encoder tuning (degradation
-  /// preference, codec order, contentHint). See [ScreenContentProfile].
+  /// What the shared content mostly is, which drives the encoder tuning in
+  /// [ScreenContentProfile].
   final ScreenContentProfile profile;
 
-  /// For a WINDOW share on Windows: the window's HWND (the desktop source `id`
-  /// IS the decimal HWND). 0 for screen shares. The screen-audio exe resolves
-  /// this HWND -> owning pid -> the app's audio-rendering pids itself, which is
-  /// far more reliable than [pid] (libwebrtc does not populate a window pid
-  /// dependably; it arrived as 0, so window shares fell back to system audio).
+  /// For a WINDOW share on Windows, the window's HWND, and 0 for a screen
+  /// share. The screen-audio exe resolves it to the app's audio-rendering pids
+  /// itself, because libwebrtc does not populate a window [pid] dependably and
+  /// a 0 there drops the share back to system audio.
   final int windowHwnd;
 
   const ScreenShareSelection({
@@ -75,7 +71,7 @@ class ScreenShareSelection {
     this.profile = ScreenContentProfile.motion,
   });
 
-  /// Human-readable quality label, e.g. "1080p60", "4K30".
+  /// Human-readable quality label, e.g. "1080p60".
   String get qualityLabel {
     const resLabels = {360: '360p', 480: '480p', 720: '720p', 1080: '1080p', 1440: '1440p', 2160: '4K'};
     final res = resLabels[height] ?? '${height}p';
@@ -83,8 +79,7 @@ class ScreenShareSelection {
   }
 }
 
-/// Show the screen share picker dialog.
-/// Returns [ScreenShareSelection] if user confirms, null if cancelled.
+/// Shows the screen share picker, returning null when it is cancelled.
 Future<ScreenShareSelection?> showScreenShareDialog(
     BuildContext context) async {
   return showHollowDialog<ScreenShareSelection>(
@@ -111,22 +106,20 @@ class _ScreenShareDialogState extends State<_ScreenShareDialog> {
   bool _showScreens = true; // true = screens tab, false = windows tab
   Timer? _refreshTimer;
 
-  /// Wayland portal-first mode: no enumeration, no thumbnails — the desktop's
-  /// own xdg-desktop-portal dialog picks the screen/window at capture start.
+  /// Wayland portal-first mode: no enumeration and no thumbnails, because the
+  /// desktop's own portal dialog picks the source at capture start.
   final bool _portalMode = DesktopCaptureSupport.usePortalPicker;
 
-  /// Portal mode only: true = the user wants a fresh portal prompt instead of
-  /// silently re-sharing what the last grant covered.
+  /// Portal mode only: the user wants a fresh portal prompt rather than a
+  /// silent re-share of what the last grant covered.
   bool _portalFresh = false;
   late final List<ScreenShareResolution> _availableResolutions =
       _computeAvailableResolutions();
 
-  /// Only offer resolutions a connected display can actually produce —
-  /// capture is native-res and the encoder only ever downscales, so a
-  /// preset above the display is pure waste (same pixels, higher bitrate
-  /// cap). Orientation-agnostic (portrait monitors compare by long/short
-  /// side); on multi-monitor setups a preset stays available if ANY display
-  /// fits it. Falls back to the full list if the platform reports nothing.
+  /// Only the resolutions a connected display can produce: capture is native
+  /// resolution and the encoder only downscales, so a preset above the display
+  /// costs bitrate for the same pixels. Orientation-agnostic, available if ANY
+  /// display fits it, and the full list when the platform reports nothing.
   List<ScreenShareResolution> _computeAvailableResolutions() {
     final displays = WidgetsBinding.instance.platformDispatcher.displays;
     if (displays.isEmpty) return ScreenShareResolution.values;
@@ -143,23 +136,20 @@ class _ScreenShareDialogState extends State<_ScreenShareDialog> {
   @override
   void initState() {
     super.initState();
-    // Clamp the default (1080p) down to the best available tier on smaller
-    // displays (e.g. a 720p laptop offers 360p/480p/720p, defaults to 720p).
+    // Clamp the default down to the best available tier on a smaller display.
     if (!_availableResolutions.contains(_resolution)) {
       _resolution = _availableResolutions.last;
     }
 
     // Portal mode never enumerates: merely building a desktop media list on
-    // Wayland pops the desktop's own portal dialog (and windows can't be
-    // listed at all). The single portal entry needs no sources, no thumbnail
-    // refresh timer and no source listeners.
+    // Wayland pops the desktop's own portal dialog, and windows cannot be
+    // listed there at all.
     if (_portalMode) {
       _loading = false;
       return;
     }
     _loadSources();
 
-    // Listen for source changes.
     desktopCapturer.onAdded.stream.listen((source) {
       if (mounted) setState(() => _sources[source.id] = source);
     });
@@ -179,11 +169,9 @@ class _ScreenShareDialogState extends State<_ScreenShareDialog> {
 
   Future<void> _loadSources() async {
     try {
-      // macOS only enumerates shareable screens/windows after the user has
-      // granted Screen Recording in System Settings → Privacy & Security.
-      // Trigger the system prompt before getSources(); if the user denies
-      // (or hasn't granted yet) we still call getSources so the dialog can
-      // show its "no sources" state instead of staying on the loader.
+      // macOS enumerates nothing until Screen Recording is granted, so the
+      // system prompt comes first. getSources() still runs after a denial, so
+      // the dialog shows its "no sources" state instead of the loader.
       if (Platform.isMacOS) {
         try {
           await Helper.requestCapturePermission();
@@ -201,7 +189,6 @@ class _ScreenShareDialogState extends State<_ScreenShareDialog> {
         _loading = false;
       });
 
-      // Refresh thumbnails periodically.
       _refreshTimer?.cancel();
       _refreshTimer = Timer.periodic(const Duration(seconds: 3), (_) {
         desktopCapturer.updateSources(types: DesktopCaptureSupport.sourceTypes);
@@ -253,7 +240,6 @@ class _ScreenShareDialogState extends State<_ScreenShareDialog> {
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  // Title
                   Text(
                     'Share Your Screen',
                     style: HollowTypography.heading.copyWith(
@@ -263,11 +249,9 @@ class _ScreenShareDialogState extends State<_ScreenShareDialog> {
                   ),
                   const SizedBox(height: HollowSpacing.md),
 
-                  // Portal-first Wayland picker: ONE entry, no thumbnail
-                  // grid — the desktop's own xdg-desktop-portal dialog is
-                  // where the user picks a screen or a window, right after
-                  // pressing Share. Everything else keeps the enumerated
-                  // Screens/Windows tabs.
+                  // Portal-first Wayland picker: ONE entry, because the
+                  // desktop's own portal dialog is where the user picks, right
+                  // after pressing Share.
                   if (_portalMode) ...[
                     _buildPortalSection(hollow),
                     const SizedBox(height: HollowSpacing.md),
@@ -285,7 +269,6 @@ class _ScreenShareDialogState extends State<_ScreenShareDialog> {
                     ),
                     const SizedBox(height: HollowSpacing.md),
 
-                    // Source grid
                     Expanded(
                       child: _loading
                           ? Center(
@@ -326,10 +309,8 @@ class _ScreenShareDialogState extends State<_ScreenShareDialog> {
                     const SizedBox(height: HollowSpacing.md),
                   ],
 
-                  // Content profile pills — tunes the encoder for what's
-                  // being shared. Switching also snaps the fps default
-                  // (15 for text, 60 for motion); the user can still
-                  // override fps afterwards.
+                  // Switching the profile also snaps the fps default, which the
+                  // user can still override afterwards.
                   Row(
                     children: [
                       Text(
@@ -357,7 +338,6 @@ class _ScreenShareDialogState extends State<_ScreenShareDialog> {
                     ],
                   ),
                   const SizedBox(height: HollowSpacing.sm),
-                  // Quality: resolution pills
                   Row(
                     children: [
                       Text(
@@ -374,7 +354,6 @@ class _ScreenShareDialogState extends State<_ScreenShareDialog> {
                     ],
                   ),
                   const SizedBox(height: HollowSpacing.sm),
-                  // Quality: FPS pills
                   Row(
                     children: [
                       Text(
@@ -393,14 +372,13 @@ class _ScreenShareDialogState extends State<_ScreenShareDialog> {
                   const SizedBox(height: HollowSpacing.md),
 
                   Builder(builder: (context) {
-                    // macOS 10.15–12.x cannot capture system audio (Apple
-                    // exposes no API before ScreenCaptureKit audio in 13.0).
-                    // Lock the toggle off and explain why, rather than letting
-                    // the user enable a feature that silently does nothing.
+                    // Older macOS exposes no system-audio API at all, so the
+                    // toggle locks off and says why rather than enabling a
+                    // feature that silently does nothing.
                     final audioBlocked =
                         MacOsScreenAudioSupport.audioSendBlockedByOldOs;
                     if (audioBlocked && _shareAudio) {
-                      // Defensive: ensure we never send with a stale-true value.
+                      // Never send with a stale-true value.
                       WidgetsBinding.instance.addPostFrameCallback(
                           (_) => setState(() => _shareAudio = false));
                     }
@@ -458,7 +436,6 @@ class _ScreenShareDialogState extends State<_ScreenShareDialog> {
                   }),
                   const SizedBox(height: HollowSpacing.lg),
 
-                  // Actions
                   Row(
                     mainAxisAlignment: MainAxisAlignment.end,
                     children: [
@@ -470,10 +447,10 @@ class _ScreenShareDialogState extends State<_ScreenShareDialog> {
                       HollowButton.filled(
                         onPressed: _portalMode
                             ? () {
-                                // Portal-first: the id is the sentinel the
-                                // native side maps onto the generic PipeWire
-                                // capturer. A fresh pick bumps the restore
-                                // generation so the portal prompts again.
+                                // The id is the sentinel the native side maps
+                                // onto the generic PipeWire capturer, and a
+                                // fresh pick bumps the restore generation so
+                                // the portal prompts again.
                                 if (_portalFresh) {
                                   DesktopCaptureSupport.bumpPortalGeneration();
                                 }
@@ -499,11 +476,10 @@ class _ScreenShareDialogState extends State<_ScreenShareDialog> {
                             : _selectedSourceId != null
                             ? () {
                                 final selectedSource = _sources[_selectedSourceId!];
-                                // For a WINDOW source the source id IS the HWND
-                                // (decimal) — hand THAT to the per-app capturer,
-                                // which resolves HWND -> pid -> audio pids itself.
-                                // libwebrtc's `pid` field arrives as 0 for
-                                // windows, so we must NOT rely on it.
+                                // For a WINDOW source the source id IS the
+                                // HWND, which the per-app capturer resolves to
+                                // audio pids itself. libwebrtc's `pid` arrives
+                                // as 0 for windows, so it cannot be used.
                                 final isWindow =
                                     selectedSource?.type == SourceType.Window;
                                 final hwnd = isWindow
@@ -545,9 +521,8 @@ class _ScreenShareDialogState extends State<_ScreenShareDialog> {
     );
   }
 
-  /// The Wayland portal-first section: one explanatory entry instead of a
-  /// thumbnail grid, plus — once a grant likely exists — the choice between
-  /// silently re-sharing the previous pick and forcing a fresh portal prompt.
+  /// The Wayland portal-first section: one explanatory entry, plus the choice
+  /// between a silent re-share and a fresh portal prompt once a grant exists.
   Widget _buildPortalSection(HollowTheme hollow) {
     final canReuse = DesktopCaptureSupport.portalGrantLikely;
     return Column(
@@ -684,7 +659,6 @@ class _ScreenShareDialogState extends State<_ScreenShareDialog> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              // Thumbnail
               Expanded(
                 child: thumbnail != null && thumbnail.isNotEmpty
                     ? Image.memory(
@@ -701,7 +675,6 @@ class _ScreenShareDialogState extends State<_ScreenShareDialog> {
                         ),
                       ),
               ),
-              // Name
               Container(
                 padding: const EdgeInsets.symmetric(
                   horizontal: HollowSpacing.xs + 2,

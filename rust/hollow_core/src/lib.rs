@@ -1,9 +1,6 @@
-/// Debug log file for release builds.
-///
-/// On Windows the log lives next to the executable (legacy layout that the
-/// Hollow installer expects). On macOS/Linux it sits in the per-user data
-/// directory (`dirs::data_dir()/hollow/`) — keeping the log out of the .app
-/// bundle and next to `hollow_crash.log` from the Dart side.
+/// Debug log file for release builds. On Windows it lives next to the executable
+/// (the layout the installer expects), elsewhere in the per-user data directory
+/// next to the Dart side's `hollow_crash.log`.
 pub(crate) mod log {
     use std::fs::{File, OpenOptions};
     use std::io::Write;
@@ -20,9 +17,8 @@ pub(crate) mod log {
                 .unwrap_or_else(|| std::path::PathBuf::from("hollow_debug.log"));
         }
 
-        // Mobile sets the data dir via set_data_dir() (DATA_DIR_OVERRIDE), not the
-        // env var. Honor it so the log lands in the same app dir as messages.db
-        // (otherwise Rust logs vanish into an inaccessible location on Android).
+        // Mobile sets the data dir via set_data_dir(), not the env var; honor it or
+        // Rust logs vanish into an inaccessible location on Android.
         if let Ok(dir) = crate::identity::data_dir() {
             return dir.join("hollow_debug.log");
         }
@@ -45,14 +41,13 @@ pub(crate) mod log {
     pub fn init() {
         let path = log_path();
 
-        // Log rotation: if file exceeds 10MB, keep only the last 2MB.
         const MAX_LOG_SIZE: u64 = 10 * 1024 * 1024;
         const KEEP_SIZE: usize = 2 * 1024 * 1024;
         if let Ok(meta) = std::fs::metadata(&path) {
             if meta.len() > MAX_LOG_SIZE {
                 if let Ok(data) = std::fs::read(&path) {
                     let start = data.len().saturating_sub(KEEP_SIZE);
-                    // Find the next newline after the cut point to avoid partial lines.
+                    // Cut at a newline so the file never starts mid-line.
                     let start = data[start..].iter().position(|&b| b == b'\n')
                         .map(|p| start + p + 1)
                         .unwrap_or(start);
@@ -92,34 +87,26 @@ macro_rules! hollow_log {
 pub mod api;
 mod archive;
 mod chat_clock;
-/// C-ABI entry point for the iOS Notification Service Extension (disposable-NSE
-/// Tier B). Raw `extern "C"`, intentionally OUTSIDE `api` so flutter_rust_bridge
-/// codegen never scans it.
+/// C-ABI entry point for the iOS Notification Service Extension. Raw `extern "C"`,
+/// intentionally OUTSIDE `api` so flutter_rust_bridge codegen never scans it.
 pub mod push_enrich;
 /// C-ABI + Android JNI surface for DeepFilterNet3 noise suppression, bound at
-/// runtime by the forked flutter_webrtc capture-processor ports. Raw
-/// `extern "C"`, intentionally OUTSIDE `api` (same rule as `push_enrich`).
+/// runtime by the forked flutter_webrtc capture processors. Outside `api` for the
+/// same reason as `push_enrich`.
 pub mod dfn_ffi;
 mod crdt;
 mod crypto;
 mod frb_generated;
-/// Media forwarder (media forwarding step 3): blind str0m packet relay for
-/// SFrame screen-share RTP. Phase 1 = the headless `hollow-forwarder` VPS bin;
-/// phase 2 embeds the same engine in DESKTOP app builds (viewer-peer
-/// forwarders — swarm bridges the fwd_* lane into `engine::run`). Feature-gated
-/// AND desktop-gated (the feature flag reaches mobile cargokit builds too, but
-/// its deps are target-scoped out there) + intentionally OUTSIDE `api` so
-/// flutter_rust_bridge codegen never scans it (same rule as `push_enrich`).
-/// Public surface = `ForwarderConfig` + `run` only — the bin target can't see
-/// the crate's pub(crate) internals.
+/// Media forwarder: blind str0m packet relay for SFrame screen-share RTP, run
+/// headless on the VPS and embedded in desktop builds. Feature- AND desktop-gated
+/// (the flag reaches mobile cargokit builds, its deps do not) and outside `api` so
+/// codegen never scans it. Public surface is `ForwarderConfig` + `run`, which is
+/// all the bin target can see of the crate.
 #[cfg(all(feature = "forwarder", not(any(target_os = "android", target_os = "ios"))))]
 pub mod forwarder;
-/// `.hollowpack` — the artist shop's art container (format, the app's own
-/// encoders, and the ONE verification both the CLI and the importer run).
-/// Public so the `hollowpack` bin can link it through the rlib; intentionally
-/// OUTSIDE `api` so flutter_rust_bridge codegen never scans it (same rule as
-/// `push_enrich` and `forwarder`) — the app-facing FFI is
-/// `api::network::import_hollowpack`.
+/// `.hollowpack`, the artist shop's art container: the format, the encoders and the
+/// ONE verification both the CLI and the importer run. Public so the `hollowpack`
+/// bin can link it through the rlib, outside `api` so codegen never scans it.
 pub mod hollowpack;
 mod identity;
 mod node;

@@ -28,22 +28,20 @@ import 'package:hollow/src/ui/shader_warmup.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:window_manager/window_manager.dart';
 
-/// Global provider container — used by window/tray listeners.
+/// Global provider container, used by the window and tray listeners.
 late final ProviderContainer _container;
 
-/// Lock file path — prevents multiple instances.
+/// Lock file path: one running process per data root.
 late final String _lockFilePath;
 
-/// Check if another instance is already running via lock file.
-/// Returns true if this is the only instance (safe to proceed).
+/// True when this is the only instance, so it is safe to proceed.
 bool _acquireSingleInstanceLock() {
   final sep = Platform.pathSeparator;
   final String lockDir;
   if (isPortableMode || isPinnedProfile) {
-    // Portable copies get their own lock inside hollow_data so a portable and
-    // an installed COPY (different exe) can coexist. Pinned profiles (issue
-    // #47) lock the same way — the lock's job is one process per data root.
-    // Note two profiles from the SAME exe still can't run at once: the native
+    // Portable copies and pinned profiles (issue #47) lock inside their own
+    // data root, so a portable and an installed copy can coexist. Two
+    // profiles from the SAME exe still cannot: the native
     // SendAppLinkToInstance() forwarder exits a second instance pre-Flutter.
     lockDir = hollowDataDir;
   } else {
@@ -54,7 +52,6 @@ bool _acquireSingleInstanceLock() {
   }
   _lockFilePath = '$lockDir${sep}hollow.lock';
 
-  // Ensure directory exists.
   final dir = Directory(lockDir);
   if (!dir.existsSync()) {
     dir.createSync(recursive: true);
@@ -66,17 +63,14 @@ bool _acquireSingleInstanceLock() {
       final pidStr = lockFile.readAsStringSync().trim();
       final pid = int.tryParse(pidStr);
       if (pid != null && _isProcessRunning(pid)) {
-        // Another instance is alive — exit.
         return false;
       }
     } catch (_) {}
-    // Stale lock file — remove it.
     try {
       lockFile.deleteSync();
     } catch (_) {}
   }
 
-  // Write our PID.
   try {
     lockFile.writeAsStringSync('$pid');
   } catch (_) {}
@@ -84,19 +78,16 @@ bool _acquireSingleInstanceLock() {
   return true;
 }
 
-/// Check if a Hollow process with the given PID is still running.
-/// Also verifies the process name contains "hollow" to avoid false
-/// positives from PID reuse after a crash.
+/// Whether a Hollow process with [targetPid] is still running. The name check
+/// avoids a false positive from PID reuse after a crash.
 bool _isProcessRunning(int targetPid) {
   try {
     if (Platform.isWindows) {
       final result = Process.runSync(
           'tasklist', ['/FI', 'PID eq $targetPid', '/NH']);
       final output = result.stdout.toString().toLowerCase();
-      // Must match both PID and our process name.
       return output.contains('$targetPid') && output.contains('hollow');
     } else {
-      // Linux/macOS: check /proc or ps for both PID and name.
       final result = Process.runSync('ps', ['-p', '$targetPid', '-o', 'comm=']);
       return result.exitCode == 0 &&
           result.stdout.toString().toLowerCase().contains('hollow');
@@ -116,8 +107,8 @@ void _releaseLock() {
 /// Crash log file for Flutter errors.
 IOSink? _crashLogSink;
 
-/// Initialize crash logging — captures Flutter framework errors and
-/// platform/async errors to hollow_crash.log alongside hollow_debug.log.
+/// Captures Flutter framework and platform/async errors into
+/// hollow_crash.log, alongside hollow_debug.log.
 Future<void> _initCrashLogging() async {
   try {
     final dataDir = hollowDataDir;
@@ -126,7 +117,6 @@ Future<void> _initCrashLogging() async {
 
     final logFile = File('$dataDir${Platform.pathSeparator}hollow_crash.log');
 
-    // Rotate if over 5MB.
     if (logFile.existsSync() && logFile.lengthSync() > 5 * 1024 * 1024) {
       final backup = File('${logFile.path}.old');
       if (backup.existsSync()) backup.deleteSync();
@@ -136,7 +126,6 @@ Future<void> _initCrashLogging() async {
     _crashLogSink = logFile.openWrite(mode: FileMode.append);
     _crashLogSink!.writeln('\n=== Hollow started at ${DateTime.now().toIso8601String()} ===');
 
-    // Flutter framework errors (widget build, rendering, etc.).
     FlutterError.onError = (details) {
       FlutterError.presentError(details); // still print to console
       _crashLogSink?.writeln(
@@ -145,7 +134,7 @@ Future<void> _initCrashLogging() async {
       _crashLogSink?.flush();
     };
 
-    // Async/platform errors not caught by Flutter framework.
+    // Async and platform errors the Flutter framework does not catch.
     PlatformDispatcher.instance.onError = (error, stack) {
       debugPrint('[HOLLOW-CRASH] $error\n$stack');
       _crashLogSink?.writeln(
@@ -162,57 +151,48 @@ Future<void> _initCrashLogging() async {
 Future<void> main(List<String> args) async {
   final binding = FrameScheduleProbe.ensureInitialized();
 
-  // Phones and tablets are portrait-only for now: the UI is the mobile shell
-  // on all Android/iOS devices, and landscape/tablet layouts are unhandled
-  // (edge cases deferred). Also enforced in AndroidManifest.xml and
-  // Info.plist (iPad needs UIRequiresFullScreen for the lock to hold).
+  // Portrait-only on phones and tablets: landscape and tablet layouts are
+  // unhandled. Also enforced in AndroidManifest.xml and Info.plist (iPad
+  // needs UIRequiresFullScreen for the lock to hold).
   if (Platform.isAndroid || Platform.isIOS) {
     await SystemChrome.setPreferredOrientations(
         [DeviceOrientation.portraitUp]);
   }
 
-  // Release builds: debugPrint is a real print on every platform, and the
-  // event dispatcher interpolates + prints per network event. Silence it —
-  // release diagnostics go through hollow_log!/logFromDart (hollow_debug.log).
+  // In release, debugPrint is a real print on every platform and the event
+  // dispatcher prints per network event. Release diagnostics go through
+  // hollow_log!/logFromDart into hollow_debug.log instead.
   if (kReleaseMode) {
     debugPrint = (String? message, {int? wrapWidth}) {};
   }
 
   registerRustLicenses();
 
-  // Resolve app data directory (async on mobile, sync on desktop; detects
-  // portable mode). Must run before the single-instance lock so a portable
-  // copy locks inside its own data folder, and before any file I/O.
+  // Must run before the single-instance lock, so a portable copy locks inside
+  // its own data folder, and before any file I/O.
   await initHollowDataDir(forcePortable: args.contains('--portable'));
 
-  // Single-instance check — exit if another instance is running.
   if (Platform.isWindows || Platform.isLinux || Platform.isMacOS) {
     if (!_acquireSingleInstanceLock()) {
       exit(0);
     }
   }
 
-  // Pre-compile GPU shaders before the first frame, so Skia does not compile
+  // Pre-compile GPU shaders before the first frame so Skia does not compile
   // them mid-animation (20-200ms each, dropped frames).
   //
-  // DESKTOP-SKIA ONLY, and deliberately so: this is paired with
-  // `ImpellerSwitch::Disabled` in windows/runner/main.cpp and
-  // `fl_dart_project_set_enable_impeller(project, FALSE)` in
-  // linux/runner/my_application.cc, which put both back on Skia because
-  // Impeller's render targets cost several hundred MB (tmp4.md section 18).
-  //
-  // macOS, iOS and Android still run Impeller, which compiles its shaders at
-  // build time, so warming them there only delays the first frame. Whenever a
-  // platform goes back to Impeller, drop it from this condition.
+  // DESKTOP-SKIA ONLY, paired with `ImpellerSwitch::Disabled` in
+  // windows/runner/main.cpp and `fl_dart_project_set_enable_impeller` in
+  // linux/runner/my_application.cc. Impeller compiles its shaders at build
+  // time, so warming them there only delays the first frame; move this
+  // condition whenever a platform goes back to Impeller.
   if (Platform.isWindows || Platform.isLinux) {
     await HollowShaderWarmUp().execute();
   }
 
-  // iOS: migrate the data dir into the App Group container so the Notification
-  // Service Extension can open the SAME SQLCipher DB + identity to fetch &
-  // decrypt push messages on-device. Must happen BEFORE RustLib opens the DB.
-  // No-op on other platforms; falls back to the private dir if the App Group is
-  // unavailable or migration fails.
+  // iOS: the data dir moves into the App Group container so the Notification
+  // Service Extension can open the SAME SQLCipher DB and identity. Must
+  // happen BEFORE RustLib opens it; falls back to the private dir on failure.
   if (Platform.isIOS) {
     final migrated =
         await IosDataDirMigration.resolveAndMigrate(hollowDataDir);
@@ -224,15 +204,14 @@ Future<void> main(List<String> args) async {
 
   await RustLib.init();
 
-  // On mobile, dirs crate returns None — pass the app data path to Rust.
-  // Portable desktop copies and pinned profiles (Settings > Profile switcher)
-  // pass it too so Rust's data_dir() follows the chosen root instead of
-  // falling back to the OS profile dir.
+  // The dirs crate returns None on mobile, and a portable copy or pinned
+  // profile needs Rust's data_dir() to follow the chosen root rather than
+  // the OS profile dir.
   if (Platform.isAndroid || Platform.isIOS || isPortableMode || isPinnedProfile) {
     await identity_api.setDataDir(path: hollowDataDir);
   }
-  // Portable verdict into hollow_debug.log (next to the exe on Windows) so a
-  // "marker not picked up" report is diagnosable from the log alone.
+  // The portable verdict into hollow_debug.log, so a "marker not picked up"
+  // report is diagnosable from the log alone.
   if (Platform.isWindows || Platform.isLinux || Platform.isMacOS) {
     network_api
         .logFromDart(
@@ -241,14 +220,12 @@ Future<void> main(List<String> args) async {
         .catchError((_) {});
   }
 
-  // Performance sentinels: frame-stall logger + slow platform-channel
-  // watchdog. Quiet by default — anomalies only, into hollow_debug.log.
+  // Frame-stall logger plus slow platform-channel watchdog. Anomalies only.
   PerfSentinel.init();
-  // One burst, 20s in, naming whatever keeps asking for frames on an idle
-  // window. Disarms itself after reporting.
+  // One burst, 20s in, naming what keeps asking for frames on an idle window.
   binding.startBurst(sink: PerfSentinel.emit);
 
-  // Initialize Firebase early (required before FCM token generation).
+  // Required before any FCM token generation.
   if (Platform.isAndroid || Platform.isIOS) {
     try {
       await Firebase.initializeApp();
@@ -258,8 +235,8 @@ Future<void> main(List<String> args) async {
     }
   }
 
-  // fvp provides the video_player backend on Windows/Linux (where the official
-  // plugin has no native support). Skip on mobile — official plugin works natively.
+  // fvp provides the video_player backend on desktop, where the official
+  // plugin has no native support.
   if (Platform.isWindows || Platform.isLinux || Platform.isMacOS) {
     fvp.registerWith();
   }
@@ -267,34 +244,31 @@ Future<void> main(List<String> args) async {
   final container = ProviderContainer();
   _container = container;
 
-  // Deep links (hollow:// from browsers/other apps). Initialized before
-  // runApp so the cold-start protocol launch link is captured; handled links
-  // buffer until HollowShell mounts. On desktop, an incoming link restores
-  // the window first (it usually arrives while Hollow is hidden in tray).
+  // Initialized before runApp so the cold-start protocol launch link is
+  // captured; handled links buffer until HollowShell mounts. On desktop an
+  // incoming link restores the window first, since Hollow is usually hidden.
   await DeepLinkService.instance.init(container);
   if (Platform.isWindows || Platform.isLinux || Platform.isMacOS) {
     DeepLinkService.instance.bringToForeground =
         TrayService.instance.restoreWindow;
   }
 
-  // Custom window chrome on desktop — hide native title bar.
+  // Custom window chrome on desktop: no native title bar.
   if (Platform.isWindows || Platform.isLinux || Platform.isMacOS) {
     await windowManager.ensureInitialized();
-    // On macOS we keep the native traffic-light buttons (close/minimize/zoom)
-    // for a proper Mac look — `TitleBarStyle.hidden` already gives a frameless
-    // content area while leaving those three circles in the top-left corner.
-    // Windows/Linux hide the native controls entirely (we draw our own).
+    // macOS keeps its native traffic lights, and `TitleBarStyle.hidden`
+    // already gives a frameless content area. Windows and Linux hide the
+    // native controls entirely and draw their own.
     final windowOptions = WindowOptions(
       size: const Size(1280, 800),
       minimumSize: const Size(800, 500),
       center: true,
-      backgroundColor: const Color(0xFF0D0F14), // Hollow dark background
+      backgroundColor: const Color(0xFF0D0F14),
       titleBarStyle: TitleBarStyle.hidden,
       windowButtonVisibility: Platform.isMacOS,
     );
     windowManager.waitUntilReadyToShow(windowOptions, () async {
-      // setAsFrameless() strips the macOS traffic lights too — only do it on
-      // Windows/Linux where we render the full custom control set ourselves.
+      // setAsFrameless() strips the macOS traffic lights too.
       if (!Platform.isMacOS) {
         await windowManager.setAsFrameless();
       }
@@ -306,30 +280,24 @@ Future<void> main(List<String> args) async {
     });
 
     // Always-visible tray icon on Windows (issue #50); shared window-restore
-    // on all desktop platforms (deep links).
+    // on every desktop platform.
     await TrayService.instance.init(container, quitApp: _quitApp);
 
-    // Install .desktop + icon to XDG paths on first launch.
     await _installLinuxDesktopIntegration();
   }
 
-  // Set up crash dump logging to hollow_crash.log.
   await _initCrashLogging();
 
-  // Resolve whether this build may show shop UI at all (Apple 3.1.1 / Play
-  // policy). Before runApp so no shop button can flash onto a store build
-  // while an async answer is still in flight.
+  // Before runApp so no shop button can flash onto a store build while the
+  // answer is still in flight (Apple 3.1.1 / Play policy).
   await ShopAvailability.prime();
 
-  // Seed reduce-motion from the OS accessibility flag BEFORE tickers start, so
-  // decorative animations never spin on the login screen when the OS has
-  // Reduce Motion on. The persisted in-app override (Auto/On/Off) is applied
-  // in _bootstrap() after the DB opens. This also wires the runtime listener
-  // so flipping the OS setting takes effect live.
+  // Seed reduce-motion from the OS flag BEFORE tickers start, or decorative
+  // animations spin on the login screen with Reduce Motion on. The persisted
+  // in-app override is applied in _bootstrap() once the DB opens.
   ReduceMotionController.instance.initFromOs();
 
-  // Start shared animation tickers (one ticker drives all decorative anims).
-  // No-op if reduce-motion was already effective (controller set disabled).
+  // No-op if reduce-motion already left the controller disabled.
   SharedTickers.instance.start();
 
   runApp(UncontrolledProviderScope(
@@ -338,12 +306,11 @@ Future<void> main(List<String> args) async {
   ));
 }
 
-/// Full app shutdown — tray "Quit Hollow" and the close button when
-/// minimize-to-tray is off (Windows/macOS; Linux quits via [_linuxQuit]).
+/// Full app shutdown: tray "Quit Hollow", and the close button when
+/// minimize-to-tray is off (Windows and macOS; Linux quits via [_linuxQuit]).
 Future<void> _quitApp() async {
   await windowManager.hide();
   try {
-    // Phase 6.25: Dispose WebRTC resources before shutdown.
     await _container.read(webRtcProvider.notifier).disposeAll();
   } catch (_) {}
   try {
@@ -355,23 +322,21 @@ Future<void> _quitApp() async {
   await windowManager.destroy();
 }
 
-/// Set when a Linux close press issued a `minimize()` that the window manager
-/// may have ignored; the NEXT close press then quits instead (issue #59).
+/// Set when a Linux close press issued a `minimize()` the window manager may
+/// have ignored; the NEXT close press then quits instead (issue #59).
 ///
-/// Cleared on focus: on a WM that really minimized, the window only comes back
-/// by being restored, which focuses it — so the following close minimizes
-/// again, exactly as before. On wlroots (Hyprland, sway) `set_minimized` is a
-/// no-op, the window never moves and never re-focuses, so the flag survives
-/// and the second press is the way out.
+/// Cleared on focus: where the minimize really landed the window comes back
+/// only by being restored, which focuses it. On wlroots (Hyprland, sway)
+/// `set_minimized` is a no-op, nothing ever re-focuses, and the flag survives
+/// as the way out.
 bool _linuxCloseMayHaveBeenIgnored = false;
 
 /// Whether a just-issued `minimize()` visibly iconified the window.
 ///
-/// `isMinimized()` reads GDK_WINDOW_STATE_ICONIFIED, set asynchronously — hence
-/// a poll rather than a single read. This is deliberately used ONLY to decide
-/// whether to warn the user, never to quit: GTK on Wayland does not reliably
-/// report ICONIFIED even where minimize genuinely works, and a false negative
-/// must not be able to close the app out from under someone.
+/// `isMinimized()` reads GDK_WINDOW_STATE_ICONIFIED, set asynchronously, hence
+/// a poll. Used ONLY to decide whether to warn, never to quit: GTK on Wayland
+/// underreports ICONIFIED even where minimize works, and a false negative must
+/// not close the app out from under someone.
 Future<bool> _minimizeVisiblyTookEffect() async {
   for (var i = 0; i < 8; i++) {
     await Future.delayed(const Duration(milliseconds: 50));
@@ -382,9 +347,8 @@ Future<bool> _minimizeVisiblyTookEffect() async {
   return false;
 }
 
-/// Tell the user the app is still here and how to actually close it. Only ever
-/// SEEN when the minimize was ignored — on a WM that honoured it this paints
-/// into a window nobody is looking at.
+/// Tells the user the app is still here and how to close it. Only ever SEEN
+/// when the minimize was ignored; otherwise it paints into a hidden window.
 void _warnLinuxCloseIgnored() {
   try {
     final overlay = hollowNavigatorKey.currentState?.overlay;
@@ -413,10 +377,9 @@ Future<void> _linuxQuit() async {
   await windowManager.destroy();
 }
 
-/// Install .desktop file and icon to XDG paths so the DE shows the correct
-/// name and icon in the taskbar, and register the hollow:// scheme handler.
-/// Re-writes the file whenever the desired content changes (exe moved, or an
-/// older install predates the MimeType/%u deep-link fields).
+/// Installs the .desktop file and icon to XDG paths and registers the
+/// hollow:// scheme handler. Re-written whenever the desired content changes
+/// (exe moved, or an install predating the MimeType/%u fields).
 Future<void> _installLinuxDesktopIntegration() async {
   if (!Platform.isLinux) return;
   final homeDir = Platform.environment['HOME'];
@@ -436,8 +399,8 @@ Future<void> _installLinuxDesktopIntegration() async {
     if (!appsDir.existsSync()) appsDir.createSync(recursive: true);
     if (!iconsDir.existsSync()) iconsDir.createSync(recursive: true);
 
-    // Write .desktop with absolute Exec and Icon paths. %u passes a clicked
-    // hollow:// URI as an argument; MimeType registers us as its handler.
+    // %u passes a clicked hollow:// URI as an argument; MimeType registers
+    // us as its handler.
     final iconDest = '${iconsDir.path}/com.anonlisten.hollow.png';
     final content = '[Desktop Entry]\n'
         'Type=Application\n'
@@ -457,9 +420,9 @@ Future<void> _installLinuxDesktopIntegration() async {
     bundledIcon.copySync(iconDest);
     desktopFile.writeAsStringSync(content);
 
-    // Refresh the desktop database and claim the scheme so browsers resolve
-    // hollow:// immediately (best-effort — the MimeType line alone works on
-    // most DEs after the next cache refresh).
+    // Claim the scheme so browsers resolve hollow:// immediately. Best
+    // effort: the MimeType line alone works on most DEs after a cache
+    // refresh.
     try {
       await Process.run('update-desktop-database', [appsDir.path]);
     } catch (_) {}
@@ -488,12 +451,11 @@ class _HollowWindowListener extends WindowListener {
   void onWindowFocus() {
     SharedTickers.instance.resume();
     _container.read(windowFocusedProvider.notifier).state = true;
-    // The window came back, so the last minimize did land — the next close
+    // The window came back, so the last minimize did land: the next close
     // press minimizes again rather than quitting (#59).
     _linuxCloseMayHaveBeenIgnored = false;
-    // On macOS the window is re-shown natively from the Dock
-    // (applicationShouldHandleReopen) without going through the tray restore
-    // path, so sync the visible state here.
+    // macOS re-shows the window natively from the Dock without going through
+    // the tray restore path, so sync the visible state here.
     if (Platform.isMacOS) {
       _container.read(windowVisibleProvider.notifier).state = true;
     }
@@ -501,20 +463,18 @@ class _HollowWindowListener extends WindowListener {
 
   @override
   void onWindowBlur() {
-    // Window lost focus (alt-tabbed / clicked another app). Drives native-toast
-    // gating so messages in the open conversation still notify while we're away.
+    // Drives native-toast gating, so messages in the open conversation still
+    // notify while we are away.
     _container.read(windowFocusedProvider.notifier).state = false;
-    // ...and stop painting decoration nobody is looking at. Measured: an idle
-    // but VISIBLE window ran the render pipeline at vsync forever, 69% of one
-    // core, because only minimize and hide-to-tray ever called pause(). A
-    // window sitting behind another app is the common case, so this was most
-    // of Hollow's idle cost. onWindowFocus resumes.
+    // An idle but VISIBLE window ran the render pipeline at vsync forever,
+    // 69% of one core, because only minimize and hide-to-tray called
+    // pause(). A window behind another app is the common case, so this was
+    // most of Hollow's idle cost. onWindowFocus resumes.
     SharedTickers.instance.pause();
   }
 
   @override
   void onWindowClose() async {
-    // Check user preference.
     bool minimizeToTray = true;
     try {
       final val = await storage_api.loadSetting(key: 'minimize_to_tray');
@@ -523,46 +483,40 @@ class _HollowWindowListener extends WindowListener {
 
     if (minimizeToTray) {
       if (Platform.isLinux) {
-        // Linux taskbar provides restore (click) + Quit (right-click).
-        // If already minimized, the close event is from taskbar "Quit".
-        // wlroots compositors (Hyprland, sway) implement no minimize at all,
-        // so gtk_window_iconify() is a silent no-op there: the window never
-        // moves, ICONIFIED is never set, and this quit branch was unreachable
-        // — the close button read as dead and the app could only be killed
-        // from a task manager (#59). `_linuxCloseMayHaveBeenIgnored` is the
-        // second door into it.
+        // The Linux taskbar provides restore and quit, so an already
+        // minimized window means the close came from taskbar "Quit".
+        // wlroots compositors implement no minimize at all, making
+        // gtk_window_iconify() a silent no-op: this branch was unreachable
+        // and the close button read as dead (#59).
         if (await windowManager.isMinimized() ||
             _linuxCloseMayHaveBeenIgnored) {
           await _linuxQuit();
         } else {
           await windowManager.minimize();
-          // Arm the second door only after the poll window, so any focus
-          // churn the minimize itself caused has settled and can't clear the
-          // flag we just set.
+          // Arm the second door only after the poll window, so focus churn
+          // from the minimize itself cannot clear the flag we just set.
           if (!await _minimizeVisiblyTookEffect()) {
             _linuxCloseMayHaveBeenIgnored = true;
             _warnLinuxCloseIgnored();
           }
         }
       } else if (Platform.isMacOS) {
-        // macOS-native idiom: hide the window, app keeps running in the Dock
-        // with the active dot. No tray icon (macOS has no system tray).
-        // Clicking the Dock icon re-shows it via `applicationShouldHandleReopen`
-        // in AppDelegate.swift, which fires onWindowFocus → tickers resume.
+        // macOS idiom: hide, and keep running in the Dock. Clicking the Dock
+        // icon re-shows via applicationShouldHandleReopen, which fires
+        // onWindowFocus and resumes the tickers.
         _container.read(windowVisibleProvider.notifier).state = false;
         SharedTickers.instance.pause();
         await windowManager.hide();
       } else {
-        // Windows: hide to the always-visible tray — app keeps running in
-        // the background (issue #50: the icon is up for the whole session,
-        // this just re-asserts it in case creation failed at startup).
+        // Windows: hide to the always-visible tray. Issue #50 keeps the icon
+        // up for the whole session; this re-asserts it if creation failed at
+        // startup.
         await TrayService.instance.ensureIcon();
         _container.read(windowVisibleProvider.notifier).state = false;
         SharedTickers.instance.pause();
         await windowManager.hide();
       }
     } else {
-      // Quit the app.
       if (Platform.isLinux) {
         await _linuxQuit();
       } else {

@@ -4,10 +4,8 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'annotation_controller.dart';
 import 'annotation_models.dart';
 
-/// Floating control panel for the annotation overlay: tool picker, color
-/// palette, width slider, line-style picker, undo/redo, clear, close.
-///
-/// Stateless — reads everything from [controller] and rebuilds on changes.
+/// Floating control panel for the annotation overlay: tools, colours, width,
+/// line style, undo and redo.
 class AnnotationToolbar extends StatelessWidget {
   final AnnotationController controller;
   final VoidCallback onClose;

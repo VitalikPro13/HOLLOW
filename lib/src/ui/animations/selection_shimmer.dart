@@ -1,13 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:hollow/src/core/shared_tickers.dart';
 
-/// A subtle shimmer overlay for selected list items.
+/// A subtle shimmer overlay for selected list items, sweeping over 4s on
+/// [SharedTickers] rather than a controller of its own.
 ///
-/// A transparent-to-highlight-to-transparent gradient sweeps across
-/// the widget over 4s, repeating infinitely via [SharedTickers].
-/// Very subtle — just enough to catch the eye.
-///
-/// Set [vertical] to true for a top-to-bottom sweep (voice channels).
+/// [vertical] sweeps top to bottom instead, for voice channels.
 class SelectionShimmer extends StatelessWidget {
   final Widget child;
   final Color highlightColor;
@@ -24,11 +21,9 @@ class SelectionShimmer extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    // The sweep gets its own layer, so a 60fps repaint costs the sweep and
-    // not the row under it. Passing `child` through the builder spares the
-    // rebuild but NOT the raster: without a boundary between them, the
-    // painter's markNeedsPaint walks up to whatever layer the surrounding
-    // list or panel happens to own, and re-rasters all of it, every frame.
+    // The sweep gets its own layer, so a 60fps repaint costs the sweep and not
+    // the row under it. Without a boundary between them, markNeedsPaint walks
+    // up to whatever layer the list owns and re-rasters all of it every frame.
     return Stack(
       children: [
         child,

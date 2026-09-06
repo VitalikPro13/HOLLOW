@@ -27,7 +27,6 @@ class ArchiveConversationList extends ConsumerWidget {
 
     return Column(
       children: [
-        // ── Inner tab bar ──
         Padding(
           padding: const EdgeInsets.fromLTRB(
             HollowSpacing.md, HollowSpacing.md, HollowSpacing.md, HollowSpacing.xs,
@@ -64,7 +63,6 @@ class ArchiveConversationList extends ConsumerWidget {
           ),
         ),
 
-        // ── Search field (not shown for Vault Files tab) ──
         if (innerTab != MyDataInnerTab.vaultFiles)
           Padding(
             padding: const EdgeInsets.symmetric(
@@ -82,7 +80,6 @@ class ArchiveConversationList extends ConsumerWidget {
 
         const SizedBox(height: HollowSpacing.xs),
 
-        // ── Content list ──
         Expanded(
           child: switch (innerTab) {
             MyDataInnerTab.dms => const _DmList(),
@@ -94,8 +91,6 @@ class ArchiveConversationList extends ConsumerWidget {
     );
   }
 }
-
-// ── Tab pill widget ─────────────────────────────────────────────
 
 class _TabPill extends StatelessWidget {
   final String label;
@@ -113,8 +108,8 @@ class _TabPill extends StatelessWidget {
     final hollow = HollowTheme.of(context);
 
     // Spacing lives OUTSIDE the pressable: padding on the pressable itself
-    // made the hover fill paint beyond the pill's outline (bands above and
-    // below the border). Hover must never read bigger than the control.
+    // paints the hover fill beyond the pill's outline, and hover must never
+    // read bigger than the control.
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 6),
       child: HollowPressable(
@@ -144,8 +139,6 @@ class _TabPill extends StatelessWidget {
   }
 }
 
-// ── DM list ─────────────────────────────────────────────────────
-
 class _DmList extends ConsumerStatefulWidget {
   const _DmList();
 
@@ -172,8 +165,8 @@ class _DmListState extends ConsumerState<_DmList> {
             style: TextStyle(color: hollow.error)),
       ),
       data: (entries) {
-        // The self-DM renders as "Saved messages" — search should match that
-        // label, not your own profile name.
+        // The self-DM renders as "Saved messages", so search matches that
+        // label rather than your own profile name.
         final savedId = ref.watch(savedMessagesPeerIdProvider);
         final filtered = search.isEmpty
             ? entries
@@ -281,17 +274,16 @@ class _DmRow extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final hollow = HollowTheme.of(context);
-    // Self-DM = Saved messages: bookmark avatar + fixed label instead of your
-    // own profile name/picture. Row behavior (open/hide/count) is unchanged.
+    // Self-DM = Saved messages: a bookmark avatar and fixed label instead of
+    // your own name and picture.
     final isSaved = entry.peerId == ref.watch(savedMessagesPeerIdProvider);
     final peerProfile = ref.watch(
         profileProvider.select((p) => p[entry.peerId]));
     final name =
         isSaved ? 'Saved messages' : displayNameForPeer(peerProfile, entry.peerId);
 
-    // ONE box: selection bg lives on the pressable itself, so the hover rect
-    // and the selected rect are the same shape (the old inner Container drew
-    // a smaller selected box inside a larger hover box).
+    // ONE box: the selection fill lives on the pressable itself, so the hover
+    // rect and the selected rect are the same shape.
     return Padding(
       padding: const EdgeInsets.only(bottom: 2),
       child: HollowPressable(
@@ -428,8 +420,6 @@ class _HiddenHeader extends StatelessWidget {
   }
 }
 
-// ── Channel list (grouped by server) ────────────────────────────
-
 class _ChannelList extends ConsumerWidget {
   const _ChannelList();
 
@@ -447,7 +437,6 @@ class _ChannelList extends ConsumerWidget {
             style: TextStyle(color: hollow.error)),
       ),
       data: (groups) {
-        // Flatten for rendering — filter by search.
         final items = <_ChannelListItem>[];
         for (final group in groups) {
           final matchingChannels = group.channels.where((ch) {
@@ -550,9 +539,8 @@ class _ChannelList extends ConsumerWidget {
                   ref.read(archiveSelectedDmProvider.notifier).state = null;
                 },
                 borderRadius: BorderRadius.circular(hollow.radiusSm),
-                // ONE box: selection bg on the pressable itself so hover and
-                // selection share the same rect (the inner Container drew a
-                // smaller selected box inside a larger hover box).
+                // ONE box: the selection fill on the pressable itself, so
+                // hover and selection share the same rect.
                 backgroundColor: isSelected
                     ? hollow.accent.withValues(alpha: 0.12)
                     : null,
@@ -630,8 +618,6 @@ class _ChannelListItem {
         headerName = null,
         group = null;
 }
-
-// ── Vault files list (Evidence Recovery Phase A) ────────────────
 
 class _VaultFilesPlaceholder extends StatelessWidget {
   const _VaultFilesPlaceholder();

@@ -1,16 +1,12 @@
-//! Anti-censorship proxy tunnel — launches the bundled `shoes` REALITY client
-//! as a subprocess exposing a local SOCKS5 listener, so the relay WSS
-//! connection can ride a VLESS+REALITY tunnel and look like ordinary HTTPS to a
-//! censor (Russia/TSPU, China/GFW, …).
+//! Anti-censorship proxy tunnel: launches the bundled `shoes` REALITY client as
+//! a subprocess exposing a local SOCKS5 listener, so the relay WSS connection
+//! rides a VLESS+REALITY tunnel and looks like ordinary HTTPS to a censor.
 //!
-//! `shoes` is run as a subprocess rather than linked as a library: it pulls
-//! edition-2024 + wildcard deps + its own aws-lc-rs/rustls/tokio runtime, which
-//! would collide with hollow_core's `tokio-tungstenite` (rustls-webpki-roots).
-//! A local SOCKS5 port is a clean, protocol-agnostic boundary.
+//! A subprocess rather than a linked library: `shoes` pulls its own
+//! aws-lc-rs/rustls/tokio runtime, which would collide with hollow_core's
+//! `tokio-tungstenite`. A local SOCKS5 port is a protocol-agnostic boundary.
 //!
-//! Lifecycle: `start()` on node startup (when a ProxyConfig is present),
-//! `stop()` on node shutdown. The child is force-killed on stop; a fresh YAML is
-//! written to the data dir each start.
+//! `start()` on node startup, `stop()` on shutdown; the child is force-killed.
 
 use std::io::Write;
 use std::net::{Ipv4Addr, SocketAddr, TcpListener as StdTcpListener, TcpStream as StdTcpStream};
@@ -110,10 +106,9 @@ fn spawn_hidden(cmd: &mut Command) -> std::io::Result<Child> {
     cmd.spawn()
 }
 
-/// Start the tunnel for `cfg`. Writes the YAML to the data dir, spawns `shoes`,
-/// waits for the SOCKS port to accept, and returns the SOCKS5 address
-/// (`127.0.0.1:port`) for ws_client to dial. Returns Err (proxy stays off) if
-/// the binary is missing or the tunnel doesn't come up.
+/// Start the tunnel for `cfg`: write the YAML, spawn `shoes`, wait for the SOCKS
+/// port to accept, and return `127.0.0.1:port` for ws_client to dial. Err (the
+/// proxy stays off) when the binary is missing or the tunnel does not come up.
 pub(crate) fn start(cfg: &ProxyConfig) -> Result<String, String> {
     // Kill any stale child first (defensive — start should follow stop).
     stop();
@@ -163,15 +158,13 @@ pub(crate) fn start(cfg: &ProxyConfig) -> Result<String, String> {
     // (hard exit(0) on restart, crash, or Task-Manager-kill all skip stop()).
     write_pid_file(child.id());
 
-    // Store the child so stop() can kill it.
     if let Ok(mut slot) = child_slot().lock() {
         *slot = Some(child);
     }
 
-    // Health-gate: wait until the SOCKS listener ACCEPTS a TCP connection.
-    // We probe by CONNECTING (not by trying to bind — a bind-probe races shoes
-    // for the port and can hold it away from shoes). connect refused = shoes not
-    // up yet; connect ok = shoes is listening and we're good.
+    // Health-gate: wait until the SOCKS listener ACCEPTS a TCP connection. Probe
+    // by CONNECTING, never by binding: a bind-probe races shoes for the port and
+    // can hold it away from it.
     let socks_addr = SocketAddr::from((Ipv4Addr::LOCALHOST, socks_port));
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
@@ -237,10 +230,9 @@ fn clear_pid_file() {
     }
 }
 
-/// Kill a shoes process orphaned by a previous app run (hard exit / crash /
-/// Task-Manager-kill). Called at node startup, BEFORE deciding whether to launch
-/// a fresh tunnel, so a stale shoes never lingers — whether the proxy is now on
-/// or off. Reads the PID we recorded on the last spawn; no-op if none.
+/// Kill a shoes process orphaned by a previous app run (hard exit, crash, kill).
+/// Called at node startup BEFORE deciding whether to launch a fresh tunnel, so a
+/// stale shoes never lingers, whether the proxy is now on or off.
 pub(crate) fn sweep_orphan() {
     let Some(p) = pid_file_path() else { return };
     let Ok(raw) = std::fs::read_to_string(&p) else { return };

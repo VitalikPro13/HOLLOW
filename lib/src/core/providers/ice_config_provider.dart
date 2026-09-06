@@ -11,22 +11,17 @@ void _iceLog(String msg) {
 
 /// ICE server configuration with STUN and TURN servers.
 ///
-/// TURN credentials arrive over the AUTHENTICATED relay WebSocket
-/// (`NetworkEvent.turnCredentials`, routed here by the event dispatcher) —
-/// Rust requests a fresh set on every relay (re)connect plus a 50-minute
-/// refresh interval. This replaced the old HTTP fetch, whose retry chain
-/// died permanently on a single non-200 (e.g. a 503 during a relay
-/// restart), silently degrading calls to STUN-only until app restart.
-/// Starts STUN-only until the first credential set lands.
+/// TURN credentials arrive over the AUTHENTICATED relay WebSocket, refreshed
+/// on every reconnect plus a 50-minute interval. NEVER re-add an HTTP fetch:
+/// the old one died permanently on a single non-200 and silently degraded
+/// calls to STUN-only until restart. Starts STUN-only until the first set lands.
 ///
-/// This is also the single chokepoint for the "Always relay calls" privacy
-/// setting ([alwaysRelayCallsProvider]) — every consumer reads its config from
-/// here, so the policy cannot be forgotten at a call site. Hollow Share is
-/// deliberately NOT covered: it builds its own map in [shareIceConfigProvider].
+/// Also the single chokepoint for "Always relay calls"
+/// ([alwaysRelayCallsProvider]), so the policy cannot be forgotten at a call
+/// site. Hollow Share is deliberately NOT covered ([shareIceConfigProvider]).
 class IceConfigNotifier extends Notifier<Map<String, dynamic>> {
-  // Latest TURN credentials from the relay, kept so the config can be
-  // recomposed when the privacy toggle flips without waiting for the next
-  // 50-minute credential refresh.
+  // Latest TURN credentials, kept so the config can be recomposed when the
+  // privacy toggle flips without waiting for the next 50-minute refresh.
   String? _turnUsername;
   String? _turnPassword;
   List<String> _turnUris = const [];
@@ -64,16 +59,11 @@ class IceConfigNotifier extends Notifier<Map<String, dynamic>> {
   /// Build the config for the current credentials + privacy setting.
   ///
   /// With "Always relay calls" ON we ask for `iceTransportPolicy: 'relay'` and
-  /// drop the STUN entries — under that policy no host/server-reflexive
-  /// candidate is gathered, so STUN can't contribute anything and only slows
-  /// gathering down. The peer therefore only ever sees the TURN server's
-  /// address.
+  /// drop the STUN entries: under that policy no host or server-reflexive
+  /// candidate is gathered, so the peer only ever sees the TURN address.
   ///
-  /// It FAILS CLOSED: if credentials haven't arrived yet the server list is
-  /// empty and the connection simply doesn't form — it never quietly falls
-  /// back to a direct path that would leak the address. In practice this is
-  /// unreachable, because TURN credentials ride the same authenticated relay
-  /// WebSocket that carries the signalling needed to place a call at all.
+  /// It FAILS CLOSED: with no credentials the server list is empty and the
+  /// connection simply doesn't form, never a quiet fall back to a direct path.
   Map<String, dynamic> _compose() {
     final turnServers = _turnServers();
     if (ref.read(alwaysRelayCallsProvider)) {
@@ -111,20 +101,14 @@ final iceConfigProvider =
     NotifierProvider<IceConfigNotifier, Map<String, dynamic>>(
         IceConfigNotifier.new);
 
-/// STUN-only ICE config used by Hollow Share data channels (Phase 7A).
+/// STUN-only ICE config used by Hollow Share data channels.
 ///
-/// Per HOLLOW_PLAN.md §7A: share traffic must NOT consume relay (TURN)
-/// bandwidth — that capacity is reserved for messaging and voice. About
-/// 85% of peers connect via STUN; the rest can't participate in a given
-/// share but can still join other shares.
+/// Per HOLLOW_PLAN.md §7A share traffic must NOT consume relay (TURN)
+/// bandwidth; that capacity is reserved for messaging and voice. About 85% of
+/// peers connect via STUN.
 ///
-/// Pass this map to `RTCPeerConnection` factory calls whose room ID begins
-/// with `share:`.
-///
-/// This provider builds its own server list on purpose: it must stay STUN-only
-/// even when "Always relay calls" is ON. NEVER add TURN entries or an
-/// `iceTransportPolicy` here — a multi-GB Share riding the relay is exactly
-/// what §7A forbids, and the setting's copy discloses the carve-out.
+/// Builds its own server list on purpose: it must stay STUN-only even when
+/// "Always relay calls" is ON. NEVER add TURN or an `iceTransportPolicy` here.
 final shareIceConfigProvider = Provider<Map<String, dynamic>>((ref) {
   final domain = ref.watch(relayDomainProvider);
   return {

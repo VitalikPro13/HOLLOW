@@ -4,13 +4,10 @@ use rusqlite::{params, Connection};
 
 use crate::crdt::operations::CrdtOp;
 
-/// Sync lookback overlap (ms). "Since" watermarks are per-sender/-conversation
-/// MAX timestamps, and a plain high-watermark permanently skips a message that
-/// was MISSED while a newer one arrived (live topic miss during a
-/// subscribe/reconnect window, push-fetch inserting newer rows first, …).
-/// Requesters therefore ask from `watermark - SYNC_LOOKBACK_MS`; receivers
-/// deduplicate the overlap by message_id, so the only cost is responders
-/// re-sending up to this much recent history per sync request.
+/// Sync lookback overlap (ms). "Since" watermarks are per-sender MAX timestamps,
+/// and a plain high-watermark permanently skips a message MISSED while a newer one
+/// arrived, so requesters ask from `watermark - SYNC_LOOKBACK_MS`. Receivers dedup
+/// the overlap by message_id, so the only cost is re-sent recent history.
 pub(crate) const SYNC_LOOKBACK_MS: i64 = 30 * 60 * 1000;
 
 /// A user profile stored locally (ours or a peer's).
@@ -31,40 +28,32 @@ pub(crate) struct StoredProfile {
     /// procedural frame, 64-hex = an asset-rail blob hash. Never bytes: the
     /// art rides the rail so it can be evicted, unlike a profile push.
     pub avatar_frame: String,
-    /// Content hash of this person's ANIMATED avatar, or `""` for none. The
-    /// bytes ride the asset rail (`AssetKind::Profile`), pulled on demand;
-    /// `avatar_bytes` above holds only the STILL companion, which is what an
-    /// old client and the guest thumb read. Same split `server_avatar_anim`
-    /// makes for server icons.
+    /// Content hash of this person's ANIMATED avatar, `""` for none. The bytes ride the
+    /// asset rail; `avatar_bytes` above holds only the STILL companion, which is what
+    /// an old client and the guest thumb read.
     pub avatar_anim: String,
     /// Content hash of this person's ANIMATED banner, or `""` for none. See
     /// [`StoredProfile::avatar_anim`].
     pub banner_anim: String,
-    /// Support credentials (artist shop, design section 5): a JSON array of
-    /// self-contained blind-signature entries, or `""` for none. Written ONLY
-    /// by `support_creds::sanitize_incoming_support_creds` for a peer, and
-    /// from our own `support_creds_own` table for ourselves. Not part of the
-    /// profile signature: each entry binds the master peer id itself.
+    /// Support credentials: a JSON array of self-contained blind-signature entries, or
+    /// `""`. Written ONLY by `sanitize_incoming_support_creds` for a peer and from
+    /// `support_creds_own` for us. Not covered by the profile signature: each entry
+    /// binds the master peer id itself.
     pub support_creds: String,
-    /// The SUBJECT's own signature over the relayable subset of this profile
-    /// (`crypto_handler::profile_signing_payload`). Persisted so we can forward
-    /// it in a `ProfileRelay` — a relayed profile with no owner signature is
-    /// refused by the receiver, so a profile stored without one simply never
-    /// gets relayed. Not populated by the light loaders.
+    /// The SUBJECT's own signature over the relayable subset of this profile,
+    /// persisted so we can forward it in a `ProfileRelay`. A relayed profile with no
+    /// owner signature is refused, so one stored without it simply never gets relayed.
     pub profile_sig: Option<String>,
     /// Owner MASTER public key (base64 protobuf) paired with `profile_sig`.
     pub profile_pk: Option<String>,
-    /// The avatar hash the signature was made over. Stored rather than derived
-    /// from `avatar_bytes`: announces are LIGHT (hash only, no blob), so our
-    /// cached blob can lag the owner's current one. Re-hashing a stale blob at
-    /// relay time would produce a hash the signature does not cover and every
-    /// receiver would reject the relay.
+    /// The avatar hash the signature was made over, stored rather than derived from
+    /// `avatar_bytes`: announces are LIGHT, so our cached blob can lag the owner's and
+    /// re-hashing a stale blob would produce a hash the signature does not cover.
     pub profile_avatar_hash: Option<String>,
 }
 
-/// The subject's proof for a profile, moved as one unit because the three parts
-/// are only meaningful together (see [`StoredProfile::profile_avatar_hash`]).
-/// `None` at a `save_profile` call = "leave the stored proof alone".
+/// The subject's proof for a profile, moved as one unit because the three parts are
+/// only meaningful together. `None` at `save_profile` leaves the stored proof alone.
 #[derive(Clone, Copy)]
 pub(crate) struct ProfileProof<'a> {
     pub sig: &'a str,
@@ -86,12 +75,10 @@ pub(crate) struct StoredMessage {
     pub hidden_at: Option<i64>,
     pub reply_to_mid: Option<String>,
     pub file_id: Option<String>,
-    /// Link preview for the first URL in the message (Phase 6.75).
-    /// Persisted as JSON in the `link_preview_json` column. None for
-    /// messages with no previewable URL.
+    /// Link preview for the first URL in the message, persisted as JSON.
     pub link_preview: Option<crate::node::LinkPreviewRef>,
-    /// Microsecond send timestamp for stable ordering (Step 9C/C4). `None` for
-    /// legacy rows (predate the column) → callers fall back to `timestamp * 1000`.
+    /// Microsecond send timestamp for stable ordering. `None` for legacy rows, whose
+    /// callers fall back to `timestamp * 1000`.
     pub order_us: Option<i64>,
 }
 
@@ -111,18 +98,15 @@ pub(crate) struct StoredChannelMessage {
     pub hidden_at: Option<i64>,
     pub reply_to_mid: Option<String>,
     pub file_id: Option<String>,
-    /// Link preview for the first URL in the message (Phase 6.75).
-    /// Persisted as JSON in the `link_preview_json` column. None for
-    /// messages with no previewable URL.
+    /// Link preview for the first URL in the message, persisted as JSON.
     pub link_preview: Option<crate::node::LinkPreviewRef>,
-    /// Microsecond send timestamp for stable ordering (Step 9C/C4). `None` for
-    /// legacy rows (predate the column) → callers fall back to `timestamp * 1000`.
+    /// Microsecond send timestamp for stable ordering. `None` for legacy rows, whose
+    /// callers fall back to `timestamp * 1000`.
     pub order_us: Option<i64>,
 }
 
-/// One message row's signature-relevant fields (v2 message signing) — see
-/// [`MessageStore::get_dm_message_sig_row`]. Not a display row: only what a
-/// signer/verifier needs to build the canonical payload.
+/// One message row's signature-relevant fields (v2 message signing). Not a display
+/// row: only what a signer or verifier needs to build the canonical payload.
 pub(crate) struct MessageSigRow {
     pub text: String,
     pub timestamp: i64,
@@ -157,23 +141,19 @@ pub(crate) struct StoredFile {
     pub disk_path: Option<String>,
     pub hidden_at: Option<i64>,
     pub expired_at: Option<i64>,
-    /// Video thumbnail back-reference (Phase 6.75 video preview).
-    /// When this file is a thumbnail image for a vault-stored video, this field
-    /// holds the link back to the underlying video. Persisted as JSON in the
-    /// `video_thumb_json` column. None for regular files and images.
+    /// Link back to the underlying vault video when this file is its thumbnail,
+    /// persisted as JSON.
     pub video_thumb: Option<crate::node::VideoThumbRef>,
     /// Share back-reference for share-backed (>34 MB) files, persisted so a
     /// manual download can rejoin the share swarm after a restart (issue #41).
     pub share_ref: Option<crate::node::ShareRef>,
-    /// Tiny base64 WebP placeholder thumbnail riding the FileHeader (issue #41
-    /// carry-over) — rendered blurred under the Download button while the real
-    /// bytes are gated/undownloaded. `thumb_b64` column.
+    /// Tiny base64 WebP placeholder, rendered blurred under the Download button while
+    /// the real bytes are gated or undownloaded.
     pub thumb_b64: Option<String>,
 }
 
-/// One sticker of the user's personal vault. `pack` is a free-form group
-/// name (`""` = the default, ungrouped pack) and `(pack, hash)` is the row
-/// identity — see the `personal_stickers` DDL for why that, and not the name.
+/// One sticker of the user's personal vault. `pack` is a free-form group name (`""`
+/// = ungrouped) and `(pack, hash)` is the row identity, not the name.
 #[derive(Clone, Debug)]
 pub(crate) struct PersonalStickerRow {
     pub pack: String,
@@ -201,10 +181,9 @@ pub(crate) fn ddl(conn: &Connection, what: &str, sql: &str) -> Result<(), String
         .map_err(|e| format!("Failed to create {what}: {e}"))
 }
 
-/// Run one idempotent migration statement (ALTER TABLE ADD COLUMN & friends)
-/// in its own batch, silently ignoring the "already exists" error a re-run
-/// produces. Never batch multiple migrations into one call — the first
-/// already-applied statement would abort the rest of the batch.
+/// Run one idempotent migration statement in its own batch, ignoring the "already
+/// exists" error a re-run produces. Never batch several: the first already-applied
+/// statement would abort the rest.
 pub(crate) fn migrate(conn: &Connection, sql: &str) {
     conn.execute_batch(sql).unwrap_or(());
 }
@@ -231,9 +210,7 @@ const DM_MSG_COLS: &str = "id, peer_id, text, is_mine, timestamp, signature, pub
 /// Column list every channel-message query selects, in [`channel_message_from_row`] order.
 const CHANNEL_MSG_COLS: &str = "id, server_id, channel_id, sender_id, text, is_mine, timestamp, signature, public_key, message_id, edited_at, hidden_at, reply_to_mid, file_id, link_preview_json, order_us";
 
-/// The column tail shared by DM and channel message rows, in select order:
-/// text, is_mine, timestamp, signature, public_key, message_id, edited_at,
-/// hidden_at, reply_to_mid, file_id, link_preview, order_us.
+/// The column tail shared by DM and channel message rows, in select order.
 struct MsgTail {
     text: String,
     is_mine: bool,
@@ -249,9 +226,8 @@ struct MsgTail {
     order_us: Option<i64>,
 }
 
-/// Read the shared message-column tail starting at column index `base`
-/// (2 for DM rows after id/peer_id, 4 for channel rows after
-/// id/server_id/channel_id/sender_id).
+/// Read the shared message-column tail starting at column index `base` (2 for DM
+/// rows, 4 for channel rows).
 fn msg_tail_from_row(row: &rusqlite::Row<'_>, base: usize) -> rusqlite::Result<MsgTail> {
     Ok(MsgTail {
         text: row.get(base)?,
@@ -325,9 +301,7 @@ fn stored_file_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredFile>
     })
 }
 
-/// Map one full profile row (peer_id, display_name, status, about_me,
-/// updated_at, avatar, banner, twitch_username, showcase_board,
-/// showcase_assets, proof triple, avatar_frame) to a StoredProfile.
+/// Map one full profile row, blobs and proof triple included, to a StoredProfile.
 fn profile_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredProfile> {
     Ok(StoredProfile {
         peer_id: row.get(0)?,
@@ -350,10 +324,8 @@ fn profile_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredProfile> 
     })
 }
 
-/// Map one light profile row (peer_id, display_name, status, about_me,
-/// updated_at, twitch_username, showcase_board, avatar_frame — no blobs) to a
-/// StoredProfile. The frame is an ID, not bytes, so it rides the light load:
-/// every list that renders an avatar needs it.
+/// Map one light profile row (no blobs) to a StoredProfile. The frame is an ID, not
+/// bytes, so it rides the light load: every list that renders an avatar needs it.
 fn profile_light_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredProfile> {
     Ok(StoredProfile {
         peer_id: row.get(0)?,
@@ -371,12 +343,10 @@ fn profile_light_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredPro
         profile_pk: None,
         profile_avatar_hash: None,
         avatar_frame: row.get::<_, String>(7).unwrap_or_default(),
-        // Hashes, not bytes — every list that renders an avatar needs them
-        // to know whether an animated variant exists at all.
+        // Hashes, not bytes: a list needs to know an animated variant exists at all.
         avatar_anim: row.get::<_, String>(8).unwrap_or_default(),
         banner_anim: row.get::<_, String>(9).unwrap_or_default(),
-        // Small capped text, like the showcase board: renderers need it to
-        // light a support mark, so it rides the light load.
+        // Small capped text: renderers need it to light a support mark.
         support_creds: row.get::<_, String>(10).unwrap_or_default(),
     })
 }
@@ -410,32 +380,21 @@ impl MessageStore {
         let conn =
             Connection::open(path).map_err(|e| format!("Failed to open database: {e}"))?;
 
-        // Set encryption key BEFORE any other operations.
-        // Use x'' hex key format to avoid SQL injection and quoting issues.
+        // Hex key format, so no quoting or injection question arises.
         conn.execute_batch(&format!("PRAGMA key = \"x'{}'\";", passphrase))
             .map_err(|e| format!("Failed to set encryption key: {e}"))?;
 
-        // NOTE: auto_vacuum conversion + incremental reclaim is NOT done here.
-        // `open()` is the universal path (~139 transient call sites) and the
-        // CrdtStore/CryptoStore actors hold long-lived connections to the SAME
-        // WAL file — running `PRAGMA auto_vacuum` (a page-1 read) + `VACUUM` (an
-        // exclusive-lock full-file rewrite) on every concurrent open raced the
-        // SQLCipher codec and spewed `hmac check failed for pgno=1` to stderr
-        // (harmless — swallowed — but noisy in prod + the test harness). The
-        // one-time legacy migration now runs ONCE at startup in a single-connection
-        // window via `migrate_auto_vacuum_once` (see api/network.rs::start_node).
+        // auto_vacuum conversion is deliberately NOT done here. `open()` is the universal
+        // path and the CrdtStore/CryptoStore actors hold long-lived connections to the
+        // same WAL file, so running `PRAGMA auto_vacuum` plus `VACUUM` on every concurrent
+        // open raced the SQLCipher codec and spewed `hmac check failed for pgno=1`. The
+        // one-time migration runs in a single-connection window at startup instead.
 
-        // Journal mode: WAL everywhere EXCEPT iOS.
-        //
-        // On iOS the messages.db lives in the shared App Group container so the
-        // Notification Service Extension can open it to fetch+decrypt push
-        // messages. WAL keeps a PERSISTENT shared-memory lock file (`-shm`) open;
-        // iOS's RunningBoard watchdog kills any app suspended while holding a
-        // file lock in a shared container (`EXC_CRASH 0xdead10cc`). Rollback-
-        // journal mode (TRUNCATE) only locks DURING a transaction, never
-        // persistently, so the app can be suspended safely while the NSE shares
-        // the file. The mobile write volume (chat) makes the small WAL-vs-
-        // rollback speed difference negligible. Desktop/Android keep WAL.
+        // Journal mode: WAL everywhere EXCEPT iOS, where messages.db lives in the shared
+        // App Group container for the NSE. WAL keeps a persistent `-shm` lock file open,
+        // and RunningBoard kills any app suspended while holding a lock in a shared
+        // container (`EXC_CRASH 0xdead10cc`); a rollback journal locks only during a
+        // transaction. Chat write volume makes the speed difference negligible.
         #[cfg(target_os = "ios")]
         let journal_pragma = "PRAGMA journal_mode = TRUNCATE;";
         #[cfg(not(target_os = "ios"))]
@@ -449,19 +408,14 @@ impl MessageStore {
              PRAGMA busy_timeout = 4000;"
         )).map_err(|e| format!("Failed to set performance PRAGMAs: {e}"))?;
 
-        // Schema DDL (~25 CREATE TABLE + ~40 ALTER + indexes + FTS triggers)
-        // used to replay on EVERY open — real per-call milliseconds on the hot
-        // per-message/per-chunk paths (~139 transient call sites). Run it once
-        // per process per DB path instead. `IF NOT EXISTS` semantics are
-        // unchanged, and a fresh process after an app update still self-heals
-        // new columns/tables on its first open. The mutex also serializes the
-        // first-open DDL against concurrent opens on a brand-new DB.
+        // The schema DDL used to replay on EVERY open, costing real milliseconds on the
+        // hot per-message paths, so it runs once per process per DB path instead. A fresh
+        // process after an app update still self-heals new columns on its first open, and
+        // the mutex serializes first-open DDL against concurrent opens.
         //
-        // The path memo alone is NOT enough: a wipe/reset (and the unit tests)
-        // can delete the DB file and re-open the SAME path within one process
-        // — the fresh file has no tables. Pair the memo with a one-row
-        // sqlite_master probe (microseconds) so a schemaless file always gets
-        // the DDL regardless of the memo.
+        // The path memo alone is NOT enough: a wipe (and the unit tests) can delete the
+        // file and re-open the SAME path in one process, so a one-row sqlite_master probe
+        // makes sure a schemaless file always gets the DDL.
         {
             use std::sync::{Mutex as StdMutex, OnceLock};
             static SCHEMA_DONE: OnceLock<StdMutex<std::collections::HashSet<String>>> =
@@ -487,10 +441,9 @@ impl MessageStore {
         Ok(MessageStore { conn })
     }
 
-    /// All schema DDL + idempotent data migrations, previously inline in
-    /// `open()`. Runs once per process per DB path — see the gate in `open()`.
+    /// All schema DDL and idempotent data migrations. Runs once per process per DB
+    /// path, gated in `open()`.
     fn init_schema(conn: &Connection) -> Result<(), String> {
-        // Create messages table if it doesn't exist.
         ddl(conn, "messages table",
             "CREATE TABLE IF NOT EXISTS messages (
                 id        INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -500,7 +453,6 @@ impl MessageStore {
                 timestamp INTEGER NOT NULL
             )")?;
 
-        // Index for fast per-peer lookups.
         ddl(conn, "index",
             "CREATE INDEX IF NOT EXISTS idx_messages_peer_ts ON messages (peer_id, timestamp)")?;
 
@@ -511,14 +463,12 @@ impl MessageStore {
                 pickle TEXT NOT NULL
             )")?;
 
-        // Olm sessions, one per peer.
         ddl(conn, "olm_sessions table",
             "CREATE TABLE IF NOT EXISTS olm_sessions (
                 peer_id TEXT PRIMARY KEY,
                 pickle  TEXT NOT NULL
             )")?;
 
-        // Channel messages table.
         ddl(conn, "channel_messages table",
             "CREATE TABLE IF NOT EXISTS channel_messages (
                 id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -534,16 +484,12 @@ impl MessageStore {
         ddl(conn, "channel_messages index",
             "CREATE INDEX IF NOT EXISTS idx_channel_msgs ON channel_messages (server_id, channel_id, timestamp)")?;
 
-        // Migration: add UNIQUE constraint to existing channel_messages tables.
-        // SQLite can't ALTER constraints, so we create a unique index instead.
-        //
-        // The index is PARTIAL (message_id IS NULL): the original full-table
-        // content index treated two DISTINCT rapid messages with identical
-        // text in the same millisecond as one duplicate and dropped the
-        // second (fast channel spam lost messages). Rows carrying a
-        // message_id dedup by channel_message_exists() at every insert site;
-        // the content index (and the cleanup DELETE) apply only to legacy
-        // rows without one — the DELETE must NEVER eat distinct mid rows.
+        // SQLite cannot ALTER constraints, so uniqueness is a unique index. It is PARTIAL
+        // (message_id IS NULL) because the original full-table content index treated two
+        // DISTINCT rapid messages with identical text in the same millisecond as a
+        // duplicate and dropped the second. Rows carrying a message_id dedup at every
+        // insert site; the content index and its cleanup DELETE apply only to legacy rows
+        // without one, and that DELETE must NEVER eat distinct mid rows.
         migrate(conn, "DROP INDEX IF EXISTS idx_channel_msgs_unique;");
         conn.execute_batch(
             "DELETE FROM channel_messages WHERE message_id IS NULL AND id NOT IN (
@@ -588,24 +534,17 @@ impl MessageStore {
                 actor       TEXT NOT NULL
             )")?;
 
-        // -- Migration: Ed25519 signature columns --
-        // ALTER TABLE ADD COLUMN is safe for nullable columns in SQLite.
-        // Silently ignore if columns already exist.
+        // ALTER TABLE ADD COLUMN is safe for nullable columns; ignore "already exists".
         migrate(conn, "ALTER TABLE channel_messages ADD COLUMN signature TEXT;");
         migrate(conn, "ALTER TABLE channel_messages ADD COLUMN public_key TEXT;");
         migrate(conn, "ALTER TABLE messages ADD COLUMN signature TEXT;");
         migrate(conn, "ALTER TABLE messages ADD COLUMN public_key TEXT;");
 
-        // -- Migration: DM deduplication unique index --
-        // Allows INSERT OR IGNORE for DM sync (like channel_messages).
-        //
-        // The index is PARTIAL (message_id IS NULL): the original full-table
-        // content index treated two DISTINCT rapid messages with identical
-        // text in the same millisecond as one duplicate — INSERT OR IGNORE
-        // silently dropped the second AND its MessageReceived event, so fast
-        // identical-text spam lost messages. Rows carrying a message_id dedup
-        // by dm_message_exists() at every insert site instead; the content
-        // index survives only as a backstop for legacy rows without one.
+        // DM dedup index, PARTIAL (message_id IS NULL) for the same reason as the channel
+        // one: the original full-table content index made INSERT OR IGNORE silently drop
+        // a distinct same-millisecond identical-text message AND its MessageReceived
+        // event. Rows with a message_id dedup by dm_message_exists() at every insert site,
+        // and the content index survives only as a backstop for legacy rows.
         migrate(conn, "DROP INDEX IF EXISTS idx_messages_dedup;");
         migrate(conn,
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_dedup_legacy
@@ -622,23 +561,19 @@ impl MessageStore {
                 updated_at   INTEGER NOT NULL DEFAULT 0
             )")?;
 
-        // Phase 3.5 block — editing, deletion/hiding, reactions, friends,
-        // settings, emotes, MLS identity, file sharing. ORDERED mixed list:
-        // an EMPTY label marks a swallowed idempotent migration (own batch,
-        // "already exists" ignored — the migrate() contract); a non-empty
-        // label is fail-fast DDL. One loop instead of a periodic call run
-        // (Sonar CPD self-matches periodic token streams).
+        // ORDERED mixed list: an EMPTY label marks a swallowed idempotent migration (own
+        // batch, "already exists" ignored), a non-empty label is fail-fast DDL. One loop
+        // rather than a run of periodic calls, which Sonar CPD self-matches.
         const PHASE35_SCHEMA: &[(&str, &str)] = &[
-            // message_id + edited_at columns (Phase 3.5 editing), then the
-            // message_id indexes for fast edit lookups.
+            // Editing columns, then the message_id indexes edit lookups need.
             ("", "ALTER TABLE messages ADD COLUMN message_id TEXT;"),
             ("", "ALTER TABLE messages ADD COLUMN edited_at INTEGER;"),
             ("", "ALTER TABLE channel_messages ADD COLUMN message_id TEXT;"),
             ("", "ALTER TABLE channel_messages ADD COLUMN edited_at INTEGER;"),
             ("", "CREATE INDEX IF NOT EXISTS idx_messages_msg_id ON messages (message_id);"),
             ("", "CREATE INDEX IF NOT EXISTS idx_channel_msgs_msg_id ON channel_messages (message_id);"),
-            // Edit history table — preserves previous text for Rat Files
-            // evidence — plus prev_* columns for edit chain provenance.
+            // Edit history preserves previous text as evidence, plus prev_* columns for the
+            // edit chain's provenance.
             ("message_edits table",
              "CREATE TABLE IF NOT EXISTS message_edits (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -654,8 +589,8 @@ impl MessageStore {
             ("", "ALTER TABLE message_edits ADD COLUMN prev_signature TEXT;"),
             ("", "ALTER TABLE message_edits ADD COLUMN prev_public_key TEXT;"),
             ("", "ALTER TABLE message_edits ADD COLUMN prev_timestamp INTEGER;"),
-            // hidden_at column for message deletion/hiding (Phase 3.5) +
-            // deletion evidence table (text at deletion time, Rat Files).
+            // hidden_at for deletion/hiding, plus the deletion evidence table holding the
+            // text at deletion time.
             ("", "ALTER TABLE messages ADD COLUMN hidden_at INTEGER;"),
             ("", "ALTER TABLE channel_messages ADD COLUMN hidden_at INTEGER;"),
             ("message_deletions table",
@@ -669,7 +604,6 @@ impl MessageStore {
             )"),
             ("message_deletions index",
              "CREATE INDEX IF NOT EXISTS idx_deletions_msg_id ON message_deletions (message_id)"),
-            // reply_to_mid column for reply chains (Phase 3.5).
             ("", "ALTER TABLE messages ADD COLUMN reply_to_mid TEXT;"),
             ("", "ALTER TABLE channel_messages ADD COLUMN reply_to_mid TEXT;"),
             // Emoji reactions + removal history (Rat Files evidence).
@@ -716,9 +650,8 @@ impl MessageStore {
                 peer_id    TEXT PRIMARY KEY,
                 blocked_at INTEGER NOT NULL DEFAULT 0
             )"),
-            // Custom emotes: content-addressed blob cache (shared across
-            // servers/DMs — the same hash is stored once) + the user's own
-            // personal emote set (names are local; hashes are global).
+            // Custom emotes: a content-addressed blob cache shared across servers and DMs,
+            // plus the user's own set (names are local, hashes global).
             ("emote_blobs table",
              "CREATE TABLE IF NOT EXISTS emote_blobs (
                 hash     TEXT PRIMARY KEY,
@@ -734,12 +667,10 @@ impl MessageStore {
                 source   TEXT NOT NULL DEFAULT '',
                 added_at INTEGER NOT NULL DEFAULT 0
             )"),
-            // The user's own sticker vault, grouped into named packs. Keyed
-            // by (pack, hash) rather than by name the way emotes are: an
-            // emote is TYPED as `:name:` so its name has to be unique, while
-            // a sticker is only ever picked visually — the name is a label,
-            // and adding the same image to a pack twice is a no-op instead of
-            // an error. Bytes live in emote_blobs under kind='sticker'.
+            // The sticker vault, keyed by (pack, hash) rather than by name the way emotes
+            // are: an emote is TYPED as `:name:` so its name must be unique, while a sticker
+            // is only ever picked visually, so adding the same image twice is a no-op instead
+            // of an error. Bytes live in emote_blobs under kind='sticker'.
             ("personal_stickers table",
              "CREATE TABLE IF NOT EXISTS personal_stickers (
                 pack     TEXT NOT NULL DEFAULT '',
@@ -796,26 +727,21 @@ impl MessageStore {
             }
         }
 
-        // -- Migration: video_thumb_json column (Phase 6.75 video preview).
-        // Stores a JSON-encoded VideoThumbRef when this file is a thumbnail
-        // for a vault-stored video.
+        // video_thumb_json: a JSON VideoThumbRef when this file is a video's thumbnail.
         migrate(conn, "ALTER TABLE files ADD COLUMN video_thumb_json TEXT;");
 
-        // Timestamp when the file was expired by the retention timer.
-        // NULL = not expired. Non-null = file data deleted from disk, row kept as placeholder.
+        // When the retention timer expired the file: NULL = live, non-null = data deleted
+        // from disk with the row kept as a placeholder.
         migrate(conn, "ALTER TABLE files ADD COLUMN expired_at INTEGER;");
 
-        // -- Migration: persisted ShareRef for share-backed (>34 MB) files --
-        // (issue #41). The share root hash + AES key used to arrive only inside
-        // the live FileHeader and were kept in RAM, so a manual download after
-        // an app restart (or with auto-download off) had no way back into the
-        // share swarm — the fallback FileRequest path re-serves the bytes with
-        // share_ref: None and the requester's own 34 MB cap rejects them.
+        // Persisted ShareRef for share-backed (>34 MB) files. The share root hash and key
+        // used to live only in the live FileHeader, so a manual download after a restart
+        // had no way back into the swarm: the fallback FileRequest re-serves the bytes
+        // with share_ref None and the requester's own 34 MB cap rejects them.
         migrate(conn, "ALTER TABLE files ADD COLUMN share_ref_json TEXT;");
 
-        // -- Migration: tiny base64 WebP placeholder thumbnail riding the
-        // FileHeader (issue #41 carry-over) — rendered blurred under the
-        // Download button while the real bytes are gated/undownloaded.
+        // Tiny base64 WebP placeholder, rendered blurred under the Download button while
+        // the real bytes are gated or undownloaded.
         migrate(conn, "ALTER TABLE files ADD COLUMN thumb_b64 TEXT;");
 
         ddl(conn, "file_chunks table",
@@ -830,26 +756,19 @@ impl MessageStore {
         migrate(conn, "ALTER TABLE messages ADD COLUMN file_id TEXT;");
         migrate(conn, "ALTER TABLE channel_messages ADD COLUMN file_id TEXT;");
 
-        // -- Migration: link_preview_json column (Phase 6.75 link previews).
-        // Stores a JSON-encoded LinkPreviewRef for messages that previewed a URL.
-        // Populated by update_link_preview / update_channel_link_preview after
-        // the message row is inserted.
+        // link_preview_json: a JSON LinkPreviewRef, written after the row is inserted.
         migrate(conn, "ALTER TABLE messages ADD COLUMN link_preview_json TEXT;");
         migrate(conn, "ALTER TABLE channel_messages ADD COLUMN link_preview_json TEXT;");
 
-        // -- Migration: order_us — microsecond send timestamp for stable ordering --
-        // (Step 9C/C4). The display ORDER BY uses this BEFORE sender_id, so a
-        // sender's same-millisecond burst stays grouped + in true send order instead
-        // of being alternated by the sender_id tiebreaker (the multi-device-backfill
-        // "ping-pong" bug). Set by the SENDER (microsecond wall clock), carried over
-        // the wire untouched, and NULL for legacy rows / pre-9C peers — those fall
-        // back to the old (timestamp, sender_id, id) order.
+        // order_us, the microsecond send timestamp. The display ORDER BY uses it BEFORE
+        // sender_id, so a sender's same-millisecond burst stays grouped and in true send
+        // order instead of being alternated by the sender_id tiebreaker. Set by the
+        // SENDER, carried over the wire untouched, NULL for legacy rows.
         migrate(conn, "ALTER TABLE messages ADD COLUMN order_us INTEGER;");
         migrate(conn, "ALTER TABLE channel_messages ADD COLUMN order_us INTEGER;");
 
-        // -- Migration: updated_at column for edit/delete sync (H12+H13 QA fix) --
-        // Tracks when a message was last modified (edit or delete) so sync queries
-        // can catch edits/deletes to old messages that would otherwise be missed.
+        // updated_at tracks the last edit or delete, so sync queries catch changes to old
+        // messages they would otherwise miss.
         migrate(conn, "ALTER TABLE messages ADD COLUMN updated_at INTEGER;");
         migrate(conn, "ALTER TABLE channel_messages ADD COLUMN updated_at INTEGER;");
         ddl(conn, "idx_messages_peer_updated",
@@ -875,19 +794,16 @@ impl MessageStore {
         migrate(conn, "ALTER TABLE user_profiles ADD COLUMN banner_anim TEXT NOT NULL DEFAULT '';");
         // -- Artist shop, phase 2: support credentials (JSON array, "" = none).
         migrate(conn, "ALTER TABLE user_profiles ADD COLUMN support_creds TEXT NOT NULL DEFAULT '';");
-        // -- 2026-09-03: the retired per-master pin for `support_creds_sig`.
-        // Nothing reads or writes it any more: `support_creds` requires a valid
-        // signature from every master, so there is no baseline left to learn.
-        // The column stays so existing databases open unchanged.
+        // The retired per-master pin for `support_creds_sig`. Nothing reads or writes it:
+        // `support_creds` requires a valid signature from every master, so there is no
+        // baseline left to learn. The column stays so existing databases open unchanged.
         migrate(conn, "ALTER TABLE user_profiles ADD COLUMN support_creds_signed INTEGER NOT NULL DEFAULT 0;");
 
         // -- Migration: content_id column on files (vault ↔ file_id link) --
         migrate(conn, "ALTER TABLE files ADD COLUMN content_id TEXT;");
 
-        // -- Migration: asset rail — emote_blobs generalizes to all content-
-        // addressed asset kinds ('emote' | 'banner' | 'sticker' | 'gif').
-        // The kind is LOCAL bookkeeping (per-kind size caps + eviction
-        // grouping); it never rides the wire.
+        // Asset rail: emote_blobs generalizes to every content-addressed kind. The kind
+        // is LOCAL bookkeeping for caps and eviction and never rides the wire.
         migrate(conn, "ALTER TABLE emote_blobs ADD COLUMN kind TEXT NOT NULL DEFAULT 'emote';");
 
         // -- Verified peers (RAT Files — peer identity verification) --
@@ -897,12 +813,10 @@ impl MessageStore {
                 verified_at INTEGER NOT NULL
             )")?;
 
-        // -- Security alerts (Issue 1-C: visible key/device change warnings) --
-        // One row per NOTEWORTHY identity event for a contact. `alert_id` is
-        // deterministic ("{kind}:{peer}:{detail}") so re-ingesting the same
-        // device list — which happens on every reconnect — can never pile up
-        // duplicates of a fact the user has already seen.
-        // `peer_id` is always the MASTER id: alerts are about a PERSON.
+        // One row per NOTEWORTHY identity event for a contact. `alert_id` is deterministic
+        // ("{kind}:{peer}:{detail}") so re-ingesting the same device list on every
+        // reconnect can never pile up duplicates of a fact the user has seen. `peer_id` is
+        // always the MASTER id: alerts are about a PERSON.
         ddl(conn, "security_alerts table",
             "CREATE TABLE IF NOT EXISTS security_alerts (
                 alert_id        TEXT PRIMARY KEY,
@@ -916,11 +830,9 @@ impl MessageStore {
             "CREATE INDEX IF NOT EXISTS idx_security_alerts_peer
                 ON security_alerts (peer_id, acknowledged_at)")?;
 
-        // -- Olm identity-key pins (Issue 1-C, TOFU) --
-        // The Curve25519 identity key we first saw for a DEVICE. Keyed by DEVICE
-        // (not master) because the Olm ratchet is per-device: each device of one
-        // identity legitimately has its own key, and only a CHANGE within one
-        // device id means a reinstall/re-key.
+        // The Curve25519 identity key first seen for a DEVICE. Keyed by device, not
+        // master, because the Olm ratchet is per-device: each device legitimately has its
+        // own key, and only a CHANGE within one device id means a reinstall or re-key.
         ddl(conn, "olm_key_pins table",
             "CREATE TABLE IF NOT EXISTS olm_key_pins (
                 device_peer_id TEXT PRIMARY KEY,
@@ -928,10 +840,8 @@ impl MessageStore {
                 pinned_at      INTEGER NOT NULL
             )")?;
 
-        // -- Hollow Share (Phase 7A) --
-        // One row per share we've created, opened, or downloaded. The encryption_key
-        // is the AES-256-GCM key from the share link; if the user loses the link
-        // and the row is gone, the file is unrecoverable (which is the point).
+        // One row per share created, opened or downloaded. If the user loses the link and
+        // the row is gone the file is unrecoverable, which is the point.
         ddl(conn, "shares table",
             "CREATE TABLE IF NOT EXISTS shares (
                 root_hash       TEXT PRIMARY KEY,
@@ -952,7 +862,6 @@ impl MessageStore {
                 created_at      INTEGER NOT NULL,
                 completed_at    INTEGER
             )")?;
-        // Idempotent migrations for existing dbs.
         migrate(conn, "ALTER TABLE shares ADD COLUMN save_dir TEXT;");
         migrate(conn, "ALTER TABLE shares ADD COLUMN server_id TEXT;");
         migrate(conn, "ALTER TABLE shares ADD COLUMN context_type TEXT;");
@@ -979,10 +888,8 @@ impl MessageStore {
                 updated_at   INTEGER NOT NULL
             )")?;
 
-        // -- Conference rooms (host-local; reports/CONFERENCES_PLAN.md) --
-        // Durable "my meeting room" objects. access_code_hash is the
-        // conf-scoped sha256 derivation, never the plaintext code. co_hosts
-        // is a JSON array of master ids (enforced at ingest, phase 2).
+        // Durable "my meeting room" objects. access_code_hash is the conf-scoped sha256
+        // derivation, never the plaintext code; co_hosts is a JSON array of master ids.
         ddl(conn, "conferences table",
             "CREATE TABLE IF NOT EXISTS conferences (
                 conf_id          TEXT PRIMARY KEY,
@@ -994,9 +901,8 @@ impl MessageStore {
                 created_at       INTEGER NOT NULL
             )")?;
 
-        // -- FTS5 full-text search indexes (L4 QA fix) --
-        // Content-sync FTS: the FTS table reads from the main table on demand,
-        // triggers keep the index in sync on INSERT/DELETE/UPDATE.
+        // Content-sync FTS: the FTS table reads the main table on demand and triggers
+        // keep it in sync.
         conn.execute_batch(
             "CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
                 text, content='messages', content_rowid='id'
@@ -1050,10 +956,9 @@ impl MessageStore {
             );
         }
 
-        // -- Multi-device: signed device lists (Phase 6) --
-        // One row per master identity holding its full signed device list JSON +
-        // monotonic version (replay protection). `device_links` is the fast
-        // reverse index used by the device→master resolver.
+        // One row per master holding its full signed device list JSON plus a monotonic
+        // version for replay protection. `device_links` is the reverse index the
+        // device-to-master resolver reads.
         ddl(conn, "device_lists table",
             "CREATE TABLE IF NOT EXISTS device_lists (
                 master_peer_id TEXT PRIMARY KEY,
@@ -1079,13 +984,10 @@ impl MessageStore {
                 label          TEXT NOT NULL DEFAULT ''
             )")?;
 
-        // -- Parked server joins (pending joins, rung 1) --
-        // A join whose members were ALL offline is not a failure any more: the
-        // request is persisted here and deposited into the server room's
-        // `~join` ring, so it outlives the app being closed. `state` is
-        // 'pending' (still waiting) or 'rejected' (a member answered no; the
-        // row survives so the tile can say why). `requested_at` is the nonce
-        // every answer must name.
+        // A join whose members were ALL offline is not a failure: the request is persisted
+        // here and deposited into the server room's `~join` ring, so it outlives the app
+        // closing. `state` is 'pending' or 'rejected' (the row survives so the tile can say
+        // why), and `requested_at` is the nonce every answer must name.
         ddl(conn, "pending_server_joins table",
             "CREATE TABLE IF NOT EXISTS pending_server_joins (
                 server_id         TEXT PRIMARY KEY,
@@ -1097,21 +999,15 @@ impl MessageStore {
                 last_deposited_at INTEGER NOT NULL DEFAULT 0,
                 created_at        INTEGER NOT NULL
             )")?;
-        // -- Migration: the carried KeyPackage (pending joins, rung 2) --
-        // Nullable: a row written before rung 2 has no package and falls back
-        // to bootstrapping on co-presence, exactly as it did.
+        // The carried KeyPackage, nullable: an older row falls back to bootstrapping on
+        // co-presence.
         migrate(conn, "ALTER TABLE pending_server_joins ADD COLUMN key_package TEXT;");
 
-        // -- Artist shop: art imported from a `.hollowpack` --
-        // Keyed by the art's HASH, because that is the art's identity
-        // everywhere else in Hollow (the asset rail, the profile field, and
-        // the support credential phase 2 binds to it). The bytes themselves
-        // live in `emote_blobs` under the ordinary rail kinds; this table is
-        // only the provenance beside them, so "who made this and under what
-        // licence" survives a rail eviction.
-        //
-        // Re-importing the same pack is an UPSERT rather than a duplicate: a
-        // buyer who downloads their order twice owns the art once.
+        // Art imported from a `.hollowpack`, keyed by the art's HASH because that is its
+        // identity everywhere else. The bytes live in `emote_blobs` under the ordinary
+        // rail kinds; this table is the provenance beside them, so "who made this and
+        // under what licence" survives a rail eviction. Re-importing is an UPSERT: a buyer
+        // who downloads their order twice owns the art once.
         ddl(conn, "owned_art table",
             "CREATE TABLE IF NOT EXISTS owned_art (
                 hash        TEXT PRIMARY KEY,
@@ -1127,31 +1023,23 @@ impl MessageStore {
         ddl(conn, "owned_art item index",
             "CREATE INDEX IF NOT EXISTS idx_owned_art_item ON owned_art (item_id)")?;
 
-        // -- Artist shop: kept redeem codes --
-        // The shop's thank-you page hands the buyer a `hollow://redeem/<code>`
-        // link. Phase 2 will blind-sign a support credential from that code;
-        // until then the app simply KEEPS it, so a buyer who closes the page
-        // cannot lose what they paid for.
+        // Kept redeem codes. The shop's thank-you page hands the buyer a
+        // `hollow://redeem/<code>` link and the app KEEPS it, so closing the page cannot
+        // lose what they paid for.
         //
-        // A deep link is REMOTE-AUTHORED input: anybody can put a
-        // `hollow://redeem/…` link anywhere and get a click. The gate is the
-        // shape check (`api::shop::valid_redeem_code`) plus a hard cap of 64
-        // rows, so the worst a hostile link can do is add one short string to
-        // a table nothing else reads (wiki `security_write_gates.md`). No
-        // network call, no crypto and no profile change happens here.
+        // A deep link is REMOTE-AUTHORED input: the gate is the shape check plus a hard cap
+        // of 64 rows, so the worst a hostile link can do is add one short string to a table
+        // nothing else reads. No network call, no crypto, no profile change.
         ddl(conn, "redeem_codes table",
             "CREATE TABLE IF NOT EXISTS redeem_codes (
                 code        TEXT PRIMARY KEY,
                 received_at INTEGER NOT NULL DEFAULT 0
             )")?;
 
-        // -- Artist shop, phase 2: OUR support credentials --
-        // One row per item this identity redeemed: the verified entry JSON
-        // exactly as it rides the profile, plus what the shop said the item
-        // was so Settings can name it. Keyed by the item hash: redeeming a
-        // second code for the same item replaces the row (13.23), it does not
-        // double it. The profile field is rebuilt from this table, so a
-        // profile rewrite can never lose a credential.
+        // OUR support credentials: one row per redeemed item, holding the verified entry
+        // JSON exactly as it rides the profile plus what the shop said the item was. Keyed
+        // by item hash, so redeeming a second code for the same item replaces the row. The
+        // profile field is rebuilt from this table, so a profile rewrite cannot lose one.
         ddl(conn, "support_creds_own table",
             "CREATE TABLE IF NOT EXISTS support_creds_own (
                 item         TEXT PRIMARY KEY,
@@ -1165,19 +1053,14 @@ impl MessageStore {
         Ok(())
     }
 
-    /// One-time storage hygiene, run ONCE at node startup while the DB is held by
-    /// a SINGLE connection — before the CryptoStore/CrdtStore actors and any
-    /// transient `open()` calls exist. Converts a legacy database created with
-    /// `auto_vacuum=0` to INCREMENTAL (which requires a full `VACUUM` — an
-    /// exclusive-lock, whole-file rewrite) and does one incremental reclaim.
+    /// One-time storage hygiene, run ONCE at node startup while a SINGLE connection
+    /// holds the DB. Converts a legacy `auto_vacuum=0` database to INCREMENTAL (which
+    /// needs a full `VACUUM`) and does one incremental reclaim.
     ///
-    /// MUST run in a single-connection window: the `VACUUM` takes an exclusive
-    /// lock and the page-1 `auto_vacuum` read races any other connection's
-    /// SQLCipher codec, producing spurious `hmac check failed for pgno=1` noise.
-    /// Idempotent — once converted the DB reads `auto_vacuum=INCREMENTAL` and the
-    /// `VACUUM` never runs again. A missing/locked DB is a non-fatal skip (caller
-    /// logs); correctness never depends on it (incremental vacuum is pure disk
-    /// hygiene, not data integrity).
+    /// The single-connection window is required: the `VACUUM` takes an exclusive lock
+    /// and the page-1 read races any other connection's SQLCipher codec, producing
+    /// spurious `hmac check failed for pgno=1` noise. Idempotent, and a missing or
+    /// locked DB is a non-fatal skip, since this is disk hygiene, not data integrity.
     pub fn migrate_auto_vacuum_once(path: &str, passphrase: &str) -> Result<(), String> {
         let conn = Connection::open(path)
             .map_err(|e| format!("Failed to open database for migration: {e}"))?;
@@ -1210,15 +1093,13 @@ impl MessageStore {
             .map_err(|e| format!("COMMIT failed: {e}"))
     }
 
-    /// Reconcile a synced/edited DM against an existing local row that shares the
-    /// same (peer_id, timestamp, is_mine=0) but has a NULL or different
-    /// message_id. This happens when the original message was delivered via one
-    /// path (e.g. offline fetch) and its edit arrives via another (DM sync) — the
-    /// mid-based dedup misses, and a naive insert creates a duplicate row.
+    /// Reconcile a synced or edited DM against an existing local row with the same
+    /// (peer_id, timestamp, is_mine=0) but a NULL or different message_id, which
+    /// happens when the original arrived by one path and its edit by another, so
+    /// mid-based dedup misses and a naive insert duplicates the row.
     ///
-    /// If such a row is found, it adopts the canonical `message_id` and applies
-    /// the new text/edited_at in place. Returns true if a row was reconciled (so
-    /// the caller must NOT insert a new row).
+    /// A reconciled row adopts the canonical `message_id` and the new text in place.
+    /// Returns true when that happened, in which case the caller must NOT insert.
     pub fn reconcile_dm_by_timestamp(
         &self,
         peer_id: &str,
@@ -1229,15 +1110,11 @@ impl MessageStore {
         signature: Option<&str>,
         public_key: Option<&str>,
     ) -> Result<bool, String> {
-        // Find a candidate row: same peer + timestamp, received (is_mine=0),
-        // whose message_id is NULL or different from the canonical one.
-        //
-        // A different-mid row only qualifies when its TEXT differs (the
-        // edit-delivered-via-another-path case). A different-mid row with
-        // IDENTICAL text is a DISTINCT message from a same-millisecond
-        // identical-text burst — grafting the incoming mid onto it silently
-        // merged two real messages into one row (permanent loss: every later
-        // sync then saw the mid as "existing" and never re-inserted it).
+        // A different-mid row only qualifies when its TEXT differs (the edit-by-another-
+        // path case). A different-mid row with IDENTICAL text is a DISTINCT message from a
+        // same-millisecond burst, and grafting the incoming mid onto it merged two real
+        // messages into one row permanently: every later sync then saw the mid as existing
+        // and never re-inserted it.
         let existing_id: Option<i64> = self
             .conn
             .query_row(
@@ -1255,7 +1132,6 @@ impl MessageStore {
             return Ok(false);
         };
 
-        // Adopt the canonical message_id, update text + edit metadata in place.
         let edit_ts = edited_at.unwrap_or(timestamp);
         self.conn
             .execute(
@@ -1295,10 +1171,9 @@ impl MessageStore {
 
     /// Insert a message. Returns the row ID.
     ///
-    /// `order_us` is the SENDER's microsecond send timestamp for stable ordering
-    /// (Step 9C/C4); pass `None` at receive/backfill sites that don't carry it —
-    /// it defaults to `timestamp * 1000`, which orders identically to the legacy
-    /// millisecond `timestamp` so old peers / pre-9C rows are unaffected.
+    /// `order_us` is the SENDER's microsecond send timestamp; pass `None` at receive
+    /// or backfill sites that do not carry it and it defaults to `timestamp * 1000`,
+    /// which orders identically to the legacy millisecond timestamp.
     #[allow(clippy::too_many_arguments)]
     pub fn insert(
         &self,
@@ -1314,10 +1189,9 @@ impl MessageStore {
         order_us: Option<i64>,
     ) -> Result<i64, String> {
         let order_us = order_us.unwrap_or(timestamp.saturating_mul(1000));
-        // Lamport chat clock: every persisted stamp (live, backfill, push
-        // fetch, our own echo) advances the send clock so our NEXT send stamps
-        // after everything we've seen — cross-machine clock skew can no longer
-        // sort a reply above the message it answers (see chat_clock.rs).
+        // Every persisted stamp advances the Lamport send clock, so our NEXT send stamps
+        // after everything we have seen and clock skew can no longer sort a reply above
+        // the message it answers.
         crate::chat_clock::observe(order_us.max(timestamp.saturating_mul(1000)));
         let rows = self.conn
             .execute(
@@ -1332,16 +1206,13 @@ impl MessageStore {
         }
     }
 
-    /// Overwrite a DM row's text + signature with the caption's ONLY when the
-    /// current text is a "[file:...]" sentinel (a captionless-image placeholder).
-    /// Used by the push fetch node: an offline captioned image arrives as TWO
-    /// frames sharing one message_id — the inlined FileHeader (text "[file:<id>]",
-    /// no signature) and the caption DM (carries the real sig/pk over the caption
-    /// text). Whichever inserts first wins the INSERT OR IGNORE; if the FileHeader
-    /// won, this promotes the row to the real caption AND its signature when the
-    /// caption arrives — otherwise the message would render "Unsigned" because the
-    /// FileHeader carried no sig. No-op if no row matches or the row already has
-    /// real (non-sentinel) text.
+    /// Overwrite a DM row's text and signature with the caption's ONLY when the current
+    /// text is a `[file:...]` sentinel.
+    ///
+    /// An offline captioned image arrives as TWO frames sharing one message_id: the
+    /// inlined FileHeader (sentinel text, no signature) and the caption DM (the real
+    /// signature over the caption). Whichever inserts first wins, so when the header
+    /// won this promotes the row, which would otherwise render "Unsigned" forever.
     pub fn promote_file_sentinel_to_caption(
         &self,
         message_id: &str,
@@ -1359,14 +1230,12 @@ impl MessageStore {
         Ok(rows > 0)
     }
 
-    /// Set the link preview JSON for a DM row identified by `message_id`.
-    /// No-op if no row matches. Phase 6.75.
+    /// Set the link preview JSON for a DM row by `message_id`. No-op if none matches.
     pub fn update_link_preview(&self, message_id: &str, link_preview_json: &str) -> Result<(), String> {
         self.update_link_preview_in("messages", message_id, link_preview_json)
     }
 
-    /// Set the link preview JSON for a channel message row identified by `message_id`.
-    /// No-op if no row matches. Phase 6.75.
+    /// Set the link preview JSON for a channel row by `message_id`. No-op if none matches.
     pub fn update_channel_link_preview(&self, message_id: &str, link_preview_json: &str) -> Result<(), String> {
         self.update_link_preview_in("channel_messages", message_id, link_preview_json)
     }
@@ -1383,7 +1252,6 @@ impl MessageStore {
     }
 
     /// Set (or clear) a DM row's link preview AND its signature together.
-    /// Issue #45 — see [`Self::update_link_preview_and_sig_in`].
     pub fn update_link_preview_and_sig(
         &self,
         message_id: &str,
@@ -1396,7 +1264,7 @@ impl MessageStore {
         )
     }
 
-    /// Channel twin of [`Self::update_link_preview_and_sig`]. Issue #45.
+    /// Channel twin of [`Self::update_link_preview_and_sig`].
     pub fn update_channel_link_preview_and_sig(
         &self,
         message_id: &str,
@@ -1409,19 +1277,15 @@ impl MessageStore {
         )
     }
 
-    /// Attach (or clear) a card and swap in the re-signature that covers it,
-    /// in ONE statement. Returns whether a row matched.
+    /// Attach (or clear) a card and swap in the re-signature that covers it, in ONE
+    /// statement. Returns whether a row matched.
     ///
-    /// The pair is inseparable: the v2 signature binds `lp_digest`, so a row
-    /// whose preview changed without its signature following would stop
-    /// verifying and stop replicating through signed sync backfill. Writing
-    /// them apart would leave that inconsistency visible to any concurrent
-    /// reader.
+    /// The pair is inseparable: the v2 signature binds `lp_digest`, so a row whose
+    /// preview changed without its signature following would stop verifying and stop
+    /// replicating through signed sync backfill.
     ///
-    /// Deliberately does NOT touch `text`, `edited_at`, or `message_edits`:
-    /// attaching a late card is not an edit, and the bubble must not sprout
-    /// an "(edited)" badge because a fetch finished a second after send.
-    /// `table` is a fixed table name, never user input.
+    /// Deliberately does NOT touch `text`, `edited_at` or `message_edits`: attaching a
+    /// late card is not an edit. `table` is a fixed table name, never user input.
     fn update_link_preview_and_sig_in(
         &self,
         table: &str,
@@ -1501,8 +1365,8 @@ impl MessageStore {
         }
     }
 
-    /// Delete a persisted Olm session (Step 7 device revocation — so a revoked
-    /// device's session is not resurrected from the DB on restart). Idempotent.
+    /// Delete a persisted Olm session, so a revoked device's session is not resurrected
+    /// from the DB on restart. Idempotent.
     pub fn delete_olm_session(&self, peer_id: &str) -> Result<(), String> {
         self.conn
             .execute("DELETE FROM olm_sessions WHERE peer_id = ?1", params![peer_id])
@@ -1522,8 +1386,7 @@ impl MessageStore {
         collect_rows(rows, "olm_sessions")
     }
 
-    /// Load recent messages for a peer, ordered oldest-first.
-    /// Hidden (deleted) messages are excluded.
+    /// Load recent messages for a peer, oldest-first, excluding hidden ones.
     pub fn load_for_peer(
         &self,
         peer_id: &str,
@@ -1570,9 +1433,8 @@ impl MessageStore {
         }
     }
 
-    /// Get the latest DM timestamp for a peer (for DM sync requests).
-    /// Only considers received messages (is_mine=0) since sync only sends
-    /// the other peer's sent messages (their is_mine=1 = our is_mine=0).
+    /// Latest DM timestamp for a peer, for sync requests. Received messages only, since
+    /// sync only asks the peer for what THEY sent.
     pub fn get_latest_dm_timestamp(
         &self,
         peer_id: &str,
@@ -1584,10 +1446,9 @@ impl MessageStore {
         )
     }
 
-    /// Get DM messages **we sent** newer than or equal to a given timestamp (for DM sync responses).
-    /// Only returns `is_mine = 1` — the requesting peer already has messages they sent.
-    /// Uses `>=` (inclusive) — INSERT OR IGNORE dedup handles overlap.
-    /// Includes hidden (deleted) messages — evidence must sync to all peers (Rat Files).
+    /// DM messages **we sent** at or after `since`, for sync responses: the requesting
+    /// peer already has their own. Inclusive, because INSERT OR IGNORE handles the
+    /// overlap, and hidden rows are included because evidence must sync.
     pub fn get_dm_messages_since(
         &self,
         peer_id: &str,
@@ -1624,11 +1485,9 @@ impl MessageStore {
         collect_rows(rows, what)
     }
 
-    /// Latest DM timestamp in a conversation **regardless of direction** (for
-    /// multi-device sibling backfill). The friend-sync `get_latest_dm_timestamp`
-    /// filters `is_mine = 0` (a friend only re-serves what THEY sent); a sibling
-    /// serves BOTH directions, so the requester's high-water mark must span both
-    /// — otherwise we'd re-pull our own already-known sends every reconnect.
+    /// Latest DM timestamp in a conversation **regardless of direction**, for sibling
+    /// backfill: a friend only re-serves what THEY sent, but a sibling serves both, so
+    /// the requester's high-water mark must span both or we re-pull our own sends.
     pub fn get_latest_dm_timestamp_any(
         &self,
         peer_id: &str,
@@ -1640,18 +1499,14 @@ impl MessageStore {
         )
     }
 
-    /// Get DM messages in a conversation newer than a timestamp, **in BOTH
-    /// directions** (for multi-device sibling backfill). Unlike
-    /// `get_dm_messages_since` (friend sync: `is_mine = 1` only), a sibling needs
-    /// the friend's half of the conversation too. `is_mine` is carried through so
-    /// the receiving sibling can render each message on the correct side.
-    /// Uses `timestamp > since` (STRICT) for fresh messages so the requester's
-    /// high-water-mark message isn't re-sent on every reconnect (the
-    /// re-send-the-latest-every-sync waste), but `updated_at >= since`
-    /// (inclusive) so an EDIT/REACTION/DELETE stamped on an already-synced
-    /// message at/after the high-water still re-syncs it. `INSERT OR IGNORE`
-    /// dedup makes any overlap harmless. Includes hidden (deleted) messages —
-    /// evidence must sync (Rat Files).
+    /// DM messages in a conversation newer than a timestamp **in BOTH directions**, for
+    /// sibling backfill; `is_mine` rides along so the sibling renders each on the right
+    /// side.
+    ///
+    /// Fresh messages use `timestamp > since` (STRICT) so the high-water message is not
+    /// re-sent every reconnect, while `updated_at >= since` (inclusive) still re-syncs
+    /// an edit, reaction or delete stamped on an already-synced message. Hidden rows
+    /// are included because evidence must sync.
     pub fn get_dm_messages_for_sibling(
         &self,
         peer_id: &str,
@@ -1803,11 +1658,9 @@ impl MessageStore {
         Ok(())
     }
 
-    /// Load CRDT ops for a server, ordered by HLC — bounded to the NEWEST 1000
-    /// (matches ServerState::MAX_OP_LOG). The DB table only prunes on the
-    /// 30-min rebalance timer, so an old server could hold far more rows than
-    /// the in-memory log would ever keep; loading them all at boot was O(all
-    /// history) JSON parsing per server for ops the compactor would discard.
+    /// Load CRDT ops for a server, HLC-ordered and bounded to the NEWEST 1000 (matching
+    /// ServerState::MAX_OP_LOG). The table only prunes on the 30-min rebalance timer, so
+    /// loading everything was O(all history) JSON parsing for ops the compactor drops.
     pub fn load_ops_for_server(&self, server_id: &str) -> Result<Vec<CrdtOp>, String> {
         let mut stmt = self
             .conn
@@ -1851,10 +1704,9 @@ impl MessageStore {
 
     // -- Channel message methods --
 
-    /// Insert a channel message. Returns number of rows inserted (0 if duplicate, 1 if new).
+    /// Insert a channel message. Returns rows inserted, 0 for a duplicate.
     ///
-    /// `order_us` — see [`Self::insert`]: the sender's microsecond send timestamp for
-    /// stable ordering (Step 9C/C4); `None` defaults to `timestamp * 1000` (legacy-equivalent).
+    /// `order_us`: see [`Self::insert`].
     #[allow(clippy::too_many_arguments)]
     pub fn insert_channel_message(
         &self,
@@ -1884,8 +1736,7 @@ impl MessageStore {
         Ok(rows)
     }
 
-    /// Load recent messages for a channel, ordered oldest-first.
-    /// Hidden (deleted) messages are excluded.
+    /// Load recent messages for a channel, oldest-first, excluding hidden ones.
     pub fn load_channel_messages(
         &self,
         server_id: &str,
@@ -1926,10 +1777,9 @@ impl MessageStore {
         )
     }
 
-    /// Latest timestamp of the LOCAL user's own messages in a channel
-    /// (`is_mine = 1`, so it stays correct across the user's linked devices).
-    /// Used by the send-side slow-mode gate. Returns None on query failure —
-    /// slow mode fails open rather than blocking sends on a DB error.
+    /// Latest timestamp of the LOCAL user's own channel messages (`is_mine = 1`, so it
+    /// stays correct across linked devices), for the send-side slow-mode gate. `None` on
+    /// query failure: slow mode fails open rather than blocking sends on a DB error.
     pub fn latest_own_channel_ts(&self, server_id: &str, channel_id: &str) -> Option<i64> {
         self.conn
             .query_row(
@@ -1942,11 +1792,9 @@ impl MessageStore {
             .flatten()
     }
 
-    /// Highest chat send-stamp (µs) across DMs + channel messages. Seeds the
-    /// Lamport chat clock at node start (see chat_clock.rs) so a restart can't
-    /// mint stamps below already-stored ones from a peer whose clock runs
-    /// ahead of ours — without the seed, our first post-restart reply would
-    /// sort above the message it answers until the next inbound bump.
+    /// Highest chat send-stamp across DMs and channels, seeding the Lamport clock at
+    /// node start so a restart cannot mint stamps below stored ones from a peer whose
+    /// clock runs ahead of ours.
     pub fn max_chat_stamp_us(&self) -> i64 {
         let q = |sql: &str| {
             self.conn
@@ -1960,9 +1808,7 @@ impl MessageStore {
     }
 
     /// Whether `sender_id` already has a channel message in the open interval
-    /// (`from_ts`, `to_ts`) (epoch ms). Used by the receive-side slow-mode
-    /// gate: a message whose signed timestamp lands within the slow-mode
-    /// window of another message from the same sender is dropped.
+    /// (`from_ts`, `to_ts`), for the receive-side slow-mode gate.
     pub fn channel_sender_has_msg_in_range(
         &self,
         server_id: &str,
@@ -1984,8 +1830,8 @@ impl MessageStore {
             .unwrap_or(false)
     }
 
-    /// Get channel messages newer than a given timestamp (for sync responses).
-    /// Includes hidden (deleted) messages — evidence must sync to all peers (Rat Files).
+    /// Channel messages newer than a timestamp, for sync responses. Hidden rows
+    /// included: evidence must sync.
     pub fn get_channel_messages_since(
         &self,
         server_id: &str,
@@ -2056,12 +1902,10 @@ impl MessageStore {
             .unwrap_or(0) as u32
     }
 
-    /// Count all visible DM messages across every peer. Used by the Home stats
-    /// card as a multi-device sync-comparison number: DMs fully converge across a
-    /// person's devices (fan-out + sibling backfill), unlike channel messages
-    /// which are lazy-paged per device and would diverge. Excludes hidden
-    /// (deleted) rows — deletion tombstones are per-device and would skew the
-    /// comparison.
+    /// Count all visible DM messages across every peer, the Home card's multi-device
+    /// sync-comparison number: DMs fully converge across a person's devices, unlike
+    /// lazily-paged channel messages. Hidden rows are excluded because deletion
+    /// tombstones are per-device and would skew the comparison.
     pub fn count_all_dm_messages(&self) -> u32 {
         self.conn
             .query_row(
@@ -2117,10 +1961,8 @@ impl MessageStore {
         Ok(deleted as u32)
     }
 
-    /// Delete channel messages in a time range for a specific server.
-    /// Only prunes messages with `timestamp >= since AND timestamp < before`.
-    /// This ensures forward-only retention: only messages created after the
-    /// policy was set are subject to pruning.
+    /// Delete channel messages in a time range for a server, so retention is
+    /// forward-only: only messages created after the policy was set are pruned.
     pub fn prune_channel_messages_in_range(&self, server_id: &str, since: i64, before: i64) -> Result<u32, String> {
         let deleted = self.conn
             .execute(
@@ -2131,24 +1973,17 @@ impl MessageStore {
         Ok(deleted as u32)
     }
 
-    /// Count unread DM messages: messages STRICTLY NEWER (millisecond
-    /// timestamp) than the `last_seen_message_id` row.
+    /// Count unread DM messages: those STRICTLY NEWER in MILLISECONDS than the
+    /// `last_seen_message_id` row.
     ///
-    /// Deliberately millisecond-granular, NOT rowid and NOT the full display
-    /// tuple:
-    /// - rowid (`id >`): a sync backfill inserts older-timestamped rows with
-    ///   HIGHER rowids — those counted forever ("ghost unread" that no
-    ///   reading cleared, because the seen pointer is the newest-by-time
-    ///   message while the ghost had the max rowid).
-    /// - full tuple (timestamp, order_us, id): Dart marks seen from its
-    ///   in-memory list's `.last`, which is millisecond-sorted — in a
-    ///   same-millisecond burst that may not be the tuple-max row, so the
-    ///   tail of the burst stayed "unread" until the user SENT something.
-    /// Same-millisecond messages render together on screen, so treating the
-    /// whole millisecond as seen matches what the user actually saw, and any
-    /// same-ms seen pointer zeroes the count deterministically.
-    /// Returns 0 when the seen row is not found (never a count-everything
-    /// degradation — the live event path still increments for new arrivals).
+    /// Neither alternative works. By rowid, a sync backfill inserts older-timestamped
+    /// rows with HIGHER rowids and they count forever, since the seen pointer is the
+    /// newest-by-time message. By the full (timestamp, order_us, id) tuple, Dart marks
+    /// seen from a millisecond-sorted `.last`, which in a same-millisecond burst may
+    /// not be the tuple-max row, leaving the tail of the burst unread until the user
+    /// sent something. Same-millisecond messages render together, so treating the whole
+    /// millisecond as seen matches what the user saw. A missing seen row returns 0,
+    /// never a count-everything degradation.
     pub fn count_unread_dm(&self, peer_id: &str, last_seen_message_id: &str) -> u32 {
         self.conn
             .query_row(
@@ -2164,9 +1999,8 @@ impl MessageStore {
             .unwrap_or(0) as u32
     }
 
-    /// Count unread channel messages strictly newer (millisecond) than the
-    /// seen row — see [`Self::count_unread_dm`] for why neither rowids nor
-    /// the full display tuple work here.
+    /// Count unread channel messages strictly newer in milliseconds than the seen row;
+    /// see [`Self::count_unread_dm`] for why.
     pub fn count_unread_channel(
         &self,
         server_id: &str,
@@ -2212,9 +2046,8 @@ impl MessageStore {
             .unwrap_or(0) as u32
     }
 
-    /// Count unread messages and mention-containing messages for a channel.
-    /// `mention_patterns` should include strings like `@everyone`, `@DisplayName`, `@Nickname`.
-    /// A message counts as a mention if it contains any pattern OR has a reply_to.
+    /// Count unread and mention-containing messages for a channel. A message counts as
+    /// a mention if it contains any pattern in `mention_patterns` or has a reply_to.
     pub fn count_unread_channel_with_mentions(
         &self,
         server_id: &str,
@@ -2228,10 +2061,8 @@ impl MessageStore {
         param_values.push(Box::new(channel_id.to_string()));
 
         let mut param_idx = 3;
-        // Strictly newer (millisecond) than the seen row — see
-        // count_unread_dm for why neither rowids nor the full display tuple
-        // work. When the seen row is missing the comparison is NULL →
-        // count 0 (never count-everything).
+        // Strictly newer in milliseconds than the seen row; a missing seen row makes the
+        // comparison NULL and counts 0.
         let seen_filter = if let Some(mid) = last_seen_message_id {
             param_values.push(Box::new(mid.to_string()));
             let f = format!(
@@ -2250,8 +2081,7 @@ impl MessageStore {
             param_values.push(Box::new(format!("%{pattern}%")));
             param_idx += 1;
         }
-        // Any reply counts as a mention — parity with the live path
-        // (event_provider.dart treats replyToMid != null as a mention).
+        // Any reply counts as a mention, matching the live path.
         mention_clauses.push("reply_to_mid IS NOT NULL".to_string());
 
         let mention_expr = mention_clauses.join(" OR ");
@@ -2286,8 +2116,7 @@ impl MessageStore {
         rows.filter_map(|r| r.ok()).collect()
     }
 
-    /// Get the latest timestamp per sender for a channel (for per-sender sync).
-    /// Returns a map of `{ sender_id → max_timestamp }`.
+    /// Latest timestamp per sender for a channel, as `{ sender_id -> max_timestamp }`.
     pub fn get_per_sender_timestamps(
         &self,
         server_id: &str,
@@ -2309,21 +2138,16 @@ impl MessageStore {
         let mut map = HashMap::new();
         for row in rows {
             let (sender, ts) = row.map_err(|e| format!("Failed to read per_sender row: {e}"))?;
-            // Lookback overlap: MAX(timestamp) is a high-watermark, and a
-            // watermark permanently skips a message that was MISSED while a
-            // newer one arrived (live topic miss during a subscribe/reconnect
-            // window, push-fetch inserting newer rows first). Asking from
-            // `watermark - LOOKBACK` re-covers that hole; the overlap is
-            // deduplicated by message_id on receipt, so the only cost is
-            // re-sending up to LOOKBACK of recent messages per sync.
+            // Lookback overlap: a MAX(timestamp) watermark permanently skips a message MISSED
+            // while a newer one arrived, so ask from `watermark - LOOKBACK`. The overlap is
+            // deduplicated by message_id on receipt.
             map.insert(sender, (ts - SYNC_LOOKBACK_MS).max(0));
         }
         Ok(map)
     }
 
-    /// Get channel messages filling gaps from per-sender timestamps.
-    /// For each known sender, returns messages with `timestamp >= sender_ts`.
-    /// For unknown senders (not in the map), returns ALL their messages.
+    /// Channel messages filling gaps from per-sender timestamps: known senders from
+    /// their timestamp, unknown senders in full.
     pub fn get_channel_messages_since_per_sender(
         &self,
         server_id: &str,
@@ -2359,13 +2183,10 @@ impl MessageStore {
         collect_rows(rows, "per_sender")
     }
 
-    /// Build the dynamic per-sender WHERE fragment + parameter list shared by
-    /// [`Self::get_channel_messages_since_per_sender`] and
-    /// [`Self::count_channel_messages_since_per_sender`]: for each known sender,
-    /// messages with `timestamp >= their latest` (inclusive — catches
-    /// same-millisecond messages; INSERT OR IGNORE dedup handles overlap);
-    /// unknown senders match ALL their messages. Params ?1/?2 are
-    /// server_id/channel_id.
+    /// Build the dynamic per-sender WHERE fragment and parameters shared by the
+    /// per-sender sync query and its count: known senders match from their latest
+    /// (inclusive, to catch same-millisecond messages), unknown senders match
+    /// everything. Params ?1/?2 are server_id/channel_id.
     fn per_sender_where(
         server_id: &str,
         channel_id: &str,
@@ -2379,7 +2200,6 @@ impl MessageStore {
         let known_senders: Vec<&String> = sender_timestamps.keys().collect();
         let mut param_idx = 3;
 
-        // Condition for each known sender: messages newer than or equal to their latest.
         for (sender, ts) in sender_timestamps {
             conditions.push(format!("(sender_id = ?{} AND timestamp >= ?{})", param_idx, param_idx + 1));
             param_values.push(Box::new(sender.clone()));
@@ -2387,7 +2207,6 @@ impl MessageStore {
             param_idx += 2;
         }
 
-        // Condition for unknown senders: all their messages.
         if !known_senders.is_empty() {
             let placeholders: Vec<String> = known_senders.iter().enumerate().map(|(i, _)| {
                 let idx = param_idx + i;
@@ -2472,9 +2291,8 @@ impl MessageStore {
         Ok(())
     }
 
-    /// Delete the persisted MLS identity (signer + credential + group storage).
-    /// Multi-device: used when a linked sibling detects it inherited the source
-    /// device's MLS identity and must mint a fresh, distinct one.
+    /// Delete the persisted MLS identity, used when a linked sibling detects it
+    /// inherited the source device's identity and must mint a distinct one.
     pub fn clear_mls_identity(&self) -> Result<(), String> {
         self.conn
             .execute("DELETE FROM mls_identity WHERE id = 1", [])
@@ -2506,9 +2324,8 @@ impl MessageStore {
 
     // ── Multi-device signed device lists (Phase 6) ──
 
-    /// Current stored device-list version for a master, or 0 if none.
-    /// Callers use this to enforce monotonic version (replay protection) BEFORE
-    /// accepting an incoming list.
+    /// Current stored device-list version for a master, 0 if none. Callers enforce a
+    /// monotonic version (replay protection) with it BEFORE accepting an incoming list.
     pub fn device_list_version(&self, master_peer_id: &str) -> Result<u64, String> {
         let mut stmt = self
             .conn
@@ -2524,12 +2341,9 @@ impl MessageStore {
     }
 
     /// Persist a verified device list: upsert the master row and rebuild its
-    /// `device_links` reverse-index entries. The caller MUST have cryptographically
-    /// verified the list AND confirmed `version` strictly increases (use
-    /// `device_list_version`). `devices` is the authoritative member set.
-    ///
-    /// Stale links from a previous (lower-version) list for this master are
-    /// removed so a revoked device no longer resolves to it.
+    /// `device_links` entries. The caller MUST have cryptographically verified the list
+    /// AND confirmed `version` strictly increases. Stale links from a lower-version list
+    /// are removed, so a revoked device no longer resolves to this master.
     pub fn save_device_list(
         &self,
         master_peer_id: &str,
@@ -2550,10 +2364,8 @@ impl MessageStore {
             )
             .map_err(|e| format!("Failed to upsert device_lists: {e}"))?;
 
-        // Rebuild reverse index for this master: drop its old links, insert the
-        // current device set. A device can only belong to one master, so an
-        // INSERT OR REPLACE re-homes any device that moved (shouldn't happen for
-        // honest lists, but keeps the index consistent).
+        // A device can only belong to one master, so INSERT OR REPLACE re-homes any device
+        // that moved and the index stays consistent even for a dishonest list.
         self.conn
             .execute(
                 "DELETE FROM device_links WHERE master_peer_id = ?1",
@@ -2572,10 +2384,8 @@ impl MessageStore {
         Ok(())
     }
 
-    /// Load the persisted `SignedDeviceList` for a master, if any. Used to read
-    /// our OWN list back (devices + version) before re-publishing, and to inspect
-    /// a peer's stored list. Returns `Ok(None)` when no row exists or the stored
-    /// JSON fails to deserialize (treated as absent, not an error).
+    /// Load the persisted `SignedDeviceList` for a master. `Ok(None)` when no row exists
+    /// or the stored JSON fails to deserialize, which is treated as absent, not an error.
     pub fn load_device_list(
         &self,
         master_peer_id: &str,
@@ -2607,11 +2417,9 @@ impl MessageStore {
         collect_rows(rows, "device_link")
     }
 
-    /// Wipe ALL persisted device lists + reverse-index links (multi-device,
-    /// Phase 6). Testing/maintenance aid: union-merge never removes a device id,
-    /// so repeated wipe+reimport test cycles leave ghost devices accumulating in
-    /// our own published list. Clearing lets the set rebuild from currently-live
-    /// siblings. (Production cleanup of a single device = Step 7 revocation.)
+    /// Wipe ALL persisted device lists and links. A testing aid: union-merge never
+    /// removes a device id, so repeated wipe-and-reimport cycles accumulate ghosts in
+    /// our own published list. Production cleanup of one device is revocation.
     pub fn clear_all_device_lists(&self) -> Result<(), String> {
         self.conn
             .execute("DELETE FROM device_links", [])
@@ -2659,14 +2467,11 @@ impl MessageStore {
 
     // ── User Profile Persistence (Phase 3.5) ──
 
-    /// Upsert a user profile (ours or a peer's).
-    /// `avatar` and `banner` are optional: `None` preserves the existing image, `Some(bytes)` overwrites
-    /// (pass empty slice to clear).
-    /// `showcase_board` is optional: `None` preserves the existing board (e.g. an update from an
-    /// old client that predates boards), `Some("")` clears, `Some(json)` sets.
-    /// `avatar_frame` carries the same three-state semantics (issue #54), and
-    /// so do `avatar_anim`/`banner_anim` — the ANIMATED variants' asset-rail
-    /// hashes (`None` preserves, `Some("")` clears, `Some(hash)` sets).
+    /// Upsert a user profile, ours or a peer's.
+    ///
+    /// `avatar`, `banner`, `showcase_board`, `avatar_frame`, `avatar_anim` and
+    /// `banner_anim` are three-state: `None` preserves what is stored (an update from a
+    /// client that predates the field must not erase it), empty clears, else it sets.
     #[allow(clippy::too_many_arguments)]
     pub fn save_profile(
         &self,
@@ -2680,22 +2485,19 @@ impl MessageStore {
         twitch_username: &str,
         showcase_board: Option<&str>,
         showcase_assets: Option<&[u8]>,
-        // The subject's proof for this profile, or `None` to leave whatever is
-        // stored untouched (COALESCE) — a partial update must not orphan an
-        // existing signature.
+        // `None` leaves whatever proof is stored (COALESCE): a partial update must not
+        // orphan an existing signature.
         proof: Option<ProfileProof<'_>>,
         avatar_frame: Option<&str>,
         avatar_anim: Option<&str>,
         banner_anim: Option<&str>,
-        // Support credentials, same three states: `None` preserves,
-        // `Some("")` clears, `Some(json)` sets the ALREADY-sanitized array.
+        // Support credentials, same three states; the array must ALREADY be sanitized.
         support_creds: Option<&str>,
     ) -> Result<(), String> {
         let profile_sig = proof.map(|p| p.sig);
         let profile_pk = proof.map(|p| p.pk);
         let profile_avatar_hash = proof.map(|p| p.avatar_hash);
-        // For avatar/banner: None = no change (use COALESCE), Some(empty) = clear (store NULL), Some(data) = set.
-        // Normalize Some(empty) to an explicit NULL for SQL.
+        // Normalize an empty avatar/banner to an explicit NULL, since COALESCE cannot.
         let avatar_val: Option<&[u8]> = avatar.and_then(|b| if b.is_empty() { None } else { Some(b) });
         let banner_val: Option<&[u8]> = banner.and_then(|b| if b.is_empty() { None } else { Some(b) });
         let avatar_is_clear = avatar.is_some() && avatar.unwrap().is_empty();
@@ -2753,13 +2555,6 @@ impl MessageStore {
         Ok(())
     }
 
-    // The `support_creds_signed` per-master pin used to live here, read and
-    // written by `social::gated_support_creds`. It is gone: a pin that can only
-    // be learned from the network is worthless against a relay that strips the
-    // signature from the FIRST announce, which is exactly the frame it would
-    // need to see. `support_creds` now requires a valid signature from everyone,
-    // always. The COLUMN stays (no schema churn, old rows read fine) and nothing
-    // consults it.
 
     /// Load a profile for a specific peer.
     pub fn load_profile(&self, peer_id: &str) -> Result<Option<StoredProfile>, String> {
@@ -2897,11 +2692,9 @@ impl MessageStore {
             .ok()
     }
 
-    /// Returns the conversation peer_id (the OTHER party's master id) a DM is
-    /// filed under. Used by multi-device self fan-out (Phase 6, Step 3): when a
-    /// sibling echoes an edit/delete/reaction on a message WE sent, we attribute
-    /// the resulting UI event to the right conversation by looking up the row's
-    /// peer_id by message_id (the edit/delete/reaction envelopes carry no convo).
+    /// The conversation peer_id (the OTHER party's master) a DM is filed under. Used by
+    /// multi-device self fan-out: an edit, delete or reaction envelope carries no
+    /// conversation, so the event is attributed by looking the row up by message_id.
     pub fn get_dm_message_peer(&self, message_id: &str) -> Option<String> {
         self.conn
             .query_row(
@@ -2912,9 +2705,8 @@ impl MessageStore {
             .ok()
     }
 
-    /// Returns the current text of a channel message by message_id.
-    /// Used when signing deletions so the canonical payload reflects the
-    /// text at deletion time (rather than the ad-hoc "delete:..." format).
+    /// Current text of a channel message, used when signing deletions so the canonical
+    /// payload reflects the text at deletion time.
     pub fn get_channel_message_text(&self, message_id: &str) -> Option<String> {
         self.conn
             .query_row(
@@ -2925,9 +2717,8 @@ impl MessageStore {
             .ok()
     }
 
-    /// Returns the current text of a DM message by message_id.
-    /// Used when signing deletions so the canonical payload reflects the
-    /// text at deletion time (rather than the ad-hoc "delete:..." format).
+    /// Current text of a DM message, used when signing deletions so the canonical
+    /// payload reflects the text at deletion time.
     pub fn get_dm_message_text(&self, message_id: &str) -> Option<String> {
         self.conn
             .query_row(
@@ -2938,11 +2729,8 @@ impl MessageStore {
             .ok()
     }
 
-    /// One message row's signature-relevant fields (v2 message signing).
-    /// Loaded by the edit/delete SIGN sites (the edit signature binds the
-    /// row's structural fields), the live edit/delete VERIFY sites (the
-    /// receiver reconstructs the same extras from ITS row), and the Message
-    /// Proof FFI.
+    /// One message row's signature-relevant fields (v2 message signing), loaded by the
+    /// edit and delete SIGN sites, their VERIFY twins, and the Message Proof FFI.
     fn message_sig_row(&self, table: &str, message_id: &str) -> Option<MessageSigRow> {
         self.conn
             .query_row(
@@ -3000,11 +2788,9 @@ impl MessageStore {
         self.edit_message_in("channel_messages", message_id, new_text, edited_at, signature, public_key)
     }
 
-    /// Shared implementation of [`Self::edit_channel_message`] /
-    /// [`Self::edit_dm_message`]. `table` is a fixed table name ("messages" /
-    /// "channel_messages"), never user input. Preserves the previous text (and
-    /// signature provenance) in message_edits before overwriting, in one
-    /// transaction.
+    /// Shared implementation of the edit methods. `table` is a fixed table name, never
+    /// user input. Preserves the previous text and signature provenance in
+    /// message_edits before overwriting, in one transaction.
     fn edit_message_in(
         &self,
         table: &str,
@@ -3014,7 +2800,6 @@ impl MessageStore {
         signature: Option<&str>,
         public_key: Option<&str>,
     ) -> Result<bool, String> {
-        // 1. Read the current text + signature/public_key/timestamp before overwriting.
         let row: Option<(String, Option<String>, Option<String>, i64)> = self
             .conn
             .query_row(
@@ -3060,15 +2845,13 @@ impl MessageStore {
         }
     }
 
-    /// Repair a channel message's attributed sender + signature material (multi-device
-    /// self-heal). A row that was stored before the device→master resolve fix can be
-    /// keyed under a sender DEVICE id with signature material that no longer verifies
-    /// against the master-id payload. When channel sync later delivers the SAME message
-    /// id with a signature that DOES verify (proving authentic sender + text), the
-    /// caller overwrites the local row's `sender_id`/`signature`/`public_key`/`is_mine`
-    /// with the verified values so the bubble renders the person and the proof verifies.
-    /// `INSERT OR IGNORE` blocks re-inserting the corrupt row, so this UPDATE is the only
-    /// way to converge it. Returns true if a row was changed.
+    /// Repair a channel message's attributed sender and signature material
+    /// (multi-device self-heal). A row stored before the device-to-master resolve fix
+    /// can be keyed under a sender DEVICE id with signature material that no longer
+    /// verifies against the master-id payload; when sync later delivers the SAME message
+    /// id with a signature that DOES verify, the caller overwrites the local row with
+    /// the verified values. `INSERT OR IGNORE` blocks re-inserting the corrupt row, so
+    /// this UPDATE is the only way to converge it.
     pub fn repair_channel_message_sender(
         &self,
         message_id: &str,
@@ -3109,9 +2892,8 @@ impl MessageStore {
 
     // ── Message Deletion / Hiding (Phase 3.5) ──
 
-    /// Hide a channel message by message_id. Preserves text in message_deletions table.
-    /// The message stays in the DB (Rat Files evidence) but is hidden from UI queries.
-    /// Returns true if the message was found and hidden.
+    /// Hide a channel message, preserving its text in message_deletions. The row stays
+    /// in the DB as evidence but is filtered out of UI queries.
     pub fn hide_channel_message(
         &self,
         message_id: &str,
@@ -3134,9 +2916,8 @@ impl MessageStore {
         self.hide_message_in("messages", message_id, deleted_at, signature, public_key)
     }
 
-    /// Shared implementation of [`Self::hide_channel_message`] /
-    /// [`Self::hide_dm_message`]. `table` is a fixed table name ("messages" /
-    /// "channel_messages"), never user input.
+    /// Shared implementation of the hide methods. `table` is a fixed table name, never
+    /// user input.
     fn hide_message_in(
         &self,
         table: &str,
@@ -3145,7 +2926,6 @@ impl MessageStore {
         signature: Option<&str>,
         public_key: Option<&str>,
     ) -> Result<bool, String> {
-        // 1. Read the current text for evidence preservation.
         let text: Option<String> = self
             .conn
             .query_row(
@@ -3159,7 +2939,6 @@ impl MessageStore {
             return Ok(false); // Message not found.
         };
 
-        // 2. Preserve the text in message_deletions (Rat Files evidence).
         self.conn
             .execute(
                 "INSERT INTO message_deletions (message_id, deleted_text, deleted_at, signature, public_key)
@@ -3168,7 +2947,6 @@ impl MessageStore {
             )
             .map_err(|e| format!("Failed to insert deletion record: {e}"))?;
 
-        // 3. Set hidden_at — message stays in DB but is filtered out of queries.
         let rows = self
             .conn
             .execute(
@@ -3180,9 +2958,8 @@ impl MessageStore {
         Ok(rows > 0)
     }
 
-    /// Lightweight hidden_at setter for channel messages during sync.
-    /// Unlike hide_channel_message(), this does NOT preserve evidence in message_deletions
-    /// (the original deleter already did that). Used when syncing deleted messages to late joiners.
+    /// Lightweight hidden_at setter for channel messages during sync. Does NOT preserve
+    /// evidence: the original deleter already did.
     pub fn set_channel_message_hidden(&self, message_id: &str, hidden_at: i64) -> Result<(), String> {
         self.set_message_hidden_in("channel_messages", message_id, hidden_at)
     }
@@ -3203,11 +2980,8 @@ impl MessageStore {
         Ok(())
     }
 
-    /// The stored deletion proof for a message: `(deleted_at, signature,
-    /// public_key)` from the latest SIGNED `message_deletions` evidence row.
-    /// Sync responders attach this to `hidden_at` items (0.8.4); `None` for
-    /// pre-signing legacy deletions — those no longer propagate through sync
-    /// (REJECT-ABSENT).
+    /// The stored deletion proof for a message from the latest SIGNED evidence row.
+    /// `None` for pre-signing legacy deletions, which no longer propagate through sync.
     pub fn load_deletion_proof(&self, message_id: &str) -> Option<(i64, String, String)> {
         self.conn
             .query_row(
@@ -3244,11 +3018,9 @@ impl MessageStore {
             .flatten()
     }
 
-    /// Sync-apply setter for a VERIFIED deletion (0.8.4): sets `hidden_at`
-    /// like [`Self::set_channel_message_hidden`] AND stores the verified
-    /// proof in `message_deletions` (once) so THIS node can re-serve the
-    /// deletion with its proof. Without the store-forward, REJECT-ABSENT
-    /// would stop deletions from propagating past the first sync hop.
+    /// Sync-apply setter for a VERIFIED deletion: sets `hidden_at` and stores the proof
+    /// once, so THIS node can re-serve the deletion. Without the store-forward,
+    /// REJECT-ABSENT would stop deletions propagating past the first sync hop.
     pub fn set_channel_message_hidden_verified(
         &self,
         message_id: &str,
@@ -3270,9 +3042,8 @@ impl MessageStore {
         self.set_message_hidden_verified_in("messages", message_id, hidden_at, signature, public_key)
     }
 
-    /// Shared verified-hidden setter. `table` is a fixed table name, never
-    /// user input. Idempotent under sync re-apply: the evidence row is only
-    /// inserted while no SIGNED one exists for this message.
+    /// Shared verified-hidden setter. `table` is a fixed name, never user input.
+    /// Idempotent under re-apply: the evidence row is inserted only while none exists.
     fn set_message_hidden_verified_in(
         &self,
         table: &str,
@@ -3311,9 +3082,8 @@ impl MessageStore {
 
     // ── Emoji Reactions (Phase 3.5) ──────────────────────────────
 
-    /// Add a reaction to a message. INSERT OR IGNORE handles duplicates via UNIQUE constraint.
-    /// Enforces a limit of 3 distinct emojis per user per message.
-    /// Returns true if a new reaction was inserted (false if already exists or limit reached).
+    /// Add a reaction, at most 3 distinct emojis per user per message. Returns true only
+    /// when a new reaction was inserted.
     pub fn add_reaction(
         &self,
         message_id: &str,
@@ -3323,7 +3093,6 @@ impl MessageStore {
         signature: Option<&str>,
         public_key: Option<&str>,
     ) -> Result<bool, String> {
-        // Check how many distinct emojis this peer already has on this message.
         let count: i64 = self
             .conn
             .query_row(
@@ -3348,8 +3117,7 @@ impl MessageStore {
         Ok(rows > 0)
     }
 
-    /// Remove a reaction. Records evidence in reaction_removals (Rat Files).
-    /// Returns true if the reaction existed and was removed.
+    /// Remove a reaction, recording the removal as evidence.
     pub fn remove_reaction(
         &self,
         message_id: &str,
@@ -3381,12 +3149,9 @@ impl MessageStore {
         Ok(rows > 0)
     }
 
-    /// Shared batch loader for the per-message evidence tables (reactions,
-    /// edits, deletions, removals): runs
-    /// `SELECT message_id, <cols> FROM <table> WHERE message_id IN (…) ORDER BY <order_col> ASC`
-    /// and groups the mapped rows by message_id. `table`/`cols`/`order_col` are
-    /// fixed identifiers, never user input; `map` reads the row STARTING AT
-    /// INDEX 1 (index 0 is the message_id).
+    /// Shared batch loader for the per-message evidence tables, grouping mapped rows by
+    /// message_id. `table`/`cols`/`order_col` are fixed identifiers, never user input,
+    /// and `map` reads the row STARTING AT INDEX 1, since index 0 is the message_id.
     fn load_grouped_by_message_id<T>(
         &self,
         table: &str,
@@ -3399,7 +3164,6 @@ impl MessageStore {
             return Ok(HashMap::new());
         }
 
-        // Build placeholder list for IN clause.
         let placeholders: Vec<String> = message_ids.iter().enumerate().map(|(i, _)| format!("?{}", i + 1)).collect();
         let sql = format!(
             "SELECT message_id, {cols} FROM {table} WHERE message_id IN ({}) ORDER BY {order_col} ASC",
@@ -3423,8 +3187,7 @@ impl MessageStore {
         Ok(result)
     }
 
-    /// Load all reactions for a set of message IDs.
-    /// Returns a map: message_id → Vec<(emoji, peer_id, added_at)>.
+    /// Load all reactions for a set of message IDs, keyed by message_id.
     pub fn load_reactions_for_messages(
         &self,
         message_ids: &[String],
@@ -3438,8 +3201,7 @@ impl MessageStore {
         )
     }
 
-    /// Load all reactions with signatures for sync.
-    /// Returns: message_id → Vec<(emoji, peer_id, added_at, signature, public_key)>.
+    /// Load all reactions with signatures for sync, keyed by message_id.
     pub fn load_reactions_for_sync(
         &self,
         message_ids: &[String],
@@ -3455,8 +3217,8 @@ impl MessageStore {
 
     // ── Archive queries ─────────────────────────────────────────
 
-    /// Load ALL DM messages for a peer, including soft-deleted (hidden_at set).
-    /// No limit, ordered oldest-first. Used by the archive exporter.
+    /// Load ALL DM messages for a peer including hidden ones, oldest-first and
+    /// unlimited, for the archive exporter.
     pub fn load_all_dm_messages(
         &self,
         peer_id: &str,
@@ -3478,8 +3240,8 @@ impl MessageStore {
         collect_rows(rows, "DM message")
     }
 
-    /// Load ALL channel messages, including soft-deleted (hidden_at set).
-    /// No limit, ordered oldest-first. Used by the archive exporter.
+    /// Load ALL channel messages including hidden ones, oldest-first and unlimited, for
+    /// the archive exporter.
     pub fn load_all_channel_messages(
         &self,
         server_id: &str,
@@ -3502,8 +3264,7 @@ impl MessageStore {
         collect_rows(rows, "channel message")
     }
 
-    /// Load edit history for a batch of message IDs.
-    /// Returns a map of message_id → Vec<(old_text, new_text, edited_at, signature, public_key)>.
+    /// Load edit history for a batch of message IDs, keyed by message_id.
     pub fn load_edits_for_messages(
         &self,
         message_ids: &[String],
@@ -3526,8 +3287,7 @@ impl MessageStore {
         )
     }
 
-    /// Load deletion evidence for a batch of message IDs.
-    /// Returns a map of message_id → Vec<(deleted_text, deleted_at, signature, public_key)>.
+    /// Load deletion evidence for a batch of message IDs, keyed by message_id.
     pub fn load_deletions_for_messages(
         &self,
         message_ids: &[String],
@@ -3541,8 +3301,7 @@ impl MessageStore {
         )
     }
 
-    /// Load reaction removal evidence for a batch of message IDs.
-    /// Returns a map of message_id → Vec<(emoji, peer_id, removed_at, signature, public_key)>.
+    /// Load reaction removal evidence for a batch of message IDs, keyed by message_id.
     pub fn load_reaction_removals_for_messages(
         &self,
         message_ids: &[String],
@@ -3561,8 +3320,7 @@ impl MessageStore {
     /// Save a key-value setting (insert or update).
     // ── Search ────────────────────────────────────────────────────
 
-    /// Search channel messages by text content using FTS5 index.
-    /// Falls back to LIKE if FTS match fails.
+    /// Search channel messages via the FTS5 index, falling back to LIKE on a match error.
     pub fn search_channel_messages(
         &self,
         server_id: &str,
@@ -3639,17 +3397,13 @@ impl MessageStore {
             .as_millis() as i64;
         self.conn
             .execute(
-                // `requested_at` ADVANCES on a pending row and is FROZEN on every
-                // other status. It is what every dedup / anti-downgrade guard
-                // measures against, so a pending row that keeps the first value it
-                // was ever written with makes a genuinely newer request look newer
-                // than the store on every single re-delivery — the mailbox replays
-                // it and the receiver re-notifies forever. MAX(), not blind assign:
-                // an out-of-order older copy must never walk the row backwards.
-                // Accepted / declined / removed rows keep their ORIGINAL request
-                // time on purpose: the declined tombstone IS the freshness baseline
-                // a re-add has to beat, and an accepted friendship records when it
-                // was actually asked for.
+                // `requested_at` ADVANCES on a pending row and is FROZEN on every other status,
+                // because it is what every dedup and anti-downgrade guard measures against: a
+                // pending row keeping its first value makes a genuinely newer request look newer
+                // than the store on every re-delivery, so the mailbox replays it and the receiver
+                // re-notifies forever. MAX(), not blind assign, so an out-of-order older copy never
+                // walks the row backwards. Accepted and declined rows keep their ORIGINAL time: the
+                // declined tombstone IS the freshness baseline a re-add has to beat.
                 "INSERT INTO friends (peer_id, status, direction, requested_at, updated_at)
                  VALUES (?1, ?2, ?3, ?4, ?5)
                  ON CONFLICT(peer_id) DO UPDATE SET
@@ -3672,20 +3426,17 @@ impl MessageStore {
         Ok(())
     }
 
-    /// Re-key a friend row from a DEVICE id to its MASTER id once the device→master
-    /// mapping is learned (device-list ingest). Friendships must key on the master
-    /// (presence/DM/profile all do), but a friend added by TEMPORARY NICKNAME lands
-    /// under the friend's DEVICE id (the relay claims nicknames under the WS-auth
-    /// device socket), stranding the row. Returns true if a row was migrated.
+    /// Re-key a friend row from a DEVICE id to its MASTER id once the mapping is known.
+    /// Friendships must key on the master (presence, DM and profile all do), but a
+    /// friend added by TEMPORARY NICKNAME lands under the device id, because the relay
+    /// claims nicknames under the WS-auth device socket.
     ///
-    /// Merge rule when a master row already exists: keep `accepted` over `pending`,
-    /// keep the earliest non-zero `requested_at`, then delete the device row. No-op
-    /// when `device == master` or no device row exists.
+    /// When a master row already exists: keep `accepted` over `pending`, keep the
+    /// earliest non-zero `requested_at`, then delete the device row.
     pub fn migrate_friend_to_master(&self, device: &str, master: &str) -> Result<bool, String> {
         if device == master {
             return Ok(false);
         }
-        // Load the device row (if any).
         let dev_row: Option<(String, String, i64)> = self
             .conn
             .query_row(
@@ -3697,7 +3448,6 @@ impl MessageStore {
         let Some((dev_status, dev_dir, dev_req)) = dev_row else {
             return Ok(false);
         };
-        // Load the existing master row (if any) to merge.
         let mas_row: Option<(String, String, i64)> = self
             .conn
             .query_row(
@@ -3743,8 +3493,7 @@ impl MessageStore {
         Ok(true)
     }
 
-    /// Load all friends, optionally filtered by status.
-    /// Returns Vec<(peer_id, status, direction, requested_at, updated_at)>.
+    /// Load all friends as (peer_id, status, direction, requested_at, updated_at).
     pub fn load_friends(
         &self,
         status_filter: Option<&str>,
@@ -3780,9 +3529,9 @@ impl MessageStore {
 
     // ── Parked server joins ───────────────────────────────────────
 
-    /// Insert or replace a pending/rejected join row. `created_at` is preserved
-    /// across a repeat request (the tile keeps saying when you first asked)
-    /// while `requested_at` becomes the new nonce.
+    /// Insert or replace a pending or rejected join row. `created_at` survives a repeat
+    /// request so the tile keeps saying when you first asked, while `requested_at`
+    /// becomes the new nonce.
     pub fn upsert_pending_join(&self, row: &PendingJoinRow) -> Result<(), String> {
         self.conn
             .execute(
@@ -3864,10 +3613,9 @@ impl MessageStore {
         }
     }
 
-    /// Returns `(status, direction)` for a friend row, or `None` if absent.
-    /// Used to detect a MUTUAL friend request: an inbound request arriving while
-    /// our own row is `("pending", "outgoing")` means both sides requested and
-    /// should deterministically converge to friends.
+    /// `(status, direction)` for a friend row, used to detect a MUTUAL request: an
+    /// inbound request arriving while ours is `("pending", "outgoing")` means both sides
+    /// asked and should converge to friends.
     pub fn get_friend_status_direction(
         &self,
         peer_id: &str,
@@ -3884,11 +3632,9 @@ impl MessageStore {
         }
     }
 
-    /// Returns `(status, direction, requested_at)` for a friend row, or `None`.
-    /// The `requested_at` is what the anti-downgrade guard on the FriendRequest
-    /// handler needs to tell a duplicate mailbox re-delivery (same or older
-    /// `requested_at`, already displayed) from a genuine re-request (a strictly
-    /// newer one that must fall through and refresh).
+    /// `(status, direction, requested_at)` for a friend row. The anti-downgrade guard
+    /// needs `requested_at` to tell a duplicate mailbox re-delivery from a genuine
+    /// re-request, which is strictly newer and must refresh.
     pub fn get_friend_row(
         &self,
         peer_id: &str,
@@ -4009,9 +3755,8 @@ impl MessageStore {
         self.save_asset_blob(hash, bytes, animated, "emote")
     }
 
-    /// Cache a content-addressed asset blob. `kind` is one of
-    /// `emote | banner | sticker | gif` (see `node/assets.rs::AssetKind`) —
-    /// local bookkeeping for per-kind caps and eviction, never wire data.
+    /// Cache a content-addressed asset blob. `kind` is local bookkeeping for per-kind
+    /// caps and eviction and never rides the wire.
     pub fn save_asset_blob(
         &self,
         hash: &str,
@@ -4034,12 +3779,9 @@ impl MessageStore {
         Ok(())
     }
 
-    /// Record one file imported from a `.hollowpack` (artist shop).
-    ///
-    /// The bytes went onto the asset rail under their hash; this is the
-    /// provenance beside them. Idempotent by hash: importing the same pack
-    /// twice refreshes the row rather than doubling it, because a buyer who
-    /// re-downloads their order still owns the art once.
+    /// Record one file imported from a `.hollowpack`; the bytes went onto the asset rail
+    /// under their hash and this is the provenance beside them. Idempotent by hash: a
+    /// buyer who re-downloads their order still owns the art once.
     #[allow(clippy::too_many_arguments)]
     pub fn save_owned_art(
         &self,
@@ -4113,10 +3855,9 @@ impl MessageStore {
         Ok(out)
     }
 
-    /// The hash of every piece of shop art this install owns.
-    ///
-    /// Feeds the asset evictor's keep-set: art somebody PAID for is never a
-    /// cache entry, worn or not, and there is no peer to re-pull it from.
+    /// The hash of every piece of shop art this install owns, feeding the evictor's
+    /// keep-set: art somebody PAID for is never a cache entry, and there is no peer to
+    /// re-pull it from.
     pub fn owned_art_hashes(&self) -> Result<Vec<String>, String> {
         let mut stmt = self
             .conn
@@ -4128,12 +3869,9 @@ impl MessageStore {
         Ok(rows.filter_map(|r| r.ok()).collect())
     }
 
-    /// Keep one redeem code from a `hollow://redeem/<code>` deep link.
-    ///
-    /// Returns whether a row was actually written: a code kept twice (the
-    /// buyer clicked the thank-you link again) is a no-op, not an error. The
-    /// caller has already checked the code's SHAPE and the 64-row cap; this
-    /// is the write.
+    /// Keep one redeem code from a `hollow://redeem/<code>` deep link. Returns whether a
+    /// row was written: keeping the same code twice is a no-op, not an error. The caller
+    /// has already checked the code's shape and the row cap.
     pub fn save_redeem_code(&self, code: &str) -> Result<bool, String> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -4164,8 +3902,7 @@ impl MessageStore {
         Ok(rows.filter_map(|r| r.ok()).collect())
     }
 
-    /// Forget one kept redeem code. Deleting a code that was never kept is
-    /// not an error.
+    /// Forget one kept redeem code. Deleting one never kept is not an error.
     pub fn delete_redeem_code(&self, code: &str) -> Result<(), String> {
         self.conn
             .execute("DELETE FROM redeem_codes WHERE code = ?1", params![code])
@@ -4182,8 +3919,8 @@ impl MessageStore {
             .map_err(|e| format!("Failed to count redeem codes: {e}"))
     }
 
-    /// Keep one of OUR support credentials (artist shop, phase 2). Upsert by
-    /// item: a second redemption for the same item replaces the entry.
+    /// Keep one of OUR support credentials, upserting by item: a second redemption for
+    /// the same item replaces the entry.
     pub fn save_own_support_cred(
         &self,
         item: &str,
@@ -4212,9 +3949,8 @@ impl MessageStore {
         Ok(())
     }
 
-    /// Rewrite the stored entry of one of our credentials. The glyph flag is
-    /// stamped at publish time now, so nothing calls this today; it is the
-    /// only way to amend a kept row in place.
+    /// Rewrite the stored entry of one of our credentials, the only way to amend a kept
+    /// row in place. Nothing calls it today.
     pub fn update_own_support_cred_entry(&self, item: &str, entry_json: &str) -> Result<(), String> {
         self.conn
             .execute(
@@ -4225,8 +3961,7 @@ impl MessageStore {
         Ok(())
     }
 
-    /// Every credential this identity holds, newest first:
-    /// (item, entry_json, slug, title, artist_name, redeemed_at).
+    /// Every credential this identity holds, newest first.
     #[allow(clippy::type_complexity)]
     pub fn list_own_support_creds(
         &self,
@@ -4257,8 +3992,8 @@ impl MessageStore {
         Ok(out)
     }
 
-    /// Forget one of our credentials. Not offered in the UI (12.6: a
-    /// credential cannot be re-minted); the tests need a way.
+    /// Forget one of our credentials. Not offered in the UI, since a credential cannot
+    /// be re-minted; the tests need a way.
     pub fn delete_own_support_cred(&self, item: &str) -> Result<(), String> {
         self.conn
             .execute("DELETE FROM support_creds_own WHERE item = ?1", params![item])
@@ -4266,8 +4001,8 @@ impl MessageStore {
         Ok(())
     }
 
-    /// (hash, animated, byte size) of every cached blob of one kind, newest
-    /// first. Metadata only — bytes load per-hash via [`load_emote_blob`].
+    /// (hash, animated, byte size) of every cached blob of one kind, newest first.
+    /// Metadata only: bytes load per-hash via [`load_emote_blob`].
     pub fn list_asset_blobs_by_kind(
         &self,
         kind: &str,
@@ -4302,12 +4037,10 @@ impl MessageStore {
             .map_err(|e| format!("Failed to read asset usage: {e}"))
     }
 
-    /// LRU-evict asset blobs (oldest `added_at` first) until total size is
-    /// under `max_bytes * 0.8` (same hysteresis as the file-cache evictor).
-    /// Hashes in `keep` are never evicted — the caller passes everything
-    /// still referenced by a personal set or replicated CRDT state, so
-    /// eviction can only ever drop blobs that would be re-pulled on demand.
-    /// Returns bytes freed.
+    /// LRU-evict asset blobs until the total is under `max_bytes * 0.8` (the file-cache
+    /// evictor's hysteresis). Hashes in `keep` are never evicted: the caller passes
+    /// everything still referenced, so eviction can only drop blobs that would be
+    /// re-pulled on demand. Returns bytes freed.
     pub fn evict_asset_blobs(
         &self,
         max_bytes: u64,
@@ -4446,7 +4179,6 @@ impl MessageStore {
     // ── Personal sticker vault ────────────────────────────────────
 
     /// One row of the personal sticker vault.
-    /// `(pack, hash, name, animated, w, h, source, added_at)`.
     pub fn add_personal_sticker(&self, row: &PersonalStickerRow) -> Result<(), String> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -4485,9 +4217,8 @@ impl MessageStore {
         Ok(())
     }
 
-    /// Delete a whole pack. Blobs stay in the cache — they are
-    /// content-addressed and may still be referenced by a sent message; the
-    /// LRU reclaims them once nothing points at them.
+    /// Delete a whole pack. Blobs stay in the cache: they are content-addressed and may
+    /// still be referenced by a sent message, so the LRU reclaims them later.
     pub fn remove_personal_sticker_pack(&self, pack: &str) -> Result<(), String> {
         self.conn
             .execute(
@@ -4498,9 +4229,8 @@ impl MessageStore {
         Ok(())
     }
 
-    /// Move every sticker of `from` into `to` (pack rename). Rows already in
-    /// `to` with the same hash win, so a rename onto an existing pack merges
-    /// instead of failing the unique constraint.
+    /// Move every sticker of `from` into `to`. Rows already in `to` with the same hash
+    /// win, so a rename onto an existing pack merges instead of failing.
     pub fn rename_personal_sticker_pack(&self, from: &str, to: &str) -> Result<(), String> {
         self.conn
             .execute(
@@ -4511,9 +4241,8 @@ impl MessageStore {
         Ok(())
     }
 
-    /// The whole vault, pack-major and oldest-first inside each pack —
-    /// upload order IS pack order, which is what makes a multi-part pack
-    /// readable in the picker.
+    /// The whole vault, pack-major and oldest-first inside each pack: upload order IS
+    /// pack order, which is what makes a multi-part pack readable in the picker.
     pub fn list_personal_stickers(&self) -> Result<Vec<PersonalStickerRow>, String> {
         let mut stmt = self
             .conn
@@ -4561,10 +4290,8 @@ impl MessageStore {
         Ok(())
     }
 
-    /// Load ALL settings whose key starts with `prefix` in one query.
-    /// Startup used to issue one `load_setting` FFI round-trip per
-    /// server/channel/DM (~hundreds, serial) for the `notif:`/`seen:`
-    /// namespaces — this replaces that with a single indexed range read.
+    /// Load ALL settings whose key starts with `prefix` in one query. Startup used to
+    /// issue one FFI round-trip per server, channel and DM, hundreds of them, serially.
     pub fn load_settings_with_prefix(
         &self,
         prefix: &str,
@@ -4661,14 +4388,10 @@ impl MessageStore {
 
     // ── Security alerts (Issue 1-C) ────────────────────────────────
 
-    /// Record a security alert for a contact. Returns `true` if this is a NEW
-    /// fact (the row did not exist), `false` if we have already recorded it.
-    ///
-    /// Callers use the return value to decide whether to emit a live event —
-    /// a device list is re-ingested on every reconnect, so emitting
-    /// unconditionally would re-raise a warning the user already dismissed.
-    ///
-    /// `peer_id` MUST be a master id (alerts are about a person, not a socket).
+    /// Record a security alert for a contact. Returns `true` only when this is a NEW
+    /// fact, which is how callers decide to emit a live event: a device list is
+    /// re-ingested on every reconnect, so emitting unconditionally would re-raise a
+    /// warning the user already dismissed. `peer_id` MUST be a master id.
     pub fn record_security_alert(
         &self,
         peer_id: &str,
@@ -4689,8 +4412,7 @@ impl MessageStore {
         Ok(changed > 0)
     }
 
-    /// All security alerts, newest first. `acknowledged_at` is `None` while the
-    /// alert is still unread.
+    /// All security alerts, newest first; `acknowledged_at` is `None` while unread.
     pub fn get_security_alerts(&self) -> Result<Vec<SecurityAlertRow>, String> {
         let mut stmt = self
             .conn
@@ -4714,8 +4436,8 @@ impl MessageStore {
         Ok(rows.flatten().collect())
     }
 
-    /// Mark one alert as read. Idempotent — re-acknowledging keeps the first
-    /// timestamp so "when did I dismiss this" stays truthful.
+    /// Mark one alert as read. Idempotent, keeping the first timestamp so "when did I
+    /// dismiss this" stays truthful.
     pub fn acknowledge_security_alert(&self, alert_id: &str) -> Result<(), String> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -4731,8 +4453,7 @@ impl MessageStore {
         Ok(())
     }
 
-    /// Mark every outstanding alert for one contact as read (the "Dismiss"
-    /// action on the conversation banner, which speaks for all of them).
+    /// Mark every outstanding alert for one contact as read.
     pub fn acknowledge_security_alerts_for_peer(&self, peer_id: &str) -> Result<(), String> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -4750,8 +4471,8 @@ impl MessageStore {
 
     // ── Olm identity-key pins (Issue 1-C, TOFU) ────────────────────
 
-    /// The Curve25519 identity key previously pinned for `device_peer_id`, or
-    /// `None` if we have never completed a key exchange with it.
+    /// The Curve25519 identity key pinned for `device_peer_id`, `None` when we have
+    /// never completed a key exchange with it.
     pub fn get_olm_key_pin(&self, device_peer_id: &str) -> Result<Option<String>, String> {
         let mut stmt = self
             .conn
@@ -4812,15 +4533,12 @@ impl MessageStore {
     ) -> Result<(), String> {
         let vthumb_json = video_thumb
             .and_then(|v| serde_json::to_string(v).ok());
-        // UPSERT (not INSERT OR IGNORE): the FCM background-fetch node may have
-        // already inserted a MINIMAL placeholder row for this file (it only had
-        // the file_id from the DM payload — the real FileHeader is never sent to
-        // an offline peer, see file_handler.rs). When the real FileHeader later
-        // arrives via self-heal, we must FILL IN the true name/ext/size/dimensions,
-        // not silently ignore them. We deliberately do NOT touch completed_at,
-        // disk_path, or chunks_received here — those are owned by the download
-        // path (mark_file_complete / mark_chunk_received) and a re-arriving
-        // header must never reset a finished file back to "incomplete".
+        // UPSERT, not INSERT OR IGNORE: the background-fetch node may already have inserted
+        // a MINIMAL placeholder row (it only had the file_id, since the real FileHeader is
+        // never sent to an offline peer), so a later header must FILL IN the true
+        // name/ext/size/dimensions. It deliberately leaves completed_at, disk_path and
+        // chunks_received alone: those belong to the download path, and a re-arriving
+        // header must never reset a finished file back to incomplete.
         self.conn
             .execute(
                 "INSERT INTO files
@@ -4854,15 +4572,13 @@ impl MessageStore {
     }
 
 
-    /// Helper: deserialize a VideoThumbRef JSON blob from the DB. Returns None
-    /// on null or parse failure (forward-compat).
+    /// Deserialize a VideoThumbRef JSON blob; `None` on null or a parse failure.
     fn parse_video_thumb_json(json: Option<String>) -> Option<crate::node::VideoThumbRef> {
         json.and_then(|s| serde_json::from_str(&s).ok())
     }
 
-    /// Persist the ShareRef of a share-backed file (issue #41). Kept out of
-    /// `insert_file_metadata` so re-arriving headers WITHOUT a share_ref (e.g.
-    /// a FileRequest response) never blank an already-stored one.
+    /// Persist the ShareRef of a share-backed file. Kept out of `insert_file_metadata`
+    /// so a re-arriving header without one never blanks a stored ShareRef.
     pub fn set_file_share_ref(
         &self,
         file_id: &str,
@@ -4897,9 +4613,8 @@ impl MessageStore {
             )
             .map_err(|e| format!("Failed to insert file chunk: {e}"))?;
 
-        // Increment the counter only when the chunk row was actually new —
-        // a full `SELECT COUNT(*)` recount here made receiving a file O(n²)
-        // in its chunk count. A duplicate chunk (retry/re-send) is a no-op.
+        // Increment only when the chunk row was actually new: a full COUNT(*) recount here
+        // made receiving a file O(n²) in its chunk count.
         if inserted > 0 {
             self.conn
                 .execute(
@@ -4910,7 +4625,6 @@ impl MessageStore {
                 .map_err(|e| format!("Failed to update chunks_received: {e}"))?;
         }
 
-        // Return current count.
         let count: u32 = self
             .conn
             .query_row(
@@ -4941,18 +4655,14 @@ impl MessageStore {
         Ok(())
     }
 
-    /// Re-resolve a completed file's `disk_path` against the CURRENT files
-    /// directory.
+    /// Re-resolve a completed file's `disk_path` against the CURRENT files directory.
     ///
-    /// The DB stores an absolute `disk_path` captured when the file finished
-    /// downloading. On iOS the app's data-container path is NOT stable across
-    /// launches/reinstalls (the `Application/<UUID>` segment changes), so a
-    /// stored absolute path can point at a now-nonexistent old container even
-    /// though the file itself moved with the container and still exists. Files
-    /// are stored as `{file_id}.{file_ext}`, so we can deterministically rebuild
-    /// the correct current path. If the rebuilt path exists on disk we use it;
-    /// otherwise we leave the stored value untouched (desktop paths are stable
-    /// and some callers rely on the original string).
+    /// The stored path is absolute, captured when the download finished, but on iOS the
+    /// data-container path is NOT stable across launches, so it can point at a
+    /// now-nonexistent container even though the file moved with it. Files are stored as
+    /// `{file_id}.{file_ext}`, so the current path is deterministic; if the rebuilt path
+    /// exists we use it, otherwise the stored value is left alone because desktop paths
+    /// are stable and some callers rely on the original string.
     fn resolve_disk_path(file: &mut StoredFile) {
         if file.completed_at.is_none() {
             return;
@@ -5041,8 +4751,8 @@ impl MessageStore {
         collect_rows(rows, "file")
     }
 
-    /// Get total file storage used for a server (sum of size_bytes for completed files).
-    /// context_id for channel files is "server_id:channel_id", so we match with LIKE 'server_id:%'.
+    /// Total bytes of completed files for a server; channel context_ids are
+    /// "server_id:channel_id", so the match is a LIKE prefix.
     pub fn total_file_storage_for_server(&self, server_id: &str) -> Result<u64, String> {
         let pattern = format!("{server_id}:%");
         let result: i64 = self
@@ -5099,13 +4809,11 @@ impl MessageStore {
         Ok(missing)
     }
 
-    /// Get file_ids from messages that have a file_id but no completed file entry.
-    /// Used to find files that need downloading after message sync.
-    /// Also checks disk — skips files that already exist in ~/.hollow/files/.
+    /// file_ids from messages that have one but no completed file entry, for finding
+    /// files to download after message sync. Checks disk as well as the DB.
     ///
-    /// A row the retention sweep marked EXPIRED is never returned: those bytes
-    /// are gone by policy, so re-requesting them only asks holders that deleted
-    /// them for the same reason.
+    /// A row the retention sweep marked EXPIRED is never returned: those bytes are gone
+    /// by policy, so re-requesting them only asks holders that deleted them too.
     pub fn get_missing_file_ids(&self) -> Result<Vec<String>, String> {
         let mut stmt = self
             .conn
@@ -5129,9 +4837,8 @@ impl MessageStore {
         Ok(Self::filter_ids_not_on_disk(rows))
     }
 
-    /// Drop file ids whose bytes already exist in the files dir (a stem hit
-    /// means the bytes exist regardless of the DB `completed_at` state).
-    /// Unreadable rows are silently skipped.
+    /// Drop file ids whose bytes already exist in the files dir. Unreadable rows are
+    /// skipped.
     fn filter_ids_not_on_disk(rows: impl Iterator<Item = rusqlite::Result<String>>) -> Vec<String> {
         let disk_file_ids = Self::disk_file_stems();
         rows.filter_map(|r| r.ok())
@@ -5139,9 +4846,8 @@ impl MessageStore {
             .collect()
     }
 
-    /// File-id stems present in the files dir (read dir once). Files are stored
-    /// as {file_id}.{ext} — a stem hit means the bytes exist regardless of the
-    /// DB `completed_at` state.
+    /// File-id stems present in the files dir. A stem hit means the bytes exist,
+    /// whatever the DB `completed_at` says.
     fn disk_file_stems() -> std::collections::HashSet<String> {
         let files_dir = crate::identity::data_dir()
             .unwrap_or_default()
@@ -5156,11 +4862,9 @@ impl MessageStore {
             .unwrap_or_default()
     }
 
-    /// Like `get_missing_file_ids`, but scoped to ONE DM conversation (messages
-    /// are keyed on the friend's MASTER peer_id). Opening a DM must only
-    /// re-request files belonging to that thread — the account-global sweep
-    /// re-requested every missing id from the DM peer on every open (bandwidth
-    /// leak, and it leaked unrelated file ids to the friend).
+    /// Like `get_missing_file_ids`, scoped to ONE DM conversation. Opening a DM must
+    /// only re-request that thread's files: the account-global sweep re-requested every
+    /// missing id from the DM peer on every open, leaking unrelated file ids to them.
     pub fn get_missing_file_ids_for_dm(&self, peer_id: &str) -> Result<Vec<String>, String> {
         let mut stmt = self
             .conn
@@ -5200,16 +4904,13 @@ impl MessageStore {
         Ok(Self::filter_ids_not_on_disk(rows))
     }
 
-    /// Scan completed files for stale disk_paths (file no longer exists on disk).
-    /// Resets those entries to incomplete so they get re-requested from peers.
-    /// Returns the number of entries reset.
+    /// Scan completed files for stale disk_paths and reset those rows to incomplete so
+    /// they are re-requested. Returns how many were reset.
     ///
-    /// A stale ABSOLUTE path is not proof the bytes are gone: the data dir can
-    /// move (iOS container rotation, drive/profile changes) while the file is
-    /// still at the CURRENT `data_dir/files/{file_id}.{ext}`. Those rows are
-    /// HEALED (disk_path re-pointed) instead of nulled — nulling them marked
-    /// perfectly good files "missing" and made chat-open sweeps re-download
-    /// bytes we already hold.
+    /// A stale ABSOLUTE path is not proof the bytes are gone: the data dir can move
+    /// (iOS container rotation, profile changes) while the file is still at the current
+    /// `data_dir/files/{file_id}.{ext}`. Those rows are HEALED instead of nulled, since
+    /// nulling them marked good files missing and re-downloaded bytes we already hold.
     pub fn reset_stale_file_paths(&self) -> Result<u32, String> {
         let mut stmt = self
             .conn
@@ -5237,8 +4938,7 @@ impl MessageStore {
                 if std::path::Path::new(&disk_path).exists() {
                     continue;
                 }
-                // Stored path is stale — check the current canonical location
-                // before declaring the bytes missing.
+                // Check the current canonical location before declaring the bytes missing.
                 let current = files_dir
                     .as_ref()
                     .map(|d| d.join(format!("{file_id}.{file_ext}")));
@@ -5286,10 +4986,8 @@ impl MessageStore {
 
     // ── Storage Manager (downloaded-file disk usage) ────────────────────────
 
-    /// Per-context disk usage of downloaded files (Storage Manager breakdown).
-    /// Returns rows of `(context_type, context_id, total_size_bytes, file_count)`
-    /// for files that are completed AND still on disk. Cheap — backed by
-    /// `idx_files_context (context_type, context_id)`.
+    /// Per-context disk usage of downloaded files as `(context_type, context_id, bytes,
+    /// count)`, for files completed AND still on disk.
     pub fn storage_breakdown(&self) -> Result<Vec<(String, String, u64, u32)>, String> {
         let mut stmt = self
             .conn
@@ -5358,8 +5056,8 @@ impl MessageStore {
         Ok(rows.flatten().collect())
     }
 
-    /// Null the disk_path + completed_at for a single conversation/server's files
-    /// (so the message renders as a re-downloadable card). Returns rows affected.
+    /// Null disk_path and completed_at for one context's files, so the message renders
+    /// as a re-downloadable card. Returns rows affected.
     pub fn null_disk_path_for_context(
         &self,
         context_type: &str,
@@ -5391,9 +5089,8 @@ impl MessageStore {
         Ok(n as u32)
     }
 
-    /// Get file_ids for missing *image* files in a specific server.
-    /// Used for late-joiner image sync in 6+ member servers where non-image files
-    /// use vault erasure shards instead of P2P streaming.
+    /// file_ids for missing *image* files in a server, for late-joiner image sync in 6+
+    /// member servers where other files use vault erasure shards.
     pub fn get_missing_image_file_ids_for_server(&self, server_id: &str) -> Result<Vec<String>, String> {
         let mut stmt = self
             .conn
@@ -5421,7 +5118,6 @@ impl MessageStore {
     }
 
     /// Link a vault content_id to a file record via its message_id.
-    /// Used when VaultUploadFile completes (sender) or VaultManifestBroadcast arrives (receiver).
     pub fn set_file_content_id(&self, message_id: &str, content_id: &str) -> Result<(), String> {
         self.conn
             .execute(
@@ -5432,8 +5128,8 @@ impl MessageStore {
         Ok(())
     }
 
-    /// Get the vault content_id for a file by its file_id.
-    /// Returns None if the file doesn't have a vault content_id (e.g. DM files, <6 member files).
+    /// The vault content_id for a file, `None` when it has none (DM files, small
+    /// servers).
     pub fn get_content_id_for_file(&self, file_id: &str) -> Result<Option<String>, String> {
         self.conn
             .query_row(
@@ -5446,8 +5142,8 @@ impl MessageStore {
 
     // -- Hollow Share (Phase 7A) --
 
-    /// Insert or replace a share row. Used both at create-time (we made the share)
-    /// and at open-link-time (we received the link, manifest will arrive later).
+    /// Insert or replace a share row, both at create time and when a link is opened
+    /// before its manifest arrives.
     #[allow(clippy::too_many_arguments)]
     pub fn upsert_share(
         &self,
@@ -5490,8 +5186,7 @@ impl MessageStore {
         Ok(())
     }
 
-    /// Update only the save_dir for a share. Used by share_start when the
-    /// caller passes a new download location.
+    /// Update only the save_dir for a share.
     pub fn set_share_save_dir(&self, root_hash: &str, save_dir: &str) -> Result<(), String> {
         self.conn.execute(
             "UPDATE shares SET save_dir = ?2 WHERE root_hash = ?1",
@@ -5607,11 +5302,9 @@ impl MessageStore {
     }
 }
 
-/// A recorded identity event for a contact (Issue 1-C).
-///
-/// `kind` is one of the [`crate::node::security_alerts`] constants; `detail`
-/// carries the device id (`new_device`) or the new Olm identity key
-/// (`identity_key_changed`) so the UI can show WHAT changed, not just that
+/// A recorded identity event for a contact. `kind` is one of the
+/// [`crate::node::security_alerts`] constants and `detail` carries the device id or
+/// the new Olm identity key, so the UI can show WHAT changed.
 /// something did.
 #[derive(Clone, Debug)]
 pub struct SecurityAlertRow {
@@ -5625,11 +5318,9 @@ pub struct SecurityAlertRow {
     pub acknowledged_at: Option<i64>,
 }
 
-/// A persisted server join that has not completed yet (pending joins, rung 1).
-///
-/// Survives restarts on purpose: the whole point of parking a join is that the
-/// members were all offline, so the answer may arrive days later, on a
-/// different run of the app.
+/// A persisted server join that has not completed yet. Survives restarts on purpose:
+/// parking a join means every member was offline, so the answer may arrive days
+/// later on another run of the app.
 #[derive(Clone, Debug)]
 pub struct PendingJoinRow {
     pub server_id: String,
@@ -5644,10 +5335,9 @@ pub struct PendingJoinRow {
     /// Unix MILLISECONDS of the last `~join` ring deposit.
     pub last_deposited_at: i64,
     pub created_at: i64,
-    /// Base64 of the MLS KeyPackage this join will be added with (rung 2).
-    /// `None` for a row written before it existed, or a live join that never
-    /// parked. Persisted because the private half lives in the MLS store and
-    /// the answer can arrive days later, on another run of the app.
+    /// Base64 of the MLS KeyPackage this join will be added with; `None` for an older
+    /// row or a join that never parked. Persisted because the private half lives in the
+    /// MLS store and the answer can arrive days later.
     pub key_package: Option<String>,
 }
 
@@ -5715,17 +5405,14 @@ fn stored_share_from_row(row: &rusqlite::Row<'_>) -> Result<StoredShare, String>
 mod tests {
     use super::*;
 
-    /// In-memory SQLCipher store for tests. The passphrase must be valid hex
-    /// (interpolated as `x'…'`); a fresh `:memory:` db is created per call.
+    /// In-memory SQLCipher store for tests; the passphrase must be valid hex.
     fn mem_store() -> MessageStore {
         MessageStore::open(":memory:", &"ab".repeat(32)).expect("open in-memory store")
     }
 
-    /// Locks the multi-device peer-fallback responder branch: a friend serving a
-    /// SINGLE-device requester via `get_dm_messages_since` returns ONLY our own
-    /// sends (is_mine=1), while serving a MULTI-device requester via
-    /// `get_dm_messages_for_sibling` returns BOTH directions — so the requester
-    /// recovers its own messages sent from another (offline) device.
+    /// Locks the multi-device peer-fallback responder branch: a friend serving a SINGLE
+    /// device returns ONLY our own sends, while serving a MULTI-device requester returns
+    /// BOTH directions, so it recovers messages sent from another offline device.
     #[test]
     fn sibling_serve_returns_both_directions_unlike_friend_serve() {
         let store = mem_store();
@@ -5750,9 +5437,8 @@ mod tests {
         assert_eq!(both.iter().filter(|m| !m.is_mine).count(), 3);
     }
 
-    /// 0.8.4 deletion-proof plumbing: `load_deletion_proof` returns only a
-    /// SIGNED evidence row (a legacy bare hide has none to serve), and the
-    /// verified sync setter stores the proof exactly once under re-apply.
+    /// `load_deletion_proof` returns only a SIGNED evidence row, and the verified sync
+    /// setter stores the proof exactly once under re-apply.
     #[test]
     fn deletion_proof_load_and_verified_setter_idempotency() {
         let store = mem_store();
@@ -5783,11 +5469,10 @@ mod tests {
         );
     }
 
-    /// A friend added by temporary nickname is stored under the friend's DEVICE
-    /// id; once the device→master mapping is learned, `migrate_friend_to_master`
-    /// must move the row to the master so presence/DM/profile (all master-keyed)
-    /// line up. Covers the plain move, the merge-with-existing-master case
-    /// (prefer accepted), and the device==master no-op.
+    /// A friend added by temporary nickname is stored under their DEVICE id, and once
+    /// the mapping is learned the row must move to the master so presence, DM and
+    /// profile line up. Covers the move, the merge with an existing master, and the
+    /// device == master no-op.
     #[test]
     fn migrate_friend_device_to_master() {
         let device = "12D3KooWdeviceXYZ";
@@ -5836,11 +5521,9 @@ mod tests {
         }
     }
 
-    /// `save_friend` is an upsert, and `requested_at` is what every dedup /
-    /// anti-downgrade guard measures against. It must ADVANCE while the row is
-    /// pending (a cancel + re-add, or a newer incoming request) and FREEZE on
-    /// every other status, so the declined tombstone keeps the baseline a re-add
-    /// has to beat and an accepted friendship keeps when it was asked for.
+    /// `requested_at` must ADVANCE while a row is pending and FREEZE on every other
+    /// status, so the declined tombstone keeps the baseline a re-add has to beat and an
+    /// accepted friendship keeps when it was asked for.
     #[test]
     fn save_friend_advances_requested_at_for_pending_only() {
         let peer = "12D3KooWfriend";
@@ -5889,9 +5572,8 @@ mod tests {
         }
     }
 
-    /// `get_latest_dm_timestamp` (friend high-water) ignores our own sends, so a
-    /// multi-device requester must use `get_latest_dm_timestamp_any` to ask for
-    /// the gap in its OWN outgoing messages too.
+    /// A multi-device requester must use `get_latest_dm_timestamp_any`, since the friend
+    /// high-water ignores our own sends and would miss the gap in them.
     #[test]
     fn latest_any_spans_both_directions() {
         let store = mem_store();
@@ -5906,11 +5588,8 @@ mod tests {
         assert_eq!(store.get_latest_dm_timestamp_any(convo).unwrap(), Some(200));
     }
 
-    /// Step 9C/C4: a same-MILLISECOND burst from two senders must display grouped
-    /// by sender in true send order (order_us), NOT alternated by the sender_id
-    /// tiebreaker (the "ping-pong" bug). Pixel sends 3, then AL sends 3, all at the
-    /// SAME `timestamp` ms but with strictly increasing `order_us` reflecting true
-    /// order. Correct display: P1,P2,P3,A1,A2,A3 (not P,A,P,A,…).
+    /// A same-MILLISECOND burst from two senders must display grouped by sender in true
+    /// send order (order_us), not alternated by the sender_id tiebreaker.
     #[test]
     fn channel_same_ms_burst_orders_by_order_us_not_sender() {
         let store = mem_store();
@@ -5945,8 +5624,8 @@ mod tests {
         );
     }
 
-    /// C4: legacy rows with NULL order_us still sort deterministically (fall back to
-    /// timestamp*1000 then sender_id/id) — backward-compat with pre-9C data.
+    /// Legacy rows with NULL order_us still sort deterministically, falling back to
+    /// timestamp then sender_id and id.
     #[test]
     fn channel_null_order_us_falls_back_deterministically() {
         let store = mem_store();
@@ -5965,11 +5644,9 @@ mod tests {
         assert_eq!(order, vec!["first", "second"], "legacy NULL rows order by timestamp");
     }
 
-    /// Ghost-unread regression: the unread count is millisecond-granular —
-    /// a sync-BACKFILLED older row with a higher rowid must NOT count, and a
-    /// same-millisecond burst sibling of the seen row must NOT count (Dart
-    /// marks seen from a millisecond-sorted `.last`, which may not be the
-    /// intra-ms tuple-max). Only strictly-newer milliseconds are unread.
+    /// The unread count is millisecond-granular: a sync-backfilled older row with a
+    /// higher rowid must NOT count, and neither must a same-millisecond sibling of the
+    /// seen row, because Dart marks seen from a millisecond-sorted `.last`.
     #[test]
     fn unread_counts_are_millisecond_granular() {
         let store = mem_store();
@@ -6023,8 +5700,8 @@ mod tests {
         store.mark_file_complete(file_id, disk_path).unwrap();
     }
 
-    /// `storage_breakdown` groups completed-on-disk files by (context_type,
-    /// context_id) and sums their bytes + counts. Incomplete files are excluded.
+    /// `storage_breakdown` groups completed-on-disk files by context and sums them;
+    /// incomplete files are excluded.
     #[test]
     fn storage_breakdown_sums_per_context() {
         let store = mem_store();
@@ -6048,10 +5725,8 @@ mod tests {
         assert_eq!(ch.3, 1);
     }
 
-    /// `null_disk_path_for_context` clears disk_path + completed_at for ONE
-    /// context only — the conversation's files become re-downloadable while
-    /// other contexts are untouched. `disk_paths_for_context` returns the paths
-    /// to delete first.
+    /// `null_disk_path_for_context` clears one context only, leaving others untouched;
+    /// `disk_paths_for_context` returns the paths to delete first.
     #[test]
     fn clear_context_nulls_only_that_context() {
         let store = mem_store();
@@ -6092,9 +5767,8 @@ mod tests {
         assert!(store.storage_breakdown().unwrap().is_empty());
     }
 
-    /// Kept redeem codes: keeping the same code twice writes one row (the
-    /// buyer clicked their thank-you link again), forgetting removes it, and
-    /// the count is what the API layer caps against.
+    /// Keeping the same redeem code twice writes one row, forgetting removes it, and the
+    /// count is what the API layer caps against.
     #[test]
     fn redeem_codes_keep_is_idempotent_and_capped() {
         let store = mem_store();

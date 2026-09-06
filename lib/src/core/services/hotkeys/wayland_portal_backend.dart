@@ -7,23 +7,19 @@ import 'package:flutter/foundation.dart';
 import 'hotkey_backend.dart';
 import 'hotkey_binding.dart';
 
-/// System-wide hotkeys on Wayland via the XDG GlobalShortcuts portal
-/// (org.freedesktop.portal.GlobalShortcuts, KDE Plasma 5.25+ / GNOME 48+).
-/// The compositor delivers Activated AND Deactivated per shortcut — press
-/// and release — so hold-PTT works natively, with user consent handled by
-/// the portal's own dialog (same family as the screen-cast picker).
+/// System-wide hotkeys on Wayland via the XDG GlobalShortcuts portal (KDE
+/// Plasma 5.25+, GNOME 48+). The compositor delivers Activated AND
+/// Deactivated per shortcut, so hold-PTT works natively and consent is
+/// handled by the portal's own dialog.
 ///
-/// Lifecycle: the D-Bus connection comes from [detect] (which also proves
-/// the portal exists); the portal session is created lazily on the first
-/// start() and then KEPT for the process lifetime — BindShortcuts is
-/// once-per-session by spec, and bound shortcuts persist per app across
-/// sessions, so keeping the session avoids re-prompting the consent dialog
-/// on every call. A changed binding set closes the session and rebinds.
+/// The portal session is created lazily on the first start() and then KEPT
+/// for the process lifetime: BindShortcuts is once-per-session by spec and
+/// bound shortcuts persist per app, so keeping the session avoids re-prompting
+/// the consent dialog on every call. A changed binding set closes the session
+/// and rebinds.
 ///
-/// Trigger hints use the freedesktop shortcuts spec ("CTRL+space",
-/// "CTRL+SHIFT+m"); the compositor may honor or override them — the user
-/// always has the last word in the portal dialog / system settings, which
-/// is why [canHandle] accepts every binding.
+/// Trigger hints follow the freedesktop shortcuts spec and the compositor may
+/// honor or override them, which is why [canHandle] accepts every binding.
 class WaylandPortalBackend implements HotkeyBackend {
   WaylandPortalBackend._(this._client, this._portal);
 
@@ -53,8 +49,8 @@ class WaylandPortalBackend implements HotkeyBackend {
   Future<void>? _sessionWork;
 
   /// Detects a Wayland session with a GlobalShortcuts portal. Async because
-  /// availability is only knowable by asking D-Bus — the controller awaits
-  /// this once at init and falls back to the in-app backend on null.
+  /// availability is only knowable by asking D-Bus; the controller awaits it
+  /// once at init and falls back to the in-app backend on null.
   static Future<WaylandPortalBackend?> detect() async {
     if (!Platform.isLinux) return null;
     final env = Platform.environment;
@@ -96,9 +92,9 @@ class WaylandPortalBackend implements HotkeyBackend {
     _onEdge = onEdge;
     _isTextEditing = isTextEditing;
     final gen = ++_startGeneration;
-    // Serialize session work (start() can be called in bursts while the
-    // controller re-registers on settings loads); errors degrade to
-    // "portal hotkeys inactive", logged, never thrown out of start().
+    // Serialize session work, since start() can arrive in bursts while the
+    // controller re-registers on settings loads. Errors degrade to "portal
+    // hotkeys inactive", logged, never thrown out of start().
     _sessionWork = (_sessionWork ?? Future.value())
         .then((_) => _ensureSession(gen))
         .catchError((Object e) {
@@ -150,9 +146,9 @@ class WaylandPortalBackend implements HotkeyBackend {
     final wanted = _wantedSet();
     if (wanted.isEmpty) return;
 
-    // A session bound with a DIFFERENT set can't be rebound (BindShortcuts
-    // is once-per-session) — retire it. The consent dialog may reappear;
-    // that's the portal's contract for changed shortcuts.
+    // A session bound with a DIFFERENT set cannot be rebound (BindShortcuts
+    // is once-per-session), so retire it. The consent dialog may reappear;
+    // that is the portal's contract for changed shortcuts.
     if (_sessionHandle != null &&
         _boundSet != null &&
         !mapEquals(_boundSet, wanted)) {
@@ -161,7 +157,7 @@ class WaylandPortalBackend implements HotkeyBackend {
     }
     if (_sessionHandle != null && _boundSet != null) return; // covered
 
-    // --- CreateSession (skipped when an unbound session lingers) ---------
+    // CreateSession, skipped when an unbound session lingers.
     if (_sessionHandle == null) {
       final token = 'hollow_hk_r${++_tokenCounter}';
       final created = await _request('CreateSession', token, [
@@ -181,7 +177,7 @@ class WaylandPortalBackend implements HotkeyBackend {
       _sessionHandle = session;
     }
 
-    // --- Signals (subscribe before binding: no missed edges) --------------
+    // Subscribe to the signals before binding, so no edges are missed.
     _activatedSub ??= DBusSignalStream(_client,
             interface: _iface,
             name: 'Activated',
@@ -193,7 +189,6 @@ class WaylandPortalBackend implements HotkeyBackend {
             path: DBusObjectPath(_portalPath))
         .listen((s) => _onSignal(s, pressed: false));
 
-    // --- BindShortcuts ----------------------------------------------------
     final shortcuts = DBusArray(DBusSignature('(sa{sv})'), [
       for (final e in _bindings.entries)
         DBusStruct([
@@ -253,10 +248,9 @@ class WaylandPortalBackend implements HotkeyBackend {
 
   /// Calls a portal method that answers via the Request::Response signal.
   /// [token] must be the same handle_token passed inside the options dict:
-  /// the request path is derived from it + our unique name, and we subscribe
-  /// BEFORE the call — the Response can otherwise beat a late subscription
-  /// (the documented reason handle_token exists). Guaranteed consistent on
-  /// any xdg-desktop-portal new enough to have GlobalShortcuts (1.14+).
+  /// the request path is derived from it plus our unique name, and we
+  /// subscribe BEFORE the call, since the Response can otherwise beat a late
+  /// subscription, which is the documented reason handle_token exists.
   Future<Map<String, DBusValue>> _request(
       String method, String token, List<DBusValue> args) async {
     final sender =

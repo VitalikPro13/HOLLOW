@@ -31,11 +31,9 @@ class ServerListNotifier extends Notifier<Map<String, ServerInfo>> {
 
   /// Called when a ServerCreated/ServerJoined event arrives.
   ///
-  /// Inserts the server into the list UNCONDITIONALLY (never depends on a DB
-  /// read finding it — that weak path failed to refresh the list when a sibling
-  /// re-synced a server). The optimistic 1/1 counts are shown immediately so the
-  /// server icon appears instantly; a background DB read then corrects the
-  /// member/channel counts (an already-synced server may have many of each).
+  /// Inserts UNCONDITIONALLY, never depending on a DB read finding it (that weak
+  /// path failed when a sibling re-synced). Optimistic 1/1 counts show at once so
+  /// the icon appears; a background DB read then corrects them.
   void onServerCreated(String serverId, String name) {
     final updated = Map.of(state);
     final existing = updated[serverId];
@@ -74,7 +72,6 @@ class ServerListNotifier extends Notifier<Map<String, ServerInfo>> {
   /// Called when a ServerUpdated event arrives — full reload from DB.
   Future<void> onServerUpdated(String serverId) async {
     try {
-      // Reload all servers to get fresh name + counts
       final servers = await crdt_api.getJoinedServers();
       final match = servers.where((s) => s.serverId == serverId).firstOrNull;
       final updated = Map.of(state);
@@ -160,10 +157,9 @@ final serverIsNsfwProvider = FutureProvider.family<bool, String>(
 
 /// Returns the set of online member peer IDs for a server.
 ///
-/// Server members are master-keyed (ServerState.members), but presence is
-/// device-keyed. `onlineIdentitiesProvider` collapses devices→master and
-/// already excludes invisible peers, so a multi-device member counts as online
-/// via any of their devices.
+/// Server members are master-keyed while presence is device-keyed;
+/// `onlineIdentitiesProvider` collapses devices to masters and excludes
+/// invisible peers, so a member counts as online via any of their devices.
 final onlineMembersProvider =
     Provider.family<Set<String>, String>((ref, serverId) {
   final online = ref.watch(onlineIdentitiesProvider);
@@ -205,9 +201,8 @@ final serverNicknamesProvider =
   );
 });
 
-/// Memoized set of display names for all members in a server.
-/// Used by MessageText for @mention highlighting. Computed once per server
-/// when members/profiles/nicknames change, instead of per-message-bubble.
+/// Memoized set of display names for all members in a server, used by
+/// MessageText for @mention highlighting. Computed once per server.
 final serverMemberNamesProvider =
     Provider.family<Set<String>?, String>((ref, serverId) {
   final membersAsync = ref.watch(serverMembersProvider(serverId));

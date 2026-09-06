@@ -12,13 +12,11 @@ import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-/// Danger Zone tab — owner sees Delete, non-owners see Leave.
+/// Danger Zone tab: the owner sees Delete, everyone else sees Leave.
 class DangerZoneTab extends ConsumerWidget {
   final ServerInfo server;
 
   const DangerZoneTab({super.key, required this.server});
-
-  // ── Delete Server (Owner only) ─────────────────────────────────────
 
   void _confirmDelete(BuildContext context, WidgetRef ref) {
     showHollowDialog(
@@ -60,7 +58,6 @@ class DangerZoneTab extends ConsumerWidget {
   Future<void> _deleteServer(BuildContext context, WidgetRef ref) async {
     try {
       await crdt_api.deleteServer(serverId: server.serverId);
-      // Navigate away from settings
       ref.read(serverSettingsOpenProvider.notifier).state = false;
       ref.read(selectedServerProvider.notifier).state = null;
       ref.read(selectedChannelProvider.notifier).state = null;
@@ -82,8 +79,6 @@ class DangerZoneTab extends ConsumerWidget {
       }
     }
   }
-
-  // ── Leave Server (non-Owner) ───────────────────────────────────────
 
   void _confirmLeave(BuildContext context, WidgetRef ref) {
     showHollowDialog(
@@ -147,8 +142,6 @@ class DangerZoneTab extends ConsumerWidget {
     }
   }
 
-  // ── Build ──────────────────────────────────────────────────────────
-
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final hollow = HollowTheme.of(context);
@@ -182,7 +175,6 @@ class DangerZoneTab extends ConsumerWidget {
               const SizedBox(height: HollowSpacing.lg),
 
               if (!isOwner)
-                // Non-owner: Leave Server
                 Row(
                   children: [
                     Expanded(
@@ -211,7 +203,6 @@ class DangerZoneTab extends ConsumerWidget {
                 ),
 
               if (isOwner)
-                // Owner only: Delete Server
                 Row(
                   children: [
                     Expanded(

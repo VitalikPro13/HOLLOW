@@ -1,24 +1,17 @@
-//! Conferences — Zoom-style ad-hoc rooms with an MLS-gated waiting room.
+//! Conferences: Zoom-style ad-hoc rooms with an MLS-gated waiting room.
 //! Design doc: `reports/CONFERENCES_PLAN.md`.
 //!
-//! A conference is a "virtual server": its id is `conf:{conf_id}` and that one
-//! string is simultaneously the relay WS room code, the MLS group key, and the
-//! `server_id` fed to the existing voice-channel machinery (channel id is
-//! always [`CONF_CHANNEL`]). Because `server_states` never contains a `conf:`
-//! id, every CRDT-coupled path (sync requests, member fan-outs, restricted
-//! guards) skips naturally — the only conference-aware branches are the ones
-//! in this module plus a membership guard in `voice_handler` and an admitted
-//! event in the `MlsWelcome` arm.
+//! A conference is a "virtual server": its id `conf:{conf_id}` is at once the
+//! relay WS room code, the MLS group key and the `server_id` fed to the existing
+//! voice-channel machinery (the channel is always [`CONF_CHANNEL`]).
+//! `server_states` never contains a `conf:` id, so every CRDT-coupled path skips
+//! naturally.
 //!
-//! **Admission IS the cryptography:** the waiting room gates an MLS `add`.
-//! Until the host commits the add, a joiner sitting in the WS room holds only
-//! ciphertext. Kick/deny never needs UI-side enforcement. Each `Start meeting`
-//! mints a FRESH MLS group, so attendees of a past meeting can't decrypt the
-//! next one.
-//!
-//! Live-only by design: nothing here rides relay topic rings or the offline
-//! buffer, and conference chat is never persisted — it exists in the MLS group
-//! for exactly as long as the meeting does.
+//! **Admission IS the cryptography:** the waiting room gates an MLS `add`, so
+//! until the host commits it a joiner sitting in the WS room holds only
+//! ciphertext, and kick or deny never needs UI enforcement. Each `Start meeting`
+//! mints a FRESH group, so past attendees cannot decrypt the next one. Live-only:
+//! nothing rides topic rings or the offline buffer, and chat is never persisted.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
@@ -53,10 +46,9 @@ pub(crate) fn conf_id_from_sid(sid: &str) -> Option<&str> {
     sid.strip_prefix(CONF_SID_PREFIX)
 }
 
-/// Access-code wire form: sha256("{conf_id}:{code}") hex. The code itself
-/// never travels; the derivation is conf-scoped so one room's hash is useless
-/// against another room owned by the same host. This is an ADMISSION check,
-/// not key material — real access control is the MLS add.
+/// Access-code wire form: sha256("{conf_id}:{code}") hex. The code itself never
+/// travels, and the derivation is conf-scoped, so one room's hash is useless
+/// against another. An ADMISSION check, not key material: control is the MLS add.
 pub(crate) fn derive_access_hash(conf_id: &str, code: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(conf_id.as_bytes());
@@ -72,10 +64,9 @@ pub(crate) struct ConfPendingJoin {
     pub key_package_b64: String,
 }
 
-/// (Joiner side) an outbound knock we haven't been admitted/denied for yet.
-/// Kept so the knock can be RE-SENT when the host appears: a joiner who opens
-/// the link before the host starts the meeting broadcasts into an empty room
-/// — without a re-knock on the host's arrival, they'd wait forever.
+/// (Joiner side) an outbound knock not yet admitted or denied. Kept so it can be
+/// RE-SENT when the host appears: a joiner who opens the link before the meeting
+/// starts broadcasts into an empty room and would otherwise wait forever.
 struct PendingKnock {
     display_name: String,
     avatar_hash: String,
@@ -107,10 +98,9 @@ pub(crate) fn clear_pending_knock(conf_id: &str) {
     }
 }
 
-/// A peer appeared in a conf room we're still knocking on — re-broadcast the
-/// join request with a FRESH KeyPackage (the arrival may be the host starting
-/// the meeting). Throttled so a burst of arrivals doesn't spam; the host side
-/// dedups by peer anyway. Called from the PeerJoined/RoomMembers arms.
+/// A peer appeared in a conf room we are still knocking on: re-broadcast the join
+/// request with a FRESH KeyPackage, since the arrival may be the host starting the
+/// meeting. Throttled, and the host side dedups by peer anyway.
 pub(crate) fn reknock_if_pending(
     mls: &mut Option<MlsManager>,
     crypto_store: &CryptoStore,
@@ -291,10 +281,9 @@ pub(crate) fn handle_conference_leave(
 
 // ── Host: inbound join requests + admit/deny ─────────────────────────
 
-/// Host-side gate for an inbound `ConferenceJoinRequest`. Order matters:
-/// blocklist FIRST (a blocked identity never surfaces, standard inbound
-/// stranger-surface rule), then the access code, then waiting room vs
-/// auto-admit.
+/// Host-side gate for an inbound `ConferenceJoinRequest`. Order matters: blocklist
+/// FIRST (the standard inbound stranger-surface rule), then the access code, then
+/// waiting room versus auto-admit.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_inbound_join_request(
     conference_host: &mut HashMap<String, ConferenceHostState>,
@@ -537,9 +526,8 @@ pub(crate) async fn handle_inbound_chat(
         Err(_) => return,
     };
     // decrypt returns (plaintext, MLS leaf credential). Attribute chat by the
-    // CREDENTIAL — it's cryptographically authenticated per message, so one
-    // room member can't spoof another's lines (the WS sender is only a frame
-    // header). It's a DEVICE id; Dart collapses it via identityOf for display.
+    // CREDENTIAL: it is authenticated per message, so one room member cannot spoof
+    // another's lines. It is a DEVICE id, and Dart collapses it for display.
     let (plaintext, credential) = match mls_mgr.decrypt(&sid, &ciphertext) {
         Ok(p) => p,
         Err(e) => {
@@ -561,10 +549,9 @@ pub(crate) async fn handle_inbound_chat(
 
 // ── Voice-roster hygiene ─────────────────────────────────────────────
 
-/// Drop every voice-participant entry belonging to a conference. Called on
-/// start/end/leave: a previous meeting's members otherwise linger (their
-/// VoiceChannelLeave broadcast races the host's room-leave/group-drop and
-/// never lands, and restarting reuses the same `conf:{id}:main` key).
+/// Drop every voice-participant entry belonging to a conference. Called on start,
+/// end and leave: a previous meeting's members otherwise linger, because their
+/// VoiceChannelLeave races the host's room-leave and a restart reuses the key.
 pub(crate) fn clear_conf_voice_state(
     voice_channel_participants: &mut HashMap<String, HashSet<String>>,
     voice_channel_gossip_mode: &mut HashMap<String, bool>,
@@ -575,11 +562,10 @@ pub(crate) fn clear_conf_voice_state(
     voice_channel_gossip_mode.retain(|k, _| !k.starts_with(&prefix));
 }
 
-/// A device vanished from a conference ROOM (PeerLeft / missing from the
-/// authoritative RoomMembers snapshot): being in the room is a prerequisite
-/// for being in the call, so drop them from the voice roster and tell Dart —
-/// this is what removes the tile LIVE for kicked/crashed/departed members
-/// whose VoiceChannelLeave never arrived.
+/// A device vanished from a conference ROOM (PeerLeft, or missing from the
+/// authoritative RoomMembers snapshot): being in the room is a prerequisite for
+/// being in the call, so drop them from the voice roster and tell Dart. This is
+/// what removes the tile LIVE when a VoiceChannelLeave never arrived.
 pub(crate) async fn handle_conf_room_peer_gone(
     voice_channel_participants: &mut HashMap<String, HashSet<String>>,
     voice_channel_gossip_mode: &mut HashMap<String, bool>,

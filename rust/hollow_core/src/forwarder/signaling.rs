@@ -2,14 +2,13 @@
 //! `fwd:{peer_id}` room, an Olm KEY-EXCHANGE RESPONDER (the forwarder never
 //! initiates), and the fwd_* envelope dispatch into the engine.
 //!
-//! Deliberately NOT `spawn_node` / `spawn_ws_client` — no CRDT, no MLS, no
-//! sync, no gossip, no room-state machinery. The manual loop mirrors
-//! `node/fetch.rs::run_fetch` (the proven headless precedent) plus the
-//! keepalive/liveness discipline from `ws_client.rs` (30 s ping, 70 s
-//! liveness, bounded writes, backoff reconnect + room rejoin). Media legs ride
-//! their own UDP sockets and survive signaling blips untouched.
+//! Deliberately NOT `spawn_node` / `spawn_ws_client`: no CRDT, MLS, sync, gossip or
+//! room-state machinery. The manual loop keeps the keepalive and liveness
+//! discipline of `ws_client.rs` (30 s ping, 70 s liveness, bounded writes, backoff
+//! reconnect and room rejoin), and media legs ride their own UDP sockets, so they
+//! survive signaling blips untouched.
 //!
-//! Zero metadata logging: no per-peer request logs; security refusals log the
+//! Zero metadata logging: no per-peer request logs, and a security refusal logs the
 //! reason, never a stream identity.
 
 use std::collections::{HashMap, HashSet};
@@ -33,8 +32,8 @@ use crate::node::ws_client;
 use super::engine::{EngineCmd, OutSignal};
 use super::ForwarderConfig;
 
-/// Mirrors ws_client.rs WRITE_TIMEOUT / LIVENESS_TIMEOUT (the zombie-socket
-/// lessons — a wedged sink must never freeze the loop).
+/// Mirrors ws_client.rs WRITE_TIMEOUT / LIVENESS_TIMEOUT: a wedged sink must never
+/// freeze the loop.
 const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 const LIVENESS_TIMEOUT: Duration = Duration::from_secs(70);
 
@@ -80,8 +79,7 @@ pub(crate) async fn run(
             Ok(ws) => ws,
             Err(e) => {
                 if e.contains("license") {
-                    // License refusals never heal by retrying (mirrors the
-                    // client's stop-on-LicenseError rule).
+                    // License refusals never heal by retrying.
                     return Err(format!("relay refused auth: {e}"));
                 }
                 hollow_log!("[HOLLOW-FWD] relay connect failed: {e} — retry in {backoff}s");
@@ -115,14 +113,9 @@ pub(crate) async fn run(
                     if bounded_send(&mut write, Message::Ping(vec![0x01].into())).await.is_err() {
                         break 'session;
                     }
-                    // Membership belt (field 2026-08-06: large frames to this
-                    // long-lived socket vanished — one suspect is relay-side
-                    // room-membership loss, which silently diverts directs
-                    // into the offline buffer until our next join). Re-joining
-                    // is idempotent at the relay (redundant joins suppress the
-                    // peer_joined broadcast) AND replays anything buffered
-                    // while membership was broken — prevention and recovery in
-                    // one frame every 30 s.
+                    // Membership belt: relay-side room-membership loss silently diverts directs
+                    // into the offline buffer until our next join. Re-joining is idempotent at
+                    // the relay AND replays what was buffered while membership was broken.
                     if bounded_send(&mut write, Message::Text(join.clone().into())).await.is_err() {
                         break 'session;
                     }
@@ -167,8 +160,8 @@ pub(crate) async fn run(
     }
 }
 
-/// Room presence tracking. A vanished peer drives engine cleanup (owner gone
-/// → streams unregister; viewer gone → legs detach).
+/// Room presence tracking. A vanished peer drives engine cleanup: owner gone
+/// unregisters streams, viewer gone detaches legs.
 fn handle_text_frame(
     text: &str,
     room: &str,
@@ -225,8 +218,8 @@ fn parse_direct_frame(body: &[u8]) -> Option<(String, String)> {
     Some((sender, payload))
 }
 
-/// The engine-bound fwd envelope's wire tag, for the inbound observability
-/// line (envelope types + sizes only — never identities).
+/// The engine-bound fwd envelope's wire tag, for the inbound observability line
+/// (envelope types and sizes only, never identities).
 fn fwd_env_label(env: &MessageEnvelope) -> &'static str {
     match env {
         MessageEnvelope::FwdStreamRegister { .. } => "fwd_stream_register",
@@ -243,14 +236,12 @@ fn fwd_env_label(env: &MessageEnvelope) -> &'static str {
 /// Inbound relay binary frame: only 0x06 (direct) matters — the whole fwd
 /// control plane is Olm-direct.
 ///
-/// NO rate limiting here (2026-08-07): the per-peer token bucket this carried
-/// was the only spot in the whole fwd pipeline that ate a frame with ZERO
-/// trace — exactly the silent-drop class the relay refuses to have
-/// (`feedback_relay_rules`), and a live suspect for the vanished large-frame
-/// field defect. The DoS surface stays bounded without it: garbage fails the
-/// cheap HavenMessage/Olm parse, the expensive KeyRequest re-bundle is behind
-/// the 5 s per-peer cooldown, and admission caps refuse with explicit
-/// FwdError codes. Every outcome below logs (sizes + types, never identities).
+/// NO rate limiting here: the per-peer token bucket this once carried was the only
+/// spot in the fwd pipeline that ate a frame with ZERO trace, the silent-drop class
+/// the relay refuses (`feedback_relay_rules`). The DoS surface stays bounded
+/// without it: garbage fails the cheap HavenMessage/Olm parse, the expensive
+/// KeyRequest re-bundle is behind a 5 s per-peer cooldown, and admission caps refuse
+/// with explicit FwdError codes.
 #[allow(clippy::too_many_arguments)]
 async fn handle_binary_frame(
     data: &[u8],
@@ -314,9 +305,8 @@ async fn handle_binary_frame(
                     );
                     let _ = engine_tx.send(EngineCmd::Signal { sender, envelope: env });
                 }
-                // SessionAck confirms the peer's ratchet; everything else a
-                // client might broadcast at room peers (profiles, sync
-                // requests) is irrelevant to a forwarder.
+                // SessionAck confirms the peer's ratchet; anything else a client broadcasts at
+                // room peers is irrelevant to a forwarder.
                 Ok(_) => {
                     hollow_log!("[HOLLOW-FWD] inbound {frame_len} B: non-fwd envelope — ignored");
                 }
@@ -325,19 +315,16 @@ async fn handle_binary_frame(
                 }
             }
         }
-        // The forwarder never sends KeyRequest, so KeyBundle should never
-        // arrive; everything else (profiles, friend requests, ...) is not
-        // for us.
+        // The forwarder never sends KeyRequest, so a KeyBundle should never arrive.
         _ => {
             hollow_log!("[HOLLOW-FWD] inbound {frame_len} B: non-fwd HavenMessage — ignored");
         }
     }
 }
 
-/// The Olm key-exchange RESPONDER (mirrors swarm.rs's KeyRequest arm):
-/// signature REQUIRED (`REQUIRE_SIGNED_KEY_EXCHANGE`), re-key storms bounded
-/// by a 5 s cooldown, our bundle signed by the forwarder's own keypair
-/// (master == device for a forwarder — one identity).
+/// The Olm key-exchange RESPONDER: signature REQUIRED
+/// (`REQUIRE_SIGNED_KEY_EXCHANGE`), re-key storms bounded by a 5 s cooldown, our
+/// bundle signed by the forwarder's own keypair (master == device here).
 #[allow(clippy::too_many_arguments)]
 async fn handle_key_request(
     sender: &str,
@@ -369,10 +356,9 @@ async fn handle_key_request(
             return;
         }
     }
-    // NOTE: no `key_exchange_device_unauthorized` check here — the forwarder
-    // holds no device-list state (resolver empty ⇒ every device is
-    // first-contact), and authorization is enforced where it matters: the
-    // per-stream allowlist at admission.
+    // No `key_exchange_device_unauthorized` check: the forwarder holds no device-list
+    // state, so every device is first-contact, and authorization is enforced where it
+    // matters, at the per-stream allowlist.
 
     let now = std::time::Instant::now();
     let cooldown_ok = rekey_cooldown
@@ -382,8 +368,8 @@ async fn handle_key_request(
         return;
     }
     if olm.has_session(sender) {
-        // Peer lost their half — drop ours before re-bundling so the new
-        // inbound session isn't shadowed by a dead one.
+        // Peer lost their half: drop ours before re-bundling so the new inbound
+        // session is not shadowed by a dead one.
         olm.remove_session(sender);
         rekey_cooldown.insert(sender.to_string(), now);
     }
@@ -397,8 +383,8 @@ async fn handle_key_request(
     send_haven_direct(write, room, sender, &bundle).await;
 }
 
-/// Olm decrypt for an inbound Encrypted body (fetch.rs `olm_decrypt_payload`
-/// shape: prekey messages try the existing session, then recreate inbound).
+/// Olm decrypt for an inbound Encrypted body: prekey messages try the existing
+/// session first, then recreate inbound.
 fn olm_decrypt(
     from: &str,
     message_type: usize,
@@ -464,9 +450,8 @@ async fn send_encrypted(
         Err(_) => return,
     };
     if !olm.has_session(&sig.to_peer) {
-        // Can't happen for replies (every request arrived through a session);
-        // if it does, the client's 20 s watch timeout walks the fallback
-        // ladder.
+        // Cannot happen for replies (every request arrived through a session); if it
+        // does, the client's 20 s watch timeout walks the fallback ladder.
         hollow_log!("[HOLLOW-FWD] no Olm session for reply target — dropped");
         return;
     }

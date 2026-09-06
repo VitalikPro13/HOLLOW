@@ -106,9 +106,8 @@ class ConnectionStatusState {
     );
   }
 
-  /// Get peers with meaningful connection activity worth showing in the UI.
-  /// Excludes dialing (routine rebootstrap noise) and failed (auto-expires).
-  /// Only shows peers that actually made progress: connected or keyExchange.
+  /// Peers with meaningful connection activity worth showing: connected or
+  /// keyExchange, never dialing (rebootstrap noise) or failed (auto-expires).
   List<PeerConnectionStatus> get activePeers => peers.values
       .where((p) =>
           p.stage == PeerConnectionStage.connected ||
@@ -262,13 +261,10 @@ final connectionStatusProvider =
         ConnectionStatusNotifier.new);
 
 /// The single source of truth for "am I actually connected", combining the
-/// LOCAL node lifecycle (`nodeProvider`) with the REAL relay-WebSocket state
-/// (`connectionStatusProvider.relayStatus`).
+/// LOCAL node lifecycle with the REAL relay-WebSocket state.
 ///
 /// The local node reaches `connected` the instant it starts, even with no
-/// internet — so it must NOT drive the connection indicator on its own. The
-/// node phase only gates loading/error; once the node is up, the relay state
-/// decides Connected / Connecting / Reconnecting / Offline.
+/// internet, so the node phase only gates loading/error; the relay state decides.
 enum OverallConnection { loading, error, connecting, reconnecting, connected, offline }
 
 extension OverallConnectionLabel on OverallConnection {

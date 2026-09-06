@@ -7,10 +7,9 @@ import 'package:hollow/src/ui/components/edge_scroll_row.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-/// Two-row signature status banner for imported archives (archive-level
-/// signature + per-message signatures). Strings come from
-/// `prepareImportedArchive` so each form factor keeps its exact wording.
-/// [dense] = mobile sizing (icon 13 / fonts 11+10 / md padding).
+/// Two-row signature status banner for imported archives: the archive-level
+/// signature and the per-message ones. Strings come from
+/// `prepareImportedArchive`, and [dense] is the mobile sizing.
 class ArchiveVerificationBanner extends StatelessWidget {
   final bool archiveSigValid;
   final String archiveSigText;
@@ -95,8 +94,8 @@ class ArchiveVerificationBanner extends StatelessWidget {
   }
 }
 
-/// Horizontal chip row for switching channels in a server archive.
-/// Callers reset filter/search providers in [onChannelSelected].
+/// Horizontal chip row for switching channels in a server archive. Callers
+/// reset the filter and search providers in [onChannelSelected].
 class ArchiveChannelSelector extends StatelessWidget {
   final List<archive_api.ArchiveChannelInfoFfi> channels;
   final String? activeChannelId;
@@ -120,8 +119,8 @@ class ArchiveChannelSelector extends StatelessWidget {
         color: hollow.surface,
         border: Border(bottom: BorderSide(color: hollow.border)),
       ),
-      // EdgeScrollRow: past a handful of channels the strip overflowed with
-      // no way to reach the rest on a wheel mouse.
+      // Past a handful of channels the strip overflows with no way to reach
+      // the rest on a wheel mouse.
       child: EdgeScrollRow(
         semanticLabel: 'channels',
         children: channels.map((ch) {

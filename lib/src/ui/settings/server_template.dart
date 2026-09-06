@@ -19,8 +19,6 @@ import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-// ─── Data models ────────────────────────────────────────────────────────────
-
 class ServerTemplate {
   final int version;
   final String? exportedAt;
@@ -137,18 +135,14 @@ class TemplateDiff {
       !layoutChanged;
 }
 
-// ─── Export ──────────────────────────────────────────────────────────────────
-
 Future<void> exportServerTemplate(
   BuildContext context,
   ServerInfo server,
 ) async {
   try {
-    // Read current channels.
     final channelsFfi =
         await crdt_api.getServerChannels(serverId: server.serverId);
 
-    // Read layout.
     final layoutRaw =
         await crdt_api.getChannelLayout(serverId: server.serverId);
     final layoutList = layoutRaw.isNotEmpty
@@ -156,7 +150,6 @@ Future<void> exportServerTemplate(
             .cast<Map<String, dynamic>>()
         : <Map<String, dynamic>>[];
 
-    // Read settings.
     String description = '';
     try {
       description = await crdt_api.getServerSetting(
@@ -170,7 +163,6 @@ Future<void> exportServerTemplate(
       if (val.isNotEmpty) iconBase64 = val;
     } catch (_) {}
 
-    // Assign template_id to each channel and build the id mapping.
     final idToTemplate = <String, String>{}; // channel_id -> template_id
     final templateChannels = <TemplateChannel>[];
     for (var i = 0; i < channelsFfi.length; i++) {
@@ -185,7 +177,6 @@ Future<void> exportServerTemplate(
       ));
     }
 
-    // Rewrite layout: replace channel_id with template_id.
     final templateLayout = <Map<String, dynamic>>[];
     for (final item in layoutList) {
       final type = item['type'] as String?;
@@ -213,7 +204,6 @@ Future<void> exportServerTemplate(
 
     final json = const JsonEncoder.withIndent('  ').convert(template.toJson());
 
-    // Sanitize server name for filename.
     final safeName = server.name
         .replaceAll(RegExp(r'[^\w\s-]'), '')
         .replaceAll(RegExp(r'\s+'), '-')
@@ -248,8 +238,6 @@ Future<void> exportServerTemplate(
     }
   }
 }
-
-// ─── Import ─────────────────────────────────────────────────────────────────
 
 Future<void> importServerTemplate(
   BuildContext context,
@@ -296,7 +284,6 @@ Future<void> importServerTemplate(
       return;
     }
 
-    // Icon sanity check: reject decoded icons >1MB.
     if (template.iconBase64Webp != null) {
       try {
         final decoded = base64.decode(template.iconBase64Webp!);
@@ -312,7 +299,6 @@ Future<void> importServerTemplate(
       }
     }
 
-    // Read current server state for diffing.
     final currentChannels =
         await crdt_api.getServerChannels(serverId: server.serverId);
     final currentChannelInfos = currentChannels
@@ -374,9 +360,8 @@ Future<void> importServerTemplate(
     final confirmed = await _showConfirmationDialog(context, template, diff);
     if (confirmed != true || !context.mounted) return;
 
-    // Non-dismissible progress dialog: the apply runs channel deletes/creates
-    // plus an up-to-5s polling loop — without this the UI sits silent until
-    // the terminal toast. Popped in the finally.
+    // Non-dismissible: the apply runs channel deletes, creates and a polling
+    // loop, so without this the UI sits silent until the terminal toast.
     unawaited(showHollowDialog<void>(
       context: context,
       barrierDismissible: false,
@@ -395,8 +380,6 @@ Future<void> importServerTemplate(
   }
 }
 
-// ─── Diff computation ───────────────────────────────────────────────────────
-
 TemplateDiff _computeDiff({
   required ServerTemplate template,
   required String currentName,
@@ -404,7 +387,6 @@ TemplateDiff _computeDiff({
   required String? currentIcon,
   required List<ChannelInfo> currentChannels,
 }) {
-  // Match channels by exact name + type (case-insensitive).
   final unmatched = List<ChannelInfo>.from(currentChannels);
   final matched = <String, String>{}; // template_id -> channel_id
   final toAdd = <TemplateChannel>[];
@@ -421,12 +403,8 @@ TemplateDiff _computeDiff({
     }
   }
 
-  // Check layout change — compare the template layout (with template_ids
-  // resolved to real channel_ids) against the current layout.
   bool layoutChanged = toAdd.isNotEmpty || unmatched.isNotEmpty;
-  // If channels match perfectly, still check if the ordering changed.
   if (!layoutChanged && template.channelLayout.isNotEmpty) {
-    // Build the resolved layout channel order from template.
     final templateOrder = <String>[];
     for (final item in template.channelLayout) {
       if (item['type'] == 'channel') {
@@ -436,7 +414,6 @@ TemplateDiff _computeDiff({
         }
       }
     }
-    // Build current channel order from provider data.
     final currentOrder =
         currentChannels.map((c) => c.channelId).toList();
     if (templateOrder.length != currentOrder.length ||
@@ -469,8 +446,6 @@ bool _listEquals<T>(List<T> a, List<T> b) {
   }
   return true;
 }
-
-// ─── Apply template ─────────────────────────────────────────────────────────
 
 /// Blocking progress dialog shown while [_applyTemplate] runs.
 class _TemplateApplyProgressDialog extends StatelessWidget {
@@ -509,7 +484,6 @@ Future<void> _applyTemplate(
   TemplateDiff diff,
 ) async {
   try {
-    // Phase 1: settings (independent, fire in parallel).
     final settingsFutures = <Future>[];
     if (diff.nameChange != null) {
       settingsFutures.add(crdt_api.renameServer(
@@ -537,16 +511,13 @@ Future<void> _applyTemplate(
     }
     await Future.wait(settingsFutures);
 
-    // Phase 2: remove channels not in the template.
     for (final ch in diff.channelsToRemove) {
       await crdt_api.removeChannel(
           serverId: serverId, channelId: ch.channelId);
     }
 
-    // Phase 3: create new channels and wait for their IDs.
     final newChannelMap = <String, String>{}; // template_id -> channel_id
     if (diff.channelsToAdd.isNotEmpty) {
-      // Snapshot current channel names before creation.
       final existingIds =
           ref.read(channelListProvider).keys.toSet();
 
@@ -559,7 +530,6 @@ Future<void> _applyTemplate(
         );
       }
 
-      // Poll channelListProvider until new channels appear (max 5s).
       for (var attempt = 0; attempt < 50; attempt++) {
         await Future.delayed(const Duration(milliseconds: 100));
         final current = ref.read(channelListProvider);
@@ -577,9 +547,7 @@ Future<void> _applyTemplate(
       }
     }
 
-    // Phase 4: update layout.
     if (diff.layoutChanged && template.channelLayout.isNotEmpty) {
-      // Build full ID mapping: matched existing + newly created.
       final fullMap = <String, String>{
         ...diff.matchedChannels,
         ...newChannelMap,
@@ -605,7 +573,6 @@ Future<void> _applyTemplate(
       );
     }
 
-    // Phase 5: refresh UI.
     await ref.read(channelListProvider.notifier).loadForServer(serverId);
     await ref.read(channelLayoutProvider.notifier).loadForServer(serverId);
     ref.read(serverListProvider.notifier).onServerUpdated(serverId);
@@ -621,8 +588,6 @@ Future<void> _applyTemplate(
     }
   }
 }
-
-// ─── Confirmation dialog ────────────────────────────────────────────────────
 
 Future<bool?> _showConfirmationDialog(
   BuildContext context,
@@ -655,7 +620,6 @@ Future<bool?> _showConfirmationDialog(
               ),
               const SizedBox(height: HollowSpacing.lg),
 
-              // Settings changes.
               if (diff.nameChange != null ||
                   diff.descriptionChange != null ||
                   diff.iconChanged) ...[
@@ -673,7 +637,6 @@ Future<bool?> _showConfirmationDialog(
                 const SizedBox(height: HollowSpacing.md),
               ],
 
-              // Channels to add.
               if (diff.channelsToAdd.isNotEmpty) ...[
                 _sectionHeader(hollow, 'CHANNELS TO ADD'),
                 const SizedBox(height: HollowSpacing.xs),
@@ -689,7 +652,6 @@ Future<bool?> _showConfirmationDialog(
                 const SizedBox(height: HollowSpacing.md),
               ],
 
-              // Channels to remove.
               if (diff.channelsToRemove.isNotEmpty) ...[
                 _sectionHeader(hollow, 'CHANNELS TO REMOVE'),
                 const SizedBox(height: HollowSpacing.xs),
@@ -705,7 +667,6 @@ Future<bool?> _showConfirmationDialog(
                 const SizedBox(height: HollowSpacing.md),
               ],
 
-              // Layout.
               if (diff.layoutChanged &&
                   diff.channelsToAdd.isEmpty &&
                   diff.channelsToRemove.isEmpty)
@@ -719,8 +680,8 @@ Future<bool?> _showConfirmationDialog(
             onPressed: () => Navigator.of(ctx).pop(false),
             child: const Text('Cancel'),
           ),
-          // Filled, not danger: applying a template is not destructive —
-          // red misread as "this will delete something".
+          // Filled, not danger: applying a template is not destructive, and red
+          // misreads as "this will delete something".
           HollowButton.filled(
             onPressed: () => Navigator.of(ctx).pop(true),
             child: const Text('Apply template'),
@@ -761,8 +722,6 @@ Widget _changeRow(HollowTheme hollow, IconData icon, String text,
     ),
   );
 }
-
-// ─── Iterable extension (firstWhereOrNull) ──────────────────────────────────
 
 extension _IterableExt<T> on Iterable<T> {
   T? firstWhereOrNull(bool Function(T) test) {

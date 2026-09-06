@@ -9,14 +9,9 @@ import 'package:super_clipboard/super_clipboard.dart';
 
 /// Handles keyboard shortcuts for the chat input field.
 ///
-/// Structural (fixed): Enter → send, Shift+Enter → newline, Ctrl+V → paste
-/// image from clipboard (if any), else default text paste.
-///
-/// Formatting (rebindable, Settings > Shortcuts, defaults in parentheses):
-/// bold **…** (Ctrl+B), italic *…* (Ctrl+I), `code` (Ctrl+E),
-/// ~~strikethrough~~ (Ctrl+Shift+X), ||spoiler|| (Ctrl+Shift+S).
-/// [formatBindings] carries the live map (pass
-/// `ref.read(appShortcutsProvider).valueOrNull`); null = defaults.
+/// Send, newline and image paste are fixed; the formatting shortcuts are
+/// rebindable and [formatBindings] carries the live map, null meaning the
+/// defaults.
 KeyEventResult handleChatInputKey(
   KeyEvent event,
   TextEditingController controller,
@@ -29,24 +24,22 @@ KeyEventResult handleChatInputKey(
     return KeyEventResult.ignored;
   }
 
-  // AltGr registers as Ctrl+Alt on Windows — a held Alt means the user is
-  // typing a layout character (e.g. AZERTY € = AltGr+E), not a shortcut.
+  // AltGr registers as Ctrl+Alt on Windows, so a held Alt means a layout
+  // character (AZERTY € is AltGr+E), not a shortcut.
   final isCtrl = HardwareKeyboard.instance.isControlPressed &&
       !HardwareKeyboard.instance.isAltPressed;
   final isShift = HardwareKeyboard.instance.isShiftPressed;
 
-  // Enter to send, Shift+Enter for newline.
   if (event.logicalKey == LogicalKeyboardKey.enter && !isCtrl) {
     return _handleEnterKey(controller, onSend, isShift);
   }
 
-  // Ctrl+V — check for clipboard image before letting default paste through.
   if (isCtrl && !isShift && event.logicalKey == LogicalKeyboardKey.keyV) {
     if (onPasteImage != null) {
       _tryPasteImage(onPasteImage);
     }
-    // Always return ignored so default text paste still works
-    // (if no image is found, the async handler does nothing).
+    // Ignored either way, so default text paste still works when the async
+    // handler finds no image.
     return KeyEventResult.ignored;
   }
 
@@ -54,14 +47,12 @@ KeyEventResult handleChatInputKey(
       event, controller, formatBindings ?? kAppShortcutDefaults);
 }
 
-/// Enter → send, Shift+Enter → newline.
 KeyEventResult _handleEnterKey(
   TextEditingController controller,
   VoidCallback onSend,
   bool isShift,
 ) {
   if (isShift) {
-    // Insert newline at cursor position.
     final sel = controller.selection;
     final text = controller.text;
     final newText =
@@ -72,14 +63,12 @@ KeyEventResult _handleEnterKey(
     );
     return KeyEventResult.handled;
   }
-  // Plain Enter → send.
   onSend();
   return KeyEventResult.handled;
 }
 
-/// Markdown formatting shortcuts, matched against the live (rebindable)
-/// bindings — `matchesEvent` enforces the full modifier state per binding,
-/// including the AltGr guard.
+/// Markdown formatting shortcuts against the live rebindable bindings;
+/// `matchesEvent` enforces the full modifier state, AltGr guard included.
 KeyEventResult _handleFormattingKey(
   KeyEvent event,
   TextEditingController controller,
@@ -102,8 +91,8 @@ KeyEventResult _handleFormattingKey(
   return KeyEventResult.ignored;
 }
 
-/// Attempts to read an image from the system clipboard.
-/// If found, saves it to a temp file and calls [onPasteImage].
+/// Reads an image from the system clipboard, saving it to a temp file and
+/// calling [onPasteImage].
 Future<void> _tryPasteImage(
   void Function(String path, String name) onPasteImage,
 ) async {
@@ -112,15 +101,15 @@ Future<void> _tryPasteImage(
 
   final reader = await clipboard.read();
 
-  // Check for image formats in priority order.
+  // Priority order.
   for (final format in [Formats.png, Formats.jpeg, Formats.gif, Formats.bmp, Formats.webp]) {
     if (!reader.canProvide(format)) continue;
     if (await _pasteImageForFormat(reader, format, onPasteImage)) return;
   }
 }
 
-/// Reads clipboard bytes for [format]; if present, saves them to a temp file
-/// and calls [onPasteImage]. Returns true when an image was pasted.
+/// Reads clipboard bytes for [format] into a temp file and calls
+/// [onPasteImage]. True when an image was pasted.
 Future<bool> _pasteImageForFormat(
   ClipboardReader reader,
   SimpleFileFormat format,
@@ -129,10 +118,8 @@ Future<bool> _pasteImageForFormat(
   final bytes = await _readClipboardImageBytes(reader, format);
   if (bytes == null || bytes.isEmpty) return false;
 
-  // Determine extension from format.
   final ext = _extensionForFormat(format);
 
-  // Save to temp file.
   final tempDir = Directory.systemTemp;
   final timestamp = DateTime.now().millisecondsSinceEpoch;
   final fileName = 'clipboard_$timestamp.$ext';
@@ -169,7 +156,7 @@ String _extensionForFormat(SimpleFileFormat format) {
                   : 'webp';
 }
 
-/// Copies image bytes to system clipboard.
+/// Copies image bytes to the system clipboard.
 Future<bool> copyImageToClipboard(String filePath) async {
   final clipboard = SystemClipboard.instance;
   if (clipboard == null) return false;
@@ -180,7 +167,6 @@ Future<bool> copyImageToClipboard(String filePath) async {
   final bytes = await file.readAsBytes();
   final ext = filePath.split('.').last.toLowerCase();
 
-  // Pick the right format based on extension.
   final SimpleFileFormat format;
   switch (ext) {
     case 'jpg':
@@ -206,8 +192,8 @@ Future<bool> copyImageToClipboard(String filePath) async {
   return true;
 }
 
-/// Wraps the current selection with [before] and [after] markers.
-/// If no text is selected, inserts the markers and places cursor in between.
+/// Wraps the current selection with [before] and [after], or inserts both and
+/// places the cursor between them when nothing is selected.
 void _wrapSelection(
   TextEditingController controller,
   String before,
@@ -217,7 +203,6 @@ void _wrapSelection(
   final text = controller.text;
 
   if (sel.start == sel.end) {
-    // No selection — insert markers and place cursor between them.
     final newText = text.replaceRange(sel.start, sel.end, '$before$after');
     controller.value = TextEditingValue(
       text: newText,
@@ -225,7 +210,6 @@ void _wrapSelection(
           TextSelection.collapsed(offset: sel.start + before.length),
     );
   } else {
-    // Wrap selected text.
     final selected = text.substring(sel.start, sel.end);
     final newText =
         text.replaceRange(sel.start, sel.end, '$before$selected$after');

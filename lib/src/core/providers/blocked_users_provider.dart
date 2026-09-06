@@ -4,14 +4,10 @@ import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 
 /// Set of blocked MASTER peer_ids, mirrored from the Rust block list.
 ///
-/// Rust enforces blocks at ingest (DMs, friend requests, calls, files are
-/// dropped before they reach Dart); this mirror exists so the UI can
-/// synchronously toggle Block/Unblock buttons, hide blocked senders' channel
-/// messages and suppress their channel notifications.
-///
-/// The set is MASTER-keyed — always compare
-/// `ref.read(deviceLinkProvider).identityOf(peerId)` against it, never a raw
-/// (possibly per-device) peer_id.
+/// Rust enforces blocks at ingest; this mirror exists so the UI can
+/// synchronously toggle Block/Unblock, hide blocked senders' channel messages
+/// and suppress their notifications. Always compare a peer id resolved through
+/// `deviceLinkProvider.identityOf`, never a raw per-device id.
 class BlockedUsersNotifier extends Notifier<Set<String>> {
   @override
   Set<String> build() => const {};
@@ -27,9 +23,8 @@ class BlockedUsersNotifier extends Notifier<Set<String>> {
     }
   }
 
-  /// Block [masterId] (resolve device ids to the master at the call site).
-  /// Optimistic: the set updates immediately and reverts if the FFI call
-  /// fails — rethrows so callers can toast the failure.
+  /// Block [masterId] (resolve device ids at the call site). Optimistic: the set
+  /// updates immediately, reverts on failure, and rethrows so callers can toast.
   Future<void> block(String masterId) async {
     if (state.contains(masterId)) return;
     state = {...state, masterId};

@@ -34,10 +34,9 @@ class ChannelsTab extends ConsumerStatefulWidget {
 
 class _ChannelsTabState extends ConsumerState<ChannelsTab> {
   List<LayoutItem> _layout = [];
-  List<LayoutItem> _savedLayout = []; // What's in DB — for discard comparison.
+  List<LayoutItem> _savedLayout = [];
   bool _loaded = false;
 
-  /// Compare current layout against saved to determine if changes exist.
   bool get _dirty => !_sameLayout(_layout, _savedLayout);
 
   static bool _sameLayout(List<LayoutItem> a, List<LayoutItem> b) {
@@ -67,8 +66,6 @@ class _ChannelsTabState extends ConsumerState<ChannelsTab> {
       final json = await crdt_api.getChannelLayout(serverId: widget.serverId);
       final layout = parseLayoutJson(json);
       if (mounted) {
-        // Compute effective layout (includes newly created channels)
-        // and use it as both current and saved baseline.
         final channels = ref.read(channelListProvider);
         final effective = effectiveLayoutFrom(layout, channels);
         setState(() { _layout = effective; _savedLayout = List.from(effective); _loaded = true; });
@@ -82,21 +79,18 @@ class _ChannelsTabState extends ConsumerState<ChannelsTab> {
     }
   }
 
-  /// Build the effective layout: current layout + any channels not yet in it.
-  /// Shared with the sidebar's context menus (`effectiveLayoutFrom`) so both
-  /// surfaces place unplaced channels identically.
+  /// The current layout plus any channels not yet in it. Shared with the
+  /// sidebar's context menus so both place unplaced channels identically.
   List<LayoutItem> _effectiveLayout(Map<String, ChannelInfo> channels) {
     return effectiveLayoutFrom(_layout, channels);
   }
 
   /// The tab's only layout writer.
   ///
-  /// Routes through [ChannelLayoutNotifier.mutate] whenever this tab is
-  /// editing the SELECTED server, so the write is normalised, published to the
-  /// sidebar immediately, and shielded from the DB reload a server event would
-  /// otherwise land on top of it. Settings opened for a non-selected server
-  /// (mobile route, chats-tab long-press) has no provider to publish to and
-  /// writes directly.
+  /// Routes through [ChannelLayoutNotifier.mutate] whenever this tab edits the
+  /// SELECTED server, so the write is normalised, published to the sidebar and
+  /// shielded from a DB reload landing on top of it. Settings opened for a
+  /// non-selected server has no provider to publish to and writes directly.
   void _writeLayout(List<LayoutItem> layout) {
     if (ref.read(selectedServerProvider) == widget.serverId) {
       ref.read(channelLayoutProvider.notifier).mutate(
@@ -155,7 +149,6 @@ class _ChannelsTabState extends ConsumerState<ChannelsTab> {
             content: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                // Channel type toggle
                 Row(
                   children: [
                     _ChannelTypeChip(
@@ -292,9 +285,9 @@ class _ChannelsTabState extends ConsumerState<ChannelsTab> {
          });
   }
 
-  /// Commit a channel-property CRDT write; on failure revert the optimistic
-  /// provider update (done at the call site BEFORE the FFI, per convention)
-  /// and toast — otherwise a dead node leaves the control lying silently.
+  /// Commits a channel-property CRDT write, reverting and toasting on failure
+  /// so a dead node cannot leave the control lying. The optimistic update
+  /// happens at the call site BEFORE the FFI, per convention.
   Future<void> _commitChannelProp(
       Future<void> Function() commit, VoidCallback revert) async {
     try {
@@ -308,9 +301,9 @@ class _ChannelsTabState extends ConsumerState<ChannelsTab> {
     }
   }
 
-  /// Open the access-label picker for a channel's visibility or posting
-  /// gate. Optimistic: label list + the Rust-side Admin+ tier stamp are
-  /// reflected immediately, both reverted on failure.
+  /// Opens the access-label picker for a channel's visibility or posting gate.
+  /// The label list and the Rust-side Admin+ tier stamp are both reflected
+  /// immediately and both reverted on failure.
   Future<void> _editGateLabels(String channelId, ChannelInfo? info,
       {required bool forVisibility}) async {
     final initial = (forVisibility
@@ -366,13 +359,12 @@ class _ChannelsTabState extends ConsumerState<ChannelsTab> {
     );
   }
 
-  /// Category bulk-apply: stamp visibility/posting access onto every channel
-  /// under the category (forward-scan from the category's index in the live
-  /// layout until the next Category/Separator — the inverse of the sidebar's
-  /// backward scan, so membership matches what users see). Anchored on
-  /// INDEX, never the category NAME (duplicate names are legal). Sequential
-  /// per-channel writes with per-channel optimistic+revert; the summary
-  /// toast never implies rollback of ops that already landed.
+  /// Category bulk-apply: stamps access onto every channel under the category,
+  /// forward-scanning from its INDEX (never its NAME, duplicate names are
+  /// legal) to the next Category or Separator, the inverse of the sidebar's
+  /// backward scan so membership matches what users see. Writes are sequential
+  /// with per-channel revert, and the summary toast never implies rollback of
+  /// ops that already landed.
   Future<void> _bulkApplyAccess(int categoryIndex, String categoryName) async {
     final channels = ref.read(channelListProvider);
     final targetIds = <String>[];
@@ -385,8 +377,7 @@ class _ChannelsTabState extends ConsumerState<ChannelsTab> {
         if (info != null && !info.isPublic) targetIds.add(item.channelId);
       }
     }
-    // Dialog + per-channel writes are shared with the sidebar's category
-    // right-click menu (issue #61).
+    // Shared with the sidebar's category right-click menu (issue #61).
     await runCategoryBulkAccess(
       context: context,
       ref: ref,
@@ -396,9 +387,8 @@ class _ChannelsTabState extends ConsumerState<ChannelsTab> {
     );
   }
 
-  /// Picking a plain tier on a label-gated channel widens access — confirm
-  /// before silently clearing the gate (a 4-item menu tap is easy to
-  /// fat-finger on a security setting).
+  /// Picking a plain tier on a label-gated channel widens access, so confirm
+  /// before silently clearing the gate.
   Future<bool> _confirmClearLabelGate(String channelName, String tier) async {
     final confirmed = await showHollowDialog<bool>(
       context: context,
@@ -427,8 +417,8 @@ class _ChannelsTabState extends ConsumerState<ChannelsTab> {
     return confirmed ?? false;
   }
 
-  /// Awaited rename with an error toast — a bare fire-and-forget here
-  /// rejected unhandled on a dead node with zero user feedback.
+  /// Awaited rename with an error toast: fire-and-forget rejected unhandled on
+  /// a dead node, with no user feedback at all.
   Future<void> _commitRename(String channelId, String newName) async {
     try {
       await crdt_api.renameChannel(
@@ -545,11 +535,8 @@ class _ChannelsTabState extends ConsumerState<ChannelsTab> {
       return const Center(child: CircularProgressIndicator());
     }
 
-    // Adopt layout edits made OUTSIDE this editor — the sidebar's category
-    // right-click menu writes through `channelLayoutProvider`, and without
-    // this the tab kept showing its stale snapshot until you switched tabs.
-    // Only while the user has no unsaved edits of their own: their in-progress
-    // drag always outranks an incoming change.
+    // Adopt layout edits made OUTSIDE this editor, but only while the user has
+    // no unsaved edits: an in-progress drag outranks an incoming change.
     if (!_dirty && ref.watch(selectedServerProvider) == widget.serverId) {
       final incoming =
           effectiveLayoutFrom(parseLayoutJson(ref.watch(channelLayoutProvider)),
@@ -566,17 +553,14 @@ class _ChannelsTabState extends ConsumerState<ChannelsTab> {
     }
 
     final effective = _effectiveLayout(channels);
-    // Sync local state if effective differs (new channels added/removed
-    // externally). Auto-save so the sidebar updates without a manual Save.
-    // Guard: skip when channels map is empty (server deselected / switching).
+    // Auto-save so the sidebar updates without a manual Save. Skipped while the
+    // channels map is empty (server deselected or switching).
     if (channels.isNotEmpty && effective.length != _layout.length) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!mounted) return;
-        // RECOMPUTE rather than reusing the value captured during build. The
-        // adopt-external-changes callback above may have replaced `_layout`
-        // since, and writing the pre-adoption value here would undo the very
-        // edit we just took in — which is how a category created in the
-        // sidebar came back reverted.
+        // RECOMPUTE rather than reuse the value captured during build: the
+        // adopt-external-changes callback above may have replaced `_layout`,
+        // and writing the pre-adoption value would undo the edit just taken in.
         final channelsNow = ref.read(channelListProvider);
         if (channelsNow.isEmpty) return;
         final fresh = _effectiveLayout(channelsNow);
@@ -591,7 +575,6 @@ class _ChannelsTabState extends ConsumerState<ChannelsTab> {
 
     return Column(
       children: [
-        // Header row with action buttons
         Padding(
           padding: const EdgeInsets.fromLTRB(
             HollowSpacing.lg, HollowSpacing.md, HollowSpacing.lg, HollowSpacing.sm,
@@ -636,7 +619,6 @@ class _ChannelsTabState extends ConsumerState<ChannelsTab> {
 
         Divider(height: 1, color: hollow.border),
 
-        // Drag-and-drop list
         Expanded(
           child: _layout.isEmpty
               ? Center(
@@ -672,7 +654,6 @@ class _ChannelsTabState extends ConsumerState<ChannelsTab> {
                   },
                   itemBuilder: (context, index) {
                     final item = _layout[index];
-                    // Check if this channel is under a category.
                     // A separator breaks the category scope.
                     bool isUnderCategory = false;
                     if (item is ChannelItem) {
@@ -684,7 +665,6 @@ class _ChannelsTabState extends ConsumerState<ChannelsTab> {
                         }
                       }
                     }
-                    // Is this the last channel before next category, separator, or end?
                     bool isLastInCategory = false;
                     if (isUnderCategory) {
                       isLastInCategory = index == _layout.length - 1 ||
@@ -798,8 +778,7 @@ class _ChannelsTabState extends ConsumerState<ChannelsTab> {
                           final prev = info?.visibility ?? 'everyone';
                           final prevLabels =
                               info?.visibilityLabels ?? const <String>[];
-                          // The Rust tier handler clears any label gate too —
-                          // mirror that optimistically.
+                          // The Rust tier handler clears any label gate too.
                           channels.updateChannel(
                             item.channelId,
                             (ch) => ch.copyWith(
@@ -880,7 +859,6 @@ class _ChannelsTabState extends ConsumerState<ChannelsTab> {
                 ),
         ),
 
-        // Save / Cancel buttons
         if (_dirty)
           Padding(
             padding: const EdgeInsets.fromLTRB(
@@ -891,8 +869,8 @@ class _ChannelsTabState extends ConsumerState<ChannelsTab> {
                 Expanded(
                   child: HollowButton.ghost(
                     onPressed: () {
-                      // Reload from DB to get current state
-                      // (channels created/deleted are CRDT ops, can't undo).
+                      // Channels created or deleted are CRDT ops and cannot be
+                      // undone.
                       setState(() {
                         _loaded = false;
                       });
@@ -1190,9 +1168,9 @@ class _ChannelRow extends StatelessWidget {
                         ),
                       ),
                     ),
-                    // Public toggle is TEXT-ONLY (#44): a public voice channel
-                    // is rejected by Rust and would only ghost-flash in the
-                    // browser (its list responders filter voice out).
+                    // Public toggle is TEXT-ONLY (#44): Rust rejects a public
+                    // voice channel, so it would only ghost-flash in the
+                    // browser.
                     const SizedBox(width: 4),
                     HollowTooltip(
                       message: isPublic
@@ -1329,7 +1307,6 @@ class _TreeConnectorPainter extends CustomPainter {
       ..strokeWidth = 1.5
       ..style = PaintingStyle.stroke;
 
-    // Vertical line from top to middle (or full height if not last).
     final midY = size.height / 2;
     canvas.drawLine(
       const Offset(0, 0),
@@ -1337,7 +1314,6 @@ class _TreeConnectorPainter extends CustomPainter {
       paint,
     );
 
-    // Horizontal line from left to right at middle.
     canvas.drawLine(
       Offset(0, midY),
       Offset(size.width, midY),
@@ -1406,9 +1382,8 @@ class _ChannelTypeChip extends StatelessWidget {
   }
 }
 
-/// Compact dropdown chip for channel visibility or posting mode. When a
-/// label gate is active (`gateLabels` non-empty), the chip shows the label
-/// name (or a count) and the menu highlights Custom.
+/// Compact dropdown chip for channel visibility or posting mode. A live label
+/// gate shows the label name or a count and highlights Custom in the menu.
 class _AccessChip extends StatelessWidget {
   final IconData icon;
   final String value;
@@ -1486,7 +1461,7 @@ class _AccessChip extends StatelessWidget {
             Icon(_gated ? LucideIcons.shieldCheck : icon, size: 10,
                 color: isRestricted ? hollow.warning : hollow.textSecondary),
             const SizedBox(width: 3),
-            // Label names are free-form user content — cap the chip width.
+            // Label names are free-form user content, so cap the chip width.
             ConstrainedBox(
               constraints: const BoxConstraints(maxWidth: 90),
               child: Text(

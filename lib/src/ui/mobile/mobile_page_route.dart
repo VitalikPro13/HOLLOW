@@ -4,21 +4,17 @@ import 'package:hollow/src/core/reduce_motion.dart';
 
 /// Transition styles for [hollowMobileRoute].
 enum HollowRouteTransition {
-  /// Slide in from the right (default page push).
   slideRight,
 
-  /// Slide up from the bottom (modal-ish routes: voice channel, call).
   slideUp,
 
-  /// Cross-fade.
   fade,
 }
 
-/// A [PageRoute] that respects Reduce Motion: when reduce-motion is effective,
-/// the route appears instantly (zero duration, no transition). Otherwise it
-/// uses the requested [transition].
+/// A [PageRoute] that appears instantly while Reduce Motion is effective, and
+/// otherwise uses [transition].
 ///
-/// Use this instead of bespoke `PageRouteBuilder`s so the reduce-motion gate
+/// Use this instead of a bespoke `PageRouteBuilder`, so the reduce-motion gate
 /// lives in one place.
 PageRoute<T> hollowMobileRoute<T>({
   required WidgetBuilder builder,

@@ -1,17 +1,11 @@
-//! Multi-device device-linking orchestration (Step 4).
+//! Device-linking orchestration: an EMPTY device pulls a full DB snapshot from a
+//! POPULATED sibling.
 //!
-//! Lets an EMPTY device pull a full DB snapshot from a POPULATED sibling. Two
-//! entry paths converge on the same snapshot push:
-//!   - **Code path:** populated device claims a 6-char relay code + joins `link:{code}`;
-//!     empty device resolves the code + joins `link:{code}`, then requests the snapshot.
-//!   - **Mnemonic path:** the empty device already shares the master, meets the populated
-//!     device in `inbox:{master}` (sibling inbox-proof), and requests the snapshot there.
-//!
-//! The snapshot itself is the existing `export_backup` zip (incl. `identity.key`),
-//! AES-256-GCM encrypted with a one-time random key, streamed via
-//! `ws_stream_transfer::ws_stream_send_bytes` as `StreamKind::LinkSnapshot`. The
-//! receiver registers the key in `pending_link_snapshots`; `file_handler` decrypts
-//! and imports on completion.
+//! Two entry paths converge on one snapshot push: a 6-char relay code with both
+//! devices in `link:{code}`, or the mnemonic path where they already share a
+//! master and meet in `inbox:{master}`. The snapshot is the existing
+//! `export_backup` zip (`identity.key` included), streamed as
+//! `StreamKind::LinkSnapshot` and imported on the receiver's next launch.
 
 use std::collections::{HashMap, HashSet};
 
@@ -26,10 +20,9 @@ use super::types::{HavenMessage, NetworkEvent};
 use super::ws_client::WsCommand;
 use super::ws_stream_transfer::{ws_stream_send_bytes, StreamKind};
 
-/// (Receiver) The link CODE this device typed — the passphrase the inbound `.hollow`
-/// blob is encrypted with. Process-global so the `LinkSnapshotKey` handler (deep in
-/// `handle_incoming_request`, which doesn't thread link state) can read it. Set when
-/// the user enters a code; cleared after use.
+/// (Receiver) The link CODE this device typed, the passphrase the inbound
+/// `.hollow` blob is encrypted with. Process-global because the `LinkSnapshotKey`
+/// handler threads no link state. Cleared after use.
 static MY_TYPED_LINK_CODE: Mutex<Option<String>> = Mutex::new(None);
 
 pub(crate) fn set_my_link_code(code: &str) {
@@ -70,9 +63,8 @@ pub(crate) fn handle_release_link_code(
     let _ = ws_cmd_tx.send(WsCommand::LeaveRoom { room_code: link_room(code) });
 }
 
-/// (Empty device) Begin resolving a link code: join its rendezvous room and ask the
-/// relay to resolve the code to the populated peer. The `LinkCodeResolved` WsEvent
-/// then carries the populated peer_id, at which point we send the snapshot request.
+/// (Empty device) Join the rendezvous room and ask the relay to resolve the code;
+/// the `LinkCodeResolved` event then carries the populated peer_id.
 pub(crate) fn handle_resolve_link_code(
     ws_cmd_tx: &mpsc::UnboundedSender<WsCommand>,
     code: &str,
@@ -122,9 +114,8 @@ pub(crate) fn handle_request_link_snapshot(
     hollow_log!("[HOLLOW-LINK] Sent snapshot request to sibling {target_peer}");
 }
 
-/// (Populated device) An empty device asked for our snapshot. Surface a confirm
-/// prompt to the UI (carrying the requester's state summary for direction detect).
-/// The actual push happens on `AcceptLinkPush`.
+/// (Populated device) An empty device asked for our snapshot: surface a confirm
+/// prompt carrying its state summary. The push happens on `AcceptLinkPush`.
 pub(crate) async fn handle_inbound_link_request(
     event_tx: &mpsc::Sender<NetworkEvent>,
     sender_peer: &str,
@@ -141,8 +132,8 @@ pub(crate) async fn handle_inbound_link_request(
     }).await;
 }
 
-/// (Populated device) Build the snapshot, encrypt with a one-time random key, send
-/// the key to the target, then stream the ciphertext as a `LinkSnapshot`.
+/// (Populated device) Build the `.hollow` snapshot encrypted with the link code,
+/// tell the target its link_id, then stream the ciphertext as a `LinkSnapshot`.
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_accept_link_push(
@@ -155,9 +146,8 @@ pub(crate) async fn handle_accept_link_push(
     device_peer_id: &str,
     link_code: &str,
 ) {
-    // Build the FULL `.hollow` backup blob, encrypted with the link CODE as the
-    // passphrase — byte-for-byte the same pipeline as a manual export. The receiver
-    // stashes it and imports via `import_backup` on next launch (the proven path).
+    // Byte-for-byte the same pipeline as a manual export, so the receiver imports
+    // it through `import_backup` on next launch, the proven path.
     let blob = match crate::api::storage::export_backup_bytes(link_code, include_vault, include_files) {
         Ok(b) => b,
         Err(e) => {
@@ -187,7 +177,6 @@ pub(crate) async fn handle_accept_link_push(
         },
     );
 
-    // Stream the encrypted .hollow blob in the room shared with the target.
     let Some(room) = super::crypto_handler::ws_room_for_peer(ws_room_peers, target_peer) else {
         hollow_log!("[HOLLOW-LINK] No shared room with {target_peer} — cannot stream snapshot");
         let _ = event_tx.send(NetworkEvent::LinkFailed {
@@ -202,20 +191,14 @@ pub(crate) async fn handle_accept_link_push(
         ws_cmd_tx, &room, target_peer,
         &StreamKind::LinkSnapshot, &link_id, &ciphertext,
     ).await;
-    // ws_stream_send_bytes only QUEUES every chunk into the local WS command channel —
-    // it returns long before those bytes reach the relay, let alone the target. So this
-    // is NOT proof of receipt: emitting LinkPushComplete here made the sender flash
-    // "Data sent" while the receiver was only just starting its progress bar. Instead
-    // we stay on the "sending" spinner and wait for the receiver to send back a
-    // `LinkSnapshotAck` (it does so right after it stashes the full blob); the dispatch
-    // arm for that ack emits LinkPushComplete. The sender does NOT restart; only the
-    // receiver replaced its DB.
+    // ws_stream_send_bytes only QUEUES chunks into the local WS channel, so it is
+    // NOT proof of receipt: completion waits for the receiver's `LinkSnapshotAck`.
+    // The sender does not restart; only the receiver replaced its DB.
     hollow_log!("[HOLLOW-LINK] Snapshot {link_id} fully queued to {target_peer} ({total} bytes) — awaiting receiver ack");
 }
 
-/// (Empty device) The populated device announced the link_id. Register the pending
-/// snapshot keyed by it, carrying the CODE we typed (the `.hollow` blob's passphrase)
-/// so the completion handler can stash blob+code for a next-launch `import_backup`.
+/// (Empty device) Register the pending snapshot under the announced link_id,
+/// carrying the CODE we typed so the completion handler can stash blob and code.
 pub(crate) fn handle_inbound_link_key(
     pending_link_snapshots: &mut HashMap<String, LinkSnapshotState>,
     link_id: &str,

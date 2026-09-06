@@ -12,23 +12,21 @@ import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/settings/settings_shared.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-/// Multi-device management pieces shared by the desktop Devices category and
-/// the mobile Settings tab: the "Your Devices" list scaffold, the per-device
-/// row shell, and the rename/sync/remove/reset flows. The two surfaces only
-/// differ in text styling and the row action buttons — those are passed in.
+/// Multi-device management shared by the desktop Devices category and the
+/// mobile Settings tab. The two surfaces differ only in text styling and row
+/// action buttons, which are passed in.
 
-/// Whether a device is "active" — worth showing by default. Online now, the
-/// device we're running on, or one the user has labeled (i.e. cares about).
-/// Ghosts from past re-link test cycles are offline + unlabeled and get folded
-/// behind "Show all".
+/// Whether a device is worth showing by default: online, ourselves, or
+/// labelled. Ghosts from past re-link cycles are offline and unlabelled, and
+/// fold behind "Show all".
 bool deviceIsActive(MyDevice d) =>
     d.online || d.isThisDevice || d.label.isNotEmpty;
 
-/// Display title for a device row: label if set, else shortened peer id.
+/// The device's label, or its shortened peer id when it has none.
 String deviceTitle(MyDevice d) =>
     d.label.isNotEmpty ? d.label : shortenPeerId(d.peerId);
 
-/// Rename flow — label edit dialog + persist via [deviceLabelProvider].
+/// Label edit dialog, persisted through [deviceLabelProvider].
 Future<void> renameDeviceFlow(
     BuildContext context, WidgetRef ref, MyDevice device) async {
   final controller = TextEditingController(text: device.label);
@@ -60,8 +58,8 @@ Future<void> renameDeviceFlow(
   }
 }
 
-/// Sync-from flow — confirm, then pull servers + friends FROM the given
-/// (online) sibling device onto this one.
+/// Confirms, then pulls servers and friends FROM an online sibling onto this
+/// device.
 Future<void> syncFromDeviceFlow(
     BuildContext context, WidgetRef ref, MyDevice device) async {
   final name = deviceTitle(device);
@@ -110,7 +108,7 @@ Future<void> syncFromDeviceFlow(
   }
 }
 
-/// Remove (revoke) flow — confirm, then permanently revoke the device.
+/// Confirms, then permanently revokes the device.
 Future<void> removeDeviceFlow(BuildContext context, MyDevice device) async {
   final name = deviceTitle(device);
   final confirmed = await showHollowDialog<bool>(
@@ -150,7 +148,7 @@ Future<void> removeDeviceFlow(BuildContext context, MyDevice device) async {
   }
 }
 
-/// Reset-device-list flow — confirm, then drop ALL other linked devices.
+/// Confirms, then drops ALL other linked devices.
 Future<void> resetDeviceListsFlow(BuildContext context) async {
   final confirmed = await showHollowDialog<bool>(
     context: context,
@@ -205,7 +203,7 @@ Future<void> resetDeviceListsFlow(BuildContext context) async {
   }
 }
 
-/// Small colored badge ("This device").
+/// The "This device" badge.
 class DeviceBadge extends StatelessWidget {
   final String text;
   final Color color;
@@ -231,9 +229,8 @@ class DeviceBadge extends StatelessWidget {
   }
 }
 
-/// Row shell for a device entry: bordered container with the smartphone icon,
-/// title + "This device" badge, id/online subtitle, and the surface-specific
-/// action buttons appended at the end.
+/// Row shell for a device entry, with the surface-specific action buttons
+/// appended at the end.
 class DeviceRowShell extends StatelessWidget {
   final MyDevice device;
   final List<Widget> actions;
@@ -298,9 +295,8 @@ class DeviceRowShell extends StatelessWidget {
   }
 }
 
-/// Step 8 — the "Your Devices" list. Stateful for the "Show all" toggle that
-/// reveals offline/unlabeled ghost devices. The surrounding surface passes the
-/// info-text style and the per-device row builder.
+/// The "Your Devices" list. Stateful for the "Show all" toggle that reveals
+/// offline, unlabelled ghost devices.
 class DevicesListSection extends ConsumerStatefulWidget {
   final TextStyle Function(HollowTheme hollow) infoStyle;
   final Widget Function(MyDevice device) rowBuilder;
@@ -322,12 +318,9 @@ class _DevicesListSectionState extends ConsumerState<DevicesListSection> {
   @override
   void initState() {
     super.initState();
-    // Re-pull the device list from the running node's resolver whenever this
-    // panel opens. The startup warm-up (event_provider) races node readiness and
-    // there's no live listener keeping deviceLinkProvider fresh while Settings is
-    // closed — so after an app restart the list would render empty/stale even
-    // though the data is persisted in the DB. Refreshing on mount fixes the
-    // "devices disappear after restart" bug.
+    // Re-pull from the running node's resolver on open: the startup warm-up
+    // races node readiness and nothing keeps the provider fresh while Settings
+    // is closed, so the list renders stale after a restart.
     WidgetsBinding.instance.addPostFrameCallback((_) {
       ref.read(deviceLinkProvider.notifier).refresh();
       ref.read(deviceLabelProvider.notifier).refresh();

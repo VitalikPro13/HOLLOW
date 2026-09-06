@@ -15,13 +15,11 @@ import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 
-/// Shared Storage Manager widgets used by both the desktop settings dialog
-/// (`user_settings_dialog.dart`) and the mobile settings tab
-/// (`mobile_settings_tab.dart`). All read the same providers in
-/// `storage_provider.dart` — layout only, no duplicated logic.
+/// Shared Storage Manager widgets for the desktop dialog and the mobile
+/// settings tab. Layout only: both read the same providers.
 
-/// Modern storage dashboard: a summary header (total + segmented usage bar +
-/// legend) with a "⋯" cleanup menu, followed by the per-conversation list.
+/// Storage dashboard: a summary header with a cleanup menu, then the
+/// per-conversation list.
 class StorageBreakdownView extends ConsumerWidget {
   const StorageBreakdownView({super.key});
 
@@ -88,8 +86,8 @@ class _UsageSegment {
   final Color color;
 }
 
-/// The summary header: big total, a segmented proportional usage bar, a legend
-/// of byte values, and a "⋯" overflow menu for the destructive clear actions.
+/// The summary header: total, a proportional usage bar with a byte legend, and
+/// an overflow menu for the destructive clear actions.
 class _SummaryHeader extends ConsumerWidget {
   const _SummaryHeader({required this.breakdown});
   final storage_api.StorageBreakdown breakdown;
@@ -101,8 +99,8 @@ class _SummaryHeader extends ConsumerWidget {
     final cache = breakdown.vaultCacheBytes.toInt();
     final shards = breakdown.vaultShardBytes.toInt();
     final assets = breakdown.assetBlobBytes.toInt();
-    // Dart-owned disk cache (GIF picker thumbnails) — outside the Rust
-    // breakdown, appended as its own segment.
+    // A Dart-owned disk cache, outside the Rust breakdown, so it is appended as
+    // its own segment.
     final gifCache =
         ref.watch(gifThumbCacheSizeProvider).valueOrNull ?? 0;
     final total = downloads + cache + shards + assets + gifCache;
@@ -221,8 +219,8 @@ class _LegendChip extends StatelessWidget {
   }
 }
 
-/// The "⋯" overflow menu holding destructive clear actions, so they're reachable
-/// but out of the way (held shards intentionally absent — read-only).
+/// Overflow menu for the destructive clear actions. Held shards are absent on
+/// purpose: they are read-only.
 class _CleanupMenu extends ConsumerWidget {
   const _CleanupMenu(
       {required this.downloads,
@@ -280,7 +278,7 @@ class _CleanupMenu extends ConsumerWidget {
             );
             if (ok) await actions.clearUnreferencedAssets();
           case 'gif_cache':
-            // Pure thumbnail cache — no confirm needed, nothing is lost.
+            // A pure thumbnail cache, so nothing is lost and nothing is asked.
             await actions.clearGifThumbCache();
         }
       },
@@ -388,8 +386,8 @@ class _ContextRowState extends ConsumerState<_ContextRow> {
         padding: const EdgeInsets.symmetric(
             horizontal: HollowSpacing.sm, vertical: HollowSpacing.sm),
         decoration: BoxDecoration(
-          // Zero-alpha rest color, not Colors.transparent (transparent BLACK
-          // — the lerp flashed dark on hover/unhover, worst in light mode).
+          // Zero-alpha rest colour, not `Colors.transparent`: that is
+          // transparent BLACK, and the lerp flashes dark on hover.
           color: _hovered
               ? hollow.surface
               : hollow.surface.withValues(alpha: 0.0),
@@ -415,17 +413,16 @@ class _ContextRowState extends ConsumerState<_ContextRow> {
                 ],
               ),
             ),
-            // Per-conversation auto-download override (issue #41). Channel
-            // rows map to their SERVER — one override per server, not per
-            // channel.
+            // Per-conversation auto-download override (issue #41). Channel rows
+            // map to their SERVER: one override per server, not per channel.
             _AutoDownloadOverrideButton(
               contextKey: isDm
                   ? 'dm:${usage.contextId}'
                   : 'server:${usage.contextId.split(':').first}',
               conversationLabel: label,
             ),
-            // Trash is always tappable (works on touch); it just brightens on
-            // hover on desktop. Always-visible keeps it discoverable on mobile.
+            // Always tappable and always visible, so touch can reach it; hover
+            // only brightens it.
             AnimatedOpacity(
               opacity: _hovered ? 1 : 0.55,
               duration: const Duration(milliseconds: 120),
@@ -443,9 +440,8 @@ class _ContextRowState extends ConsumerState<_ContextRow> {
   }
 }
 
-/// Per-conversation auto-download override menu (issue #41): Default (follow
-/// the global threshold) / Always on / Off. State is stored in
-/// [autoDownloadOverridesProvider] and pushed to Rust on every change.
+/// Per-conversation auto-download override menu (issue #41). The state lives in
+/// [autoDownloadOverridesProvider] and is pushed to Rust on every change.
 class _AutoDownloadOverrideButton extends ConsumerWidget {
   const _AutoDownloadOverrideButton(
       {required this.contextKey, required this.conversationLabel});
@@ -535,8 +531,8 @@ class _RowTrashButton extends StatelessWidget {
       if (ok) await onConfirmed();
     }
 
-    // HollowPressable (never Material InkWell — no ripple in Hollow, and the
-    // pressable already carries the focus ring + button semantics).
+    // Never a Material InkWell: no ripple in Hollow, and the pressable already
+    // carries the focus ring and button semantics.
     return HollowPressable(
       onTap: handleTap,
       semanticLabel: 'Delete files',

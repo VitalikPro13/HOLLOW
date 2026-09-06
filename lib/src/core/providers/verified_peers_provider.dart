@@ -7,10 +7,7 @@ import 'package:hollow/src/rust/api/verification.dart' as verification_api;
 ///
 /// MASTER-KEYED, always. A verified flag stored against a per-device peer_id
 /// would stop applying the moment that contact linked or dropped a device, and
-/// a badge that quietly stops reflecting reality is worse than no badge — it
-/// asserts a safety that is not there. Rust resolves device → master on every
-/// write too; this provider mirrors that so the synchronous [isVerified] used
-/// by list rows agrees with the DB.
+/// a badge that quietly stops reflecting reality asserts a safety that is gone.
 class VerifiedPeersNotifier extends Notifier<Set<String>> {
   @override
   Set<String> build() => const {};

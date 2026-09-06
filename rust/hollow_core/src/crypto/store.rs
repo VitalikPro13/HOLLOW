@@ -12,9 +12,8 @@ pub(crate) enum CryptoStoreCmd {
 
 /// A fire-and-forget persistence actor for Olm state.
 ///
-/// Owns a `rusqlite::Connection` (which is `!Send`) inside a `spawn_blocking`
-/// task. The swarm task sends save commands via an mpsc channel.
-/// The in-memory `OlmManager` is authoritative; the DB is for restart persistence.
+/// Owns a `!Send` rusqlite connection inside a `spawn_blocking` task. The
+/// in-memory `OlmManager` is authoritative; the DB only survives restarts.
 pub(crate) struct CryptoStore {
     cmd_tx: mpsc::UnboundedSender<CryptoStoreCmd>,
 }
@@ -24,7 +23,6 @@ impl CryptoStore {
     pub fn open(db_path: String, passphrase: String) -> Result<Self, String> {
         let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<CryptoStoreCmd>();
 
-        // Spawn a blocking task that owns the Connection.
         tokio::task::spawn_blocking(move || {
             let store = match MessageStore::open(&db_path, &passphrase) {
                 Ok(s) => s,
@@ -34,8 +32,6 @@ impl CryptoStore {
                 }
             };
 
-            // Block this OS thread, receiving commands from the async world.
-            // We use `blocking_recv` since we're already on a blocking thread.
             let mut backlog = crate::sentinel::BacklogLatch::new("crypto_store", 256);
             while let Some(cmd) = cmd_rx.blocking_recv() {
                 backlog.observe(cmd_rx.len());
@@ -80,7 +76,7 @@ impl CryptoStore {
         });
     }
 
-    /// Fire-and-forget: delete a persisted Olm session (Step 7 revocation).
+    /// Fire-and-forget: delete a persisted Olm session.
     pub fn delete_session(&self, peer_id: String) {
         let _ = self.cmd_tx.send(CryptoStoreCmd::DeleteSession { peer_id });
     }

@@ -97,29 +97,23 @@ pub(crate) fn handle_webrtc_send_signal(
             return;
         }
     };
-    // Multi-device: `peer_id` may be the conversation MASTER (UI key), which no
-    // socket authenticates as → the signal would be silently dropped and the data
-    // channel (used for P2P file transfer) never forms. Target ONE concrete online
-    // device of that identity — NOT a fan-out: a duplicate SDP offer/answer to
-    // several devices would create competing peer connections / answer glare for a
-    // single `conn_id`. A deterministic pick (lowest device id) keeps both sides
-    // agreeing on the same target. Single-device falls back to the raw id.
+    // Multi-device: `peer_id` may be the conversation MASTER, which no socket
+    // authenticates as, so the signal would be silently dropped and the data
+    // channel never forms. Target ONE concrete online device, NOT a fan-out: a
+    // duplicate offer to several devices creates competing peer connections for a
+    // single `conn_id`. Deterministic (lowest device id), so both sides agree.
     let target = pick_online_device(ws_room_peers, &peer_id);
     send_message_to_peer(ws_cmd_tx, ws_room_peers, &target, msg);
 }
 
 /// Pick ONE concrete online device for an identity addressed by `peer_id` (which
-/// may be a master id). Used by `conn_id`-keyed call/WebRTC signaling so a signal
-/// the UI addressed by master reaches a real device instead of being dropped.
+/// may be a master id), so a `conn_id`-keyed signal the UI addressed by master
+/// reaches a real device instead of being dropped.
 ///
-/// CRITICAL — if `peer_id` is ALREADY a live device id (exact match in a room),
-/// return it UNCHANGED. This is what keeps a call/data-channel ANSWER and its ICE
-/// flowing back to the EXACT device that sent the offer: the receive path reports
-/// the sender's device id to Dart, Dart replies addressed to that device, and we
-/// must not re-pick a different sibling device (which would break the `conn_id`
-/// negotiation). The master→device pick only kicks in for an OUTBOUND
-/// invite/offer where the UI only knows the master; deterministic (lowest id) so
-/// both sides converge. Falls back to the raw id when nothing is online.
+/// CRITICAL: if `peer_id` is ALREADY a live device id, return it UNCHANGED. That
+/// is what keeps an ANSWER and its ICE flowing back to the EXACT device that sent
+/// the offer; re-picking a sibling would break the `conn_id` negotiation. The
+/// master-to-device pick applies only to an OUTBOUND offer, deterministically.
 fn pick_online_device(
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     peer_id: &str,
@@ -140,17 +134,13 @@ fn pick_online_device(
 
 /// Send one 1:1 call signal to the callee, Olm-encrypted.
 ///
-/// SECURITY (TRANSPORT-1, 2026-09): this used to hand the relay a bare
-/// `HavenMessage::Call*` frame, so the relay read the call's AES-128-GCM SFrame
-/// media key out of the invite/accept, read every SDP and ICE candidate, and
-/// could inject a forged CallAccept carrying a key it chose. The signal now
-/// rides `MessageEnvelope::CallSignal` inside the Olm ciphertext, and the
-/// receive side rejects any Call* that arrives in the clear.
+/// SECURITY (TRANSPORT-1): a bare `HavenMessage::Call*` frame let the relay read
+/// the call's AES-128-GCM SFrame media key out of the invite, read every SDP and
+/// ICE candidate, and inject a forged CallAccept carrying a key it chose. The
+/// signal rides `MessageEnvelope::CallSignal` inside Olm now, and the receive side
+/// rejects any Call* that arrives in the clear.
 ///
-/// No session means no send: a call signal is NEVER worth a plaintext
-/// fallback. We ask for the peer's key bundle (throttled, exactly like the DM
-/// path) and drop this signal — the caller's UI already handles an invite that
-/// never rings, and the next signal after the session forms goes through.
+/// No session means no send: a call signal is NEVER worth a plaintext fallback.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_call_send_signal(
     peer_id: String,
@@ -170,21 +160,14 @@ pub(crate) async fn handle_call_send_signal(
 ) {
     let Some(msg) = build_call_signal(&signal_type, payload) else { return; };
     // Multi-device: `peer_id` is the friend's MASTER (the call UI keys on the
-    // friend, not a device), which no socket authenticates as → every call signal
-    // (invite/accept/sdp/ice/state) addressed to it is silently dropped and the
-    // call never rings / never connects. Target ONE concrete online device,
-    // deterministically (lowest device id) so both sides converge on the SAME
-    // target for the `call_id`-keyed negotiation — NOT a fan-out (ringing every
-    // device + competing answers). Full ring-all-answer-once is a later design;
-    // this v1 reaches the friend's (deterministically chosen) online device.
-    // Single-device falls back to the raw id (device == master), unchanged.
+    // friend), which no socket authenticates as, so every call signal addressed to
+    // it is silently dropped. Target ONE concrete online device, deterministically,
+    // so both sides converge on the SAME target for the `call_id`-keyed
+    // negotiation, and NOT a fan-out (ringing every device, competing answers).
     let target = pick_online_device(ws_room_peers, &peer_id);
-    // Observability (2026-07-20): the outgoing call path used to be fully
-    // silent — an invite aimed at a stale-presence peer vanished with no
-    // trace anywhere (UI rang 30s, logs empty, undiagnosable). Log the
-    // resolved target for the LOW-VOLUME control signals, and always log
-    // when the target is about to be dropped as unreachable; sdp/ice floods
-    // stay quiet on the happy path.
+    // Observability: the outgoing call path used to be fully silent, so an invite
+    // aimed at a stale-presence peer vanished with no trace anywhere. Log the
+    // resolved target for LOW-VOLUME control signals; sdp/ice floods stay quiet.
     let reachable = ws_room_peers.values().any(|ps| ps.contains(&target));
     let control = matches!(
         signal_type.as_str(),
@@ -217,9 +200,8 @@ pub(crate) async fn handle_call_send_signal(
     };
 
     // Route into the DETERMINISTIC DM room, not a first-match lookup: the callee
-    // device is typically co-present in several of our rooms, and picking one it
-    // has since left buffers the frame against a room it never rejoins (silent
-    // one-way loss). Both identities' devices are always members of this room.
+    // device is typically co-present in several rooms, and picking one it has since
+    // left buffers the frame against a room it never rejoins. Both sides are in it.
     let dm_room = dm_room_code(local_master, &super::resolver::resolve(&target));
     let in_dm_room = ws_room_peers.get(&dm_room).is_some_and(|p| p.contains(&target));
     if in_dm_room {
@@ -240,9 +222,8 @@ pub(crate) async fn handle_call_send_signal(
 }
 
 /// Ask `target` for a fresh key bundle, at most once per `KEY_REQUEST_THROTTLE`.
-/// Mirrors `message_ops::queue_dm_key_request` minus the queueing: a call signal
-/// is live control traffic, so a stale one replayed after the session forms is
-/// worse than nothing.
+/// Mirrors `message_ops::queue_dm_key_request` minus the queueing: a call signal is
+/// live control traffic, so a stale one replayed later is worse than nothing.
 fn request_key_bundle_throttled(
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
@@ -314,9 +295,8 @@ fn build_call_accept(payload: String) -> HavenMessage {
 }
 
 /// Call signal types whose payload MUST be valid JSON (no legacy fallback).
-/// Unknown types log "Unknown call signal type"; known types with a bad
-/// payload log "Failed to parse … payload" — exactly the original arm order
-/// (an unknown type never reports a parse failure).
+/// Unknown types log "Unknown call signal type"; a known type with a bad payload
+/// logs a parse failure, so an unknown type never reports one.
 fn build_call_json_signal(signal_type: &str, payload: &str) -> Option<HavenMessage> {
     let parsed = serde_json::from_str::<serde_json::Value>(payload).ok();
     let msg = match signal_type {
@@ -391,11 +371,9 @@ fn build_call_json_signal(signal_type: &str, payload: &str) -> Option<HavenMessa
 /// Handle one DECRYPTED 1:1 call signal and hand it to Dart as a
 /// `NetworkEvent::CallSignal`.
 ///
-/// `peer_str` is the sender DEVICE the Olm session authenticated, so the
-/// attribution here is as strong as the ratchet. `signal` is WHITELISTED again
-/// on the way out: only the 17 `Call*` variants are call signals, and anything
-/// else arriving inside a `CallSignal` envelope is an attempt to smuggle another
-/// message type past its own gate, so it is dropped and logged.
+/// `peer_str` is the sender DEVICE the Olm session authenticated. `signal` is
+/// WHITELISTED again on the way out: anything but the 17 `Call*` variants inside a
+/// `CallSignal` envelope is smuggling another message type past its own gate.
 pub(crate) async fn handle_call_signal_message(
     peer_str: &str,
     master_peer_str: &str,
@@ -594,10 +572,10 @@ pub(crate) async fn handle_voice_channel_join(
 ) {
     hollow_log!("[HOLLOW-VC] Join voice channel {channel_id} in server {server_id}");
 
-    // Restricted channel guard: a member whose role doesn't satisfy the channel's
-    // visibility tier must not be able to JOIN a restricted voice channel at all
-    // (the UI hides it, but a modified client could try). Reject before we announce
-    // the join or touch SFrame. `can_see_channel` collapses device→master.
+    // Restricted channel guard: a member whose role does not satisfy the visibility
+    // tier must not JOIN at all (the UI hides it, a modified client could try).
+    // Reject before announcing the join or touching SFrame; `can_see_channel`
+    // collapses device to master.
     let restricted = server_states
         .get(&server_id)
         .is_some_and(|s| s.channel_uses_subgroup(&channel_id));
@@ -624,9 +602,8 @@ pub(crate) async fn handle_voice_channel_join(
         &server_id, local_peer_str, &envelope, &plain,
     );
     // Track participant. SELF is keyed by our ROUTABLE DEVICE id, exactly like
-    // every remote entry (remote lanes insert the WS sender) — a master-form
-    // self-entry is the self-ghost bug: Dart's device-keyed self-skip missed
-    // it and dialed our own master as a remote participant.
+    // every remote entry: a master-form self-entry is the self-ghost bug, where
+    // Dart's device-keyed self-skip missed it and dialed our own master.
     let vc_key = format!("{}:{}", server_id, channel_id);
     voice_channel_participants.entry(vc_key.clone()).or_default()
         .insert(device_peer_id.to_string());
@@ -637,12 +614,10 @@ pub(crate) async fn handle_voice_channel_join(
         &server_id, &channel_id, restricted, local_peer_str,
         mls_epoch_hint_cooldown, event_tx,
     ).await;
-    // Emit locally so our own UI updates.
     let _ = event_tx.send(NetworkEvent::VoiceChannelJoined {
         server_id: server_id.clone(), channel_id: channel_id.clone(),
         peer_id: device_peer_id.to_string(), is_self: true,
     }).await;
-    // Check for mode transition.
     check_voice_mode_transition(
         &vc_key, &server_id, &channel_id,
         voice_channel_participants, voice_channel_gossip_mode,
@@ -667,14 +642,12 @@ fn fan_plaintext_to_members(
 }
 
 /// Announce voice-channel presence (join/leave): MLS broadcast when the server
-/// group is held, PLUS always the plaintext member fan-out — voice presence
-/// must arrive even with stale MLS epochs.
+/// group is held, PLUS always the plaintext member fan-out, because voice presence
+/// must arrive even at stale MLS epochs.
 ///
-/// This is the REFERENCE SHAPE for every VC signal: MLS plus an UNCONDITIONAL
-/// plaintext twin, never `if !mls_sent`. Our own encrypt succeeding measures
-/// the wrong end of the wire — a member can be reachable and still hold no
-/// leaf (a just-admitted parked joiner) or sit at a skewed epoch, and neither
-/// is visible from here. `broadcast_vc_state_signal` mirrors it.
+/// The REFERENCE SHAPE for every VC signal: MLS plus an UNCONDITIONAL plaintext
+/// twin, never `if !mls_sent`. Our own encrypt succeeding measures the wrong end
+/// of the wire, since a reachable member may hold no leaf or sit at a skewed epoch.
 #[allow(clippy::too_many_arguments)]
 fn broadcast_vc_presence(
     mls: &mut Option<MlsManager>,
@@ -698,16 +671,13 @@ fn broadcast_vc_presence(
 
 /// Emit the current SFrame key for a voice channel we just joined.
 ///
-/// For a RESTRICTED voice channel the SFrame key is derived from the channel's
-/// own MLS SUBGROUP (`subgroup_id`), NOT the server-wide group — so a
-/// non-qualifying member can't derive the key. The emitted event carries
-/// `channel_id: Some(cid)` so Dart routes the key to that channel's cryptor.
+/// For a RESTRICTED voice channel the key comes from the channel's own MLS
+/// SUBGROUP, not the server-wide group, so a non-qualifying member cannot derive
+/// it, and the event carries `channel_id` so Dart routes it to that cryptor.
 ///
-/// CAUTION: the subgroup may not exist on our side yet (we just became a
-/// participant / were recently promoted). In that case we must NOT fall back to
-/// the server-group key (that would defeat the cryptographic isolation). Instead
-/// we pull ourselves into the subgroup via the same bootstrap path text uses —
-/// the resulting Welcome → MlsEpochChanged{channel_id} delivers the key.
+/// CAUTION: the subgroup may not exist on our side yet. Falling back to the
+/// server-group key would defeat the isolation, so we pull ourselves into the
+/// subgroup instead and the resulting Welcome delivers the key.
 #[allow(clippy::too_many_arguments)]
 async fn emit_vc_sframe_key(
     mls: &mut Option<MlsManager>,
@@ -734,12 +704,10 @@ async fn emit_vc_sframe_key(
             hollow_log!("[HOLLOW-VC-SFRAME] MLS exists, has_group({group_key})={has_group}");
             if has_group {
                 export_and_emit_sframe(mls_mgr, &group_key, server_id, emit_cid, event_tx).await;
-                // Join-order SFrame race fix: a held group can be silently
-                // STALE (we missed the unbuffered commit broadcasts), and the
-                // export above would emit a key nobody else uses — black
-                // screen until the escalated heal. Ask the authority whether
-                // the group moved past us; a stale epoch comes back as an
-                // MlsCommitCatchup replay (or a remove+re-add) within ~1 RTT.
+                // Join-order SFrame race: a held group can be silently STALE (we
+                // missed the unbuffered commit broadcasts), and the export above
+                // would emit a key nobody else uses. Ask the authority; a stale
+                // epoch comes back as an MlsCommitCatchup replay within ~1 RTT.
                 if let Some(state) = server_states.get(server_id) {
                     super::crypto_handler::send_epoch_probe(
                         mls_mgr, ws_cmd_tx, ws_room_peers, state,
@@ -759,10 +727,9 @@ async fn emit_vc_sframe_key(
                     );
                 }
             } else if !super::conference::is_conference_sid(server_id) {
-                // No SERVER group either — every other participant encrypts
-                // with a key we can't derive, so their audio would play as
-                // ciphertext until something re-adds us. Pull ourselves in via
-                // the owner; the Welcome fires MlsEpochChanged (server group).
+                // No SERVER group either: every other participant encrypts with a
+                // key we cannot derive, so their audio plays as ciphertext. Pull
+                // ourselves in via the owner; the Welcome fires MlsEpochChanged.
                 if let Some(state) = server_states.get(server_id) {
                     hollow_log!("[HOLLOW-VC-SFRAME] Server group {group_key} not held — requesting bootstrap");
                     super::crypto_handler::request_server_group_bootstrap(
@@ -800,21 +767,16 @@ async fn export_and_emit_sframe(
 // ── VoiceSframeHeal (issue #27) ──────────────────────────────────────
 
 /// SFrame heal request from Dart: the voice cryptors report sustained decrypt
-/// failures against `peer_id`, i.e. our key material and theirs disagree.
+/// failures against `peer_id`, so our key material and theirs disagree.
 ///
-/// Non-escalated: re-export + re-emit the current epoch key (covers a lost
-/// `MlsEpochChanged` on the Dart side), or request a bootstrap when we don't
-/// hold the group at all.
+/// Non-escalated: re-export and re-emit the current epoch key (covering a lost
+/// `MlsEpochChanged` on the Dart side), or request a bootstrap when we hold no
+/// group at all.
 ///
-/// Escalated (Dart applies a 60s cooldown): converge a genuinely forked group.
-///   * We are NOT the group authority → drop our group and re-bootstrap from
-///     the authority — the fresh Welcome lands us on their epoch.
-///   * We ARE the authority (owner / subgroup coordinator) → queue a
-///     remove + re-add of the failing peer's leaves; the batch timer commits
-///     (re-keying everyone) and the peer converges via Welcome or its own
-///     commit-fail recovery.
-/// Conferences only ever re-emit — dropping the conf group would drop our
-/// admission to the call itself.
+/// Escalated (Dart applies a 60s cooldown) converges a genuinely forked group: if
+/// we are NOT the authority, drop our group and re-bootstrap from it; if we ARE,
+/// queue a remove and re-add of the failing peer's leaves. Conferences only ever
+/// re-emit, because dropping the conf group drops our admission to the call.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_voice_sframe_heal(
     server_id: String,
@@ -849,9 +811,8 @@ pub(crate) async fn handle_voice_sframe_heal(
     hollow_log!("[HOLLOW-VC-SFRAME] HEAL request for {group_key} (escalate={escalate})");
 
     // Always start with the cheap fix: re-emit whatever key we currently hold
-    // (idempotent on the Dart side), or pull ourselves into the group. A held
-    // but INACTIVE group (we were evicted — e.g. by the authority's heal
-    // remove+re-add) can't export; treat it as group-less.
+    // (idempotent on the Dart side), or pull ourselves into the group. A held but
+    // INACTIVE group cannot export, so treat it as group-less.
     let mut group_usable = mls_mgr.has_group(&group_key);
     if group_usable && !mls_mgr.is_active(&group_key) {
         hollow_log!("[HOLLOW-VC-SFRAME] HEAL: group {group_key} held but INACTIVE (evicted) — dropping");
@@ -861,11 +822,9 @@ pub(crate) async fn handle_voice_sframe_heal(
     }
     if group_usable {
         export_and_emit_sframe(mls_mgr, &group_key, &server_id, emit_cid.clone(), event_tx).await;
-        // Join-order SFrame race fix: sustained cryptor failures with a held
-        // group are very often a silently-stale epoch (the re-emit above then
-        // re-emits the same stale key — a no-op). Probe the authority; a
-        // stale epoch comes back as an MlsCommitCatchup replay within ~1 RTT,
-        // which is what turns heal step 2 from cosmetic into curative.
+        // Join-order SFrame race: sustained failures with a held group are often a
+        // silently-stale epoch, so the re-emit above is a no-op. Probe the
+        // authority; a stale epoch replies with an MlsCommitCatchup within ~1 RTT.
         if let Some(state) = server_states.get(&server_id) {
             super::crypto_handler::send_epoch_probe(
                 mls_mgr, ws_cmd_tx, ws_room_peers, state,
@@ -914,10 +873,9 @@ pub(crate) async fn handle_voice_sframe_heal(
         .is_some_and(|a| super::resolver::same_identity(a, local_peer_str));
 
     if we_are_authority {
-        // Remove + re-add the failing peer's leaves. The batch removal commit
-        // rotates the key for everyone; the peer converges via the re-add
-        // Welcome, or — if its group is forked and can't process the commit —
-        // via its own commit-fail drop-and-rebootstrap recovery.
+        // Remove and re-add the failing peer's leaves. The removal commit rotates
+        // the key for everyone; the peer converges via the re-add Welcome, or via
+        // its own commit-fail drop-and-rebootstrap when its group is forked.
         let peer_master = super::resolver::resolve(&peer_id);
         let leaves = mls_mgr.group_members(&group_key);
         let mut queued = 0usize;
@@ -1013,7 +971,6 @@ pub(crate) async fn handle_voice_channel_leave(
         server_id: server_id.clone(), channel_id: channel_id.clone(),
         peer_id: device_peer_id.to_string(), is_self: true,
     }).await;
-    // Check for mode transition.
     check_voice_mode_transition(
         &vc_key, &server_id, &channel_id,
         voice_channel_participants, voice_channel_gossip_mode,
@@ -1023,13 +980,11 @@ pub(crate) async fn handle_voice_channel_leave(
 
 // ── Auto-leave on lost visibility ────────────────────────────────────
 
-/// After a role/visibility/kick/ban op applies, leave any voice channel we're
-/// currently IN but can no longer SEE (visibility raised above our tier, or we
-/// were demoted / kicked / banned). Mirrors the text-channel UI eviction, but for
-/// the active call: a participant who loses access must drop the call (and rotate
-/// the SFrame key for the rest via the subgroup removal that already ran). Runs on
-/// the affected node itself, so it works regardless of which screen is focused and
-/// on both platforms via the normal `handle_voice_channel_leave` teardown.
+/// After a role, visibility, kick or ban op applies, leave any voice channel we
+/// are IN but can no longer SEE. Mirrors the text-channel UI eviction for the
+/// active call: a participant who loses access must drop it, and the SFrame key
+/// rotates for the rest via the subgroup removal that already ran. Runs on the
+/// affected node itself, so it works regardless of which screen is focused.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn auto_leave_invisible_voice_channels(
     mls: &mut Option<MlsManager>,
@@ -1057,10 +1012,9 @@ pub(crate) async fn auto_leave_invisible_voice_channels(
         })
         .filter_map(|(vc_key, _)| vc_key.strip_prefix(&prefix).map(|c| c.to_string()))
         .filter(|cid| {
-            // Leave if we were removed from the server entirely (kick/ban → not a
-            // member, so we can't be in any of its calls), OR a restricted channel's
-            // visibility now excludes us (demotion / tier raised). `is_member` /
-            // `can_see_channel` collapse device→master.
+            // Leave if we were removed from the server entirely (kick or ban means
+            // we cannot be in any of its calls), or a restricted channel's
+            // visibility now excludes us. Both checks collapse device to master.
             server_states.get(server_id).is_some_and(|s| {
                 !s.is_member(local_peer_str)
                     || (s.channel_uses_subgroup(cid) && !s.can_see_channel(local_peer_str, cid))
@@ -1099,11 +1053,9 @@ pub(crate) async fn handle_voice_channel_send_signal(
     device_peer_id: &str,
     event_tx: &mpsc::Sender<NetworkEvent>,
 ) {
-    // BELT: a targeted VC signal aimed at OURSELVES (either id form) is always
-    // an upstream bug — encrypting to our own id can never succeed ("No
-    // session" storms) and a master-form target is never routable. Drop loudly
-    // instead of flooding MessageSendFailed per trickled ICE candidate.
-    // Sibling devices have DISTINCT device ids, so this never blocks them.
+    // BELT: a targeted VC signal aimed at OURSELVES, in either id form, is always
+    // an upstream bug, so drop it loudly instead of flooding MessageSendFailed per
+    // trickled ICE candidate. Sibling devices have DISTINCT ids and are unaffected.
     if peer_id == local_peer_str || peer_id == device_peer_id {
         hollow_log!("[HOLLOW-VC] DROPPED self-targeted {signal_type} for vc {channel_id} (target={peer_id}) — upstream bug, not sending");
         return;
@@ -1131,10 +1083,9 @@ pub(crate) async fn handle_voice_channel_send_signal(
     }
 }
 
-/// Build the outbound voice-channel signal envelope. Signal types are
-/// WHITELISTED — an unknown type logs and yields `None`; a known type with an
-/// unparseable payload silently yields `None` (dropped, matching the original
-/// arm-local `return`s).
+/// Build the outbound voice-channel signal envelope. Signal types are WHITELISTED:
+/// an unknown type logs and yields `None`, and a known type with an unparseable
+/// payload silently yields `None`.
 fn build_vc_signal_envelope(
     signal_type: &str,
     server_id: &str,
@@ -1266,19 +1217,15 @@ fn parse_stream_origin(v: &serde_json::Value) -> Option<Box<StreamOrigin>> {
     }))
 }
 
-/// Media forwarding step 2 spoof guard: an inbound origin is acceptable only
-/// when it names the authenticated delivering sender (offer / their own
-/// outgoing-role ICE) or ourselves (answer / incoming-role ICE echoing OUR
-/// share). Anything else is an attribution spoof — the whole signal must be
-/// DROPPED (rejected, never log-and-continue): the SFrame group key is shared,
-/// so a spoofed origin would render the spoofer's pixels attributed to the
-/// victim. Forwarder-delivered legs (step 3) ride the `fwd_*` namespace, so
-/// origin ≠ sender never legitimately appears on this lane.
+/// Spoof guard: an inbound origin is acceptable only when it names the
+/// authenticated delivering sender (offer, or their own outgoing-role ICE) or
+/// ourselves (answer, or incoming-role ICE echoing OUR share). Anything else is an
+/// attribution spoof and the whole signal is DROPPED, never logged and continued:
+/// the SFrame group key is shared, so a spoofed origin would render the spoofer's
+/// pixels attributed to the victim. Forwarder legs ride the `fwd_*` namespace.
 ///
-/// Comparisons go through the resolver (multi-device iron rule): one master =
-/// many device ids, and the sender/local ids here can arrive in either form
-/// (`local_peer_str` is the MASTER; VC senders are routable DEVICE ids). A
-/// cross-identity spoof still collapses to different masters and is dropped.
+/// Comparisons go through the resolver, because one master is many device ids and
+/// the ids here arrive in either form; a cross-identity spoof still collapses.
 fn inbound_origin_ok(
     origin: &Option<Box<StreamOrigin>>,
     sender_peer_id: &str,
@@ -1299,17 +1246,14 @@ fn origin_json_value(o: &StreamOrigin) -> serde_json::Value {
     serde_json::json!({"peer": o.peer, "kind": o.kind, "stream": o.stream})
 }
 
-/// Broadcast a VC state signal (audio/screen/camera state): MLS broadcast when
-/// the server group is held, PLUS always the plaintext member fan-out — the
-/// same shape as `broadcast_vc_presence`.
+/// Broadcast a VC state signal (audio, screen, camera): MLS broadcast when the
+/// server group is held, PLUS always the plaintext member fan-out, the same shape
+/// as `broadcast_vc_presence`.
 ///
-/// This used to run the plaintext leg only `if !mls_sent`, i.e. only when OUR
-/// OWN encrypt failed. That is the wrong end of the wire: a member with no leaf
-/// in the group (the ordinary case for a just-admitted parked joiner) or at a
-/// skewed epoch is perfectly reachable and simply could not read the frame, so
-/// its member tile kept showing somebody unmuted who had muted minutes ago and
-/// nothing here reported a problem. These signals are small, idempotent
-/// last-writer-wins state, so the duplicate a formed group receives is free.
+/// Running the plaintext leg only `if !mls_sent` measures the wrong end of the
+/// wire: a member with no leaf or at a skewed epoch is perfectly reachable and
+/// simply cannot read the frame, so its tile kept showing somebody unmuted who
+/// had muted minutes before. These signals are small, idempotent, last-writer-wins.
 #[allow(clippy::too_many_arguments)]
 fn broadcast_vc_state_signal(
     signal_type: &str,
@@ -1337,10 +1281,9 @@ fn broadcast_vc_state_signal(
     }
 }
 
-/// Plaintext `HavenMessage` twin of a broadcast VC state signal, sent alongside
-/// the MLS copy on every broadcast (not only when our own encrypt fails — a
-/// receiver with no leaf is invisible from the sender). Non-state types yield
-/// `None`.
+/// Plaintext `HavenMessage` twin of a broadcast VC state signal, sent alongside the
+/// MLS copy on every broadcast, not only when our own encrypt fails: a receiver
+/// with no leaf is invisible from the sender. Non-state types yield `None`.
 fn build_vc_plaintext_state(
     signal_type: &str,
     server_id: &str,
@@ -1388,10 +1331,9 @@ pub(crate) fn handle_webrtc_ping_report(
 
 // ── WebRtcRouteReport ────────────────────────────────────────────────
 
-/// Tier 3 (reachability-aware overlay): record the ICE route class Dart
-/// measured for a live connection. Direct (host/srflx/LAN) peers score above
-/// TURN-relayed ones in `PeerScore::composite`, so the 300s rotation drifts
-/// the mesh toward peers that offload the relay instead of leaning on TURN.
+/// Tier 3 (reachability-aware overlay): record the ICE route class Dart measured
+/// for a live connection. Direct peers score above TURN-relayed ones in
+/// `PeerScore::composite`, so the rotation drifts the mesh off the relay.
 pub(crate) fn handle_webrtc_route_report(
     peer_id: String,
     is_direct: bool,
@@ -1537,10 +1479,9 @@ pub(crate) async fn handle_envelope_voice_channel_join(
     // the master compare alone would admit it as a remote participant).
     if sender_peer_id == local_peer_str || sender_peer_id == device_peer_id { return; }
     // Conferences are virtual servers with no CRDT state: this envelope arrived
-    // MLS-DECRYPTED under the `conf:{id}` group, so the sender provably holds
-    // the group — that IS the membership check (admission = the MLS add). The
-    // plaintext HavenMessage::VoiceChannelJoin path keeps its strict CRDT guard
-    // and conferences never ride it. Channel is always the synthetic "main".
+    // MLS-DECRYPTED under the `conf:{id}` group, so the sender provably holds it,
+    // and that IS the membership check. The plaintext path keeps its strict CRDT
+    // guard and conferences never ride it. Channel is always the synthetic "main".
     let is_conf = super::conference::is_conference_sid(&sid);
     let is_member = if is_conf { true } else {
         server_states.get(&sid)
@@ -1563,13 +1504,11 @@ pub(crate) async fn handle_envelope_voice_channel_join(
     }
     hollow_log!("[HOLLOW-VC] {sender_peer_id} joined voice channel {cid} in {sid}");
     let vc_key = format!("{sid}:{cid}");
-    // Conference participant sync: a freshly-admitted member's join is the
-    // FIRST thing existing participants hear from them — there is no CRDT/
-    // room history to learn the pre-existing call roster from (a server
-    // member watches every join live; a conference joiner was locked out
-    // until admission). Reply with our own join, DIRECT, so the new member's
-    // grid shows us. Plaintext (their MLS just minted — no epoch concerns);
-    // their receive guard verifies us against the conf group's leaf set.
+    // Conference participant sync: a freshly-admitted member's join is the FIRST
+    // thing existing participants hear from them, and there is no CRDT or room
+    // history to learn the pre-existing roster from. Reply with our own join,
+    // DIRECT, so the new member's grid shows us. Plaintext, since their MLS just
+    // minted; their receive guard verifies us against the conf group's leaf set.
     if super::conference::is_conference_sid(&sid)
         && voice_channel_participants
             .get(&vc_key)
@@ -1929,10 +1868,9 @@ pub(crate) async fn handle_envelope_voice_channel_screen_watch(
     }).await;
 }
 
-/// Sharer -> viewer forwarder assignment (media forwarding step 3). Same
-/// participant gate as every VC signal, plus the step-2 origin spoof guard in
-/// its offer-direction form: the origin must name the authenticated sender
-/// (the sharer assigning viewers to ITS OWN stream) — anything else could
+/// Sharer to viewer forwarder assignment. The same participant gate as every VC
+/// signal, plus the origin spoof guard in its offer-direction form: the origin must
+/// name the authenticated sender assigning viewers to ITS OWN stream, or it could
 /// steer a viewer to attach to a stream attributed to a victim.
 pub(crate) async fn handle_envelope_voice_channel_screen_assign(
     voice_channel_participants: &HashMap<String, std::collections::HashSet<String>>,
@@ -1968,13 +1906,11 @@ pub(crate) async fn handle_envelope_voice_channel_screen_assign(
 }
 
 /// Feeder election: a delegated feeder reports whether its leg into another
-/// forwarder is up, so the owner knows when it may stop supplying that
-/// forwarder itself (make-before-break handover).
+/// forwarder is up, so the owner knows when it may stop supplying that forwarder
+/// itself (make-before-break handover).
 ///
-/// Gated exactly like the assign it answers: VC participant + the origin must
-/// name a stream the SENDER could legitimately speak about. Note the direction
-/// is feeder → OWNER, so `inbound_origin_ok`'s "names ourselves" branch is the
-/// one that applies (we are the originator of the stream being fed).
+/// Gated exactly like the assign it answers: VC participant, plus an origin that
+/// names ourselves, since the direction is feeder to OWNER.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_envelope_voice_channel_screen_feed_state(
     voice_channel_participants: &HashMap<String, std::collections::HashSet<String>>,

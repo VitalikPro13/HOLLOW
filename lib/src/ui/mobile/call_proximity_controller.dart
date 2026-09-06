@@ -10,16 +10,11 @@ import '../../core/providers/call_provider.dart';
 import '../../core/providers/voice_channel_provider.dart';
 import '../../core/services/audio_route.dart';
 
-/// App-level proximity controller (mobile only).
+/// App-level proximity controller (mobile only), rendering nothing.
 ///
 /// Blanks the screen when the phone is held to the ear while audio is on the
-/// earpiece — for ANY active call, regardless of which screen is visible.
-/// Previously this lived inside the call screens, so it only worked while you
-/// were looking at the call sheet; navigate away and it stopped. Mounting it
-/// globally (in the app builder's mobile Stack) means it follows the call, not
-/// the screen.
-///
-/// Renders nothing — it's a pure side-effect widget.
+/// earpiece, for ANY active call. It is mounted globally rather than inside the
+/// call screens so it follows the call and not the visible screen.
 class CallProximityController extends ConsumerStatefulWidget {
   const CallProximityController({super.key});
 
@@ -43,8 +38,8 @@ class _CallProximityControllerState
   void _setEarpieceMode(bool earpieceMode) {
     if (!_isMobilePlatform) return;
     if (earpieceMode && _proximitySub == null) {
-      // Android: explicit wake-lock-backed screen-off. iOS blanks natively
-      // while the events stream is subscribed (proximityMonitoringEnabled).
+      // Android needs an explicit wake-lock-backed screen-off; iOS blanks
+      // natively while the events stream is subscribed.
       unawaited(
           ProximitySensor.setProximityScreenOff(true).catchError((_) => false));
       _proximitySub = ProximitySensor.events.listen((_) {}, onError: (_) {});
@@ -67,13 +62,10 @@ class _CallProximityControllerState
     final vc = ref.watch(voiceChannelProvider);
     final activeKind = ref.watch(audioRouteProvider).activeKind;
 
-    // Earpiece mode = audio actually playing through the EARPIECE: a live
-    // call/VC, no video on either side, and the route held to the ear.
-    //
-    // The route decides, not the speaker flag: with headphones plugged into a
-    // voice call the flag stays false while audio is nowhere near the ear, and
-    // blanking the screen at every passing object is wrong. Falls back to the
-    // flag when the platform can't name the route.
+    // The ROUTE decides, never the speaker flag: with headphones in a voice
+    // call the flag stays false while audio is nowhere near the ear, and
+    // blanking at every passing object is wrong. The flag is only the fallback
+    // for a platform that cannot name the route.
     final onEarpiece = activeKind == null
         ? null
         : activeKind == AudioRouteKind.earpiece;
@@ -92,8 +84,8 @@ class _CallProximityControllerState
     return const SizedBox.shrink();
   }
 
-  /// Mirrors `_hasVideo` in mobile_voice_channel_route.dart: any local/remote
-  /// camera or a focused screen share counts as video (→ not earpiece mode).
+  /// Any local or remote camera, or a focused screen share, counts as video and
+  /// so rules out earpiece mode.
   bool _vcHasVideo(VoiceChannelState vc) {
     if (vc.focusedScreenSharePeerId != null) return true;
     if (vc.isCameraOn) return true;

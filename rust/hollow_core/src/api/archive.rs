@@ -137,9 +137,8 @@ pub struct ArchiveData {
 
 // ── FFI functions ───────────────────────────────────────────────
 
-/// Export a DM conversation as a `.hollow-archive` file.
-/// `file_mode`: "full", "images_only", or "placeholder".
-/// Returns the file size in bytes on success.
+/// Export a DM conversation as a `.hollow-archive` file. `file_mode` is "full",
+/// "images_only" or "placeholder"; returns the file size in bytes.
 #[frb]
 pub fn export_dm_archive(
     peer_id: String,
@@ -167,9 +166,8 @@ pub fn export_dm_archive(
     Ok(size)
 }
 
-/// Export a channel conversation as a `.hollow-archive` file.
-/// `file_mode`: "full", "images_only", or "placeholder".
-/// Returns the file size in bytes on success.
+/// Export a channel conversation as a `.hollow-archive` file. `file_mode` is "full",
+/// "images_only" or "placeholder"; returns the file size in bytes.
 #[frb]
 pub fn export_channel_archive(
     server_id: String,
@@ -203,10 +201,9 @@ pub fn export_channel_archive(
     Ok(size)
 }
 
-/// Export all text channels of a server as a single `.hollow-archive` file.
-/// `channels_json`: JSON array of `[{"channel_id": "...", "channel_name": "..."}]`.
-/// `file_mode`: "full", "images_only", or "placeholder".
-/// Returns the file size in bytes on success.
+/// Export every text channel of a server as one `.hollow-archive` file.
+/// `channels_json` is `[{"channel_id": "...", "channel_name": "..."}]`; returns the
+/// file size in bytes.
 #[frb]
 pub fn export_server_archive(
     server_id: String,
@@ -222,7 +219,6 @@ pub fn export_server_archive(
     let id_data = crate::identity::load_or_create_identity()?;
     let data_dir = crate::identity::data_dir()?;
 
-    // Parse channels JSON.
     let channels_raw: Vec<serde_json::Value> = serde_json::from_str(&channels_json)
         .map_err(|e| format!("Invalid channels_json: {e}"))?;
     let channels: Vec<(String, String)> = channels_raw
@@ -284,8 +280,8 @@ pub fn verify_archive(archive_path: String) -> Result<ArchiveVerifyResult, Strin
     })
 }
 
-/// Load a `.hollow-archive` file for rendering in the POV viewer.
-/// Full parse: returns all messages, edits, deletions, files, and verification results.
+/// Load a `.hollow-archive` file for the viewer: every message, edit, deletion, file
+/// and verification result.
 #[frb]
 pub fn load_archive(archive_path: String) -> Result<ArchiveData, String> {
     let zip_bytes = std::fs::read(&archive_path)
@@ -293,14 +289,12 @@ pub fn load_archive(archive_path: String) -> Result<ArchiveData, String> {
 
     let loaded = crate::archive::loader::load_archive(&zip_bytes)?;
 
-    // Build per-message signature lookup.
     let sig_map: std::collections::HashMap<String, bool> = loaded
         .per_message_results
         .iter()
         .map(|v| (v.message_id.clone(), v.signature_valid))
         .collect();
 
-    // Convert to FFI types.
     let messages: Vec<ArchiveMessageFfi> = loaded
         .messages
         .into_iter()
@@ -401,7 +395,6 @@ pub fn load_archive(archive_path: String) -> Result<ArchiveData, String> {
         })
         .collect();
 
-    // Build verification summary.
     let mut valid = 0u32;
     let mut invalid = 0u32;
     let mut unsigned = 0u32;

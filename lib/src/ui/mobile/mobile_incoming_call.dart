@@ -16,8 +16,7 @@ import 'package:hollow/src/ui/mobile/mobile_call_video_view.dart';
 import 'package:hollow/src/ui/mobile/mobile_page_route.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-/// Full-screen incoming call overlay for mobile.
-/// Shows avatar, name, call type, accept/decline, 30s countdown ring.
+/// Full-screen incoming call overlay for mobile, with a 30s countdown ring.
 class MobileIncomingCallOverlay extends ConsumerStatefulWidget {
   const MobileIncomingCallOverlay({super.key});
 
@@ -121,8 +120,8 @@ class _MobileIncomingCallOverlayState
       _cachedDisplayName =
           displayNameForPeer(callerProfile, _cachedPeerId);
       _cachedIsVideoCall = call.isVideoCall;
-      // Warn when answering will pull the user out of a voice channel
-      // (issue #49 — accepting auto-leaves it).
+      // Accepting auto-leaves a voice channel, so it is worth a warning
+      // (issue #49).
       final vc = ref.watch(voiceChannelProvider);
       _cachedVcChannelName =
           vc.isInVoiceChannel ? (vc.currentChannelName ?? 'voice') : null;
@@ -154,10 +153,8 @@ class _MobileIncomingCallOverlayState
             child: Column(
               children: [
                 const Spacer(flex: 2),
-                // Avatar
                 HollowAvatar(peerId: _cachedPeerId, size: 96),
                 const SizedBox(height: HollowSpacing.lg),
-                // Name
                 Text(
                   _cachedDisplayName,
                   style: HollowTypography.heading.copyWith(
@@ -167,7 +164,6 @@ class _MobileIncomingCallOverlayState
                   textAlign: TextAlign.center,
                 ),
                 const SizedBox(height: HollowSpacing.sm),
-                // Call type
                 Text(
                   _cachedIsVideoCall
                       ? 'Incoming video call...'
@@ -188,7 +184,6 @@ class _MobileIncomingCallOverlayState
                   ),
                 ],
                 const SizedBox(height: HollowSpacing.lg),
-                // Countdown
                 SizedBox(
                   width: 52,
                   height: 52,
@@ -224,14 +219,12 @@ class _MobileIncomingCallOverlayState
                   ),
                 ),
                 const Spacer(flex: 3),
-                // Accept / Decline buttons
                 Padding(
                   padding: const EdgeInsets.symmetric(
                       horizontal: HollowSpacing.xl * 2),
                   child: Row(
                     mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                     children: [
-                      // Decline
                       _CallActionButton(
                         icon: LucideIcons.phoneOff,
                         color: hollow.error,
@@ -239,7 +232,6 @@ class _MobileIncomingCallOverlayState
                         onTap: () =>
                             ref.read(callProvider.notifier).rejectCall(),
                       ),
-                      // Accept
                       _CallActionButton(
                         icon: _cachedIsVideoCall
                             ? LucideIcons.video

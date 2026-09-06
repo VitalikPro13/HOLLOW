@@ -1,15 +1,11 @@
 /// Everything a parked server join looks like, on every surface.
 ///
-/// A parked join has no name, no icon and no channels: an invite link carries
-/// an id and nothing else, and nobody has answered yet. So the tile cannot
-/// explain itself the way a server icon does, and this menu has to. It opens
-/// on LEFT click as well as right click, because a tile that does nothing when
-/// you click it reads as broken.
+/// A parked join has no name, no icon and no channels, so the tile cannot
+/// explain itself and this menu has to. It opens on LEFT click as well as
+/// right click, because a tile that does nothing when clicked reads as broken.
 ///
-/// Desktop gets [showPendingJoinMenu] (the shared `showHollowMenu` surface),
-/// mobile gets [showPendingJoinSheet] (the bottom-sheet idiom used by the
-/// server and DM rows). Both are built from the SAME action helpers below, so
-/// a row that exists on one and not the other cannot happen.
+/// Desktop uses [showPendingJoinMenu] and mobile [showPendingJoinSheet], both
+/// built from the SAME action helpers, so the two cannot drift apart.
 library;
 
 import 'package:flutter/material.dart';
@@ -47,11 +43,9 @@ String pendingJoinExplanation(
 /// What the flair on an admitted-but-not-yet-set-up server says.
 const String kAwaitingSetupTooltip = 'Waiting for a member to finish setup';
 
-/// The flair itself: a 10px clock in a ring the colour of the surface behind
-/// it, so it reads as a badge rather than as part of the icon.
-///
-/// It is a BADGE, not a spinner. The wait is for another human to open the
-/// app, which can be tomorrow.
+/// A 10px clock in a ring the colour of the surface behind it, so it reads as a
+/// badge rather than as part of the icon. A BADGE, not a spinner: the wait is
+/// for another human to open the app, which can be tomorrow.
 class AwaitingSetupBadge extends StatelessWidget {
   final double size;
 
@@ -76,10 +70,6 @@ class AwaitingSetupBadge extends StatelessWidget {
     );
   }
 }
-
-// ---------------------------------------------------------------------------
-// Desktop menu
-// ---------------------------------------------------------------------------
 
 /// Opens the parked-join menu at [anchor] (already in OVERLAY space).
 void showPendingJoinMenu({
@@ -125,10 +115,6 @@ void showPendingJoinMenu({
   );
 }
 
-// ---------------------------------------------------------------------------
-// Mobile sheet
-// ---------------------------------------------------------------------------
-
 /// The same actions as [showPendingJoinMenu], in the mobile idiom.
 void showPendingJoinSheet({
   required BuildContext context,
@@ -143,10 +129,9 @@ void showPendingJoinSheet({
       borderRadius:
           BorderRadius.vertical(top: Radius.circular(hollow.radiusLg)),
     ),
-    // The callbacks close over the OPENING surface's context and ref: the
-    // sheet is gone by the time an action runs, so a toast anchored to the
-    // sheet's own context would never appear. (Nothing takes a `WidgetRef` as
-    // a constructor parameter here either.)
+    // The callbacks close over the OPENING surface's context and ref, because
+    // the sheet is gone by the time an action runs and a toast anchored to its
+    // context would never appear.
     builder: (sheetContext) => SafeArea(
       child: _PendingJoinSheet(
         serverId: serverId,
@@ -283,10 +268,6 @@ class _SheetRow extends StatelessWidget {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Actions
-// ---------------------------------------------------------------------------
-
 /// The invite is all we have of this server, so copying it is how the user
 /// asks somebody who IS a member to come online.
 void copyPendingJoinInvite(BuildContext context, String serverId) {
@@ -295,8 +276,8 @@ void copyPendingJoinInvite(BuildContext context, String serverId) {
       type: HollowToastType.success);
 }
 
-/// Drops the request. Awaited and toasted either way: a discard that silently
-/// failed would leave a tile the user believes they removed.
+/// Drops the request. Awaited and toasted either way, or a silent failure
+/// leaves a tile the user believes they removed.
 Future<void> discardPendingJoinAction(
   BuildContext context,
   WidgetRef ref,
@@ -304,8 +285,8 @@ Future<void> discardPendingJoinAction(
 ) async {
   try {
     await discardPendingJoin(serverId);
-    // Rust also emits `PendingJoinUpdated{discarded}`; removing here as well is
-    // idempotent and keeps the tile from lingering for a round trip.
+    // Rust also emits `PendingJoinUpdated{discarded}`, so this is idempotent
+    // and only saves the tile a round trip.
     ref.read(pendingJoinsProvider.notifier).remove(serverId);
     if (!context.mounted) return;
     HollowToast.show(context, 'Join request discarded',

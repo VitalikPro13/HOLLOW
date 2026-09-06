@@ -9,9 +9,8 @@ pub(crate) fn shard_hash(data: &[u8]) -> String {
     hex::encode(Sha256::digest(data))
 }
 
-/// Self-describing header prepended to each stored shard.
-/// Allows any shard to be independently identified and used for reconstruction
-/// without external metadata.
+/// Self-describing header prepended to each stored shard, so any shard can be
+/// identified and used for reconstruction without external metadata.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ShardMetadata {
     /// Index of this shard within the erasure coding set (0..k+m).
@@ -29,12 +28,10 @@ pub struct ShardMetadata {
     /// Hex SHA-256 of THIS shard's data bytes (the payload after the header,
     /// not the packed frame).
     ///
-    /// SECURITY (FILE-3): a holder returns whatever it kept, and the store
-    /// only ever hashed received bytes against themselves, so a substituted
-    /// shard surfaced as an AES-GCM failure at the very end with no way to
-    /// name it. Empty on shards written before this field existed: `decode`
-    /// treats an empty hash as "cannot check" so old shards on disk stay
-    /// readable, while everything minted or accepted now carries one.
+    /// FILE-3: a holder returns whatever it kept, and the store only ever hashed received
+    /// bytes against themselves, so a substituted shard surfaced as an AES-GCM failure at
+    /// the very end with no way to name it. Empty on shards written before this field
+    /// existed, which `decode` treats as "cannot check".
     #[serde(default)]
     pub shard_sha256: String,
 }
@@ -88,7 +85,6 @@ pub fn encode_raw(data: &[u8], k: usize, m: usize) -> Result<Vec<Vec<u8>>, Strin
     let shard_size = (data.len() + k - 1) / k;
     let mut shards: Vec<Vec<u8>> = Vec::with_capacity(k + m);
 
-    // Build data shards (zero-pad last if needed)
     for i in 0..k {
         let start = i * shard_size;
         let end = std::cmp::min(start + shard_size, data.len());
@@ -96,12 +92,10 @@ pub fn encode_raw(data: &[u8], k: usize, m: usize) -> Result<Vec<Vec<u8>>, Strin
         if start < data.len() {
             shard.extend_from_slice(&data[start..end]);
         }
-        // Zero-pad to shard_size
         shard.resize(shard_size, 0);
         shards.push(shard);
     }
 
-    // Build empty parity shards
     for _ in 0..m {
         shards.push(vec![0u8; shard_size]);
     }
@@ -137,7 +131,6 @@ pub fn decode_raw(
     r.reconstruct_data(shards)
         .map_err(|e| format!("Reed-Solomon reconstruct failed: {e}"))?;
 
-    // Concatenate data shards and truncate to original size
     let mut result = Vec::with_capacity(total_data_size);
     for shard in shards.iter().take(k) {
         if let Some(data) = shard {

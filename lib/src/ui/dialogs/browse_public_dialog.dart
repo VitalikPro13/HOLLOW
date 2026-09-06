@@ -94,8 +94,8 @@ void _browse(
   final input = controller.text.trim();
   if (input.isEmpty) return;
 
-  // Invite link (hollow:// or web /join#server=), raw ID, or legacy fallbacks
-  // (any URL with a ?server= query, else the last path segment).
+  // Accepts a hollow:// link, a web /join# link, a raw id, or the legacy
+  // fallbacks (a ?server= query, else the last path segment).
   String serverId = inviteIdFromInput(input, HollowLinkType.serverInvite);
   if (serverId == input) {
     final serverParam = Uri.tryParse(input)?.queryParameters['server'];
@@ -106,7 +106,7 @@ void _browse(
     }
   }
 
-  // Add to saved servers (default realtime, or manual if cap reached).
+  // Realtime by default, manual once the cap is reached.
   final notifier = ref.read(savedGuestServersProvider.notifier);
   final realtimeCount = notifier.realtimeCount;
   final mode = realtimeCount >= 7
@@ -114,7 +114,6 @@ void _browse(
       : GuestFetchMode.realtime;
   notifier.addServer(serverId, '', mode);
 
-  // Open the guest panel and expand this server.
   final split = ref.read(splitViewProvider);
   if (split.isSplit) ref.read(splitViewProvider.notifier).closeSplit();
   setShellTab(ref.read, ShellTab.guest);
@@ -126,7 +125,6 @@ void _browse(
   ref.read(guestExpandedServerProvider.notifier).state = serverId;
   ref.read(guestSelectedServerProvider.notifier).state = serverId;
 
-  // Request channels.
   final loading = Set<String>.from(ref.read(guestLoadingProvider));
   loading.add(serverId);
   ref.read(guestLoadingProvider.notifier).state = loading;

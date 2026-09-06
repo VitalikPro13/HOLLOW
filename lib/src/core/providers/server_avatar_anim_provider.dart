@@ -4,10 +4,9 @@ import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 
 import 'emote_provider.dart' show requestAssetOnce;
 
-/// One server's ANIMATED icon as held locally. The still icon lives in
-/// [serverAvatarProvider] (base64 inside the CRDT); this entry exists only
-/// for servers whose icon was uploaded from an animated source. [hash] keys
-/// re-decodes (a re-upload changes it even though the server doesn't).
+/// One server's ANIMATED icon as held locally; the still icon lives in
+/// [serverAvatarProvider] (base64 inside the CRDT). [hash] keys re-decodes, so
+/// a re-upload changes it even though the server doesn't.
 class ServerAvatarAnimEntry {
   final Uint8List bytes;
   final String hash;
@@ -15,17 +14,14 @@ class ServerAvatarAnimEntry {
   const ServerAvatarAnimEntry({required this.bytes, required this.hash});
 }
 
-/// Cache of animated server-icon bytes keyed by server_id. Near-copy of
-/// [ServerBannerNotifier]: the CRDT carries only the HASH in
-/// `settings["server_avatar_anim"]` — when the blob isn't cached yet we
-/// request it once via `request_assets(kind: avatar)` and reload when
-/// `EmoteAssetsReceived` delivers it (see `onAssetsReceived`, wired in
-/// event_provider).
+/// Cache of animated server-icon bytes keyed by server_id. The CRDT carries
+/// only the HASH in `settings["server_avatar_anim"]`; when the blob isn't
+/// cached we request it once via `request_assets(kind: avatar)` and reload
+/// when `EmoteAssetsReceived` delivers it.
 class ServerAvatarAnimNotifier extends Notifier<Map<String, ServerAvatarAnimEntry>> {
-  // Local-write bookkeeping: `set_server_avatar`/`clear_server_avatar` only
-  // QUEUE a node command — the CRDT apply + CrdtStore persist land later, so
-  // a DB read right after the FFI returns the PREVIOUS icon. Same pattern
-  // (and same "second upload applies the first icon" bug) as avatars.
+  // `set_server_avatar`/`clear_server_avatar` only QUEUE a node command, so a
+  // DB read right after the FFI returns the PREVIOUS icon: the same "second
+  // upload applies the first icon" bug as avatars.
   final Map<String, int> _writeGen = {};
   final Set<String> _writePending = {};
 
@@ -55,9 +51,8 @@ class ServerAvatarAnimNotifier extends Notifier<Map<String, ServerAvatarAnimEntr
       final bytes = data.bytes;
       if (bytes != null && bytes.isNotEmpty) {
         _pendingPulls.remove(data.hash);
-        // Same hash = same content-addressed bytes: skip the state write so
-        // ServerUpdated churn doesn't hand AnimatedGifImage a fresh bytes
-        // instance (it re-decodes and restarts on !identical bytes).
+        // Same hash = same content-addressed bytes: skip the state write, or
+        // ServerUpdated churn hands AnimatedGifImage a fresh instance and it re-decodes.
         final existing = state[serverId];
         if (existing != null && existing.hash == data.hash) return;
         state = {
@@ -65,9 +60,8 @@ class ServerAvatarAnimNotifier extends Notifier<Map<String, ServerAvatarAnimEntr
           serverId: ServerAvatarAnimEntry(bytes: bytes, hash: data.hash),
         };
       } else {
-        // Hash replicated but the blob hasn't been pulled yet — ask one
-        // online member of this server's room. The still icon renders
-        // until the animated bytes land.
+        // Hash replicated but the blob isn't pulled yet: ask one online member. The
+        // still icon renders until the animated bytes land.
         _pendingPulls[data.hash] = serverId;
         requestAssetOnce(data.hash, kind: 'avatar', serverId: serverId);
       }
@@ -92,8 +86,7 @@ class ServerAvatarAnimNotifier extends Notifier<Map<String, ServerAvatarAnimEntr
     _writeGen[serverId] = gen;
     _writePending.add(serverId);
     if (optimistic != null) {
-      // Hash is unknown until the Rust processing lands; the reload below
-      // replaces this placeholder entry with the real one.
+      // Hash is unknown until the Rust processing lands; the reload replaces this.
       state = {
         ...state,
         serverId: ServerAvatarAnimEntry(bytes: optimistic, hash: ''),

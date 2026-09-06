@@ -31,10 +31,9 @@ class PublicChannelBrowser extends ConsumerWidget {
 
     return Column(
       children: [
-        // Guest banner — accent-tinted CHROME, not a wash of accent over
-        // whatever is behind it. On a wallpapered chat the old 10%-alpha fill
-        // let the image straight through and the bar stopped looking like
-        // part of the app (issue #54).
+        // Accent-tinted CHROME, not a wash of accent: a low-alpha fill lets a
+        // wallpaper straight through and stops reading as part of the app
+        // (issue #54).
         Container(
           padding: const EdgeInsets.symmetric(
             horizontal: HollowSpacing.lg,
@@ -83,7 +82,6 @@ class PublicChannelBrowser extends ConsumerWidget {
           ),
         ),
 
-        // Main content: sidebar + chat
         Expanded(
           child: Row(
             children: [

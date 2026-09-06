@@ -64,7 +64,6 @@ class PeerCard extends ConsumerWidget {
           curve: HollowCurves.subtle,
           child: Row(
             children: [
-              // Avatar with status dot overlay
               Stack(
                 clipBehavior: Clip.none,
                 children: [
@@ -97,7 +96,6 @@ class PeerCard extends ConsumerWidget {
                 ),
               ],
               const SizedBox(width: HollowSpacing.sm + 2),
-              // Peer info
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -137,7 +135,6 @@ class PeerCard extends ConsumerWidget {
                   ],
                 ),
               ),
-              // Timestamp + unread dot
               if (lastMessage != null || hasUnread)
                 Padding(
                   padding:
@@ -184,9 +181,8 @@ class PeerCard extends ConsumerWidget {
         horizontal: HollowSpacing.sm,
         vertical: HollowSpacing.xxs,
       ),
-      // Right click opens the conversation menu (issue #61, phase 4): the
-      // full user menu plus the rows that only make sense on a DM row —
-      // mark read, mute, favourite, remove friend.
+      // Right click opens the conversation menu (issue #61): the full user
+      // menu plus the rows that only make sense on a DM row.
       child: ContextMenuTarget(
         semanticLabel: 'Conversation actions',
         onOpen: (anchor) => showUserContextMenu(

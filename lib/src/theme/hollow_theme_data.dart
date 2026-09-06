@@ -6,7 +6,6 @@ import 'hollow_typography.dart';
 
 /// Factory for creating Flutter ThemeData with Hollow's design system.
 abstract final class HollowThemeData {
-  /// Hollow's primary dark theme.
   static ThemeData dark({double? accentHue}) {
     final hollow = accentHue != null
         ? HollowTheme.darkWithHue(accentHue)
@@ -17,7 +16,6 @@ abstract final class HollowThemeData {
       scaffoldBackgroundColor: hollow.background,
       canvasColor: hollow.surface,
 
-      // ── Color Scheme ──
       colorScheme: ColorScheme.dark(
         primary: hollow.accent,
         onPrimary: hollow.textOnAccent,
@@ -29,7 +27,6 @@ abstract final class HollowThemeData {
         onError: HollowColors.textPrimary,
       ),
 
-      // ── Typography ──
       textTheme: TextTheme(
         displayLarge: HollowTypography.display,
         headlineMedium: HollowTypography.heading,
@@ -41,14 +38,12 @@ abstract final class HollowThemeData {
         labelSmall: HollowTypography.caption,
       ),
 
-      // ── Divider ──
       dividerTheme: DividerThemeData(
         color: hollow.border,
         thickness: 1,
         space: 1,
       ),
 
-      // ── Input fields ──
       inputDecorationTheme: InputDecorationTheme(
         filled: true,
         fillColor: hollow.elevated,
@@ -76,7 +71,6 @@ abstract final class HollowThemeData {
         ),
       ),
 
-      // ── Buttons ──
       filledButtonTheme: FilledButtonThemeData(
         style: ButtonStyle(
           backgroundColor: WidgetStatePropertyAll(hollow.accent),
@@ -127,7 +121,6 @@ abstract final class HollowThemeData {
         ),
       ),
 
-      // ── Dialog ──
       dialogTheme: DialogThemeData(
         backgroundColor: hollow.elevated,
         shape: RoundedRectangleBorder(
@@ -137,7 +130,6 @@ abstract final class HollowThemeData {
         contentTextStyle: HollowTypography.body,
       ),
 
-      // ── Snackbar ──
       snackBarTheme: SnackBarThemeData(
         backgroundColor: hollow.elevated,
         contentTextStyle: HollowTypography.body,
@@ -147,7 +139,6 @@ abstract final class HollowThemeData {
         behavior: SnackBarBehavior.floating,
       ),
 
-      // ── Tooltip ──
       tooltipTheme: TooltipThemeData(
         decoration: BoxDecoration(
           color: hollow.elevated,
@@ -159,7 +150,6 @@ abstract final class HollowThemeData {
         ),
       ),
 
-      // ── Scrollbar ──
       scrollbarTheme: ScrollbarThemeData(
         thumbColor: WidgetStatePropertyAll(
           hollow.textSecondary.withValues(alpha: 0.3),
@@ -168,12 +158,10 @@ abstract final class HollowThemeData {
         thickness: const WidgetStatePropertyAll(6),
       ),
 
-      // ── Hollow extension ──
       extensions: [hollow],
     );
   }
 
-  /// Hollow's secondary light theme.
   static ThemeData light({double? accentHue}) {
     final hollow = accentHue != null
         ? HollowTheme.lightWithHue(accentHue)
@@ -184,7 +172,6 @@ abstract final class HollowThemeData {
       scaffoldBackgroundColor: hollow.background,
       canvasColor: hollow.surface,
 
-      // ── Color Scheme ──
       colorScheme: ColorScheme.light(
         primary: hollow.accent,
         onPrimary: hollow.textOnAccent,
@@ -196,7 +183,6 @@ abstract final class HollowThemeData {
         onError: HollowColors.textPrimaryLight,
       ),
 
-      // ── Typography (override hardcoded dark colors) ──
       textTheme: TextTheme(
         displayLarge:
             HollowTypography.display.copyWith(color: hollow.textPrimary),
@@ -213,14 +199,12 @@ abstract final class HollowThemeData {
             HollowTypography.caption.copyWith(color: hollow.textSecondary),
       ),
 
-      // ── Divider ──
       dividerTheme: DividerThemeData(
         color: hollow.border,
         thickness: 1,
         space: 1,
       ),
 
-      // ── Input fields ──
       inputDecorationTheme: InputDecorationTheme(
         filled: true,
         fillColor: hollow.elevated,
@@ -248,7 +232,6 @@ abstract final class HollowThemeData {
         ),
       ),
 
-      // ── Buttons ──
       filledButtonTheme: FilledButtonThemeData(
         style: ButtonStyle(
           backgroundColor: WidgetStatePropertyAll(hollow.accent),
@@ -299,7 +282,6 @@ abstract final class HollowThemeData {
         ),
       ),
 
-      // ── Dialog ──
       dialogTheme: DialogThemeData(
         backgroundColor: hollow.elevated,
         shape: RoundedRectangleBorder(
@@ -311,7 +293,6 @@ abstract final class HollowThemeData {
             HollowTypography.body.copyWith(color: hollow.textPrimary),
       ),
 
-      // ── Snackbar ──
       snackBarTheme: SnackBarThemeData(
         backgroundColor: hollow.elevated,
         contentTextStyle:
@@ -322,7 +303,6 @@ abstract final class HollowThemeData {
         behavior: SnackBarBehavior.floating,
       ),
 
-      // ── Tooltip ──
       tooltipTheme: TooltipThemeData(
         decoration: BoxDecoration(
           color: hollow.elevated,
@@ -334,7 +314,6 @@ abstract final class HollowThemeData {
         ),
       ),
 
-      // ── Scrollbar ──
       scrollbarTheme: ScrollbarThemeData(
         thumbColor: WidgetStatePropertyAll(
           hollow.textSecondary.withValues(alpha: 0.3),
@@ -343,7 +322,6 @@ abstract final class HollowThemeData {
         thickness: const WidgetStatePropertyAll(6),
       ),
 
-      // ── Hollow extension ──
       extensions: [hollow],
     );
   }

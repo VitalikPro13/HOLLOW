@@ -8,20 +8,11 @@ import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-/// Compose-box staged link preview card.
+/// Compose-box staged link preview card, shown above the input bar while the
+/// message being typed carries a URL.
 ///
-/// Shown above the input bar while the user is typing a message containing a
-/// URL. Mirrors the staged file preview card at the same insertion point.
-///
-/// States:
-/// - **loading** (`preview == null && loading`) — shimmer/spinner + URL text
-///   + "Loading preview…" label
-/// - **loaded** (`preview != null`) — thumbnail (if any) + title + domain
-/// - **failed** (`preview == null && !loading`) — caller should not render
-///   this widget at all; staging state clears back to null
-///
-/// [onDismiss] clears the staged preview state. The URL stays in the
-/// compose text box — user can re-type it to re-fetch, or send without.
+/// A failed fetch is the CALLER's to handle by not rendering this at all.
+/// [onDismiss] clears the staged preview and leaves the URL in the box.
 class StagedLinkPreviewCard extends StatelessWidget {
   final String url;
   final network_api.LinkPreviewRef? preview;
@@ -91,7 +82,6 @@ class StagedLinkPreviewCard extends StatelessWidget {
 
   Widget _buildThumbnail(HollowTheme hollow) {
     final p = preview;
-    // Loaded with thumbnail — decode base64 WebP and render.
     if (p != null && p.thumbWebpB64 != null) {
       try {
         final bytes = base64Decode(p.thumbWebpB64!);
@@ -106,10 +96,8 @@ class StagedLinkPreviewCard extends StatelessWidget {
           ),
         );
       } catch (_) {
-        // Fall through to icon placeholder.
       }
     }
-    // Loading or no-thumbnail fallback.
     return Container(
       width: 48,
       height: 48,

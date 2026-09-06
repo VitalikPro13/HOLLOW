@@ -26,11 +26,9 @@ import 'package:url_launcher/url_launcher.dart';
 
 /// The Hollow Shop wall: a grid of listings pulled from the signed catalog.
 ///
-/// Buying happens in the system browser, not here, and what comes back is a
-/// `.hollowpack` that is imported from this same page. Nothing on this screen
-/// unlocks anything inside Hollow.
-///
-/// Renders nothing at all when the shop is unavailable. That is defence in
+/// Buying happens in the system browser and comes back as a `.hollowpack`
+/// imported from this same page; nothing here unlocks anything inside Hollow.
+/// Renders nothing at all when the shop is unavailable, which is defence in
 /// depth: a store build has no button that reaches this page either.
 class ShopDashboard extends ConsumerStatefulWidget {
   /// Pushed as a mobile route (or inside a settings sub-page) rather than
@@ -140,9 +138,8 @@ class _ShopDashboardState extends ConsumerState<ShopDashboard> {
         semanticLabel: 'Refresh the shop',
         onTap: () {
           ref.invalidate(shop.shopCatalogProvider);
-          // The catalog is fetched fresh every time (the shop serves it
-          // uncached); the toast is the only sign that the tap did anything
-          // when nothing on the wall changed.
+          // The catalog is fetched fresh every time, so the toast is the only
+          // sign the tap did anything when nothing on the wall changed.
           HollowToast.show(context, 'Shop refreshed');
         },
         borderRadius: BorderRadius.circular(hollow.radiusSm),
@@ -162,8 +159,8 @@ class _ShopDashboardState extends ConsumerState<ShopDashboard> {
       ),
       child: LayoutBuilder(
         builder: (context, constraints) {
-          // Narrow (a phone, or the settings sub-page): the pills get their
-          // own line rather than fighting the buttons for width.
+          // Narrow: the pills take their own line rather than fighting the
+          // buttons for width.
           final stacked = constraints.maxWidth < 620;
           final title = widget.embedded
               ? null
@@ -196,8 +193,8 @@ class _ShopDashboardState extends ConsumerState<ShopDashboard> {
                 title,
                 const SizedBox(width: HollowSpacing.lg),
               ],
-              // Takes the free width, so it doubles as the Spacer that pushes
-              // the actions to the right edge.
+              // Takes the free width, doubling as the Spacer that pushes the
+              // actions right.
               Expanded(
                 child: Wrap(
                   spacing: HollowSpacing.sm,
@@ -406,8 +403,6 @@ class _FilterPill extends StatelessWidget {
   }
 }
 
-// ── One listing ─────────────────────────────────────────────────────────────
-
 class _ShopCard extends ConsumerWidget {
   final shop.ShopListing listing;
 
@@ -416,10 +411,9 @@ class _ShopCard extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final hollow = HollowTheme.of(context);
-    // Owned means BOUGHT: this identity redeemed a code for this listing and
-    // holds its credential. A pack in the library is not ownership (a friend
-    // can hand you the files; nobody can hand you the mark), so the library
-    // decides Wear it in the item dialog and nothing here.
+    // Owned means BOUGHT: this identity redeemed a code and holds the listing's
+    // credential. A pack in the library is not ownership, since a friend can
+    // hand you the files but nobody can hand you the mark.
     final bought = ref.watch(shop.ownCredentialItemsProvider);
     final isOwned = listing.credentialItem.isNotEmpty &&
         bought.contains(listing.credentialItem);
@@ -440,9 +434,9 @@ class _ShopCard extends ConsumerWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            // Square art, but inside a flexible slot: the cell height comes
-            // from the grid delegate, and a hard AspectRatio would overflow
-            // the text below it at narrow column widths.
+            // Square art in a flexible slot: the cell height comes from the
+            // grid delegate, and a hard AspectRatio would overflow the text
+            // below it at narrow column widths.
             Expanded(
               child: Padding(
                 padding: const EdgeInsets.all(HollowSpacing.sm),
@@ -489,10 +483,9 @@ class _ShopCard extends ConsumerWidget {
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
-                      // The price group gives way before the chips do: a
-                      // narrow card on sale ("$6.99 $4.99" beside a chip)
-                      // scales the numbers down rather than overflowing,
-                      // and a chip cut in half says nothing at all.
+                      // The price group gives way before the chips do: a narrow
+                      // card scales the numbers rather than cutting a chip in
+                      // half, which would say nothing at all.
                       Flexible(
                         child: FittedBox(
                           fit: BoxFit.scaleDown,
@@ -501,9 +494,8 @@ class _ShopCard extends ConsumerWidget {
                             mainAxisSize: MainAxisSize.min,
                             children: [
                               if (listing.wasLabel.isNotEmpty) ...[
-                                // On sale: the list price, struck, right
-                                // before what a buyer pays, the same way the
-                                // website's card does.
+                                // On sale: the list price, struck, right before
+                                // what a buyer pays.
                                 Text(
                                   listing.wasLabel,
                                   style: HollowTypography.caption.copyWith(
@@ -573,10 +565,9 @@ class _ShopChip extends StatelessWidget {
   }
 }
 
-/// Teal strip below the header, the shop's counterpart of the Share tab's
-/// amber advisory: the one sentence a buyer should read before the wall, in
-/// the accent colour with a heart, not a warning. `accentText` for both the
-/// glyph and the copy (the contrast rule: raw `accent` is a fill).
+/// Teal strip below the header: the one sentence a buyer should read before the
+/// wall, in the accent colour with a heart rather than a warning. `accentText`
+/// for both glyph and copy, because raw `accent` is a fill.
 Widget _artistStrip(HollowTheme hollow) {
   final color = hollow.accentText;
   return Container(
@@ -625,11 +616,9 @@ class ShopArtPreview extends ConsumerWidget {
   /// show one preview per kind.
   final String? kindOverride;
 
-  /// A frame on the WALL sits over a neutral face (a pale square with a thin
-  /// accent outline, the way the website's cards draw an empty avatar slot),
-  /// so the frame itself is what the card shows. The item dialog leaves this
-  /// false and puts the frame on your own avatar, which is the question the
-  /// dialog answers: how it would look on you.
+  /// A frame on the WALL sits over a neutral face, so the frame itself is what
+  /// the card shows. The item dialog leaves this false and puts the frame on
+  /// your own avatar, which is the question that dialog answers.
   final bool neutralFace;
 
   const ShopArtPreview({
@@ -663,19 +652,18 @@ class ShopArtPreview extends ConsumerWidget {
           child: Icon(LucideIcons.imageOff, size: 20, color: hollow.textTertiary),
         );
 
-    // Hover means the ROW (the card's HollowPressable publishes it), the
-    // same rule the frame already follows: a card at rest paints the still,
-    // a hovered card plays the animation, and the item dialog always plays.
+    // Hover means the ROW (the card's HollowPressable publishes it): at rest
+    // the still, hovered the animation, and the item dialog always plays.
     final wantAnim = animate || (HoverScope.maybeOf(context) ?? false);
 
-    // For a bundle the display hash is the primary kind's art; a non-primary
-    // kind falls back to the file that carries it.
+    // For a bundle the display hash is the primary kind's art; another kind
+    // falls back to the file that carries it.
     final hash = _hashFor(kind, wantAnim);
     if (hash.isEmpty) return placeholder();
 
     final art = ref.watch(shop.shopArtProvider(hash));
-    // The first hover asks the shop for the animation; until it lands the
-    // still keeps painting rather than a blank box.
+    // The first hover asks the shop for the animation; the still keeps painting
+    // until it lands.
     final stillHash = _hashFor(kind, false);
     final Uint8List? fallback = wantAnim && stillHash != hash
         ? ref.watch(shop.shopArtProvider(stillHash)).valueOrNull
@@ -687,8 +675,8 @@ class ShopArtPreview extends ConsumerWidget {
     if (bytes.isEmpty) return failed();
 
     if (kind == 'frame') {
-      // Frame art has to be judged in front of a face, so it is seeded
-      // into the shared frame cache (RAM only) and painted by the avatar.
+      // Frame art has to be judged in front of a face, so it is seeded into the
+      // shared frame cache (RAM only) and painted by the avatar.
       final seeded =
           ref.watch(avatarFrameProvider.select((m) => m.containsKey(hash)));
       if (!seeded) {
@@ -741,7 +729,6 @@ class ShopArtPreview extends ConsumerWidget {
         ),
       );
     }
-    // Banners and anything else: the image itself.
     return ClipRRect(
       borderRadius: BorderRadius.circular(hollow.radiusMd),
       child: AnimatedGifImage(
@@ -753,9 +740,8 @@ class ShopArtPreview extends ConsumerWidget {
     );
   }
 
-  /// The art to show for [kind]. At rest the still sibling is preferred so a
-  /// grid of cards is not a grid of running animations; [wantAnim] asks for
-  /// the animated file instead.
+  /// The art to show for [kind]. At rest the still sibling wins, so a grid of
+  /// cards is not a grid of running animations.
   String _hashFor(String kind, bool wantAnim) {
     if (kindOverride == null || kindOverride == listing.primaryKind) {
       if (!wantAnim && listing.stillHash.isNotEmpty) {

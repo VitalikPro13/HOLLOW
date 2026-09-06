@@ -1,21 +1,14 @@
-//! Client-side media-forwarder control plane (media forwarding step 3).
+//! Client-side media-forwarder control plane.
 //!
-//! Builds and sends the Olm-encrypted `fwd_*` envelopes a client exchanges
-//! with a media forwarder inside the forwarder's dedicated `fwd:{peer_id}`
-//! relay room. The forwarder is NOT a group member — it can never satisfy the
-//! `is_vc_participant` / CRDT / MLS gates and never holds group keys — so
-//! this lane is deliberately separate from the `vc_*` signal path
-//! (`voice_handler::build_vc_signal_envelope`).
+//! Builds and sends the Olm-encrypted `fwd_*` envelopes a client exchanges with
+//! a media forwarder in its dedicated `fwd:{peer_id}` relay room. The forwarder
+//! is NOT a group member and never holds group keys, so this lane is
+//! deliberately separate from the `vc_*` signal path.
 //!
-//! The first signal after joining a fwd room races Olm key exchange with the
-//! forwarder, so the send path mirrors `message_ops::send_dm_to_device`'s
-//! no-session branch: queue the envelope in `pending_messages` + fire a
-//! throttled signed KeyRequest; the existing drains (KeyBundle handlers,
-//! PeerJoined, RoomMembers) deliver the queued envelope once the session
-//! lands. Unlike DMs there is NO belt-and-suspenders re-queue after a
-//! successful send — fwd signals are ephemeral signaling, and replaying a
-//! stale `fwd_ingest_offer` after a session re-establishment would open a
-//! bogus leg.
+//! The first signal after joining races Olm key exchange, so a no-session send
+//! queues in `pending_messages` and fires a throttled signed KeyRequest. Unlike
+//! DMs there is NO re-queue after a successful send: replaying a stale
+//! `fwd_ingest_offer` after a session re-establishment would open a bogus leg.
 
 use std::collections::HashMap;
 
@@ -62,10 +55,9 @@ fn parse_required_origin(v: &serde_json::Value) -> Option<Box<StreamOrigin>> {
     Some(Box::new(origin))
 }
 
-/// Build the outbound fwd control envelope. Signal types are WHITELISTED to
-/// the client-sendable set — the forwarder-sendable types
-/// (`fwd_ingest_answer` / `fwd_egress_offer` / `fwd_error`) are deliberately
-/// absent. Unknown type or malformed payload logs and yields `None`.
+/// Build the outbound fwd control envelope. Signal types are WHITELISTED to the
+/// client-sendable set; the forwarder-sendable types are deliberately absent.
+/// Unknown type or malformed payload logs and yields `None`.
 pub(crate) fn build_fwd_signal_envelope(
     signal_type: &str,
     payload: &str,
@@ -108,11 +100,9 @@ pub(crate) fn build_fwd_signal_envelope(
         "fwd_egress_answer" => {
             sdp_of(&v).map(|sdp| MessageEnvelope::FwdEgressAnswer { origin, sdp })
         }
-        // TEST-ONLY: the multi-node harness impersonates the FORWARDER role to
-        // drive the client receive path over a real Olm session. Production
-        // forwarders run their own signaling loop (forwarder::signaling),
-        // never this FFI path — the whitelist above stays strict in real
-        // builds.
+        // TEST-ONLY: the harness impersonates the FORWARDER role to drive the
+        // client receive path over a real Olm session. Production forwarders run
+        // their own signaling loop, never this FFI path.
         #[cfg(test)]
         "fwd_ingest_answer" => sdp_of(&v).map(|sdp| MessageEnvelope::FwdIngestAnswer { origin, sdp }),
         #[cfg(test)]
@@ -151,15 +141,11 @@ pub(crate) async fn handle_forwarder_send_signal(
         return;
     };
     let env_json = serde_json::to_string(&envelope).unwrap_or_default();
-    // The fwd lane has a DETERMINISTIC room, so route through it explicitly —
-    // never `send_encrypted_message`'s `ws_room_for_peer` lookup (the DM
-    // one-way-loss rule, `feedback_dm_friend_establishment_bugs_2026_07`).
-    // The very first signal of a share is emitted right after
-    // `join_forwarder_room`, before the relay's members snapshot reaches
-    // `ws_room_peers`, so the lookup found NO shared room and silently
-    // dropped the `fwd_stream_register` — the forwarder then refused the
-    // ingest offer that followed with `unknown_stream` (field test
-    // 2026-08-06). The room code is knowable without any snapshot.
+    // The fwd lane has a DETERMINISTIC room, so route through it explicitly and
+    // never `ws_room_for_peer` (the one-way-loss rule,
+    // `feedback_dm_friend_establishment_bugs_2026_07`): the first signal of a
+    // share is emitted before the relay's members snapshot reaches
+    // `ws_room_peers`, so the lookup finds no shared room and drops it silently.
     let room = format!("fwd:{forwarder_peer_id}");
     send_fwd_envelope_via_room(
         olm, crypto_store, event_tx, ws_cmd_tx, pending_messages, key_request_in_flight,
@@ -169,11 +155,9 @@ pub(crate) async fn handle_forwarder_send_signal(
 }
 
 /// Olm-encrypt an already-built fwd envelope to `target_peer` through an
-/// explicit room, queueing + firing a throttled signed KeyRequest when no
-/// session exists. Shared by the client→forwarder path above (room =
-/// `fwd:{target}`) and the embedded engine's replies (phase 2: room =
-/// `fwd:{OUR device id}` — sharer and assigned viewers join it before
-/// signaling us, so the deterministic-room rule holds in this direction too).
+/// explicit room, queueing and firing a throttled signed KeyRequest when no
+/// session exists. Shared by the client path (room `fwd:{target}`) and the
+/// embedded engine's replies (room `fwd:{our own device id}`).
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn send_fwd_envelope_via_room(
     olm: &mut OlmManager,
@@ -203,10 +187,8 @@ pub(crate) async fn send_fwd_envelope_via_room(
                     },
                 };
                 let json = serde_json::to_string(&haven).unwrap_or_default();
-                // Send-side observability (field debugging 2026-08-06: an
-                // ingest offer vanished between "offered" and the forwarder —
-                // this line splits send-side from transit/receive-side).
-                // Envelope TYPE + sizes only, never content.
+                // Send-side observability: splits send-side from transit and
+                // receive-side. Envelope TYPE and sizes only, never content.
                 hollow_log!(
                     "[HOLLOW-FWD] send {label} -> {target_peer} via {room}: plain {} B, frame {} B, msg_type {msg_type}",
                     env_json.len(), json.len()
@@ -230,15 +212,10 @@ pub(crate) async fn send_fwd_envelope_via_room(
         return;
     }
 
-    // No session yet — queue for the post-key-exchange drain and fire a
-    // throttled signed KeyRequest (message_ops::queue_dm_key_request pattern,
-    // 10 s throttle). Unlike the DM path we KNOW the room to reach the peer
-    // in, so the request is sent through it UNCONDITIONALLY rather than gated
-    // on our ws_room_peers snapshot — the first signal races the relay's
-    // members message for the just-joined fwd room, and the snapshot lookup
-    // reported the forwarder "offline" in that window (first field test
-    // 2026-08-06; the RoomMembers proactive exchange healed it, but the
-    // direct request removes the ordering dependency).
+    // No session yet: queue for the post-key-exchange drain and fire a throttled
+    // signed KeyRequest. Unlike the DM path we KNOW the room, so the request goes
+    // through it UNCONDITIONALLY rather than gated on our `ws_room_peers`
+    // snapshot, which reports the forwarder offline in the just-joined window.
     pending_messages
         .entry(target_peer.clone())
         .or_default()

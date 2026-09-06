@@ -33,16 +33,15 @@ import 'package:hollow/src/core/brand_icons.dart';
 
 /// Right-side member panel showing online peers or server members.
 class MemberPanel extends ConsumerWidget {
-  /// Overrides the user's saved width. Null (the shell's case) uses
-  /// [memberPanelWidthProvider], which the seam on its left edge drags.
+  /// Overrides the user's saved width. Null uses [memberPanelWidthProvider],
+  /// which the seam on its left edge drags.
   final double? width;
 
   /// Whether to draw this panel's own divider on the edge facing the chat.
   ///
   /// False wherever a [PanelResizeHandle] sits against that edge: the seam
-  /// paints the divider itself, and two of them put a second line 6px inside
-  /// the first. True for a panel with no seam beside it (the split view's
-  /// right sidebar).
+  /// paints the divider itself, and two of them put a second line just inside
+  /// the first.
   final bool edgeBorder;
 
   const MemberPanel({super.key, this.width, this.edgeBorder = true});
@@ -60,9 +59,8 @@ class MemberPanel extends ConsumerWidget {
       width: panelWidth,
       decoration: BoxDecoration(
         color: hollow.surface,
-        // The resize seam on this edge paints the divider — see
-        // [PanelResizeHandle]. Drawing one here as well put a second line 6px
-        // inside the first.
+        // The resize seam on this edge paints the divider itself, and a second
+        // one lands just inside the first.
         border: Border(
           left: edgeBorder
               ? BorderSide(color: hollow.border)
@@ -96,25 +94,23 @@ class MemberPanel extends ConsumerWidget {
   }
 }
 
-/// Where a member row's profile card hangs: to the LEFT of the panel, lifted
-/// so a row near the bottom does not open a card that runs off the screen.
-/// Re-evaluated by the card itself after a window resize (issue #54).
+/// Where a member row's profile card hangs: to the LEFT of the panel, lifted so
+/// a row near the bottom does not open a card that runs off screen. Re-evaluated
+/// by the card after a window resize (issue #54).
 Offset memberCardAnchor(BuildContext context) {
   final pos = overlayAnchorOf(context);
   return Offset(pos.dx - kProfileCardPopupWidth - 10, pos.dy - 100);
 }
 
-/// Lightweight data entry for the flat member list. No widget allocation —
-/// ListView.builder creates widgets lazily from these entries.
+/// Lightweight entry for the flat member list, so ListView.builder can create
+/// its widgets lazily.
 class _MemberListEntry {
   final bool isDivider;
   final bool isOnline;
-  // Divider fields
   final String? label;
   final int? count;
   final String? dividerRole;
   final bool collapsed;
-  // Member fields
   final String? peerId;
   final String? displayName;
   final String? role;
@@ -159,19 +155,16 @@ class _MemberListEntry {
     );
 }
 
-/// ASOT-style section divider: "Online ------------ 10"
-/// Online variant has a subtle left-to-right glow sweep on the line.
-/// Uses [SharedTickers.shimmer] instead of per-instance AnimationController.
-/// [glowColor] overrides the default accent color for the glow sweep.
+/// Section divider. The online variant sweeps a glow along the line, on the
+/// shared shimmer ticker rather than a controller per instance.
 class _SectionDivider extends StatelessWidget {
   final String label;
   final int count;
   final bool isOnline;
   final Color? glowColor;
 
-  /// Non-null makes the section foldable (issue #54) — the member list on a
-  /// busy server is mostly Offline, and nobody scrolls past 200 grey names to
-  /// reach the people who are actually here.
+  /// Non-null makes the section foldable (issue #54): a busy server's member
+  /// list is mostly Offline, and nobody scrolls past it to reach who is here.
   final VoidCallback? onToggle;
   final bool collapsed;
 
@@ -216,19 +209,18 @@ class _SectionDivider extends StatelessWidget {
           Expanded(
             child: isOnline
                 // Own layer: this rebuilds a gradient Container at vsync, once
-                // per online member. Unscoped, each of those repaints dirtied
-                // the whole member panel 60 times a second.
+                // per online member, and unscoped each repaint dirties the whole
+                // member panel.
                 ? RepaintBoundary(
                     child: ValueListenableBuilder<double>(
                     valueListenable: SharedTickers.instance.shimmer,
                     builder: (context, value, _) {
-                      // Ping-pong: 0→1→0 with easeInOut curve.
                       final pingPong = value < 0.5
                           ? value * 2.0
                           : 2.0 - value * 2.0;
                       final curved =
                           Curves.easeInOut.transform(pingPong);
-                      // Map 0..1 to -0.2..1.2 so the glow fully exits both edges.
+                      // Overshoots both ends so the glow fully exits the line.
                       final t = -0.2 + curved * 1.4;
                       const glowWidth = 0.15;
                       final color = glowColor ?? hollow.accent;
@@ -325,8 +317,7 @@ class _SpinningRefreshIconState extends State<_SpinningRefreshIcon>
   }
 }
 
-/// Glow color for role-grouped ASOT dividers.
-/// Gold for owner, purple for admin, orange for moderator, teal for member.
+/// Glow colour for role-grouped dividers.
 Color _roleGlowColor(String role, HollowTheme hollow) {
   return switch (role) {
     'owner' => hollow.warning,
@@ -337,7 +328,6 @@ Color _roleGlowColor(String role, HollowTheme hollow) {
   };
 }
 
-/// Divider label text for role groups.
 String _roleDividerLabel(String role) {
   return switch (role) {
     'owner' => 'Owner',
@@ -347,7 +337,6 @@ String _roleDividerLabel(String role) {
   };
 }
 
-/// Color for the role label text in member tiles.
 Color _roleLabelColor(String role, HollowTheme hollow) {
   return switch (role) {
     'owner' => hollow.warning,
@@ -358,19 +347,18 @@ Color _roleLabelColor(String role, HollowTheme hollow) {
   };
 }
 
-/// Computed member list entries: memoized online/offline split + role grouping.
-/// Returns (entries, totalMemberCount, isLoading, errorMessage).
+/// Memoized online/offline split and role grouping for the member list.
 final _serverMemberEntriesProvider = Provider.family
     .autoDispose<(List<_MemberListEntry>, int, bool, String?), String>(
         (ref, serverId) {
   final membersAsync = ref.watch(serverMembersProvider(serverId));
-  // Multi-device: a member is online if ANY of their devices is visible.
-  // `onlineIdentitiesProvider` already folds device→master + invisibility.
+  // A member is online if ANY of their devices is visible; the provider already
+  // folds device to master and applies invisibility.
   final onlineIdentities = ref.watch(onlineIdentitiesProvider);
   final localPeerId = ref.watch(identityProvider).peerId;
   final amInvisible = ref.watch(invisibleModeProvider);
-  // Folded sections still render their divider (with its full count) — only
-  // the rows underneath go away (issue #54).
+  // A folded section still renders its divider and full count; only the rows
+  // underneath go away (issue #54).
   final collapsedGroups = ref.watch(collapsedMemberGroupsProvider);
   bool isFolded(String label) => collapsedGroups
       .contains(CollapsedMemberGroupsNotifier.keyFor(serverId, label));
@@ -454,7 +442,7 @@ final _serverMemberEntriesProvider = Provider.family
   );
 });
 
-/// Server member list content (header + online/offline member list).
+/// Server member list content.
 class _ServerMemberContent extends ConsumerWidget {
   final String serverId;
 
@@ -479,7 +467,6 @@ class _ServerMemberContent extends ConsumerWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        // Header — ASOT-style divider matching Online/Offline sections
         Container(
           height: 48,
           decoration: BoxDecoration(
@@ -488,8 +475,8 @@ class _ServerMemberContent extends ConsumerWidget {
             ),
           ),
           alignment: Alignment.centerLeft,
-          // a11y Phase 3: fixed-height (48px) panel header chrome — cap the
-          // label scale so it stays in the bar at high OS text size.
+          // Fixed-height chrome, so the label scale is capped to keep it in the
+          // bar at high OS text size.
           child: MediaQuery.withClampedTextScaling(
             maxScaleFactor: 1.3,
             child: isLoading
@@ -514,7 +501,6 @@ class _ServerMemberContent extends ConsumerWidget {
           ),
         ),
 
-        // Member list with online/offline sections
         Expanded(
           child: isLoading
               ? const Center(
@@ -586,7 +572,7 @@ class _ServerMemberContent extends ConsumerWidget {
   }
 }
 
-/// Peer member list content (header + peer list).
+/// Peer member list content.
 class _PeerMemberContent extends ConsumerWidget {
   const _PeerMemberContent({super.key});
 
@@ -595,10 +581,9 @@ class _PeerMemberContent extends ConsumerWidget {
     final hollow = HollowTheme.of(context);
     final allPeers = ref.watch(peersProvider);
     final invisPeers = ref.watch(invisiblePeersProvider);
-    // This pane lists PEOPLE, but `peersProvider` is DEVICE-keyed — a
-    // multi-device peer showed as N raw-id rows with generic avatars. Fold each
-    // device to its master (profiles/avatars are master-keyed); keep the
-    // person "encrypted" if ANY of their device sessions is.
+    // This pane lists PEOPLE while `peersProvider` is DEVICE-keyed, so each
+    // device folds to its master or a multi-device peer renders as several
+    // raw-id rows. The person counts as encrypted if ANY session is.
     final links = ref.watch(deviceLinkProvider);
     final folded = <String, bool>{};
     for (final e in allPeers.entries) {
@@ -627,7 +612,6 @@ class _PeerMemberContent extends ConsumerWidget {
             padding: const EdgeInsets.symmetric(
                 vertical: HollowSpacing.sm),
             itemBuilder: (context, index) {
-              // First item: ASOT-style divider
               if (index == 0) {
                 return _SectionDivider(
                   label: 'Online',
@@ -653,8 +637,7 @@ class _PeerMemberContent extends ConsumerWidget {
   }
 }
 
-/// A compact member row showing a server member with role badge.
-/// Shows online/offline status and per-peer sync icon.
+/// A compact row for one server member.
 class _ServerMemberTile extends ConsumerWidget {
   final String peerId;
   final String displayName;
@@ -679,22 +662,21 @@ class _ServerMemberTile extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final hollow = HollowTheme.of(context);
     final isSyncing = ref.watch(isPeerSyncingProvider(peerId));
-    // Resolution: local nickname → server nickname → profile display name → short peer ID.
+    // Local nickname, then server nickname, then profile name, then peer id.
     final profile = ref.watch(profileProvider.select((p) => p[peerId]));
     ref.watch(localNicknameProvider); // trigger rebuild on local nickname changes
     final resolvedName = profile != null
         ? serverDisplayNameFor({peerId: profile}, peerId, nickname: nickname)
         : serverDisplayNameFor({}, peerId, nickname: nickname);
-    // The purple handle draws ONLY from a verified account credential. The
-    // member-level `TwitchUsernameChanged` op and the profile's own
-    // `twitch_username` are self-declarations, so a new client renders
-    // neither (`twitchLoginProvider`).
+    // The purple handle draws ONLY from a verified account credential: the
+    // member op and the profile field are self-declarations, which a new client
+    // never renders.
     final verifiedTwitch = ref.watch(twitchLoginProvider(peerId));
     return AnimatedOpacity(
       opacity: isOnline ? 1.0 : 0.5,
       duration: HollowDurations.fast,
-      // Left click keeps opening the profile card; right click opens the
-      // action menu with Profile as its first row (issue #61, phase 3).
+      // Left click opens the profile card, right click the action menu with
+      // Profile as its first row (issue #61).
       child: ContextMenuTarget(
         semanticLabel: 'Member actions',
         onOpen: (anchor) => showUserContextMenu(
@@ -721,8 +703,8 @@ class _ServerMemberTile extends ConsumerWidget {
               role: role,
               labels: labels.isNotEmpty ? labels : null,
               serverId: serverId,
-              // Card to the left of the member panel (like Discord), re-read
-              // on resize so it follows the row (issue #54).
+              // Card to the left of the panel, re-read on resize so it follows
+              // the row (issue #54).
               anchorOf: () => memberCardAnchor(context),
             );
           },
@@ -732,7 +714,6 @@ class _ServerMemberTile extends ConsumerWidget {
           ),
           child: Row(
             children: [
-              // Avatar with status overlay
               Stack(
                 clipBehavior: Clip.none,
                 children: [
@@ -764,7 +745,6 @@ class _ServerMemberTile extends ConsumerWidget {
 
               const SizedBox(width: HollowSpacing.sm),
 
-              // Display name + role + pledge info
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -818,7 +798,7 @@ class _ServerMemberTile extends ConsumerWidget {
   }
 }
 
-/// A compact member row in the member panel (peer/DM mode).
+/// A compact member row in peer mode.
 class _MemberTile extends ConsumerWidget {
   final String peerId;
   final bool isEncrypted;
@@ -837,8 +817,7 @@ class _MemberTile extends ConsumerWidget {
         ? displayNameFor({peerId: profile}, peerId)
         : displayNameFor({}, peerId);
 
-    // Left click opens the profile card, right click the action menu — the
-    // same pair as the server member rows above.
+    // The same click pair as the server member rows above.
     return ContextMenuTarget(
       semanticLabel: 'Peer actions',
       onOpen: (anchor) => showUserContextMenu(
@@ -866,7 +845,6 @@ class _MemberTile extends ConsumerWidget {
         ),
         child: Row(
           children: [
-            // Avatar with online dot
             Stack(
               clipBehavior: Clip.none,
               children: [
@@ -889,7 +867,6 @@ class _MemberTile extends ConsumerWidget {
 
             const SizedBox(width: HollowSpacing.sm),
 
-            // Display name
             Expanded(
               child: Text(
                 peerName,
@@ -901,7 +878,6 @@ class _MemberTile extends ConsumerWidget {
               ),
             ),
 
-            // P2P direct connection indicator
             if (ref.watch(webRtcProvider.select((s) =>
                 s.peers[peerId] == WebRtcPeerStatus.connected)))
               Padding(
@@ -913,7 +889,6 @@ class _MemberTile extends ConsumerWidget {
                 ),
               ),
 
-            // Encryption badge or spinning icon
             isEncrypted
                 ? Icon(
                     LucideIcons.lock,

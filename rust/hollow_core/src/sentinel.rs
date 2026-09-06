@@ -1,18 +1,15 @@
 //! Self-diagnosis performance sentinels.
 //!
-//! Quiet by default: sentinels log ONLY anomalies, rate-limited or latched,
-//! every line carrying the grep-able "[SENTINEL]" prefix into
-//! hollow_debug.log. The healthy path is timestamp math only — no
-//! allocation, no logging. Sentinel lines never carry content or ids that
-//! fingerprint (relay rules apply): variant names, durations, and queue
-//! depths only.
+//! Quiet by default: sentinels log ONLY anomalies, rate-limited or latched, every
+//! line carrying the grep-able "[SENTINEL]" prefix. The healthy path is timestamp
+//! math with no allocation and no logging, and a line never carries content or ids
+//! that fingerprint: variant names, durations and queue depths only.
 
 use std::time::{Duration, Instant};
 
-/// Swarm-loop stall sentinel: one dispatch iteration exceeding the threshold
-/// logs the arm + variant NAME only. At most one line per 5s; stalls in
-/// between are counted and summarized on the next emitted line. Lives as a
-/// local of the event loop — single-task state, no atomics.
+/// Swarm-loop stall sentinel: an iteration over the threshold logs the arm's variant
+/// NAME only, at most one line per 5 s, with the stalls in between summarized on the
+/// next line. A local of the event loop, so single-task state with no atomics.
 pub(crate) struct LoopStall {
     threshold: Duration,
     min_line_gap: Duration,
@@ -32,9 +29,8 @@ impl LoopStall {
         }
     }
 
-    /// Called at the top of every loop iteration with the previous arm's
-    /// name and start Instant (measuring at the NEXT iteration covers the
-    /// `continue;` early-exits scattered through the dispatch arms).
+    /// Called at the top of every iteration with the PREVIOUS arm's name and start,
+    /// which is what covers the `continue;` early-exits in the dispatch arms.
     pub(crate) fn check(&mut self, arm: &'static str, name: &'static str, started: Instant) {
         let elapsed = started.elapsed();
         if elapsed <= self.threshold {
@@ -76,10 +72,9 @@ impl LoopStall {
     }
 }
 
-/// Persistence-actor backlog sentinel: latched — logs on the first crossing
-/// of the depth threshold, then again only each time the high-water mark
-/// doubles (256 → 512 → 1024 …), so a wedged actor produces a handful of
-/// lines per session, never a stream.
+/// Persistence-actor backlog sentinel, latched: it logs on the first crossing of the
+/// depth threshold, then only when the high-water mark doubles, so a wedged actor
+/// produces a handful of lines per session rather than a stream.
 pub(crate) struct BacklogLatch {
     name: &'static str,
     next_log: usize,
@@ -120,19 +115,17 @@ impl BacklogLatch {
     }
 }
 
-/// Runtime starvation heartbeat: a 1s tokio interval; when a tick arrives
-/// more than 500 ms late an episode starts, and ONE line logs when the
-/// episode ends, carrying the worst observed drift. Catches blocking calls
-/// that starve the async runtime regardless of which task hid them. Spawned
-/// once per process (test harness nodes share it).
+/// Runtime starvation heartbeat: a 1 s tokio interval where a tick more than 500 ms
+/// late starts an episode, and ONE line logs when it ends with the worst drift. Catches
+/// blocking calls that starve the runtime whichever task hid them.
 pub(crate) fn spawn_runtime_heartbeat() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
         tokio::spawn(async {
             let period = Duration::from_secs(1);
             let mut interval = tokio::time::interval(period);
-            // Delay (not the default Burst): after a stall we want the next
-            // tick a full period later, not a rapid catch-up volley.
+            // Delay, not the default Burst: after a stall the next tick should be a full
+            // period later, not a rapid catch-up volley.
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             interval.tick().await; // consume immediate first tick
             let mut last = Instant::now();

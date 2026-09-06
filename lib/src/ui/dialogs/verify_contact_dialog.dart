@@ -18,11 +18,8 @@ import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/mobile/mobile_page_route.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-/// Open the Verify Contact screen for [peerId] (a device OR master id — it is
-/// resolved to the master, since verification is of a PERSON).
-///
-/// Desktop gets a dialog; mobile pushes a full route, matching how the profile
-/// view already adapts.
+/// Opens the Verify Contact screen for [peerId], which may be a device or a
+/// master id: it resolves to the master, because verification is of a PERSON.
 Future<void> showVerifyContactDialog(
   BuildContext context, {
   required String peerId,
@@ -113,21 +110,15 @@ class MobileVerifyContactRoute extends StatelessWidget {
 
 /// The verification flow itself, shared by desktop and mobile.
 ///
-/// ## What the user is actually doing
+/// Both people see the SAME 60-digit number, derived symmetrically from their
+/// two master Ed25519 keys, so a match means the keys each side holds for the
+/// other are real and nothing sits in the middle. It MUST be compared over a
+/// channel an attacker on the relay does not control.
 ///
-/// Both people open this screen and see the SAME 60-digit number, because it is
-/// derived symmetrically from their two master Ed25519 keys. If the numbers
-/// match, the keys each side holds for the other are the real ones and nothing
-/// is sitting in the middle. It has to be compared over a channel an attacker
-/// on the relay does not control — in person, on a video call, or through an
-/// app they already trust.
-///
-/// ## Why there is no "yours / theirs"
-///
-/// Signal shows a combined number too, but its inputs churn on reinstall.
-/// Hollow's peer_id IS the public key, so this number changes only when the
-/// person changes. That stability is why a reinstall does NOT clear the
-/// verified flag — the separate device alert covers what actually changed.
+/// There is no "yours / theirs" because Hollow's peer_id IS the public key, so
+/// the number changes only when the person does. That stability is why a
+/// reinstall does not clear the verified flag; the device alert covers what
+/// actually changed.
 class VerifyContactBody extends ConsumerStatefulWidget {
   final String peerId;
   const VerifyContactBody({super.key, required this.peerId});
@@ -142,11 +133,11 @@ class _VerifyContactBodyState extends ConsumerState<VerifyContactBody> {
   /// The raw 60 digits. `null` while loading.
   String? _number;
 
-  /// Set when the number could not be derived — shown instead of a number, so
-  /// the screen never presents a plausible-looking value it did not compute.
+  /// Set when the number could not be derived, so the screen never presents a
+  /// plausible-looking value it did not compute.
   String? _error;
 
-  /// Result of the paste-compare: null = nothing entered yet.
+  /// Result of the paste-compare; null until something is entered.
   bool? _compareMatches;
 
   bool _busy = false;
@@ -279,9 +270,8 @@ class _VerifyContactBodyState extends ConsumerState<VerifyContactBody> {
           ),
           const SizedBox(height: HollowSpacing.lg),
 
-          // ── Paste-compare ──
-          // 60 digits is a lot to check by eye. Let the machine do the
-          // comparison so a mismatch can't be missed through fatigue.
+          // 60 digits is a lot to check by eye, and the machine cannot miss a
+          // mismatch through fatigue.
           Text(
             'Or paste what they read you',
             style: HollowTypography.caption.copyWith(
@@ -305,10 +295,9 @@ class _VerifyContactBodyState extends ConsumerState<VerifyContactBody> {
           ],
           const SizedBox(height: HollowSpacing.lg),
 
-          // ── Outstanding alerts for this contact ──
-          // Surfaced HERE as well as in the conversation: this is the screen
-          // where the user decides whether to trust the person, so a pending
-          // "a new device appeared" belongs in front of them at that moment.
+          // Surfaced here as well as in the conversation: this is where the
+          // user decides whether to trust the person, so a pending "a new
+          // device appeared" belongs in front of them.
           if (alerts.isNotEmpty) ...[
             for (final a in alerts)
               Padding(
@@ -318,7 +307,6 @@ class _VerifyContactBodyState extends ConsumerState<VerifyContactBody> {
             const SizedBox(height: HollowSpacing.md),
           ],
 
-          // ── The verified flag ──
           _VerifiedRow(
             hollow: hollow,
             name: name,
@@ -332,10 +320,8 @@ class _VerifyContactBodyState extends ConsumerState<VerifyContactBody> {
   }
 }
 
-/// The number itself: 12 groups of 5, three rows of four, monospace.
-///
-/// Selectable so it can be copied by hand, and big enough to read aloud from
-/// across a desk without losing your place.
+/// The number itself. Selectable so it can be copied by hand, and big enough to
+/// read aloud without losing your place.
 class _NumberBlock extends StatelessWidget {
   final HollowTheme hollow;
   final String number;
@@ -392,8 +378,8 @@ class _NumberBlock extends StatelessWidget {
   }
 }
 
-/// Match / mismatch feedback. Carries an ICON as well as colour, so the result
-/// is not conveyed by colour alone.
+/// Match feedback. Carries an ICON as well as colour, so the result is not
+/// conveyed by colour alone.
 class _CompareResult extends StatelessWidget {
   final HollowTheme hollow;
   final bool matches;

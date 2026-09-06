@@ -1,28 +1,16 @@
-//! Stickers — the personal vault, server sticker packs, and the KLIPY
-//! sticker catalog.
+//! Stickers: the personal vault, server sticker packs and the Klipy catalog.
 //!
-//! Stickers ride the SAME rails everything else in the asset epic does, so
-//! this module is mostly plumbing:
+//! Stickers ride the SAME rails as everything else in the asset epic, so this module
+//! is mostly plumbing. BYTES are content-addressed WebP in `emote_blobs` at
+//! `kind='sticker'`, replicated on demand under `AssetKind::Sticker`, and nothing here
+//! ever puts sticker bytes on the wire. METADATA is CRDT state for a server's set and
+//! a local SQLCipher table for the vault. MESSAGES carry `[a:s:hash:w:h]`, an ordinary
+//! run of message text, so there is no new message-row path and no signing or sync
+//! change. The CATALOG is the same two-mode client as GIFs, authoring-time only: a
+//! picked sticker becomes a local blob, so message RECEIVERS make zero HTTP requests.
 //!
-//!   * BYTES: content-addressed WebP in `emote_blobs` at `kind='sticker'`,
-//!     replicated on demand by `node/emotes.rs` under
-//!     `AssetKind::Sticker` (512 KB receipt cap, 8 hashes per request).
-//!     Nothing here ever puts sticker bytes on the wire.
-//!   * METADATA: a server's set is CRDT state (`ServerState.stickers`, keyed
-//!     by hash, `MANAGE_EMOTES`); the personal vault is a local SQLCipher
-//!     table (`personal_stickers`) grouped into free-form packs.
-//!   * MESSAGES: the composer writes `[a:s:hash:w:h]`, which is an ordinary
-//!     run of message text — no new message-row path, no signing/order_us/
-//!     sync change. That is the whole reason this phase is cheap.
-//!   * CATALOG: KLIPY sticker search is the same two-mode client as GIFs
-//!     (`api/gifs.rs`, [MediaKind::Sticker]) — proxy by default, the user's
-//!     own key optional. Authoring-time only: the moment a sticker is picked
-//!     it becomes a local blob and replicates P2P, so message RECEIVERS make
-//!     zero HTTP requests, ever.
-//!
-//! Sticker identity is the HASH, not the name. An emote is typed as `:name:`
-//! so its name has to be unique; a sticker is only ever picked visually, so
-//! its name is a label and two stickers may share one.
+//! Sticker identity is the HASH, not the name: an emote is typed as `:name:` so its
+//! name must be unique, while a sticker is picked visually and its name is a label.
 
 use flutter_rust_bridge::frb;
 use sha2::{Digest, Sha256};
@@ -33,10 +21,9 @@ use super::storage::get_store;
 use crate::crdt::server_state::{MAX_SERVER_STICKERS, MAX_STICKER_LABEL, valid_sticker_label};
 use crate::node;
 
-/// Max packs in the personal vault, and stickers in one pack. Generous
-/// enough for real multi-part packs (a 5x5 mosaic is 25 pieces) while
-/// keeping the whole vault bounded — every row pins a blob against the asset
-/// cache LRU, so this ceiling is a disk commitment.
+/// Max packs in the personal vault, and stickers in one pack. Generous enough for real
+/// multi-part packs while keeping the vault bounded: every row pins a blob against the
+/// asset LRU, so this ceiling is a disk commitment.
 const MAX_PERSONAL_PACKS: usize = 50;
 const MAX_STICKERS_PER_PACK: usize = 120;
 const MAX_PERSONAL_STICKERS: u32 = 600;
@@ -80,9 +67,8 @@ pub fn sticker_token(hash: String, w: u32, h: u32) -> String {
     format!("[a:s:{hash}:{w}:{h}]")
 }
 
-/// The authoring caps Dart should enforce in its own UI copy, rather than
-/// mirroring the numbers (same rule as `default_role_permissions`):
-/// `[per server, per pack, packs, vault total, label chars]`.
+/// The authoring caps Dart enforces in its own UI copy rather than mirroring the
+/// numbers: `[per server, per pack, packs, vault total, label chars]`.
 #[frb(sync)]
 pub fn sticker_limits() -> Vec<u32> {
     vec![
@@ -96,10 +82,9 @@ pub fn sticker_limits() -> Vec<u32> {
 
 // ── Local processing ──────────────────────────────────────────────────
 
-/// Process a user-picked image (PNG/JPG/WebP/GIF, still or animated) into a
-/// sticker blob and cache it locally. Re-encoding here IS the sanitization
-/// step — the same argument emotes and GIFs make. Caller then registers it
-/// via [add_personal_sticker] or [add_server_sticker].
+/// Process a user-picked image into a sticker blob and cache it locally. Re-encoding
+/// here IS the sanitization step, the same argument emotes and GIFs make. The caller
+/// then registers it via [add_personal_sticker] or [add_server_sticker].
 #[frb]
 pub fn process_and_store_sticker(raw_bytes: Vec<u8>) -> Result<ProcessedSticker, String> {
     let (bytes, w, h, animated) =
@@ -146,9 +131,8 @@ pub fn add_personal_sticker(
     if !ms.has_emote_blob(&hash)? {
         return Err("Sticker image is not cached locally".into());
     }
-    // Caps checked against the CURRENT vault, and only for genuinely new
-    // rows — re-adding an existing (pack, hash) is a metadata edit and must
-    // never be refused for being over a limit it did not push us past.
+    // Caps apply only to genuinely new rows: re-adding an existing (pack, hash) is a
+    // metadata edit and must not be refused for a limit it did not push us past.
     let existing = ms.list_personal_stickers()?;
     let is_new = !existing
         .iter()
@@ -190,9 +174,8 @@ pub fn remove_personal_sticker(pack: String, hash: String) -> Result<(), String>
     ms.remove_personal_sticker(pack.trim(), &hash)
 }
 
-/// Delete a whole pack. The blobs stay cached — they are content-addressed
-/// and a message you already sent still points at them; the asset LRU
-/// reclaims them once nothing references them.
+/// Delete a whole pack. The blobs stay cached, because they are content-addressed and
+/// a message you already sent still points at them; the asset LRU reclaims them.
 #[frb]
 pub fn remove_personal_sticker_pack(pack: String) -> Result<(), String> {
     let store = get_store();
@@ -216,8 +199,8 @@ pub fn rename_personal_sticker_pack(from: String, to: String) -> Result<(), Stri
     ms.rename_personal_sticker_pack(&from, &to)
 }
 
-/// The whole vault, pack-major and oldest-first inside each pack — upload
-/// order IS pack order, which is what makes a multi-part pack readable.
+/// The whole vault, pack-major and oldest-first inside each pack: upload order IS pack
+/// order, which is what makes a multi-part pack readable.
 #[frb]
 pub fn list_personal_stickers() -> Result<Vec<PersonalSticker>, String> {
     let store = get_store();
@@ -264,9 +247,8 @@ pub fn get_server_stickers(server_id: String) -> Result<Vec<ServerSticker>, Stri
         .collect())
 }
 
-/// Add (or re-label) a sticker in a server's set — `MANAGE_EMOTES`, the same
-/// permission as emotes. The blob must already be cached locally so this
-/// node can serve members' pull requests.
+/// Add (or re-label) a sticker in a server's set, under `MANAGE_EMOTES`. The blob must
+/// already be cached locally so this node can serve members' pull requests.
 #[frb]
 pub fn add_server_sticker(
     server_id: String,
@@ -321,12 +303,10 @@ fn send_command(cmd: node::NodeCommand) -> Result<(), String> {
 
 // ── KLIPY sticker catalog (authoring-time only) ───────────────────────
 //
-// Thin wrappers over the shared two-mode client in `api/gifs.rs`. Every
-// guard there applies unchanged: the proxy-origin prefix check, the
-// direct-mode media host allowlist, the random per-request customer_id, the
-// blocked-host memory the settings card surfaces, and the dedicated HTTP
-// runtime (`get_http_runtime` — never the node runtime, whose blocking pool
-// SQLCipher bursts saturate).
+// Thin wrappers over the shared two-mode client in `api/gifs.rs`. Every guard there
+// applies unchanged: the proxy-origin prefix check, the direct-mode media host
+// allowlist, the random per-request customer_id, the blocked-host memory the settings
+// card surfaces, and the dedicated HTTP runtime.
 
 /// Search KLIPY stickers. `rating` is one of `gif_ratings()`.
 #[frb]
@@ -355,10 +335,10 @@ pub fn sticker_categories() -> Result<Vec<String>, String> {
 /// send format, and cache it as a `kind='sticker'` asset blob. Feed
 /// hash/w/h into [sticker_token].
 ///
-/// Same fetcher discipline as GIFs: proxy mode ignores `source_url` and
-/// builds `{base}f/{id}` itself; direct mode resolves the variants our own
-/// parse registered, falling back to `source_url` only on a registry miss
-/// and only through the media host allowlist.
+/// Same fetcher discipline as GIFs: proxy mode ignores `source_url` and builds
+/// `{base}f/{id}` itself, while direct mode resolves the variants our own parse
+/// registered and falls back to `source_url` only on a registry miss, through the
+/// media host allowlist.
 #[frb]
 pub fn sticker_fetch_and_store(
     id: String,
@@ -369,28 +349,22 @@ pub fn sticker_fetch_and_store(
 
 // ── Pack sharing: the `.hollow-pack` file (issue #36) ─────────────────
 //
-// A pack is shared as a FILE, never as a link, and that is an architectural
-// answer rather than a stylistic one: Hollow has nowhere to host bytes. A
-// server invite works because the link carries only an ID and the join
-// happens over the relay into a room the inviter is already in; a pack has no
-// room behind it, so a URL would mean either serving strangers from the
-// author's node (a discovery surface we refuse to build) or a CDN (a central
-// server we refuse to run). Dropping the file into a DM or a channel reuses
-// the whole encrypted transfer path and adds no discovery whatsoever.
+// A pack is shared as a FILE, never a link, and that is architectural rather than
+// stylistic: Hollow has nowhere to host bytes. A server invite works because the link
+// carries only an ID and the join happens over the relay into a room the inviter is
+// already in; a pack has no room behind it, so a URL would mean serving strangers from
+// the author's node or running a CDN, and we refuse both. Dropping the file into a chat
+// reuses the encrypted transfer path and adds no discovery at all.
 //
-// It is also strictly the more private primitive. A live "vault link" would
-// tell the author who added them and let them push new bytes later; a file is
-// a one-time copy with no ongoing relationship in either direction. And it
-// doubles as the personal vault's only backup story — `personal_stickers` is
-// local-only, so today a reinstall loses it.
+// It is also the more private primitive: a live "vault link" would tell the author who
+// added them and let them push new bytes later, while a file is a one-time copy. It
+// doubles as the vault's only backup story, since `personal_stickers` is local-only.
 //
-// Container (ZIP, modelled on `.hollow-shards` in api/archive.rs):
-//   manifest.json  { format_version, pack, author, created_at, items[], sig }
-//   blobs/<hash>.webp
+// Container (ZIP): `manifest.json` { format_version, pack, author, created_at,
+// items[], sig } plus `blobs/<hash>.webp`.
 //
-// The author signature is ATTRIBUTION ONLY. It never gates the import, and a
-// missing or bad one means "do not show a byline", never "refuse" — anyone
-// may author a pack, and there is no authority that could say otherwise.
+// The author signature is ATTRIBUTION ONLY. It never gates the import, and a missing
+// or bad one means "no byline", never "refuse": anyone may author a pack.
 
 const PACK_FORMAT_VERSION: u32 = 1;
 
@@ -431,10 +405,9 @@ pub struct StickerPackPreview {
     pub author_verified: bool,
     /// Stickers the file claims to carry.
     ///
-    /// CLAIMS, not a promise: the count comes from the manifest and every
-    /// entry still has to survive import validation. No thumbnail ships with
-    /// this on purpose — previewing would mean handing un-validated bytes to
-    /// an image decoder before we have checked a single one of them.
+    /// CLAIMS, not a promise: the count comes from the manifest and every entry still
+    /// has to survive import validation. No thumbnail ships with this on purpose, since
+    /// previewing would hand un-validated bytes to an image decoder.
     pub count: u32,
 }
 
@@ -449,9 +422,9 @@ pub struct StickerPackImportResult {
     pub rejected: u32,
 }
 
-/// Canonical bytes the author signs. Covers the pack name, the author, and
-/// every item's hash and dims in manifest order, so nothing inside can be
-/// reordered, retitled or resized after signing.
+/// Canonical bytes the author signs: the pack name, the author, and every item's hash
+/// and dims in manifest order, so nothing inside can be reordered, retitled or
+/// resized after signing.
 fn pack_signing_payload(pack: &str, author: &str, items: &[PackItem]) -> String {
     let mut s = format!("hollow-pack:v{PACK_FORMAT_VERSION}:{pack}:{author}");
     for it in items {
@@ -482,9 +455,8 @@ pub fn export_personal_sticker_pack(
         return Err("That pack has no stickers".into());
     }
 
-    // Collect bytes first: a row whose blob was evicted cannot be exported,
-    // and a pack file with a dangling manifest entry is worse than a smaller
-    // one.
+    // Collect bytes first: a row whose blob was evicted cannot be exported, and a pack
+    // with a dangling manifest entry is worse than a smaller one.
     let mut blobs: Vec<(String, Vec<u8>)> = Vec::new();
     let mut items: Vec<PackItem> = Vec::new();
     for r in &rows {
@@ -611,8 +583,8 @@ fn pack_signature_is_valid(manifest: &PackManifest) -> bool {
     ) else {
         return false;
     };
-    // Bind pubkey → claimed author, exactly as the device-list check does;
-    // without this anyone could sign with their own key and claim any name.
+    // Bind pubkey to claimed author, as the device-list check does: otherwise anyone
+    // could sign with their own key and claim any name.
     match NativeKeypair::peer_id_from_pubkey_protobuf(&pk) {
         Some(derived) if derived == manifest.author => {}
         _ => return false,
@@ -624,15 +596,12 @@ fn pack_signature_is_valid(manifest: &PackManifest) -> bool {
 /// Import a `.hollow-pack` into the personal vault under [into_pack] (empty =
 /// the name the file carries).
 ///
-/// Every byte here is attacker-controlled, so nothing in the manifest is
-/// trusted for anything load-bearing:
-///   * the blob is keyed by the hash we COMPUTE, and an entry whose bytes do
-///     not hash to their claimed name is rejected outright;
-///   * `w`/`h` are re-derived from the decoded image, because those two
-///     numbers go straight into the wire token;
-///   * entry paths are never joined — the hash names the file we read;
-///   * the vault caps are enforced per row, so a huge pack fills up to the
-///     limit and reports the remainder as rejected rather than failing whole.
+/// Every byte here is attacker-controlled, so nothing in the manifest is trusted: the
+/// blob is keyed by the hash we COMPUTE and an entry whose bytes do not hash to their
+/// claimed name is rejected, `w`/`h` are re-derived from the decoded image because
+/// they go straight into the wire token, entry paths are never joined, and the vault
+/// caps are enforced per row so a huge pack fills to the limit and reports the rest
+/// as rejected rather than failing whole.
 #[frb]
 pub fn import_sticker_pack(
     path: String,
@@ -665,8 +634,7 @@ pub fn import_sticker_pack(
             rejected += 1;
             continue;
         }
-        // The hash names the entry — an attacker-supplied path is never
-        // joined, so there is no traversal surface at all.
+        // The hash names the entry, so an attacker-supplied path is never joined.
         let mut bytes = Vec::new();
         let read_ok = archive
             .by_name(&format!("blobs/{}.webp", item.hash))
@@ -688,8 +656,7 @@ pub fn import_sticker_pack(
             rejected += 1;
             continue;
         };
-        // A label is cosmetic; a bad one is not worth losing the sticker
-        // over, so fall back to unnamed rather than rejecting.
+        // A label is cosmetic, so a bad one falls back to unnamed rather than rejecting.
         let name = clean_label(&item.name).unwrap_or_default();
 
         {
@@ -707,8 +674,7 @@ pub fn import_sticker_pack(
             ms.save_asset_blob(&actual, &bytes, animated, "sticker")?;
         }
 
-        // Re-uses the ordinary add path, so the vault caps, the blob-presence
-        // check and the label rules are enforced in exactly one place.
+        // The ordinary add path, so caps, blob presence and label rules are enforced once.
         match add_personal_sticker(
             target.clone(),
             actual,
@@ -850,8 +816,8 @@ mod tests {
 
     #[test]
     fn a_forged_author_cannot_borrow_someone_elses_name() {
-        // Sign with our own key, then claim to be somebody else. The
-        // pubkey→peer_id binding is what stops this.
+        // Sign with our own key, then claim to be somebody else: the pubkey-to-peer_id
+        // binding is what stops this.
         let mine = NativeKeypair::from_secret_bytes(&[7u8; 32]);
         let theirs = NativeKeypair::from_secret_bytes(&[8u8; 32]);
         let mut m = signed_manifest(&mine, "autumn", vec![item(1, 512, 512)]);

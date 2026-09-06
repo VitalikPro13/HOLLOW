@@ -18,7 +18,6 @@ pub(crate) fn load_archive(zip_bytes: &[u8]) -> Result<LoadedArchive, String> {
     let mut archive = zip::ZipArchive::new(cursor)
         .map_err(|e| format!("Invalid archive: failed to open zip: {e}"))?;
 
-    // ── 1. Read and parse manifest ──────────────────────────────
     let manifest = read_manifest(&mut archive)?;
 
     if manifest.format_version != ARCHIVE_FORMAT_VERSION {
@@ -28,32 +27,23 @@ pub(crate) fn load_archive(zip_bytes: &[u8]) -> Result<LoadedArchive, String> {
         ));
     }
 
-    // ── 2. Read pubkeys.json ────────────────────────────────────
     let pubkeys = read_pubkeys(&mut archive)?;
 
-    // ── 3. Read all entry bytes for hash verification ───────────
     let entries = collect_entry_bytes(&mut archive)?;
 
-    // ── 4. Parse messages ───────────────────────────────────────
     let messages = parse_messages(&entries.message_entries);
 
-    // ── 5. Parse edits ──────────────────────────────────────────
     let edits: Vec<ArchiveEdit> = parse_entry_lists(&entries.edit_entries, "edits");
 
-    // ── 6. Parse deletions ──────────────────────────────────────
     let deletions: Vec<ArchiveDeletion> = parse_entry_lists(&entries.deletion_entries, "deletions");
 
-    // ── 7. Parse reaction removals ──────────────────────────────
     let reaction_removals: Vec<ArchiveReactionRemoval> =
         parse_entry_lists(&entries.removal_entries, "reaction removals");
 
-    // ── 8. Parse file metadata ──────────────────────────────────
     let file_metadata = parse_file_metadata(&entries.file_meta_entries);
 
-    // ── 9. Extract file bytes to temp dir ───────────────────────
     let files_dir = extract_files_to_temp(&entries.file_data_entries);
 
-    // ── 10. Per-message signature verification ──────────────────
     let msg_type = if manifest.archive_type == "dm" { "dm" } else { "ch" };
     let is_dm = manifest.archive_type == "dm";
     let dm_peer = manifest.peer_id.clone().unwrap_or_default();
@@ -71,7 +61,6 @@ pub(crate) fn load_archive(zip_bytes: &[u8]) -> Result<LoadedArchive, String> {
         ));
     }
 
-    // ── 11. Archive-level signature verification ────────────────
     let archive_signature_valid = verify_archive_level_signature(&entries, &file_metadata);
 
     Ok(LoadedArchive {

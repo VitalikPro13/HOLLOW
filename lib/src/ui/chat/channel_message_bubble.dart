@@ -25,10 +25,8 @@ import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_focus_ring.dart';
 import 'package:hollow/src/ui/components/support_glyph.dart';
 
-/// Flat message row for channel messages — no bubbles.
-///
-/// [showHeader] controls whether avatar + name + timestamp are shown
-/// (first message in a group) or just indented text (continuation).
+/// Flat message row for channel messages. [showHeader] is false for a grouped
+/// continuation, which drops the avatar, name and timestamp.
 class ChannelMessageBubble extends ConsumerWidget {
   final ChannelChatMessage message;
   final String serverId;
@@ -42,8 +40,7 @@ class ChannelMessageBubble extends ConsumerWidget {
   final void Function(String emoji)? onToggleReaction;
 
   /// This message and its neighbour are BOTH sticker-only and grouped, so the
-  /// seam between them is drawn continuous: no row padding, no corner
-  /// rounding, no gap. See [stickerTilingFor] for how the panes decide.
+  /// seam is drawn continuous (see [stickerTilingFor]).
   final bool tileWithPrev;
   final bool tileWithNext;
 
@@ -66,12 +63,10 @@ class ChannelMessageBubble extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final hollow = HollowTheme.of(context);
-    // Multi-device: a message's senderId may be a per-DEVICE peer id (public
-    // channels store the raw frame author; older rows predate the Rust resolve).
-    // Collapse device→master so the profile, nickname, name, avatar and colour all
-    // key on the person — exactly like the member panel and DM path. Single-device
-    // senders resolve to themselves (no-op); watching keeps the row reactive if the
-    // device→master link arrives after first paint.
+    // A senderId may be a per-DEVICE peer id: public channels store the raw
+    // frame author, and older rows predate the Rust resolve. Everything below
+    // keys on the MASTER, and watching keeps the row reactive when the link
+    // arrives after first paint.
     final senderMaster =
         ref.watch(deviceLinkProvider).identityOf(message.senderId);
     final senderProfile = ref.watch(
@@ -175,7 +170,7 @@ class ChannelMessageBubble extends ConsumerWidget {
 
     final localPeerId = ref.watch(identityProvider).peerId ?? '';
 
-    // Memoized across all message bubbles — recomputes only when members change.
+    // Memoized across all bubbles; recomputes only when the members change.
     final memberNames = ref.watch(serverMemberNamesProvider(serverId));
 
     final isFileOnly = message.fileAttachment != null &&
@@ -210,8 +205,8 @@ class ChannelMessageBubble extends ConsumerWidget {
           )
         : null;
 
-    // Cheap contains() gate + hoisted regex — no per-row RegExp compile or
-    // full-text scan for the overwhelmingly common no-link case.
+    // Cheap gate first: no per-row RegExp compile or full-text scan for the
+    // overwhelmingly common no-link message.
     final hollowLinks = mightContainHollowLinks(message.text)
         ? extractHollowLinks(message.text.replaceAll(codeBlockRegex, ''))
         : const <HollowLink>[];
@@ -247,8 +242,8 @@ class ChannelMessageBubble extends ConsumerWidget {
         : null;
 
 
-    // The row carries only the highlight wash now. Being YOURS is an
-    // [OwnMessageMarker] painted OVER the row, which costs it no layout.
+    // The row carries only the highlight wash; being YOURS is an
+    // [OwnMessageMarker] painted over it, which costs no layout.
     final highlightDecoration = isHighlighted || isMentioned
         ? BoxDecoration(color: hollow.accent.withValues(alpha: 0.08))
         : null;
@@ -261,8 +256,7 @@ class ChannelMessageBubble extends ConsumerWidget {
           curve: Curves.easeOut,
           padding: EdgeInsets.only(
             top: 4,
-            // A group header never tiles upward (the run starts here), but it
-            // can tile into the continuation below it.
+            // A group header starts the run, so it never tiles upward.
             bottom: tileWithNext ? 0 : 4,
             left: HollowSpacing.md,
             right: HollowSpacing.md,
@@ -309,8 +303,7 @@ class ChannelMessageBubble extends ConsumerWidget {
                             ),
                           ),
                         ),
-                        // Support glyph (design 5.6): opt-in by the holder,
-                        // a shrunk box for everyone else.
+                        // Opt-in by the holder, a shrunk box for everyone else.
                         SupportNameGlyph(peerId: senderMaster),
                         const SizedBox(width: HollowSpacing.sm),
                         Text(
@@ -338,8 +331,8 @@ class ChannelMessageBubble extends ConsumerWidget {
       );
     }
 
-    // Continuation message — indented, no avatar/name. A tiled seam drops the
-    // row padding on that side; the block asset drops its own to match.
+    // A tiled seam drops the row padding on that side, and the block asset
+    // drops its own to match.
     return markedAsOwn(
       isMe: isMe,
       row: AnimatedContainer(

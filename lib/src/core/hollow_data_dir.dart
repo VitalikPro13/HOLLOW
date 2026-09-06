@@ -17,12 +17,10 @@ bool get isPortableMode => _portable;
 /// overridden via setDataDir, like portable mode.
 bool get isPinnedProfile => _pinned;
 
-/// Returns the Hollow data directory path, consistent with Rust's data_dir().
-/// On mobile: `getApplicationDocumentsDirectory()/hollow`
-/// On desktop: portable root → `HOLLOW_DATA_DIR` env var → `APPDATA/Hollow`
-/// (Win) → `HOME/hollow` (Linux/Mac)
-///
-/// Call [initHollowDataDir] once at startup before using this synchronously.
+/// Returns the Hollow data directory path, consistent with Rust's data_dir():
+/// mobile `getApplicationDocumentsDirectory()/hollow`; desktop portable root ->
+/// `HOLLOW_DATA_DIR` -> `APPDATA/Hollow` (Win) -> `HOME/hollow`. Call
+/// [initHollowDataDir] once at startup before using this synchronously.
 String get hollowDataDir {
   if (_cached != null) return _cached!;
   final custom = Platform.environment['HOLLOW_DATA_DIR'];
@@ -33,22 +31,19 @@ String get hollowDataDir {
   return '$appData${Platform.pathSeparator}Hollow';
 }
 
-/// One-line record of what portable detection saw at boot — logged into
-/// hollow_debug.log once Rust is up, so a "why isn't portable working"
-/// report is diagnosable from the log alone.
+/// One-line record of what portable detection saw at boot, logged into
+/// hollow_debug.log so a "why isn't portable working" report is diagnosable.
 String portableDetectionNote = 'not run';
 
 /// The `hollow_data` folder next to the executable (next to the .app bundle on
-/// macOS) — the portable-mode data root, whether or not it exists yet. Null on
-/// mobile or if the executable path can't be resolved. Also used by the
-/// Settings > Profile switcher to list/pin the portable folder as a profile.
+/// macOS), whether or not it exists yet. Null on mobile or if the executable
+/// path can't be resolved. Also listed by the Settings profile switcher.
 String? portableCandidatePath() {
   if (Platform.isAndroid || Platform.isIOS) return null;
   try {
     var appDir = File(Platform.resolvedExecutable).parent;
     if (Platform.isMacOS) {
-      // resolvedExecutable = <Bundle>.app/Contents/MacOS/hollow — the marker
-      // lives next to the .app bundle, not inside it.
+      // The marker lives next to the .app bundle, not inside it.
       appDir = appDir.parent.parent.parent;
     }
     return '${appDir.path}${Platform.pathSeparator}hollow_data';
@@ -57,12 +52,10 @@ String? portableCandidatePath() {
   }
 }
 
-/// Portable-mode detection. The data folder is `hollow_data` (NOT `data` —
-/// the Flutter runner already ships a `data\` folder next to the exe).
-/// Accepted markers: `portable.txt`, `portable.txt.txt` (Explorer's
-/// hidden-extensions trap), bare `portable`, an existing `hollow_data`
-/// folder, or a `--portable` launch argument.
-/// The env var wins over portable so a stick user can still redirect.
+/// Portable-mode detection. The data folder is `hollow_data`, NOT `data`: the
+/// Flutter runner already ships a `data` folder next to the exe. Markers:
+/// `portable.txt`, `portable.txt.txt` (Explorer's hidden-extensions trap),
+/// bare `portable`, an existing `hollow_data`, or `--portable`. Env var wins.
 String? _portableDataRoot(bool forced) {
   if (Platform.isAndroid || Platform.isIOS) return null;
   final env = Platform.environment['HOLLOW_DATA_DIR'];
@@ -73,8 +66,7 @@ String? _portableDataRoot(bool forced) {
   try {
     var appDir = File(Platform.resolvedExecutable).parent;
     if (Platform.isMacOS) {
-      // resolvedExecutable = <Bundle>.app/Contents/MacOS/hollow — the marker
-      // lives next to the .app bundle, not inside it.
+      // The marker lives next to the .app bundle, not inside it.
       appDir = appDir.parent.parent.parent;
     }
     final sep = Platform.pathSeparator;
@@ -92,11 +84,8 @@ String? _portableDataRoot(bool forced) {
     }
     if (dataDir.existsSync()) {
       // A bare folder only auto-activates portable when it actually CONTAINS
-      // identity data (existing portable installs, the copy-your-AppData
-      // migration path). A fresh/empty hollow_data folder next to the exe
-      // must NOT hijack the default profile (issue #47) — it shows up as the
-      // "Portable folder" row in Settings > Profile instead, and switching
-      // there pins it explicitly.
+      // identity data. A fresh/empty hollow_data next to the exe must NOT hijack
+      // the default profile (issue #47); it shows as a row in Settings > Profile.
       const identityMarkers = ['identity.key', 'identity.device', 'messages.db'];
       final hasData = identityMarkers
           .any((m) => File('${dataDir.path}$sep$m').existsSync());
@@ -119,9 +108,8 @@ String? _portableDataRoot(bool forced) {
 }
 
 /// Must be called once at startup (after WidgetsFlutterBinding.ensureInitialized).
-/// On mobile, resolves the async path_provider directory and caches it.
-/// On desktop, detects portable mode (marker file / hollow_data folder next to
-/// the executable, or a `--portable` launch argument) and pins the data root.
+/// Mobile resolves the async path_provider directory and caches it; desktop
+/// detects portable mode and pins the data root.
 Future<void> initHollowDataDir({bool forcePortable = false}) async {
   if (Platform.isAndroid || Platform.isIOS) {
     final appDir = await getApplicationDocumentsDirectory();
@@ -129,13 +117,10 @@ Future<void> initHollowDataDir({bool forcePortable = false}) async {
     final dir = Directory(_cached!);
     if (!dir.existsSync()) dir.createSync(recursive: true);
   } else {
-    // Profile pin (Settings > Profile switcher, issue #47) — beats portable
-    // MARKER detection ON PURPOSE: an installed copy with a hollow_data folder
-    // next to the exe (implicit portable) must be able to switch back to its
-    // OS-default profile. A pure stick on a foreign machine has no
-    // profiles.json, so portable detection still wins there. Ephemeral
-    // explicit overrides beat the stored pin: the env var (same guard as
-    // portable's) and the --portable launch arg.
+    // Profile pin (issue #47) beats portable MARKER detection ON PURPOSE: an
+    // installed copy with a hollow_data folder next to the exe must be able to
+    // switch back to its OS-default profile. A pure stick has no profiles.json.
+    // Ephemeral explicit overrides (env var, --portable) beat the stored pin.
     var pinFailureNote = '';
     final env = Platform.environment['HOLLOW_DATA_DIR'];
     if (!forcePortable && (env == null || env.isEmpty)) {
@@ -155,8 +140,7 @@ Future<void> initHollowDataDir({bool forcePortable = false}) async {
               '${_portable ? ' (== portable folder)' : ''}';
           return;
         } catch (e) {
-          // Unreachable pin (unplugged drive, revoked permissions) — boot the
-          // normal profile instead of dying; the note lands in the log.
+          // Unreachable pin (unplugged drive): boot the normal profile instead of dying.
           pinFailureNote = 'profile pin $pinnedRoot unreachable ($e) — ';
         }
       }
@@ -179,11 +163,8 @@ void overrideHollowDataDir(String path) {
   _cached = path;
 }
 
-// ── Profile rows (issue #47) ─────────────────────────────────────────────────
-//
-// One list, two surfaces: Settings > Profile and the first-run welcome screen.
-// They must agree on which profiles exist, what they are called and which one
-// is running, so neither builds its own.
+// Profile rows (issue #47): one list, two surfaces (Settings > Profile and the
+// first-run welcome). They must agree on which profiles exist and which runs.
 
 /// A profile as the UI lists it: the OS-default root, the portable
 /// `hollow_data` folder next to the executable, then the user's own entries.
@@ -209,8 +190,7 @@ class ProfileRow {
 /// Every profile on this computer, deduplicated by path.
 ///
 /// The portable row is listed whether or not the folder exists yet: an empty
-/// `hollow_data` folder no longer auto-activates portable mode, so this row IS
-/// the way to start a portable profile.
+/// `hollow_data` no longer auto-activates portable, so this row IS the way in.
 List<ProfileRow> listProfileRows(ProfileRegistry registry) {
   final rows = <ProfileRow>[
     ProfileRow(

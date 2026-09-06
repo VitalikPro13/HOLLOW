@@ -6,33 +6,20 @@ import 'screen_audio_receiver.dart';
 
 /// Process-global level control for RECEIVED screen-share audio.
 ///
-/// Share audio is raw mastered content (music sits at −14 LUFS or hotter,
-/// far denser than speech) while the voice chain converges at ~−16 LUFS, so
-/// unity playback drowns the call. This bus fuses the three inputs that decide
-/// how loud the share should play RIGHT NOW and pushes one target gain into
-/// the active [ScreenAudioReceiver] (the sink ramps click-free):
+/// Share audio is raw mastered content (music at -14 LUFS or hotter) while
+/// the voice chain converges near -16 LUFS, so unity playback drowns the
+/// call. The volume slider (0 to 200%, where 100% is a -6 dB calibration and
+/// 200% is unity, so it cannot clip), voice ducking and deafen fuse into one
+/// target gain for the active [ScreenAudioReceiver], whose sink ramps it.
 ///
-///  * the persisted share-volume slider (0–200%, 100% = −6 dB calibration,
-///    200% = the source's original loudness — gain never exceeds unity, so
-///    the slider can't clip),
-///  * voice-activity ducking (−10 dB while anyone in the call speaks, you
-///    included — MV6-style; 400 ms hold so word gaps don't pump),
-///  * deafen (hard zero — voice tracks are zeroed elsewhere, share audio
-///    must follow).
-///
-/// Static because the receivers are per-call singletons owned by
-/// call_provider / voice_channel_provider (only one is ever active) and the
-/// speaking callbacks live in service-layer closures — mirroring
-/// AudioSwitchManager-style process-global audio state.
+/// Static because only one receiver is ever active, owned per call.
 class ShareAudioLevel {
   ShareAudioLevel._();
 
-  /// −10 dB duck while voice is active — the broadcast-standard depth for a
-  /// bed under speech.
+  /// -10 dB duck, the broadcast-standard depth for a bed under speech.
   static const double _duckFactor = 0.316;
 
-  /// Keep the duck through inter-word gaps; only release after this much
-  /// continuous silence. (VAD itself updates every ~200 ms.)
+  /// Holds the duck through inter-word gaps; the VAD updates every ~200 ms.
   static const Duration _hold = Duration(milliseconds: 400);
 
   static ScreenAudioReceiver? _receiver;
@@ -49,8 +36,8 @@ class ShareAudioLevel {
     _setServoHoldReceiving(true);
   }
 
-  /// Detach on teardown; identity-checked so a stale detach from a torn-down
-  /// call can't disconnect a newer receiver.
+  /// Detach on teardown, identity-checked so a stale detach from a torn-down
+  /// call cannot disconnect a newer receiver.
   static void detach(ScreenAudioReceiver receiver) {
     if (identical(_receiver, receiver)) {
       _receiver = null;
@@ -58,14 +45,10 @@ class ShareAudioLevel {
     }
   }
 
-  // -------------------------------------------------------------------------
-  // Capture-servo hold — the OTHER half of the share-audio story: while share
-  // audio is active on this device (we SEND a share with audio, or PLAY a
-  // received one on speakers), continuous music bleed into the mic passes the
+  // Capture-servo hold, the other half of the share-audio story: while share
+  // audio is active on this device, music bleeding into the mic passes the
   // Voice Enhancement servo's speech floor and would re-calibrate the trim to
-  // the music (9 dB/s down), burying the voice. Both sources OR into one
-  // native flag; the servo freezes at its pre-share speech calibration.
-  // -------------------------------------------------------------------------
+  // the music, burying the voice. Both sources OR into one native flag.
 
   static bool _holdSending = false;
   static bool _holdReceiving = false;
@@ -104,8 +87,8 @@ class ShareAudioLevel {
     _push();
   }
 
-  /// Voice-activity sidechain — call with "is ANYONE (self included)
-  /// currently speaking". Duck engages immediately; release waits [_hold].
+  /// Voice-activity sidechain: pass "is ANYONE, self included, speaking".
+  /// Duck engages immediately; release waits [_hold].
   static void setSpeaking(bool speaking) {
     if (speaking) {
       _holdTimer?.cancel();

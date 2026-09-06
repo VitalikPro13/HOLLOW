@@ -102,8 +102,6 @@ class VaultStatusNotifier extends Notifier<Map<String, VaultServerStatus>> {
     state = {...state, serverId: status};
   }
 
-  // ── Upload events ──────────────────────────────────────────
-
   void onUploadProgress(
       String serverId, String contentId, String phase, double progress) {
     final server = _getServer(serverId);
@@ -144,8 +142,6 @@ class VaultStatusNotifier extends Notifier<Map<String, VaultServerStatus>> {
     );
   }
 
-  // ── Download events ────────────────────────────────────────
-
   void onDownloadProgress(
       String serverId, String contentId, String phase, double progress) {
     final server = _getServer(serverId);
@@ -162,7 +158,6 @@ class VaultStatusNotifier extends Notifier<Map<String, VaultServerStatus>> {
 
   void onDownloadComplete(String serverId, String contentId) {
     final server = _getServer(serverId);
-    // Remove from active downloads on completion
     final downloads = Map.of(server.activeDownloads)..remove(contentId);
     _updateServer(
       serverId,
@@ -182,8 +177,6 @@ class VaultStatusNotifier extends Notifier<Map<String, VaultServerStatus>> {
       ),
     );
   }
-
-  // ── Shard events ───────────────────────────────────────────
 
   void onShardStored(String serverId, String contentId) {
     final server = _getServer(serverId);

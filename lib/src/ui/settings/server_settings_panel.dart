@@ -18,8 +18,8 @@ import 'package:hollow/src/ui/settings/overview_tab.dart';
 import 'package:hollow/src/ui/settings/roles_tab.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-/// Full server settings panel — replaces the chat pane.
-/// Tabs are gated by the local user's permissions.
+/// Full server settings panel, in place of the chat pane. Tabs are gated by the
+/// local user's permissions.
 class ServerSettingsPanel extends ConsumerStatefulWidget {
   final ServerInfo server;
   final VoidCallback? onClose;
@@ -38,14 +38,13 @@ class _ServerSettingsPanelState extends ConsumerState<ServerSettingsPanel> {
       int permissions, String myRole) {
     final tabs = <({IconData icon, String label, bool isDanger})>[];
 
-    // Overview — always visible (nickname for all, server settings for admins)
+    // Always visible; the server settings inside are admin-gated.
     tabs.add((
       icon: LucideIcons.info,
       label: 'Overview',
       isDanger: false,
     ));
 
-    // Channels — only for channel managers
     if (permissions & Permission.manageChannels != 0) {
       tabs.add((
         icon: LucideIcons.hash,
@@ -54,7 +53,7 @@ class _ServerSettingsPanelState extends ConsumerState<ServerSettingsPanel> {
       ));
     }
 
-    // Roles — for role managers (only owner can edit, others can view)
+    // Role managers can view; only the owner can edit.
     if (permissions & Permission.manageRoles != 0) {
       tabs.add((
         icon: LucideIcons.shield,
@@ -63,36 +62,34 @@ class _ServerSettingsPanelState extends ConsumerState<ServerSettingsPanel> {
       ));
     }
 
-    // Labels — visible to everyone (self-assign), management for MANAGE_ROLES
+    // Visible to everyone for self-assign; management needs MANAGE_ROLES.
     tabs.add((
       icon: LucideIcons.tag,
       label: 'Labels',
       isDanger: false,
     ));
 
-    // Emotes — visible to everyone (browse), management for MANAGE_EMOTES
+    // Visible to everyone for browsing; management needs MANAGE_EMOTES.
     tabs.add((
       icon: LucideIcons.smile,
       label: 'Emotes',
       isDanger: false,
     ));
 
-    // Members — always visible (viewing is OK, actions gated inside)
+    // Always visible: viewing is fine, and the actions are gated inside.
     tabs.add((
       icon: LucideIcons.users,
       label: 'Members',
       isDanger: false,
     ));
 
-    // Notifications — always visible
     tabs.add((
       icon: LucideIcons.bell,
       label: 'Notifications',
       isDanger: false,
     ));
 
-    // Danger Zone / Leave — always visible
-    // Owner sees "Delete Server", non-owners see "Leave Server"
+    // The owner sees Delete Server here, everyone else sees Leave Server.
     tabs.add((
       icon: LucideIcons.alertTriangle,
       label: 'Danger',
@@ -136,7 +133,7 @@ class _ServerSettingsPanelState extends ConsumerState<ServerSettingsPanel> {
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
 
-    // Re-read the server from provider so it updates when renamed
+    // Re-read from the provider so a rename lands here.
     final currentServer =
         ref.watch(serverListProvider)[widget.server.serverId] ?? widget.server;
 
@@ -144,7 +141,7 @@ class _ServerSettingsPanelState extends ConsumerState<ServerSettingsPanel> {
         ref.watch(myPermissionsProvider(widget.server.serverId));
     final roleAsync = ref.watch(myRoleProvider(widget.server.serverId));
 
-    // Don't render until permissions and role are loaded — prevents flash of wrong tabs.
+    // Rendering before permissions load flashes the wrong tabs.
     if (!permissionsAsync.hasValue || !roleAsync.hasValue) {
       return Column(
         children: [
@@ -194,14 +191,13 @@ class _ServerSettingsPanelState extends ConsumerState<ServerSettingsPanel> {
     final myRole = roleAsync.value ?? 'member';
     final tabs = _visibleTabs(permissions, myRole);
 
-    // Clamp selected tab if permissions changed
+    // Permissions may have shrunk the tab list.
     if (_selectedTab >= tabs.length) {
       _selectedTab = 0;
     }
 
     return Column(
       children: [
-        // Header bar
         Container(
           constraints: const BoxConstraints(minHeight: 48),
           padding: const EdgeInsets.symmetric(
@@ -243,7 +239,6 @@ class _ServerSettingsPanelState extends ConsumerState<ServerSettingsPanel> {
           ),
         ),
 
-        // Tab bar
         // Own traversal group (a11y 2.6): Tab cycles the section selector on
         // its own, separate from the content pane below.
         FocusTraversalGroup(
@@ -256,14 +251,10 @@ class _ServerSettingsPanelState extends ConsumerState<ServerSettingsPanel> {
               color: hollow.surface,
               border: Border(bottom: BorderSide(color: hollow.border)),
             ),
-            // Larger Text (a11y P3): the tab strip is horizontal chrome — at
-            // high text scale the row of tabs can outgrow the panel width, so
-            // it scrolls instead of overflowing. Each label is also scale-
-            // capped (load-bearing chrome, iOS/Android tab-bar norm).
-            // EdgeScrollRow rather than a bare scroller: overflowing tabs
-            // were unreachable on a desktop with a plain wheel mouse (no
-            // drag affordance, no gesture). Arrows + wheel-to-pan appear
-            // only while there IS overflow.
+            // At high text scale the tab row outgrows the panel, so it scrolls
+            // instead of overflowing. EdgeScrollRow rather than a bare
+            // scroller, because overflowing tabs were unreachable with a plain
+            // wheel mouse: no drag affordance and no gesture.
             child: EdgeScrollRow(
               semanticLabel: 'settings tabs',
               children: List.generate(tabs.length, (i) {
@@ -281,9 +272,8 @@ class _ServerSettingsPanelState extends ConsumerState<ServerSettingsPanel> {
           ),
         ),
 
-        // Tab content
         // Own traversal group (a11y 2.6): Tab stays WITHIN the active section
-        // body instead of leaking back into the tab selector as you move down.
+        // body instead of leaking back into the tab selector.
         Expanded(
           child: FocusTraversalGroup(
             policy: ReadingOrderTraversalPolicy(),
@@ -341,8 +331,8 @@ class _TabButton extends StatelessWidget {
         children: [
           Icon(icon, size: 14, color: color),
           const SizedBox(width: HollowSpacing.xs),
-          // Load-bearing tab chrome: cap the label scale (1.3×) so the strip
-          // stays compact; content areas honor full 2.0× elsewhere.
+          // Load-bearing chrome, so the label scale is capped where content
+          // areas honour the full 2.0x.
           MediaQuery.withClampedTextScaling(
             maxScaleFactor: 1.3,
             child: Text(

@@ -12,14 +12,11 @@ import 'package:hollow/src/ui/components/hollow_toggle.dart';
 import 'package:hollow/src/ui/components/hollow_tooltip.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-/// Volume button for the screen-share control bars: opens the share-audio
-/// panel (volume slider + voice-activity duck toggle) as a popover above the
-/// button on desktop, or a bottom sheet on mobile.
+/// Volume button for the screen-share control bars, opening the share-audio
+/// panel as a desktop popover or a mobile sheet.
 ///
-/// Controls RECEIVED share audio only — the raw data-channel stream that
-/// bypasses the per-peer voice volume. Values persist via
-/// [shareAudioVolumeProvider] / [shareAudioDuckProvider] and reach the sink
-/// through [ShareAudioLevel].
+/// Controls RECEIVED share audio only: the raw data-channel stream, which
+/// bypasses the per-peer voice volume.
 class ShareVolumeButton extends ConsumerWidget {
   const ShareVolumeButton({
     super.key,
@@ -67,8 +64,8 @@ class ShareVolumeButton extends ConsumerWidget {
         box.localToGlobal(Offset.zero, ancestor: overlayBox);
     final screen = overlayBox.size;
     const panelW = 260.0;
-    // Centered over the button, clamped on-screen, opening ABOVE it (the
-    // share control bars sit at the bottom of the tile).
+    // Opens ABOVE the button, because the share control bars sit at the bottom
+    // of the tile.
     final left = (origin.dx + box.size.width / 2 - panelW / 2)
         .clamp(8.0, screen.width - panelW - 8.0);
     final bottom = screen.height - origin.dy + HollowSpacing.sm;
@@ -159,10 +156,9 @@ Future<void> showShareVolumeSheet(BuildContext context) {
   );
 }
 
-/// The share-audio controls: volume slider (0–200%, 100% = the calibrated
-/// −6 dB default, 200% = the source's original loudness) and the
-/// voice-activity duck toggle. Shared by the desktop popover and the mobile
-/// sheet.
+/// The share-audio controls, shared by the desktop popover and the mobile
+/// sheet. The slider runs 0-200%, where 100% is the calibrated -6 dB default
+/// and 200% the source's own loudness.
 class ShareVolumePanel extends ConsumerStatefulWidget {
   const ShareVolumePanel({super.key});
 
@@ -171,8 +167,7 @@ class ShareVolumePanel extends ConsumerStatefulWidget {
 }
 
 class _ShareVolumePanelState extends ConsumerState<ShareVolumePanel> {
-  /// Local drag value: the slider pushes the bus live per tick but persists
-  /// only on drag end (a storage write per tick is waste).
+  /// The slider pushes the bus live per tick but persists only on drag end.
   double? _dragVolume;
 
   @override

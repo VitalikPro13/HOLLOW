@@ -27,9 +27,8 @@ class ShareDashboard extends ConsumerStatefulWidget {
 
 class _ShareDashboardState extends ConsumerState<ShareDashboard> {
   _ShareSubTab _subTab = _ShareSubTab.myShares;
-  // Gates "Share a File" while shareCreateFromFile chunks + hashes the whole
-  // file into the vault — multi-second for large files, and the new share
-  // only appears in the list once it finishes.
+  // Gates "Share a File" while the whole file is chunked and hashed into the
+  // vault, which takes seconds on a large one.
   bool _sharing = false;
 
   @override
@@ -114,13 +113,12 @@ class _ShareDashboardState extends ConsumerState<ShareDashboard> {
     );
   }
 
-  /// Yellow advisory strip below the header: Share transfers are STUN-only
-  /// (direct P2P, no TURN relay fallback), so a transfer can fail behind
-  /// strict/symmetric NATs. Mirrors the archive verification banner styling.
+  /// Advisory strip: Share transfers are STUN-only, with no TURN relay
+  /// fallback, so one can fail behind a symmetric NAT.
   ///
   /// While "Always relay calls" is on it also names the carve-out at the point
-  /// of action — Share is the one path that setting deliberately doesn't cover,
-  /// and a privacy switch with a silent exception is worse than no switch.
+  /// of action, because a privacy switch with a silent exception is worse than
+  /// no switch.
   Widget _buildStunWarning(HollowTheme hollow) {
     final color = Colors.amber.shade700;
     final alwaysRelay = ref.watch(alwaysRelayCallsProvider);
@@ -157,8 +155,6 @@ class _ShareDashboardState extends ConsumerState<ShareDashboard> {
       ),
     );
   }
-
-  // ── My Shares tab ──
 
   Widget _buildMyShares(List<ShareItemState> userShares, HollowTheme hollow) {
     if (userShares.isEmpty) {
@@ -197,8 +193,6 @@ class _ShareDashboardState extends ConsumerState<ShareDashboard> {
     );
   }
 
-  // ── Server Files tab ──
-
   Widget _buildServerFiles(List<ShareItemState> serverFiles, HollowTheme hollow) {
     if (serverFiles.isEmpty) {
       return _buildEmptyState(
@@ -211,7 +205,6 @@ class _ShareDashboardState extends ConsumerState<ShareDashboard> {
 
     final serverMap = ref.watch(serverListProvider);
 
-    // Group by server ID.
     final grouped = <String, List<ShareItemState>>{};
     for (final s in serverFiles) {
       grouped.putIfAbsent(s.serverId!, () => []).add(s);
@@ -235,8 +228,6 @@ class _ShareDashboardState extends ConsumerState<ShareDashboard> {
       ],
     );
   }
-
-  // ── Shared helpers ──
 
   Widget _buildEmptyState(
     HollowTheme hollow, {
@@ -299,7 +290,7 @@ class _ShareDashboardState extends ConsumerState<ShareDashboard> {
   }
 }
 
-/// Pill-shaped sub-tab button — matches the Archive dashboard pattern.
+/// Pill-shaped sub-tab button, matching the Archive dashboard.
 class _SubTabPill extends StatelessWidget {
   final String label;
   final bool isSelected;

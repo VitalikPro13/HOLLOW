@@ -11,22 +11,16 @@ void _log(String msg) {
 
 /// Mobile (Android/iOS) renderer for RECEIVED screen-share audio.
 ///
-/// The desktop [ScreenAudioRenderer] spawns an out-of-process exe that decodes
-/// Opus + plays it via the OS audio API. A phone can't spawn a child process,
-/// so this sibling decodes each Opus packet in Rust ([screen_audio_api]) and
-/// streams the resulting PCM to a native player on the MEDIA output path
-/// (`Helper.startScreenAudioPlayer` → Android AudioTrack / iOS AudioQueue),
-/// deliberately OUTSIDE the WebRTC voice session so the call's AEC/AGC can't
-/// mangle the shared music.
+/// A phone cannot spawn the child process the desktop renderer uses, so this
+/// sibling decodes each Opus packet in Rust and streams the PCM to a native
+/// player on the MEDIA output path, deliberately OUTSIDE the WebRTC voice
+/// session so the call's AEC and AGC cannot mangle the shared music.
 ///
-/// Data-channel payload handed to us is `[seq:4 LE][opus_bytes...]`; we strip
-/// the 4-byte sequence and hand the bare Opus packet to the decoder (the seq
-/// is unused — the data channel is reliable + ordered, same as desktop).
-///
-/// Decoding is async (FFI), so packets are decoded through a single serial
-/// chain to preserve order. If the decode backlog grows (a stall), newer
-/// packets are dropped — a real-time stream prefers a dropped packet over
-/// unbounded latency, matching the desktop ring-buffer's overrun behavior.
+/// The data-channel payload is `[seq:4 LE][opus_bytes...]`; the sequence is
+/// stripped and unused, since the channel is reliable and ordered. Decoding is
+/// async FFI, so packets go through a single serial chain to preserve order,
+/// and newer packets are dropped once the backlog grows: a real-time stream
+/// prefers a dropped packet over unbounded latency.
 class MobileScreenAudioRenderer {
   bool _active = false;
   bool _starting = false;
@@ -36,16 +30,16 @@ class MobileScreenAudioRenderer {
   /// Serial tail: each decode awaits the previous so PCM is written in order.
   Future<void> _decodeChain = Future<void>.value();
 
-  /// Number of packets currently queued behind the decode chain. Bounded so a
-  /// decode stall can't accumulate unbounded latency/memory.
+  /// Packets currently queued behind the decode chain. Bounded so a decode
+  /// stall cannot accumulate unbounded latency or memory.
   int _pending = 0;
   static const int _kMaxPendingDecodes = 32;
 
   bool get isActive => _active;
 
-  /// Set the playback gain target (0.0..=1.0); the Rust decoder ramps toward
-  /// it click-free (fast down / slow up). Fire-and-forget FFI — a rejection
-  /// must not escape to the zone handler.
+  /// Sets the playback gain target (0.0..=1.0); the Rust decoder ramps toward
+  /// it click-free. Fire-and-forget FFI, so a rejection must not escape to the
+  /// zone handler.
   void setGain(double gain) {
     screen_audio_api
         .setScreenAudioGain(gain: gain.clamp(0.0, 1.0).toDouble())
@@ -59,7 +53,7 @@ class MobileScreenAudioRenderer {
     try {
       await Helper.startScreenAudioPlayer();
       // Reset the Rust decoder so leftover inter-packet state from a previous
-      // share session doesn't corrupt the first frames of this one.
+      // share session cannot corrupt the first frames of this one.
       await screen_audio_api.resetScreenAudioDecoder();
       _active = true;
       _packetCount = 0;

@@ -28,12 +28,10 @@ class RecordingResult {
   });
 }
 
-/// Spawns ffmpeg to capture the full screen + microphone (and on macOS 14.2+
-/// also system audio via CoreAudio Process Tap) to an MP4 file the user can
-/// upload to Google Classroom etc.
+/// Spawns a recorder for the full screen plus microphone, and system audio
+/// where the platform allows, into an MP4 the user can upload.
 ///
-/// One recording at a time. Stateless on disk between sessions; the resulting
-/// MP4 is the only artifact left behind.
+/// One recording at a time; the MP4 is the only artifact left behind.
 class RecordingService {
   RecordingService._();
 
@@ -77,13 +75,13 @@ class RecordingService {
     return 'Hollow_${n.year}-${two(n.month)}-${two(n.day)}_${two(n.hour)}-${two(n.minute)}-${two(n.second)}.mp4';
   }
 
-  /// Begin recording. Throws [StateError] if already recording, or
-  /// [RecordingException] on backend failure (native or ffmpeg).
+  /// Begins recording. Throws [StateError] when already recording, or
+  /// [RecordingException] on backend failure, native or ffmpeg.
   ///
-  /// [renderDeviceId] / [captureDeviceId] (Windows only): MMDevice endpoint
-  /// ids of the output/input devices Hollow is configured to use, so the
-  /// recorder loopbacks the device remote voices actually play on and
-  /// captures the mic actually in use — not the eConsole defaults (#53).
+  /// [renderDeviceId] / [captureDeviceId] (Windows only) are the MMDevice
+  /// endpoint ids Hollow is configured to use, so the recorder loopbacks the
+  /// device remote voices actually play on and captures the mic actually in
+  /// use, not the eConsole defaults (#53).
   Future<void> start({String? renderDeviceId, String? captureDeviceId}) async {
     if (isRecording) {
       throw StateError('Already recording');
@@ -92,9 +90,8 @@ class RecordingService {
     final dir = await recordingsDir;
     final outFile = p.join(dir.path, _timestampedFileName());
 
-    // macOS uses the native ScreenCaptureKit + AVAssetWriter recorder —
     // macOS: ScreenCaptureKit + AVAssetWriter, Windows: Graphics Capture + MF.
-    // Both produce MP4 (H.264 + AAC) with mic + system audio natively.
+    // Both produce MP4 (H.264 + AAC) with mic and system audio natively.
     if (Platform.isMacOS || Platform.isWindows) {
       final method = Platform.isMacOS
           ? 'hollowMacStartScreenRecord'
@@ -183,8 +180,8 @@ class RecordingService {
         await PerfSentinel.timedChannelCall<bool>(_channel, method);
         _recLog('native stop OK ($method)');
       } on PlatformException catch (e) {
-        // The native recorder embeds writer status + per-track sample counts +
-        // the AVAssetWriter error in the message (see MacScreenRecorder stop).
+        // The native recorder embeds writer status, per-track sample counts
+        // and the AVAssetWriter error in the message.
         _recLog('native stop FAILED: ${e.code} ${e.message}');
       }
       final duration = DateTime.now().difference(startedAt);
@@ -211,10 +208,10 @@ class RecordingService {
     final proc = _process;
     if (proc == null) return null;
 
-    // Ask ffmpeg to finalize. Sending 'q' on stdin makes it flush the moov
-    // atom — sending SIGINT/SIGKILL would leave a corrupt MP4. We escalate
-    // through SIGINT/SIGTERM/SIGKILL if ffmpeg won't budge (e.g. it's stuck
-    // waiting for frames from a broken capture pipeline).
+    // Sending 'q' on stdin makes ffmpeg flush the moov atom; SIGINT or
+    // SIGKILL would leave a corrupt MP4. Escalate through the signals only
+    // if it will not budge, such as when it is stuck waiting for frames from
+    // a broken capture pipeline.
     try {
       proc.stdin.write('q');
       await proc.stdin.flush();
@@ -298,10 +295,8 @@ class RecordingService {
     ];
   }
 
-  /// Whether recording is supported on this platform.
-  ///
-  /// macOS needs 13.0+ (the native ScreenCaptureKit recorder errors out below
-  /// that — see [MacOsScreenAudioSupport.canRecord]).
+  /// Whether recording is supported on this platform. macOS needs 13.0+,
+  /// below which the native ScreenCaptureKit recorder errors out.
   static bool get isAvailable {
     if (Platform.isMacOS) return MacOsScreenAudioSupport.canRecord;
     if (Platform.isWindows) return true;

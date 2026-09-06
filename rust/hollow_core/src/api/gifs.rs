@@ -1,47 +1,30 @@
-//! The Klipy catalog client — search/trending/categories, plus the pick-time
+//! The Klipy catalog client: search, trending and categories, plus the pick-time
 //! fetch and transcode into an asset-rail blob.
 //!
-//! It serves TWO media kinds off one code path ([MediaKind]): GIFs, and the
-//! stickers `api/stickers.rs` exposes to Dart. They differ only in the
-//! upstream path segment, the id namespace, and which transcoder the pick
-//! runs through — everything below (the two modes, the URL guards, the
-//! allowlist, the rating handling) is shared, so a fix to one is a fix to
-//! both. The normalized [GifItem] / [GifPage] / [StoredGif] shapes carry
-//! both kinds; they keep their GIF-era names because renaming them would
-//! churn every shipped call site for a cosmetic gain.
+//! It serves TWO media kinds off one code path ([MediaKind]): GIFs and the stickers
+//! `api/stickers.rs` exposes. They differ only in the upstream path segment, the id
+//! namespace and the transcoder a pick runs through, so a fix to one is a fix to both.
+//! The normalized [GifItem] / [GifPage] / [StoredGif] shapes carry both kinds and keep
+//! their GIF-era names, because renaming them would churn every shipped call site.
 //!
-//! TWO MODES, one contract. The app codes to the normalized [GifPage] shape
-//! either way:
+//! TWO MODES, one contract. PROXY (default) sends everything through the Hollow
+//! website's no-log Klipy proxy, which holds the single upstream identity and the
+//! key, so users never contact Klipy. DIRECT has the user paste their OWN Klipy key
+//! and talk to api.klipy.com; it is NOT a privacy upgrade and must never be sold as
+//! one, since Klipy then sees their IP and every search under one stable key. It
+//! exists because a user's own key is a user's own rate limit.
 //!
-//!   * PROXY (default) — everything goes through the Hollow website's no-log
-//!     Klipy proxy. The website holds the single upstream identity and the
-//!     Klipy key; users never contact Klipy or its CDN. Self-hosters point
-//!     [set_gif_proxy_url] at their own copy of `gifs/`.
-//!   * DIRECT — the user pastes their OWN Klipy key ([set_gif_api_key]) and
-//!     the client talks to api.klipy.com itself. This is NOT a privacy
-//!     upgrade and must never be sold as one: Klipy then sees the user's IP
-//!     and every search under one stable key. It exists because a user's own
-//!     key is a user's own rate limit, and because it removes any dependency
-//!     on our server without needing to host PHP.
+//! PRIVACY MODEL: the catalog is touched ONLY at authoring time. A picked GIF is
+//! re-encoded into a content-addressed Hollow WebP blob and replicates purely P2P over
+//! the asset rail, so receivers never make an HTTP request for any GIF, in either mode.
 //!
-//! PRIVACY MODEL (mirrors `emotes.rs` / `showcase.rs`): the GIF catalog is
-//! touched ONLY at authoring time. The moment a GIF is picked it is
-//! re-encoded into a content-addressed Hollow WebP blob (≤480px, ≤2 MB) and
-//! replicates purely P2P over the asset rail — receivers of a message never
-//! make an HTTP request for any GIF, ever, in EITHER mode.
-//!
-//! FETCHER DISCIPLINE, per mode:
-//!   * PROXY — `gif_fetch_and_store` builds `{base}f/{id}` itself and ignores
-//!     any caller-supplied URL outright. Structurally incapable of acting as
-//!     a generic fetcher; media URLs handed to Dart are prefix-checked
-//!     against the configured base.
-//!   * DIRECT — the id resolves through a registry populated by OUR OWN parse
-//!     of a response we requested. Only when that registry cannot help (a
-//!     favourite saved in an earlier session, whose variants are long evicted)
-//!     does the caller's remembered source URL apply, and then only if its
-//!     host is on the user's media allowlist. That allowlist IS the guard
-//!     here: every URL comes from Klipy's opaque CDN, so provenance cannot be
-//!     re-derived from the URL, only constrained.
+//! FETCHER DISCIPLINE. In proxy mode `gif_fetch_and_store` builds `{base}f/{id}` itself
+//! and ignores any caller-supplied URL, so it is structurally incapable of acting as a
+//! generic fetcher. In direct mode the id resolves through a registry populated by OUR
+//! OWN parse of a response we requested; only when that registry cannot help (a
+//! favourite from an earlier session) does the caller's remembered URL apply, and then
+//! only if its host is on the user's media allowlist. That allowlist IS the guard:
+//! every URL comes from Klipy's opaque CDN, so provenance can only be constrained.
 
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::sync::{Mutex, OnceLock};
@@ -52,31 +35,24 @@ use sha2::{Digest, Sha256};
 use super::network::get_http_runtime;
 use super::storage::get_store;
 
-/// Default base URL of the Hollow website's GIF proxy (keep in sync with
-/// GIFS_BASE_URL in gifs/config.php — trailing slash included). Self-hosters
-/// override it via [set_gif_proxy_url].
+/// Default base URL of the Hollow website's GIF proxy, trailing slash included (keep
+/// in sync with GIFS_BASE_URL in gifs/config.php).
 const DEFAULT_GIF_PROXY: &str = "https://hollow.anonlisten.com/gifs/";
-/// Proxy response-schema version (keep in sync with SEARCH_VER in
-/// gifs/search.php). The server currently ignores it — sent as a reserved
-/// cache-buster, same as the FFZ/IGDB endpoints.
+/// Proxy response-schema version. The server ignores it today: a reserved
+/// cache-buster, like the FFZ and IGDB endpoints.
 const GIF_SCHEMA_VER: &str = "2";
-/// Klipy API root for DIRECT mode. The key is a PATH segment (which is
-/// exactly why a bundled key would be extractable, and why proxy mode keeps
-/// it server-side).
+/// Klipy API root for DIRECT mode. The key is a PATH segment, which is exactly why a
+/// bundled key would be extractable and why proxy mode keeps it server-side.
 const KLIPY_API_ROOT: &str = "https://api.klipy.com/api/v1/";
-/// Media hosts direct mode may fetch grid images from. Suffix-matched, so
-/// this one entry covers api./static./static2.klipy.com. Editable in
-/// Settings: if Klipy moves its CDN, users fix it without an app release
-/// (the picker surfaces every blocked host it saw — see
-/// [gif_blocked_media_hosts]).
+/// Media hosts direct mode may fetch grid images from, suffix-matched so one entry
+/// covers every klipy.com subdomain. Editable in Settings, so a CDN move is a user
+/// fix rather than an app release.
 const DEFAULT_MEDIA_HOSTS: [&str; 1] = ["klipy.com"];
 /// Content ratings Klipy accepts, mildest first.
 const RATINGS: [&str; 4] = ["g", "pg", "pg-13", "r"];
-/// Shipped default. NOTE this is the APP's default, deliberately one step
-/// above gifs/search.php's own `DEFAULT_RATING` ('pg'): the PHP value only
-/// applies to a request that sends no rating at all — i.e. a client older
-/// than this feature — and quietly loosening what THEY receive would be a
-/// change nobody opted into.
+/// Shipped default, deliberately one step above gifs/search.php's own: the PHP value
+/// applies only to a client too old to send a rating, and quietly loosening what
+/// THEY receive would be a change nobody opted into.
 const DEFAULT_RATING: &str = "pg-13";
 /// Grid variant preference (smallest usable first) — mirrors SIZE_SLOTS in
 /// gifs/search.php.
@@ -85,9 +61,8 @@ const SIZE_SLOTS: [&str; 4] = ["sm", "xs", "md", "hd"];
 /// variant IS a static frame, which keeps direct mode on the same
 /// stills-in-the-grid bandwidth model the proxy gets from fetch.php.
 const STILL_SLOTS: [&str; 4] = ["xs", "sm", "md", "hd"];
-/// Pick-time variant preference (best first) — mirrors SLOT_ORDER in
-/// gifs/full.php. The app scales down to ≤480px, so ask for the richest
-/// source and walk down on failure.
+/// Pick-time variant preference, best first (mirrors SLOT_ORDER in gifs/full.php).
+/// The app scales down to 480px, so ask for the richest source and walk down.
 const FULL_SLOTS: [&str; 4] = ["hd", "md", "sm", "xs"];
 /// Upstream bytes we will accept for one pick (matches the proxy's cap).
 const MAX_PICK_BYTES: usize = 26_000_000;
@@ -144,11 +119,9 @@ fn media_hosts() -> Vec<String> {
         .unwrap_or_else(|_| DEFAULT_MEDIA_HOSTS.iter().map(|h| h.to_string()).collect())
 }
 
-/// Upstream variant blobs for ids OUR OWN parse handed out, so pick-time can
-/// resolve an id to a URL without Dart ever supplying one. Bounded FIFO.
-///
-/// `frb(ignore)`: private module state. Without it the derived `Default`
-/// makes the bridge generate an opaque Dart class for it.
+/// Upstream variant blobs for ids OUR OWN parse handed out, so pick-time can resolve
+/// an id to a URL without Dart ever supplying one. Bounded FIFO. `frb(ignore)`
+/// because the derived `Default` would otherwise become an opaque Dart class.
 #[frb(ignore)]
 #[derive(Default)]
 struct DirectRegistry {
@@ -178,9 +151,8 @@ impl DirectRegistry {
     }
 }
 
-/// Drop every cached upstream variant. Called whenever the mode or the media
-/// allowlist changes — a stale entry could point at a host we no longer
-/// allow.
+/// Drop every cached upstream variant, on any mode or allowlist change: a stale entry
+/// could point at a host we no longer allow.
 fn clear_direct_registry() {
     if let Ok(mut reg) = direct_src_store().lock() {
         reg.clear();
@@ -202,9 +174,8 @@ pub fn set_gif_proxy_url(base: Option<String>) -> Result<(), String> {
             } else if !trimmed.starts_with("https://") {
                 return Err("GIF proxy URL must start with https://".into());
             } else {
-                // Exactly one trailing slash: the media-URL guard and every
-                // request are prefix checks on `{base}`, and a slashless base
-                // would let "https://host/gifs-evil.example/…" through.
+                // Exactly one trailing slash: the guards are prefix checks on `{base}`, and a
+                // slashless base would let "https://host/gifs-evil.example/…" through.
                 Some(format!("{trimmed}/"))
             }
         }
@@ -227,9 +198,8 @@ fn valid_api_key(key: &str) -> bool {
             .all(|b| b.is_ascii_graphic() && !matches!(b, b'/' | b'?' | b'#' | b'%' | b'&' | b'\\'))
 }
 
-/// Set (or clear, with None/empty) the user's own Klipy API key. A key
-/// present IS direct mode — one piece of state, so there is no "enabled but
-/// no key" way to be broken.
+/// Set (or clear) the user's own Klipy API key. A key present IS direct mode: one
+/// piece of state, so there is no "enabled but no key" way to be broken.
 #[frb]
 pub fn set_gif_api_key(key: Option<String>) -> Result<(), String> {
     let normalized = match key {
@@ -249,8 +219,7 @@ pub fn set_gif_api_key(key: Option<String>) -> Result<(), String> {
     let mut guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     *guard = normalized;
     drop(guard);
-    // Mode change: registry entries and blocked-host hints belong to the old
-    // mode.
+    // Registry entries and blocked-host hints belong to the mode that made them.
     clear_direct_registry();
     if let Ok(mut blocked) = blocked_hosts_store().lock() {
         blocked.clear();
@@ -328,15 +297,13 @@ pub fn gif_blocked_media_hosts() -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Per-URL verdicts, in input order: may the client fetch this media URL in
-/// the CURRENT configuration? Always true under the active proxy base; in
-/// direct mode also true for allowlisted hosts.
+/// Per-URL verdicts, in input order: may the client fetch this media URL in the
+/// CURRENT configuration? Always true under the active proxy base, and in direct mode
+/// also for allowlisted hosts.
 ///
-/// The saved GIF library asks this about the absolute URLs it stores for
-/// direct-mode picks. Going back to proxy mode MUST hide them: fetching a
-/// Klipy CDN URL while in proxy mode would defeat the entire point of proxy
-/// mode, and a stale favourite is not a licence to do it. Dart asks rather
-/// than duplicating the rule (same reason as `default_role_permissions`).
+/// The saved GIF library asks this about the URLs it stored for direct-mode picks.
+/// Going back to proxy mode MUST hide them: fetching a Klipy CDN URL while in proxy
+/// mode would defeat the point of proxy mode, and a stale favourite is no licence.
 #[frb]
 pub fn gif_media_urls_permitted(urls: Vec<String>) -> Vec<bool> {
     let base = gif_proxy_base();
@@ -346,9 +313,8 @@ pub fn gif_media_urls_permitted(urls: Vec<String>) -> Vec<bool> {
         .collect()
 }
 
-/// The default content rating. Dart owns rating POLICY (user setting, then
-/// clamped for non-NSFW servers) and passes the result per call, so a rating
-/// change can never serve results cached under another rating.
+/// The default content rating. Dart owns rating POLICY and passes the result per call,
+/// so a rating change can never serve results cached under another rating.
 #[frb]
 pub fn default_gif_rating() -> String {
     DEFAULT_RATING.to_string()
@@ -382,8 +348,8 @@ pub(crate) fn normalized_rating_for(raw: &str) -> String {
 fn url_host(url: &str) -> Option<String> {
     let rest = url.strip_prefix("https://")?;
     let authority = rest.split(['/', '?', '#']).next()?;
-    // Everything after the LAST '@': "https://static.klipy.com@evil.example/"
-    // is a request to evil.example, and a first-match parse would allow it.
+    // Everything after the LAST '@': a first-match parse would send
+    // "https://static.klipy.com@evil.example/" to evil.example.
     let host_port = authority.rsplit('@').next()?;
     let host = if let Some(v6) = host_port.strip_prefix('[') {
         v6.split(']').next()?.to_string()
@@ -426,15 +392,12 @@ fn media_url_ok(url: &str) -> bool {
 /// Which Klipy catalog a call targets. Everything else about the two modes is
 /// shared.
 ///
-/// THE ID NAMESPACE IS THE LOAD-BEARING PART. Klipy slugs are per-catalog, so
-/// a GIF and a sticker can carry the same slug — and both the proxy's `items`
-/// registry and this module's direct-mode variant registry are keyed by bare
-/// id. Sticker ids therefore get a `~` prefix everywhere they are handed out
-/// (registry keys, media URLs, saved-library rows). GIF ids stay BARE on
-/// purpose: the saved GIF library stores media paths relative to the proxy
-/// base, so re-namespacing GIFs would 404 every favourite anyone has saved.
-/// `~` is unreserved in URLs (RFC 3986) and outside the slug charset, so it
-/// cannot collide with a real slug.
+/// THE ID NAMESPACE IS THE LOAD-BEARING PART. Klipy slugs are per-catalog, so a GIF
+/// and a sticker can share one, while both registries are keyed by bare id. Sticker
+/// ids therefore carry a `~` prefix everywhere they are handed out; GIF ids stay BARE
+/// because the saved library stores paths relative to the proxy base and
+/// re-namespacing would 404 every saved favourite. `~` is unreserved in URLs and
+/// outside the slug charset, so it cannot collide with a real slug.
 #[frb(ignore)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MediaKind {
@@ -477,11 +440,10 @@ impl MediaKind {
     }
 }
 
-/// Klipy slug shape, mirroring the proxy's ingest validation, plus the
-/// optional `~` sticker namespace prefix (see [MediaKind]). Accepting the
-/// prefix HERE rather than per-kind is deliberate: `sticker_fetch_and_store`
-/// and `gif_fetch_and_store` both build their own URL from the id, so a
-/// mismatched prefix can only ever produce a 404, never a wrong fetch.
+/// Klipy slug shape, mirroring the proxy's ingest validation, plus the optional `~`
+/// sticker prefix. Accepting the prefix here rather than per-kind is deliberate: both
+/// fetchers build their own URL from the id, so a mismatched prefix can only ever
+/// produce a 404, never a wrong fetch.
 fn valid_gif_id(id: &str) -> bool {
     let bare = id.strip_prefix('~').unwrap_or(id);
     !bare.is_empty()
@@ -505,10 +467,9 @@ pub struct GifItem {
     pub still_url: String,
     /// Small animated variant (~150px WebP or GIF) — hover/viewport preview.
     pub sm_url: String,
-    /// Best-quality source, used at PICK time only. Carried on the item so a
-    /// favourite saved in a direct-mode session can still be sent months
-    /// later, when the in-RAM variant registry is long gone — see
-    /// `gif_fetch_and_store`.
+    /// Best-quality source, used at PICK time only. Carried on the item so a favourite
+    /// saved in a direct-mode session still sends months later, when the in-RAM
+    /// registry is long gone.
     pub full_url: String,
 }
 
@@ -628,10 +589,9 @@ fn proxy_query(params: Vec<(&'static str, String)>) -> Result<serde_json::Value,
 
 // ─── Direct mode ────────────────────────────────────────────────────────────
 
-/// One-shot random customer id. Klipy REQUIRES the parameter but nothing
-/// requires it to be stable, and a stable one would hand them a stitched
-/// search history on top of the IP they already see. (Their ad products want
-/// a durable id — we do not run ads.)
+/// One-shot random customer id. Klipy REQUIRES the parameter but nothing requires it
+/// to be stable, and a stable one would hand them a stitched search history on top of
+/// the IP they already see.
 fn random_customer_id() -> String {
     let mut b = [0u8; 16];
     if getrandom::fill(&mut b).is_err() {
@@ -712,14 +672,11 @@ fn klipy_variant_in_slot(slot_obj: &serde_json::Value, fmts: &[&str]) -> Option<
     None
 }
 
-/// Normalize Klipy's own response into [GifPage]. This is the logic that
-/// lives in gifs/search.php for proxy mode — direct mode has to own a copy,
-/// which is the real cost of the feature: a provider swap stays a PHP change
-/// for proxy users but becomes an app release for direct-mode users.
+/// Normalize Klipy's own response into [GifPage], a copy of the logic gifs/search.php
+/// runs for proxy mode. That duplication is the real cost of direct mode: a provider
+/// swap stays a PHP change for proxy users but becomes an app release for direct ones.
 ///
-/// Item shape: { slug, title, type, file: { hd|md|sm|xs: { gif|webp|jpg|mp4:
-/// {url,width,height,size} } } }. Ads arrive as { type:"ad", … } — dropped,
-/// exactly like the proxy does.
+/// Ads arrive as `{ type:"ad", … }` and are dropped, exactly as the proxy does.
 fn parse_klipy_page(v: &serde_json::Value, kind: MediaKind) -> Result<GifPage, String> {
     if v.get("result").and_then(|r| r.as_bool()) != Some(true) {
         let msg = v
@@ -744,16 +701,14 @@ fn parse_klipy_page(v: &serde_json::Value, kind: MediaKind) -> Result<GifPage, S
         let Some(slug) = e.get("slug").and_then(|s| s.as_str()) else {
             continue;
         };
-        // The upstream slug is BARE; everything downstream of this parse
-        // (registry key, item id, saved-library row) uses the namespaced
-        // form, so a sticker and a GIF sharing a slug stay distinct.
+        // The upstream slug is BARE while everything downstream uses the namespaced form,
+        // so a sticker and a GIF sharing a slug stay distinct.
         let id = format!("{}{slug}", kind.id_prefix());
         if !valid_gif_id(&id) {
             continue;
         }
         let Some(file) = e.get("file") else { continue };
-        // Grid dims come from the animated variant we will actually show.
-        // mp4-only rows (clips) have neither and are unusable to us.
+        // Grid dims come from the variant we will actually show; mp4-only rows are unusable.
         let Some((sm_url, w, h)) = klipy_pick(file, &SIZE_SLOTS, &["webp", "gif"]) else {
             continue;
         };
@@ -763,8 +718,8 @@ fn parse_klipy_page(v: &serde_json::Value, kind: MediaKind) -> Result<GifPage, S
         let still_url = klipy_pick(file, &STILL_SLOTS, &["jpg", "png"])
             .map(|(u, _, _)| u)
             .unwrap_or_else(|| sm_url.clone());
-        // Best-quality source for a later pick. Falls back to the small
-        // variant rather than dropping the row: a lower-res send beats none.
+        // Best-quality source for a later pick, falling back to the small variant rather
+        // than dropping the row: a lower-res send beats none.
         let full_url = klipy_pick(file, &FULL_SLOTS, &["webp", "gif"])
             .map(|(u, _, _)| u)
             .unwrap_or_else(|| sm_url.clone());
@@ -818,8 +773,7 @@ pub(crate) fn media_page(
     let what = kind.upstream_segment();
     let t0 = std::time::Instant::now();
     let direct = gif_api_key();
-    // Mode + kind only — NEVER the query text (privacy: search text stays out
-    // of logs, ours included).
+    // Mode and kind only, NEVER the query text: search text stays out of every log.
     crate::hollow_log!(
         "[HOLLOW-GIF] query start kind={what} mode={mode} via={}",
         if direct.is_some() { "direct" } else { "proxy" }
@@ -967,19 +921,13 @@ pub(crate) fn media_categories(kind: MediaKind) -> Result<Vec<String>, String> {
         .collect())
 }
 
-/// Download a picked GIF's full-quality source, re-encode it into the
-/// ≤480px/≤2MB send format, and cache it as a `kind='gif'` asset blob.
+/// Download a picked GIF's full-quality source, re-encode it into the 480px / 2 MB send
+/// format, and cache it as a `kind='gif'` asset blob.
 ///
-/// PROXY MODE ignores `source_url` entirely and builds `{base}f/{id}` — the
-/// fetcher is structurally incapable of being pointed anywhere else.
-///
-/// DIRECT MODE resolves the variants OUR OWN parse registered for `id`, and
-/// only if that RAM registry has no entry — a favourite saved in an earlier
-/// session, which is the one case the registry cannot cover — falls back to
-/// `source_url`, and then only if it passes the media host allowlist. That
-/// allowlist is the guard in direct mode either way: every URL there comes
-/// from Klipy's opaque CDN, so provenance cannot be re-derived, only
-/// constrained.
+/// PROXY MODE ignores `source_url` entirely and builds `{base}f/{id}`. DIRECT MODE
+/// resolves the variants OUR OWN parse registered for `id`, and only when that RAM
+/// registry has no entry (a favourite from an earlier session) falls back to
+/// `source_url`, and then only if it passes the media host allowlist.
 #[frb]
 pub fn gif_fetch_and_store(id: String, source_url: Option<String>) -> Result<StoredGif, String> {
     media_fetch_and_store(MediaKind::Gif, id, source_url)
@@ -1002,9 +950,8 @@ pub(crate) fn media_fetch_and_store(
         None => proxy_pick_bytes(&id)?,
     };
     let dl_ms = t0.elapsed().as_millis();
-    // PROFILE-1 (same class): these bytes came off Klipy's CDN, and the
-    // transcoder below decodes them. Hold the DECLARED canvas to the remote
-    // ceiling before a decoder ever sees the header.
+    // PROFILE-1: these bytes came off Klipy's CDN and the transcoder decodes them, so
+    // hold the DECLARED canvas to the remote ceiling before a decoder sees the header.
     if let Err(why) = crate::node::image_convert::validate_remote_image_header(&raw) {
         return Err(format!("This {} {why}", kind.label()));
     }
@@ -1065,12 +1012,10 @@ fn proxy_pick_bytes(id: &str) -> Result<Vec<u8>, String> {
     })
 }
 
-/// Direct mode: walk the registered variants best-first, host-checking each,
-/// and take the first that downloads within the cap. Mirrors full.php's
-/// walk-down so an oversize hd variant degrades instead of failing the pick.
-/// Download candidates for a direct-mode pick, best-quality first. Split out
-/// from the download itself so the registry/fallback/allowlist decisions are
-/// unit-testable without network.
+/// Download candidates for a direct-mode pick, best quality first: the registered
+/// variants host-checked in preference order, mirroring full.php's walk-down so an
+/// oversize hd variant degrades instead of failing the pick. Split from the download
+/// so the registry, fallback and allowlist decisions are unit-testable.
 fn direct_pick_candidates(id: &str, source_url: Option<&str>) -> Vec<String> {
     let file = direct_src_store().lock().ok().and_then(|reg| reg.get(id));
 
@@ -1355,10 +1300,9 @@ mod tests {
         assert!(!valid_gif_id(&format!("~{}", "x".repeat(101))));
     }
 
-    /// The reason the `~` namespace exists: Klipy slugs are per-catalog, so
-    /// the SAME slug can arrive from both. Without the prefix the second
-    /// parse would overwrite the first's registry entry and a GIF's media URL
-    /// would start serving sticker bytes.
+    /// The reason the `~` namespace exists: without the prefix a second parse would
+    /// overwrite the first's registry entry and a GIF's media URL would serve sticker
+    /// bytes.
     #[test]
     fn sticker_and_gif_sharing_a_slug_stay_distinct() {
         let _g = settings_lock();

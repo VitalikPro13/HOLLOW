@@ -12,8 +12,7 @@ pub fn generate_file_id() -> String {
     hex::encode(bytes)
 }
 
-/// Get the directory for storing files.
-/// Creates it if it doesn't exist.
+/// Get the directory for storing files, creating it if it does not exist.
 pub fn files_dir() -> PathBuf {
     let dir = crate::identity::data_dir()
         .unwrap_or_else(|_| PathBuf::from("hollow"))
@@ -29,9 +28,8 @@ pub fn write_chunk(file_id: &str, chunk_index: u32, data: &[u8]) -> Result<(), S
         .map_err(|e| format!("Failed to write chunk {chunk_index} for {file_id}: {e}"))
 }
 
-/// Reassemble chunks into the final file.
-/// Reads chunk files from disk in order, concatenates, writes to final path.
-/// Cleans up chunk files after successful assembly.
+/// Reassemble chunks into the final file, reading the chunk files in order and
+/// cleaning them up after a successful assembly.
 pub fn assemble_file(
     file_id: &str,
     total_chunks: u32,
@@ -82,11 +80,10 @@ pub fn final_file_path(file_id: &str, ext: &str) -> PathBuf {
 
 /// SECURITY: does a wire-supplied file id have the shape this client mints?
 ///
-/// `generate_file_id` produces 32 hex characters; older senders and the
-/// share/vault lanes use other alphanumeric ids, so the check is a SHAPE
-/// check, not a format check. Anything carrying a separator, a dot, a drive
-/// letter or a NUL fails here — a receive path that cannot name the file
-/// cannot be talked into naming a file somewhere else.
+/// A SHAPE check, not a format check: `generate_file_id` produces 32 hex chars,
+/// but older senders and the share/vault lanes use other alphanumeric ids.
+/// Anything carrying a separator, a dot, a drive letter or a NUL fails here, so a
+/// receive path that cannot name the file cannot be talked into naming another.
 pub(crate) fn is_wire_file_id(s: &str) -> bool {
     (8..=64).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_alphanumeric())
 }
@@ -128,16 +125,14 @@ pub fn is_image_mime(mime: &str) -> bool {
 mod tests {
     use super::*;
 
-    /// FILE-1 regression: every path the receive sites build has to land
-    /// inside the files dir, whatever the peer put in the header. The inputs
-    /// are the ones a peer can actually send, including the exact absolute
-    /// path the audit's proof-of-concept used.
+    /// FILE-1 regression: every path the receive sites build has to land inside the
+    /// files dir, whatever the peer put in the header. The inputs are the ones a
+    /// peer can actually send, including the audit PoC's exact absolute path.
     #[test]
     fn final_file_path_stays_inside_files_dir() {
         let dir = files_dir();
-        // The proof-of-concept's own input shape: an absolute path pointing
-        // at a directory the attacker chose, which `Path::join` would adopt
-        // wholesale in place of the base.
+        // The PoC's own input shape: an absolute path pointing at a directory the
+        // attacker chose, which `Path::join` would adopt in place of the base.
         let poc = std::env::temp_dir()
             .join("evil")
             .join("pwned")

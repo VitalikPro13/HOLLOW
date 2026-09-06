@@ -145,10 +145,9 @@ pub(crate) async fn handle_vault_download_file(
                         let si: u16 = ep[0].parse().unwrap_or(0);
                         let target_peer = ep[1];
                         let shard_key = ep[2];
-                            // Placements are MASTER-keyed (server members); resolve to a
-                            // concrete online DEVICE — an Olm send to the bare master has
-                            // no session/socket. A device without the shard replies
-                            // found:false, which the retry logic already handles.
+                            // Placements are MASTER-keyed (server members), so
+                            // resolve to a concrete online DEVICE: an Olm send to a
+                            // bare master has no session or socket.
                             if let Some(dev) = preferred_online_device(&ws_room_peers, target_peer) {
                                 let envelope = MessageEnvelope::ShardRequest {
                                     sid: server_id.clone(),
@@ -224,11 +223,9 @@ pub(crate) async fn handle_vault_upload_file(
 ) {
     hollow_log!("[HOLLOW-VAULT] VaultUploadFile: {file_name} cid={content_id} in {server_id}/{channel_id}");
 
-    // Snapshot membership/pledges on the loop (cheap borrows), then hop the
-    // Reed-Solomon encode (up to 34MB of CPU) + shard disk writes onto the
-    // blocking pool — this block used to freeze the entire event loop for the
-    // largest single CPU+disk unit in the codebase. Resumes via
-    // NodeCommand::VaultUploadPrepared.
+    // Snapshot membership and pledges on the loop, then hop the Reed-Solomon encode
+    // (up to 34MB of CPU) and the shard disk writes onto the blocking pool: this
+    // used to freeze the event loop for the largest CPU+disk unit in the codebase.
     let Some(state) = server_states.get(&server_id) else {
         let _ = event_tx.send(NetworkEvent::VaultUploadFailed {
             server_id: server_id.clone(), content_id,
@@ -392,11 +389,10 @@ pub(crate) async fn handle_vault_upload_prepared(
             for placement in &plan.placements {
                 if placement.target_peer != local_peer {
                     if let Some((_, shard_data)) = plan.shards.iter().find(|(idx, _)| *idx == placement.shard_index) {
-                            // The placement records the MASTER (the identity owns the
-                            // shard); deliver to ONE concrete online device of it — the
-                            // metadata Olm send AND the byte stream must hit the SAME
-                            // socket. Later requests fan across the identity's devices,
-                            // and a device without the shard replies found:false.
+                            // The placement records the MASTER, but delivery goes
+                            // to ONE concrete online device of it: the metadata Olm
+                            // send and the byte stream must hit the SAME socket. A
+                            // device without the shard replies found:false.
                             if let Some(dev) = preferred_online_device(&ws_room_peers, &placement.target_peer) {
                                 // Send ShardStore metadata via MLS or Olm.
                                 let envelope = MessageEnvelope::ShardStore {
@@ -442,13 +438,10 @@ pub(crate) async fn handle_vault_upload_prepared(
                     manifest: manifest_json,
                 };
                 // MLS to the group when we hold it, PLUS the Olm copy to exactly
-                // the online member devices that hold no leaf in it. The old
-                // `else` measured OUR encrypt, not the receiver's ability to
-                // decrypt, so a leaf-less member simply never learned the
-                // manifest existed and could not repair a shard it was holding.
-                // A fully formed group costs zero extra frames (the leaf-less
-                // set is empty). Never a plaintext fallback here: the manifest
-                // is encrypted content.
+                // the online member devices that hold no leaf in it. Measuring OUR
+                // own encrypt says nothing about the receiver's ability to decrypt,
+                // and a leaf-less member never learned the manifest existed. Never
+                // a plaintext fallback here: the manifest is encrypted content.
                 let mls_ok = mls.as_ref().is_some_and(|m| m.has_group(&server_id));
                 if mls_ok
                     && let Err(e) = send_mls_broadcast(mls.as_mut().unwrap(), &ws_cmd_tx, &server_id, &manifest_envelope, crypto_store)
@@ -526,11 +519,10 @@ pub(crate) async fn handle_delete_vault_content(
             sid: server_id.clone(),
             cid: content_id.clone(),
         };
-        // MLS to the group when we hold it, PLUS the Olm copy to exactly the
-        // online member devices that hold no leaf in it. Same complement rule as
-        // the manifest broadcast: a leaf-less member that keeps a shard we just
-        // deleted would otherwise hold it forever, and the sender sees nothing.
-        // Never a plaintext fallback here: this is encrypted content.
+        // MLS to the group when we hold it, PLUS the Olm copy to exactly the online
+        // member devices that hold no leaf in it. Same complement rule as the
+        // manifest broadcast: a leaf-less member keeping a shard we just deleted
+        // would hold it forever. Never a plaintext fallback: encrypted content.
         let mls_ok = mls.as_ref().is_some_and(|m| m.has_group(&server_id));
         if mls_ok
             && let Err(e) = send_mls_broadcast(mls.as_mut().unwrap(), &ws_cmd_tx, &server_id, &delete_envelope, crypto_store)

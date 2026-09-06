@@ -3,13 +3,12 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart' as webrtc;
 
-/// Where a phone call's audio physically goes (and, on iOS, where its mic
-/// comes from — the two travel together in an AVAudioSession route).
+/// Where a phone call's audio physically goes, and on iOS where its mic comes
+/// from: the two travel together in an AVAudioSession route.
 ///
-/// Deliberately a small closed set of ROUTES rather than a device list: a
-/// phone has one earpiece, one loudspeaker and at most one attached headset,
-/// and that is the vocabulary both platforms speak (Android audioswitch's
-/// AudioDevice classes, iOS's port types).
+/// A small closed set of ROUTES rather than a device list, because a phone has
+/// one earpiece, one loudspeaker and at most one attached headset, and that is
+/// the vocabulary both platforms speak.
 enum AudioRouteKind {
   speaker,
   earpiece,
@@ -30,13 +29,13 @@ extension AudioRouteKindX on AudioRouteKind {
 @immutable
 class AudioRoute {
   /// Platform selector. Android: an `AudioDeviceKind` type name. iOS: a port
-  /// UID (or the literal `Speaker` for the loudspeaker override).
+  /// UID, or the literal `Speaker` for the loudspeaker override.
   final String id;
   final String label;
   final AudioRouteKind kind;
 
   /// iOS only: the UID of this route's INPUT port, when it has one. iOS
-  /// cannot pick an output directly — you pin the input with
+  /// cannot pick an output directly; you pin the input with
   /// `setPreferredInput:` and the output follows for headset-class routes.
   final String? inputUid;
 
@@ -58,32 +57,30 @@ class AudioRoute {
   String toString() => 'AudioRoute($kind, $label, id=$id)';
 }
 
-/// Mobile call audio routing: enumerate the routes a call can run on, read
-/// the one it is actually on, and switch between them.
+/// Mobile call audio routing: enumerate the routes a call can run on, read the
+/// one it is actually on, and switch between them.
 ///
-/// **The rule this type exists to enforce: a connected headset always beats
-/// the built-in loudspeaker.** Hollow defaults voice channels and video calls
-/// to "speaker on", and on iOS that used to mean a hard
-/// `overrideOutputAudioPort(.speaker)` — which OUTRANKS wired headphones, so
-/// a user who joined with headphones in heard nothing (and iOS moved capture
-/// to the built-in mic along with it). [preferLoudRoute] is the corrected
-/// meaning of "speaker on": the loudest sensible route, which is the headset
-/// whenever one is attached.
+/// The rule this type exists to enforce: a connected headset ALWAYS beats the
+/// built-in loudspeaker. Hollow defaults calls to "speaker on", and on iOS that
+/// used to mean a hard `overrideOutputAudioPort(.speaker)`, which outranks
+/// wired headphones, so a user who joined with headphones in heard nothing and
+/// capture moved to the built-in mic. [preferLoudRoute] is the corrected
+/// meaning: the loudest sensible route, which is the headset when one is there.
 class AudioRoutes {
   const AudioRoutes._();
 
   /// Test seam. Host tests run on neither Android nor iOS, but the routing
-  /// RULES here are platform-independent and are exactly what regressed —
-  /// so they get pinned down (`test/audio_route_test.dart`).
+  /// RULES here are platform-independent and are exactly what regressed
+  /// (`test/audio_route_test.dart`).
   @visibleForTesting
   static bool? debugSupportedOverride;
 
   static bool get isSupported =>
       debugSupportedOverride ?? (Platform.isAndroid || Platform.isIOS);
 
-  /// Maps a platform route token to a kind. Handles BOTH vocabularies: the
-  /// Android `AudioDeviceKind` type names our fork puts in `deviceId`, and
-  /// the raw `AVAudioSessionPort` values iOS puts in `groupId`.
+  /// Maps a platform route token to a kind, handling BOTH vocabularies: the
+  /// Android `AudioDeviceKind` type names our fork puts in `deviceId`, and the
+  /// raw `AVAudioSessionPort` values iOS puts in `groupId`.
   static AudioRouteKind? kindFromToken(String? token) {
     switch (token) {
       // Android — AudioDeviceKind.typeName.
@@ -95,8 +92,8 @@ class AudioRoutes {
         return AudioRouteKind.wired;
       case 'bluetooth':
         return AudioRouteKind.bluetooth;
-      // iOS — AVAudioSessionPort raw values (inputs and outputs both, since a
-      // route is identified by whichever end getSources reported).
+      // iOS AVAudioSessionPort raw values, inputs and outputs both, since a
+      // route is identified by whichever end getSources reported.
       case 'Speaker':
         return AudioRouteKind.speaker;
       case 'Receiver':
@@ -140,10 +137,9 @@ class AudioRoutes {
     }
   }
 
-  /// Built-in routes get a canonical name so the list reads consistently
-  /// ("Speakerphone"/"Receiver"/"MicrophoneBuiltIn" are platform trivia).
-  /// Attached devices keep the platform's name — that's where "AirPods Pro"
-  /// or the car's head-unit name comes from.
+  /// Built-in routes get a canonical name so the list reads consistently.
+  /// Attached devices keep the platform's name, which is where "AirPods Pro"
+  /// or a car head-unit name comes from.
   static String _label(AudioRouteKind kind, String platformLabel) {
     if (!kind.isExternal || platformLabel.trim().isEmpty) {
       return _canonicalLabel(kind);
@@ -151,8 +147,8 @@ class AudioRoutes {
     return platformLabel.trim();
   }
 
-  /// Every route this call could be switched to, in a stable display order
-  /// (enum order) so the list doesn't reshuffle when a device connects.
+  /// Every route this call could be switched to, in a stable display order so
+  /// the list does not reshuffle when a device connects.
   static Future<List<AudioRoute>> list() async {
     if (!isSupported) return const [];
     final List<webrtc.MediaDeviceInfo> devices;
@@ -182,8 +178,8 @@ class AudioRoutes {
     }
 
     // iOS. Inputs FIRST: an attached headset is listed in availableInputs even
-    // while a loudspeaker override is hiding it from the current route, and
-    // that entry carries the UID `setPreferredInput:` needs.
+    // while a loudspeaker override hides it from the current route, and that
+    // entry carries the UID `setPreferredInput:` needs.
     for (final d in devices) {
       if (d.kind != 'audioinput') continue;
       final kind = kindFromToken(d.groupId);
@@ -228,9 +224,9 @@ class AudioRoutes {
     return out;
   }
 
-  /// The route audio is ACTUALLY on — not the one we last asked for. The OS
-  /// moves it on its own (headset hotplug, audioswitch auto-switch), so the
-  /// picker's checkmark has to come from the platform.
+  /// The route audio is ACTUALLY on, not the one we last asked for: the OS
+  /// moves it on its own, so the picker's checkmark has to come from the
+  /// platform.
   static Future<AudioRouteKind?> current() async {
     if (!isSupported) return null;
     try {
@@ -260,8 +256,8 @@ class AudioRoutes {
         await webrtc.Helper.setSpeakerphoneOn(true);
         return;
       }
-      // iOS: drop any loudspeaker override FIRST (it outranks every attached
-      // device), then pin the input port — the output follows it.
+      // iOS: drop any loudspeaker override FIRST, since it outranks every
+      // attached device, then pin the input port and the output follows.
       await webrtc.Helper.setSpeakerphoneOn(false);
       final uid = route.inputUid;
       if (uid != null) {
@@ -272,12 +268,12 @@ class AudioRoutes {
     }
   }
 
-  /// Apply Hollow's "speaker on/off" default in a headset-aware way.
+  /// Applies Hollow's "speaker on/off" default in a headset-aware way.
   ///
-  /// [loud] true = the loudest sensible route. With a headset attached that is
-  /// the HEADSET, never the built-in loudspeaker: forcing the loudspeaker over
-  /// a connected headset leaves the user in silence (iOS) or keeps the call on
-  /// the handset for the rest of the session (Android's device pin).
+  /// [loud] true means the loudest sensible route. With a headset attached
+  /// that is the HEADSET, never the built-in loudspeaker: forcing the
+  /// loudspeaker over a connected headset leaves the user in silence on iOS
+  /// or pinned to the handset for the session on Android.
   static Future<void> preferLoudRoute(bool loud) async {
     if (!isSupported) return;
     try {
@@ -286,7 +282,7 @@ class AudioRoutes {
         return;
       }
       if (await hasExternalRoute()) {
-        // "Speaker, but let bluetooth/wired win" — implemented natively on
+        // "Speaker, but let bluetooth or wired win", implemented natively on
         // both platforms.
         await webrtc.Helper.setSpeakerphoneOnButPreferBluetooth();
       } else {

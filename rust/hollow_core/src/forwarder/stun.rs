@@ -1,19 +1,14 @@
-//! Minimal STUN binding client (RFC 5389) for embedded peer forwarders
-//! (media forwarding step 3 phase 2).
+//! Minimal STUN binding client (RFC 5389) for embedded peer forwarders.
 //!
-//! The VPS forwarder advertises its fixed public IP and never needs this. An
-//! in-app peer forwarder sits behind the member's NAT: each leg discovers the
-//! socket's public mapping with ONE binding request to the relay's STUN
-//! server, and `leg.rs` advertises it beside the LAN host candidate. Client
-//! legs stay zero-ICE-config (the iron rule from the D6 field test) — the
-//! forwarder side carrying a reflexive candidate is what makes the pair
-//! connect: the viewer's outbound checks to it punch the viewer's own NAT and
-//! the forwarder replies to the peer-reflexive source.
+//! The VPS forwarder advertises its fixed public IP and never needs this. An in-app
+//! peer forwarder sits behind the member's NAT: each leg discovers the socket's
+//! public mapping with ONE binding request and advertises it beside the LAN host
+//! candidate. Client legs stay zero-ICE-config, so the forwarder's reflexive
+//! candidate is what makes the pair connect: the viewer's outbound checks to it
+//! punch the viewer's own NAT and the forwarder replies to that source.
 //!
-//! Deliberately tiny: binding request + XOR-MAPPED-ADDRESS parse, IPv4 only
-//! (the D6 bug #2 lesson — IPv6-first resolution with no routable IPv6 is
-//! exactly the failure mode we refuse to reintroduce). No dependency; the
-//! whole exchange is ~30 bytes each way.
+//! IPv4 only, deliberately: IPv6-first resolution with no routable IPv6 is a
+//! failure mode we refuse to reintroduce.
 
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -28,11 +23,9 @@ const BINDING_SUCCESS: u16 = 0x0101;
 const ATTR_MAPPED_ADDRESS: u16 = 0x0001;
 const ATTR_XOR_MAPPED_ADDRESS: u16 = 0x0020;
 
-/// Discover this socket's server-reflexive (NAT-mapped) address. Up to 3
-/// attempts, 400 ms each — worst case ~1.2 s, typical one relay RTT. `None`
-/// (no response / parse failure) is non-fatal: the leg advertises its host
-/// candidate only, which still serves same-LAN viewers (including the peer
-/// forwarder's own display leg).
+/// Discover this socket's server-reflexive (NAT-mapped) address. Up to 3 attempts
+/// of 400 ms. `None` is non-fatal: the leg then advertises its host candidate only,
+/// which still serves same-LAN viewers.
 pub(crate) async fn discover_mapped_addr(
     socket: &UdpSocket,
     stun: SocketAddr,
@@ -57,8 +50,8 @@ pub(crate) async fn discover_mapped_addr(
                 .await
             {
                 Ok(Ok((n, source))) => {
-                    // Anything not from the STUN server (or not our txn) is
-                    // unexpected this early — keep waiting within the window.
+                    // Anything not from the STUN server (or not our txn) is unexpected this
+                    // early, so keep waiting within the window.
                     if source != stun {
                         continue;
                     }
@@ -68,8 +61,7 @@ pub(crate) async fn discover_mapped_addr(
                     continue;
                 }
                 Ok(Err(e)) if e.kind() == std::io::ErrorKind::ConnectionReset => {
-                    // Windows UDP quirk (same as the leg pump): a bounced
-                    // datagram surfaces as WSAECONNRESET on the next recv.
+                    // Windows UDP: a bounced datagram surfaces as WSAECONNRESET on the next recv.
                     continue;
                 }
                 _ => break, // timeout or hard recv error → next attempt

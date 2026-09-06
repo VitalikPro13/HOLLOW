@@ -11,29 +11,23 @@ pub(crate) const MLS_BOOTSTRAP_TIMEOUT: Duration = Duration::from_secs(60);
 /// rejoin), which is one event and not evidence of a broken group.
 pub(crate) const MLS_DECRYPT_FAIL_WINDOW: Duration = Duration::from_secs(3);
 
-/// How long the decrypt-fail ladder holds off after an epoch probe went out.
-/// A commit catch-up is one round trip and costs no epoch churn; the ladder's
-/// remove + re-add costs two epochs and rekeys everyone, so the probe gets first
-/// refusal. Short enough that a probe nobody answers barely delays the heal.
+/// How long the decrypt-fail ladder holds off after an epoch probe went out. A
+/// commit catch-up is one round trip and costs no epoch churn, while the
+/// ladder's remove + re-add costs two epochs and rekeys everyone.
 pub(crate) const EPOCH_PROBE_GRACE: Duration = Duration::from_secs(5);
 
-/// How long a served `ServerJoinRequest` is remembered, so a REPEAT ask from the
-/// same joiner is recognised as the joiner's 4s retry and bypasses the
-/// coordinator gate. Comfortably longer than that retry and shorter than the
-/// 15s join timeout, so one pending join produces at most one escalation.
+/// How long a served `ServerJoinRequest` is remembered, so a REPEAT ask is
+/// recognised as the joiner's retry and bypasses the coordinator gate. Longer
+/// than that retry, shorter than the join timeout: at most one escalation.
 pub(crate) const JOIN_SERVE_RETRY_WINDOW: Duration = Duration::from_secs(12);
 
-/// How long an in-flight Olm KeyRequest is considered "live" before the
-/// session-reconciliation sweep is allowed to resend it. The relay never ACKs a
-/// direct message, so a dropped KeyRequest/KeyBundle would otherwise strand the
-/// in-flight flag forever (recoverable only by a full relay reconnect). Mirrors
-/// MLS_BOOTSTRAP_TIMEOUT — same timestamped-retry idiom.
+/// How long an in-flight Olm KeyRequest counts as live before the
+/// session-reconciliation sweep may resend it. The relay never ACKs a direct
+/// message, so a dropped KeyRequest would otherwise strand the flag forever.
 const OLM_KEY_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Returns true if we have a KeyRequest in flight to `peer` that is still fresh
-/// (sent within OLM_KEY_REQUEST_TIMEOUT). A stale or absent entry returns false,
-/// allowing a resend. `key_request_in_flight` maps peer_id -> when the request
-/// was sent.
+/// True when a KeyRequest to `peer` is still within `OLM_KEY_REQUEST_TIMEOUT`;
+/// a stale or absent entry returns false so the caller may resend.
 fn key_request_is_fresh(
     key_request_in_flight: &HashMap<String, std::time::Instant>,
     peer: &str,
@@ -45,24 +39,19 @@ fn key_request_is_fresh(
 
 /// True for the media-forwarder control-plane rooms (`fwd:{forwarder_id}`).
 ///
-/// These rooms exist ONLY to carry Olm-encrypted `fwd_*` envelopes between a
-/// client and a forwarder engine. A forwarder is not a social peer: it holds no
-/// group keys, is in no server, shares no DMs, and DISCARDS every discovery
-/// frame we could send it. Presence in one must therefore not trigger the
-/// normal peer-discovery cascade — see [`ensure_olm_session_and_drain`].
+/// A forwarder is not a social peer: it holds no group keys, is in no server,
+/// shares no DMs and DISCARDS every discovery frame, so presence in one of these
+/// rooms must not trigger the peer-discovery cascade.
 pub(crate) fn is_forwarder_room(room: &str) -> bool {
     room.starts_with("fwd:")
 }
 
-/// True when EVERY room we currently share with `peer` is a forwarder
-/// control-plane room — i.e. this peer is a media forwarder to us, not a social
-/// peer. Structural (no configured-id lookup), so it holds for peer forwarders
-/// as well as the VPS one.
-///
-/// False when we share any ordinary room (a friend who is ALSO watching through
-/// our embedded engine shares their DM room, so they keep every social path),
-/// and false when we share no room at all — "unknown" must never be treated as
-/// "forwarder".
+/// True when EVERY room we share with `peer` is a forwarder control-plane room,
+/// so this peer is a media forwarder to us and not a social peer. Structural,
+/// which makes it hold for peer forwarders as well as the VPS one. False when we
+/// share any ordinary room (a friend watching through our embedded engine still
+/// shares their DM room) and false when we share none: "unknown" must never be
+/// treated as "forwarder".
 fn peer_is_forwarder_only(
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     peer: &str,
@@ -79,17 +68,14 @@ fn peer_is_forwarder_only(
     shares_a_room
 }
 
-/// The ONE piece of the peer-discovery cascade the forwarder lane genuinely
+/// The one piece of the peer-discovery cascade the forwarder lane genuinely
 /// needs: an Olm session, plus the drain of anything queued while we had none.
 ///
-/// Returns true when a confirmed session already existed (so the caller can run
-/// the discovery work that belongs after it — the full path also flushes
-/// pending sync requests there; the fwd lane must not).
-///
-/// Load-bearing for the fwd lane: `forwarder_client::send_fwd_envelope_via_room`
-/// QUEUES into `pending_messages` and fires a KeyRequest when no session exists,
-/// so this drain is exactly what delivers the first `fwd_stream_register` of a
-/// share. Cutting it would wedge the lane.
+/// Returns true when a confirmed session already existed, so the caller can run
+/// the discovery work that belongs after it (the full path also flushes pending
+/// sync requests there; the fwd lane must not). Load-bearing for that lane:
+/// `send_fwd_envelope_via_room` QUEUES into `pending_messages`, so this drain is
+/// what delivers a share's first `fwd_stream_register`.
 #[allow(clippy::too_many_arguments)]
 async fn ensure_olm_session_and_drain(
     olm: &mut OlmManager,
@@ -104,18 +90,15 @@ async fn ensure_olm_session_and_drain(
     peer_id: &str,
     context: &str,
 ) -> bool {
-    // Proactive key exchange if no CONFIRMED Olm session. An outbound-only
-    // session is NOT proof the peer can decrypt us — only a confirmed
-    // (bidirectional) session is. Reporting SessionEstablished for an
-    // unconfirmed session is the bug where "A writes and B doesn't see it"
-    // (B never built its half).
+    // An outbound-only session is NOT proof the peer can decrypt us. Reporting
+    // SessionEstablished for an unconfirmed session is the "A writes and B does not
+    // see it" bug: B never built its half.
     if olm.has_confirmed_session(peer_id) {
         let _ = event_tx
             .send(NetworkEvent::SessionEstablished {
                 peer_id: peer_id.to_string(),
             })
             .await;
-        // Drain any pending messages queued while the peer was offline.
         if let Some(queued) = pending_messages.remove(peer_id) {
             hollow_log!(
                 "[HOLLOW-CRYPTO] {context}: draining {} pending messages for {peer_id}",
@@ -153,19 +136,16 @@ async fn ensure_olm_session_and_drain(
     }
 }
 
-/// Run the full sibling-convergence machinery for a peer we have CRYPTOGRAPHICALLY
-/// PROVEN is our own other device (it appeared in `inbox:{our_master}` AND either
-/// already resolves to us OR answered a [`HavenMessage::SiblingProveRequest`] with a
-/// valid master-signed proof). This was previously inline in the `PeerJoined` handler,
-/// gated only on bare inbox-room membership — which a friend-request sender (a
-/// stranger) satisfies, causing a mis-merge. It is now called ONLY behind a
-/// same-identity / verified-proof gate, from both the `PeerJoined` and `RoomMembers`
-/// inbox paths and the `SiblingProveResponse` dispatch arm.
+/// Run the full sibling-convergence machinery for a peer we have
+/// CRYPTOGRAPHICALLY PROVEN is our own other device (it already resolves to us,
+/// or it answered a [`HavenMessage::SiblingProveRequest`] with a valid
+/// master-signed proof). Bare `inbox:{our_master}` membership is NOT enough: a
+/// friend-request sender satisfies that, and taking it mis-merges a stranger.
 ///
-/// Seeds the resolver, unions the sibling into our master-signed device list, pushes
-/// our profile/friends to it and pulls theirs, requests a DM backfill, re-announces
-/// our servers, and (if WE are an empty device) auto-requests a full snapshot. Sync —
-/// none of these calls await.
+/// Seeds the resolver, unions the sibling into our master-signed device list,
+/// pushes our profile and friends and pulls theirs, requests a DM backfill,
+/// re-announces our servers, and auto-requests a snapshot if WE are empty.
+/// Synchronous: none of these calls await.
 #[allow(clippy::too_many_arguments)]
 fn on_verified_sibling(
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
@@ -181,17 +161,13 @@ fn on_verified_sibling(
     peer_id: &str,
 ) {
     let own_inbox = format!("inbox:{}", local_peer_str);
-    // The joining device belongs to our master identity.
     super::resolver::update(peer_id, local_peer_str);
 
-    // CRITICAL (presence collapse): the verified proof tells us `peer_id` is OUR
-    // sibling device. Merge it into our own master-signed device list RIGHT HERE — do
-    // not wait for a ProfileUpdate carrying a device_list (a freshly-imported sibling
-    // has no profile, so it never sends one, and our list would stay 1 device forever
-    // → a friend like AL only ever learns ONE of our devices and shows us offline when
-    // that one quits). Union + re-sign + persist, then re-announce our profile (now
-    // carrying BOTH devices) to every friend we share a room with so they converge
-    // immediately.
+    // CRITICAL: merge the proven sibling into our own master-signed device list
+    // HERE rather than waiting for a ProfileUpdate carrying a device_list. A
+    // freshly-imported sibling has no profile and never sends one, so our list
+    // would stay at one device and a friend would show us offline whenever that
+    // one device quits. Union, re-sign, persist, then re-announce our profile.
     let our_set_grew = super::crypto_handler::merge_sibling_device_id(
         master_keypair, device_peer_id, peer_id,
         db_path, db_passphrase,
@@ -225,10 +201,8 @@ fn on_verified_sibling(
         db_path, db_passphrase,
     );
 
-    // SIBLING PROFILE SYNC: a freshly-imported device holds the master KEY but none of
-    // the master's profile CONTENT (name/avatar). If our OWN identity profile is
-    // empty/absent, pull it from the sibling — the incoming ProfileUpdate resolves to
-    // our master (== local_peer_str), so save_incoming_profile adopts it as our own.
+    // A freshly-imported device holds the master KEY but none of the master's
+    // profile CONTENT, so pull the profile from the sibling when ours is empty.
     // Without this the substitute device shows the identity online but nameless.
     let need_profile = crate::storage::MessageStore::open(db_path, db_passphrase)
         .ok()
@@ -284,13 +258,10 @@ fn on_verified_sibling(
         db_path, db_passphrase,
     );
 
-    // Multi-device (Step 9D follow-up): RE-ANNOUNCE every non-deleted server we belong
-    // to, to this freshly-verified sibling (idempotent on the receiver).
-    // MEMBERSHIP filter, not just the tombstone: a shell retained after our own
-    // LEAVE (legacy pre-teardown DBs) must never be re-announced — the announce
-    // handler runs an unconditional join and the sibling fast-path would re-ADD
-    // our identity to a server we left (authored by a non-member → real members
-    // reject the op → the actor's devices fork from the server).
+    // Re-announce every server we still BELONG to (idempotent on the receiver).
+    // The MEMBERSHIP filter matters as much as the tombstone: announcing a shell
+    // retained after our own LEAVE makes the sibling re-ADD our identity to a
+    // server we left, real members reject that op, and the actor's devices fork.
     for (sid, st) in server_states.iter() {
         if st.is_deleted() || !st.is_member(local_peer_str) { continue; }
         let announce = serde_json::to_vec(
@@ -311,10 +282,9 @@ fn on_verified_sibling(
             .count()
     );
 
-    // Multi-device link (Step 4): if WE are essentially empty (a fresh mnemonic
-    // import) and a populated sibling is now online, AUTO-REQUEST a full snapshot from
-    // it. The sibling shows a Confirm before sending. Gate on a near-empty DB so a
-    // populated device never re-pulls, and only fire once per sibling per session.
+    // If WE are essentially empty (a fresh mnemonic import) and a populated sibling
+    // is online, auto-request a full snapshot; the sibling confirms before sending.
+    // Gated on a near-empty DB so a populated device never re-pulls, once per sibling.
     let (my_msgs, my_friends, _my_servers, _hp) =
         crate::api::storage::snapshot_state_summary();
     if my_msgs == 0 && my_friends == 0
@@ -332,11 +302,9 @@ fn on_verified_sibling(
     }
 }
 
-/// Issue a sibling-proof challenge to an UNPROVEN peer that appeared in our own
-/// `inbox:{master}` room. Dedupes against a live unexpired challenge for the same
-/// peer, bounds the map, and sends a fresh-nonce [`HavenMessage::SiblingProveRequest`].
-/// Only a peer holding our SHARED MASTER key can answer it (see `on_verified_sibling`);
-/// a friend-request sender (a stranger) cannot, so it is never mis-merged as our device.
+/// Challenge an UNPROVEN peer in our own `inbox:{master}` room to prove it holds
+/// our master key. Only such a peer can answer, so a friend-request sender (a
+/// stranger) is never mis-merged as our device. Deduped against a live challenge.
 fn issue_sibling_challenge(
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
@@ -406,11 +374,9 @@ use super::vault_ops;
 use super::twitch;
 use super::voice_handler;
 
-/// Embedded peer-forwarder handle threaded into the shared inbound dispatch
-/// (`handle_incoming_request`) so forwarder-bound `fwd_*` envelopes can reach
-/// the embedded engine (media forwarding step 3 phase 2). Desktop-only in
-/// substance; a PhantomData elsewhere so the shared signature stays identical
-/// on every platform.
+/// Embedded peer-forwarder handle threaded into `handle_incoming_request` so
+/// forwarder-bound `fwd_*` envelopes reach the embedded engine. Desktop-only in
+/// substance; a PhantomData elsewhere so the shared signature never changes.
 #[cfg(all(feature = "forwarder", not(any(target_os = "android", target_os = "ios"))))]
 type FwdBridge<'a> = (
     &'a mut super::embedded_forwarder::EmbeddedForwarder,
@@ -422,16 +388,12 @@ type FwdBridge<'a> = std::marker::PhantomData<&'a ()>;
 /// Build and spawn the networking layer. Returns the MASTER peer ID and a join
 /// handle.
 ///
-/// Multi-device key routing (Phase 6, Step 7): the **device** keypair drives the
-/// WS relay auth and the signaling register — so each physical device gets its
-/// OWN distinct relay socket and never clobbers another device of the same
-/// identity. The **master** keypair (`native_keypair`) drives EVERYTHING else
-/// (the event loop's `local_peer_str`, MLS/server membership, message-content
-/// signing, the DB passphrase). The rooms the device joins are master-derived
-/// (`inbox:{master}`, `dm_room_code` resolves to masters, `server_id`), so the
-/// device authenticates as itself yet sits in its identity's rooms. On a
-/// pre-multi-device install device==master (migration keystone) so this is
-/// behavior-neutral. See `node::resolver` header for the full rationale.
+/// Key routing: the DEVICE keypair drives WS relay auth and the signaling
+/// register, so each physical device gets its own relay socket and never
+/// clobbers a sibling. The MASTER keypair (`native_keypair`) drives everything
+/// else: `local_peer_str`, MLS and server membership, message signing, the DB
+/// passphrase. The rooms are master-derived, so the device authenticates as
+/// itself yet sits in its identity's rooms. See `node::resolver`.
 pub(crate) async fn spawn_node(
     native_keypair: crate::identity::native_identity::NativeKeypair,
     device_keypair: crate::identity::native_identity::NativeKeypair,
@@ -452,13 +414,9 @@ pub(crate) async fn spawn_node(
     let master_peer_id = native_keypair.peer_id();
     let device_peer_id = device_keypair.peer_id();
 
-    // Legacy HTTP signaling (register/bootstrap/unregister) RETIRED 2026-07:
-    // peer discovery rides the live WS connection (`discover_peers` frame +
-    // RoomMembers on join), which replaced the per-poll TLS handshake that
-    // produced the "[HOLLOW-SIGNALING] Bootstrap failed" noise. The relay
-    // keeps its HTTP endpoints for older clients.
+    // Peer discovery rides the live WS connection (`discover_peers` plus RoomMembers
+    // on join); the relay keeps its HTTP endpoints only for older clients.
 
-    // Spawn the WebSocket relay client (device-keyed auth).
     let ws_proto = device_keypair.to_protobuf_encoding().unwrap_or_default();
     let ws_pub_b64 = base64::engine::general_purpose::STANDARD.encode(
         device_keypair.public_key_protobuf(),
@@ -471,8 +429,6 @@ pub(crate) async fn spawn_node(
         license_key, false, ws_cmd_rx, ws_event_tx,
     );
 
-    // Derive DB path/passphrase from the global data dir + master keypair (the
-    // production behavior, unchanged — now passed into the loop explicitly).
     let db_path = {
         let data_dir = crate::identity::data_dir().unwrap_or_default();
         data_dir.join("messages.db").to_string_lossy().to_string()
@@ -492,19 +448,13 @@ pub(crate) async fn spawn_node(
     Ok((master_peer_id, handle))
 }
 
-/// Test-only spawn variant for the headless multi-node integration harness
-/// (`node::test_harness`). Identical to `spawn_node` EXCEPT it does NOT open a
-/// real WebSocket socket or the HTTP signaling task — instead it accepts an
-/// injected WS channel pair so an in-process `MockRelay` can route between
-/// several nodes with no network/TLS/auth. The signaling side is a dead pair
-/// (its event receiver never fires; DM/room delivery never depends on signaling
-/// — it's a non-fatal HTTP peer-discovery fallback).
+/// Test-only spawn variant for the headless multi-node harness. Identical to
+/// `spawn_node` except that it opens no real WebSocket or HTTP signaling task
+/// and instead takes an injected WS channel pair, so an in-process `MockRelay`
+/// can route between several nodes with no network, TLS or auth.
 ///
 /// Returns `(master_peer_id, event_loop_handle, ws_cmd_rx, ws_event_tx)`: the
-/// caller (broker) drains `ws_cmd_rx` (this node's outbound relay commands) and
-/// pushes into `ws_event_tx` (this node's inbound relay events).
-///
-/// Production `spawn_node` above is untouched; this only exists under `cfg(test)`.
+/// broker drains `ws_cmd_rx` and pushes into `ws_event_tx`.
 #[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn spawn_node_mock(
@@ -560,40 +510,32 @@ async fn run_event_loop(
     local_peer_str: String,
     device_peer_id: String,
     initial_invisible: bool,
-    // DB path + passphrase, injected by the caller (production derives them from
-    // the global data dir + master keypair; the test harness injects per-node
-    // temp paths so several nodes can run in one process without colliding on the
-    // process-global `data_dir()`).
+    // Production derives these from the global data dir and master keypair; the
+    // harness injects per-node temp paths so several nodes share one process.
     db_path: String,
     db_passphrase: String,
 ) {
-    // Precompute public key base64 for prekey bundle signing.
     let pub_key_proto = bundle_keypair.public_key_protobuf();
     let pub_key_b64 = base64::engine::general_purpose::STANDARD.encode(&pub_key_proto);
 
-    // -- Multi-device identity (Phase 6) --
-    // `local_peer_str` IS the master id (the event loop runs in identity terms);
-    // `bundle_keypair` IS the master keypair (message signing, device-list sig).
-    // `device_peer_id` (passed in) is THIS device's transport peer_id — the id we
-    // authenticate to the relay with. On a pre-multi-device install they are
-    // equal (migration keystone). See `spawn_node` + `node::resolver` for the
-    // key-routing rationale.
+    // -- Multi-device identity --
+    // `local_peer_str` and `bundle_keypair` are the MASTER (the event loop runs in
+    // identity terms); `device_peer_id` is THIS device's transport id, the one we
+    // authenticate to the relay with. Equal on a pre-multi-device install.
     let master_keypair = bundle_keypair.clone();
     let master_peer_str = local_peer_str.clone();
 
-    // Decrypt failure cooldown: track last session-kill time per peer.
-    // Prevents rapid session thrashing when many in-flight chunks fail decrypt
-    // (e.g., 340MB file = 1360 chunks, all fail after session reset).
+    // Decrypt-failure cooldown per peer: prevents session thrashing when many
+    // in-flight chunks fail decrypt at once (a 340 MB file is 1360 chunks).
     let mut decrypt_fail_cooldown: HashMap<String, std::time::Instant> = HashMap::new();
     const REKEY_COOLDOWN: Duration = Duration::from_secs(5);
 
     // Buffer messages while key exchange is in progress.
     let mut pending_messages: HashMap<String, Vec<String>> = HashMap::new();
 
-    // Track which peers have an active key request in flight (avoid duplicate requests).
-    // Maps peer_id -> when the KeyRequest was sent. Entries older than
-    // OLM_KEY_REQUEST_TIMEOUT are treated as stale so the reconciliation sweep can
-    // resend (the relay never ACKs, so a dropped frame must self-heal via retry).
+    // peer_id -> when its KeyRequest was sent. Entries older than
+    // OLM_KEY_REQUEST_TIMEOUT are stale so the reconciliation sweep can resend: the
+    // relay never ACKs, so a dropped frame must self-heal by retry.
     let mut key_request_in_flight: HashMap<String, std::time::Instant> = HashMap::new();
     // Track peers we've sent a KeyBundle to (for glare detection at KeyBundle reception).
     let mut key_bundle_sent_to: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -601,7 +543,7 @@ async fn run_event_loop(
     // Track the active room code so we can re-bootstrap after getting a relay circuit address.
     let mut active_room: Option<String> = None;
 
-    // -- Vault shard assembly state (Phase 4) --
+    // -- Vault shard assembly state --
     // Tracks chunked shard reassembly. Key = "content_id:shard_index:sender_peer".
     let mut pending_shard_assembly: HashMap<String, PendingShardAssembly> = HashMap::new();
 
@@ -624,9 +566,8 @@ async fn run_event_loop(
     // Tracks which peers are in which WS rooms. Key: room_code, Value: set of peer_id strings.
     let mut ws_room_peers: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
 
-    // Embedded peer forwarder (media forwarding step 3 phase 2): this desktop
-    // can serve as a blind packet forwarder for screen shares it watches.
-    // Desktop-only + feature-gated; every use site carries the same cfg.
+    // Embedded peer forwarder: this desktop can serve as a blind packet
+    // forwarder for screen shares it watches. Desktop-only and feature-gated.
     #[cfg(all(feature = "forwarder", not(any(target_os = "android", target_os = "ios"))))]
     let mut embedded_fwd =
         super::embedded_forwarder::EmbeddedForwarder::new(device_peer_id.clone());
@@ -634,62 +575,50 @@ async fn run_event_loop(
     // Peers we've already triggered sync for this session.
     let mut synced_peers: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-    // Outstanding asset pulls, keyed by content hash. Each entry records the
-    // kind WE asked for — handle_emote_assets sizes the receipt cap from
-    // this, never from anything the sender says — plus where to ask and who
-    // has been asked already.
-    //
-    // The table SURVIVES a disconnect (only the per-connection `asked` sets
-    // are cleared): a holder who was offline when the token first rendered
-    // still gets asked when it appears, which is what a message replayed from
-    // the relay's offline ring needs.
+    // Outstanding asset pulls, keyed by content hash. Each entry records the kind WE
+    // asked for, which is what sizes the receipt cap (never anything the sender
+    // says), plus where to ask and who has been asked. The table SURVIVES a
+    // disconnect (only the per-connection `asked` sets clear), so a holder offline
+    // when the token first rendered still gets asked when it appears.
     let mut pending_asset_asks: std::collections::HashMap<String, emotes::PendingAsk> =
         std::collections::HashMap::new();
 
-    // Outstanding FILE pulls, keyed by file_id — the asset rail's table applied
-    // to file bytes (node/file_asks.rs). It SURVIVES a disconnect: a holder who
-    // was offline when the user tapped Download still gets asked when it turns
-    // up, and until then the card can say so instead of showing a button that
-    // did nothing.
+    // Outstanding FILE pulls, keyed by file_id (node/file_asks.rs). Survives a
+    // disconnect like the asset table, so a holder that was offline when the user
+    // tapped Download still gets asked, and the card can say so meanwhile.
     let mut pending_file_asks: std::collections::HashMap<String, file_asks::PendingFileAsk> =
         std::collections::HashMap::new();
 
-    // Guest public-file downloads: file_id -> (server_id, requested-at). The
-    // receipt cap for plaintext `PublicFileHeader`s — only headers answering a
-    // request WE made (fresh, matching server) are accepted, mirroring
-    // `pending_asset_asks`. An unsolicited header would otherwise register
-    // a decrypt key + let a stranger stream bytes onto our disk.
+    // Guest public-file downloads: file_id -> (server_id, requested-at). The receipt
+    // cap for plaintext `PublicFileHeader`s, mirroring `pending_asset_asks`: an
+    // unsolicited header would register a decrypt key and let a stranger stream
+    // bytes onto our disk.
     let mut pending_public_file_requests: std::collections::HashMap<String, (String, std::time::Instant)> =
         std::collections::HashMap::new();
 
-    // Files WE explicitly asked for (manual Download button, missing-file
-    // sweeps, guest pulls): file_id -> requested-at. A FileHeader answering one
-    // of these bypasses BOTH the per-context size cap and the auto-download
-    // gate — the user asked for exactly these bytes (issue #41). Receipts are
-    // consumed on first matching header and expire after 5 minutes.
+    // Files WE explicitly asked for: file_id -> requested-at. A FileHeader answering
+    // one of these bypasses BOTH the per-context size cap and the auto-download gate
+    // (issue #41), because the user asked for exactly these bytes. Consumed on the
+    // first matching header, expiring after 5 minutes.
     let mut requested_file_receipts: std::collections::HashMap<String, std::time::Instant> =
         std::collections::HashMap::new();
 
-    // Pushed files declined by the auto-download gate THIS session. Stream
-    // bytes that arrive for these (the sender queues its push before any
-    // response could reach it) are deleted instead of being parked forever in
-    // `early_file_streams`.
+    // Pushed files declined by the auto-download gate this session. Stream bytes
+    // that still arrive (the sender queued its push before any response could reach
+    // it) are deleted instead of parked forever in `early_file_streams`.
     let mut declined_file_ids: std::collections::HashSet<String> =
         std::collections::HashSet::new();
 
-    // Auto-download preferences ADVERTISED by peer devices (issue #41
-    // pre-negotiation): device peer_id -> effective threshold MB for pushes
-    // from us (0 = off). Consulted by the DM file fan-out so we skip streaming
-    // bytes a gated receiver would only discard. Connection state — cleared on
-    // WsEvent::Disconnected; peers re-advertise when they rejoin our rooms.
+    // Auto-download preferences ADVERTISED by peer devices (issue #41): device
+    // peer_id -> threshold MB for pushes from us (0 = off). The DM file fan-out
+    // consults it to skip bytes a gated receiver would only discard. Connection
+    // state, cleared on Disconnected; peers re-advertise when they rejoin.
     let mut peer_auto_dl: std::collections::HashMap<String, u32> =
         std::collections::HashMap::new();
 
-    // (server room, channel) pairs whose relay offline catch-up replay already
-    // ran THIS connection — fed by both the connect-time sweep (RoomMembers)
-    // and the channel-open hook (SubscribeChannels). Cleared on
-    // WsEvent::Disconnected like every sync gate — a new socket needs a fresh
-    // registration + replay.
+    // (server room, channel) pairs whose relay offline catch-up already ran THIS
+    // connection. Cleared on Disconnected like every sync gate: a new socket needs
+    // a fresh registration and replay.
     let mut relay_catchup_done: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
 
     let mut is_invisible = initial_invisible;
@@ -697,24 +626,21 @@ async fn run_event_loop(
         hollow_log!("[HOLLOW-STATUS] Node starting in invisible mode (persisted preference)");
     }
 
-    // -- WebRTC peer tracking (Phase 5A) --
+    // -- WebRTC peer tracking --
     // Peers with active GENERAL 'hollow-data' channels (Dart notifies us via
     // NodeCommand). Carries DM/channel files, vault shards, screen audio, gossip.
     let mut webrtc_peers: std::collections::HashSet<String> = std::collections::HashSet::new();
-    // Peers with an active HOLLOW SHARE channel — a SECOND, STUN-only peer
-    // connection (HOLLOW_PLAN §7A). Kept separate on purpose: the general
-    // channel above carries TURN, so a Share scheduled against it would push
-    // multi-GB payloads through the relay. See node/share_handler.rs.
+    // Peers with an active HOLLOW SHARE channel: a SECOND, STUN-only peer connection
+    // (HOLLOW_PLAN section 7A). Separate on purpose, because the general channel
+    // carries TURN and a Share on it would push multi-GB through the relay.
     let mut webrtc_share_peers: std::collections::HashSet<String> = std::collections::HashSet::new();
     // Pending WebRTC sends — stored so we can retry via WSS on failure.
     // Key: transfer_id, Value: (peer_id, kind, id, source_path, total_size)
     let mut pending_webrtc_sends: HashMap<String, (String, super::ws_stream_transfer::StreamKind, String, std::path::PathBuf, u64)> = HashMap::new();
 
-    // Startup sweep: delete orphaned sender-side stream temps (`.stream_send_*`,
-    // `.stream_shard_*`) left in files/ by a previous run. These are always
-    // transient ciphertext artifacts of an in-flight send — none can legitimately
-    // exist on a fresh boot — so they're safe to remove. Reclaims leaks from the
-    // pre-fix WS-relay send path that never deleted its temp (doubled disk usage).
+    // Startup sweep: delete orphaned sender-side stream temps left by a previous
+    // run. They are always transient ciphertext of an in-flight send, so none can
+    // legitimately exist on a fresh boot.
     {
         let files_dir = crate::node::file_transfer::files_dir();
         if let Ok(entries) = std::fs::read_dir(&files_dir) {
@@ -735,13 +661,12 @@ async fn run_event_loop(
     }
 
     // -- Profile sync state --
-    // Flag: have we broadcast our profile on first connection?
     let mut profile_broadcast_done = false;
 
-    // -- Gossip relay tree state (Phase 5D) --
+    // -- Gossip relay tree state --
     let mut gossip_overlays: HashMap<String, super::gossip::GossipOverlay> = HashMap::new();
 
-    // -- Voice channel participant tracking (Phase 5D) --
+    // -- Voice channel participant tracking --
     // Key: "server_id:channel_id", Value: set of peer_ids in the voice channel.
     let mut voice_channel_participants: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
     // Track the current voice mode per channel: true = gossip, false = mesh.
@@ -750,15 +675,15 @@ async fn run_event_loop(
     // -- Conference host state (active meetings we host; node/conference.rs) --
     let mut conference_host: HashMap<String, super::conference::ConferenceHostState> = HashMap::new();
 
-    // -- WS stream transfer reassembly state (Phase 5.5) --
+    // -- WS stream transfer reassembly state --
     let mut pending_ws_transfers: HashMap<String, super::ws_stream_transfer::WsTransferState> = HashMap::new();
 
     // -- Recovery pool state (Evidence Recovery) --
     let mut recovery_pool_state: Option<crate::node::recovery_pool::RecoveryPoolState> = None;
 
     // -- Hollow Share --
-    // Registry of active share swarms. Owned by this event loop and passed
-    // as &mut into every handler — same pattern as other domain modules.
+    // Registry of active share swarms, owned by this loop and passed as &mut
+    // into every handler, like the other domain modules.
     let mut share_registry: super::share_handler::ShareRegistry = super::share_handler::new_registry();
     // Process-wide outbound seed bandwidth bucket — caps share uploads at
     // SEED_REFILL_BPS so messaging/voice never starve.
@@ -771,27 +696,20 @@ async fn run_event_loop(
     // Auto-rejoin every share row with seeding=1 so we keep serving across restarts.
     super::share_handler::auto_rejoin_seeders(&mut share_registry, &bundle_keypair, &ws_cmd_tx);
 
-    // `db_path` / `db_passphrase` are now injected by the caller (see signature).
 
-    // -- Multi-device resolver warm-up (Phase 6) --
-    // Load persisted device links + our own device(s) into the process-global
-    // resolver BEFORE the event loop processes any incoming message — otherwise
-    // an early message from another device of a friend would misattribute
-    // (resolver hazard R4). On a pre-multi-device install this is a no-op
-    // self-mapping (device_peer_id == master).
+    // -- Multi-device resolver warm-up --
+    // Persisted device links must reach the process-global resolver BEFORE the loop
+    // handles any message, or an early message from a friend's other device is
+    // misattributed. A no-op self-mapping on a pre-multi-device install.
     {
         if let Ok(store) = crate::storage::MessageStore::open(&db_path, &db_passphrase) {
             if let Ok(links) = store.get_all_device_links() {
                 super::resolver::warm_from_links(&links);
             }
-            // Always include THIS running device in the self-seed, UNIONed with any
-            // persisted list. On a freshly LINKED sibling (Step 9C/C5) the imported
-            // list is the SOURCE device's and does NOT yet contain our brand-new
-            // device id — without this union our own id resolves to itself (not the
-            // master), so `myMaster`/`myDevicesProvider` are wrong and the "Your
-            // devices" panel shows only one device until the source comes online and
-            // the inbox-proof merge fires. Seeding our own id here makes the resolver
-            // (and the panel) correct immediately: {source_dev, this_dev} → master.
+            // Always UNION this running device into the self-seed. A freshly LINKED sibling
+            // imported the SOURCE device's list, which does not contain our brand-new device
+            // id, so without this our own id resolves to itself rather than to the master
+            // and "Your devices" shows one device until the source comes online.
             match store.load_device_list(&master_peer_str) {
                 Ok(Some(list)) => {
                     let mut devs = list.devices.clone();
@@ -809,20 +727,17 @@ async fn run_event_loop(
             }
         }
     }
-    // Multi-device (Step 6): install the device→master resolver into the `crdt`
-    // module so ServerState's role/ban/permission/membership accessors collapse a
-    // device id to its master internally (one chokepoint for dozens of call sites).
+    // Install the device-to-master resolver into the `crdt` module so
+    // ServerState's role, ban, permission and membership accessors collapse a
+    // device id internally: one chokepoint for dozens of call sites.
     crate::crdt::set_identity_resolver(super::resolver::resolve);
 
-    // -- Friend-table canonicalization sweep (multi-device heal) --
-    // INVARIANT: every friend row is keyed by the friend's MASTER identity. Older
-    // builds (and the temp-nickname add path) could strand a row under a friend's
-    // DEVICE id, which then diverged from presence/DM/profile (all master-keyed) —
-    // the friend showed offline, removal missed, favourites went stale, etc. The
-    // resolver is now warm (persisted device links loaded above), so fold any
-    // device-keyed row into its master in one pass. Idempotent: a row already
-    // under its master resolves to itself and is skipped. This heals an existing
-    // broken DB on the very next launch — no re-add required.
+    // -- Friend-table canonicalization sweep --
+    // INVARIANT: every friend row is keyed by the friend's MASTER identity. A row
+    // stranded under a friend's DEVICE id diverges from presence, DMs and profile,
+    // which are all master-keyed. The resolver is warm by now, so fold any
+    // device-keyed row into its master. Idempotent, and it heals an existing broken
+    // DB on the next launch with no re-add.
     {
         if let Ok(store) = crate::storage::MessageStore::open(&db_path, &db_passphrase) {
             if let Ok(rows) = store.load_friends(None) {
@@ -844,7 +759,7 @@ async fn run_event_loop(
         }
     }
 
-    // -- CRDT state (Phase 3) --
+    // -- CRDT state --
     // Server states keyed by server_id. Reload from DB so servers survive restarts.
     let mut server_states: HashMap<String, ServerState> = HashMap::new();
     {
@@ -862,9 +777,9 @@ async fn run_event_loop(
                                         state.restore_op_log(ops);
                                     }
                                 }
-                                // Multi-device (Step 6): fold any legacy device-keyed
-                                // member entries into their master identity (resolver
-                                // warmed just above). No-op for single-device.
+                                // Fold any legacy device-keyed member entries into
+                                // their master identity (the resolver was warmed just
+                                // above). A no-op for single-device.
                                 if state.canonicalize_members(|id| super::resolver::resolve(id)) {
                                     if let Ok(json) = serde_json::to_string(&state) {
                                         let _ = store.save_server_state(&server_id, &json);
@@ -872,7 +787,6 @@ async fn run_event_loop(
                                     hollow_log!("[HOLLOW-MULTIDEV] Canonicalized device-keyed members → master for server {server_id}");
                                 }
                                 server_states.insert(server_id.clone(), state);
-                                // Join the WS relay room for this server.
                                 let _ = ws_cmd_tx.send(super::ws_client::WsCommand::JoinRoom {
                                     room_code: server_id,
                                 });
@@ -898,10 +812,8 @@ async fn run_event_loop(
         if let Ok(store) = crate::storage::MessageStore::open(&db_path, &db_passphrase) {
             match store.load_mls_identity() {
                 Ok(Some((signer_data, credential_data, storage_data))) => {
-                    // Enumerate every MLS group key to reload: each server's bare id
-                    // (server-wide group) PLUS each restricted channel's subgroup id
-                    // (Option B). The storage blob already holds the group data; this
-                    // list is what gets instantiated into the live `groups` map.
+                    // Every MLS group key to reload: each server's bare id (the server-wide group)
+                    // plus each restricted channel's subgroup id.
                     let mut server_ids: Vec<String> = Vec::new();
                     for (sid, state) in server_states.iter() {
                         server_ids.push(sid.clone());
@@ -916,27 +828,14 @@ async fn run_event_loop(
                         &server_ids,
                     ) {
                         Ok(mgr) => {
-                            // Multi-device (Step 6): a linked sibling imported the
-                            // SOURCE device's whole DB — including its MLS signer +
-                            // credential. Two devices sharing one MLS signature key
-                            // can't both be leaves (OpenMLS `DuplicateSignatureKey` on
-                            // add; `CannotDecryptOwnMessage` on receive). Detect an
-                            // inherited credential (belongs to neither THIS device nor
-                            // our master) and discard it so a FRESH, distinct MLS
-                            // identity is minted below. Legacy single-device installs
-                            // (credential == master) are kept untouched — no re-key.
-                            // Detect an MLS credential that doesn't belong to THIS
-                            // device and must be regenerated (a linked sibling reused
-                            // the source device's MLS identity → DuplicateSignatureKey
-                            // on add / CannotDecryptOwnMessage on receive). Two cases:
-                            //  (a) credential is some OTHER device's id → clearly foreign.
-                            //  (b) credential is our MASTER, but we are a multi-device
-                            //      identity (we know sibling devices) → it's the
-                            //      inherited keystone-master leaf shared with a sibling;
-                            //      regenerate to a distinct device-id leaf. A LEGACY
-                            //      SOLE single-device install (no known siblings) keeps
-                            //      its master-credentialed leaf untouched — re-keying it
-                            //      would orphan servers it owns (no peer can re-add it).
+                            // Detect an MLS credential that does not belong to THIS device and must be
+                            // regenerated: a linked sibling imported the SOURCE device's whole DB including
+                            // its MLS signer, and two devices sharing one signature key cannot both be
+                            // leaves (`DuplicateSignatureKey` on add, `CannotDecryptOwnMessage` on receive).
+                            // Two cases: the credential is some OTHER device's id, or it is our MASTER while
+                            // we know sibling devices, which is the inherited keystone leaf. A legacy SOLE
+                            // single-device install keeps its master-credentialed leaf, because re-keying it
+                            // would orphan the servers it owns: no peer can re-add it.
                             let cred_id = mgr.credential_identity();
                             let siblings = super::resolver::devices_for(&master_peer_str);
                             let has_sibling = siblings.iter().any(|d| d != &device_peer_id);
@@ -994,7 +893,6 @@ async fn run_event_loop(
         match MlsManager::new(&device_peer_id) {
             Ok(mgr) => {
                 hollow_log!("[HOLLOW-MLS] Created new MLS identity");
-                // Persist immediately.
                 if let Ok(signer) = mgr.signer_bytes() {
                     if let Ok(cred) = mgr.credential_bytes() {
                         if let Ok(storage) = mgr.serialize_storage() {
@@ -1019,10 +917,9 @@ async fn run_event_loop(
     // coordinator gate can tell a first ask from the joiner's escalation retry.
     let mut join_request_seen: HashMap<String, std::time::Instant> = HashMap::new();
     // "{server_id}|{joiner_master}" -> the newest `requested_at` we know has been
-    // ANSWERED. Read from the `~join` ring (or written by our own answer), it is
-    // what stops a member that returns days later re-serving a join somebody
-    // else already handled. NOT sync-gating state, so it deliberately survives
-    // `WsEvent::Disconnected`: an answer stays answered across a reconnect.
+    // ANSWERED, read from the `~join` ring or written by our own answer. It stops a
+    // member returning days later from re-serving a join somebody else handled. NOT
+    // sync-gating state, so it deliberately survives `WsEvent::Disconnected`.
     let mut join_resolutions: HashMap<String, i64> = HashMap::new();
     // Servers whose PARKED join completed but whose MLS leaf has not formed yet.
     // Between the two the UI says "waiting for a member to finish setup"; the
@@ -1033,27 +930,23 @@ async fn run_event_loop(
     // Queued when peer isn't reachable (no shared rooms), sent when they appear.
     let mut pending_friend_requests: HashMap<String, i64> = HashMap::new();
     // Masters whose DECLINE we have already re-sent on THIS connection. The relay's
-    // copy of a reject expires (3 days) and can be gone before the requester next
-    // boots; the requester then re-deposits the same request, we swallow it against
-    // the tombstone, and without re-arming the answer it would never learn. Cleared
-    // on `WsEvent::Disconnected` like every other reconnect-scoped gate: the mailbox
-    // only replays on an inbox (re)join, so one re-send per connection is exactly
-    // one per replay burst, and a decliner whose process stays up for days still
-    // answers a requester that returns next week.
+    // copy of a reject expires before the requester next boots; the requester then
+    // re-deposits the same request and we swallow it against the tombstone, so
+    // without re-arming the answer it would never learn. Cleared on Disconnected
+    // like every reconnect-scoped gate: the mailbox only replays on an inbox
+    // rejoin, so one re-send per connection is exactly one per replay burst.
     let mut reject_resent: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut pending_nickname_resolve: Option<String> = None;
-    // Multi-device linking (Step 4). `pending_link_resolve` = (code, include_vault,
-    // include_files) carried from ResolveLinkCode to the LinkCodeResolved event.
-    // `pending_link_code` = the code WE claimed (populated device), so we can leave
-    // its room on release.
+    // `pending_link_resolve` = (code, include_vault, include_files) carried from
+    // ResolveLinkCode to the LinkCodeResolved event. `pending_link_code` = the code
+    // WE claimed, so we can leave its room on release.
     let mut pending_link_resolve: Option<(String, bool, bool)> = None;
     let mut pending_link_code: Option<String> = None;
     // Siblings we've already auto-requested a snapshot from this session (fire-once).
     let mut link_snapshot_requested: std::collections::HashSet<String> = std::collections::HashSet::new();
-    // Sibling-proof challenges in flight: unknown inbox peer_id -> (nonce, issued_at).
-    // An unproven peer joining `inbox:{our_master}` is challenged to sign the nonce with
-    // our shared master key; only a genuine sibling can, gating the merge/snapshot.
-    // 60s TTL, bounded, one live challenge per peer (see issue_sibling_challenge).
+    // Sibling-proof challenges in flight: inbox peer_id -> (nonce, issued_at). Only
+    // a peer holding our shared master key can sign the nonce, which is what gates
+    // the merge and the snapshot. 60s TTL, bounded, one live challenge per peer.
     let mut pending_sibling_challenges: HashMap<String, (String, std::time::Instant)> = HashMap::new();
     // Pending friend removals: peer_ids whose FriendRemove wasn't delivered (peer offline).
     let mut pending_friend_removals: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -1088,12 +981,10 @@ async fn run_event_loop(
         }
     }
 
-    // PARKED JOINS (pending joins, rung 1). Restore every join still waiting for
-    // an answer. A parked entry gets NO 15s timer: it has already parked, and
-    // the whole point is that it waits indefinitely for a member to return. The
-    // room join happens in the `WsEvent::Connected` handler, which is where
-    // every other room join lives. Rows in state `rejected` deliberately get no
-    // RAM entry: they are a tile, not a join in flight.
+    // PARKED JOINS: restore every join still waiting for an answer. A parked entry
+    // gets NO timer, because waiting indefinitely for a member to return is the
+    // point. The room join happens in the `WsEvent::Connected` handler with every
+    // other room join. Rows in state `rejected` get no RAM entry: a tile, not a join.
     {
         if let Ok(store) = crate::storage::MessageStore::open(&db_path, &db_passphrase) {
             let rows = store.load_pending_joins().unwrap_or_default();
@@ -1128,14 +1019,11 @@ async fn run_event_loop(
         }
     }
 
-    // Pending friend ACCEPTS: master → timestamp. A FriendAccept we sent may not have
-    // reached the requester (its device raced our accept and wasn't in our room yet, or
-    // it was offline) — without redelivery the requester stays stuck "pending outgoing"
-    // forever (it accepted on our side but never on theirs). Seed with EVERY accepted
-    // friend so that on this session's first contact with each, we (re)send an
-    // idempotent FriendAccept — guaranteeing the requester converges even across a
-    // restart. Drained on the peer's appearance (PeerJoined/RoomMembers); the entry is
-    // removed on first delivery so it's at most one extra message per friend per session.
+    // Pending friend ACCEPTS: master -> timestamp. A FriendAccept we sent may not
+    // have reached the requester (its device raced our accept, or it was offline),
+    // which leaves the requester stuck "pending outgoing" forever. Seeded with EVERY
+    // accepted friend, so first contact each session re-sends an idempotent accept;
+    // drained on the peer's appearance, at most one extra message per friend.
     let mut pending_friend_accepts: HashMap<String, i64> = HashMap::new();
     {
         if let Ok(store) = crate::storage::MessageStore::open(&db_path, &db_passphrase) {
@@ -1151,17 +1039,16 @@ async fn run_event_loop(
     // Maps peer_id_str → Vec<(server_id, channel_id, since_timestamp)>
     let mut pending_sync_requests: HashMap<String, Vec<(String, String, i64)>> = HashMap::new();
 
-    // Track server_ids for which we've already requested MLS bootstrap (KeyPackage sent to owner).
-    // Prevents spamming the owner on every MlsChannelMessage for an unknown group.
-    // Value = when the request was sent; entries expire after MLS_BOOTSTRAP_TIMEOUT to allow retry.
+    // server_ids we already requested MLS bootstrap for, so an MlsChannelMessage
+    // for an unknown group cannot spam the owner. The value is when the request
+    // was sent; entries expire after MLS_BOOTSTRAP_TIMEOUT to allow a retry.
     let mut mls_bootstrap_requested: HashMap<String, std::time::Instant> = HashMap::new();
 
-    // Groups a commit just evicted us from while we are still a member, and
-    // when. A remove + re-add is two commits from ONE batch tick and the
-    // removal goes out first, so the Welcome that puts us back is already in
-    // flight: asking for a leaf on seeing the removal mints a KeyPackage the
-    // next tick turns into another remove + re-add. Swept at the top of the
-    // batch tick, cleared by the Welcome. Key: the MLS group key.
+    // Groups a commit just evicted us from while we are still a member, and when.
+    // A remove + re-add is two commits from ONE batch tick with the removal first,
+    // so the Welcome that puts us back is already in flight: asking for a leaf on
+    // seeing the removal mints a KeyPackage the next tick turns into another
+    // remove + re-add. Swept at the top of the tick, cleared by the Welcome.
     let mut mls_welcome_grace: HashMap<String, std::time::Instant> = HashMap::new();
 
     // Per-(group, peer) cooldowns for MLS epoch-hint service and self-probes
@@ -1187,7 +1074,6 @@ async fn run_event_loop(
     // Collects connected peers for 500ms, then assigns channels evenly across peers.
     let mut sync_coordinator = SyncCoordinator::new();
 
-    // Sync coordinator dispatch timer (100ms tick — checks if collection window has elapsed).
     let mut sync_dispatch_timer = tokio::time::interval(Duration::from_millis(100));
     sync_dispatch_timer.tick().await; // consume immediate first tick
 
@@ -1213,7 +1099,6 @@ async fn run_event_loop(
     // Channel push prefs JSON — cached for re-registration on WS reconnect.
     let mut push_prefs: Option<String> = None;
 
-    // Re-bootstrap timer (30 seconds) for signaling re-registration.
     let mut rebootstrap_timer = tokio::time::interval(Duration::from_secs(30));
     rebootstrap_timer.tick().await; // consume immediate first tick
     let mut eviction_counter: u32 = 0;
@@ -1261,23 +1146,18 @@ async fn run_event_loop(
     let mut peer_liveness_timer = tokio::time::interval(Duration::from_secs(60));
     peer_liveness_timer.tick().await; // consume immediate first tick
 
-    // Asset-rail retry sweep: rotate a pull that has gone quiet to its next
-    // holder. Covers the responders that answer a total miss with silence
-    // (every client older than the `missing` field) and the case where the
-    // room had other members all along and the first one asked never replied.
-    // A node with nothing pending ticks through this for free.
-    // cfg(test) shortens the period so the harness can watch a rotation
-    // without twenty-second waits (same trick as the grant sweep).
+    // Asset-rail retry sweep: rotate a pull that has gone quiet to its next holder.
+    // Covers responders that answer a total miss with silence (any client older
+    // than the `missing` field) and a first holder that simply never replied.
+    // cfg(test) shortens the period so the harness can watch a rotation.
     let mut asset_retry_timer =
         tokio::time::interval(Duration::from_secs(emotes::ASSET_RETRY_SECS));
     asset_retry_timer.tick().await; // consume immediate first tick
 
-    // Temporary channel-grant expiry sweep. The predicate is lazy (an expired
-    // grant already reads as denied); this timer drives the CONSEQUENCES:
-    // MLS subgroup leaf removal (coordinator-gated, idempotent), voice
-    // eviction, and a ServerUpdated so the expired member's own UI refreshes.
-    // cfg(test) shortens the period so the harness can observe expiry without
-    // 30-second waits.
+    // Temporary channel-grant expiry sweep. The predicate is lazy (an expired grant
+    // already reads as denied); this timer drives the CONSEQUENCES: MLS subgroup
+    // leaf removal (coordinator-gated, idempotent), voice eviction, and a
+    // ServerUpdated so the expired member's own UI refreshes.
     let grant_sweep_secs: u64 = if cfg!(test) { 2 } else { 30 };
     let mut grant_sweep_timer = tokio::time::interval(Duration::from_secs(grant_sweep_secs));
     grant_sweep_timer.tick().await; // consume immediate first tick
@@ -1285,10 +1165,9 @@ async fn run_event_loop(
     // while this node was offline (one-time, idempotent).
     let mut grant_sweep_last_ms: u64 = 0;
 
-    // TURN credential refresh: relay credentials last 1h; re-request at 50min
-    // so long-lived sessions never expire mid-call. A fresh set is also
-    // requested on every WsEvent::Connected, so this only matters for
-    // continuously-connected sessions.
+    // TURN credentials last an hour; re-request at 50 minutes so a long session
+    // never expires mid-call. A fresh set also arrives on every Connected, so this
+    // only matters for continuously-connected sessions.
     let mut turn_refresh_timer = tokio::time::interval(Duration::from_secs(50 * 60));
     turn_refresh_timer.tick().await; // consume immediate first tick
 
@@ -1306,7 +1185,6 @@ async fn run_event_loop(
             loop_stall.check(arm, name, t0);
         }
         tokio::select! {
-            // Handle commands from the FFI layer.
             Some(cmd) = cmd_rx.recv() => {
                 arm_started = Some(("cmd", cmd.kind(), std::time::Instant::now()));
                 match cmd {
@@ -1316,11 +1194,9 @@ async fn run_event_loop(
                             let _ = event_tx.send(NetworkEvent::RoomCleared).await;
                         }
                         active_room = Some(room_code.clone());
-                        // Join the WS relay room for DMs.
                         let _ = ws_cmd_tx.send(super::ws_client::WsCommand::JoinRoom {
                             room_code: room_code.clone(),
                         });
-                        // Also register with signaling for peer discovery.
                     }
                     NodeCommand::SendMessage { peer_id: peer_id_str, text, message_id, reply_to_mid, link_preview } => {
                         last_message_traffic = std::time::Instant::now();
@@ -1344,7 +1220,7 @@ async fn run_event_loop(
                         ).await;
                     }
 
-                    // -- CRDT commands (Phase 3) --
+                    // -- CRDT commands --
 
                     NodeCommand::CreateServer { name } => {
                         sync_handler::handle_create_server(
@@ -1568,11 +1444,9 @@ async fn run_event_loop(
                         ).await { continue; }
                     }
 
-                    // Delete/update/assign/unassign can all shift who qualifies
-                    // for a label-gated channel — reconcile subgroups after each
-                    // (all channels: one label can gate many). Runs even on a
-                    // permission-denied handler result, matching the ChangeRole
-                    // precedent (reconcile is coordinator-gated + idempotent).
+                    // Delete/update/assign/unassign can each shift who qualifies for a label-gated
+                    // channel, so reconcile every channel's subgroups after each: one label can
+                    // gate many. Runs even on a permission-denied result; reconcile is idempotent.
                     NodeCommand::DeleteLabel { server_id, label_id } => {
                         let sid = server_id.clone();
                         let handled = sync_handler::handle_label_op(
@@ -1886,12 +1760,9 @@ async fn run_event_loop(
                                 let messages_result = if let Some(before_ts) = before_timestamp {
                                     store.get_channel_messages_before(&server_id, &channel_id, before_ts, limit)
                                 } else {
-                                    // Initial request: LATEST messages, mirroring the
-                                    // remote responder. `messages_since(0)` returned the
-                                    // OLDEST 50, so an owner cold-starting into their own
-                                    // public channel landed at the START of history (the
-                                    // shared member store usually masked it — until the
-                                    // member pane had loaded, the wrong window showed).
+                                    // Initial request: LATEST messages, mirroring the remote responder.
+                                    // `messages_since(0)` returns the OLDEST 50, which lands an owner cold-starting
+                                    // into their own public channel at the START of history.
                                     store.get_channel_messages_before(&server_id, &channel_id, i64::MAX, limit)
                                 };
                                 if let Ok(msgs) = messages_result {
@@ -2157,7 +2028,7 @@ async fn run_event_loop(
                         let _ = ws_cmd_tx.send(super::ws_client::WsCommand::ReleaseNickname);
                     }
 
-                    // -- Multi-device linking (Step 4) --
+                    // -- Multi-device linking --
                     NodeCommand::ClaimLinkCode { code } => {
                         pending_link_code = Some(code.clone());
                         link_handler::handle_claim_link_code(&ws_cmd_tx, &code);
@@ -2278,33 +2149,21 @@ async fn run_event_loop(
                             room_code: server_id.clone(),
                             topics: channel_ids.clone(),
                         });
-                        // Relay offline catch-up on CHANNEL OPEN (safety net for
-                        // the connect-time sweep): refresh the ring registration
-                        // (covers channels created since anyone last registered)
-                        // and replay any ring this connection hasn't pulled yet.
-                        // Dedup-by-message_id makes a re-pull harmless.
-                        // The watermark lookup is awaited on the CrdtStore actor,
-                        // so gather the channel list and DROP the `server_states`
-                        // borrow before crossing the await.
+                        // Relay offline catch-up on CHANNEL OPEN, the safety net for the connect-time
+                        // sweep: refresh the ring registration (covering channels created since anyone
+                        // last registered) and replay any ring this connection has not pulled.
+                        // Dedup-by-message_id makes a re-pull harmless. The watermark lookup awaits the
+                        // CrdtStore actor, so the channel list is gathered and the `server_states`
+                        // borrow dropped before the await.
                         //
-                        // ONLY once we are actually in the room. The relay drops
-                        // both `set_topic_buffer` and `topic_catchup` on the floor
-                        // when the sender is not a member of the room, and says
-                        // nothing about it — while `relay_catchup_done` would have
-                        // recorded the pull as done, so the connect-time sweep
-                        // skips that channel and NOTHING replays its ring for the
-                        // rest of the connection. Dart subscribes the moment the
-                        // shell picks a channel, which on a cold start is well
-                        // before the socket has authenticated and joined, so this
-                        // was the normal path, not a rare race: a fleet log shows
-                        // `Catch-up request (channel open) .../general` landing
-                        // ahead of `Room ... members`, and no `(connect)` request
-                        // for that channel afterwards. `ws_room_peers` holds an
-                        // entry from the moment the relay answers a join with its
-                        // member list (empty room included) and is cleared on
-                        // disconnect, so it says exactly "this socket is in that
-                        // room". Not being in it yet is not a miss: the
-                        // `RoomMembers` arm runs the same catch-up on arrival.
+                        // ONLY once we are actually in the room. The relay silently drops both
+                        // `set_topic_buffer` and `topic_catchup` from a non-member, while
+                        // `relay_catchup_done` would record the pull as done, so the connect-time sweep
+                        // skips that channel and nothing replays its ring for the rest of the
+                        // connection. Dart subscribes the moment the shell picks a channel, which on a
+                        // cold start is well before the socket has joined, so this was the normal path.
+                        // `ws_room_peers` holds an entry from the moment the relay answers a join with
+                        // its member list, so it says exactly "this socket is in that room".
                         let in_room = ws_room_peers.contains_key(&server_id);
                         let fresh_channels: Vec<String> = match server_states.get(&server_id) {
                             Some(state) if in_room && state.relay_catchup_secs() > 0 => {
@@ -2362,7 +2221,7 @@ async fn run_event_loop(
                         ).await { continue; }
                     }
 
-                    // -- Storage pledge (Phase 4) --
+                    // -- Storage pledge --
                     NodeCommand::SetStoragePledge { server_id, pledge_bytes } => {
                         sync_handler::handle_set_storage_pledge(
                             &mut server_states, &event_tx, &ws_cmd_tx,
@@ -2372,7 +2231,7 @@ async fn run_event_loop(
                         ).await;
                     }
 
-                    // -- Vault shard distribution (Phase 4) --
+                    // -- Vault shard distribution --
                     NodeCommand::VaultDownloadFile { server_id, content_id } => {
                         vault_ops::handle_vault_download_file(
                             &mut server_states, &mut pending_vault_downloads,
@@ -2447,7 +2306,7 @@ async fn run_event_loop(
                         ).await;
                     }
 
-                    // -- File sharing (Phase 3.5) --
+                    // -- File sharing --
                     NodeCommand::SendFile(box_payload) => {
                         let SendFilePayload { peer_id, server_id, channel_id, file_path, message_id, message_text, vthumb, override_width, override_height, share_ref, voice, poster } = *box_payload;
                         file_handler::handle_send_file(
@@ -2496,10 +2355,9 @@ async fn run_event_loop(
                     }
 
                     NodeCommand::RequestFile { file_id, peer_id: peer_id_str, chunks } => {
-                        // Explicit pull: the response header must pass the size
-                        // cap and the auto-download gate (issue #41). The ask
-                        // table re-stamps both on every retry, but the rowless
-                        // path below it never reaches the table, so stamp here.
+                        // Explicit pull: the response header must pass the size cap and the
+                        // auto-download gate (issue #41). The ask table re-stamps both on every retry,
+                        // but the rowless path below never reaches the table, so stamp here.
                         requested_file_receipts.insert(file_id.clone(), std::time::Instant::now());
                         declined_file_ids.remove(&file_id);
                         file_handler::handle_request_file(
@@ -2516,10 +2374,9 @@ async fn run_event_loop(
                     }
 
                     NodeCommand::CancelFileRequest { file_id } => {
-                        // Stop waiting: the queued ask and its explicit-pull
-                        // receipt go together, so an answer already on its way
-                        // faces the size cap and the auto-download gate as the
-                        // unsolicited push it now is.
+                        // Stop waiting: the queued ask and its explicit-pull receipt go together, so an
+                        // answer already on its way faces the size cap and the auto-download gate as
+                        // the unsolicited push it now is.
                         hollow_log!("[HOLLOW-FILE] Cancelling the pending ask for {file_id}");
                         file_asks::cancel(
                             &mut pending_file_asks,
@@ -2529,10 +2386,9 @@ async fn run_event_loop(
                     }
 
                     NodeCommand::RequestPublicFile { server_id, file_id, peer_hint } => {
-                        // Guest download: pick ONE live room peer (hint first —
-                        // usually the message sender; else any other peer, which
-                        // may be another guest that simply won't answer — the UI
-                        // retries). Mirrors the emote-rail peer pick.
+                        // Guest download: pick ONE live room peer, the hint first (usually the message
+                        // sender), else any other peer, which may be another guest that will not
+                        // answer. Mirrors the emote-rail peer pick.
                         let target = ws_room_peers.get(&server_id).and_then(|peers| {
                             peer_hint
                                 .filter(|h| peers.contains(h))
@@ -2562,7 +2418,7 @@ async fn run_event_loop(
                         }
                     }
 
-                    // -- WebRTC commands (Phase 5A) --
+                    // -- WebRTC commands --
                     NodeCommand::WebRtcPeerConnected { peer_id } => {
                         voice_handler::handle_webrtc_peer_connected(
                             peer_id, &mut webrtc_peers, &mut gossip_overlays,
@@ -2636,7 +2492,7 @@ async fn run_event_loop(
                         ).await;
                     }
 
-                    // -- Voice call signaling (Phase 5B) --
+                    // -- Voice call signaling --
                     NodeCommand::CallSendSignal { peer_id, signal_type, payload } => {
                         last_message_traffic = std::time::Instant::now();
                         voice_handler::handle_call_send_signal(
@@ -2648,7 +2504,7 @@ async fn run_event_loop(
                         ).await;
                     }
 
-                    // -- Voice channel commands (Phase 5C) --
+                    // -- Voice channel commands --
                     NodeCommand::VoiceChannelJoin { server_id, channel_id } => {
                         voice_handler::handle_voice_channel_join(
                             server_id, channel_id,
@@ -2713,9 +2569,8 @@ async fn run_event_loop(
                         ).await;
                     }
 
-                    // Deliberately NOT NodeCommand::JoinRoom — that arm mutates
-                    // `active_room` and fires `RoomCleared` (DM-conversation-pane
-                    // semantics that would wipe the open chat). The fwd room is a
+                    // Deliberately NOT NodeCommand::JoinRoom: that arm mutates `active_room` and
+                    // fires `RoomCleared`, which would wipe the open DM chat. The fwd room is a
                     // pure transport join.
                     NodeCommand::JoinForwarderRoom { forwarder_peer_id } => {
                         let _ = ws_cmd_tx.send(super::ws_client::WsCommand::JoinRoom {
@@ -2890,7 +2745,7 @@ async fn run_event_loop(
                         ).await;
                     }
 
-                    // -- Gossip relay tree commands (Phase 5D) --
+                    // -- Gossip relay tree commands --
                     NodeCommand::WebRtcPingReport { peer_id, rtt_ms } => {
                         voice_handler::handle_webrtc_ping_report(
                             peer_id, rtt_ms, &mut gossip_overlays,
@@ -2917,11 +2772,9 @@ async fn run_event_loop(
                     }
 
                     NodeCommand::WebRtcGossipOpReceived { sender_peer_id, payload } => {
-                        // Tier 2 (large-server scaling): a CRDT op arrived over the
-                        // WebRTC mesh instead of the relay. Dedup by broadcast_id,
-                        // then ingest through the EXACT same validated path as a
-                        // relay CrdtOpBroadcast (op.author permission matrix, op_log
-                        // dedup, ServerUpdated events, mesh re-flood on op-newness).
+                        // A CRDT op arrived over the WebRTC mesh instead of the relay. Dedup by
+                        // broadcast_id, then ingest through the EXACT same validated path as a relay
+                        // CrdtOpBroadcast, re-flooding the mesh only on op-newness.
                         if let Some((server_id, op_json)) =
                             super::gossip_relay::accept_gossip_op(&mut gossip_overlays, &payload)
                         {
@@ -3059,10 +2912,9 @@ async fn run_event_loop(
                         }
                     }
 
-                    // TEST-ONLY: snapshot live in-memory MLS/Olm state for the
-                    // multi-node harness (these managers are owned by this loop and
-                    // are otherwise unreadable from a TestNode). Reads the SAME live
-                    // state the production paths use — no persisted snapshot lag.
+                    // TEST-ONLY: snapshot live in-memory MLS/Olm state for the multi-node harness.
+                    // These managers are owned by this loop and unreadable from a TestNode; this
+                    // reads the SAME live state the production paths use, with no snapshot lag.
                     #[cfg(test)]
                     NodeCommand::DebugSnapshot { reply } => {
                         let mut snap = super::types::DebugSnapshotReply::default();
@@ -3114,14 +2966,11 @@ async fn run_event_loop(
                         // (media legs survive the signaling blip).
                         #[cfg(all(feature = "forwarder", not(any(target_os = "android", target_os = "ios"))))]
                         embedded_fwd.on_ws_connected(&ws_cmd_tx);
-                        // Join personal inbox room (for receiving friend requests
-                        // from strangers). Carry an ownership PROOF: a request for
-                        // an offline stranger is addressed to their MASTER, which
-                        // no socket authenticates as, so the relay buffers it under
-                        // the master and only replays it to a device that proves it
-                        // owns that inbox. Without the proof this join still works
-                        // exactly as before, it just collects nothing from the
-                        // mailbox — which is the pre-async-friending behaviour.
+                        // Join the personal inbox room, carrying an ownership PROOF: a request for an
+                        // offline stranger is addressed to their MASTER, which no socket authenticates
+                        // as, so the relay buffers it under the master and only replays it to a device
+                        // that proves it owns that inbox. Without the proof the join still works, it
+                        // just collects nothing from the mailbox.
                         {
                             let inbox_room = format!("inbox:{}", local_peer_str);
                             match crypto_handler::build_local_device_list(
@@ -3140,14 +2989,11 @@ async fn run_event_loop(
                                 }
                             }
                         }
-                        // ASYNC FRIENDING: re-deposit every still-pending outgoing
-                        // request into the target's master-keyed mailbox. A target we
-                        // have no DEVICE for is unreachable by any targeted send, so
-                        // the presence drains never fire for them — the mailbox is
-                        // the only leg that reaches someone who is simply not here.
-                        // Re-depositing every connect is cheap and idempotent (the
-                        // receiver dedups on its friends row) and it is what makes
-                        // the request survive a relay restart clearing the buffer.
+                        // ASYNC FRIENDING: re-deposit every still-pending outgoing request into the
+                        // target's master-keyed mailbox. A target we hold no DEVICE for is unreachable
+                        // by any targeted send, so the presence drains never fire for them and the
+                        // mailbox is the only leg that reaches someone who is not here. Cheap and
+                        // idempotent, and it survives a relay restart clearing the buffer.
                         {
                             let targets: Vec<(String, i64)> = pending_friend_requests
                                 .iter()
@@ -3167,24 +3013,20 @@ async fn run_event_loop(
                             }
                         }
 
-                        // Auto-join rooms for all servers we're a member of.
                         for server_id in server_states.keys() {
                             let _ = ws_cmd_tx.send(super::ws_client::WsCommand::JoinRoom {
                                 room_code: server_id.clone(),
                             });
                         }
-                        // …and for every server we are still WAITING to join.
-                        // A parked join is not a membership, so the loop above
-                        // misses it, and being in that room is what makes both
-                        // legs of the answer reachable: the relay replays the
-                        // admitting member's buffered snapshot on the room join,
-                        // and the `~join` ring catch-up is gated on membership.
+                        // ...and for every server we are still WAITING to join. A parked join is not a
+                        // membership, so the loop above misses it, and being in that room is what makes
+                        // both legs of the answer reachable: the relay replays the admitter's buffered
+                        // snapshot on the room join, and the `~join` catch-up is gated on membership.
                         for server_id in pending_server_joins.keys() {
                             let _ = ws_cmd_tx.send(super::ws_client::WsCommand::JoinRoom {
                                 room_code: server_id.clone(),
                             });
                         }
-                        // Auto-join DM rooms for all accepted friends.
                         {
                             if let Ok(store) = crate::storage::MessageStore::open(&db_path, &db_passphrase) {
                                 if let Ok(friends) = store.load_friends(None) {
@@ -3198,7 +3040,6 @@ async fn run_event_loop(
                                 }
                             }
                         }
-                        // Re-join guest rooms for public channel browsing.
                         for guest_sid in guest_rooms.iter() {
                             let _ = ws_cmd_tx.send(super::ws_client::WsCommand::JoinRoom {
                                 room_code: guest_sid.clone(),
@@ -3213,17 +3054,14 @@ async fn run_event_loop(
                                 });
                             }
                         }
-                        // Verify local shard integrity on startup. Removes DB records
-                        // for shards whose files are missing or corrupt.
+                        // Verify local shard integrity on startup, removing DB records for shards whose
+                        // files are missing or corrupt.
                         //
-                        // Gated on having servers: with none, the loop below has
-                        // nothing to verify, yet opening a `ContentStore` (a SEPARATE
-                        // SQLCipher connection that runs its own `PRAGMA key` page-1
-                        // check) while the MessageStore/CrdtStore/CryptoStore
-                        // connections are concurrently live raced the codec and
-                        // logged a harmless `hmac check failed for pgno=1` on every
-                        // connect. A node in ≥1 server has real shard data (page 1
-                        // exists) so the legitimate open doesn't race.
+                        // Gated on having servers: opening a `ContentStore` (a SEPARATE SQLCipher
+                        // connection running its own page-1 `PRAGMA key` check) while the other
+                        // connections are concurrently live raced the codec and logged a harmless
+                        // `hmac check failed for pgno=1` on every connect. A node in a server has real
+                        // shard data, so the legitimate open does not race.
                         if !server_states.is_empty() {
                             let vault_dir = crate::identity::data_dir().unwrap_or_default().join("vault");
                             if let Ok(cs) = crate::vault::content_store::ContentStore::open(&db_path, &db_passphrase, &vault_dir) {
@@ -3239,7 +3077,6 @@ async fn run_event_loop(
                                 }
                             }
                         }
-                        // Re-register push token + channel push prefs on reconnect.
                         if let Some((ref tok, ref plat)) = push_token {
                             let _ = ws_cmd_tx.send(super::ws_client::WsCommand::RegisterPushToken {
                                 token: tok.clone(),
@@ -3268,10 +3105,9 @@ async fn run_event_loop(
                         // what the dead connection told us is dropped.
                         file_asks::reset_on_disconnect(&mut pending_file_asks);
                         pending_public_file_requests.clear();
-                        // Explicit-pull receipts die with the socket (the pending
-                        // request can't be answered on a new connection anyway);
-                        // declined_file_ids intentionally survives — it reflects the
-                        // auto-download setting, not connection state.
+                        // Explicit-pull receipts die with the socket, since the pending request cannot
+                        // be answered on a new connection. `declined_file_ids` deliberately survives:
+                        // it reflects the auto-download setting, not connection state.
                         requested_file_receipts.clear();
                         // Advertised auto-download prefs are connection state:
                         // peers re-advertise on rejoin (issue #41 pre-negotiation).
@@ -3283,20 +3119,17 @@ async fn run_event_loop(
                         key_request_in_flight.clear();
                         key_bundle_sent_to.clear();
                         mls_bootstrap_requested.clear();
-                        // The grace waits for a Welcome that was in flight on the
-                        // socket that just died. Dropping it together with the
-                        // throttle keeps the pair consistent: the new socket
-                        // re-bootstraps through the ordinary paths instead of
-                        // through a sweep holding a stale deadline.
+                        // The grace waits for a Welcome that was in flight on the socket that just
+                        // died. Dropping it with the throttle keeps the pair consistent: the new socket
+                        // re-bootstraps through the ordinary paths, not a sweep on a stale deadline.
                         mls_welcome_grace.clear();
                         mls_epoch_hint_cooldown.clear();
                         if !pending_messages.is_empty() {
                             hollow_log!("[HOLLOW-WS] Keeping {} pending message queues for delivery after reconnect", pending_messages.len());
                         }
-                        // Clean up in-progress WS stream transfers.
-                        // Resumption infrastructure exists (offset field in FileRequest,
-                        // seek support in ws_stream_send) but transfer state is in-memory
-                        // only — persistence needed for cross-restart resumption.
+                        // Clean up in-progress WS stream transfers. Resumption infrastructure exists
+                        // (the FileRequest offset, seek support in ws_stream_send) but transfer state
+                        // is in-memory only, so cross-restart resumption would need persistence.
                         if !pending_ws_transfers.is_empty() {
                             hollow_log!("[HOLLOW-WS] Cleaning up {} in-progress WS transfers", pending_ws_transfers.len());
                             for (id, state) in pending_ws_transfers.drain() {
@@ -3345,19 +3178,14 @@ async fn run_event_loop(
                             &room, &peer_id, &local_peer_str, &device_peer_id,
                         ).await;
 
-                        // Media-forwarder control-plane room: run the MINIMAL path
-                        // (Olm session + queued fwd envelope drain) and skip the whole
-                        // discovery cascade. A forwarder discards every profile /
-                        // sync / friend / MLS / DM frame we could send it, so the
-                        // cascade was ~45 junk frames per join — pure join-burst
-                        // bandwidth and journal noise at the forwarder, and the burst
-                        // that used to drain the (now removed) fwd control-plane token
-                        // bucket and eat the last large frame behind it.
+                        // Media-forwarder control-plane room: run the MINIMAL path (Olm session plus a
+                        // queued fwd envelope drain) and skip the discovery cascade. A forwarder
+                        // discards every profile, sync, friend, MLS and DM frame we could send it, so
+                        // the cascade was ~45 junk frames per join.
                         //
-                        // CRITICAL: this must NOT touch `synced_peers`. That set is
-                        // GLOBAL, not per-room — inserting here would burn the `is_new`
-                        // flag so a LATER join of a genuinely shared room would skip
-                        // profile/sync forever (a silent discovery blackhole).
+                        // CRITICAL: this must NOT touch `synced_peers`. That set is GLOBAL, not
+                        // per-room, so inserting here burns the `is_new` flag and a LATER join of a
+                        // genuinely shared room skips profile and sync forever.
                         let is_fwd_room = is_forwarder_room(&room);
                         if is_fwd_room && peer_id != local_peer_str && peer_id != device_peer_id {
                             ensure_olm_session_and_drain(
@@ -3380,7 +3208,6 @@ async fn run_event_loop(
                             if let Some(pool) = recovery_pool_state.as_ref() {
                                 if room == pool.room_code() && peer_id != local_peer_str && peer_id != device_peer_id {
                                     hollow_log!("[RECOVERY-POOL] Peer {peer_id} joined — sending our inventory");
-                                        && social::holds_accepted_friend(&db_path, &db_passphrase, &joined_master)
                                     if let Some(our_inv) = pool.members.get(&local_peer_str) {
                                         let welcome = HavenMessage::RecoveryWelcome {
                                             manifest_ids: our_inv.manifest_ids.clone(),
@@ -3407,34 +3234,24 @@ async fn run_event_loop(
                             ).await;
                         }
 
-                        // Trigger event-driven vault rebalance for this server room.
                         if server_states.contains_key(&room) {
                             rebalance_pending.insert(room.clone());
                         }
 
-                        // Voice presence: tell a peer that just (re)appeared in this
-                        // room which of its voice channels we are in.
+                        // Voice presence: tell a peer that just (re)appeared in this room which of its
+                        // voice channels we are in.
                         //
-                        // DELIBERATELY OUTSIDE the `is_new` guard below, which is
-                        // where this used to live. `synced_peers` means "have we
-                        // synced with this peer at all this session", and it is NOT
-                        // cleared when a peer's socket dies: the relay only broadcasts
-                        // PeerLeft for a CLEAN leave, so a peer that dropped and came
-                        // back is `is_new == false` and skips the entire cascade. That
-                        // is precisely the peer that needs this.
+                        // DELIBERATELY OUTSIDE the `is_new` guard below. `synced_peers` means "have we
+                        // synced with this peer at all this session" and is NOT cleared when a peer's
+                        // socket dies, because the relay only broadcasts PeerLeft for a CLEAN leave, so
+                        // a peer that dropped and came back is `is_new == false` and skips the cascade.
+                        // That is exactly the peer that needs this: `WsEvent::Disconnected` purges every
+                        // REMOTE participant from `voice_channel_participants`, that set gates EVERY
+                        // inbound VC signal, and nothing else refills it, so the reconnecting side
+                        // blackholes the offers its own peer sends while its own requests still arrive.
                         //
-                        // Why it is load-bearing: `WsEvent::Disconnected` purges every
-                        // REMOTE participant from `voice_channel_participants`, and
-                        // that set gates EVERY inbound VC signal. Nothing else refills
-                        // it, so the reconnecting side blackholes the offers its own
-                        // peer is sending while its own requests still arrive.
-                        // Field-caught 2026-08-27: the VM asked for a leg rebuild four
-                        // times, the host dialed four times, and the VM dropped all
-                        // four as `BLOCKED VC SDP offer from non-participant`.
-                        //
-                        // One small plaintext frame, idempotent at the receiver (a Set
-                        // insert), and plaintext because a reconnecting peer's MLS
-                        // epoch is very likely stale.
+                        // One small plaintext frame, idempotent at the receiver, and plaintext because
+                        // a reconnecting peer's MLS epoch is very likely stale.
                         if !is_fwd_room && peer_id != local_peer_str && peer_id != device_peer_id {
                             for (vc_key, vc_peers) in voice_channel_participants.iter() {
                                 if !vc_peers.contains(&device_peer_id)
@@ -3461,11 +3278,10 @@ async fn run_event_loop(
                             }
                         }
 
-                            // Update gossip overlay: add this peer and maybe connect.
-                            // Multi-device: the relay reports US under our DEVICE id, which
-                            // differs from local_peer_str (= master). Exclude both, else a
-                            // node key-exchanges / WebRTCs with its OWN device presence
-                            // (endless MAC-mismatch re-key — the "VM fights itself" bug).
+                            // Update the gossip overlay: add this peer and maybe connect. Multi-device: the
+                            // relay reports US under our DEVICE id, which differs from local_peer_str (the
+                            // master). Exclude both, or the node key-exchanges and WebRTCs with its OWN
+                            // device presence, an endless MAC-mismatch re-key.
                             if peer_id != local_peer_str && peer_id != device_peer_id {
                                 if let Some(overlay) = gossip_overlays.get_mut(&room) {
                                     if let Some(new_neighbor) = overlay.add_known_peer(&peer_id) {
@@ -3488,12 +3304,10 @@ async fn run_event_loop(
                                     },
                                 }).await;
 
-                                // Drain pending friend requests for this peer. The request is
-                                // keyed by the TARGET'S MASTER id (the friend-list/UI key), but
-                                // the relay reports DEVICE ids in rooms — so match the joining
-                                // device to a queued request by resolving device→master (a fresh
-                                // target we've never linked resolves to itself, so a single-device
-                                // peer still matches its own id). Deliver to the concrete device.
+                                // Drain pending friend requests for this peer. The request is keyed by the
+                                // TARGET'S MASTER id but the relay reports DEVICE ids, so match the joining
+                                // device by resolving device to master (a fresh target we never linked resolves
+                                // to itself). Deliver to the concrete device.
                                 let pending_target = {
                                     let joined_master = super::resolver::resolve(&peer_id);
                                     if pending_friend_requests.contains_key(&peer_id) {
@@ -3507,10 +3321,9 @@ async fn run_event_loop(
                                 if let Some(target_key) = pending_target {
                                     if let Some(requested_at) = pending_friend_requests.remove(&target_key) {
                                         hollow_log!("[HOLLOW-FRIENDS] Peer {peer_id} appeared (target {target_key}), sending queued friend request");
-                                        // Same bundled message the mailbox holds:
-                                        // `build_friend_request` reuses the cached
-                                        // bundle, so a live drain and a deposit are
-                                        // the same request and the target dedups.
+                                        // The same bundled message the mailbox holds: `build_friend_request` reuses
+                                        // the cached bundle, so a live drain and a deposit are the same request and
+                                        // the target dedups.
                                         let req_msg = social::build_friend_request(
                                             &mut olm, &crypto_store, &master_keypair,
                                             &device_keypair, &device_peer_id,
@@ -3530,12 +3343,10 @@ async fn run_event_loop(
                                     }
                                 }
 
-                                // Drain pending friend removals for this peer. The
-                                // tombstone is keyed by the friend's MASTER (the
-                                // friend-list key), but the relay reports DEVICE ids
-                                // — resolve the joining device→master to match (a
-                                // single-device peer resolves to itself). Deliver the
-                                // FriendRemove to the concrete device that appeared.
+                                // Drain pending friend removals for this peer. The tombstone is keyed by the
+                                // friend's MASTER but the relay reports DEVICE ids, so resolve the joining
+                                // device to its master to match (a single-device peer resolves to itself).
+                                // Deliver the FriendRemove to the concrete device that appeared.
                                 {
                                     let joined_master = super::resolver::resolve(&peer_id);
                                     let removal_key = if pending_friend_removals.contains(&peer_id) {
@@ -3558,12 +3369,9 @@ async fn run_event_loop(
                                     }
                                 }
 
-                                // (Re)deliver a queued FriendAccept to the requester. The
-                                // accept can race the requester's DM-room join (it isn't in
-                                // our room yet when we click Accept) or the requester may
-                                // have been offline — so we send the FriendAccept to its
-                                // device now that it has appeared. Idempotent (receiver
-                                // re-saves "accepted"); the entry is removed on delivery so
+                                // (Re)deliver a queued FriendAccept to the requester. The accept can race the
+                                // requester's DM-room join, or the requester may have been offline. Idempotent
+                                // (the receiver re-saves "accepted"), and the entry is removed on delivery so
                                 // it fires at most once per friend per session.
                                 {
                                     let joined_master = super::resolver::resolve(&peer_id);
@@ -3572,6 +3380,7 @@ async fn run_event_loop(
                                         .or_else(|| pending_friend_accepts.remove(&peer_id));
                                     if let Some(stamp) = queued
                                         && !super::blocklist::is_blocked(&peer_id)
+                                        && social::holds_accepted_friend(&db_path, &db_passphrase, &joined_master)
                                     {
                                         hollow_log!("[HOLLOW-FRIENDS] Peer {peer_id} appeared (master {joined_master}), (re)sending FriendAccept");
                                         social::send_friend_accept(
@@ -3581,7 +3390,6 @@ async fn run_event_loop(
                                 }
 
                                 if is_new {
-                                    // Send our profile (with invisible flag) to the new peer.
                                     social::send_own_profile_to_peer(
                                         &ws_cmd_tx, &ws_room_peers,
                                         &local_peer_str, &master_keypair, &device_peer_id, &peer_id,
@@ -3600,15 +3408,11 @@ async fn run_event_loop(
                                         );
                                     }
 
-                                    // Multi-device (Phase 6): a peer in OUR OWN inbox room
-                                    // (`inbox:{master}`) MIGHT be our own other device — but the
-                                    // friend-request protocol makes a STRANGER (the requester) join
-                                    // our inbox to deliver, so bare room membership is NOT proof
-                                    // (that mis-merged strangers as siblings). Require a cryptographic
-                                    // same-identity proof: a sibling we already resolve to ourselves
-                                    // runs the convergence machinery directly; an UNPROVEN inbox peer
-                                    // is challenged to sign a nonce with our SHARED MASTER key (only
-                                    // a real sibling can) before any merge/resolver/snapshot.
+                                    // A peer in OUR OWN inbox room MIGHT be our own other device, but the
+                                    // friend-request protocol makes a STRANGER join our inbox to deliver, so bare
+                                    // room membership is NOT proof and taking it mis-merges strangers as siblings.
+                                    // A sibling we already resolve to ourselves runs the convergence directly; an
+                                    // UNPROVEN inbox peer must first sign a nonce with our SHARED MASTER key.
                                     let own_inbox = format!("inbox:{}", local_peer_str);
                                     if room == own_inbox && peer_id != device_peer_id {
                                         if super::resolver::same_identity(&peer_id, &local_peer_str) {
@@ -3645,13 +3449,11 @@ async fn run_event_loop(
                                         ).await;
                                     }
 
-                                    // CRDT sync + message sync for shared servers.
-                                    // Members are master-keyed; `peer_id` is a DEVICE —
-                                    // match by identity so a multi-device member's device
-                                    // still triggers sync + MLS bootstrap.
+                                    // CRDT sync and message sync for shared servers. Members are master-keyed and
+                                    // `peer_id` is a DEVICE, so match by identity: a multi-device member's device
+                                    // still triggers sync and MLS bootstrap.
                                     for (sid, state) in server_states.iter() {
                                         if state.members.keys().any(|k| super::resolver::same_identity(&peer_id, k)) {
-                                            // CRDT state sync via MLS.
                                             let our_vector = StateVector::from_server_state(state);
                                             if let Ok(sv_json) = serde_json::to_string(&our_vector) {
                                                 // Always use plaintext for post-reconnection SyncReq —
@@ -3668,7 +3470,6 @@ async fn run_event_loop(
                                                 );
                                             }
 
-                                            // Channel message sync via coordinator.
                                             {
                                                 if let Ok(store) = crate::storage::MessageStore::open(&db_path, &db_passphrase) {
                                                     let channels_ts: Vec<(String, i64)> = state.channels.keys()
@@ -3722,18 +3523,15 @@ async fn run_event_loop(
                                         }
                                     }
 
-                                    // DM sync. High-water keyed by the friend's MASTER
-                                    // (the conversation key), not the raw device id the
-                                    // relay reported — else a multi-device friend's
+                                    // DM sync. High-water keyed by the friend's MASTER (the conversation key),
+                                    // not the raw device id the relay reported, or a multi-device friend's
                                     // timestamp lookup misses and we mis-page the sync.
                                     {
                                         if let Ok(store) = crate::storage::MessageStore::open(&db_path, &db_passphrase) {
                                             let convo = super::resolver::resolve(&peer_id);
-                                            // Multi-device peer-fallback: if WE have a
-                                            // sibling, ask for BOTH directions from our
-                                            // high-water-mark across both directions —
-                                            // so a friend re-serves the messages we sent
-                                            // from another (possibly-offline) device.
+                                            // Multi-device peer-fallback: if WE have a sibling, ask for BOTH
+                                            // directions, so a friend re-serves the messages we sent from another,
+                                            // possibly offline, device.
                                             let multi_device =
                                                 !super::resolver::devices_for(&master_peer_str).is_empty();
                                             // Lookback overlap — mid-deduped
@@ -3780,35 +3578,21 @@ async fn run_event_loop(
                                     hollow_log!("[HOLLOW-CRDT] Sent pending join request to {peer_id} for {room}");
                                 }
 
-                                // DM-room co-presence re-key (outside is_new — the peer was
-                                // already met in the inbox so is_new is false here). FIX for the
-                                // friend-handshake Olm wedge: a friend-request requester joins
-                                // the DM room, joins the target inbox to deliver, then LEAVES the
-                                // inbox — and its DM-room join may not have reached the accepter's
-                                // ws_room_peers yet when the accepter sends its KeyBundle reply.
-                                // That bundle then targets a peer in NO shared room and is
-                                // SILENTLY DROPPED (send_message_to_peer → ws_room_for_peer = None),
-                                // so the lower-id side never builds an outbound session and the
-                                // higher-id side defers forever (only the 30s sweep healed it).
-                                // When the DURABLE DM room becomes mutually populated, re-issue a
-                                // KeyRequest — bypassing the in-flight freshness gate, because a
-                                // room transition is exactly the dropped-frame event the sweep was
-                                // meant to catch, but at sub-second latency. KeyRequest is
-                                // idempotent (the receiver rebuilds only a stale/unconfirmed half;
-                                // a confirmed session under cooldown is preserved) and the
-                                // device-vs-device glare tiebreaker still arbitrates who creates
-                                // the outbound session. `local_peer_str` is the master, so this is
-                                // the pure f(masters) DM room (resolver stays OUTSIDE dm_room_code).
-                                // Siblings meet in inbox:{master}, never in dm_room_code(m,m), so
-                                // this never fires for them; server members meet in the server
-                                // room, not here; strangers/guests share neither → no key spam.
-                                // Gate on `!has_session` (NO session object), not
-                                // `!has_confirmed_session`: the wedged/deferred side holds no
-                                // session at all, so this targets exactly it. A side that already
-                                // built an unconfirmed OUTBOUND session has a handshake in flight —
-                                // re-keying it would tear that down (the KeyRequest handler removes
-                                // a held session) and cause needless glare churn. Skipping it lets
-                                // the in-progress handshake finish; only the truly-stuck side kicks.
+                                // DM-room co-presence re-key, outside `is_new` because the peer was already
+                                // met in the inbox. A friend-request requester joins the DM room, joins the
+                                // target inbox to deliver, then LEAVES the inbox, and its DM-room join may not
+                                // have reached the accepter's `ws_room_peers` when the accepter sends its
+                                // KeyBundle; that bundle then targets a peer in no shared room and is SILENTLY
+                                // DROPPED, so the lower-id side never builds an outbound session. When the
+                                // DURABLE DM room becomes mutually populated, re-issue a KeyRequest, bypassing
+                                // the in-flight freshness gate: a room transition is exactly the dropped-frame
+                                // event the 30s sweep was meant to catch, at sub-second latency. KeyRequest is
+                                // idempotent and the glare tiebreaker still arbitrates who creates the session.
+                                // `local_peer_str` is the master, so this is the pure f(masters) DM room, which
+                                // siblings, server members and guests never share: no key spam.
+                                // Gate on `!has_session` (NO session object), never `!has_confirmed_session`:
+                                // the wedged side holds no session at all, while a side with an unconfirmed
+                                // OUTBOUND session has a handshake in flight that re-keying would tear down.
                                 if !olm.has_session(&peer_id)
                                     && room == dm_room_code(&local_peer_str, &super::resolver::resolve(&peer_id))
                                 {
@@ -3822,16 +3606,11 @@ async fn run_event_loop(
                             }
                     }
                     WsEvent::LeftRoom { room } => {
-                        // WE left this room: purge its frozen member snapshot from
-                        // the routing table. A self-left room receives no further
-                        // PeerLeft/RoomMembers, so a stale entry lives forever and
-                        // the flexible `ws_room_for_peer` first-match can route
-                        // targeted sends into it — the relay then drops them
-                        // (sender not in room), a silent one-way blackhole that
-                        // persists until restart. Field-hit 2026-08-07 twice, both
-                        // times right after a viewer's `fwd:` room detach: every
-                        // later VC signal to the sharer vanished ("Connecting to
-                        // screen share..." forever / lost screen_answer on revert).
+                        // WE left this room: purge its frozen member snapshot from the routing table.
+                        // A self-left room receives no further PeerLeft or RoomMembers, so a stale
+                        // entry lives forever and the flexible `ws_room_for_peer` first-match can
+                        // route targeted sends into it; the relay then drops them because the sender
+                        // is not in the room, a silent one-way blackhole that persists until restart.
                         if ws_room_peers.remove(&room).is_some() {
                             hollow_log!("[HOLLOW-WS] Left room {room} — purged its peer snapshot from routing");
                         }
@@ -3873,7 +3652,6 @@ async fn run_event_loop(
                             &event_tx, &room, &peer_id,
                         ).await;
 
-                        // Recovery pool: track member departure.
                         if room.starts_with("recovery:") {
                             if let Some(pool) = recovery_pool_state.as_mut() {
                                 if room == pool.room_code() && peer_id != local_peer_str {
@@ -3883,7 +3661,6 @@ async fn run_event_loop(
                                         server_id: pool.server_id.clone(),
                                         peer_id: peer_id.clone(),
                                     }).await;
-                                    // Update status.
                                     let status = pool.compute_status();
                                     let _ = event_tx.send(NetworkEvent::RecoveryPoolStatus {
                                         server_id: pool.server_id.clone(),
@@ -3902,7 +3679,6 @@ async fn run_event_loop(
                             rebalance_pending.insert(room.clone());
                         }
 
-                        // Update gossip overlay: remove peer and pick replacement if needed.
                         if let Some(overlay) = gossip_overlays.get_mut(&room) {
                             let (was_neighbor, replacement) = overlay.remove_known_peer(&peer_id);
                             if was_neighbor {
@@ -3913,7 +3689,6 @@ async fn run_event_loop(
                                 }
                             }
                         }
-                        // Clean up voice channel participants for this peer in this server room.
                         let vc_prefix = format!("{}:", room);
                         let vc_left: Vec<(String, String)> = voice_channel_participants.iter()
                             .filter(|(k, v)| k.starts_with(&vc_prefix) && v.contains(&peer_id))
@@ -3952,13 +3727,10 @@ async fn run_event_loop(
                                 peer_id: peer_id.clone(),
                             }).await;
                         } else {
-                            // The peer may be genuinely in those rooms — or they
-                            // may be STALE entries from a previous connection of
-                            // theirs (the relay never sends PeerLeft for rooms a
-                            // dead connection abandoned earlier). Re-join those
-                            // rooms: the relay answers with a fresh RoomMembers
-                            // snapshot, and the RoomMembers handler purges the
-                            // peer + emits the disconnect if they're truly gone.
+                            // The peer may genuinely be in those rooms, or they may be STALE entries
+                            // from a previous connection of theirs: the relay never sends PeerLeft for
+                            // rooms a dead connection abandoned. Re-join them, so the relay answers with
+                            // a fresh RoomMembers and that handler purges a peer who is truly gone.
                             hollow_log!("[HOLLOW-WS] Peer {peer_id} still listed in {} room(s) {:?} — refreshing membership", still_rooms.len(), still_rooms);
                             for r in still_rooms {
                                 let _ = ws_cmd_tx.send(super::ws_client::WsCommand::JoinRoom {
@@ -3970,31 +3742,25 @@ async fn run_event_loop(
                     WsEvent::RoomMembers { room, peers } => {
                         hollow_log!("[HOLLOW-WS] Room {room}: {} members", peers.len());
                         let local_peer = local_peer_str.to_string();
-                        // Exclude BOTH our master (local_peer) and our DEVICE id: the relay
-                        // lists us by our device id, so without this a node keeps its own
-                        // presence in ws_room_peers and key-exchanges / sends profile to
-                        // ITSELF (the "VM fights its own device id" loop).
+                        // Exclude BOTH our master (local_peer) and our DEVICE id: the relay lists us
+                        // by our device id, so without this a node keeps its own presence in
+                        // ws_room_peers and key-exchanges with ITSELF.
                         let room_set: std::collections::HashSet<String> = peers.iter()
                             .filter(|p| *p != &local_peer && p.as_str() != device_peer_id)
                             .cloned()
                             .collect();
-                        // RoomMembers is the relay's AUTHORITATIVE snapshot for
-                        // this room — peers in our old set but missing from it
-                        // are stale entries from a previous connection of
-                        // theirs (the relay only broadcasts PeerLeft for rooms
-                        // a connection is CURRENTLY in, so entries survive a
-                        // peer's reconnect cycle and pin them "online" forever).
+                        // RoomMembers is the relay's AUTHORITATIVE snapshot for this room, so peers
+                        // in our old set but missing from it are stale entries from a previous
+                        // connection: the relay only broadcasts PeerLeft for rooms a connection is
+                        // CURRENTLY in, so they survive a reconnect cycle and pin a peer "online".
                         let vanished: Vec<String> = ws_room_peers.get(&room)
                             .map(|old| old.difference(&room_set).cloned().collect())
                             .unwrap_or_default();
 
-                        // Media-forwarder control-plane room: presence bookkeeping
-                        // (the authoritative snapshot + the vanished purge below)
-                        // still runs — the embedded engine's tolerance depends on it —
-                        // but the whole discovery cascade is skipped. See the
-                        // PeerJoined arm for the rationale and the two "burn"
-                        // hazards this must not touch (`synced_peers` there,
-                        // `profile_broadcast_done` here).
+                        // Media-forwarder control-plane room: presence bookkeeping still runs,
+                        // because the embedded engine's tolerance depends on it, but the discovery
+                        // cascade is skipped. See the PeerJoined arm for the rationale and the two
+                        // one-shot flags this must not burn (`synced_peers`, `profile_broadcast_done`).
                         let is_fwd_room = is_forwarder_room(&room);
 
                         if !is_fwd_room {
@@ -4010,19 +3776,16 @@ async fn run_event_loop(
                         }
                         ws_room_peers.insert(room.clone(), room_set);
 
-                        // The authoritative roster is the FIRST moment after a
-                        // boot at which anyone is known to be reachable, and
-                        // the relay's offline ring replays messages before it
-                        // arrives. Any asset ask made against that replay had
-                        // nobody to ask; this is where it gets someone.
+                        // The authoritative roster is the FIRST moment after a boot at which
+                        // anyone is known to be reachable, and the relay's offline ring replays
+                        // messages before it arrives, so an ask made then finally gets someone.
                         emotes::retry_asks_in_room(
                             &ws_cmd_tx, &ws_room_peers, &mut pending_asset_asks,
                             &room, &local_peer_str,
                         );
-                        // Same for file pulls: after a reconnect the ask table
-                        // is full of holders that were unreachable on the old
-                        // socket, and this roster is the first moment anybody is
-                        // known to be reachable again.
+                        // Same for file pulls: after a reconnect the ask table is full of holders
+                        // that were unreachable on the old socket, and this roster is the first
+                        // moment anybody is known to be reachable again.
                         file_asks::retry_asks_in_room(
                             &ws_cmd_tx, &ws_room_peers, &server_states, &event_tx,
                             &mut pending_file_asks,
@@ -4061,13 +3824,11 @@ async fn run_event_loop(
                             if state.members.len() >= super::gossip::GOSSIP_ACTIVATION_THRESHOLD {
                                 let overlay = gossip_overlays.entry(room.clone())
                                     .or_insert_with(|| super::gossip::GossipOverlay::new(room.clone()));
-                                // Add all room members as known peers.
                                 for pid in &peers {
                                     if pid != &local_peer && pid.as_str() != device_peer_id {
                                         overlay.add_known_peer(pid);
                                     }
                                 }
-                                // If no neighbors selected yet, do initial selection.
                                 if overlay.neighbors.is_empty() {
                                     let total_webrtc = webrtc_peers.len();
                                     let initial = overlay.select_initial_neighbors(total_webrtc);
@@ -4080,32 +3841,22 @@ async fn run_event_loop(
                         }
 
                         // -- Relay offline catch-up (server-owner opt-in) --
-                        // Once per connection per server room: refresh the relay's
-                        // per-channel ring-buffer registration, then replay whatever
-                        // buffered while nobody was online. Replayed frames arrive as
-                        // ordinary topic messages (verify + dedup-by-message_id +
-                        // CRDT merge — idempotent with peer sync). Runs even when the
-                        // room has zero peers: that empty room is exactly the gap
-                        // this feature closes.
-                        // Gather the channel list first and drop the `server_states`
-                        // borrow: the watermark lookup is awaited on the CrdtStore
-                        // actor rather than opening a DB handle per channel here.
+                        // Once per connection per server room: refresh the relay's per-channel ring
+                        // registration, then replay whatever buffered while nobody was online.
+                        // Replayed frames arrive as ordinary topic messages, so verification,
+                        // dedup-by-message_id and CRDT merge make this idempotent with peer sync.
+                        // Runs even for a room with zero peers: that is exactly the gap it closes.
                         sync_handler::request_channel_catchups(
                             &ws_cmd_tx, &crdt_store, server_states.get(&room), &room,
                             &local_peer, &mut relay_catchup_done, "connect",
                         ).await;
 
                         // -- The JOIN ring (pending joins, rung 1) --
-                        // Read once per connection, by BOTH roles: a member
-                        // collects parked requests and other members'
-                        // resolutions, and a joiner collects the resolution
-                        // addressed to it. A joiner is not in `server_states`
-                        // at all, which is why this cannot ride the block
-                        // above. No `max_age`: unlike channel frames, a join
-                        // has no watermark and an old request is exactly the
-                        // one we want. Members never SUBSCRIBE to `~join` —
-                        // live joins stay on the unicast path, the ring is
-                        // read by catch-up only.
+                        // Read once per connection by BOTH roles: a member collects parked
+                        // requests and other members' resolutions, a joiner collects the
+                        // resolution addressed to it. A joiner is not in `server_states` at all,
+                        // which is why this cannot ride the block above. No `max_age`: a join has
+                        // no watermark and an old request is exactly the one we want.
                         {
                             let ring_wanted = server_states
                                 .get(&room)
@@ -4124,13 +3875,10 @@ async fn run_event_loop(
                             }
                         }
 
-                        // A still-parked join of OUR OWN re-deposits its copy,
-                        // but only on a 12h interval. The ring is 200 frames
-                        // shared by everyone joining this server, so a joiner
-                        // that flaps every minute would own it inside four
-                        // hours; the relay's fair share is the backstop, not
-                        // the design. The live re-send to present peers is
-                        // free and happens per peer below.
+                        // A still-parked join of OUR OWN re-deposits its copy, but only on a
+                        // 12h interval: the ring is 200 frames shared by everyone joining this
+                        // server, so a joiner that flaps every minute would own it within hours.
+                        // The live re-send to present peers is free and happens per peer below.
                         if let Some(p) = pending_server_joins.get_mut(&room) {
                             let now = super::types::now_ms();
                             if p.parked && now - p.last_deposited_at >= super::types::REDEPOSIT_INTERVAL_MS {
@@ -4158,15 +3906,13 @@ async fn run_event_loop(
                             }
                         }
 
-                        // On first RoomMembers, broadcast our profile to all rooms.
-                        // This ensures peers who were online while we were offline get our latest profile.
-                        // NOT on a fwd room: that would BURN the one-shot flag on a
-                        // forwarder that discards profiles, so real rooms never get it.
+                        // On first RoomMembers, broadcast our profile to all rooms, so peers who were
+                        // online while we were offline get the latest. NOT on a fwd room: that would
+                        // BURN the one-shot flag on a forwarder that discards profiles.
                         if !is_fwd_room && !profile_broadcast_done {
                             profile_broadcast_done = true;
                             hollow_log!("[HOLLOW-PROFILE] First RoomMembers — broadcasting our profile");
-                            // Send our profile to all peers in this room (not ourselves —
-                            // exclude both master and device id).
+                            // Send our profile to every peer in the room, excluding both our own ids.
                             for pid in &peers {
                                 if pid != &local_peer && pid.as_str() != device_peer_id {
                                     social::send_own_profile_to_peer(
@@ -4206,11 +3952,9 @@ async fn run_event_loop(
                                 // on join with all current members, before individual PeerJoined).
                                 let is_new = synced_peers.insert(pid_str.clone());
                                 if is_new {
-                                    // Send our profile (with invisible flag) so the peer sees our display name.
                                     social::send_own_profile_to_peer(
                                         &ws_cmd_tx, &ws_room_peers,
                                         &local_peer_str, &master_keypair, &device_peer_id, pid_str,
-                                        && social::holds_accepted_friend(&db_path, &db_passphrase, &joined_master)
                                         is_invisible,
                                         &db_path, &db_passphrase,
                                     );
@@ -4225,7 +3969,6 @@ async fn run_event_loop(
                                         );
                                     }
 
-                                    // Request their profile if we don't have it.
                                     {
                                         if let Ok(store) = crate::storage::MessageStore::open(&db_path, &db_passphrase) {
                                             if let Ok(None) = store.load_profile(pid_str) {
@@ -4252,7 +3995,6 @@ async fn run_event_loop(
                                                     let is_online = ws_room_peers.values()
                                                         .any(|peers| peers.contains(member_id.as_str()));
                                                     if is_online { continue; }
-                                                    // Skip if we already have their profile.
                                                     if let Ok(Some(_)) = store.load_profile_light(member_id) {
                                                         continue;
                                                     }
@@ -4270,7 +4012,6 @@ async fn run_event_loop(
                                         }
                                     }
 
-                                    // Send CRDT SyncReq + channel message sync for servers shared with this peer.
                                     for (sid, state) in server_states.iter() {
                                         if state.is_member(pid_str) {
                                             if let Some(sv_json) = sv_cache.get(sid.as_str()) {
@@ -4306,10 +4047,9 @@ async fn run_event_loop(
                                         }
                                     }
 
-                                    // MLS: if we lost our group for any shared server,
-                                    // send KeyPackage to this peer for re-bootstrap.
-                                    // Multi-device (Step 6): members are master-keyed;
-                                    // `pid_str` is a device — match by identity.
+                                    // MLS: if we lost our group for any shared server, send a KeyPackage to
+                                    // this peer for re-bootstrap. Members are master-keyed and `pid_str` is a
+                                    // device, so match by identity.
                                     if let Some(ref mls_mgr) = mls {
                                         for (sid, srv_state) in server_states.iter() {
                                             if !srv_state.members.keys().any(|k| super::resolver::same_identity(pid_str, k)) { continue; }
@@ -4331,24 +4071,14 @@ async fn run_event_loop(
                                         }
                                     }
 
-                                    // (Friend request / removal / accept drains MOVED out of the
-                                    // is_new guard — see below, after the block closes. A re-add to
-                                    // an ALREADY-SYNCED peer (device already in synced_peers from a
-                                    // prior friendship) produced is_new=false here, so the queued
-                                    // re-add FriendRequest never drained and the peer never saw it.)
+                                    // The friend request / removal / accept drains run OUTSIDE this guard; see below.
 
-                                    // Multi-device sibling convergence on the RECONNECTING side.
-                                    // RoomMembers fires on US (the device that just came back online)
-                                    // and lists peers already there, so PeerJoined never fires for that
-                                    // sibling on our side. THIS IS THE DIRECTIONAL HALF that matters for
-                                    // a fresh mnemonic link: the new EMPTY device joins last → it learns
-                                    // of the populated sibling via RoomMembers (not PeerJoined), and it
-                                    // is the side that must PULL the snapshot. As with PeerJoined,
-                                    // membership in `inbox:{master}` is NOT proof on its own (a stranger
-                                    // delivering a friend request lands there too) — gate on a verified
-                                    // same-identity proof. A proven sibling runs full convergence
-                                    // (which re-announces our servers, idempotent); an unproven peer is
-                                    // challenged to prove it holds our shared master key.
+                                    // Multi-device sibling convergence on the RECONNECTING side. RoomMembers
+                                    // fires on US and lists peers already there, so PeerJoined never fires for
+                                    // that sibling on our side. This is the directional half a fresh mnemonic
+                                    // link needs: the new EMPTY device joins last, learns of the populated
+                                    // sibling here, and is the side that must PULL the snapshot. Membership in
+                                    // `inbox:{master}` is not proof, so an unproven peer is challenged first.
                                     {
                                         let own_inbox = format!("inbox:{}", local_peer_str);
                                         if room == own_inbox && pid_str.as_str() != device_peer_id {
@@ -4368,10 +4098,9 @@ async fn run_event_loop(
                                         }
                                     }
 
-                                    // Olm key exchange + pending_messages drain + DM sync.
-                                    // RoomMembers fires on the JOINING peer (us) while PeerJoined
-                                    // fires on the EXISTING peer (them). Without this, DM sync is
-                                    // one-directional: they ask us, but we never ask them.
+                                    // Olm key exchange, pending_messages drain and DM sync. RoomMembers fires
+                                    // on the JOINING peer (us) while PeerJoined fires on the EXISTING peer
+                                    // (them); without this, DM sync is one-directional.
                                     if ensure_olm_session_and_drain(
                                         &mut olm, &crypto_store, &event_tx, &ws_cmd_tx,
                                         &ws_room_peers, &mut pending_messages,
@@ -4422,17 +4151,12 @@ async fn run_event_loop(
 
                                 }
 
-                                // Friend request / removal / accept drains — OUTSIDE the is_new
-                                // guard. CRITICAL for RE-ADD while the peer stays ONLINE: the
-                                // peer's device is already in `synced_peers` from the prior
-                                // friendship, so the RoomMembers `is_new` was false and the queued
-                                // re-add FriendRequest never drained — the peer never saw the new
-                                // request (and, with the stale pending_friend_accepts now cleared on
-                                // FriendRemove, it also no longer auto-accepts → it would see
-                                // NOTHING). These drains are one-shot (`.remove()`), so running them
-                                // on every RoomMembers for an already-synced peer is idempotent
-                                // (no pending entry → no-op). Mirrors the PeerJoined drains, which
-                                // already run unconditionally.
+                                // Friend request / removal / accept drains, OUTSIDE the is_new guard.
+                                // CRITICAL for a RE-ADD while the peer stays ONLINE: its device is already
+                                // in `synced_peers` from the prior friendship, so `is_new` is false and the
+                                // queued re-add FriendRequest would never drain, leaving the peer nothing to
+                                // see. The drains are one-shot (`.remove()`), so running them on every
+                                // RoomMembers for an already-synced peer is idempotent.
                                 {
                                     let joined_master = super::resolver::resolve(pid_str);
                                     // Queued friend REQUEST (the re-add path).
@@ -4486,6 +4210,7 @@ async fn run_event_loop(
                                         .or_else(|| pending_friend_accepts.remove(&pid_str.to_string()));
                                     if let Some(stamp) = queued
                                         && !super::blocklist::is_blocked(pid_str)
+                                        && social::holds_accepted_friend(&db_path, &db_passphrase, &joined_master)
                                     {
                                         hollow_log!("[HOLLOW-FRIENDS] Peer {pid_str} appeared in RoomMembers (master {joined_master}), (re)sending FriendAccept");
                                         social::send_friend_accept(
@@ -4516,19 +4241,11 @@ async fn run_event_loop(
                                     hollow_log!("[HOLLOW-CRDT] Sent pending join request to {pid_str} for {room}");
                                 }
 
-                                // DM-room co-presence re-key (RoomMembers twin of the PeerJoined
-                                // heal above — REQUIRED because, depending on join order, the
-                                // wedged side may learn of the peer's DM-room entry via RoomMembers
-                                // (it's the joiner) rather than PeerJoined (the incumbent). Same
-                                // fix: when the durable DM room is mutually populated and we lack a
-                                // confirmed session, re-issue a KeyRequest bypassing the freshness
-                                // gate so a KeyBundle dropped during the inbox-leave race is retried
-                                // promptly instead of waiting for the 30s sweep. See the PeerJoined
-                                // arm for the full rationale (idempotent, antisymmetric, no sibling/
-                                // server/guest regression; pure f(masters) DM room).
-                                // See the PeerJoined arm: gate on `!has_session` so only the
-                                // wedged/deferred side (which holds no session) kicks, not a side
-                                // with an unconfirmed handshake already in flight.
+                                // DM-room co-presence re-key, the RoomMembers twin of the PeerJoined heal
+                                // above: depending on join order the wedged side learns of the peer's
+                                // DM-room entry here rather than there. See that arm for the full rationale,
+                                // including why this gates on `!has_session`, so only the truly wedged side
+                                // kicks and not one with an unconfirmed handshake already in flight.
                                 if !olm.has_session(pid_str)
                                     && room == dm_room_code(&local_peer_str, &super::resolver::resolve(pid_str))
                                 {
@@ -4546,10 +4263,9 @@ async fn run_event_loop(
                         if let Some(completed) = super::ws_stream_transfer::ws_stream_receive(
                             &mut pending_ws_transfers, &data,
                         ) {
-                            // Auto-download gate (issue #41): the sender queues its
-                            // push before our decline could ever reach it — bytes
-                            // for a declined file are deleted here instead of being
-                            // parked forever in early_file_streams.
+                            // Auto-download gate (issue #41): the sender queues its push before our
+                            // decline could reach it, so bytes for a declined file are deleted here
+                            // instead of being parked forever in early_file_streams.
                             if declined_file_ids.contains(&completed.id) {
                                 hollow_log!("[HOLLOW-FILE] Discarding declined pushed stream {} ({} bytes)", completed.id, completed.size);
                                 let _ = std::fs::remove_file(&completed.temp_path);
@@ -4607,11 +4323,9 @@ async fn run_event_loop(
                         }
                     }
                     WsEvent::DiscoveredPeers { room, peers } => {
-                        // Peer discovery over the live WS connection (replaces HTTP
-                        // /bootstrap). Populate ws_room_peers and proactively key-exchange
-                        // with any peer we lack a confirmed session for — reusing the same
-                        // freshness guard as the reconciliation sweep so a dropped frame
-                        // self-heals. Mirrors the members-on-join flow for an explicit refresh.
+                        // Peer discovery over the live WS connection. Populate ws_room_peers and
+                        // proactively key-exchange with any peer we lack a confirmed session for,
+                        // reusing the reconciliation sweep's freshness guard so a dropped frame heals.
                         hollow_log!("[HOLLOW-WS] Discovered {} peers in room {room}", peers.len());
                         let room_set = ws_room_peers.entry(room.clone()).or_default();
                         for pid in &peers {
@@ -4649,19 +4363,15 @@ async fn run_event_loop(
                     WsEvent::NicknameResolved { nickname, peer_id, master_id } => {
                         if pending_nickname_resolve.as_deref() == Some(&nickname) {
                             pending_nickname_resolve = None;
-                            // The relay binds a nickname to the claimer's WS-auth
-                            // DEVICE id but also hands back the claimer's
-                            // self-reported MASTER (`master_id`). Friendships key
-                            // on the master AND delivery targets `inbox:{master}`
-                            // — a device id has an inbox nobody joins, so a
-                            // stranger's request queued under it never drained.
-                            // Prefer master_id; fall back to the local resolver
-                            // for old relays (cold resolver = identity, then the
-                            // device-list ingest re-key repairs the row).
-                            // SECURITY: master_id is self-reported by the claimer
-                            // — use it ONLY as the friend-request target string,
-                            // NEVER feed it into `resolver` (resolver mappings
-                            // come only from master-signed device lists).
+                            // The relay binds a nickname to the claimer's WS-auth DEVICE id but also
+                            // hands back the claimer's self-reported MASTER. Friendships key on the
+                            // master and delivery targets `inbox:{master}`, while a device id has an
+                            // inbox nobody joins, so prefer `master_id` and fall back to the local
+                            // resolver for old relays (a cold resolver returns the identity, and the
+                            // device-list ingest repairs the row).
+                            // SECURITY: `master_id` is self-reported by the claimer, so use it ONLY as
+                            // the friend-request target string, NEVER feed it into `resolver` (resolver
+                            // mappings come only from master-signed device lists).
                             let target = if !master_id.is_empty() {
                                 master_id
                             } else {
@@ -4678,9 +4388,8 @@ async fn run_event_loop(
                             ).await;
                         }
                     }
-                    // TURN credentials from the authed relay socket → Dart's
-                    // iceConfigProvider (replaces the HTTP fetch + its
-                    // dead-chain-on-503 retry bug).
+                    // TURN credentials from the authed relay socket feed Dart's
+                    // iceConfigProvider.
                     WsEvent::TurnCredentials { username, password, ttl, uris } => {
                         // Phase 2: the TURN URIs double as the embedded
                         // forwarder's STUN source for srflx discovery.
@@ -4695,7 +4404,7 @@ async fn run_event_loop(
                             peer_id, online,
                         }).await;
                     }
-                    // -- Multi-device link codes (Step 4) --
+                    // -- Multi-device link codes --
                     WsEvent::LinkCodeClaimed { code } => {
                         let _ = event_tx.send(NetworkEvent::LinkCodeClaimed { code }).await;
                     }
@@ -4719,11 +4428,9 @@ async fn run_event_loop(
                         }
                     }
                     WsEvent::Message { room, from, data } | WsEvent::DirectMessage { room, from, data } => {
-                        // Route incoming WS messages through the same handler as libp2p.
-                        // A frame that dies here must SAY so with the sender tagged — the
-                        // fwd-signal blackhole was only diagnosable from log absence on
-                        // both ends (these payloads are always HavenMessage JSON; binary
-                        // chunks ride 0x02 → BinaryDirect, so a failure here is abnormal).
+                        // Route incoming WS messages through the same handler as libp2p. A frame that
+                        // dies here must SAY so with the sender tagged: these payloads are always
+                        // HavenMessage JSON (binary chunks ride 0x02), so a failure here is abnormal.
                         let frame_len = data.len();
                         let utf8 = String::from_utf8(data);
                         if utf8.is_err() {
@@ -4783,7 +4490,6 @@ async fn run_event_loop(
                                                         };
                                                         pool.add_member(from.clone(), inventory);
 
-                                                        // Reply with our own inventory as RecoveryWelcome.
                                                         if let Some(our_inv) = pool.members.get(&local_peer_str) {
                                                             let welcome = HavenMessage::RecoveryWelcome {
                                                                 manifest_ids: our_inv.manifest_ids.clone(),
@@ -4803,7 +4509,6 @@ async fn run_event_loop(
                                                             peer_id: from.clone(),
                                                         }).await;
 
-                                                        // Broadcast updated status.
                                                         let status = pool.compute_status();
                                                         let _ = event_tx.send(NetworkEvent::RecoveryPoolStatus {
                                                             server_id: pool.server_id.clone(),
@@ -4846,7 +4551,6 @@ async fn run_event_loop(
                                                         peer_id: from.clone(),
                                                     }).await;
 
-                                                    // Emit updated status with new member's data.
                                                     let status = pool.compute_status();
                                                     let _ = event_tx.send(NetworkEvent::RecoveryPoolStatus {
                                                         server_id: pool.server_id.clone(),
@@ -4857,7 +4561,6 @@ async fn run_event_loop(
                                                         progress_pct: status.progress_pct,
                                                     }).await;
 
-                                                    // Coordinator election after welcome.
                                                     if pool.is_coordinator() && pool.members.len() >= 2 {
                                                         let plan = pool.compute_transfer_plan();
                                                         if !plan.is_empty() {
@@ -4909,7 +4612,6 @@ async fn run_event_loop(
                                                 }
                                                 HavenMessage::RecoveryManifestSync { manifests_json } => {
                                                     hollow_log!("[RECOVERY-POOL] ManifestSync from {from}");
-                                                    // Parse and merge manifests from coordinator.
                                                     if let Ok(manifests) = serde_json::from_str::<Vec<crate::vault::pipeline::VaultManifest>>(&manifests_json) {
                                                         for m in manifests {
                                                             if m.k > 0 || m.m > 0 {
@@ -4931,17 +4633,14 @@ async fn run_event_loop(
                                                     if let Ok(plan) = serde_json::from_str::<Vec<crate::node::recovery_pool::TransferAssignment>>(&plan_json) {
                                                         hollow_log!("[RECOVERY-POOL] Processing {} transfer assignments", plan.len());
 
-                                                        // Open ContentStore for shard I/O.
                                                         let vault_dir_r = crate::identity::data_dir().unwrap_or_default().join("vault");
 
                                                         if let Ok(cs) = crate::vault::content_store::ContentStore::open(&db_path, &db_passphrase, &vault_dir_r) {
                                                             for assignment in &plan {
-                                                                // Register incoming shards we're expecting to receive.
                                                                 if assignment.dest_peer == local_peer_str {
                                                                     if let Some(meta) = pool.manifest_meta.get(&assignment.content_id) {
                                                                         let key = format!("{}:{}", assignment.content_id, assignment.shard_index);
                                                                         let sk = crate::vault::content_store::shard_key(&assignment.content_id, assignment.shard_index);
-                                                                        // Skip if we already have this shard locally.
                                                                         if cs.has_shard(&sk).unwrap_or(false) {
                                                                             continue;
                                                                         }
@@ -4961,7 +4660,6 @@ async fn run_event_loop(
                                                                     }
                                                                 }
 
-                                                                // Send shards we have to peers that need them.
                                                                 if assignment.source_peer == local_peer_str {
                                                                     let sk = crate::vault::content_store::shard_key(&assignment.content_id, assignment.shard_index);
                                                                     if let Ok(shard_bytes) = cs.read_shard_unchecked(&pool.server_id, &sk) {
@@ -4986,7 +4684,6 @@ async fn run_event_loop(
                                                                             ).await;
                                                                             let _ = std::fs::remove_file(&temp_path);
 
-                                                                            // Broadcast that this shard was sent.
                                                                             let received_msg = HavenMessage::RecoveryShardReceived {
                                                                                 content_id: assignment.content_id.clone(),
                                                                                 shard_index: assignment.shard_index,
@@ -5010,10 +4707,9 @@ async fn run_event_loop(
                                         continue; // Don't pass to handle_incoming_request.
                                     }
 
-                                    // ── Hollow Share message interception ──
-                                    // Share envelopes ride HavenMessage (relay-room broadcast or
-                                    // SendDirect within a share room), not MLS. Intercept before
-                                    // Olm/MLS decryption attempts.
+                                    // Share envelopes ride HavenMessage (a relay-room broadcast, or SendDirect
+                                    // within a share room), not MLS, so they are intercepted before any Olm or
+                                    // MLS decryption attempt.
                                     let is_share = matches!(msg,
                                         HavenMessage::ShareManifestRequest { .. }
                                         | HavenMessage::ShareManifestResponse { .. }
@@ -5118,15 +4814,12 @@ async fn run_event_loop(
             _ = mls_batch_timer.tick() => {
                 arm_started = Some(("timer", "mls_batch", std::time::Instant::now()));
                 if let Some(ref mut mls_mgr) = mls {
-                    // Phase 0: the Welcome grace. A commit that evicted our own
-                    // leaf while we are still a member is half of a remove +
-                    // re-add, and the Welcome half is normally a few hundred ms
-                    // behind it. Asking for a leaf on the removal alone turns
-                    // one heal into an epoch treadmill, so the eviction only
-                    // ARMS this and we ask here, once, if the Welcome never
-                    // came. Runs before phase 1 so a KeyPackage it sends is
-                    // processed by the committer's NEXT tick, never half of
-                    // this one.
+                    // Phase 0: the Welcome grace. A commit that evicted our own leaf while we
+                    // are still a member is half of a remove + re-add, and the Welcome half is
+                    // normally a few hundred ms behind, so asking for a leaf on the removal
+                    // alone turns one heal into an epoch treadmill. The eviction only ARMS this;
+                    // we ask here, once, if the Welcome never came. Before phase 1, so a
+                    // KeyPackage it sends is processed by the committer's NEXT tick.
                     if !mls_welcome_grace.is_empty() {
                         let elapsed: Vec<String> = mls_welcome_grace
                             .iter()
@@ -5188,10 +4881,9 @@ async fn run_event_loop(
                                         continue;
                                     }
                                     persist_mls_state(mls_mgr, &crypto_store);
-                                    // Rotate SFrame for remaining participants (forward
-                                    // secrecy). For a restricted VOICE channel mid-call,
-                                    // a demotion removal must re-key the voice cryptor so
-                                    // the removed member can't decode further audio.
+                                    // Rotate SFrame for the remaining participants (forward secrecy). In a
+                                    // restricted VOICE channel mid-call a demotion removal must re-key the voice
+                                    // cryptor, or the removed member can still decode audio.
                                     if let Ok(sframe_key) = mls_mgr.export_secret(&group_key, "sframe", b"", 32) {
                                         let epoch = mls_mgr.epoch(&group_key).unwrap_or(0);
                                         let _ = event_tx.send(NetworkEvent::MlsEpochChanged {
@@ -5200,12 +4892,10 @@ async fn run_event_loop(
                                         }).await;
                                     }
                                     let commit_b64 = base64::engine::general_purpose::STANDARD.encode(&commit_bytes);
-                                    // Tier 1 (large-server scaling): ONE room broadcast
-                                    // replaces the per-device SendDirect loop — the commit
-                                    // bytes are identical for every recipient and the relay
-                                    // fans out. Non-holders (subgroup non-qualifiers, the
-                                    // removed devices) ignore it via has_group / the epoch
-                                    // guard on the receive side.
+                                    // Tier 1 (large-server scaling): ONE room broadcast replaces the per-device
+                                    // SendDirect loop, because the commit bytes are identical for every
+                                    // recipient and the relay fans out. Non-holders (subgroup non-qualifiers,
+                                    // the removed devices) ignore it via has_group and the epoch guard.
                                     let commit_epoch = mls_mgr.epoch(&group_key).ok();
                                     crate::node::crypto_handler::broadcast_mls_commit(
                                         mls_mgr, &ws_cmd_tx, &server_id, channel_id.clone(),
@@ -5242,10 +4932,9 @@ async fn run_event_loop(
                                         continue;
                                     }
                                     persist_mls_state(mls_mgr, &crypto_store);
-                                    // Emit epoch change for SFrame key rotation. Voice
-                                    // SFrame keys are derived per group key — a restricted
-                                    // voice channel keys off its SUBGROUP, so a subgroup
-                                    // add/remove must reach that channel's voice cryptor.
+                                    // Emit the epoch change for SFrame key rotation. Voice SFrame keys derive
+                                    // per group key, and a restricted voice channel keys off its SUBGROUP, so a
+                                    // subgroup add or remove must reach that channel's voice cryptor.
                                     if let Ok(sframe_key) = mls_mgr.export_secret(&group_key, "sframe", b"", 32) {
                                         let epoch = mls_mgr.epoch(&group_key).unwrap_or(0);
                                         let _ = event_tx.send(NetworkEvent::MlsEpochChanged {
@@ -5257,7 +4946,6 @@ async fn run_event_loop(
                                     let welcome_b64 = base64::engine::general_purpose::STANDARD.encode(&welcome_bytes);
                                     let commit_b64 = base64::engine::general_purpose::STANDARD.encode(&commit_bytes);
 
-                                    // Send Welcome to all new joiners.
                                     let welcome_data = serde_json::to_vec(&HavenMessage::MlsWelcome {
                                         server_id: server_id.clone(),
                                         welcome: welcome_b64.clone(),
@@ -5270,22 +4958,13 @@ async fn run_event_loop(
                                                 peer_id_str, welcome_data.clone(),
                                             );
                                         } else {
-                                            // The device is not here. Rung 2 admits a
-                                            // PARKED joiner and seats its leaf in the
-                                            // same batch, so the common case for this
-                                            // branch is a Welcome for somebody who has
-                                            // not been online for days. Addressed into
-                                            // the server room by NAME, which is what the
-                                            // relay buffers under the target device and
-                                            // replays on its next join of that room —
-                                            // the same device-keyed queue the snapshot
-                                            // and the SyncResponse ride, and FIFO, so the
-                                            // Welcome lands AFTER the SyncResponse that
-                                            // completes the join and re-creates the
-                                            // server state it belongs to. Dropping it
-                                            // here (the old `if reachable` alone) is
-                                            // what left a returning parked joiner
-                                            // waiting for co-presence.
+                                            // The device is not here. Rung 2 admits a PARKED joiner and
+                                            // seats its leaf in the same batch, so the common case is a
+                                            // Welcome for somebody offline for days. Addressed into the
+                                            // server room by NAME, which the relay buffers under the target
+                                            // device and replays on its next join of that room: the same
+                                            // device-keyed FIFO queue the snapshot and the SyncResponse
+                                            // ride, so the Welcome lands AFTER the SyncResponse.
                                             let room = crate::crypto::split_group_key(&group_key).0;
                                             send_message_to_peer_in_room(
                                                 &ws_cmd_tx, &room,
@@ -5299,14 +4978,11 @@ async fn run_event_loop(
                                         }
                                     }
 
-                                    // Tier 1 (large-server scaling): broadcast the single
-                                    // Commit to the whole server room in ONE frame instead
-                                    // of the per-device SendDirect loop. Every existing
-                                    // leaf (including our own siblings and a member's
-                                    // already-joined sibling A when only sibling B was
-                                    // just added) is in the room. The just-added devices
-                                    // receive it too but skip it via the epoch guard —
-                                    // their Welcome already lands them at this epoch.
+                                    // Tier 1 (large-server scaling): broadcast the single Commit to the whole
+                                    // server room in ONE frame instead of a per-device SendDirect loop. Every
+                                    // existing leaf is in the room, including our own siblings and a member's
+                                    // already-joined sibling. The just-added devices receive it too but skip it
+                                    // via the epoch guard: their Welcome already lands them at this epoch.
                                     let commit_epoch = mls_mgr.epoch(&group_key).ok();
                                     crate::node::crypto_handler::broadcast_mls_commit(
                                         mls_mgr, &ws_cmd_tx, &server_id, channel_id.clone(),
@@ -5315,11 +4991,9 @@ async fn run_event_loop(
 
                                     hollow_log!("[HOLLOW-MLS] Batch-added {} members to {group_key}: {:?}", added_peers.len(), added_peers);
 
-                                    // Coordinator side: request channel sync FROM each
-                                    // recovered peer.  During the stale epoch the
-                                    // coordinator may have dropped messages that the
-                                    // recovered peer sent (decrypt failed).  Syncing
-                                    // from them fills the gap on this side.
+                                    // Coordinator side: request channel sync FROM each recovered peer.
+                                    // During the stale epoch the coordinator may have dropped messages
+                                    // that peer sent, so syncing from them fills the gap on this side.
                                     if let Some(state) = server_states.get(&server_id) {
                                         if let Ok(store) = crate::storage::MessageStore::open(&db_path, &db_passphrase) {
                                             // Server group: sync all channels. Subgroup:
@@ -5371,13 +5045,11 @@ async fn run_event_loop(
                 }
             }
 
-            // Periodic re-bootstrap for signaling re-registration.
             _ = rebootstrap_timer.tick() => {
                 arm_started = Some(("timer", "rebootstrap", std::time::Instant::now()));
-                // Primary peer discovery now rides the LIVE WS connection (no fresh TLS
-                // handshake — fixes the bootstrap stall under WS frame bursts). The HTTP
-                // bootstrap below is kept as a non-fatal fallback (legacy address-based
-                // discovery); its failures are logged quietly and never surfaced.
+                // Primary peer discovery rides the LIVE WS connection, with no fresh TLS
+                // handshake. The HTTP bootstrap below is a non-fatal legacy fallback; its
+                // failures are logged quietly and never surfaced.
                 if let Some(room) = &active_room {
                     let _ = ws_cmd_tx.send(super::ws_client::WsCommand::DiscoverPeers {
                         room_code: room.clone(),
@@ -5394,15 +5066,11 @@ async fn run_event_loop(
                 for sid in server_states.keys() {
                 }
 
-                // ── Olm session reconciliation sweep (self-heal) ──────────────
-                // The relay never ACKs a direct message, so a dropped KeyRequest/
-                // KeyBundle/SessionAck/PreKey would otherwise strand the handshake
-                // until BOTH peers restart (the only thing that clears the in-flight
-                // map is a relay disconnect). This sweep repairs that: for every
-                // online peer we have a relationship with but NO confirmed Olm
+                // -- Olm session reconciliation sweep (self-heal) --
+                // The relay never ACKs a direct message, so a dropped KeyRequest, KeyBundle,
+                // SessionAck or PreKey would strand the handshake until BOTH peers restart.
+                // For every online peer we have a relationship with but NO confirmed Olm
                 // session, resend a KeyRequest once the prior request goes stale.
-                // Heals wedges: stuck in-flight flag, dropped glare PreKey, and the
-                // post-reconnect drain race.
                 {
                     // Online peers across all rooms (deduped), excluding ourselves.
                     let mut online: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -5413,15 +5081,11 @@ async fn run_event_loop(
                             }
                         }
                     }
-                    // Accepted-friend masters (built once per sweep). BACKSTOP for the
+                    // Accepted-friend masters, built once per sweep. BACKSTOP for the
                     // friend-handshake Olm wedge: the side that DEFERRED on glare holds NO
-                    // session object at all (absent, not unconfirmed → `half_session` is
-                    // false) and a freshly-friended peer is not a server member, so without
-                    // this a wedged friend with no queued DM would never be swept. The
-                    // prompt heal is the DM-room co-presence re-key (PeerJoined/RoomMembers);
-                    // this guarantees EVENTUAL convergence if any co-presence signal is
-                    // missed. One DB read per 30s tick — negligible. Master-keyed; a sibling
-                    // resolves to our own master (not in our friends) so it's excluded.
+                    // session object at all, and a freshly-friended peer is not a server member,
+                    // so a wedged friend with no queued DM would otherwise never be swept.
+                    // Master-keyed, so a sibling resolves to our own master and is excluded.
                     let accepted_friends: std::collections::HashSet<String> =
                         crate::storage::MessageStore::open(&db_path, &db_passphrase)
                             .ok()
@@ -5429,10 +5093,9 @@ async fn run_event_loop(
                             .map(|v| v.into_iter().map(|(pid, ..)| pid).collect())
                             .unwrap_or_default();
                     for peer in &online {
-                        // Only reconcile peers we actually have a relationship with —
-                        // a shared-server member, an accepted friend, a peer with queued
-                        // DMs, or one with a half-built (unconfirmed) session. Avoids
-                        // spamming co-room strangers (e.g. public-channel guests we never DM).
+                        // Only reconcile peers we actually have a relationship with: a shared-server
+                        // member, an accepted friend, a peer with queued DMs, or one with a
+                        // half-built session. Avoids spamming co-room strangers such as guests.
                         let is_member = server_states.values()
                             .any(|s| s.is_member(peer));
                         let is_friend = accepted_friends.contains(&super::resolver::resolve(peer));
@@ -5441,11 +5104,9 @@ async fn run_event_loop(
                         if !(is_member || is_friend || has_pending || half_session) {
                             continue;
                         }
-                        // Confirmed session → nothing to do.
                         if olm.has_confirmed_session(peer) {
                             continue;
                         }
-                        // A fresh request is still outstanding → give it time.
                         if key_request_is_fresh(&key_request_in_flight, peer) {
                             continue;
                         }
@@ -5510,7 +5171,6 @@ async fn run_event_loop(
                         "[HOLLOW-SYNC] Fan-out dispatch for server {server_id}: {total_channels} channel probes across {total_peers} peers"
                     );
 
-                    // Open DB for message count queries.
                     let sync_store = crate::storage::MessageStore::open(&db_path, &db_passphrase).ok();
 
                     for (peer, channels) in assignments {
@@ -5525,11 +5185,9 @@ async fn run_event_loop(
                             }
                             channel_sync_sent.insert(dedup_key, std::time::Instant::now());
 
-                            // Send direct ChannelSyncRequest (plaintext) instead of MLS ChannelProbe.
-                            // MLS probes silently fail when the MLS epoch is stale after reconnection
-                            // (peer can't decrypt → no response → sync never completes).
-                            // ChannelSyncRequest works reliably because it's plaintext, and the
-                            // response handler uses MLS if available, Olm fallback otherwise.
+                            // Send a plaintext ChannelSyncRequest rather than an MLS ChannelProbe: an
+                            // MLS probe silently fails at a stale epoch after reconnection, so sync never
+                            // completes. The response handler uses MLS if available, Olm otherwise.
                             let sender_ts = sync_store.as_ref()
                                 .map(|s| s.get_per_sender_timestamps(server_id, channel_id).unwrap_or_default())
                                 .unwrap_or_default();
@@ -5545,18 +5203,15 @@ async fn run_event_loop(
                         }
                     }
 
-                    // Emit sync started for UI feedback.
                     let _ = event_tx.send(NetworkEvent::MessageSyncStarted {
                         server_id: server_id.clone(),
                         peer_id: "fan-out".to_string(),
                     }).await;
                 }
 
-                // Clean up stale entries (dispatched > 30s ago).
                 sync_coordinator.cleanup_stale();
             }
 
-            // Flush pending disconnects that have passed the debounce window.
             // -- Stream transfer progress poll (every 500ms) --
             _ = stream_progress_timer.tick() => {
                 arm_started = Some(("timer", "stream_progress", std::time::Instant::now()));
@@ -5628,13 +5283,10 @@ async fn run_event_loop(
                             }
 
                             // 2b. Retention for channel files not tracked by vault manifests
-                            // (full-replication <6 member servers, or any channel files in ~/.hollow/files/)
-                            //
-                            // Rows we never FETCHED come back here too: only the
-                            // ones that reached disk have a path to delete, but
-                            // EVERY row past the window is marked, so a card the
-                            // user never downloaded reads "removed by this
-                            // server's retention policy" instead of asking
+                            // (full-replication servers under 6 members, or any channel file in files/).
+                            // Rows we never FETCHED come back here too: only the ones that reached disk
+                            // have a path to delete, but EVERY row past the window is marked, so a card
+                            // the user never downloaded reads as removed by retention instead of asking
                             // holders that deleted it for the same reason.
                             let prefix = format!("{}:", server_id);
                             if let Ok(files) = cs.find_expirable_channel_files(&prefix, cutoff) {
@@ -5656,10 +5308,9 @@ async fn run_event_loop(
                             let msg_policy = state.settings
                                 .get("retention_messages")
                                 .map(|r| r.read().clone())
-                                // Absent = PERMANENT (Vitalik, 2026-09-05). A year of a
-                                // busy server's text is a few megabytes, and a community
-                                // losing its first year one morning is the "where did it
-                                // go" feeling Hollow exists to remove. Files keep "365d".
+                                // Absent = PERMANENT. A year of a busy server's text is a few
+                                // megabytes, and a community losing its first year one morning is
+                                // the "where did it go" feeling Hollow exists to remove.
                                 .unwrap_or_else(|| "permanent".to_string());
                             if let Some(days) = crate::vault::adaptive::parse_retention_days(&msg_policy) {
                                 let since = state.settings
@@ -5678,10 +5329,8 @@ async fn run_event_loop(
                     }
 
                     // 3. Shard health: detect under-replicated content and request repairs via MLS.
-                    // Rooms hold DEVICE ids but placements/members are MASTER-keyed —
-                    // include each room peer's resolved master so a multi-device
-                    // member counts as an online shard holder/target (single-device
-                    // resolves to itself; dedup via the set).
+                    // Rooms hold DEVICE ids while placements and members are MASTER-keyed, so
+                    // include each room peer's resolved master; dedup via the set.
                     let online_peers: std::collections::HashSet<String> = ws_room_peers.values()
                         .flat_map(|peers| peers.iter())
                         .flat_map(|p| [p.clone(), super::resolver::resolve(p)])
@@ -5952,9 +5601,8 @@ async fn run_event_loop(
             }
 
             // -- Hollow Share scheduler (1 second) --
-            // Drives chunk requests, Have rebroadcast, in-flight timeout/retry.
-            // Pauses chunk requests when messaging/voice traffic is recent so
-            // share never starves real-time traffic on the same peer connection.
+            // Drives chunk requests, Have rebroadcast and in-flight retry; chunk requests
+            // pause when messaging or voice traffic is recent so a share never starves it.
             _ = share_tick_timer.tick() => {
                 arm_started = Some(("timer", "share_tick", std::time::Instant::now()));
                 let messaging_active = std::time::Instant::now()
@@ -5969,11 +5617,10 @@ async fn run_event_loop(
             }
 
             // -- MLS state debounce (2s) --
-            // RECEIVE-path only: a regressed receive ratchet can ratchet
-            // forward again after a crash, so deferring its persistence is
-            // safe. Send-path encrypts persist IMMEDIATELY (persist-on-encrypt
-            // rule) — a regressed send ratchet re-uses generations and wedges
-            // the group for every receiver.
+            // RECEIVE-path only: a regressed receive ratchet can ratchet forward again
+            // after a crash, so deferring its persistence is safe. Send-path encrypts
+            // persist IMMEDIATELY, since a regressed send ratchet re-uses generations
+            // and wedges the group for every receiver.
             _ = mls_persist_timer.tick() => {
                 arm_started = Some(("timer", "mls_persist", std::time::Instant::now()));
                 if mls_dirty {
@@ -6034,12 +5681,10 @@ async fn run_event_loop(
                 }
             }
 
-            // Temporary channel-grant expiry sweep: the predicate already
-            // denies an expired grant lazily; this enacts the crypto/UI
-            // consequences. Only (server, channel)s with a grant whose expiry
-            // fell INSIDE the (last_tick, now] window fire — each expiry
-            // triggers exactly one reconcile; long-expired rows (lazy,
-            // unpruned) never re-fire after the first tick.
+            // Temporary channel-grant expiry sweep: the predicate already denies an
+            // expired grant lazily, so this enacts the crypto and UI consequences. Only
+            // (server, channel)s with an expiry inside the (last_tick, now] window fire,
+            // so each expiry triggers exactly one reconcile and old rows never re-fire.
             _ = grant_sweep_timer.tick() => {
                 arm_started = Some(("timer", "grant_sweep", std::time::Instant::now()));
                 let now_ms = std::time::SystemTime::now()
@@ -6085,19 +5730,13 @@ async fn run_event_loop(
 
 }
 
-// check_voice_mode_transition moved to voice_handler.rs
-// send_message_to_peer moved to crypto_handler.rs
-// send_own_profile_to_peer moved to social.rs
-// handle_completed_stream, stream_to_peer, broadcast_to_gossip_neighbors moved to file_handler.rs
 
 
-/// Resolve the DM conversation a received edit/delete/reaction event belongs to
-/// (multi-device self fan-out, Phase 6 Step 3). For a normal DM from a friend the
-/// sender IS the conversation peer → `resolve(sender)`. For a copy echoed from our
-/// OWN sibling device, the sender is US, so the event must be keyed to the OTHER
-/// party — look that up from the message's stored row by `mid` (the edit/delete/
-/// reaction envelopes carry no convo field). Falls back to `resolve(sender)` if
-/// the row isn't found (e.g. not yet synced), which is the pre-fan-out behavior.
+/// Resolve the DM conversation a received edit/delete/reaction event belongs to.
+/// For a normal DM the sender IS the conversation peer; for a copy echoed from
+/// our OWN sibling the sender is US, so the event must be keyed to the OTHER
+/// party, looked up from the stored row by `mid` (these envelopes carry no
+/// convo field). Falls back to `resolve(sender)` when the row is not found.
 fn dm_event_convo(
     sender_peer: &str,
     local_master: &str,
@@ -6116,14 +5755,10 @@ fn dm_event_convo(
 }
 
 /// After a session is (re)established with `peer_str`, ask that peer to re-serve
-/// our DM history from our high-water mark. This is the LIVE equivalent of the
-/// restart-time DM re-sync: during an Olm session desync (glare) the peer kept
-/// encrypting on a ratchet we couldn't decrypt, so its messages never rendered —
-/// a restart recovered them only because it re-synced over a fresh session. Now
-/// that we hold a fresh session, do the same without a restart. The DmSyncBatch
-/// response rides the new (good) session; the receiver dedups by message_id, so a
-/// redundant re-serve on an already-healthy session is harmless. Targets the
-/// concrete device `peer_str` (the live socket); the convo key resolves to master.
+/// our DM history from our high-water mark. During an Olm desync the peer kept
+/// encrypting on a ratchet we could not decrypt, so its messages never rendered;
+/// this recovers them without the restart that used to be the only cure. The
+/// receiver dedups by message_id, so a redundant re-serve is harmless.
 fn request_dm_resync_after_rekey(
     peer_str: &str,
     master_peer_str: &str,
@@ -6133,10 +5768,8 @@ fn request_dm_resync_after_rekey(
     db_passphrase: &str,
 ) {
     // A media forwarder is not a social peer: it has no DM history with us and
-    // DISCARDS the request (one "non-fwd HavenMessage — ignored" line in its
-    // journal per session). Detected structurally — the only room we share with
-    // it is a `fwd:` room — so this covers peer forwarders as well as the VPS
-    // one, without either side knowing the other's role.
+    // DISCARDS the request. Detected structurally (the only room we share with it
+    // is a `fwd:` room), so it covers peer forwarders as well as the VPS one.
     if peer_is_forwarder_only(ws_room_peers, peer_str) {
         return;
     }
@@ -6168,10 +5801,9 @@ fn request_dm_resync_after_rekey(
     }
 }
 
-/// Pack a slice of stored DM messages into wire `DmSyncItem`s, joining in each
-/// message's reactions and file metadata in two batch queries. Shared by the
-/// friend `DmSyncRequest` responder and the multi-device sibling backfill
-/// responder so the (reactions + file-meta) join logic lives in one place.
+/// Pack stored DM messages into wire `DmSyncItem`s, joining each message's
+/// reactions and file metadata in two batch queries. Shared by the friend
+/// `DmSyncRequest` responder and the multi-device sibling backfill responder.
 fn build_dm_sync_items(
     store: &crate::storage::MessageStore,
     messages: &[crate::storage::messages::StoredMessage],
@@ -6249,16 +5881,13 @@ fn build_dm_sync_items(
     super::sync_handler::SyncPage { items, truncated }
 }
 
-/// Enforce device revocations (Step 7) that were just learned from an ingested
-/// device list. For each freshly-revoked device id:
-/// - **Olm (every node):** drop the in-RAM session AND delete the persisted pickle
-///   so a friend never encrypts a DM to the revoked device, and a restart can't
-///   resurrect it. (Olm has no coordinator — each holder of a session drops it.)
-/// - **MLS (coordinator only, single leaf):** for each server where we are the
-///   elected coordinator and the revoked id still holds a leaf, enqueue that ONE
-///   leaf into `pending_mls_removals` — the existing `mls_batch_timer` issues a
-///   single `remove_members_batch` commit + `MlsCommit` broadcast. We remove ONLY
-///   that device's leaf; the device's MASTER is still a valid member.
+/// Enforce device revocations just learned from an ingested device list. For
+/// each freshly-revoked device id:
+/// - **Olm (every node):** drop the in-RAM session AND delete the persisted
+///   pickle, so no friend encrypts a DM to it and a restart cannot resurrect it.
+/// - **MLS (coordinator only):** where we are the elected coordinator and the
+///   revoked id still holds a leaf, enqueue that ONE leaf into
+///   `pending_mls_removals`. Only that leaf: the device's MASTER stays a member.
 fn enforce_device_revocations(
     newly_revoked: &[String],
     olm: &mut OlmManager,
@@ -6321,13 +5950,11 @@ pub(crate) fn install_op_signer(
 }
 
 /// Apply ONE remotely-authored CRDT op: the single ingest path for a
-/// `CrdtOpBroadcast` and for the `MemberAdded` op a `ServerJoinResolved` frame
-/// carries. Author-validated by `op_allowed` (never sender-validated: the
-/// sender may legitimately be relaying), persisted through `insert_crdt_op`,
-/// re-flooded once, and turned into the per-payload UI events.
-///
-/// Extracted from the `CrdtOpBroadcast` arm verbatim so a join resolution can
-/// never become a SECOND ingest path with its own, weaker gates.
+/// `CrdtOpBroadcast` and for the `MemberAdded` op a `ServerJoinResolved` carries.
+/// Author-validated by `op_allowed`, never sender-validated (the sender may
+/// legitimately be relaying), persisted through `insert_crdt_op`, re-flooded
+/// once, and turned into the per-payload UI events. ONE path, so a join
+/// resolution can never become a SECOND ingest with its own weaker gates.
 #[allow(clippy::too_many_arguments)]
 async fn apply_remote_crdt_op(
     server_states: &mut HashMap<String, ServerState>,
@@ -6367,10 +5994,9 @@ async fn apply_remote_crdt_op(
             hollow_log!("[HOLLOW-CRDT] Note: CrdtOpBroadcast author '{}' differs from sender '{peer_str}' (relay)", op.author);
         }
 
-        // SECURITY: the ONE admission gate (ServerState::admit_remote_op) —
-        // the author's signature, the clock bound, then the shared permission
-        // matrix. It validates op.author (the original creator), never the
-        // sender, who may legitimately be relaying.
+        // SECURITY: the ONE admission gate (`ServerState::admit_remote_op`): the
+        // author's signature, the clock bound, then the shared permission matrix. It
+        // validates op.author, never the sender, who may legitimately be relaying.
         {
             let state = server_states.get(&server_id).unwrap();
             if let Err(reason) = state.admit_remote_op(&op) {
@@ -6388,7 +6014,6 @@ async fn apply_remote_crdt_op(
         let _ = state.apply_op(&op);
 
         if state.op_log.len() > was_len {
-            // New op — persist and forward to other connected peers
             if let Ok(json) = serde_json::to_string(&state) {
                 if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
                     let _ = store.save_server_state(&server_id, &json);
@@ -6396,13 +6021,10 @@ async fn apply_remote_crdt_op(
                 }
             }
 
-            // Forward the (validated, NEW) op onward. Tier 2 (large-server
-            // scaling): prefer the WebRTC mesh — the historical per-member
-            // SendDirect re-forward made EVERY receiving node pay
-            // O(members × devices) relay uploads per op (O(N²) network-wide).
-            // Op-newness gates this block, so each node re-floods a given op
-            // at most once and only after the permission checks above passed.
-            // Falls back to the relay fan-out when the mesh isn't up.
+            // Forward the validated, NEW op onward, preferring the WebRTC mesh: the old
+            // per-member SendDirect re-forward made every receiving node pay
+            // O(members x devices) relay uploads per op. Op-newness gates this block, so a
+            // node re-floods a given op at most once. Falls back to the relay fan-out.
             if super::gossip_relay::flood_crdt_op(
                 gossip_overlays, event_tx, &server_id, &op_json, Some(peer_str),
             ) == 0 {
@@ -6453,16 +6075,12 @@ async fn apply_remote_crdt_op(
                     }).await;
                 }
                 CrdtPayload::MemberRemoved { peer_id } => {
-                    // Self-eviction: OUR identity was removed (our own LEAVE
-                    // fanned from a sibling device, or a plain kick of us) and
-                    // the merge confirms we're no longer a member. Tear down
-                    // DURABLY — the acting device deletes its state in
-                    // handle_leave_server, but a sibling that only emitted
-                    // MemberLeft kept the shell, which reloaded on restart and
-                    // fed the sibling re-announce loop (a left server could
-                    // resurrect on our own devices and even re-ADD us via the
-                    // sibling join fast-path). Guarded on !pending so a rejoin
-                    // replaying the old removal op can't nuke the fresh join.
+                    // Self-eviction: OUR identity was removed (our own LEAVE fanned from a
+                    // sibling, or a plain kick) and the merge confirms we are no longer a
+                    // member. Tear down DURABLY: the acting device deletes its state in
+                    // handle_leave_server, but a sibling that only emitted MemberLeft kept the
+                    // shell, which reloaded on restart and fed the sibling re-announce loop.
+                    // Guarded on !pending so a rejoin replaying the old removal op cannot nuke it.
                     let self_evicted = super::resolver::same_identity(peer_id, &local_peer_str)
                         && !pending_server_joins.contains_key(&server_id)
                         && !state.is_member(&local_peer_str);
@@ -6608,10 +6226,9 @@ async fn apply_remote_crdt_op(
                 });
             }
 
-            // Option B: a role/visibility op shifts who qualifies for restricted
-            // channels. Reconcile subgroups here too (coordinator-gated + idempotent)
-            // so the ACTUAL subgroup coordinator acts even when the op was authored
-            // by some other member. The `state` mutable borrow above has ended.
+            // A role or visibility op shifts who qualifies for restricted channels, so
+            // reconcile subgroups here too (coordinator-gated and idempotent), letting the
+            // ACTUAL coordinator act even when another member authored the op.
             let affects_subgroups = matches!(
                 &op.payload,
                 CrdtPayload::RoleChanged { .. }
@@ -6728,13 +6345,11 @@ async fn handle_incoming_request(
 
     match request {
         HavenMessage::KeyRequest { to, ts, sig, pk } => {
-            // SECURITY (Fix B): this handler TEARS DOWN a working Olm session, so
-            // an unauthenticated KeyRequest is a remote session-reset primitive
-            // against any peer. Authenticate before acting on it.
-            //
-            // A device that is not in its master's SIGNED device list is refused
-            // outright — a signature alone only proves that *some* device sent
-            // this, not that it speaks for the identity we think we're talking to.
+            // SECURITY: this handler TEARS DOWN a working Olm session, so an
+            // unauthenticated KeyRequest is a remote session-reset primitive against any
+            // peer. A device that is not in its master's SIGNED device list is refused
+            // outright: a signature alone only proves that SOME device sent this, not
+            // that it speaks for the identity we think we are talking to.
             let payload = key_request_signing_payload(peer_str, device_peer_id, ts.unwrap_or(0));
             let auth = verify_key_exchange(
                 peer_str, device_peer_id, to.as_deref(), ts, sig.as_deref(), pk.as_deref(), &payload,
@@ -6758,13 +6373,11 @@ async fn handle_incoming_request(
                 return;
             }
 
-            // A peer asking for a key bundle means THEIR side has no usable session.
-            // If we hold a CONFIRMED session, our half is stale relative to theirs
-            // (they pruned / lost / restarted) — silently ignoring it strands both
-            // sides until a mutual restart. Tear ours down and re-handshake. If we
-            // only have an UNCONFIRMED outbound session, the peer never got our
-            // PreKey — also rebuild. A decrypt-fail-style cooldown prevents a
-            // KeyRequest flood from thrashing the session.
+            // A peer asking for a key bundle means THEIR side has no usable session. If
+            // we hold a CONFIRMED one, our half is stale relative to theirs and silently
+            // ignoring it strands both sides until a mutual restart; an UNCONFIRMED
+            // outbound session means they never got our PreKey. Either way tear down and
+            // re-handshake, under a cooldown so a KeyRequest flood cannot thrash it.
             let now = std::time::Instant::now();
             let cooldown_ok = match decrypt_fail_cooldown.get(peer_str) {
                 Some(last) => now.duration_since(*last) >= Duration::from_secs(5),
@@ -6795,18 +6408,14 @@ async fn handle_incoming_request(
         }
 
         HavenMessage::KeyBundle { identity_key, one_time_key, to, ts, sig, pk } => {
-            // SECURITY (Fix A): these Curve25519 keys arrive over the relay and
-            // become the Olm ratchet for this peer. Unauthenticated, a hostile
-            // relay could substitute its own keys and sit in the middle of every
-            // DM with no visible sign — the reported MITM.
+            // SECURITY: these Curve25519 keys arrive over the relay and become the Olm
+            // ratchet for this peer. Unauthenticated, a hostile relay could substitute
+            // its own keys and sit in the middle of every DM with no visible sign.
             //
-            // The signature binds them to the sender's Ed25519 DEVICE key, and
-            // `verify_message_signature` re-derives the peer_id from `pk`, so the
-            // keys are cryptographically tied to the peer_id the frame claims to
-            // come from. The device-list check then ties that device to a master
-            // the user actually trusts, completing the chain:
-            //   master (known out of band) → signed device list → device key →
-            //   signed bundle → Olm keys.
+            // The signature binds them to the sender's Ed25519 DEVICE key and
+            // `verify_message_signature` re-derives the peer_id from `pk`, while the
+            // device-list check ties that device to a master the user trusts, completing
+            // master -> signed device list -> device key -> signed bundle -> Olm keys.
             let payload = key_bundle_signing_payload(
                 peer_str, device_peer_id, &identity_key, &one_time_key, ts.unwrap_or(0),
             );
@@ -6835,43 +6444,33 @@ async fn handle_incoming_request(
                 return;
             }
 
-            // SECURITY (Issue 1-C): the bundle is authenticated at this point —
-            // signed by the sender's device key, and that device is in its
-            // master's signed list. Pin the Olm identity key so a LATER change
-            // (a reinstall) is surfaced instead of passing silently. Done before
-            // the glare/session branching so the fact is recorded even when this
-            // particular bundle loses the tiebreaker and builds no session.
+            // SECURITY: the bundle is authenticated by now, so pin the Olm identity key
+            // and surface a LATER change (a reinstall) instead of letting it pass
+            // silently. Done before the glare branching, so the fact is recorded even
+            // when this bundle loses the tiebreaker and builds no session.
             super::security_alerts::note_olm_identity_key(
                 event_tx, db_path, db_passphrase, master_peer_str,
                 &super::resolver::resolve(peer_str), peer_str, &identity_key,
             ).await;
 
-            // Peer responded with their key bundle — create outbound Olm session.
             if olm.has_session(peer_str) {
                 hollow_log!("[HOLLOW-CRYPTO] Already have session with {peer_str}, ignoring KeyBundle");
                 key_bundle_sent_to.remove(peer_str);
             } else if key_bundle_sent_to.remove(peer_str) && device_peer_id > peer_str {
-                // Glare: we sent THEM a KeyBundle (responding to their KeyRequest) AND
-                // they sent US a KeyBundle (responding to our KeyRequest). Both sides
-                // would create outbound sessions → MAC mismatch. The lower peer ID
-                // creates the outbound session; we're higher, so we wait for their
-                // PreKey/SessionAck to create an inbound session instead.
+                // Glare: we sent THEM a KeyBundle and they sent US one, so both sides would
+                // create outbound sessions and MAC-mismatch. The lower peer id creates the
+                // outbound session; we are higher, so we wait for their PreKey and create an
+                // inbound one instead.
                 //
-                // CRITICAL — compare DEVICE ids, not master. `peer_str` is the
-                // SENDER'S DEVICE id (the relay reports device ids + authenticates
-                // device sockets); the outbound Olm session lives on the SOCKET, so
-                // the tiebreaker must be device↔device to stay antisymmetric. Using
-                // the local MASTER (`local_peer_str`) here compared our master vs the
-                // peer's device — two unrelated strings, so BOTH peers of a pair could
-                // satisfy `local > peer` at once → both defer → deadlock (never keyed
-                // until the 30s sweep). All `key_bundle_sent_to` / `key_request_in_flight`
-                // / KeyRequest targets are already device-keyed, so `device_peer_id`
-                // is the consistent id-kind to compare against `peer_str`.
+                // CRITICAL: compare DEVICE ids, not master. `peer_str` is the SENDER'S DEVICE
+                // id and the outbound Olm session lives on the SOCKET, so the tiebreaker must
+                // be device against device to stay antisymmetric. Comparing our MASTER with
+                // the peer's device is two unrelated strings, so BOTH peers can satisfy
+                // `local > peer` at once, both defer, and the pair deadlocks until the sweep.
                 //
-                // Do NOT clear key_request_in_flight here: if the low peer's PreKey/
-                // SessionAck is dropped, clearing it would strand us sessionless with
-                // no retry. Instead REFRESH the timestamp so the reconciliation sweep
-                // re-requests once the deferral window lapses.
+                // Do NOT clear key_request_in_flight here: if the low peer's PreKey is
+                // dropped, clearing it strands us sessionless with no retry. REFRESH the
+                // timestamp so the reconciliation sweep re-requests after the deferral window.
                 hollow_log!("[HOLLOW-CRYPTO] KeyBundle glare with {peer_str} — we're higher, deferring to their PreKey (sweep will retry if dropped)");
                 key_request_in_flight.insert(peer_str.to_string(), std::time::Instant::now());
             } else {
@@ -6880,11 +6479,10 @@ async fn handle_incoming_request(
                     Ok(()) => {
                         hollow_log!("[HOLLOW-CRYPTO] Created outbound (unconfirmed) session with {peer_str} via KeyBundle");
                         persist_crypto_state(olm, crypto_store, peer_str);
-                        // Keep key_request_in_flight set (refreshed): the session is
-                        // outbound-only/unconfirmed until the peer replies (SessionAck or
-                        // any decrypt). If our PreKey is dropped, the sweep resends.
-                        // Do NOT emit SessionEstablished yet — that would be the optimistic
-                        // "A sends, B never sees it" bug. Confirmation happens on SessionAck.
+                        // Keep key_request_in_flight set (refreshed): the session is outbound-only
+                        // until the peer replies, and if our PreKey is dropped the sweep resends. Do
+                        // NOT emit SessionEstablished yet, which would be the optimistic "A sends, B
+                        // never sees it" bug; confirmation happens on SessionAck.
                         key_request_in_flight.insert(peer_str.to_string(), std::time::Instant::now());
 
                         // Send encrypted SessionAck to upgrade the ratchet.
@@ -6895,7 +6493,6 @@ async fn handle_incoming_request(
                             ws_cmd_tx, ws_room_peers,
                         ).await;
 
-                        // Drain pending messages for this peer.
                         if let Some(queued) = pending_messages.remove(peer_str) {
                             hollow_log!("[HOLLOW-CRYPTO] Draining {} pending messages for {peer_str}", queued.len());
                             for text in queued {
@@ -6906,7 +6503,6 @@ async fn handle_incoming_request(
                             }
                         }
 
-                        // Flush pending sync requests.
                         sync_handler::flush_pending_sync_requests(
                             pending_sync_requests, peer_str,
                             olm, crypto_store, bundle_keypair, event_tx,
@@ -6939,7 +6535,6 @@ async fn handle_incoming_request(
             };
 
             let plaintext = if message_type == 0 {
-                // PreKeyMessage — create inbound session.
                 let their_identity = match &identity_key {
                     Some(k) => k,
                     None => {
@@ -6957,11 +6552,9 @@ async fn handle_incoming_request(
                 let had_existing_session = olm.has_session(&peer_str);
 
                 if had_existing_session {
-                    // We have an inbound-derived session (already good). Try to decrypt
-                    // the PreKey using the existing session — this handles the race where
-                    // two encrypted messages arrive as PreKeys (e.g. sync batch response +
-                    // regular channel message overlap). The first creates a new session,
-                    // the second should decrypt with it.
+                    // We have an inbound-derived session already. Try it first, which handles the
+                    // race where two encrypted messages arrive as PreKeys: the first creates the
+                    // session, the second should decrypt with it.
                     match olm.try_decrypt_prekey_with_existing(&peer_str, &ciphertext) {
                         Ok(pt) => {
                             hollow_log!("[HOLLOW-CRYPTO] Decrypted PreKey with existing session for {peer_str}");
@@ -6980,10 +6573,9 @@ async fn handle_incoming_request(
                                             peer_id: peer_str.to_string(),
                                         })
                                         .await;
-                                    // SECURITY (Issue 1-C): pin only AFTER the session
-                                    // was built — vodozemac has now proven this
-                                    // identity key belongs to the sender, so a forged
-                                    // key can't fabricate a "they re-keyed" notice.
+                                    // SECURITY: pin only AFTER the session was built. vodozemac
+                                    // has now proven this identity key belongs to the sender, so
+                                    // a forged key cannot fabricate a "they re-keyed" notice.
                                     super::security_alerts::note_olm_identity_key(
                                         event_tx, db_path, db_passphrase, master_peer_str,
                                         &super::resolver::resolve(peer_str), peer_str,
@@ -7044,7 +6636,6 @@ async fn handle_incoming_request(
                         }
                     }
                 } else {
-                    // No existing session — standard path: create inbound session.
                     match olm.create_inbound_session(&peer_str, their_identity, &ciphertext) {
                         Ok(pt) => {
                             let _ = event_tx
@@ -7075,14 +6666,10 @@ async fn handle_incoming_request(
                                     ).await;
                                 }
                             }
-                            // Re-pull any DMs the peer sent on the now-dead ratchet
-                            // (the glare-desync case: the peer kept encrypting on a
-                            // session we couldn't decrypt, so those messages never
-                            // rendered live — exactly what a RESTART recovers via DM
-                            // sync). Now that we hold a FRESH session, ask the peer to
-                            // re-serve from our high-water mark; the response rides this
-                            // good session and the receiver dedups by message_id. This is
-                            // the live equivalent of the restart-time re-sync.
+                            // Re-pull any DMs the peer sent on the now-dead ratchet: during
+                            // the desync it kept encrypting on a session we could not decrypt,
+                            // so those messages never rendered. Now that we hold a FRESH
+                            // session, ask it to re-serve from our high-water mark.
                             request_dm_resync_after_rekey(
                                 &peer_str, &master_peer_str,
                                 &ws_cmd_tx, &ws_room_peers, db_path, db_passphrase,
@@ -7126,10 +6713,9 @@ async fn handle_incoming_request(
                     }
                 }
             } else {
-                // Normal encrypted message — decrypt with existing session.
-                // Capture confirmation transition: if this was an unconfirmed outbound
-                // session, a successful decrypt proves the peer replied (decrypt() clears
-                // outbound_only internally), so we can now report SessionEstablished.
+                // Normal encrypted message. Capture the confirmation transition: on an
+                // unconfirmed outbound session a successful decrypt proves the peer replied
+                // (decrypt() clears outbound_only), so SessionEstablished can be reported.
                 let was_unconfirmed = olm.has_unconfirmed_session(&peer_str);
                 match olm.decrypt(&peer_str, message_type, &ciphertext) {
                     Ok(pt) => {
@@ -7150,10 +6736,9 @@ async fn handle_incoming_request(
                     }
                     Err(e) => {
                         let now = std::time::Instant::now();
-                        // ALWAYS log every decrypt failure (was gated behind the 5s
-                        // teardown cooldown, so a burst of undecryptable frames after a
-                        // glare-desynced session went completely UNLOGGED — the bug was
-                        // invisible: 40+ frames delivered by the relay, zero trace here).
+                        // ALWAYS log a decrypt failure. Gating this behind the 5s teardown
+                        // cooldown left a burst of undecryptable frames after a glare-desynced
+                        // session completely unlogged, which made the bug invisible.
                         hollow_log!("[HOLLOW-SWARM] Decrypt FAILED for {peer_str}: {e}");
 
                         // Tear down the (known-dead) session at most once per 5s — this
@@ -7186,16 +6771,11 @@ async fn handle_incoming_request(
                             }
                         }
 
-                        // Send a KeyRequest to re-establish the session — independent of
-                        // the teardown throttle, lightly throttled on its own (2s). The
-                        // sender keeps blasting messages on its live-but-dead ratchet and
-                        // the relay never ACKs, so OUR repeated KeyRequest is the only
-                        // signal that drives the peer to drop its half and re-handshake.
-                        // Gating this behind the 5s teardown cooldown (the old bug) made
-                        // us go silent for 5s after the first failure → the glare never
-                        // resolved live and only a RESTART fixed it. Once the session is
-                        // rebuilt, our pending_messages queue + the peer's re-send recover
-                        // the missed messages (the receiver dedups by message_id).
+                        // Send a KeyRequest to re-establish the session, independent of the
+                        // teardown throttle and lightly throttled on its own (2s). The sender keeps
+                        // blasting on its live-but-dead ratchet and the relay never ACKs, so our
+                        // repeated KeyRequest is the only signal that drives the peer to drop its
+                        // half. Gating it behind the 5s cooldown went silent and never resolved live.
                         let req_throttled = key_request_in_flight
                             .get(peer_str)
                             .is_some_and(|t| now.duration_since(*t) < Duration::from_secs(2));
@@ -7215,14 +6795,12 @@ async fn handle_incoming_request(
             // Persist only session ratchet after decrypt (account unchanged).
             persist_olm_session(olm, crypto_store, &peer_str);
 
-            // Detect message envelope and route accordingly.
             let text = String::from_utf8_lossy(&plaintext).to_string();
 
-            // ASYNC FRIENDING: the accepter's ONE pre-key establisher. Its whole job
-            // was done by the decrypt above, which created our inbound session with
-            // them. It is control traffic, so it stops here — checked BEFORE the
-            // envelope parse because it is deliberately not JSON, and the parse
-            // failure path renders unknown plaintext as a legacy raw-text DM bubble.
+            // ASYNC FRIENDING: the accepter's ONE pre-key establisher. Its whole job was
+            // done by the decrypt above, which created our inbound session, so it stops
+            // here. Checked BEFORE the envelope parse because it is deliberately not
+            // JSON, and the parse-failure path renders unknown plaintext as a DM bubble.
             if text == social::FRIEND_HANDSHAKE_SENTINEL {
                 hollow_log!("[HOLLOW-FRIENDS] Friend-handshake establisher from {peer_str} — Olm session live, no DM row");
                 return;
@@ -7231,13 +6809,10 @@ async fn handle_incoming_request(
             match serde_json::from_str::<MessageEnvelope>(&text) {
                 Ok(MessageEnvelope::ChannelMessage { inner }) => {
                     let ChannelMessagePayload { sid, cid, text: msg_text, ts, sig, pk, mid, reply_to, file_id, link_preview, order_us } = *inner;
-                    // Multi-device: this Olm-direct path (MLS-failure fallback +
-                    // offline replay) authenticates the sender's DEVICE socket,
-                    // but channel messages are SIGNED by — and attributed to —
-                    // the sender's MASTER. Resolve first so the signature
-                    // verifies and the row is master-keyed, exactly like the
-                    // MLS and public-channel paths. Verifying against the raw
-                    // device id REJECTED every multi-device fallback message.
+                    // Multi-device: this Olm-direct path (MLS-failure fallback plus
+                    // offline replay) authenticates the sender's DEVICE socket, but
+                    // channel messages are SIGNED by and attributed to the sender's
+                    // MASTER, so resolve first or the signature cannot verify.
                     let sender_master = super::resolver::resolve(peer_str);
                     // SECURITY: Verify sender is a member of the claimed server.
                     if let Some(state) = server_states.get(&sid) {
@@ -7250,14 +6825,11 @@ async fn handle_incoming_request(
                         return;
                     }
 
-                    // SECURITY: a LIVE channel message MUST carry a signature that
-                    // verifies. The old `if sig.is_some()` gate was itself the
-                    // bypass — strip `sig`/`pk` and verification was skipped
-                    // entirely, leaving attribution resting on the relay-reported
-                    // sender id. `ChannelSyncBatch` backfill applies the same rule
-                    // since 0.8.5 (`REQUIRE_SIGNED_BACKFILL`); the live-enforce /
-                    // backfill-tolerate split now survives only for the moderation
-                    // trio, where a mute may legitimately postdate synced history.
+                    // SECURITY: a LIVE channel message MUST carry a signature that verifies.
+                    // The old `if sig.is_some()` gate was itself the bypass: strip `sig`/`pk`
+                    // and verification was skipped entirely, leaving attribution on the
+                    // relay-reported sender id. `ChannelSyncBatch` backfill applies the same
+                    // rule; the live-enforce split survives only for the moderation trio.
                     {
                         // v2 only (0.8.5) — binds the wire's structured fields.
                         let lp_digest = link_preview.as_ref().map(crypto_handler::link_preview_digest);
@@ -7278,21 +6850,18 @@ async fn handle_incoming_request(
                         }
                     }
 
-                    // SECURITY: Enforce the 4,000 byte storage limit (already
-                    // signature-verified above, against the raw text). Char-boundary
-                    // safe: the old `msg_text[..4000]` PANICKED when byte 4,000 landed
-                    // inside a multi-byte character, aborting the swarm event loop on a
-                    // remote-controlled string.
+                    // SECURITY: enforce the 4,000 byte storage limit, already
+                    // signature-verified above against the RAW text. Char-boundary safe:
+                    // `msg_text[..4000]` PANICKED when byte 4,000 landed inside a multi-byte
+                    // character, aborting the swarm event loop on a remote-controlled string.
                     let msg_text = clip_text(msg_text);
 
                     // Multi-device: a message authored by ANY of our own devices is ours.
                     let is_mine = super::resolver::same_identity(&sender_master, &local_peer_str);
 
-                    // Persist channel message using sender's timestamp.
-                    // Dedup by message_id (replays); the content UNIQUE index
-                    // is legacy-only now (WHERE message_id IS NULL) — it used
-                    // to swallow DISTINCT identical-text messages landing in
-                    // the same millisecond, dropping the second message.
+                    // Persist with the sender's timestamp, deduped by message_id. The content
+                    // UNIQUE index is legacy-only now (WHERE message_id IS NULL): it used to
+                    // swallow distinct identical-text messages landing in the same millisecond.
                     let mut is_new = true;
                     let mut reply_to_own = false;
                     if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
@@ -7317,7 +6886,6 @@ async fn handle_incoming_request(
                                 Err(_) => { is_new = false; }
                             }
                         }
-                        // Persist link preview for this message if present (Phase 6.75).
                         if is_new {
                             if let (Some(lp), Some(message_id)) = (link_preview.as_ref(), mid.as_ref()) {
                                 if let Ok(lp_json) = serde_json::to_string(lp) {
@@ -7327,11 +6895,10 @@ async fn handle_incoming_request(
                         }
                     }
 
-                    // ALWAYS emit — a ChannelSyncBatch racing this live message
-                    // (channel-open fires requestChannelSync) inserts the row
-                    // first without emitting; suppressing the live event too
-                    // left the open pane stale. Dart dedups by message_id and
-                    // skips unread/notifications when `duplicate`.
+                    // ALWAYS emit. A ChannelSyncBatch racing this live message inserts the row
+                    // first without emitting, and suppressing the live event too left the open
+                    // pane stale. Dart dedups by message_id and skips unread and notifications
+                    // when `duplicate`.
                     let _ = event_tx
                         .send(NetworkEvent::ChannelMessageReceived {
                             server_id: sid,
@@ -7359,14 +6926,11 @@ async fn handle_incoming_request(
                         let _ = store.begin_transaction();
                         let mut pk_cache = PkCache::new();
                         for msg in &messages {
-                            // Backfill signature rule (0.8.5): Valid or nothing —
-                            // an unsigned item is an injection that can claim ANY
-                            // sender via `msg.s`. An edited row verifies against its
-                            // EDIT signature (edited_at + current text). See
-                            // `check_backfill_signature`.
-                            // Recomputed from the shipped card when there is
-                            // one — that is what makes the preview
-                            // signature-covered (`backfill_lp_digest`).
+                            // Backfill signature rule: Valid or nothing. An unsigned item is
+                            // an injection that can claim ANY sender via `msg.s`. An edited
+                            // row verifies against its EDIT signature (edited_at plus current
+                            // text). The digest is recomputed from the shipped card when there
+                            // is one, which is what makes the preview signature-covered.
                             let lp_digest = crypto_handler::backfill_lp_digest(
                                 msg.lp.as_deref(), msg.lp_digest.as_deref(),
                             );
@@ -7418,17 +6982,12 @@ async fn handle_incoming_request(
                                     msg.sig.as_deref(), msg.pk.as_deref(),
                                 );
                             } else if sig_verified {
-                                // Multi-device self-heal: the row already exists but may
-                                // have been stored under a sender DEVICE id (pre device→
-                                // master resolve fix) with signature material that no
-                                // longer verifies on this device — the "12D3KooW… +
-                                // unverified signature" bubble. This synced copy's sig
-                                // VERIFIED (authentic sender + text), so if our stored row
-                                // is attributed to a different sender, repair it to the
-                                // verified one. INSERT OR IGNORE blocked re-inserting the
-                                // good copy, so this UPDATE is the only path to converge.
-                                // Safe: we only ever replace with a cryptographically
-                                // verified attribution (can't be used to forge).
+                                // Multi-device self-heal: the row may exist under a sender DEVICE id
+                                // with signature material that no longer verifies here, which renders
+                                // as an unverified-signature bubble. This synced copy's signature
+                                // VERIFIED, so a row attributed to a different sender is repaired to
+                                // the verified one. INSERT OR IGNORE blocks re-inserting the good copy,
+                                // so this UPDATE is the only converging path, and it can never forge.
                                 if let Some(mid) = &msg.mid {
                                     let stored_sender = store.get_channel_message_sender(mid);
                                     if stored_sender.as_deref() != Some(msg.s.as_str()) {
@@ -7475,10 +7034,9 @@ async fn handle_incoming_request(
                                 );
                             }
 
-                            // Insert file metadata and emit FileHeaderReceived for late joiners.
-                            // The item's v2 signature binds `file_id`, NOT this
-                            // file_meta blob — so the owner guard is what stops a
-                            // responder relabelling someone else's attachment.
+                            // Insert file metadata and emit FileHeaderReceived for late joiners. The
+                            // item's v2 signature binds `file_id`, NOT this file_meta blob, so the owner
+                            // guard is what stops a responder relabelling someone else's attachment.
                             if let Some(ref fm) = msg.file_meta
                                 .as_ref()
                                 .filter(|fm| file_handler::file_meta_write_allowed(&store, &fm.fid, &fm.sender))
@@ -7509,10 +7067,9 @@ async fn handle_incoming_request(
                                 }).await;
                             }
 
-                            // Sync reactions for this message (INSERT OR IGNORE — idempotent).
-                            // Each reaction names its own reactor, so it carries
-                            // its own signature check — the item verdict above
-                            // covers the message, not the reactions on it.
+                            // Sync reactions for this message (INSERT OR IGNORE, idempotent). Each
+                            // reaction names its own reactor and carries its own signature check: the
+                            // item verdict above covers the message, not the reactions on it.
                             if let Some(mid) = &msg.mid {
                                 for r in &msg.reactions {
                                     if !message_ops::sync_reaction_accepted(mid, r) {
@@ -7577,22 +7134,16 @@ async fn handle_incoming_request(
                     // the signature covers the text the sender actually sent, so
                     // clipping first would invalidate it. See below.
 
-                    // Multi-device: attribute the DM to the sender's MASTER identity
-                    // so messages from any of a friend's devices land in the single
-                    // DM thread (and our own other-device sends attribute to us).
-                    // Pre-multi-device this resolves to peer_str unchanged.
+                    // Multi-device: attribute the DM to the sender's MASTER, so messages from any
+                    // of a friend's devices land in the single DM thread and our own other-device
+                    // sends attribute to us. Pre-multi-device this resolves to peer_str unchanged.
                     let is_own_device = super::resolver::same_identity(&peer_str, master_peer_str);
-                    // Self fan-out (Step 3): a copy echoed from our OWN sibling carries
-                    // `convo` = the OTHER party's master, so we file it under the real
-                    // conversation rather than resolving it to ourselves (the sender).
-                    // For a normal DM from a friend, `convo` is None → resolve the sender.
-                    // PHANTOM-CHAT GUARD (Step 7): drop a DM from a device we just
-                    // revoked but that is still alive and talking. Without this, a
-                    // revoked device that hasn't yet self-nuked keeps sending DMs;
-                    // since we `forget`-ed its device→master link, `resolve` returns
-                    // its own id → the message spawns a standalone "unknown peer"
-                    // conversation (the phantom chat). Drop it; it stops for good once
-                    // the device self-nukes / disconnects.
+                    // Self fan-out: a copy echoed from our OWN sibling carries `convo` = the OTHER
+                    // party's master, so it files under the real conversation rather than
+                    // resolving to ourselves. For a normal DM `convo` is None.
+                    // PHANTOM-CHAT GUARD: drop a DM from a device we just revoked but that is
+                    // still alive and talking. We `forget`-ed its device-to-master link, so
+                    // `resolve` returns its own id and it would spawn an "unknown peer" chat.
                     if super::resolver::is_revoked(&peer_str) {
                         hollow_log!("[HOLLOW-REVOKE] Dropped DM from revoked-but-alive device {peer_str}");
                         return;
@@ -7610,28 +7161,20 @@ async fn handle_incoming_request(
 
                     // SECURITY: a DM whose signature does not verify is DROPPED.
                     //
-                    // This signature is the ONLY thing binding DM content to the
-                    // sender's Ed25519 identity. The Olm session it arrived on proves
-                    // only that someone holds the ratchet, and the KeyBundle that
-                    // established that ratchet is itself unauthenticated (no
-                    // signature, no pinning), so a hostile relay can sit in the
-                    // middle. Verifying-then-storing-anyway (the old behaviour: log,
-                    // no `return`) meant such a relay could FORGE DM content, not
-                    // merely read it.
+                    // This signature is the ONLY thing binding DM content to the sender's
+                    // Ed25519 identity. The Olm session it arrived on proves only that someone
+                    // holds the ratchet, so verifying-then-storing-anyway would let a hostile
+                    // relay FORGE DM content, not merely read it.
                     //
-                    // A MISSING signature is rejected too. The old `if sig.is_some()`
-                    // gate was itself the bypass: strip `sig`/`pk` and verification
-                    // was skipped entirely. `verify_message_signature` already returns
-                    // false for None, so the gate is simply gone. Signed DMs have been
-                    // mandatory since e2cc8ab (2026-03-09).
+                    // A MISSING signature is rejected too: the old `if sig.is_some()` gate was
+                    // itself the bypass, since stripping `sig`/`pk` skipped verification entirely.
                     //
-                    // Verified against the RAW text, before the length clamp: the
-                    // sender signed what they sent, and a 4,000-CHARACTER composer
-                    // limit is up to ~16,000 BYTES in Cyrillic/CJK/emoji. Clipping
-                    // first would have dropped every long non-Latin DM.
+                    // Verified against the RAW text, before the length clamp: the sender signed
+                    // what they sent, and a 4,000-CHARACTER composer limit is up to ~16,000
+                    // BYTES in Cyrillic, CJK or emoji, so clipping first would have dropped
+                    // every long non-Latin DM.
                     //
-                    // Signer/context are SWAPPED for a self fan-out echo
-                    // (`is_own_device`, our OWN sibling mirroring a message WE sent):
+                    // Signer and context are SWAPPED for a self fan-out echo (`is_own_device`):
                     // WE signed it and the FRIEND (`convo_peer`) was the recipient.
                     {
                         let (recipient_m, signer_m): (&str, &str) = if is_own_device {
@@ -7658,24 +7201,19 @@ async fn handle_incoming_request(
                         }
                     }
 
-                    // Enforce the 4,000 byte storage limit, char-boundary safe: the
-                    // old `msg_text[..4000]` PANICKED when byte 4,000 landed inside a
-                    // multi-byte character, aborting the swarm event loop on a
-                    // remote-controlled string.
+                    // Enforce the 4,000 byte storage limit, char-boundary safe: the old
+                    // `msg_text[..4000]` PANICKED when byte 4,000 landed inside a multi-byte
+                    // character, aborting the swarm event loop on a remote-controlled string.
                     let msg_text = clip_text(msg_text);
 
-                    // Persist received DM using sender's timestamp (not Dart DateTime.now()).
-                    // This ensures DM sync timestamps are consistent for deduplication.
-                    // `is_own` flags a message echoed from our OWN other device as ours.
+                    // Persist with the SENDER timestamp, never a local now(), so DM sync
+                    // dedups consistently. `is_own` flags an echo from our OWN device.
                     let mut is_new = true;
                     {
                         if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
-                            // Dedup by message_id (replays: reconnect resend,
-                            // pending drain, relay buffer). The content UNIQUE
-                            // index is legacy-only now (WHERE message_id IS
-                            // NULL) — it used to swallow DISTINCT identical-text
-                            // messages landing in the same millisecond, dropping
-                            // the second message and its MessageReceived event.
+                            // Dedup by message_id (reconnect resend, pending drain,
+                            // relay buffer). The content UNIQUE index is legacy-only
+                            // now: it used to swallow distinct identical-text messages.
                             let already = mid.as_deref()
                                 .map(|m| store.dm_message_exists(m))
                                 .unwrap_or(false);
@@ -7692,7 +7230,6 @@ async fn handle_incoming_request(
                                     Err(_) => { is_new = false; }
                                 }
                             }
-                            // Persist link preview for this message if present (Phase 6.75).
                             if is_new {
                                 if let (Some(lp), Some(message_id)) = (link_preview.as_ref(), mid.as_ref()) {
                                     if let Ok(lp_json) = serde_json::to_string(lp) {
@@ -7703,14 +7240,10 @@ async fn handle_incoming_request(
                         }
                     }
 
-                    // ALWAYS emit — even when the row already existed. A sync
-                    // batch racing this live delivery (chat-open triggers
-                    // DmSyncRequest) inserts the row first WITHOUT emitting
-                    // per-message events; suppressing the live event too left
-                    // an OPEN chat stale until re-entry (typing animated,
-                    // messages never appeared). The in-memory list dedups by
-                    // message_id, and Dart skips unread/notifications when
-                    // `duplicate` — so replays can't double-count.
+                    // ALWAYS emit, even when the row already existed. A sync
+                    // batch racing this live delivery inserts the row first
+                    // WITHOUT per-message events, and suppressing the live event
+                    // too left an OPEN chat stale until re-entry.
                     let _ = event_tx
                         .send(NetworkEvent::MessageReceived {
                             from_peer: convo_peer.to_string(),
@@ -7740,17 +7273,11 @@ async fn handle_incoming_request(
                     {
                         return;
                     }
-                    // CRITICAL — `DmSyncItem.mine` is RESPONDER-relative (it's
-                    // `is_mine` as stored in the SENDER's DB). A FRIEND's perspective is
-                    // the OPPOSITE of ours: a message the friend SENT (their is_mine=1)
-                    // is one WE RECEIVED (our is_mine=false), and a message the friend
-                    // RECEIVED from us (their is_mine=0) is one WE SENT (our is_mine=
-                    // true). So on the friend path we INVERT. From our own SIBLING
-                    // (same_identity) is_mine already means the same on both our devices
-                    // — keep as-is. (The pre-both-directions one-directional path served
-                    // only the friend's own sends and hardcoded the insert to `false`,
-                    // i.e. it was implicitly `!mine` for that single case — this
-                    // generalizes it correctly to both directions.)
+                    // CRITICAL: `DmSyncItem.mine` is RESPONDER-relative, `is_mine` as stored in
+                    // the SENDER's DB, and a FRIEND's perspective is the OPPOSITE of ours: what
+                    // the friend SENT we RECEIVED, and what they received from us we sent. So on
+                    // the friend path we INVERT. From our own SIBLING, `is_mine` already means
+                    // the same on both devices, so it is kept as-is.
                     let from_sibling = super::resolver::same_identity(&peer_str, &local_peer);
                     let mut new_count = 0u32;
 
@@ -7763,16 +7290,12 @@ async fn handle_incoming_request(
                             // path, keep as-is from a sibling.
                             let is_mine = if from_sibling { msg.mine } else { !msg.mine };
 
-                            // CRITICAL (multi-device): the signer is always a
-                            // MASTER id, never the raw device id `peer_str` the
-                            // relay reported. The original sig context is the
-                            // FRIEND conversation, direction-dependent on OUR
-                            // effective `is_mine`:
-                            //   is_mine=true  → sender = our master, recipient = convo
-                            //   is_mine=false → sender = convo,      recipient = our master
-                            // (mirrors the sibling-batch receiver below). Verifying
-                            // against the wrong end failed EVERY signature for a
-                            // multi-device friend (the "Sig verify FAILED" flood).
+                            // CRITICAL (multi-device): the signer is always a MASTER
+                            // id, never the raw device id the relay reported. The
+                            // signing context is the FRIEND conversation, direction-
+                            // dependent on OUR effective `is_mine`:
+                            //   is_mine=true  -> sender = our master, recipient = convo
+                            //   is_mine=false -> sender = convo,      recipient = our master
                             let (sender_m, recipient_m): (&str, &str) = if is_mine {
                                 (&local_peer, &convo_peer)
                             } else {
@@ -7814,10 +7337,9 @@ async fn handle_incoming_request(
                                 msg.mid, msg.ts, msg.mine, msg.edited_at, already_exists, msg.t.len()
                             );
 
-                            // Reconcile against a row delivered via another path
-                            // (e.g. offline fetch) that has a NULL/different mid.
-                            // Without this, an edited message whose original was
-                            // fetched separately would insert as a duplicate row.
+                            // Reconcile against a row delivered via another path (an
+                            // offline fetch) that has a NULL or different mid. Without
+                            // this, an edited message inserts as a duplicate row.
                             let reconciled = if !already_exists {
                                 if let Some(mid) = msg.mid.as_deref() {
                                     store.reconcile_dm_by_timestamp(
@@ -7861,7 +7383,6 @@ async fn handle_incoming_request(
                                     _ => {}
                                 }
                             } else if let (Some(edit_ts), Some(mid)) = (msg.edited_at, &msg.mid) {
-                                // Message already exists — apply edit if text differs.
                                 let edit_result = store.edit_dm_message(
                                     mid, &msg.t, edit_ts,
                                     msg.sig.as_deref(),
@@ -7883,11 +7404,9 @@ async fn handle_incoming_request(
                                 }
                             }
 
-                            // The card the item's signature covers. Runs on
-                            // every branch above — fresh row, pre-existing
-                            // card-less row, edited row — so a friend catching
-                            // up after being offline gets the preview with the
-                            // message. See `apply_synced_link_preview`.
+                            // The card the item's signature covers. Runs on every
+                            // branch above, so a friend catching up after being
+                            // offline gets the preview with the message.
                             if sig_check == BackfillSig::Valid
                                 && let (Some(lp), Some(mid)) = (msg.lp.as_deref(), &msg.mid)
                                 && message_ops::apply_synced_link_preview(
@@ -7918,11 +7437,10 @@ async fn handle_incoming_request(
                                 }
                             }
 
-                            // Insert file metadata and emit FileHeaderReceived for late joiners.
-                            // DM file context = the conversation MASTER (`convo_peer`),
-                            // NOT the raw device id, so it matches where the message row
-                            // is stored and `_reloadChatForFile` reloads the right thread.
-                            // Owner guard: see the channel batch above.
+                            // Insert file metadata and emit FileHeaderReceived for late joiners. A DM
+                            // file's context is the conversation MASTER (`convo_peer`), not the raw
+                            // device id, so it matches where the message row is stored and
+                            // `_reloadChatForFile` reloads the right thread. Owner guard: see above.
                             if let Some(ref fm) = msg.file_meta
                                 .as_ref()
                                 .filter(|fm| file_handler::file_meta_write_allowed(&store, &fm.fid, &fm.sender))
@@ -7968,10 +7486,8 @@ async fn handle_incoming_request(
                         }
                         let _ = store.commit_transaction();
 
-                        // Pagination: if has_more, send follow-up DmSyncRequest.
-                        // Carry the multi-device both-direction mode forward — else
-                        // the next page reverts to is_mine=0-only and re-strands our
-                        // own sends past message 200.
+                        // Pagination. Carry the multi-device both-direction mode forward, or the
+                        // next page reverts to is_mine=0-only and re-strands our own sends.
                         if has_more == Some(true) {
                             let multi_device =
                                 !super::resolver::devices_for(master_peer_str).is_empty();
@@ -7994,10 +7510,9 @@ async fn handle_incoming_request(
                     }
 
                     hollow_log!("[HOLLOW-SYNC] DM sync: {new_count} new messages from {peer_str}");
-                    // Always emit DmSyncCompleted — even with 0 new messages.
-                    // Dart may have cleared its in-memory cache on disconnect;
-                    // this tells it to reload from DB regardless.
-                    // Only emit completion when there are no more pages.
+                    // Always emit DmSyncCompleted, even with 0 new messages: Dart may have
+                    // cleared its in-memory cache on disconnect and this tells it to reload
+                    // from the DB. Only on the last page.
                     if has_more != Some(true) {
                         let _ = event_tx.send(NetworkEvent::DmSyncCompleted {
                             peer_id: convo_peer.clone(),
@@ -8014,10 +7529,9 @@ async fn handle_incoming_request(
                     }
                     hollow_log!("[HOLLOW-SYNC] Received {} sibling DM(s) for convo {convo} from {peer_str} (has_more: {has_more:?})", messages.len());
                     let local_peer = local_peer_str.to_string();
-                    // File these under the REAL conversation (the friend's master),
-                    // NOT resolve(peer_str) (which would be our own master, since the
-                    // sender is our sibling). Each item carries its own `mine` so both
-                    // directions land on the correct side.
+                    // File these under the REAL conversation (the friend's master), not
+                    // resolve(peer_str), which would be our own master since the sender is our
+                    // sibling. Each item carries its own `mine`, so both directions land right.
                     let convo_peer = convo.clone();
                     let mut new_count = 0u32;
 
@@ -8034,10 +7548,9 @@ async fn handle_incoming_request(
                             } else {
                                 (&convo_peer, &local_peer)
                             };
-                            // Backfill signature rule (0.8.5): Valid or nothing. A
-                            // sibling is still only as trustworthy as the batch it
-                            // forwards — including the cards in it, which is why
-                            // the digest comes from the shipped preview.
+                            // Backfill signature rule: Valid or nothing. A sibling is
+                            // still only as trustworthy as the batch it forwards,
+                            // including the cards in it, hence the shipped-preview digest.
                             let lp_digest = crypto_handler::backfill_lp_digest(
                                 msg.lp.as_deref(), msg.lp_digest.as_deref(),
                             );
@@ -8103,19 +7616,12 @@ async fn handle_incoming_request(
                                         if let (Some(edit_ts), Some(mid)) = (msg.edited_at, &msg.mid) {
                                             let _ = store.set_dm_message_edited_at(mid, edit_ts);
                                         }
-                                        // NOTE: deliberately do NOT emit a per-message
-                                        // MessageReceived here. That event drives the
-                                        // unread counter (`onDmMessage` INCREMENTS), so
-                                        // replaying a whole conversation's history as
-                                        // live MessageReceived events inflated the unread
-                                        // pill with already-seen messages (Home "Recent"
-                                        // + friends-bar pill regression). Instead the
-                                        // batch's terminal `DmSyncCompleted` triggers
-                                        // Dart `loadHistory` (shows the messages, sorted)
-                                        // + `recomputeDmUnread` (counts from the DB
-                                        // against the seen-pointer — idempotent, no
-                                        // over-count). This mirrors the friend
-                                        // `DmSyncBatch` path exactly.
+                                        // Deliberately NO per-message MessageReceived here:
+                                        // that event INCREMENTS the unread counter, so
+                                        // replaying a conversation as live events inflated
+                                        // the unread pill with already-seen messages. The
+                                        // terminal `DmSyncCompleted` drives `loadHistory` plus
+                                        // `recomputeDmUnread`, which counts from the DB.
                                     }
                                     _ => {}
                                 }
@@ -8258,13 +7764,11 @@ async fn handle_incoming_request(
                     let mut edit_applied = false;
                     if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
                         if sid.is_some() {
-                            // Channel edit — verify sender owns the message.
                             let sender = store.get_channel_message_sender(&mid);
                             if sender.as_deref() == Some(&peer_str) {
                                 // SECURITY: a LIVE edit must carry a signature that
                                 // verifies (v2 binds the row's structural fields; the
-                                // ownership check above trusts the transport-reported
-                                // sender). Mirrors message_ops::handle_envelope_edit_message.
+                                // ownership check above trusts the reported sender).
                                 let ctx = format!(
                                     "{}:{}", sid.as_deref().unwrap_or_default(), cid.as_deref().unwrap_or_default(),
                                 );
@@ -8286,19 +7790,15 @@ async fn handle_incoming_request(
                             }
                             // sender == None → message not synced yet; sync batch will bring the edited version.
                         } else {
-                            // DM edit. Normally the editor must be the SENDER (the
-                            // message is NOT ours: is_mine==false). Self fan-out
-                            // (Step 3) is the one exception: a sibling echoing OUR
-                            // OWN edit carries is_mine==true, and is legitimate
-                            // because it resolves to our own master.
+                            // DM edit. Normally the editor must be the SENDER
+                            // (is_mine==false). Self fan-out is the one exception: a
+                            // sibling echoing OUR OWN edit carries is_mine==true.
                             let is_mine = store.get_dm_message_is_mine(&mid);
                             let is_sibling = super::resolver::same_identity(&peer_str, master_peer_str);
                             if is_mine == Some(false) || (is_mine == Some(true) && is_sibling) {
-                                // SECURITY: verify the edit signature. Signer/context
-                                // mirror the live-DM rule: a sibling echo of OUR edit
-                                // was signed by US with the row's conversation peer as
-                                // recipient; a friend's edit was signed by them with
-                                // US as recipient.
+                                // SECURITY: verify the edit signature. Signer and context
+                                // mirror the live-DM rule: a sibling echo of OUR edit was
+                                // signed by US, a friend's edit by them with US as recipient.
                                 let (signer, ctx): (String, String) = if is_sibling {
                                     (
                                         master_peer_str.to_string(),
@@ -8398,10 +7898,9 @@ async fn handle_incoming_request(
                                 sig.as_deref(), pk.as_deref(),
                             );
                         } else {
-                            // SECURITY: the deleter must own the DM message (is_mine
-                            // ==false). Self fan-out (Step 3) exception: a sibling
-                            // echoing OUR OWN delete carries is_mine==true and is
-                            // legitimate (it resolves to our master).
+                            // SECURITY: the deleter must own the DM message
+                            // (is_mine==false). Self fan-out exception: a sibling
+                            // echoing OUR OWN delete carries is_mine==true.
                             let is_mine = store.get_dm_message_is_mine(&mid);
                             let is_sibling = super::resolver::same_identity(&peer_str, master_peer_str);
                             let allowed = is_mine == Some(false) || (is_mine == Some(true) && is_sibling);
@@ -8437,7 +7936,6 @@ async fn handle_incoming_request(
                         }
                     }
 
-                    // Emit event so Dart updates UI.
                     if let (Some(server_id), Some(channel_id)) = (sid, cid) {
                         let _ = event_tx.send(NetworkEvent::ChannelMessageDeleted {
                             server_id,
@@ -8480,11 +7978,10 @@ async fn handle_incoming_request(
                         peer_str.to_string()
                     };
 
-                    // SECURITY: a LIVE reaction must carry a signature that verifies
-                    // (the reactor identity below is otherwise transport-attested
-                    // only). Reactions are signed by the MASTER keypair, so verify
-                    // against the resolved master even where the stored reactor key
-                    // stays the raw device id (channel branch).
+                    // SECURITY: a LIVE reaction must carry a signature that verifies; the
+                    // reactor identity below is otherwise transport-attested only. Reactions
+                    // are signed by the MASTER keypair, so verify against the resolved master
+                    // even where the stored reactor key stays the raw device id.
                     if message_ops::reaction_sig_rejected(
                         &super::resolver::resolve(&peer_str), "reaction", &mid, &emoji, ts,
                         sig.as_deref(), pk.as_deref(),
@@ -8509,10 +8006,9 @@ async fn handle_incoming_request(
                             added_at: ts,
                         }).await;
                     } else {
-                        // peer_id = the DM thread key (the OTHER party). For a normal
-                        // friend reaction reactor==thread peer, but for a sibling
-                        // self-echo the reactor is US while the thread is the friend —
-                        // resolve the thread by the message's row, not the reactor.
+                        // peer_id = the DM thread key (the OTHER party). For a friend's reaction
+                        // the reactor IS the thread peer, but for a sibling self-echo the reactor
+                        // is US while the thread is the friend, so resolve it by the message's row.
                         let convo_peer = dm_event_convo(&peer_str, master_peer_str, &mid, &db_path, &db_passphrase);
                         let _ = event_tx.send(NetworkEvent::DmReactionAdded {
                             peer_id: convo_peer,
@@ -8591,10 +8087,9 @@ async fn handle_incoming_request(
                     // The answer to a queued pull arrived: the ask is over.
                     file_asks::retire(pending_file_asks, &fid);
 
-                    // SECURITY: Validate file size against server limit (or default 34MB for DMs).
-                    // Skip for share-backed files — Share handles delivery with no size limit.
-                    // Skip for explicit pulls — the >34MB share-backed fallback re-serve
-                    // arrives WITHOUT a share_ref and must not be rejected by our own cap.
+                    // SECURITY: validate file size against the server limit (34MB default for
+                    // DMs). Skipped for share-backed files, which Share delivers with no size
+                    // limit, and for explicit pulls, whose fallback re-serve carries no share_ref.
                     if share_ref.is_none() && !explicitly_requested {
                         let max_bytes: u64 = if let Some(ref s) = sid {
                             if let Some(state) = server_states.get(s) {
@@ -8651,13 +8146,10 @@ async fn handle_incoming_request(
                     {
                         return;
                     }
-                    // Multi-device: a DM file's conversation key MUST be the sender's
-                    // MASTER id (where the DM message row itself is stored), NOT the
-                    // raw sender DEVICE id. Otherwise the file metadata is filed under
-                    // the device id while the message is under the master, so
-                    // `_reloadChatForFile` (Dart) reloads the wrong/empty conversation
-                    // and the message renders its `[file:<id>]` placeholder until a
-                    // manual tab-switch reloads the right thread. No-op single-device.
+                    // Multi-device: a DM file's conversation key MUST be the sender's MASTER id,
+                    // where the DM message row itself is stored, not the raw sender DEVICE id.
+                    // Otherwise the metadata is filed under the device while the message is
+                    // under the master, and Dart reloads the wrong conversation.
                     let dm_convo = super::resolver::resolve(&peer_str);
                     let ctx_id = match (&sid, &cid) {
                         (Some(s), Some(c)) => format!("{s}:{c}"),
@@ -8694,15 +8186,10 @@ async fn handle_incoming_request(
                     let cid_str = cid.unwrap_or_else(|| dm_convo.clone());
 
                     // LOOP BREAKER: if this file is ALREADY complete on disk, ignore the
-                    // FileHeader entirely — do NOT register a pending stream or re-process
-                    // early arrivals. A DM file fans out to several of the recipient's
-                    // devices and the decrypt-fail safety re-request also re-sends a
-                    // FileHeader, so the SAME completed file can keep producing headers.
-                    // Each one used to re-register a pending stream (resetting retry_count
-                    // since the prior entry was removed on success) → another crossed
-                    // header/stream pair → an endless re-download of one already-saved file
-                    // (22k log lines, wasted bandwidth re-fetching e.g. a 10KB banner
-                    // thousands of times). Once it's on disk we're done — drop the header.
+                    // FileHeader entirely and register no pending stream. A DM file fans out to
+                    // several of the recipient's devices and the decrypt-fail re-request also
+                    // re-sends a header, so each re-registration reset retry_count and made an
+                    // endless re-download of one already-saved file.
                     let already_complete = {
                         if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
                             match store.get_file_metadata(&fid) {
@@ -8727,17 +8214,14 @@ async fn handle_incoming_request(
                         hollow_log!("[HOLLOW-FILE] FileHeader for {fid} ignored — already complete on disk");
                     }
 
-                    // Inlined offline image (relay-buffered 0x08 DM): the AES ciphertext
-                    // rides INSIDE the header — write it to disk NOW; no stream will ever
-                    // arrive. The FCM fetch node always did this (fetch.rs); the FULL node
-                    // ignored inline_bytes, registered a pending stream that never
-                    // completed, and the buffered image rendered as nothing on desktop.
-                    // AUTO-DOWNLOAD GATE key + verdict (issue #41) — computed
-                    // here because it gates BOTH the inline-image write below
-                    // and the pending-stream registration further down. An
-                    // existing pending stream = a transfer we already chose to
-                    // accept (the decrypt-fail retry re-requests WITHOUT a
-                    // receipt — its fresh header must not be declined).
+                    // Inlined offline image (relay-buffered 0x08 DM): the AES ciphertext rides
+                    // INSIDE the header, so write it to disk now, because no stream will ever
+                    // arrive.
+                    // The AUTO-DOWNLOAD GATE key and verdict (issue #41) are computed here
+                    // because they gate BOTH the inline write below and the pending-stream
+                    // registration further down. An existing pending stream is a transfer we
+                    // already accepted, and the decrypt-fail retry re-requests WITHOUT a
+                    // receipt, so its fresh header must not be declined.
                     let auto_dl_key = if sid_str.is_empty() {
                         format!("dm:{dm_convo}")
                     } else {
@@ -8769,26 +8253,18 @@ async fn handle_incoming_request(
                                 });
                             if let Some(plaintext) = decoded {
                                 if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
-                                    // Captionless offline image: the "[file:...]"
-                                    // companion DM is never sent to offline peers, so
-                                    // insert the message row here (dedup by mid — a
-                                    // captioned image's real caption DM wins later via
-                                    // promote_file_sentinel_to_caption). Mirrors fetch.rs.
-                                    // Stored REGARDLESS of the auto-download gate —
-                                    // only the file bytes are gated, never the message.
+                                    // Captionless offline image: the "[file:...]" companion
+                                    // DM is never sent to offline peers, so the message row
+                                    // is inserted here (deduped by mid; a captioned image's
+                                    // real caption DM wins later). Stored REGARDLESS of the
+                                    // auto-download gate, which gates only the bytes.
                                     //
-                                    // SECURITY (backfill rule, 0.8.5): the header's sig is
-                                    // the MESSAGE signature over the sentinel text — the
-                                    // row is stored ONLY when it VERIFIES (a captioned
-                                    // image's header legitimately fails here, since the
-                                    // sender signed the CAPTION — its caption DM creates
-                                    // the row instead; an unsigned header no longer
-                                    // materialises a row at all). Sibling echoes skip the
-                                    // check: the sender is us, and the header carries no
-                                    // convo to reconstruct the signing context from.
-                                    // `order_us` from the header — the v2 signature binds
-                                    // the sender's Lamport stamp, so a local ts*1000
-                                    // default would wedge this row's later sync re-serve.
+                                    // SECURITY (backfill rule): the header's sig is the
+                                    // MESSAGE signature over the sentinel text, so the row is
+                                    // stored ONLY when it VERIFIES; a captioned image's
+                                    // header legitimately fails, because the sender signed the
+                                    // CAPTION. `order_us` comes from the header, since the v2
+                                    // signature binds the sender's Lamport stamp.
                                     let from_sibling = super::resolver::same_identity(&peer_str, master_peer_str);
                                     let sentinel_text = format!("[file:{fid}]");
                                     let sentinel_sig_ok = from_sibling || {
@@ -8820,21 +8296,18 @@ async fn handle_incoming_request(
                                 }
                                 if !auto_ok {
                                     // AUTO-DOWNLOAD GATE (issue #41): drop the inline
-                                    // ciphertext — the card renders from the metadata
-                                    // row with a manual Download button that re-pulls
-                                    // the bytes from the sender.
+                                    // ciphertext. The card renders from the metadata row with
+                                    // a manual Download button that re-pulls the bytes.
                                     hollow_log!("[HOLLOW-FILE] Auto-download gate dropped inline image bytes for {fid} ({auto_dl_key}) — message kept, manual download available");
                                     inline_done = true;
                                 } else if !file_transfer::is_wire_file_id(&fid)
                                     || !file_transfer::is_wire_ext(&ext)
                                 {
                                     // SECURITY (FILE-1): this write names a file
-                                    // from two raw wire strings. An absolute
+                                    // from two raw wire strings, and an absolute
                                     // `fid` makes `Path::join` discard the base
-                                    // directory entirely, so a peer that chooses
-                                    // the name chooses the directory. A header
-                                    // whose id or extension is not the shape we
-                                    // mint writes nothing at all.
+                                    // directory, so a peer that chooses the name
+                                    // chooses the directory.
                                     hollow_log!("[HOLLOW-SECURITY] REJECTED inline FileHeader from {peer_str}: bad file id or extension");
                                 } else {
                                     let files_dir = file_transfer::files_dir();
@@ -8858,11 +8331,9 @@ async fn handle_incoming_request(
                     }
 
                     // AUTO-DOWNLOAD GATE (issue #41): a pushed stream in a
-                    // conversation with auto-download off (or over the
-                    // threshold) is declined — the metadata row above still
-                    // renders the card with a manual Download button, but no
-                    // pending stream registers and any bytes the sender already
-                    // queued are deleted on arrival instead of parked.
+                    // conversation with auto-download off, or over the threshold, is
+                    // declined. The metadata row still renders the card with a manual
+                    // Download button, and queued bytes are deleted on arrival.
                     if !already_complete && !inline_done && !auto_ok
                         && share_ref.is_none() && aes_key.is_some()
                     {
@@ -8871,11 +8342,9 @@ async fn handle_incoming_request(
                             let _ = std::fs::remove_file(&temp_path);
                         }
                         hollow_log!("[HOLLOW-FILE] Auto-download gate declined pushed file {fid} ({size} bytes, {auto_dl_key}) — metadata kept, manual download available");
-                        // Tell Dart NOW, at header time: the transfer provider
-                        // flags the file declined so NO progress source (Rust
-                        // WS poll, Dart WebRTC data-channel receive) can flip
-                        // the bubble into a spinner while the unwanted push
-                        // transits and is discarded.
+                        // Tell Dart NOW, at header time: the transfer provider flags
+                        // the file declined so no progress source can flip the bubble
+                        // into a spinner while the unwanted push transits.
                         let _ = event_tx.send(NetworkEvent::FileFailed {
                             file_id: fid.clone(),
                             error: "auto_download_off".to_string(),
@@ -8885,14 +8354,11 @@ async fn handle_incoming_request(
                     // If aes_key is present and no share_ref, this is a streamed transfer — register for stream receive.
                     // Share-backed files skip this — Share handles delivery, no P2P binary data.
                     if !already_complete && !inline_done && auto_ok && share_ref.is_none() && let (Some(ak), Some(an)) = (aes_key, aes_nonce) {
-                        // Preserve the retry counter across a re-registration. A DM
-                        // file is fanned out to several of the recipient's devices, so
-                        // the SAME file can produce MULTIPLE FileHeaders here — and the
-                        // decrypt-fail auto-retry also re-requests (which re-sends a
-                        // FileHeader). Resetting retry_count to 0 on every header made
-                        // the bounded "3 retries then give up" never fire → an infinite
-                        // FileHeader/stream/decrypt-fail loop (4.5k log lines, "stuck
-                        // loading forever"). Carry the existing count forward instead.
+                        // Preserve the retry counter across a re-registration. A DM file fans out
+                        // to several of the recipient's devices, and the decrypt-fail auto-retry
+                        // also re-sends a FileHeader. Resetting retry_count on every header made
+                        // the bounded "3 retries then give up" never fire, giving an infinite
+                        // header/stream/decrypt-fail loop.
                         let carried_retry = pending_file_streams.get(&fid)
                             .map(|p| p.retry_count)
                             .unwrap_or(0);
@@ -8954,22 +8420,18 @@ async fn handle_incoming_request(
                 }
                 Ok(MessageEnvelope::FileChunk { fid, idx, data }) => {
                     use crate::node::file_transfer;
-                    // Decode base64 chunk data.
                     let chunk_bytes = base64::engine::general_purpose::STANDARD.decode(&data);
                     if let Err(e) = &chunk_bytes {
                         hollow_log!("[HOLLOW-FILE] Failed to decode chunk {idx} for {fid}: {e}");
                     }
                     if let Ok(chunk_bytes) = chunk_bytes {
 
-                    // Write chunk to disk.
                     if let Err(e) = file_transfer::write_chunk(&fid, idx, &chunk_bytes) {
                         hollow_log!("[HOLLOW-FILE] {e}");
                     } else {
 
-                    // Update DB.
                     if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
                         if let Ok(received) = store.mark_chunk_received(&fid, idx) {
-                            // Get total chunks from file metadata.
                             if let Ok(Some(file_meta)) = store.get_file_metadata(&fid) {
                                 let _ = event_tx.send(NetworkEvent::FileProgress {
                                     file_id: fid.clone(),
@@ -8977,7 +8439,6 @@ async fn handle_incoming_request(
                                     total_chunks: file_meta.chunk_count,
                                 }).await;
 
-                                // Check if all chunks received.
                                 if received >= file_meta.chunk_count {
                                     let final_path = file_transfer::final_file_path(&fid, &file_meta.file_ext);
                                     match file_transfer::assemble_file(&fid, file_meta.chunk_count, &final_path) {
@@ -9006,7 +8467,7 @@ async fn handle_incoming_request(
                     } // if let Ok(chunk_bytes)
                 }
 
-                // -- Vault shard receive handlers (Phase 4) --
+                // -- Vault shard receive handlers --
                 Ok(MessageEnvelope::ShardStore { inner }) => {
                     let ShardStorePayload { sid, cid, si, sk, k, m, total_size, tier, data, chunks, .. } = *inner;
                     hollow_log!("[HOLLOW-VAULT] ShardStore received: cid={cid} si={si} chunks={chunks} from {peer_str}");
@@ -9028,7 +8489,6 @@ async fn handle_incoming_request(
                     } else if chunks == 0 {
                         // Inline shard (legacy) — decode and store immediately
                         if let Ok(shard_bytes) = base64::engine::general_purpose::STANDARD.decode(&data) {
-                            // Check pledge capacity
                             let local_peer = local_peer_str.to_string();
                             let pledge = server_states.get(&sid)
                                 .map(|s| s.get_storage_pledge(&local_peer))
@@ -9052,7 +8512,6 @@ async fn handle_incoming_request(
                                         ws_cmd_tx, ws_room_peers,
                                         ).await;
                                 } else {
-                                    // Store the shard
                                     let tier_enum = crate::vault::content_store::StorageTier::from_str(&tier);
                                     match content_store.store_shard(&sid, &cid, si, k, m, total_size, tier_enum, &shard_bytes) {
                                         Ok(_) => {
@@ -9063,7 +8522,6 @@ async fn handle_incoming_request(
                                                 shard_index: si,
                                                 from_peer: peer_str.to_string(),
                                             }).await;
-                                            // Send ack
                                             let ack = MessageEnvelope::ShardStoreAck {
                                                 sid: sid.clone(), cid: cid.clone(), si, ok: true, err: None,
                                                 target: None,
@@ -9096,7 +8554,6 @@ async fn handle_incoming_request(
                             }
                         }
                     } else {
-                        // Chunked shard — create assembly entry
                         let key = format!("{cid}:{si}:{peer_str}");
                         pending_shard_assembly.insert(key, PendingShardAssembly {
                             server_id: sid,
@@ -9125,9 +8582,7 @@ async fn handle_incoming_request(
                                 assembly.chunk_data.push((ci, chunk_bytes));
                             }
 
-                            // Check if all chunks received
                             if assembly.received.len() as u32 >= assembly.expected_chunks {
-                                // Reassemble in order
                                 let mut asm = pending_shard_assembly.remove(&key).unwrap();
                                 asm.chunk_data.sort_by_key(|(idx, _)| *idx);
                                 let mut full_data = Vec::new();
@@ -9135,7 +8590,6 @@ async fn handle_incoming_request(
                                     full_data.extend_from_slice(chunk);
                                 }
 
-                                // Store via ContentStore
                                 let vault_dir = crate::identity::data_dir().unwrap_or_default().join("vault");
 
                                 if let Ok(content_store) = crate::vault::content_store::ContentStore::open(db_path, db_passphrase, &vault_dir) {
@@ -9194,7 +8648,6 @@ async fn handle_incoming_request(
                         error: err.unwrap_or_default(),
                     }).await;
 
-                    // Mark placement as confirmed in DB
                     if ok {
                         let vault_dir = crate::identity::data_dir().unwrap_or_default().join("vault");
                         if let Ok(content_store) = crate::vault::content_store::ContentStore::open(db_path, db_passphrase, &vault_dir) {
@@ -9230,7 +8683,7 @@ async fn handle_incoming_request(
                     }
                 }
 
-                // -- Vault shard retrieve handlers (Phase 4) --
+                // -- Vault shard retrieve handlers --
 
                 Ok(MessageEnvelope::ShardRequest { sid, cid, si, sk, .. }) => {
                     hollow_log!("[HOLLOW-VAULT] ShardRequest: cid={cid} si={si} from {peer_str}");
@@ -9259,7 +8712,6 @@ async fn handle_incoming_request(
                                         ws_cmd_tx, ws_room_peers,
                                         ).await;
 
-                                        // Stream shard bytes via stream_to_peer (WS or libp2p).
                                         let shard_temp_dir = crate::node::file_transfer::files_dir();
                                         let shard_safe_prefix = &cid[..16.min(cid.len())];
                                         let shard_temp_name = format!(".stream_shard_{}_{}.tmp", shard_safe_prefix, si);
@@ -9416,13 +8868,10 @@ async fn handle_incoming_request(
                 }
 
                 Ok(MessageEnvelope::SessionAck) => {
-                    // Lightweight encrypted ping from peer after they created an inbound
-                    // session. The act of decrypting this message upgrades our outbound
-                    // session's ratchet so subsequent encrypts produce Normal (type 1).
-                    // This is the CONFIRMATION point for an initiator: the peer proved it
-                    // can decrypt us, so the session is now bidirectional. Emit
-                    // SessionEstablished here (not optimistically at outbound creation) and
-                    // clear the in-flight marker so the sweep stops retrying.
+                    // Lightweight encrypted ping the peer sends after creating an inbound
+                    // session. Decrypting it upgrades our outbound ratchet, and it is the
+                    // CONFIRMATION point for an initiator: the peer proved it can decrypt us,
+                    // so SessionEstablished is emitted here, not optimistically at creation.
                     hollow_log!("[HOLLOW-CRYPTO] SessionAck received from {peer_str} — session confirmed bidirectional");
                     let was_unconfirmed = olm.has_unconfirmed_session(&peer_str);
                     olm.mark_session_bidirectional(&peer_str);
@@ -9434,10 +8883,9 @@ async fn handle_incoming_request(
                     }
                 }
 
-                // 1:1 call signaling — the ONLY accepted path for a Call*
-                // message. `peer_str` is the device whose Olm ratchet just
-                // decrypted this, so the sender is authenticated; the plaintext
-                // Call* arms below reject instead of handling.
+                // 1:1 call signaling, the ONLY accepted path for a Call* message.
+                // `peer_str` is the device whose Olm ratchet just decrypted this, so the
+                // sender is authenticated; the plaintext Call* arms below reject instead.
                 Ok(MessageEnvelope::CallSignal { signal }) => {
                     voice_handler::handle_call_signal_message(
                         peer_str, master_peer_str, *signal, event_tx,
@@ -9497,11 +8945,9 @@ async fn handle_incoming_request(
                         // just that op, never the whole batch.
                         let incoming_ops = crate::crdt::operations::parse_ops_tolerant(&ops_json);
                         if !incoming_ops.is_empty() {
-                            // Persist synced ops (op_log is RAM-only — see the
-                            // plaintext SyncResponse handler for rationale).
-                            // ONLY ops merge_ops admitted reach the table: the
-                            // gate lives inside the merge, and the hook fires
-                            // for exactly what passed it.
+                            // Persist synced ops (op_log is RAM-only). ONLY ops
+                            // merge_ops admitted reach the table: the gate lives
+                            // inside the merge and the hook fires for what passed it.
                             let store = crate::storage::MessageStore::open(db_path, db_passphrase).ok();
                             let report = crate::crdt::sync::merge_ops_with(state, &incoming_ops, |op| {
                                 if let Some(store) = store.as_ref() {
@@ -9624,10 +9070,9 @@ async fn handle_incoming_request(
                         }).await;
                     }
                 }
-                // Screen offer/answer/ICE consolidate into the shared
-                // voice_handler handlers (same participant + size guards the
-                // inline arms had, plus the step-2 origin spoof guard) so the
-                // origin contract lives in ONE place for both Olm + MLS paths.
+                // Screen offer/answer/ICE consolidate into the shared voice_handler
+                // handlers (the same participant and size guards, plus the origin spoof
+                // guard), so the origin contract lives in ONE place for Olm and MLS.
                 Ok(MessageEnvelope::VoiceChannelScreenOffer { sid, cid, sdp, origin, .. }) => {
                     voice_handler::handle_envelope_voice_channel_screen_offer(
                         voice_channel_participants, event_tx,
@@ -9704,11 +9149,10 @@ async fn handle_incoming_request(
                 }
 
                 // -- Media forwarder control plane (step 3) --
-                // Client-bound signals from a forwarder. Rust enforces only the
-                // SDP size cap; the trust decision ("from the discovered
-                // forwarder AND for a watched+assigned origin") lives in Dart —
-                // an arbitrary peer sending these reaches a provider that
-                // ignores unknown senders.
+                // Client-bound signals from a forwarder. Rust enforces only the SDP size
+                // cap; the trust decision ("from the discovered forwarder AND for a
+                // watched and assigned origin") lives in Dart, and an arbitrary peer
+                // sending these reaches a provider that ignores unknown senders.
                 Ok(MessageEnvelope::FwdIngestAnswer { origin, sdp }) => {
                     if sdp.len() > MAX_SDP_SIZE {
                         hollow_log!("[HOLLOW-SECURITY] BLOCKED fwd_ingest_answer — size {} exceeds limit from {peer_str}", sdp.len());
@@ -9731,12 +9175,10 @@ async fn handle_incoming_request(
                         #[cfg(not(all(feature = "forwarder", not(any(target_os = "android", target_os = "ios")))))]
                         let consumed = false;
                         if consumed {
-                            // The fed forwarder ADMITTED our ingest (an old
-                            // binary that ignores the `feeder` field, or any
-                            // refusal, answers with fwd_error instead). Tell
-                            // Dart so it can report the feed up to the owner,
-                            // which is what lets the owner stop supplying that
-                            // forwarder itself — make-before-break.
+                            // The fed forwarder ADMITTED our ingest; any refusal,
+                            // including an old binary that ignores the `feeder`
+                            // field, answers with fwd_error. Tell Dart so it can
+                            // report the feed up to the owner: make-before-break.
                             let payload = serde_json::json!({
                                 "origin": {"peer": origin.peer, "kind": origin.kind, "stream": origin.stream},
                             }).to_string();
@@ -9780,11 +9222,9 @@ async fn handle_incoming_request(
                         signal_type: "fwd_error".to_string(), payload,
                     }).await;
                 }
-                // Forwarder-bound signals arriving at a client. Phase 2: an
-                // ENABLED embedded peer forwarder consumes them (expectation
-                // gate + engine admission + token bucket in
-                // `embedded_forwarder`); otherwise — misdirected or malicious —
-                // they keep hitting the pre-phase-2 ignore arm.
+                // Forwarder-bound signals arriving at a client. An ENABLED embedded
+                // peer forwarder consumes them behind its expectation gate, engine
+                // admission and token bucket; otherwise they hit the ignore arm.
                 Ok(env @ (MessageEnvelope::FwdStreamRegister { .. }
                 | MessageEnvelope::FwdStreamAuth { .. }
                 | MessageEnvelope::FwdStreamUnregister { .. }
@@ -9809,9 +9249,7 @@ async fn handle_incoming_request(
                 Err(e) => {
                     // A decrypted payload that LOOKS like JSON but failed the
                     // MessageEnvelope parse is version skew or corruption being
-                    // silently MISROUTED into the legacy-DM fallback — say so
-                    // with the sender tagged (the fwd-signal blackhole was only
-                    // diagnosable from log absence on both ends).
+                    // MISROUTED into the legacy-DM fallback, so say so with the sender.
                     if text.trim_start().starts_with('{') {
                         hollow_log!("[HOLLOW-SWARM] Decrypted envelope from {peer_str} failed MessageEnvelope parse ({} B) — falling through as legacy raw-text DM: {e}", text.len());
                     }
@@ -9838,7 +9276,6 @@ async fn handle_incoming_request(
                 }
             }
 
-            // Ack.
             
         }
 
@@ -9849,7 +9286,6 @@ async fn handle_incoming_request(
 
 
             if let Some(state) = server_states.get(&server_id) {
-                // Compute what they're missing
                 if let Ok(their_vector) = serde_json::from_str::<StateVector>(&state_vector_json) {
                     let delta = crdt_sync::compute_delta(&state.op_log, &their_vector);
                     if !delta.is_empty() {
@@ -9899,12 +9335,10 @@ async fn handle_incoming_request(
                     }
                     snap.set_hlc(Hlc::new(local_peer_str.to_string()));
                     install_op_signer(&mut snap, bundle_keypair);
-                    // SECURITY (CRDT-2): a snapshot is adopted wholesale from
-                    // ONE responder, so its registers are only as honest as
-                    // that peer. Pull any stamped past the drift bound back to
-                    // it, or a single hostile responder could hand us a state
-                    // whose name/roles/settings no later honest write could
-                    // ever overtake.
+                    // SECURITY (CRDT-2): a snapshot is adopted wholesale from ONE
+                    // responder, so its registers are only as honest as that peer.
+                    // Pull any stamped past the drift bound back to it, or one hostile
+                    // responder hands us a state no later honest write can overtake.
                     let clamped = snap.clamp_future_hlcs(crate::crdt::hlc::wall_clock_ms());
                     if clamped > 0 {
                         hollow_log!("[HOLLOW-SECURITY] Clamped {clamped} future-dated register(s) in the {server_id} snapshot from {peer_str}");
@@ -9948,12 +9382,10 @@ async fn handle_incoming_request(
             let incoming_ops = crate::crdt::operations::parse_ops_tolerant(&ops_json);
             if !incoming_ops.is_empty() {
                 let state = server_states.entry(server_id.clone()).or_insert_with(|| {
-                    // Skeleton for a pending join. The responder (peer_str) is
-                    // just our sync source — when the owner is offline this is
-                    // the MLS coordinator, a plain Member. Strip the creator
-                    // seeding (member entry + Owner role) and zero the name
-                    // register's HLC so the real name/owner always win the
-                    // merge via the ServerCreated/ServerRenamed ops.
+                    // Skeleton for a pending join. The responder is just our sync
+                    // source, and when the owner is offline that is the MLS
+                    // coordinator, a plain Member. Strip the creator seeding and zero
+                    // the name register's HLC, so the real name and owner win the merge.
                     let mut s = ServerState::new(server_id.clone(), "".into(), peer_str.to_string());
                     s.members.remove(peer_str);
                     s.roles.remove(peer_str);
@@ -9968,19 +9400,14 @@ async fn handle_incoming_request(
                 });
 
                 // SECURITY: every op in the batch passes `admit_remote_op`
-                // inside `merge_ops` — the author's signature, the clock
-                // bound, then the permission matrix, using OUR role map and
-                // never the relayer's word. That covers the destructive
-                // `ServerDeleted` tombstone (Owner-authored only) along with
-                // every other payload, so the ad hoc tombstone filter that
-                // used to sit here is gone rather than duplicated.
+                // inside `merge_ops`: the author's signature, the clock bound,
+                // then the permission matrix using OUR role map and never the
+                // relayer's word. That covers the destructive `ServerDeleted`
+                // tombstone along with every other payload.
                 //
-                // Persist every ADMITTED op into the crdt_ops table (INSERT OR
-                // IGNORE — idempotent). op_log is NOT serialized in the state
-                // JSON, so without this a member that joined via sync holds
-                // the server's history in RAM only and serves near-empty op
-                // logs to future joiners after a restart (missing server
-                // name/avatar/nicknames when the owner is offline).
+                // Persist every ADMITTED op into the crdt_ops table. op_log is
+                // NOT serialized in the state JSON, so without this a member
+                // that joined via sync serves near-empty op logs after a restart.
 
                 // Capture membership BEFORE merge so we can detect a kick-while-offline
                 // (we were a member, the synced ops remove us → self-evict on reconnect).
@@ -10000,10 +9427,9 @@ async fn handle_incoming_request(
                     }
                 }
                 match merged {
-                    // Run even when 0 ops applied if a join is pending — the
-                    // joiner may have adopted a ServerStateSnapshot already
-                    // (responder's op log can be empty/compacted), and the
-                    // join must still complete.
+                    // Run even when 0 ops applied if a join is pending: the joiner
+                    // may have adopted a ServerStateSnapshot already (the
+                    // responder's op log can be compacted), and the join must complete.
                     Ok(report) if report.applied > 0 || pending_server_joins.contains_key(&server_id) => {
                         let applied = report.applied;
                         hollow_log!("[HOLLOW-CRDT] Applied {applied} ops for server {server_id}");
@@ -10012,27 +9438,21 @@ async fn handle_incoming_request(
                         // not-yet-upgraded peer's ops introduced into their master.
                         state.canonicalize_members(|id| super::resolver::resolve(id));
 
-                        // Persist
                         if let Ok(json) = serde_json::to_string(&state) {
                             if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
                                 let _ = store.save_server_state(&server_id, &json);
                             }
                         }
 
-                        // Check if this completes a pending server join
                         if let Some(completed) = pending_server_joins.remove(&server_id) {
                             let server_name = state.name().to_string();
                             hollow_log!("[HOLLOW-CRDT] Server join completed: {server_id} ({server_name})");
 
-                            // The persisted tile is done with. A PARKED join
-                            // also owes the UI two more beats: it was admitted
-                            // (said BEFORE ServerJoined so the tile turns into a
-                            // server rather than blinking out), and later it is
-                            // READY, once the MLS leaf that lets it read the
-                            // channel actually forms. Between them the UI says
-                            // "waiting for a member to finish setup", which is
-                            // the honest description of holding a server whose
-                            // traffic you cannot decrypt yet.
+                            // The persisted tile is done with. A PARKED join owes
+                            // the UI two more beats: admitted (said BEFORE
+                            // ServerJoined so the tile turns into a server rather
+                            // than blinking out), then READY once the MLS leaf that
+                            // lets it read the channel actually forms.
                             crdt_store.delete_pending_join(server_id.clone());
                             if completed.parked {
                                 let _ = event_tx.send(NetworkEvent::PendingJoinUpdated {
@@ -10065,12 +9485,9 @@ async fn handle_incoming_request(
                             }).await;
 
                             // Backfill profiles of OFFLINE members from the
-                            // responder's cache (display name + avatar for
-                            // chat rendering). Online members are covered by
-                            // the normal per-peer ProfileRequest on sync, but
-                            // during a pending join this server wasn't in
-                            // server_states yet, so the proxy-profile pass in
-                            // the RoomMembers handler skipped it entirely.
+                            // responder's cache. Online members are covered by the
+                            // per-peer ProfileRequest on sync, but during a pending
+                            // join this server was not in server_states yet.
                             {
                                 if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
                                     let mut proxy_count = 0u32;
@@ -10093,7 +9510,6 @@ async fn handle_incoming_request(
                                 }
                             }
 
-                            // Auto-pledge min_pledge_mb for the newly joined server
                             {
                                 let local_peer = local_peer_str.to_string();
                                 if state.get_storage_pledge(&local_peer) == 0 {
@@ -10112,18 +9528,14 @@ async fn handle_incoming_request(
                                         }
                                     }
 
-                                    // Broadcast the pledge op to connected members: MLS when we
-                                    // hold the group, PLUS the plaintext `CrdtOpBroadcast` twin
-                                    // UNCONDITIONALLY. A CRDT op is author-signed and idempotent,
-                                    // so a member with a working leaf just applies the same op
-                                    // twice; a member with NO leaf (a just-admitted parked joiner)
-                                    // or at a skewed epoch is otherwise invisible from here and
-                                    // would never learn our pledge. Duplication is free, silence
-                                    // is not (`feedback_mls_first_fallback_dead_targets`).
+                                    // Broadcast the pledge op to connected members: MLS when we hold
+                                    // the group, PLUS the plaintext `CrdtOpBroadcast` twin
+                                    // UNCONDITIONALLY. A CRDT op is author-signed and idempotent, so a
+                                    // member with a working leaf just applies it twice, while a member
+                                    // with NO leaf or at a skewed epoch is otherwise invisible here.
                                     //
-                                    // `StoragePledgeChanged` does not touch `members`, so reading
-                                    // the target list after `apply_op` is safe here (unlike
-                                    // `ServerDeleted`, which DRAINS membership as part of apply).
+                                    // `StoragePledgeChanged` does not touch `members`, so reading the
+                                    // target list after `apply_op` is safe, unlike `ServerDeleted`.
                                     if let Ok(op_json) = serde_json::to_string(&pledge_op) {
                                         let mls_ok = mls.as_ref().is_some_and(|m| m.has_group(&server_id));
                                         if mls_ok {
@@ -10144,10 +9556,9 @@ async fn handle_incoming_request(
                                 }
                             }
 
-                            // Establish Olm session with all server members we're
-                            // connected to but don't have sessions with yet.
-                            // Members are master-keyed → bootstrap a session with each
-                            // online DEVICE of every member (Olm is per-device).
+                            // Establish an Olm session with every server member we are
+                            // connected to but lack one for. Members are master-keyed, so
+                            // bootstrap with each online DEVICE of every member.
                             for member in state.members_list() {
                                 if super::resolver::same_identity(&member.peer_id, &local_peer_str) { continue; }
                                 for dev in crate::node::crypto_handler::online_devices_for(ws_room_peers, &member.peer_id) {
@@ -10168,50 +9579,27 @@ async fn handle_incoming_request(
                             // MLS: we hold the server but not a leaf in its group, so
                             // ask for one.
                             //
-                            // Exactly ONE KeyPackage may leave here. A second one from
-                            // the same device straddling a batch tick is a remove +
-                            // re-add: two commits, the removal one evicting the leaf
-                            // the first Welcome just gave us, and the eviction path
-                            // then asks for a third. A clean three-member join used to
-                            // land at epoch 5 for that reason.
+                            // Exactly ONE KeyPackage may leave here. A second from the
+                            // same device straddling a batch tick is a remove + re-add:
+                            // two commits, the removal evicting the leaf the first
+                            // Welcome just gave us, and the eviction path then asks for
+                            // a third.
                             //
-                            // So the target is the one every other bootstrap path
-                            // already uses (`server_bootstrap_target`: the owner while
-                            // reachable, else the lowest reachable master), because the
-                            // receiving handler only ACTS as the owner or as a group
-                            // holder — a responder that is neither logs "not owner" and
-                            // drops it. When that send lands we STAMP the throttle,
-                            // which is what stops the message-triggered rescue firing
-                            // the duplicate the instant the admitter's MLS-encrypted
-                            // `MemberAdded` twin arrives (it always does).
-                            //
-                            // With no target — a resolver still cold for a server we
-                            // joined seconds ago, which is the ordinary field case — we
-                            // fall back to the raw responder id, which is provably in
-                            // the room because it just messaged us, and we do NOT stamp:
-                            // that send only lands a leaf when the responder happens to
-                            // BE the owner, so the rescue paths have to stay armed
-                            // behind it. Stamping here alone was tried and reverted; a
-                            // joiner whose responder was a group-less non-owner never
-                            // got a leaf at all.
+                            // The target is the one every other bootstrap path uses
+                            // (`server_bootstrap_target`), because the receiving handler
+                            // only ACTS as the owner or as a group holder. When that send
+                            // lands we STAMP the throttle, which stops the
+                            // message-triggered rescue firing a duplicate.
                             let want_leaf = mls.as_ref().is_some_and(|m| !m.has_group(&server_id));
                             if want_leaf && completed.parked && completed.key_package.is_some() {
                                 // Rung 2: the ring copy of this request CARRIED a
-                                // KeyPackage, so the member that admitted us has
-                                // already seated our leaf and the Welcome is
-                                // waiting in our own relay buffer, behind the
-                                // SyncResponse we are handling right now. Asking
-                                // again would mint a second package and turn that
-                                // Welcome into a remove + re-add.
-                                //
-                                // Expecting a Welcome is exactly what the eviction
-                                // grace already means, so it is the same wait: if
-                                // none arrives inside it, the batch tick asks once,
-                                // through the ordinary bootstrap. Without that the
-                                // stall would be silent and long — a member that
-                                // answered our LIVE re-request instead of the ring
-                                // copy never saw the carried package, and nothing
-                                // else here is guaranteed to fire.
+                                // KeyPackage, so the member that admitted us has already
+                                // seated our leaf and the Welcome waits in our own relay
+                                // buffer, behind the SyncResponse we are handling. Asking
+                                // again would mint a second package and turn that Welcome
+                                // into a remove + re-add. Expecting a Welcome is what the
+                                // eviction grace already means, so if none arrives inside
+                                // it the batch tick asks once through the ordinary path.
                                 mls_bootstrap_requested.insert(server_id.clone(), std::time::Instant::now());
                                 mls_welcome_grace.insert(server_id.clone(), std::time::Instant::now());
                                 hollow_log!("[HOLLOW-MLS] Parked join for {server_id} carried a KeyPackage; expecting a buffered Welcome");
@@ -10219,15 +9607,11 @@ async fn handle_incoming_request(
                                 && let Some(mls_mgr) = mls.as_ref()
                                 && let Ok(kp_bytes) = crate::node::crypto_handler::mint_key_package(mls_mgr, crypto_store)
                             {
-                                // ONE package per attempt, minted before we know
-                                // which of the two addresses it will go to. Every
-                                // mint writes a private init key and a private leaf
-                                // encryption key into the persisted MLS storage, and
-                                // only a Welcome consumes them: a second package
-                                // built for a fallback the first send made
-                                // unnecessary would sit there unused for the life of
-                                // the install. The frame is byte-identical either
-                                // way, so there is nothing to re-mint for.
+                                // ONE package per attempt, minted before we know which
+                                // of the two addresses it will go to. Every mint writes
+                                // private init and leaf-encryption keys into persisted
+                                // MLS storage that only a Welcome consumes, and the
+                                // frame is byte-identical either way.
                                 let kp_b64 = base64::engine::general_purpose::STANDARD.encode(&kp_bytes);
                                 let data = serde_json::to_vec(&HavenMessage::MlsKeyPackage {
                                     server_id: server_id.clone(),
@@ -10255,10 +9639,9 @@ async fn handle_incoming_request(
                             }
                         }
 
-                        // Reconcile changes that happened while we were OFFLINE (the
-                        // grow-only sync just delivered the ops): a server DELETION
-                        // (tombstone), a BAN, or a plain KICK / our own LEAVE (fanned by
-                        // a sibling) of us.
+                        // Reconcile changes that happened while we were OFFLINE, now that
+                        // the grow-only sync delivered the ops: a DELETION tombstone, a
+                        // BAN, or a plain KICK or our own LEAVE fanned by a sibling.
                         let deleted_now = state.is_deleted();
                         let kicked_now = was_member_before && !state.is_member(local_peer_str);
                         let banned_now = state.is_banned(&local_peer_str);
@@ -10277,14 +9660,11 @@ async fn handle_incoming_request(
                                 server_id,
                             }).await;
                         } else if banned_now || (kicked_now && !pending) {
-                            // Self-eviction reconciled from sync — tear down DURABLY, not
-                            // just the UI event: without removing the state + DB row, the
-                            // shell reloads on restart, re-lists the server, and the
-                            // sibling re-announce path can even re-ADD us as a member of
-                            // a server we left/were kicked from (authored by a non-member,
-                            // so real members reject it → permanent fork). Mirrors the
-                            // MemberKickBroadcast teardown, which only covers devices that
-                            // were ONLINE at kick time.
+                            // Self-eviction reconciled from sync: tear down DURABLY, not just
+                            // the UI event. Without removing the state and DB row the shell
+                            // reloads on restart, re-lists the server, and the sibling
+                            // re-announce path can even re-ADD us to a server we left,
+                            // authored by a non-member, so real members reject it and we fork.
                             hollow_log!("[HOLLOW-CRDT] Offline-reconciled self-eviction from {server_id} (banned={banned_now}) — durable teardown");
                             server_states.remove(&server_id);
                             if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
@@ -10346,21 +9726,16 @@ async fn handle_incoming_request(
             // ATTRIBUTION FIRST, before anything reads the joiner's identity.
             //
             // A PARKED request is read out of a TTL ring by a member that has
-            // never been online with the joiner, so it holds no device -> master
-            // link for them: `resolve(sender_device)` hands the device straight
-            // back, and the CRDT member entry (which is MASTER-keyed) would be
-            // created under a device id. Every gate below reads this value too,
-            // so a wrong answer here is a wrong ban check, not just a wrong
-            // label.
+            // never been online with the joiner, so it holds no device-to-master
+            // link: `resolve()` hands the device straight back and the
+            // MASTER-keyed CRDT member entry would be created under a device id.
+            // Every gate below reads this value too, so a wrong answer here is a
+            // wrong ban check, not just a wrong label.
             //
-            // So the request CARRIES the joiner's own master-signed device list
-            // and attribution becomes cryptographic: the list must verify, its
-            // signer must BE the master it claims (the pubkey -> peer_id binding
-            // inside `verify_device_list`), and the relay-authenticated sender
-            // device must be listed and un-revoked. A list that is PRESENT but
-            // BAD is a dropped message, never a downgrade to the resolver:
-            // `if list.is_some()` must not be the bypass. Mirrors the
-            // `FriendReject` arm, for the same reason.
+            // So the request CARRIES the joiner's master-signed device list and
+            // attribution becomes cryptographic: the list must verify, its signer
+            // must BE the master it claims, and the sender device must be listed
+            // and un-revoked. `if list.is_some()` must not be the bypass.
             let member_master = match device_list.as_ref() {
                 Some(list) => {
                     let bad = if !crypto_handler::verify_device_list(list) {
@@ -10393,30 +9768,25 @@ async fn handle_incoming_request(
             let resolution_key = format!("{server_id}|{member_master}");
 
             if let Some(state) = server_states.get_mut(&server_id) {
-                // Multi-device: a SAME-IDENTITY requester is one of OUR OWN devices
-                // (a sibling co-owning/co-membering this server, e.g. onboarding a
-                // newly-created server). It skips the ban + Twitch + owner-verify gates
-                // — those are for strangers; a sibling is already us. It still gets the
-                // normal snapshot + MLS-leaf add below.
+                // Multi-device: a SAME-IDENTITY requester is one of OUR OWN devices,
+                // a sibling co-owning this server. It skips the ban, Twitch and
+                // owner-verify gates, which are for strangers, and is still added.
                 let is_sibling = super::resolver::same_identity(peer_str, local_peer_str)
                     && peer_str != local_peer_str;
 
-                // Check if this identity is already a member (by master).
                 let already_member = state.members_list().iter()
                     .any(|m| super::resolver::same_identity(&m.peer_id, &member_master));
 
                 let catchup_secs = state.relay_catchup_secs();
 
                 if parked {
-                    // A PARKED copy is held to stricter rules than a live one.
-                    // It was written into a shared ring, possibly days ago, and
-                    // is read by whoever happens to come back — so it must never
-                    // bypass a gate and must never write a sticky wrong answer.
+                    // A PARKED copy is held to stricter rules than a live one. It
+                    // was written into a shared ring, possibly days ago, and is read
+                    // by whoever comes back, so it must never bypass a gate.
 
-                    // Already a member: either this request was already resolved
-                    // (and we are reading our own history), or the joiner lost
-                    // its state and its own live re-request on co-presence is
-                    // the right way to rebuild it. Either way, nothing to do.
+                    // Already a member: either this request was already resolved and
+                    // we are reading our own history, or the joiner lost its state
+                    // and its own live re-request is the right way to rebuild it.
                     if already_member {
                         return;
                     }
@@ -10430,36 +9800,22 @@ async fn handle_incoming_request(
                     }
 
                     // TWITCH-GATED SERVERS used to wait here for co-presence,
-                    // because the parked copy carried no proof: the old JSON
-                    // named a Twitch account, and a ring frame is readable by
-                    // anyone holding the invite. A follow CREDENTIAL names a
-                    // channel, an age bucket and a tier and nothing else, so it
-                    // rides the ring like the rest of the request and the gate
-                    // below runs on a parked copy exactly as it does on a live
-                    // one (`sync_handler::deposit_parked_join`). A parked
-                    // request with no credential at all still falls through to
-                    // the gate, which refuses it with `twitch_required`.
+                    // because the parked copy carried no proof: the old JSON named
+                    // a Twitch account and a ring frame is readable by anyone with
+                    // the invite. A follow CREDENTIAL names a channel, an age
+                    // bucket and a tier, so it can ride the ring like the rest.
                 } else {
-                    // COORDINATOR GATE. This handler is the expensive half of a join:
-                    // a MemberAdded op, a full ServerStateSnapshot and the ENTIRE op
-                    // log, all aimed at one joiner. Nothing used to gate it, so every
-                    // online member ran the whole thing — N snapshots, N op logs and N
-                    // duplicate MemberAdded ops per join. Measured 2026-08-27 with the
-                    // relay meter: ~48 SendDirect commands per join at 5 members, ~170
-                    // at 9, ~342 at 13. Super-linear, while steady-state messaging sat
-                    // flat at 2 deliveries per other-member. The MLS half was already
-                    // election-gated to a single committer; this brings the CRDT half
-                    // onto the SAME election, so the two agree on who is serving.
+                    // COORDINATOR GATE. This handler is the expensive half of a join: a
+                    // MemberAdded op, a full ServerStateSnapshot and the ENTIRE op log,
+                    // all aimed at one joiner. Ungated, every online member ran the
+                    // whole thing, which measured super-linear (~48 SendDirect per join
+                    // at 5 members, ~342 at 13). The MLS half was already election-gated
+                    // to one committer; this puts the CRDT half on the SAME election.
                     //
-                    // A repeat request inside the window means the joiner's 4s retry
-                    // fired: our elected coordinator did not answer (its socket died
-                    // between the relay's presence snapshot and now), so everyone
-                    // serves and the cost degrades to the old fan-out rather than to a
-                    // failed join. Siblings are never gated — a sibling IS us.
-                    //
-                    // A PARKED copy never touches this map: it cannot be a repeat
-                    // ask (nobody is retrying anything), so letting it write here
-                    // would hand the NEXT live request a free gate bypass.
+                    // A repeat request inside the window means the joiner's retry fired,
+                    // so everyone serves and the cost degrades to the old fan-out rather
+                    // than a failed join. Siblings are never gated. A PARKED copy never
+                    // touches this map: writing here would hand the next live ask a bypass.
                     let seen_key = format!("{server_id}|{peer_str}");
                     let repeat_ask = join_request_seen
                         .get(&seen_key)
@@ -10471,10 +9827,9 @@ async fn handle_incoming_request(
                     }
                     join_request_seen.insert(seen_key, std::time::Instant::now());
                     if !is_sibling && !repeat_ask {
-                        // Candidates are the CRDT members (every one of them holds the
-                        // state a joiner needs), minus the joiner itself — a REJOINING
-                        // member is already in `members` and electing them would leave
-                        // nobody serving.
+                        // Candidates are the CRDT members, minus the joiner itself: a
+                        // REJOINING member is already in `members`, and electing them
+                        // would leave nobody serving.
                         let candidates: Vec<String> = state.members.keys()
                             .filter(|m| !super::resolver::same_identity(&member_master, m))
                             .cloned()
@@ -10491,10 +9846,9 @@ async fn handle_incoming_request(
                     }
                 }
 
-                // Ban check: reject banned peers before any other verification.
-                // Keyed by the joiner's MASTER, which is what the ban list holds —
-                // a parked request's raw device id resolves to itself on a member
-                // that has never met them, and would sail straight past the ban.
+                // Ban check, before any other verification. Keyed by the joiner's
+                // MASTER, which is what the ban list holds: a parked request's raw
+                // device id resolves to itself and would sail straight past it.
                 if !is_sibling && state.is_banned(&member_master) {
                     hollow_log!("[HOLLOW-CRDT] Rejecting join from banned peer {peer_str} (master {member_master}) for server {server_id}");
                     if requested_at != 0 {
@@ -10507,13 +9861,10 @@ async fn handle_incoming_request(
                     return;
                 }
 
-                // Twitch verification gate: check CRDT settings before accepting.
-                //
-                // Offline, against the root pinned in `support_creds.rs`. The
-                // joiner ships a blind-signed follow credential bound to its
-                // own MASTER; we contact nobody and we learn nothing about its
-                // Twitch account beyond the channel, the bucket and the tier
-                // this server actually gates on.
+                // Twitch verification gate, offline against the root pinned in
+                // `support_creds.rs`. The joiner ships a blind-signed follow
+                // credential bound to its own MASTER; we contact nobody and learn
+                // nothing beyond the channel, bucket and tier this server gates on.
                 if !is_sibling { if let Some(twitch_settings) = twitch::TwitchServerSettings::from_server_state(state) {
                     let reject_reason = match &twitch_proof_json {
                         None => Some("twitch_required".to_string()),
@@ -10590,10 +9941,9 @@ async fn handle_incoming_request(
                 let mut admitted_op_json: Option<String> = None;
 
                 if !already_member {
-                    // Private-server gate: an invite-only server rejects all new
-                    // joiners (existing members re-joining are never blocked, since
-                    // they short-circuit above). Mirrors the Twitch gate. A sibling
-                    // (our own device) is exempt — it co-owns/co-members the server.
+                    // Private-server gate: an invite-only server rejects new joiners,
+                    // while existing members re-joining short-circuit above. A sibling
+                    // (our own device) is exempt, since it co-owns the server.
                     if !is_sibling && state.is_private() {
                         hollow_log!("[HOLLOW-CRDT] Rejecting join from {peer_str}: server {server_id} is private");
                         let reason = format!("server_private:{}", state.name());
@@ -10607,13 +9957,11 @@ async fn handle_incoming_request(
                         return;
                     }
 
-                    // NSFW consent gate: an NSFW-flagged server requires the joiner
-                    // to accept a "proceed at your own risk" prompt first. Unlike
-                    // private/full this is not a hard rejection — we reject ONCE with
-                    // an `nsfw_confirm:` reason carrying the server name; the joiner's
-                    // client shows the consent dialog and re-sends with
-                    // `nsfw_confirmed=true`. Ordered after private/full so we never
-                    // ask consent for a server they can't enter. Siblings exempt.
+                    // NSFW consent gate. Unlike private or full this is not a hard
+                    // rejection: we reject ONCE with an `nsfw_confirm:` reason carrying
+                    // the server name, the joiner's client shows the consent dialog, and
+                    // it re-sends with `nsfw_confirmed=true`. Ordered after private and
+                    // full so we never ask consent for a server they cannot enter.
                     if !is_sibling && state.is_nsfw() && !nsfw_confirmed {
                         hollow_log!("[HOLLOW-CRDT] NSFW consent required for {peer_str} joining {server_id}");
                         let reason = format!("nsfw_confirm:{}", state.name());
@@ -10650,15 +9998,11 @@ async fn handle_incoming_request(
                     });
                     let _ = state.apply_op(&op);
 
-                    // The owner used to mint a `TwitchUsernameChanged` op here,
-                    // straight out of the joiner's own unsigned JSON. A follow
-                    // credential names no Twitch account at all, by design, so
-                    // there is nothing to mint and nothing to display: the
-                    // purple chip draws from the joiner's OWN verified account
-                    // credential on their profile, or from nothing. The op and
-                    // its FFI stay on the wire for clients that predate this.
+                    // A follow credential names no Twitch account at all, by
+                    // design, so there is nothing to mint here and nothing to
+                    // display: the purple chip draws from the joiner's OWN
+                    // verified account credential on their profile.
 
-                    // Persist
                     if let Ok(json) = serde_json::to_string(&state) {
                         if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
                             let _ = store.save_server_state(&server_id, &json);
@@ -10666,20 +10010,14 @@ async fn handle_incoming_request(
                         }
                     }
 
-                    // Broadcast MemberAdded to other peers: MLS when we hold the
-                    // group, PLUS the plaintext `CrdtOpBroadcast` twin
-                    // UNCONDITIONALLY. Our own encrypt succeeding says nothing
-                    // about whether an existing member can DECRYPT: one with no
-                    // leaf (a parked joiner completes its CRDT half before
-                    // co-presence forms the leaf) or at a skewed epoch never saw
-                    // the new member appear, and nothing here showed it. The op
-                    // is author-signed and idempotent, so a member with a
-                    // working leaf simply applies it twice.
+                    // Broadcast MemberAdded to other peers: MLS when we hold the group,
+                    // PLUS the plaintext `CrdtOpBroadcast` twin UNCONDITIONALLY. Our own
+                    // encrypt succeeding says nothing about whether an existing member
+                    // can DECRYPT: one with no leaf or at a skewed epoch never saw the
+                    // new member appear. The op is author-signed and idempotent.
                     //
-                    // Targets come from `ws_room_peers`, not `state.members`, so
-                    // the drain-on-apply concern that bit `ServerDeleted` does
-                    // not apply here. The joiner (`peer_str`) stays excluded: it
-                    // gets the full snapshot + op log below.
+                    // Targets come from `ws_room_peers`, not `state.members`, so the
+                    // drain-on-apply concern that bit `ServerDeleted` does not apply.
                     if let Ok(op_json) = serde_json::to_string(&op) {
                         admitted_op_json = Some(op_json.clone());
                         let mls_ok = mls.as_ref().is_some_and(|m| m.has_group(&server_id));
@@ -10722,24 +10060,18 @@ async fn handle_incoming_request(
                     }
                 }
 
-                // RUNG 2: a PARKED request carries the joiner's KeyPackage, so
-                // the leaf goes in the same batch as the membership and the
-                // joiner comes back to a server it can READ rather than one it
-                // can only see.
+                // RUNG 2: a PARKED request carries the joiner's KeyPackage, so the
+                // leaf goes in the same batch as the membership and the joiner comes
+                // back to a server it can READ rather than one it can only see.
                 //
-                // This sits here, and nowhere earlier, because everything above
-                // it is a gate on this exact request: the cryptographic
-                // attribution that produced `member_master`, the ban list, the
-                // Twitch credential, owner-verify, private, NSFW consent and the
-                // member cap. A leaf is the strongest thing a member can hand
-                // out, so it is queued only for a joiner the gates have already
-                // admitted.
+                // This sits here and nowhere earlier because everything above it is
+                // a gate on this exact request: the attribution behind
+                // `member_master`, the ban list, the Twitch credential,
+                // owner-verify, private, NSFW consent and the member cap. A leaf is
+                // the strongest thing a member can hand out.
                 //
-                // And only when the package's OWN credential identity is the
-                // device attribution named. A KeyPackage names the leaf it wants
-                // created; one naming a different id is asking us to seat
-                // somebody who never passed a gate, which is a refusal, not a
-                // log line.
+                // And only when the package's OWN credential identity is the device
+                // attribution named: any other asks us to seat an ungated joiner.
                 if parked && let Some(kp_b64) = key_package.as_ref() {
                     match base64::engine::general_purpose::STANDARD.decode(kp_b64) {
                         Err(e) => hollow_log!("[HOLLOW-MLS] Carried KeyPackage from {peer_str} for {server_id} is not valid base64: {e}"),
@@ -10792,18 +10124,15 @@ async fn handle_incoming_request(
                     }
                 }
 
-                // Send a full STATE snapshot first — op logs can be incomplete
-                // (pre-persistence history loss, 1000-op compaction), so the
-                // joiner must not depend on op replay alone to reconstruct
-                // channels/layout/name. WS delivery is FIFO, so the snapshot
-                // lands before the SyncResponse that completes the join.
+                // Send a full STATE snapshot first: op logs can be incomplete
+                // (history loss, 1000-op compaction), so the joiner must not depend
+                // on op replay alone to reconstruct channels, layout and name. WS
+                // delivery is FIFO, so it lands before the SyncResponse.
                 //
-                // Both go to the DETERMINISTIC server room, not through a
-                // presence lookup: the joiner of a PARKED request is not here,
-                // and a targeted frame into a room the target is not in is
-                // exactly what the relay buffers and replays on their next join
-                // of that room. That buffered pair IS how a parked join
-                // completes with nobody online.
+                // Both go to the DETERMINISTIC server room, not through a presence
+                // lookup: the joiner of a PARKED request is not here, and a targeted
+                // frame into a room the target is not in is what the relay buffers
+                // and replays. That buffered pair IS how a parked join completes.
                 if let Ok(state_json) = serde_json::to_string(&state) {
                     send_message_to_peer_in_room(
                         ws_cmd_tx, &server_id,
@@ -10854,38 +10183,30 @@ async fn handle_incoming_request(
         }
 
         // A member's answer to a join, read out of the room's `~join` ring.
-        //
-        // Two jobs: it stops US re-serving a join somebody else already
-        // answered, and it carries the `MemberAdded` op so a member that was
-        // offline for the whole exchange still converges on the membership.
+        // Two jobs: it stops US re-serving a join somebody else answered, and
+        // it carries the `MemberAdded` op so an absent member still converges.
         HavenMessage::ServerJoinResolved {
             server_id, joiner_master, requested_at, admitted, reason, op_json,
         } => {
             hollow_log!("[HOLLOW-CRDT] ServerJoinResolved from {peer_str} for {joiner_master} on {server_id} (admitted {admitted}, reason '{reason}')");
 
-            // JOINER SIDE FIRST: this may be the answer to OUR OWN parked ask,
-            // read out of our own catch-up. It only ever acts on the exact ask
-            // it names, so a copy replayed out of a three-day ring cannot
-            // resolve a request we made afterwards.
+            // JOINER SIDE FIRST: this may be the answer to OUR OWN parked ask.
+            // It only ever acts on the exact ask it names, so a copy replayed
+            // out of a three-day ring cannot resolve a later request.
             if let Some(pending) = pending_server_joins.get(&server_id) {
                 if joiner_master == local_peer_str && requested_at == pending.requested_at {
                     if admitted {
-                        // Nothing to do: the admitting member's buffered
-                        // snapshot + SyncResponse are what complete us, and if
-                        // the relay dropped them our live re-request on the next
-                        // co-presence completes us through today's rejoin path.
+                        // Nothing to do: the admitting member's buffered snapshot
+                        // and SyncResponse are what complete us, and if the relay
+                        // dropped them our live re-request does it on next co-presence.
                         hollow_log!("[HOLLOW-CRDT] Our parked join for {server_id} was admitted; waiting for the buffered snapshot");
                         return;
                     }
-                    // Same landing pad as the targeted refusal, so the two
-                    // legs of the same answer can never diverge. An INTERACTIVE
-                    // reason should be unreachable here by construction:
-                    // `send_join_rejection` publishes nothing for one, so no
-                    // honest member ever writes a question into the ring. A
-                    // hostile member could, which is exactly why this routes
-                    // through the shared handler rather than assuming it: the
-                    // worst case is then a dialog the user dismisses, not a
-                    // permanently poisoned tile.
+                    // The same landing pad as the targeted refusal, so the two
+                    // legs of one answer can never diverge. An INTERACTIVE reason
+                    // should be unreachable by construction, but a hostile member
+                    // could write one, which is why this routes through the shared
+                    // handler: the worst case is a dialog, not a poisoned tile.
                     sync_handler::handle_join_refused(
                         pending_server_joins, event_tx, ws_cmd_tx, crdt_store_actor,
                         mls, crypto_store, server_id, reason,
@@ -10896,8 +10217,7 @@ async fn handle_incoming_request(
 
             // A resolution is only meaningful for a server we hold, and only
             // from somebody entitled to have made it. Anyone in the room can
-            // publish on the topic, so the CRDT membership of the SENDER is the
-            // gate: a non-member cannot resolve anything.
+            // publish on the topic, so CRDT membership of the SENDER is the gate.
             if !server_states.contains_key(&server_id) {
                 return;
             }
@@ -10940,12 +10260,10 @@ async fn handle_incoming_request(
             // its own refusal. Only the FIRST for an in-flight join is acted on,
             // which dedups the popup (otherwise the joiner sees N).
             let Some(pending) = pending_server_joins.get(&server_id) else { return };
-            // NONCE GUARD. This frame now rides the deterministic server room,
-            // so the relay buffers it for an absent joiner and replays it on
-            // that device's next join of that room — and the next join of that
-            // room is normally the user asking AGAIN. A copy that names an
-            // older ask must not touch the newer one. 0 = a pre-parked-joins
-            // member, which can only ever mean "the request you have pending".
+            // NONCE GUARD. This frame rides the deterministic server room, so the
+            // relay buffers it for an absent joiner and replays it on that
+            // device's next join, which is normally the user asking AGAIN. A copy
+            // naming an older ask must not touch the newer one.
             if requested_at != 0 && requested_at != pending.requested_at {
                 hollow_log!("[HOLLOW-CRDT] Ignoring a rejection for {server_id} that names ask {requested_at}, ours is {}", pending.requested_at);
                 return;
@@ -10973,8 +10291,7 @@ async fn handle_incoming_request(
 
             // Legacy one-shot path (a pre-tombstone peer may still send this). Convert
             // it to a TOMBSTONE rather than hard-delete: synthesize the owner's
-            // ServerDeleted op locally, apply + persist it, and keep the shell so we
-            // relay it onward like the CRDT-op path. (New senders no longer emit this.)
+            // ServerDeleted op locally, apply and persist it, and keep the shell.
             if let Some(state) = server_states.get_mut(&server_id) {
                 if !state.is_deleted() {
                     let now_ms = std::time::SystemTime::now()
@@ -11030,7 +10347,6 @@ async fn handle_incoming_request(
                     let _ = store.delete_server_state(&server_id);
                 }
 
-                // Clean up MLS group.
                 if let Some(mls_mgr) = mls {
                     mls_mgr.remove_group(&server_id);
                     persist_mls_state(mls_mgr, crypto_store);
@@ -11045,13 +10361,11 @@ async fn handle_incoming_request(
         HavenMessage::ChannelSyncRequest { server_id, channel_id, since_timestamp, sender_timestamps } => {
             
 
-            // Room gating: only respond for servers we're a member of, and only
-            // for a channel this requester is allowed to SEE. The per-channel MLS
-            // subgroup keeps a non-qualifier out of the live traffic; backfill was
-            // the way straight around it, because this responder used to serve any
-            // channel's stored rows (file headers and their AES keys included) to
-            // anybody holding the server. A rejection is a return, never a log line
-            // that carries on.
+            // Room gating: only respond for servers we are a member of, and only
+            // for a channel this requester may SEE. The per-channel MLS subgroup
+            // keeps a non-qualifier out of live traffic, and backfill was the way
+            // straight around it, because this responder used to serve any
+            // channel's stored rows, file headers and AES keys included.
             let visible = match server_states.get(&server_id) {
                 Some(state) => super::crypto_handler::channel_readable_by(state, peer_str, &channel_id),
                 None => return,
@@ -11096,10 +10410,9 @@ async fn handle_incoming_request(
         HavenMessage::ChannelSyncProbe { server_id, channel_id, our_latest, msg_count: _probe_count } => {
             
 
-            // Same visibility gate as the full request. A probe answers with the
-            // channel's message count and latest timestamp, which is exactly the
-            // metadata a hidden channel is hidden to withhold, and it is also what
-            // tells a non-qualifier there is history worth asking for.
+            // The same visibility gate as the full request. A probe answers with
+            // the channel's message count and latest timestamp, which is exactly
+            // the metadata a hidden channel is hidden to withhold.
             let visible = match server_states.get(&server_id) {
                 Some(state) => super::crypto_handler::channel_readable_by(state, peer_str, &channel_id),
                 None => return,
@@ -11136,7 +10449,6 @@ async fn handle_incoming_request(
         HavenMessage::ChannelSyncProbeResponse { server_id, channel_id, their_latest, msg_count } => {
             
 
-            // Compare: if the peer has newer messages than us, fire a full sync request.
             if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
                 let our_latest = store
                     .get_latest_channel_timestamp(&server_id, &channel_id)
@@ -11170,7 +10482,6 @@ async fn handle_incoming_request(
                     hollow_log!(
                         "[HOLLOW-SYNC] Probe response: {channel_id} is up to date (ts: ours={our_latest} peer={their_latest}, count: {our_msg_count}). Skipping."
                     );
-                    // Emit completion for this channel so UI knows sync is done.
                     let _ = event_tx.send(NetworkEvent::MessageSyncCompleted {
                         server_id,
                         new_message_count: 0,
@@ -11183,23 +10494,17 @@ async fn handle_incoming_request(
             hollow_log!("[HOLLOW-SYNC] DmSyncRequest from {peer_str} since {since_timestamp} (both_directions={both_directions})");
 
             // Multi-device: the requester sends its DEVICE id, but our DM rows for
-            // that person are keyed by their MASTER id (the conversation key). A
-            // multi-device requester (e.g. a friend's 2nd device) therefore matched
-            // ZERO rows under the raw device id → we replied "Sending 0" and the
-            // catch-up sync silently delivered nothing (text limped through on live
-            // fan-out; a file whose live WebRTC stream failed was then lost entirely
-            // — no placeholder, no metadata). Resolve to the master for the lookup;
-            // the transport send still targets the raw device `peer_str`. No-op
-            // single-device (resolve returns the id unchanged).
+            // that person are keyed by their MASTER id. A multi-device requester
+            // therefore matched ZERO rows under the raw device id and the catch-up
+            // sync silently delivered nothing. Resolve to the master for the
+            // lookup; the transport send still targets the raw device.
             let convo_peer = super::resolver::resolve(&peer_str);
 
             if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
                 // Multi-device peer-fallback: a multi-device requester sets
                 // `both_directions` so we re-serve the requester's OWN messages
-                // (sent from another of their devices, stored here as is_mine=0)
-                // alongside our own — otherwise those are stranded when that
-                // other device is offline. A single-device requester omits the
-                // flag → the cheap is_mine=1-only path, byte-for-byte as before.
+                // (stored here as is_mine=0) alongside ours, which are otherwise
+                // stranded when that device is offline.
                 let messages_result = if both_directions {
                     store.get_dm_messages_for_sibling(&convo_peer, since_timestamp, 200)
                 } else {
@@ -11233,13 +10538,10 @@ async fn handle_incoming_request(
                                 ).await;
                             } else {
                                 // Asymmetric fresh-peer handshake: THEY built a session
-                                // and sent us this catch-up request, but our half was
-                                // never built (a dropped glare frame). Encrypting now
-                                // would hit "No session" and surface a user-visible
-                                // MessageSendFailed for a purely internal sync reply.
-                                // Queue the batch + re-key instead — pending_messages is
-                                // drained on the KeyBundle-success / PreKey-decrypt /
-                                // co-presence heal paths, exactly like every deferred DM.
+                                // and sent this catch-up request, but our half was never
+                                // built. Encrypting now would hit "No session" and surface
+                                // a user-visible MessageSendFailed for an internal sync
+                                // reply, so queue the batch and re-key instead.
                                 pending_messages
                                     .entry(peer_str.to_string())
                                     .or_default()
@@ -11332,20 +10634,16 @@ async fn handle_incoming_request(
         HavenMessage::PeerDisconnecting => {
             hollow_log!("[HOLLOW-SWARM] Peer {peer_str} is disconnecting gracefully");
 
-            // Peer is gracefully disconnecting — emit PeerDisconnected.
             let _ = event_tx.send(NetworkEvent::PeerDisconnected {
                 peer_id: peer_str.to_string(),
             }).await;
         }
 
         HavenMessage::SiblingProveRequest { nonce } => {
-            // A peer in OUR inbox is challenging us to prove we are its sibling (we
-            // share the master key). We sign `hollow-sibling:{our_master}:{our_device}:
-            // {nonce}` with the MASTER key. A genuine challenger shares our master, so
-            // it can reconstruct + verify this; a stranger that somehow received this
-            // (it never should — strangers don't sit in our inbox to challenge) gains
-            // nothing because the proof binds to OUR master, which only real siblings
-            // hold. `master_peer_str` is our master peer_id; `device_peer_id` is ours.
+            // A peer in OUR inbox is challenging us to prove we are its sibling. We
+            // sign `hollow-sibling:{our_master}:{our_device}:{nonce}` with the MASTER
+            // key: a genuine challenger shares that master and can verify it, and
+            // anyone else gains nothing, because the proof binds to OUR master.
             let (sig_b64, master_pubkey_b64) =
                 super::crypto_handler::build_sibling_proof(master_keypair, device_peer_id, &nonce);
             hollow_log!("[HOLLOW-SIBLING] Answering sibling-proof challenge from {peer_str}");
@@ -11356,10 +10654,9 @@ async fn handle_incoming_request(
         }
 
         HavenMessage::SiblingProveResponse { nonce, sig_b64, master_pubkey_b64 } => {
-            // The peer we challenged answered. Verify the proof binds to OUR master AND
-            // to the device id WE challenged (peer_str — taken from the routing layer,
-            // never self-reported) AND to the nonce we issued. Only on a valid proof do
-            // we treat it as our sibling and run the convergence machinery.
+            // The peer we challenged answered. Verify the proof binds to OUR master, to
+            // the device id WE challenged (`peer_str`, from the routing layer and never
+            // self-reported) AND to the nonce we issued, before treating it as a sibling.
             let Some((expected_nonce, issued_at)) = pending_sibling_challenges.get(peer_str) else {
                 hollow_log!("[HOLLOW-SIBLING] Unsolicited/expired SiblingProveResponse from {peer_str} — ignored");
                 return;
@@ -11408,25 +10705,16 @@ async fn handle_incoming_request(
             if let Some(state) = server_states.get(&server_id) {
                 if state.is_deleted() { return; }
             }
-            // ALWAYS run the inline join flow — even if we ALREADY hold the server.
-            // This is the deliberate choice (vs. a weaker ServerUpdated nudge that
-            // proved unreliable at refreshing the UI): the join flow ends in
-            // `Server join completed` → NetworkEvent::ServerJoined → Dart
-            // `onServerCreated`, which UNCONDITIONALLY inserts the server into
-            // serverListProvider. That is the exact path a live (both-online) create
-            // uses and the ONLY path observed to refresh the list reliably. For a
-            // server we already have, the same-identity ServerJoinRequest fast-path
-            // on the responder just re-serves the snapshot/ops (idempotent —
-            // message/op dedup), and the SyncResponse handler completes the pending
-            // join (it runs even with 0 new ops when a join is pending). MLS isn't
-            // re-keyed: we keep our existing leaf; the bootstrap KeyPackage only
-            // fires if we lack the group.
+            // ALWAYS run the inline join flow, even for a server we already hold. The
+            // flow ends in NetworkEvent::ServerJoined and Dart's `onServerCreated`,
+            // which unconditionally inserts the server into serverListProvider; a
+            // weaker ServerUpdated nudge proved unreliable at refreshing the list. For a
+            // server we hold, the responder's same-identity fast path just re-serves the
+            // snapshot and ops, and MLS is not re-keyed: we keep our existing leaf.
             hollow_log!("[HOLLOW-CRDT] Sibling {peer_str} announced server {server_id}; running join flow (have_it={})", server_states.contains_key(&server_id));
-            // Lightweight inline join (mirrors handle_join_server): join the rooms +
+            // Lightweight inline join (mirrors handle_join_server): join the rooms and
             // send a ServerJoinRequest to the announcer, which same-identity fast-paths
-            // us (serves the snapshot + adds our MLS leaf). No twitch proof for a co-owner.
-            // Same-identity join: bypasses the gates anyway (the receiver's NSFW
-            // gate is `!is_sibling`), so no twitch proof and nsfw pre-confirmed.
+            // us. The receiver's gates are `!is_sibling`, so no proof and NSFW pre-confirmed.
             pending_server_joins.insert(server_id.clone(), PendingJoin {
                 twitch_proof_json: None,
                 nsfw_confirmed: true,
@@ -11464,10 +10752,9 @@ async fn handle_incoming_request(
                 if !mls_mgr.has_group(&group_key) {
                     hollow_log!("[HOLLOW-MLS] Received MlsChannelMessage for unknown group {group_key}");
 
-                    // If we're a member of this server but don't have the MLS group,
-                    // the Welcome was lost. Send KeyPackage to the coordinator
-                    // (lowest online peer) for MLS bootstrap.
-                    // Only do this once per group to avoid spamming (expires after 60s).
+                    // A member of this server without its MLS group lost the Welcome, so
+                    // send a KeyPackage to the coordinator for bootstrap. Once per group
+                    // (expires after 60s) so this cannot spam.
                     if !mls_bootstrap_requested.get(&group_key).is_some_and(|t| t.elapsed() < MLS_BOOTSTRAP_TIMEOUT) {
                         if let Some(state) = server_states.get(&server_id) {
                             // Subgroup: only bootstrap if we actually qualify for the
@@ -11527,7 +10814,6 @@ async fn handle_incoming_request(
                         mls_decrypt_failures.remove(&group_key); // Reset failure counter on success.
                         hollow_log!("[HOLLOW-TOPIC] DECRYPT ok for {group_key}, sender(leaf)={sender_peer_id}");
 
-                        // Parse the plaintext as a MessageEnvelope.
                         let envelope_str = String::from_utf8_lossy(&plaintext);
                         let envelope = match serde_json::from_str::<MessageEnvelope>(&envelope_str) {
                             Ok(env) => env,
@@ -11546,12 +10832,10 @@ async fn handle_incoming_request(
                             }
                         }
 
-                        // Multi-device (Step 6): the MLS leaf credential is the
-                        // sender's DEVICE id, but channel messages/edits/reactions
-                        // are signed by — and attributed to — the sender's MASTER.
-                        // Resolve once: `sender_master` for attribution + signature
-                        // verification, `sender_peer_id` (device) kept for Olm
-                        // reply/transport sites (sync responders, file re-requests).
+                        // Multi-device: the MLS leaf credential is the sender's DEVICE
+                        // id, but channel messages, edits and reactions are signed by
+                        // and attributed to their MASTER. Resolve once: `sender_master`
+                        // for attribution, `sender_peer_id` for Olm reply and transport.
                         let sender_master = super::resolver::resolve(&sender_peer_id);
 
                         match envelope {
@@ -11627,12 +10911,10 @@ async fn handle_incoming_request(
                             // -- Phase 6 new MLS dispatch branches --
 
                             MessageEnvelope::CrdtOp { sid, op_json } => {
-                                // Detect a membership/visibility op BEFORE applying so we
-                                // can reconcile subgroups + auto-leave invisible voice
-                                // channels afterwards. This op may arrive via MLS *or*
-                                // plaintext (we now send both); whichever wins the race
-                                // applies it and the other no-ops — so BOTH paths must run
-                                // the reconcile/auto-leave, else neither fires when MLS wins.
+                                // Detect a membership or visibility op BEFORE applying, so
+                                // subgroups can be reconciled and invisible voice channels left
+                                // afterwards. The op arrives via MLS and plaintext, whichever wins
+                                // applies it, so BOTH paths must run the reconcile.
                                 let sniffed_op = serde_json::from_str::<crate::crdt::operations::CrdtOp>(&op_json).ok();
                                 let affects_subgroups = sniffed_op.as_ref()
                                     .map(|o| matches!(
@@ -11662,10 +10944,8 @@ async fn handle_incoming_request(
 
                                 // Capture membership BEFORE apply: a MemberRemoved of OUR
                                 // identity arriving via MLS must trigger the same durable
-                                // self-eviction teardown as the plaintext CrdtOpBroadcast
-                                // path. The op is sent BOTH ways and the op_log dedups —
-                                // when MLS wins the race the plaintext copy no-ops, so
-                                // this path must tear down too or the shell survives.
+                                // self-eviction teardown as the plaintext path, or when MLS wins
+                                // the race the plaintext copy no-ops and the shell survives.
                                 let was_member_before = server_states.get(&sid)
                                     .map(|s| s.is_member(&local_peer_str))
                                     .unwrap_or(false);
@@ -11917,7 +11197,7 @@ async fn handle_incoming_request(
                                 ).await;
                             }
 
-                            // -- Voice channel signaling (Phase 5C) --
+                            // -- Voice channel signaling --
                             // SECURITY (Phase 6.25): VC signal sub-rate-limiter (drop on rate-limit).
                             MessageEnvelope::VoiceChannelJoin { .. }
                             | MessageEnvelope::VoiceChannelLeave { .. }
@@ -11941,15 +11221,11 @@ async fn handle_incoming_request(
                                 // Rate limited — drop silently (already logged).
                             }
 
-                            // VC participants/signaling are keyed by the ROUTABLE WS
-                            // sender (`peer_str`), NOT the MLS leaf credential
-                            // (`sender_peer_id`). For a multi-device sender these can
-                            // differ — the leaf credential is not a live socket, so
-                            // using it would (a) add a PHANTOM second participant that
-                            // can never connect (the cause of "two ALs" in the VC list)
-                            // and (b) make every SDP/ICE reply Olm-target an unreachable
-                            // id. The plaintext VC path already uses the routable sender;
-                            // matching it here lets the Set dedup the two arrivals.
+                            // VC participants and signaling are keyed by the ROUTABLE WS
+                            // sender (`peer_str`), NOT the MLS leaf credential, which for a
+                            // multi-device sender is a different id and is not a live socket.
+                            // Using it adds a PHANTOM participant that can never connect and
+                            // makes every SDP/ICE reply target an unreachable id.
                             MessageEnvelope::VoiceChannelJoin { sid, cid } => {
                                 voice_handler::handle_envelope_voice_channel_join(
                                     server_states, voice_channel_participants,
@@ -11990,7 +11266,7 @@ async fn handle_incoming_request(
                                 ).await;
                             }
 
-                            // -- Voice channel screen sharing (Phase 5B) --
+                            // -- Voice channel screen sharing --
                             MessageEnvelope::VoiceChannelScreenOffer { sid, cid, sdp, origin, .. } => {
                                 voice_handler::handle_envelope_voice_channel_screen_offer(
                                     voice_channel_participants, event_tx,
@@ -12040,7 +11316,7 @@ async fn handle_incoming_request(
                                 ).await;
                             }
 
-                            // -- Voice channel camera (Phase 5B) --
+                            // -- Voice channel camera --
                             MessageEnvelope::VoiceChannelRenegOffer { sid, cid, sdp, ice_restart, .. } => {
                                 voice_handler::handle_envelope_voice_channel_reneg_offer(
                                     voice_channel_participants, event_tx,
@@ -12072,7 +11348,7 @@ async fn handle_incoming_request(
                                 ).await;
                             }
 
-                            // -- Gossip relay tree (Phase 5D) --
+                            // -- Gossip relay tree --
                             MessageEnvelope::BroadcastMeta { broadcast_id, origin, sid, cid, file_id, ttl } => {
                                 file_handler::handle_envelope_broadcast_meta(
                                     gossip_overlays, local_peer_str, &sender_peer_id,
@@ -12088,18 +11364,16 @@ async fn handle_incoming_request(
                                 hollow_log!("[HOLLOW-MLS] Unexpected DM envelope via MLS from {sender_peer_id} — ignoring");
                             }
 
-                            // A 1:1 call signal is Olm-direct by contract. Over
-                            // MLS it would be readable by, and forgeable by,
-                            // every other member of the group — including for a
-                            // call they are not part of, SFrame key and all.
+                            // A 1:1 call signal is Olm-direct by contract. Over MLS
+                            // it would be readable by, and forgeable by, every other
+                            // member of the group, SFrame key and all.
                             MessageEnvelope::CallSignal { .. } => {
                                 hollow_log!("[HOLLOW-SECURITY] REJECTED call signal envelope via MLS from {sender_peer_id}");
                             }
 
-                            // Forwarder control plane is Olm-direct inside the
-                            // fwd:{forwarder} room by contract — the forwarder
-                            // holds no group keys, so fwd_* via MLS is always
-                            // misdirected or spoofed.
+                            // The forwarder control plane is Olm-direct inside the
+                            // fwd:{forwarder} room by contract, and the forwarder holds
+                            // no group keys, so fwd_* over MLS is always misdirected.
                             MessageEnvelope::FwdStreamRegister { .. }
                             | MessageEnvelope::FwdStreamAuth { .. }
                             | MessageEnvelope::FwdStreamUnregister { .. }
@@ -12117,10 +11391,9 @@ async fn handle_incoming_request(
                     Err(e) => {
                         hollow_log!("[HOLLOW-MLS] Decrypt failed for {group_key}: {e}");
 
-                        // Immediately request sync from the sender. Server group:
-                        // all subscribed channels (the dropped message came via topic
-                        // routing for one of them). Subgroup: just that one channel.
-                        // 5s dedup prevents flood.
+                        // Immediately request sync from the sender. Server group: all
+                        // subscribed channels, since the dropped message came via topic
+                        // routing for one. Subgroup: just that one. A 5s dedup prevents a flood.
                         {
                             let dedup_key = format!("mls_fail_sync:{group_key}:{peer_str}");
                             if !channel_sync_sent.get(&dedup_key).is_some_and(|t| t.elapsed() < Duration::from_secs(5)) {
@@ -12153,15 +11426,11 @@ async fn handle_incoming_request(
                             }
                         }
 
-                        // Server group: ALSO request a CRDT op-log sync — on a SHORTER
-                        // dedup than the message sync above. A WrongEpoch failure usually
-                        // means the sender is ahead (it advanced the epoch + may have
-                        // broadcast new CRDT ops — a freshly created channel, a visibility
-                        // change — that we can't decrypt and would otherwise never learn
-                        // about, since per-channel message sync only covers channels we
-                        // already know). Several such ops can arrive back-to-back (create
-                        // then restrict), so a 1s dedup lets each trigger a fresh op-log
-                        // delta rather than the 5s message-sync window swallowing the rest.
+                        // Server group: ALSO request a CRDT op-log sync, on a SHORTER dedup
+                        // than the message sync. A WrongEpoch failure usually means the sender
+                        // is ahead and may have broadcast ops we cannot decrypt (a fresh
+                        // channel, a visibility change) that per-channel sync can never
+                        // recover. A 1s dedup lets back-to-back ops each trigger a delta.
                         if msg_channel_id.is_none() {
                             let op_dedup = format!("mls_fail_opsync:{group_key}:{peer_str}");
                             if !channel_sync_sent.get(&op_dedup).is_some_and(|t| t.elapsed() < Duration::from_secs(1)) {
@@ -12184,16 +11453,11 @@ async fn handle_incoming_request(
                             }
                         }
 
-                        // Track consecutive failures — trigger recovery after 3 that
-                        // are actually SUSTAINED. The count alone counted a burst: on
-                        // rejoin the relay's availability cache replays every buffered
-                        // channel frame at once, so a returning member saw three
-                        // undecryptable frames in the same millisecond and nuked its
-                        // group before the first `SyncRequest` (which carries the epoch
-                        // hint) had even arrived. That is ONE event, not three, and the
-                        // heal it pre-empted was the cheap one. Measured in the fleet
-                        // 2026-08-27: probe sent, catch-up served, then "Ignoring
-                        // MlsCommitCatchup for group we don't hold".
+                        // Track consecutive failures, and recover only after 3 SUSTAINED
+                        // ones. The raw count counted a burst: on rejoin the relay's
+                        // availability cache replays every buffered channel frame at once,
+                        // so a returning member nuked its group before the first
+                        // `SyncRequest` carrying the epoch hint arrived. That is ONE event.
                         let entry = mls_decrypt_failures
                             .entry(group_key.clone())
                             .or_insert_with(|| (0, std::time::Instant::now()));
@@ -12201,16 +11465,11 @@ async fn handle_incoming_request(
                         let sustained = entry.1.elapsed() >= MLS_DECRYPT_FAIL_WINDOW;
                         let count = &mut entry.0;
 
-                        // An epoch probe already in flight is about to answer with a
-                        // commit catch-up, which costs NO epoch churn. Dropping the
-                        // group out from under it wastes that answer ("Ignoring
-                        // MlsCommitCatchup for group we don't hold") and heals the
-                        // heavy way instead: remove + re-add, two epochs, rekeying
-                        // everyone. Seen in the fleet 2026-08-27 — a returning owner
-                        // rejoins, the relay's availability cache replays three
-                        // buffered channel frames instantly, and the ladder beat the
-                        // probe's round trip every time. Hold the group for one grace
-                        // window; if the answer does not come, the ladder still runs.
+                        // An epoch probe already in flight is about to answer with a commit
+                        // catch-up, which costs NO epoch churn. Dropping the group out from
+                        // under it wastes that answer and heals the heavy way instead:
+                        // remove + re-add, two epochs, rekeying everyone. Hold the group for
+                        // one grace window; if the answer never comes, the ladder still runs.
                         let probe_in_flight = mls_epoch_hint_cooldown
                             .get(&format!("{group_key}|probe"))
                             .is_some_and(|t| t.elapsed() < EPOCH_PROBE_GRACE);
@@ -12222,7 +11481,6 @@ async fn handle_incoming_request(
                             hollow_log!("[HOLLOW-MLS] {} consecutive decrypt failures — initiating MLS recovery for {group_key}", count);
                             *count = 0;
 
-                            // Drop broken group and request re-bootstrap from coordinator.
                             mls_mgr.remove_group(&group_key);
                             persist_mls_state(mls_mgr, crypto_store);
 
@@ -12231,9 +11489,6 @@ async fn handle_incoming_request(
                                 // Only attempt recovery if we're still a member (skip if banned/removed).
                                 // Members are master-keyed; our master is the key. For a
                                 // subgroup we must also still QUALIFY for the channel.
-                    if master != peer_str {
-                        let _ = store.migrate_friend_to_master(peer_str, &master);
-                    }
                                 let still_eligible = state.members.contains_key(&local_peer)
                                     && match &msg_channel_id {
                                         Some(cid) => state.can_see_channel(&local_peer, cid),
@@ -12246,24 +11501,6 @@ async fn handle_incoming_request(
                                     // send to one of its online DEVICES. Subgroup uses the
                                     // qualifying-member candidate set.
                                     let coordinator = match &msg_channel_id {
-                    // An accept answers a request of ours. With a row, a stamp older than
-                    // it is a relay-parked or mailbox-replayed copy, not consent for the
-                    // re-add (a bare stamp is a pre-0.11.1 sender and passes). With no row
-                    // after a removal, every copy is stale, stamped or not.
-                    match store.get_friend_row(&master).ok().flatten() {
-                        Some((_, _, stored)) => {
-                            if let Some(stamp) = requested_at && stamp < stored {
-                                hollow_log!("[HOLLOW-FRIENDS] Ignoring stale FriendAccept from {peer_str}: answers request {stamp}, current is {stored}");
-                                return;
-                            }
-                        }
-                        None => {
-                            if store.load_setting(&social::removed_key(&master)).ok().flatten().is_some() {
-                                hollow_log!("[HOLLOW-FRIENDS] Ignoring FriendAccept from {peer_str}: no open request for {master} since we removed them");
-                                return;
-                            }
-                        }
-                    }
                                         Some(cid) => crate::node::crypto_handler::elect_subgroup_coordinator(
                                             state, cid, &local_peer, ws_room_peers,
                                         ).filter(|c| c != &local_peer),
@@ -12305,15 +11542,12 @@ async fn handle_incoming_request(
             };
             hollow_log!("[HOLLOW-MLS] MlsKeyPackage from {peer_str} for {group_key}");
 
-            // L6: Reject KeyPackage from non-members (prevents unauthorized MLS group joins).
-            // Multi-device (Step 6): members are keyed by MASTER; the sender is a
-            // DEVICE. Accept if the sending device's IDENTITY is a member — this is
-            // what lets a SIBLING of an existing member get its own leaf added
-            // without first being its own CRDT member. Unknown device → resolves to
-            // itself → falls back to plain membership (single-device unchanged).
-            // For a subgroup, the sender's identity must additionally QUALIFY for
-            // the channel (role satisfies the visibility tier) — otherwise we'd add
-            // a leaf that cryptographically defeats the channel restriction.
+            // L6: reject a KeyPackage from a non-member, which would be an
+            // unauthorized MLS group join. Members are keyed by MASTER while the
+            // sender is a DEVICE, so accept when the sending device's IDENTITY is a
+            // member: that is what lets a SIBLING of an existing member get its own
+            // leaf. For a subgroup the identity must additionally QUALIFY for the
+            // channel, or the leaf would cryptographically defeat the restriction.
             if let Some(state) = server_states.get(&server_id) {
                 let is_member = state.members.keys()
                     .any(|k| super::resolver::same_identity(peer_str, k));
@@ -12333,16 +11567,12 @@ async fn handle_incoming_request(
                 return;
             }
 
-            // SIBLING-RE-ADDS-SIBLING fast path (keystone regen recovery): if WE hold
-            // the group and the sender is OUR OWN identity (a sibling/keystone that
-            // regenerated its leaf), WE process it directly — the coordinator election
-            // below excludes the sender's identity (= ours), leaving an owned-server
-            // keystone with no one to re-add it. We hold a valid device-credentialed
-            // leaf, so the batch processor below removes any STALE leaf sharing the
-            // sender's credential (the keystone's old master-credentialed leaf — same
-            // id "M" — caught by the "sender already a leaf" branch) and adds the new
-            // leaf to the SAME group: one epoch advance, no fork. The `!=` guard keeps
-            // us from self-processing (we never send our own KP to ourselves).
+            // SIBLING-RE-ADDS-SIBLING fast path (keystone regen recovery): when WE
+            // hold the group and the sender is OUR OWN identity, we process it
+            // directly, because the coordinator election below excludes the sender's
+            // identity and would leave an owned-server keystone with nobody to re-add
+            // it. The batch processor removes any STALE leaf sharing the sender's
+            // credential and adds the new one to the SAME group: one epoch, no fork.
             let sibling_readd = mls.as_ref().is_some_and(|m| {
                 if !(m.has_group(&group_key)
                     && super::resolver::same_identity(peer_str, local_peer_str)
@@ -12363,11 +11593,10 @@ async fn handle_incoming_request(
                 hollow_log!("[HOLLOW-MLS] Sibling re-add: adding our own sibling {peer_str}'s regenerated leaf to {group_key} (bypassing coordinator election)");
             }
 
-            // Distributed committer: lowest online MLS member (by MASTER identity)
+            // Distributed committer: the lowest online MLS member by MASTER identity
             // processes KeyPackages. The sender's IDENTITY is excluded from the
-            // election — they sent the KeyPackage because they (or a sibling) lost
-            // their group, so neither the sending device nor its siblings can be
-            // the coordinator that processes it.
+            // election, because they sent the KeyPackage precisely because they or a
+            // sibling lost their group.
             if !sibling_readd { if let Some(mls_mgr) = mls.as_ref() {
                 if mls_mgr.has_group(&group_key) {
                     let members: Vec<String> = mls_mgr.group_members(&group_key)
@@ -12375,9 +11604,8 @@ async fn handle_incoming_request(
                         .filter(|p| !super::resolver::same_identity(p, peer_str))
                         .collect();
                     // Server group: prefer the OWNER as the single authoritative
-                    // committer (linear epochs; avoids the non-owner-committer
-                    // fan-out-miss divergence with 3+ distinct members). Subgroup
-                    // with a group: deterministic lowest-master election.
+                    // committer, which keeps epochs linear and avoids the
+                    // non-owner-committer divergence. A subgroup elects the lowest master.
                     let coordinator = if kp_channel_id.is_none() {
                         server_states.get(&server_id).map_or_else(
                             || elect_coordinator(&members, local_peer_str, &ws_room_peers),
@@ -12403,7 +11631,6 @@ async fn handle_incoming_request(
                             .filter(|m| !super::resolver::same_identity(peer_str, m))
                             .filter(|m| m.as_str() == local_peer_str || peer_is_reachable(&ws_room_peers, m))
                             .cloned()
-                    let _ = store.save_setting(&social::removed_key(&master), "1");
                             .collect();
                         masters.sort();
                         masters.dedup();
@@ -12441,11 +11668,10 @@ async fn handle_incoming_request(
                     }
                 }
 
-                // Step 1: Queue stale MLS members for batch removal. A leaf is stale
-                // iff NO CRDT member shares its identity (Step 6: leaves are device
-                // ids, members are masters) — and, for a subgroup, additionally if the
-                // member's identity no longer QUALIFIES for the channel (demoted).
-                // Never sweep our own device's leaf.
+                // Step 1: queue stale MLS members for batch removal. A leaf is stale iff
+                // NO CRDT member shares its identity (leaves are device ids, members are
+                // masters) and, for a subgroup, if that identity no longer QUALIFIES for
+                // the channel. Never sweep our own device's leaf.
                 if let Some(state) = server_states.get(&server_id) {
                     let mls_members = mls_mgr.group_members(&group_key);
                     for stale_peer in &mls_members {
@@ -12516,10 +11742,9 @@ async fn handle_incoming_request(
                         mls_decrypt_failures.remove(&group_key);
                         hollow_log!("[HOLLOW-MLS] Joined MLS group {group_key}");
 
-                        // A parked join is only truly finished HERE: it held the
-                        // server (name, channels, members) from the moment the
-                        // buffered snapshot landed, but could not read a word of
-                        // it until this leaf formed.
+                        // A parked join is only truly finished HERE: it has held the
+                        // server since the buffered snapshot landed, but could not
+                        // read a word of it until this leaf formed.
                         if awaiting_mls_after_parked_join.remove(&server_id) {
                             let _ = event_tx.send(NetworkEvent::PendingJoinUpdated {
                                 server_id: server_id.clone(),
@@ -12527,19 +11752,12 @@ async fn handle_incoming_request(
                                 reason: String::new(),
                             }).await;
 
-                            // And ask the relay for the channel rings again.
-                            //
-                            // On the way back in, `RoomMembers` for this room can
-                            // be processed BEFORE the buffered SyncResponse lands,
-                            // and at that instant the server is not in
-                            // `server_states` at all, so the connect-time sweep
-                            // requested nothing for it. Anything that DID replay
-                            // before this Welcome failed to decrypt and was
-                            // dropped, because there was no group to read it with.
-                            // Clear this room's "already pulled" marks first, or
-                            // the request filters itself away; dedup is by
-                            // message_id, so a frame we already stored is stored
-                            // once.
+                            // And ask the relay for the channel rings again. On the way
+                            // back in, `RoomMembers` for this room can be processed
+                            // BEFORE the buffered SyncResponse lands, and at that instant
+                            // the server is not in `server_states`, so the connect-time
+                            // sweep requested nothing. Clear this room's "already pulled"
+                            // marks first, or the request filters itself away.
                             if wl_channel_id.is_none() {
                                 relay_catchup_done.retain(|(r, _)| r != &server_id);
                                 sync_handler::request_channel_catchups(
@@ -12559,11 +11777,9 @@ async fn handle_incoming_request(
                             }).await;
                         }
 
-                        // Emit the SFrame key for this group — if we joined a
-                        // restricted VOICE channel's subgroup (e.g. via VC-join
-                        // bootstrap), this delivers the key to its voice cryptor.
-                        // For the server group / text-only subgroups Dart just
-                        // caches it (no active cryptor for that channel).
+                        // Emit the SFrame key for this group. If we joined a
+                        // restricted VOICE channel's subgroup this delivers the key to
+                        // its voice cryptor; elsewhere Dart just caches it.
                         if let Ok(sframe_key) = mls_mgr.export_secret(&group_key, "sframe", b"", 32) {
                             let epoch = mls_mgr.epoch(&group_key).unwrap_or(0);
                             let _ = event_tx.send(NetworkEvent::MlsEpochChanged {
@@ -12572,13 +11788,10 @@ async fn handle_incoming_request(
                             }).await;
                         }
 
-                        // After SERVER-GROUP recovery, also catch up on CRDT OPS we
-                        // missed while at a stale epoch (new channels, visibility, role
-                        // changes). An op broadcast via MLS at an epoch we couldn't
-                        // decrypt was dropped with no plaintext fallback — without this
-                        // SyncRequest a channel created during our skew is lost forever
-                        // (we never learn it exists, so per-channel sync can't recover
-                        // it). The responder serves the op-log delta via SyncResponse.
+                        // After SERVER-GROUP recovery, also catch up on CRDT OPS missed at a
+                        // stale epoch. An op broadcast via MLS at an epoch we could not decrypt
+                        // was dropped with no plaintext fallback, so a channel created during
+                        // the skew is otherwise lost forever: per-channel sync cannot find it.
                         if wl_channel_id.is_none() {
                             if let Some(state) = server_states.get(&server_id) {
                                 let our_vector = StateVector::from_server_state(state);
@@ -12667,12 +11880,10 @@ async fn handle_incoming_request(
         }
 
         HavenMessage::MlsCommitCatchup { server_id, channel_id: cu_channel_id, commits } => {
-            // Replay of commit frames we missed (unbuffered 0x03 broadcast).
+            // Replay of commit frames we missed on the unbuffered 0x03 broadcast.
             // Every frame goes through the SAME validated apply path as a live
-            // MlsCommit; additionally each must be exactly one epoch ahead of
-            // us — we never attempt a gapped commit, so a bad catch-up can't
-            // even reach the drop-group recovery (strictly safer than the
-            // broadcast path it supplements).
+            // MlsCommit, and each must be exactly one epoch ahead of us, so a bad
+            // catch-up cannot even reach the drop-group recovery.
             let is_member = server_states.get(&server_id).is_some_and(|s| {
                 s.members.keys().any(|m| super::resolver::same_identity(m, peer_str))
             });
@@ -12734,16 +11945,12 @@ async fn handle_incoming_request(
             // Respond with our KeyPackage if we have an MLS identity.
             //
             // HOLDING the group is NOT a reason to refuse. The requester is the
-            // authority on whether our leaf needs replacing and it only asks on a
-            // real signal: the PeerJoined coordinator asks when we hold no leaf,
-            // and `handle_epoch_hint`'s repair arm asks when our epoch is stale and
-            // the commit cache cannot bridge it — it has already queued the removal
-            // of our old leaf. Refusing there deadlocked the repair (we think the
-            // group is fine, they have just evicted us) and left the peer waiting
-            // for the decrypt-fail ladder. Re-adding an existing leaf is safe: the
-            // batch processor's "sender already a leaf" branch drops the stale one
-            // sharing our credential and adds the new one in the SAME commit, so
-            // it is one epoch advance and no fork.
+            // authority on whether our leaf needs replacing and only asks on a real
+            // signal: the PeerJoined coordinator when we hold no leaf, or
+            // `handle_epoch_hint`'s repair arm, which has already queued the removal
+            // of our old leaf. Re-adding an existing leaf is safe: the batch
+            // processor drops the stale one sharing our credential in the SAME
+            // commit, so it is one epoch advance and no fork.
             if let Some(mls_mgr) = mls {
                 if mls_mgr.has_group(&group_key) {
                     hollow_log!("[HOLLOW-MLS] KeyPackageRequest for {group_key} while we hold it — answering anyway (leaf repair)");
@@ -12765,7 +11972,7 @@ async fn handle_incoming_request(
             }
         }
 
-        // -- Profile sync (Phase 3.5) --
+        // -- Profile sync --
 
         HavenMessage::FriendRequest { requested_at, carried_bundle, device_list, carried_profile } => {
 
@@ -12777,33 +11984,27 @@ async fn handle_incoming_request(
                 return;
             }
 
-            // BLOCK GUARD: a blocked identity's friend request is dropped
-            // outright — no pending row, no room join, no event/notification.
-            // This is the anti-spam surface blocking exists for. It runs BEFORE
-            // any device-list ingest or bundle work, so a request replayed out of
-            // the relay mailbox is dropped on exactly the same terms as a live one.
+            // BLOCK GUARD: a blocked identity's friend request is dropped outright,
+            // with no pending row, room join, event or notification. It runs BEFORE
+            // any device-list ingest or bundle work, so a request replayed out of the
+            // relay mailbox is dropped on exactly the same terms as a live one.
             if super::blocklist::is_blocked(peer_str) {
                 return;
             }
 
             hollow_log!("[HOLLOW-FRIENDS] Friend request from {peer_str}");
 
-            // ASYNC FRIENDING: the request may carry the sender's master-signed
-            // device list. Ingest it FIRST. A stranger reaching us out of the
-            // mailbox has never sent us a ProfileUpdate, so without this our
-            // resolver is cold for them: the friends row keys under their DEVICE
-            // id and `dm_room_code` computes a room they are not in, so our accept
-            // is addressed nowhere. `ingest_device_list` applies the same
-            // signature + version-monotonicity + revocation gates it applies to a
-            // ProfileUpdate-carried list, so this adds a transport, not a trust
-            // level. A list claiming OUR master routes to the sibling merge, which
-            // refuses anything not signed by our own master key.
+            // ASYNC FRIENDING: the request may carry the sender's master-signed device
+            // list. Ingest it FIRST. A stranger reaching us out of the mailbox has
+            // never sent us a ProfileUpdate, so our resolver is cold for them: the
+            // friends row would key under their DEVICE id and `dm_room_code` would
+            // compute a room they are not in, addressing our accept nowhere.
+            // `ingest_device_list` applies the same signature, version-monotonicity
+            // and revocation gates as a ProfileUpdate-carried list, so this adds a
+            // transport, not a trust level.
             //
-            // The membership gate is stated HERE as well as inside the ingest,
-            // matching the `ServerJoinRequest` and `FriendReject` arms: this inbox
-            // is stranger-reachable, so a captured list replayed from an unlisted
-            // socket is a DROPPED request, never a downgrade to the resolver.
-            // `if list.is_some()` must not be the bypass.
+            // This inbox is stranger-reachable, so a captured list replayed from an
+            // unlisted socket is a DROPPED request: `list.is_some()` is not a bypass.
             if let Some(list) = device_list.as_ref() {
                 let bad = if !crypto_handler::verify_device_list(list) {
                     Some("bad signature or master binding")
@@ -12825,20 +12026,17 @@ async fn handle_incoming_request(
 
             let req_master_early = super::resolver::resolve(&peer_str);
 
-            // Verify + persist the carried prekey bundle, so ACCEPT (which may be a
+            // Verify and persist the carried prekey bundle, so ACCEPT (which may be a
             // reboot away) can build the Olm session with the requester long gone.
-            // REJECT on any failure — an unverifiable bundle simply is not stored,
-            // and the friendship falls back to today's lazy co-presence re-key.
+            // REJECT on any failure: an unverifiable bundle is simply not stored.
             if let (Some(bundle), Some(list)) = (carried_bundle.as_ref(), device_list.as_ref()) {
                 if crypto_handler::verify_carried_bundle(master_peer_str, list, bundle) {
                     let record = social::CarriedRequestRecord {
                         bundle: bundle.clone(),
                         device_list: list.clone(),
-                        // Was the requester actually HERE when this landed? A live
-                        // frame only reaches us because its sender shares a room
-                        // with us, so room membership at receipt is the honest test.
-                        // A mailbox replay of an absent sender fails it, which is
-                        // exactly the case the carried bundle exists to serve.
+                        // Was the requester actually HERE when this landed? A live frame
+                        // only reaches us because its sender shares a room with us, so
+                        // room membership at receipt is the honest test.
                         live_at_receipt: crypto_handler::ws_room_for_peer(
                             ws_room_peers, peer_str,
                         ).is_some(),
@@ -12858,19 +12056,14 @@ async fn handle_incoming_request(
                 }
             }
 
-            // ANTI-DOWNGRADE / DEDUP guard (async friending). The relay inbox
-            // mailbox is TTL-only: it re-delivers the ORIGINAL buffered request to
-            // a device on EVERY `inbox:` join — by design, so every sibling device
-            // collects it. Without this guard a re-delivery UNDOES settled state:
-            // an accepter who already accepted, then reboots, has the mailbox
-            // replay the original request, and the save below would DOWNGRADE the
-            // "accepted" row back to "pending incoming" and re-emit
-            // `FriendRequestReceived` — the field symptom where the DM vanishes
-            // from Recent Conversations and the person reappears as an Incoming
-            // request. We read the existing row and refuse to let a stale replay
-            // walk a friendship backwards. Placed AFTER the carried-bundle store (a
-            // half-formed friendship may still want its bundle refreshed) and
-            // BEFORE `is_mutual` (a live outgoing request must still auto-accept).
+            // ANTI-DOWNGRADE / DEDUP guard. The relay inbox mailbox is TTL-only and
+            // re-delivers the ORIGINAL buffered request on EVERY `inbox:` join, by
+            // design, so every sibling device collects it. Without this guard a
+            // re-delivery UNDOES settled state: an accepter who already accepted and
+            // then reboots would have the save below DOWNGRADE the "accepted" row
+            // back to "pending incoming" and re-emit `FriendRequestReceived`. Placed
+            // AFTER the carried-bundle store, since a half-formed friendship may want
+            // its bundle refreshed, and BEFORE `is_mutual`, which must still fire.
             {
                 let existing = crate::storage::MessageStore::open(db_path, db_passphrase)
                     .ok()
@@ -12883,21 +12076,16 @@ async fn handle_incoming_request(
                         hollow_log!("[HOLLOW-FRIENDS] Re-delivered request from {peer_str} — already accepted, ignoring");
                         return;
                     }
-                    // The user already refused this person; the TTL-only mailbox is
-                    // merely replaying the SAME (or older) request. Do not resurrect
-                    // it as fresh. A strictly NEWER requested_at (a genuine cancel +
-                    // re-add) falls through and shows again, exactly like the
-                    // pending-incoming arm.
+                    // The user already refused this person and the TTL-only mailbox is
+                    // merely replaying the SAME or an older request, so do not resurrect
+                    // it. A strictly NEWER requested_at is a genuine re-add and falls through.
                     Some(("declined", _, stored_req)) if requested_at <= stored_req => {
                         hollow_log!("[HOLLOW-FRIENDS] Re-delivered request from {peer_str} (requested_at {requested_at} <= stored {stored_req}) — already declined, ignoring");
-                        // RE-ARM THE ANSWER. Swallowing here silently is exactly how
-                        // a decline failed to converge: our reject sits in the
-                        // requester's TTL-only mailbox, and when that copy expires
-                        // before the requester next boots, the requester re-deposits
-                        // this very request and nobody ever answers it again — stuck
-                        // pending on their side, declined on ours, forever. Every
-                        // swallow therefore re-sends the decline, ONCE per requester
-                        // per process so five replayed copies cost one deposit.
+                        // RE-ARM THE ANSWER. Swallowing silently is exactly how a decline
+                        // failed to converge: our reject sits in the requester's TTL-only
+                        // mailbox, and when that copy expires before the requester next boots
+                        // it re-deposits this very request and nobody answers again. So every
+                        // swallow re-sends the decline, ONCE per requester per process.
                         if reject_resent.insert(req_master_early.clone()) {
                             social::send_friend_reject(
                                 ws_cmd_tx, ws_room_peers, peer_str,
@@ -12909,30 +12097,25 @@ async fn handle_incoming_request(
                         }
                         return;
                     }
-                    // A duplicate delivery of a request we already SHOW. Re-emitting
-                    // would spam the notification for a row already on screen. Only
-                    // a strictly NEWER `requested_at` is a genuine re-request (e.g.
-                    // a cancel + re-add) and falls through to refresh.
+                    // A duplicate delivery of a request we already SHOW; re-emitting would
+                    // spam the notification for a row already on screen. Only a strictly
+                    // NEWER `requested_at` is a genuine re-request and refreshes it.
                     Some(("pending", "incoming", stored_req)) if requested_at <= stored_req => {
                         hollow_log!("[HOLLOW-FRIENDS] Duplicate incoming request from {peer_str} (requested_at {requested_at} <= stored {stored_req}) — already shown, ignoring");
                         return;
                     }
-                    // pending/outgoing → the `is_mutual` path below auto-accepts.
-                    // pending/incoming OR declined with a strictly NEWER
-                    // requested_at, "removed", or no row → fall through to the
-                    // normal new-request path (a genuine new/re-request must show).
+                    // pending/outgoing goes to the `is_mutual` auto-accept below.
+                    // pending/incoming or declined with a strictly NEWER requested_at,
+                    // "removed", or no row at all falls through to the new-request path.
                     _ => {}
                 }
             }
 
-            // FIX B (carried profile): a stranger's request holds no profile in our
-            // DB — the sender is often gone before it can push one — so the incoming
-            // card would render a raw peer id. If the request carried the sender's
-            // OWN master-signed profile, verify it (same rule as a ProfileRelay) and
-            // store it under the sender's master BEFORE we emit
-            // `FriendRequestReceived`, so the card and friend row render the name +
-            // avatar hash immediately. A bad/absent signature drops JUST the profile
-            // and keeps the request; over-long fields are rejected, not truncated.
+            // A stranger's request holds no profile in our DB and the sender is often
+            // gone before it can push one, so the card would render a raw peer id.
+            // When the request carries the sender's OWN master-signed profile, verify
+            // it by the same rule as a ProfileRelay and store it under their master
+            // BEFORE emitting the event. A bad signature drops JUST the profile.
             if let Some(profile) = carried_profile.as_ref() {
                 if let Some(stored_master) = social::store_carried_profile(
                     profile, &req_master_early, db_path, db_passphrase,
@@ -12943,15 +12126,11 @@ async fn handle_incoming_request(
                 }
             }
 
-            // MUTUAL request → auto-converge to friends. If our OWN outgoing request
-            // to this person is still live (a queued outbound request in
-            // `pending_friend_requests`, or a persisted "pending outgoing" row),
-            // both sides requested each other. Saving "pending incoming" here and
-            // showing a Reject affordance is the reject/accept race: rejecting drops
-            // our row but our queued outbound request later drains and re-friends us
-            // anyway. Instead, treat the inbound request as an implicit accept and
-            // converge deterministically. FriendAccept is idempotent, so both sides
-            // running this branch still converge.
+            // MUTUAL request: auto-converge to friends. If our OWN outgoing request is
+            // still live, both sides requested each other, and saving "pending
+            // incoming" with a Reject affordance is the reject/accept race, because
+            // our queued outbound request later drains and re-friends us anyway.
+            // FriendAccept is idempotent, so both sides running this still converge.
             let is_mutual = {
                 let queued = pending_friend_requests.contains_key(&req_master_early)
                     || pending_friend_requests.contains_key(peer_str);
@@ -12977,16 +12156,12 @@ async fn handle_incoming_request(
                 pending_friend_requests.remove(peer_str);
                 pending_friend_removals.remove(&req_master_early);
                 pending_friend_removals.remove(peer_str);
-                // STAMP THE CONVERGED REQUEST, before the accept freezes the row.
-                // Each side has been holding its OWN outgoing request's timestamp,
-                // and the two crossed a millisecond apart, so the two accepted rows
-                // would record DIFFERENT stamps for one friendship. A later decline
-                // of it carries the decliner's stamp and is measured against the
-                // other side's, which then reads as a stale replay half the time and
-                // is refused, leaving the pair friends on one side and declined on
-                // the other. save_friend advances a PENDING row by MAX, and MAX is
-                // symmetric, so writing the incoming stamp here makes both sides
-                // freeze on MAX(ours, theirs) and a reject can name it from either.
+                // STAMP THE CONVERGED REQUEST, before the accept freezes the row. Each
+                // side holds its OWN outgoing request's timestamp and the two crossed a
+                // millisecond apart, so the accepted rows would record DIFFERENT stamps
+                // for one friendship, and a later decline measured against the other
+                // side's reads as a stale replay half the time. save_friend advances a
+                // PENDING row by MAX, and MAX is symmetric, so both sides freeze together.
                 if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
                     let _ = store.save_friend(
                         &req_master_early, "pending", "outgoing", requested_at,
@@ -13004,29 +12179,25 @@ async fn handle_incoming_request(
                 return;
             }
 
-            // Save as pending incoming, keyed by the sender's MASTER (friendships key
-            // on the master). Cold resolver → resolves to the device id itself, which
-            // the device-list ingest re-key later migrates to the master. Also migrate
-            // any row already stranded under the device id.
+            // Save as pending incoming, keyed by the sender's MASTER, since
+            // friendships key on the master. A cold resolver returns the device id
+            // itself, which the device-list ingest re-key later migrates.
             {
                 if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
                     let master = super::resolver::resolve(&peer_str);
+                    if master != peer_str {
+                        let _ = store.migrate_friend_to_master(&peer_str, &master);
+                    }
                     let _ = store.save_friend(&master, "pending", "incoming", requested_at);
                 }
             }
 
-            // Register DM room code so we can rediscover this peer, AND JOIN the DM
-            // relay room now. The requester is already in this DM room (it joined at
-            // send time) and — post anti-mis-link fix — LEAVES our inbox after
-            // delivery, so the DM room is the shared rendezvous over which our eventual
-            // FriendAccept routes back. Without joining here, the accept could find no
-            // shared room (we used to rely on the requester lingering in our inbox).
-            // `dm_room_code` is pure (f(masters)) — pass the requester's MASTER (not the
-            // raw sender device) so we land in the SAME room the requester joined
-            // (`dm_room_code(my_master, their_master)`). Using the device id put us in a
-            // DIFFERENT room (`dm_room_code(my_master, their_device)`) where the requester
-            // never was → our FriendAccept had no shared room and was lost (the exact bug
-            // where the requester never learned we accepted).
+            // Register the DM room code and JOIN the DM relay room now. The requester
+            // joined it at send time and LEAVES our inbox after delivery, so the DM
+            // room is the shared rendezvous our FriendAccept routes over.
+            // `dm_room_code` is pure f(masters), so pass the requester's MASTER, not
+            // the raw sender device: the device id lands us in a DIFFERENT room the
+            // requester was never in, and the accept is lost.
             let local_peer = local_peer_str.to_string();
             let req_master = super::resolver::resolve(&peer_str);
             let room = dm_room_code(&local_peer, &req_master);
@@ -13034,16 +12205,12 @@ async fn handle_incoming_request(
                 room_code: room,
             });
 
-            // CRITICAL: push OUR profile + DEVICE LIST to the requester NOW, while it is
-            // still reachable (it just sent us this request, so it shares a room with
-            // us — the inbox and/or the DM room). This is the ONLY reliable moment to
-            // teach the requester `our-device → our-master`: our normal device-list send
-            // is gated behind the `is_new` PeerJoined path, which the requester defeats
-            // by leaving our inbox right after delivery and then being pinned in
-            // `synced_peers` via the shared DM room — so it never fires again. Without
-            // this, the requester never ingests our device list, never collapses our
-            // device→master, and our friendship stays split (their incoming row keyed by
-            // our device id, never re-keyed). Send to the SENDER device directly.
+            // CRITICAL: push OUR profile and DEVICE LIST to the requester NOW, while
+            // it is still reachable. This is the ONLY reliable moment to teach it
+            // our-device -> our-master: the normal device-list send is gated behind
+            // the `is_new` PeerJoined path, which the requester defeats by leaving our
+            // inbox right after delivery and then being pinned in `synced_peers` via
+            // the shared DM room, so it never fires again. Send to the SENDER device.
             social::send_own_profile_to_peer(
                 ws_cmd_tx, ws_room_peers,
                 local_peer_str, master_keypair, device_peer_id, &peer_str,
@@ -13059,33 +12226,48 @@ async fn handle_incoming_request(
         HavenMessage::FriendAccept { requested_at } => {
 
             // Update our outgoing request to accepted, keyed by the friend's MASTER.
-            // The accepter's `peer_str` may be a device id (multi-device / nickname);
-            // resolve so the accepted row matches presence/DM/profile, and migrate any
-            // pending row stranded under the device id.
+            // The accepter's `peer_str` may be a device id, so resolve it and migrate
+            // any pending row stranded under that device id.
             let master = super::resolver::resolve(&peer_str);
             {
                 if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+                    if master != peer_str {
+                        let _ = store.migrate_friend_to_master(peer_str, &master);
+                    }
                     // A DECLINE IS STICKY, and an accept is the other way it used to
                     // come undone. `pending_friend_accepts` is re-seeded from every
                     // accepted friend at startup and re-fires on the peer's next
                     // appearance, so an accept can arrive well AFTER we refused this
-                    // person (the mutual request race: both sides auto-converged,
-                    // then we hit Reject). Overwriting the tombstone there made the
-                    // pair friends behind the user's back. A re-add is what clears a
-                    // tombstone; an accept never does.
+                    // person. Overwriting the tombstone made the pair friends behind
+                    // the user's back. A re-add clears a tombstone; an accept never does.
                     if store.get_friend_status(&master).ok().flatten().as_deref()
                         == Some("declined")
                     {
                         hollow_log!("[HOLLOW-FRIENDS] Ignoring FriendAccept from {peer_str}: we declined {master}");
                         return;
                     }
+                    // An accept answers a request of ours. With a row, a stamp older than
+                    // it is a relay-parked or mailbox-replayed copy, not consent for the
+                    // re-add (a bare stamp is a pre-0.11.1 sender and passes). With no row
+                    // after a removal, every copy is stale, stamped or not.
+                    match store.get_friend_row(&master).ok().flatten() {
+                        Some((_, _, stored)) => {
+                            if let Some(stamp) = requested_at && stamp < stored {
+                                hollow_log!("[HOLLOW-FRIENDS] Ignoring stale FriendAccept from {peer_str}: answers request {stamp}, current is {stored}");
+                                return;
+                            }
+                        }
+                        None => {
+                            if store.load_setting(&social::removed_key(&master)).ok().flatten().is_some() {
+                                hollow_log!("[HOLLOW-FRIENDS] Ignoring FriendAccept from {peer_str}: no open request for {master} since we removed them");
+                                return;
+                            }
+                        }
+                    }
                     let now = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap_or_default()
                         .as_millis() as i64;
-                    if master != peer_str {
-                        let _ = store.migrate_friend_to_master(&peer_str, &master);
-                    }
                     let _ = store.save_friend(&master, "accepted", "", now);
                 }
             }
@@ -13114,22 +12296,17 @@ async fn handle_incoming_request(
         }
 
         HavenMessage::FriendReject { requested_at, device_list } => {
-            // ATTRIBUTION FIRST. The sender is a DEVICE id and our outgoing request
-            // row is keyed by their MASTER, so a raw device-id lookup silently
-            // misses it. `resolve()` alone cannot bridge that here: a decline of an
-            // ASYNC request answers somebody we have never been online with, so we
-            // have ingested no device list for them and `resolve(device)` hands the
-            // device straight back. Field-verified on two fresh installs: the reject
-            // arrived twice and was dropped twice with `row None`, while the row sat
-            // there under the master with a matching `requested_at`.
+            // ATTRIBUTION FIRST. The sender is a DEVICE id and our outgoing request row
+            // is keyed by their MASTER, so a raw device-id lookup silently misses it.
+            // `resolve()` alone cannot bridge that here: a decline of an ASYNC request
+            // answers somebody we have never been online with, so we have ingested no
+            // device list for them and `resolve(device)` hands the device back.
             //
-            // So the reject CARRIES the decliner's own master-signed device list,
-            // exactly like a friend request, and attribution becomes cryptographic:
-            // the list must verify, its signer must BE the master it claims (the
-            // pubkey -> peer_id binding inside `verify_device_list`), and the
-            // relay-authenticated sender device must be listed and un-revoked. A
-            // list that is present but bad is a REJECTED message, never a downgrade
-            // to the resolver: `if list.is_some()` must not be the bypass.
+            // So the reject CARRIES the decliner's own master-signed device list, exactly
+            // like a friend request, and attribution becomes cryptographic: the list must
+            // verify, its signer must BE the master it claims, and the relay-authenticated
+            // sender device must be listed and un-revoked. A list that is present but bad
+            // is a REJECTED message, never a downgrade: `list.is_some()` is not a bypass.
             let master = match device_list.as_ref() {
                 Some(list) => {
                     let reason = if !crypto_handler::verify_device_list(list) {
@@ -13146,9 +12323,8 @@ async fn handle_incoming_request(
                         return;
                     }
                     // Ingest through the SAME path the FriendRequest arm uses, so the
-                    // resolver, the device store and the DM room key all agree
-                    // afterwards (an accept/DM that follows must not compute a
-                    // different room than the one this identity is in).
+                    // resolver, the device store and the DM room key all agree afterwards:
+                    // an accept or DM that follows must not compute a different room.
                     let _ = crypto_handler::ingest_device_list(
                         event_tx, master_peer_str, device_peer_id, master_keypair,
                         peer_str, ws_cmd_tx, ws_room_peers,
@@ -13167,26 +12343,18 @@ async fn handle_incoming_request(
             };
             let row = store.get_friend_row(&master).ok().flatten();
 
-            // A reject now rides the TTL-only mailbox, so it can arrive LATE, out
-            // of order, or replayed for three days. Unconditionally deleting on it
-            // would make an old copy a remote un-friend primitive: it could wipe a
-            // friendship, or a request we minted AFTER the decline (a cancel +
-            // re-add). So a reject only ever acts on the request it NAMES.
+            // A reject rides the TTL-only mailbox, so it can arrive LATE, out of order,
+            // or replayed for three days. Unconditionally deleting on it would make an
+            // old copy a remote un-friend primitive, wiping a friendship or a request
+            // minted AFTER the decline. So a reject only ever acts on what it NAMES.
             //
-            //   * pending/outgoing — the ordinary case. `requested_at == 0` is a
-            //     pre-2026-08-29 client saying "decline whatever is pending", which
-            //     is why the legacy form is confined to this arm: with no timestamp
-            //     to check, only a still-pending request is safe to drop.
-            //   * accepted — the MUTUAL RACE. Both sides requested each other, both
-            //     auto-converged to friends, and the user then hit Reject on that
-            //     same request. A reject carrying the accepted row's OWN
-            //     `requested_at` answers exactly the request that produced this
-            //     friendship, so honouring it keeps both sides symmetric instead of
-            //     leaving them friends on one side and declined on the other.
-            //     Nothing weakens here: an accepted row FREEZES `requested_at` at
-            //     the request that was accepted (save_friend's CASE/MAX rule), so a
-            //     reject replayed after a cancel + re-add carries the OLDER stamp
-            //     and is still refused, and legacy 0 never reaches this arm.
+            //   * pending/outgoing: the ordinary case. `requested_at == 0` is a pre-nonce
+            //     client saying "decline whatever is pending", confined to this arm
+            //     because with no timestamp only a still-pending request is safe to drop.
+            //   * accepted: the MUTUAL RACE. Both sides requested each other, both
+            //     converged, and the user then hit Reject on that same request, so
+            //     honouring it keeps both sides symmetric. An accepted row FREEZES
+            //     `requested_at`, so a reject replayed after a re-add is still refused.
             let acts_on = match row.as_ref().map(|(s, d, r)| (s.as_str(), d.as_str(), *r)) {
                 Some(("pending", "outgoing", stored)) => requested_at == 0 || requested_at >= stored,
                 Some(("accepted", _, stored)) => requested_at != 0 && requested_at >= stored,
@@ -13204,11 +12372,9 @@ async fn handle_incoming_request(
             }
 
             // Stop RE-DEPOSITING this request. Our outgoing request may still sit in
-            // `pending_friend_requests`, which the reconnect handler re-deposits into
-            // the target's TTL-only mailbox on every connect — that would perpetually
-            // refresh a request they just declined. Clear the in-memory queue (and any
-            // queued accept) under both keys; the persisted pending-outgoing row is
-            // deleted above. Mirrors the FriendRemove handler below.
+            // `pending_friend_requests`, which the reconnect handler re-deposits into the
+            // target's TTL-only mailbox on every connect, perpetually refreshing a
+            // request they just declined. Clear the in-memory queue under both keys.
             pending_friend_requests.remove(&master);
             pending_friend_accepts.remove(&master);
             if master != peer_str {
@@ -13229,16 +12395,15 @@ async fn handle_incoming_request(
         }
 
         HavenMessage::FriendRemove => {
-            // The remover sends from a DEVICE id, but the friendship is keyed by
-            // their MASTER on our side — resolve so the DELETE hits the right row
-            // (a raw device-id delete misses a master-keyed friend → asymmetric
-            // removal where they removed us but we still list them). Delete both
-            // keys for any legacy device-stranded row.
+            // The remover sends from a DEVICE id while the friendship is keyed by their
+            // MASTER on our side, so resolve or the DELETE misses and the removal is
+            // asymmetric. Delete both keys for any legacy device-stranded row.
             let master = super::resolver::resolve(&peer_str);
             hollow_log!("[HOLLOW-FRIENDS] Friend removed by {peer_str} (master {master})");
 
             {
                 if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+                    let _ = store.save_setting(&social::removed_key(&master), "1");
                     let _ = store.remove_friend(&master);
                     if master != peer_str {
                         let _ = store.remove_friend(&peer_str);
@@ -13246,15 +12411,11 @@ async fn handle_incoming_request(
                 }
             }
 
-            // CRITICAL — clear our OWN queued accept/request for this person. We may
-            // hold a `pending_friend_accepts[master]` entry (we accepted them earlier,
-            // AND it is re-seeded from accepted-friends at every startup). If it
-            // survives this removal, then when they RE-ADD us and their device
-            // reappears, the pending-accepts drain AUTO-SENDS a FriendAccept WITHOUT
-            // ever surfacing their new request — they re-friend us off that stale
-            // accept while WE show nothing and never consented (the asymmetric
-            // re-add-auto-accept bug). The send-side `handle_remove_friend` already
-            // does this; the RECEIVE side must too. Clear both master and device keys.
+            // CRITICAL: clear our OWN queued accept and request for this person. A
+            // `pending_friend_accepts` entry is re-seeded from accepted friends at every
+            // startup, and if it survives this removal then when they RE-ADD us the drain
+            // AUTO-SENDS a FriendAccept without ever surfacing their new request: they
+            // re-friend us while WE show nothing and never consented.
             pending_friend_accepts.remove(&master);
             pending_friend_requests.remove(&master);
             if master != peer_str {
@@ -13262,10 +12423,9 @@ async fn handle_incoming_request(
                 pending_friend_requests.remove(peer_str);
             }
 
-            // NOTE: do NOT LeaveRoom here either — symmetric with the send side. The
-            // lingering ex-friend presence is handled as a UI-count concern (the Network
-            // column counts only peers resolving to an accepted friend), not by leaving
-            // rooms (which raced removal delivery and dropped the message).
+            // Do NOT LeaveRoom here either, symmetric with the send side. Lingering
+            // ex-friend presence is a UI-count concern (the Network column counts only
+            // peers resolving to an accepted friend); leaving raced removal delivery.
 
             let _ = event_tx.send(NetworkEvent::FriendRemoved {
                 peer_id: master,
@@ -13301,10 +12461,9 @@ async fn handle_incoming_request(
                     if super::resolver::same_identity(&entry.peer_id, local_peer_str) {
                         continue;
                     }
-                    // Key the friend by their MASTER (the invariant). A sibling on a
-                    // current build already sends masters, but resolve defensively so
-                    // a device-keyed entry from an older sibling still lands canonical
-                    // and dedups against our existing master row.
+                    // Key the friend by their MASTER (the invariant). A current sibling
+                    // already sends masters, but resolve defensively so a device-keyed entry
+                    // from an older one still lands canonical and dedups against our row.
                     let fmaster = super::resolver::resolve(&entry.peer_id);
                     if existing.contains(&fmaster) || existing.contains(&entry.peer_id) {
                         continue;
@@ -13316,43 +12475,33 @@ async fn handle_incoming_request(
                     {
                         inserted += 1;
                     }
-                    // Join the friend's DM room so presence flows both ways and
-                    // future live messages arrive (history backfill is Step 4/5).
-                    // Use the friend's MASTER so both sides compute the same pure
-                    // dm_room_code (a device-keyed room would diverge per-side).
+                    // Join the friend's DM room so presence flows both ways and future
+                    // live messages arrive. Use the friend's MASTER so both sides compute
+                    // the same pure dm_room_code; a device-keyed room would diverge.
                     let room = dm_room_code(local_peer_str, &fmaster);
                     let _ = ws_cmd_tx.send(super::ws_client::WsCommand::JoinRoom {
                         room_code: room.clone(),
                     });
                     // CRITICAL (presence collapse): announce ourselves to this
-                    // freshly-learned friend with our profile + MERGED device list.
-                    // Without this, a substitute device (e.g. a VM that imported the
-                    // mnemonic) joins the friend's DM room but the friend never
-                    // receives a ProfileUpdate carrying our device id — so the
-                    // friend's resolver never maps our-device → master and shows the
+                    // freshly-learned friend with our profile and MERGED device list.
+                    // Without it a substitute device joins the friend's DM room but the
+                    // friend never receives a ProfileUpdate carrying our device id, so
+                    // their resolver never maps our-device to master and shows the
                     // identity OFFLINE when the original device quits.
                     //
-                    // We just issued JoinRoom, so we are NOT in `ws_room_peers[room]`
-                    // yet — `send_own_profile_to_peer`'s room-lookup would drop the
-                    // send. Target the KNOWN DM room directly: on the same WS
-                    // connection JoinRoom is processed before this SendDirect (ordered
-                    // TCP), so by the time the relay routes it we are in the room.
+                    // We just issued JoinRoom, so we are NOT in `ws_room_peers[room]` yet
+                    // and `send_own_profile_to_peer`'s room lookup would drop the send.
+                    // Target the KNOWN DM room directly: JoinRoom is processed before this
+                    // SendDirect on the same ordered connection.
                     //
-                    // CRITICAL: a freshly-imported substitute device has NO local
-                    // profile row yet (no display name set), so we must NOT gate the
-                    // device-list send on `load_profile` being Some — that was the
-                    // exact bug where AL never learned the VM→master mapping. Build
-                    // the ProfileUpdate from whatever profile exists (or empty
-                    // defaults) and ALWAYS attach the device list.
+                    // A freshly-imported device has no profile row: never gate on load_profile.
                     {
                         let profile = crate::storage::MessageStore::open(db_path, db_passphrase)
                             .ok()
                             .and_then(|s| s.load_profile(local_peer_str).ok().flatten());
-                        // LIGHT announce (device list is the payload here) — blobs
-                        // ride as hashes; a stale friend pulls via ProfileRequest.
-                        // Our proof rides along - receivers REQUIRE it to store
-                        // the profile, and forward it when relaying us onward.
-                        // Signed fresh if the row predates 0.8.5.
+                        // LIGHT announce, with the device list as the payload: blobs ride
+                        // as hashes and a stale friend pulls via ProfileRequest. Our proof
+                        // rides along, since receivers REQUIRE it to store the profile.
                         let (profile_sig, profile_pk, signed_avatar_hash) =
                             social::own_profile_proof(master_keypair, local_peer_str, profile.as_ref());
                         let (display_name, status, about_me, updated_at, avatar_hash, banner_hash, twitch_username, showcase_board, showcase_assets_hash, avatar_frame, avatar_anim, banner_anim, support_creds) =
@@ -13372,10 +12521,8 @@ async fn handle_incoming_request(
                             master_keypair, device_peer_id, db_path, db_passphrase,
                         );
                         let dev_count = device_list.as_ref().map(|d| d.devices.len()).unwrap_or(0);
-                        // The credentials field's own master signature — see
-                        // `crypto_handler::sign_support_creds`. Every announce
-                        // that carries the field carries this too, or a
-                        // receiver that has pinned us drops the field.
+                        // The credentials field's own master signature. Every announce
+                        // carrying the field carries this, or a pinned receiver drops it.
                         let support_creds_sig = super::crypto_handler::sign_support_creds(
                             master_keypair, local_peer_str, updated_at, Some(&support_creds),
                         );
@@ -13457,12 +12604,10 @@ async fn handle_incoming_request(
                 );
                 return;
             }
-            // 1) Announce every server we're STILL A MEMBER of to the requester. Each
-            //    announce drives the requester's join flow → ServerJoined → its UI
-            //    list refresh (the proven path). Idempotent on the requester.
-            //    Membership filter mirrors on_verified_sibling: a shell retained
-            //    after our own leave must never be re-announced (it would re-join /
-            //    re-ADD us to a server we left).
+            // 1) Announce every server we are STILL A MEMBER of. Each announce drives
+            //    the requester's join flow through to ServerJoined and its UI refresh,
+            //    and is idempotent. The membership filter mirrors on_verified_sibling:
+            //    a shell kept after our own leave would re-ADD us to a server we left.
             let mut announced = 0u32;
             for (sid, st) in server_states.iter() {
                 if st.is_deleted() || !st.is_member(local_peer_str) { continue; }
@@ -13498,12 +12643,11 @@ async fn handle_incoming_request(
             );
         }
 
-        // -- Multi-device link snapshot (Step 4) --
+        // -- Multi-device link snapshot --
         HavenMessage::LinkSnapshotRequest { include_vault: _, include_files: _, msg_count, friend_count, has_profile } => {
-            // An empty device wants our full snapshot. We do NOT require same_identity
-            // here: the code-path requester isn't a sibling yet (no shared master). The
-            // authorization is the human Confirm on THIS (populated) device — surfaced
-            // via SiblingLinkAvailable. The actual push happens on AcceptLinkPush.
+            // An empty device wants our full snapshot. same_identity is deliberately NOT
+            // required: a code-path requester is not a sibling yet. The authorization is
+            // the human Confirm on THIS device, and the push happens on AcceptLinkPush.
             link_handler::handle_inbound_link_request(
                 &event_tx, peer_str, msg_count, friend_count, has_profile,
             ).await;
@@ -13536,16 +12680,13 @@ async fn handle_incoming_request(
 
         HavenMessage::PublicChannelMessage { server_id, channel_id, text, ts, sig, pk, mid, reply_to, file_id, link_preview, order_us, file_meta } => {
             if peer_str == local_peer_str { return; }
-            // Multi-device: the relay frame author (`peer_str`) is the sender's
-            // DEVICE id, but a public channel message is SIGNED by — and must be
-            // attributed to — the sender's MASTER (the send side signs with the
-            // master id; see message_ops public-channel send). Resolve first so the
-            // signature verifies and the row is master-keyed, exactly like the MLS
-            // path. Single-device senders resolve to themselves (no-op).
+            // Multi-device: the relay frame author (`peer_str`) is the sender's DEVICE
+            // id, but a public channel message is SIGNED by and must be attributed to
+            // their MASTER, so resolve first or the signature cannot verify and the row
+            // is not master-keyed.
             //
-            // `order_us` is the SENDER's Lamport stamp (0.8.3+) — persist it
-            // faithfully: the v2 signature binds it, so a local ts*1000 default
-            // would store a row whose signature fails when re-served via sync.
+            // `order_us` is the SENDER's Lamport stamp and the v2 signature binds it, so
+            // a local ts*1000 default would store a row whose signature fails on re-serve.
             let sender_master = super::resolver::resolve(peer_str);
             message_ops::handle_envelope_channel_message(
                 &event_tx, &bundle_keypair, server_states.get(&server_id), &local_peer_str,
@@ -13554,10 +12695,9 @@ async fn handle_incoming_request(
                 Some(mid.clone()), reply_to, file_id.clone(), link_preview, order_us,
                 &db_path, &db_passphrase,
             ).await;
-            // GUEST live file card: we can't decrypt the MLS FileHeader that
-            // follows, so the plaintext message carries display metadata.
-            // Members ignore it (server state present = MLS header is their
-            // source); the v2 signature binds `file_id`, not this blob, so
+            // GUEST live file card: we cannot decrypt the MLS FileHeader that
+            // follows, so the plaintext message carries display metadata. Members
+            // ignore it, and the v2 signature binds `file_id` and not this blob, so
             // require the blob to describe exactly the signed file_id.
             if server_states.get(&server_id).is_none() && guest_rooms.contains(&server_id) {
                 if let Some(fm) = file_meta
@@ -13710,12 +12850,9 @@ async fn handle_incoming_request(
                         let mut truncated = false;
 
                         for m in msgs.iter() {
-                            // Same rule as the member responders: cut the page
-                            // rather than serve a message stripped of the card
-                            // its signature covers. This page walks BACKWARDS
-                            // (newest first, `before_timestamp`), so the tail we
-                            // drop is the oldest — exactly what the requester
-                            // asks for next.
+                            // Same rule as the member responders: cut the page rather
+                            // than serve a message stripped of the card its signature
+                            // covers. This page walks BACKWARDS, so the tail is the oldest.
                             if let Some(lp) = &m.link_preview {
                                 if !budget.fits(lp, items.len()) {
                                     hollow_log!(
@@ -13849,14 +12986,13 @@ async fn handle_incoming_request(
         HavenMessage::PublicChannelSyncResponse { server_id, channel_id, messages, has_more, sender_profiles } => {
             if peer_str == local_peer_str { return; }
             if !guest_rooms.contains(&server_id) { return; }
-            // Guests hold no rows to check against, so EVERYTHING is verified
-            // from the items' own fields — public-channel sync is plaintext, so
-            // the relay (or any responder) can rewrite the whole batch:
-            //   * content signature  -> drop the item        (0.8.5)
-            //   * hidden flag proof  -> strip the flag       (0.8.4, REJECT-ABSENT)
-            //   * reaction signature -> drop that reaction   (0.8.5)
-            // This is the one surface strangers see, so it gets the same rule
-            // the four member-side backfill sites use.
+            // Guests hold no rows to check against, so EVERYTHING is verified from
+            // the items' own fields: public-channel sync is plaintext, so the relay
+            // or any responder can rewrite the whole batch.
+            //   * content signature  -> drop the item
+            //   * hidden flag proof  -> strip the flag (REJECT-ABSENT)
+            //   * reaction signature -> drop that reaction
+            // This is the one surface strangers see, so it gets the member-side rule.
             let mut pk_cache = PkCache::new();
             let mut ffi_messages: Vec<GuestSyncMessageFfi> = Vec::with_capacity(messages.len());
             for m in messages {
@@ -13876,11 +13012,10 @@ async fn handle_incoming_request(
                     // No mid = nothing a reaction signature could bind to.
                     None => Vec::new(),
                 };
-                // Attachment metadata → file card (metadata only, never bytes).
-                // The item's v2 signature binds `file_id` but NOT the file_meta
-                // blob, so require the blob to describe exactly the signed
-                // file_id — a rewriting responder can then only change cosmetic
-                // fields (name/size), never attach someone else's file id.
+                // Attachment metadata to a file card (metadata only, never bytes). The
+                // item's v2 signature binds `file_id` but NOT this blob, so require the
+                // blob to describe exactly the signed file_id: a rewriting responder can
+                // then only change cosmetic fields, never attach someone else's file id.
                 let file_meta = m.file_meta
                     .filter(|fm| m.file_id.as_deref() == Some(fm.fid.as_str()))
                     .map(|fm| GuestFileMetaFfi {
@@ -13933,11 +13068,10 @@ async fn handle_incoming_request(
         HavenMessage::PublicFileHeader {
             file_id, name, ext, mime, size, img, w, h, mid, sid, cid, ts, aes_key, aes_nonce,
         } => {
-            // SECURITY receipt cap (mirrors `pending_asset_asks`): accept
-            // ONLY a fresh header answering a request WE made, for the server
-            // we made it in, and only while browsing that server as a guest.
-            // An unsolicited plaintext header would register a decrypt key and
-            // let a stranger stream arbitrary bytes onto our disk.
+            // SECURITY receipt cap (mirrors `pending_asset_asks`): accept ONLY a
+            // fresh header answering a request WE made, for the server we made it
+            // in, and only while browsing that server as a guest. An unsolicited
+            // plaintext header would register a decrypt key and stream bytes to disk.
             let Some((req_sid, req_at)) = pending_public_file_requests.remove(&file_id) else {
                 hollow_log!("[HOLLOW-SECURITY] REJECTED unsolicited PublicFileHeader for {file_id} from {peer_str}");
                 return;
@@ -13949,10 +13083,9 @@ async fn handle_incoming_request(
                 hollow_log!("[HOLLOW-SECURITY] REJECTED PublicFileHeader for {file_id} from {peer_str} — stale or server mismatch");
                 return;
             }
-            // Same ingest as an Olm FileHeader: 34 MB default size cap (no
+            // The same ingest as an Olm FileHeader: 34 MB default size cap (no
             // server state as a guest), metadata row, pending-stream key
-            // registration, FileHeaderReceived for the transfer UI. The
-            // sender recorded here is the RESPONDER — that is who streams.
+            // registration, FileHeaderReceived. The sender recorded is the RESPONDER.
             file_handler::handle_envelope_file_header(
                 server_states, pending_file_streams, pending_shard_streams,
                 early_file_streams, bundle_keypair, event_tx,
@@ -13988,10 +13121,9 @@ async fn handle_incoming_request(
             if super::resolver::is_revoked(peer_str) {
                 return;
             }
-            // Attribute typing to the sender's MASTER identity (server members and
-            // DM threads are master-keyed). The raw `peer_str` is a device id, which
-            // would never match the master-keyed member/thread → indicator never
-            // shows for a multi-device (or keystone-rotated) sender.
+            // Attribute typing to the sender's MASTER identity, since server members and
+            // DM threads are master-keyed. The raw `peer_str` is a device id and would
+            // never match, so the indicator never shows for a multi-device sender.
             let typist_master = super::resolver::resolve(peer_str);
             hollow_log!(
                 "[HOLLOW-TYPING] Received from {peer_str} (server={}, master {typist_master})",
@@ -14014,9 +13146,8 @@ async fn handle_incoming_request(
 
         HavenMessage::AutoDownloadPref { mb } => {
             // Auto-download pre-negotiation (issue #41): remember this DEVICE's
-            // advertised threshold so our DM file fan-out can skip streaming
-            // bytes it would discard. Clamp to the settings slider's ceiling —
-            // a larger value is malformed, not a real preference.
+            // advertised threshold so our DM file fan-out can skip bytes it would
+            // discard. Clamp to the slider's ceiling: a larger value is malformed.
             let mb = mb.min(2048);
             hollow_log!("[HOLLOW-FILE] Peer {peer_str} advertised auto-download pref: {mb} MB");
             peer_auto_dl.insert(peer_str.to_string(), mb);
@@ -14032,24 +13163,17 @@ async fn handle_incoming_request(
                 }).await;
             }
 
-            // Multi-device: ingest the sender's signed device list (verify +
-            // monotonic + persist + resolver update + DeviceListUpdated). A list
-            // for our OWN master is a sibling device → merged (union) + friend
-            // list shared (see ingest_sibling_device_list).
+            // Multi-device: ingest the sender's signed device list (verify, monotonic,
+            // persist, resolver update, DeviceListUpdated). A list for our OWN master
+            // is a sibling device and is merged as a union.
             //
             // ORDER, and why it is this way round (CRYPTO-1): the list is ingested
-            // BEFORE the profile signature is checked, and that is deliberate. The
-            // list authenticates itself twice over — the master's own signature,
-            // and `device_list_binds_sender`, which now requires that signature to
-            // NAME the delivering device — so it needs nothing from the profile.
-            // The profile signature, on the other hand, needs the list: it verifies
-            // against `resolve(sender)`, and the ingest is what teaches the resolver
-            // device→master. Checking it first would refuse every first-contact
-            // announce from a device whose id differs from its master, and a node
-            // with no profile row signs nothing at all (`own_profile_proof`), so
-            // gating the list on it would silently kill presence collapse for a
-            // freshly imported device. The profile FIELDS are still refused without
-            // a valid signature, in `save_incoming_profile`.
+            // BEFORE the profile signature is checked, deliberately. The list
+            // authenticates itself twice over, by the master's own signature and by
+            // `device_list_binds_sender`, so it needs nothing from the profile. The
+            // profile signature needs the list: it verifies against `resolve(sender)`,
+            // and this ingest is what teaches the resolver device-to-master. The
+            // profile FIELDS are still refused without a valid signature, downstream.
             let ingest_outcome = super::crypto_handler::ingest_device_list(
                 event_tx, master_peer_str, device_peer_id, master_keypair, peer_str,
                 ws_cmd_tx, ws_room_peers, device_list, db_path, db_passphrase,
@@ -14061,12 +13185,10 @@ async fn handle_incoming_request(
                 &ingest_outcome.newly_revoked, olm, crypto_store, mls.as_ref(),
                 local_peer_str, ws_room_peers, pending_mls_removals,
             );
-            // If a sibling merge added one of OUR device ids, re-announce our
-            // profile (now carrying the merged device list) to every peer we share
-            // a room with — friends converge on the full device set immediately,
-            // while we're still online. Without this, a friend only learns the
-            // union when our substitute device joins their DM room (racy), and
-            // shows us OFFLINE if our original device quits first.
+            // If a sibling merge added one of OUR device ids, re-announce our profile
+            // with the merged device list to every peer we share a room with, so
+            // friends converge on the full device set immediately. Without this a
+            // friend learns the union only when our substitute device joins their room.
             if our_devices_grew {
                 let peers: Vec<String> = ws_room_peers.values()
                     .flat_map(|p| p.iter().cloned())
@@ -14088,18 +13210,12 @@ async fn handle_incoming_request(
                 }
             }
 
-            // MAPPING-LEARNED friend-request drain. A queued outbound friend
-            // request is keyed by the TARGET'S MASTER, but the presence-event
-            // drains (PeerJoined/RoomMembers) only match a joining DEVICE to that
-            // master via the resolver. A FRESH requester that has never ingested
-            // the target's device list resolves the target's device to ITSELF
-            // (cold resolver → identity), so those drains no-op — the request sits
-            // queued and the target never receives it UNTIL it re-joins a shared
-            // room (a restart) AFTER the mapping is finally learned. The moment we
-            // learn device→master (this ingest) is exactly when we CAN attribute
-            // the target's present device to the queued master — so drain here.
-            // `peer_str` (the sender of this profile) is guaranteed co-present (it
-            // just reached us), so friend_device_targets resolves a live device.
+            // MAPPING-LEARNED friend-request drain. A queued outbound request is keyed
+            // by the TARGET'S MASTER, but the presence drains only match a joining
+            // DEVICE to that master via the resolver, and a FRESH requester resolves
+            // the target's device to ITSELF, so those drains no-op and the request sits
+            // queued. The moment we learn device-to-master, here, is exactly when we
+            // CAN attribute the target's present device to the queued master.
             {
                 let sender_master = super::resolver::resolve(peer_str);
                 let queued: Option<i64> = pending_friend_requests
@@ -14165,11 +13281,10 @@ async fn handle_incoming_request(
 
             hollow_log!("[HOLLOW-SWARM] ProfileUpdate from {peer_str}: name={display_name}");
 
-            // Multi-device: persist under the sender's MASTER identity (so any
-            // device of one person updates the ONE identity profile), with the
-            // empty-profile guard (a profile-less sibling must not blank a good
-            // row). Single-device: master == sender, so this is a no-op rename.
-            // Showcase asset bundle: same CLEAR/b64 semantics as the blobs.
+            // Multi-device: persist under the sender's MASTER identity, so any device of
+            // one person updates the ONE identity profile, with the empty-profile guard:
+            // a profile-less sibling must not blank a good row. The showcase asset
+            // bundle uses the same CLEAR/b64 semantics as the blobs.
             let showcase_assets_bytes: Option<Vec<u8>> = if showcase_assets_b64.is_empty() {
                 None
             } else if showcase_assets_b64 == "CLEAR" {
@@ -14179,10 +13294,9 @@ async fn handle_incoming_request(
                     .filter(|b| b.len() <= 2_000_000)
             };
 
-            // Owner proof (0.8.5) — stored only when it VERIFIES, so an
-            // unverified signature can never be laundered into a ProfileRelay
-            // by us. Absent is fine here: attribution is transport-attested on
-            // this path, the profile just becomes non-relayable.
+            // Owner proof, stored only when it VERIFIES, so an unverified signature
+            // can never be laundered into a ProfileRelay by us. Absent is fine here:
+            // attribution is transport-attested, the profile just becomes non-relayable.
             let verified_proof = social::verified_profile_proof(
                 peer_str, updated_at, &display_name, &status, &about_me,
                 &twitch_username, &avatar_hash, profile_sig.as_deref(), profile_pk.as_deref(),
@@ -14229,7 +13343,6 @@ async fn handle_incoming_request(
             }).await;
         }
 
-        // File request — respond with file chunks via Olm.
         HavenMessage::FileRequest { file_id, chunks, offset } => {
 
             use crate::node::file_transfer;
@@ -14237,17 +13350,13 @@ async fn handle_incoming_request(
 
             if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
                 if let Ok(Some(file_meta)) = store.get_file_metadata(&file_id) {
-                        // SECURITY: serving used to be UNGATED — any peer that
+                        // SECURITY: serving used to be UNGATED, so any peer that
                         // learned a file_id (guests see them in plaintext public
                         // messages) could pull ANY file we hold, DM attachments
                         // included. Serve only:
-                        //   * DM files      -> the conversation counterparty or
-                        //                      our own sibling devices
-                        //   * channel files -> server members; PUBLIC (text)
-                        //                      channels -> anyone (guest browser)
-                        // `requester_is_member` also picks the header transport
-                        // below: Olm for members/DM parties, plaintext public
-                        // header for guests (who may hold no Olm session).
+                        //   * DM files      -> the counterparty or our own siblings
+                        //   * channel files -> members; PUBLIC channels -> anyone
+                        // `requester_is_member` also picks the header transport below.
                         if crate::node::blocklist::is_blocked(peer_str) {
                             hollow_log!("[HOLLOW-SECURITY] REJECTED FileRequest from {peer_str} — blocked");
                             return;
@@ -14264,13 +13373,11 @@ async fn handle_incoming_request(
                                 match (parts.next(), parts.next()) {
                                     (Some(sid), Some(cid)) => match server_states.get(sid) {
                                         Some(s) => (
-                                            // Membership is not enough for a
-                                            // RESTRICTED channel: the header we
-                                            // would send back carries the file's
-                                            // AES key, so serving it to a member
-                                            // who cannot see the channel hands
-                                            // over exactly what the subgroup
-                                            // exists to withhold.
+                                            // Membership is not enough for a RESTRICTED
+                                            // channel: the header we would send back
+                                            // carries the file's AES key, so serving it to
+                                            // a member who cannot see the channel hands over
+                                            // exactly what the subgroup exists to withhold.
                                             s.is_member(&requester_master)
                                                 && crate::node::crypto_handler::channel_readable_by(
                                                     s, &requester_master, cid,
@@ -14290,17 +13397,13 @@ async fn handle_incoming_request(
                             hollow_log!("[HOLLOW-SECURITY] REJECTED FileRequest from {peer_str} for {file_id} — not entitled ({} file)", file_meta.context_type);
                             return;
                         }
-                        // HONEST NEGATIVE ANSWER (tmp.txt item 1). The gate above
-                        // has passed, so this requester is entitled to these
-                        // bytes and we simply do not have them. Saying nothing
-                        // leaves the asker unable to tell "they are offline"
-                        // from "they deleted it", which is the silent failure
-                        // behind a Download button that does nothing. Note what
-                        // is NOT answered: a blocked requester, an unknown
-                        // file_id and a non-entitled requester still get
-                        // silence, because an answer to those would let anyone
-                        // tell "this device holds a row for X" from "it does
-                        // not" — a membership leak. Their retry timer covers it.
+                        // HONEST NEGATIVE ANSWER. The gate above has passed, so
+                        // this requester is entitled to these bytes and we simply
+                        // do not have them; saying nothing leaves the asker unable
+                        // to tell "they are offline" from "they deleted it". Note
+                        // what is NOT answered: a blocked requester, an unknown
+                        // file_id and a non-entitled requester still get silence,
+                        // because an answer would leak whether we hold a row.
                         let served_bytes = if file_meta.expired_at.is_some() {
                             Err("expired")
                         } else {
@@ -14323,24 +13426,16 @@ async fn handle_incoming_request(
                                 return;
                             }
                         };
-                        // AES-encrypt and stream the file.
                         if let Ok(enc) = crate::vault::pipeline::aes_encrypt(&file_data) {
-                            // UNIQUE temp file per encryption (suffix = this
+                            // UNIQUE temp file per encryption (the suffix is this
                             // request's random AES nonce). A fixed
                             // `.stream_send_{file_id}.tmp` was CLOBBERED when the
-                            // receiver re-requested rapidly (the decrypt-fail
-                            // retry / thread-open retry): request B's
-                            // re-encryption (new key) overwrote the temp while
-                            // request A's stream was still reading it, so A
-                            // streamed B's ciphertext under A's header key →
-                            // AES-GCM decrypt failed every time, fixed only by an
-                            // app restart (which serializes a single clean
-                            // request). Per-nonce path lets concurrent requests
-                            // each stream their own matching ciphertext.
+                            // receiver re-requested rapidly: request B's re-encryption
+                            // overwrote the temp while A's stream was still reading it,
+                            // so A streamed B's ciphertext under A's header key.
                             let nonce_hex = hex::encode(enc.nonce);
                             let temp_path = file_transfer::files_dir().join(format!(".stream_send_{file_id}_{nonce_hex}.tmp"));
                             if let Ok(()) = std::fs::write(&temp_path, &enc.ciphertext) {
-                                // Extract server/channel IDs from context.
                                 let (resp_sid, resp_cid) = if file_meta.context_type == "channel" {
                                     let parts: Vec<&str> = file_meta.context_id.splitn(2, ':').collect();
                                     if parts.len() == 2 {
@@ -14387,7 +13482,6 @@ async fn handle_incoming_request(
                                             voice: false,
                                         }),
                                     };
-                                    // Send FileHeader via Olm (targeted) + SendDirect.
                                     let header_json = serde_json::to_string(&header).unwrap_or_default();
                                     send_encrypted_message(
                                         olm, crypto_store,
@@ -14442,9 +13536,8 @@ async fn handle_incoming_request(
                                     }
                                     // Clean up the re-served ciphertext temp once the WS-relay
                                     // stream is queued. A WebRTC send still in flight owns the
-                                    // temp (removed on WebRtcTransferComplete), so only delete
-                                    // when none is pending — otherwise this leaked a duplicate
-                                    // encrypted copy on every file re-request.
+                                    // temp, so only delete when none is pending, or every file
+                                    // re-request leaks a duplicate encrypted copy.
                                     if !pending_webrtc_sends.contains_key(&file_id) {
                                         let _ = std::fs::remove_file(&temp_path);
                                     }
@@ -14468,7 +13561,7 @@ async fn handle_incoming_request(
             ).await;
         }
 
-        // -- WebRTC signaling (Phase 5A) --
+        // -- WebRTC signaling --
         HavenMessage::RtcOffer { sdp, conn_id } => {
             if sdp.len() > MAX_SDP_SIZE {
                 hollow_log!("[HOLLOW-SECURITY] BLOCKED RtcOffer — size {} exceeds limit from {peer_str}", sdp.len());
@@ -14610,14 +13703,13 @@ async fn handle_incoming_request(
             }).await;
         }
 
-        // -- Voice call signaling (Phase 5B) --
+        // -- Voice call signaling --
         //
-        // SECURITY (TRANSPORT-1, 2026-09): 1:1 call signaling is Olm-encrypted
-        // and arrives as `MessageEnvelope::CallSignal` after decryption (handled
-        // in `voice_handler::handle_call_signal_message`). A Call* frame reaching
-        // us in the CLEAR came from the relay or an on-path attacker, not from
-        // the peer: honouring it would let the relay hand us an SFrame media key
-        // of its own choosing in a forged CallAccept. Reject, never log-and-pass.
+        // SECURITY (TRANSPORT-1): 1:1 call signaling is Olm-encrypted and arrives as
+        // `MessageEnvelope::CallSignal` after decryption. A Call* frame reaching us
+        // in the CLEAR came from the relay or an on-path attacker, not from the peer,
+        // and honouring it would let the relay hand us an SFrame media key of its own
+        // choosing in a forged CallAccept. Reject, never log-and-pass.
         HavenMessage::CallInvite { .. }
         | HavenMessage::CallAccept { .. }
         | HavenMessage::CallReject { .. }
@@ -14638,7 +13730,7 @@ async fn handle_incoming_request(
             hollow_log!("[HOLLOW-SECURITY] REJECTED plaintext call signal from {peer_str}");
         }
 
-        // -- Gossip relay tree (Phase 5D) --
+        // -- Gossip relay tree --
         HavenMessage::PeerExchange { server_id, peers } => {
             hollow_log!("[HOLLOW-GOSSIP] PeerExchange from {peer_str} for server {server_id}: {} peers", peers.len());
             // SECURITY (Phase 6.25): Only accept from gossip neighbors + cap list size.
@@ -14663,7 +13755,7 @@ async fn handle_incoming_request(
             }
         }
 
-        // -- Profile request (Phase profile-sync) --
+        // -- Profile request --
         HavenMessage::ProfileRequest => {
             hollow_log!("[HOLLOW-PROFILE] ProfileRequest from {peer_str} — sending our profile");
             // FULL send — this is the pull half of the light-announce protocol.
@@ -14716,13 +13808,10 @@ async fn handle_incoming_request(
         HavenMessage::VoiceChannelJoin { server_id, channel_id } => {
             // Self-echo guard: both id forms (sender echoes carry our DEVICE id).
             if peer_str == local_peer_str || peer_str == device_peer_id { return; }
-            // Conferences have no CRDT membership — the equivalent check is
-            // MLS group membership (leaf credentials ARE device ids), which
-            // only an ADMITTED peer can hold. This is what lets the existing
-            // PeerJoined re-broadcast + the conference reply-on-join sync
-            // reach late joiners (their plaintext copies otherwise hit the
-            // server guard below and a new member never sees who's already
-            // in the call).
+            // Conferences have no CRDT membership, so the equivalent check is MLS
+            // group membership (leaf credentials ARE device ids), which only an
+            // ADMITTED peer can hold. That is what lets the PeerJoined re-broadcast
+            // and the conference reply-on-join sync reach late joiners.
             let is_conf = super::conference::is_conference_sid(&server_id);
             let is_member = if is_conf {
                 mls.as_ref().is_some_and(|m|
@@ -14852,5 +13941,4 @@ async fn handle_incoming_request(
     }
 }
 
-// flush_pending_sync_requests moved to sync_handler.rs
 

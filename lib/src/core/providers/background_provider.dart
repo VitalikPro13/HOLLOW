@@ -37,11 +37,9 @@ class BackgroundNotifier extends Notifier<BackgroundState> {
 
   Future<void> load() async {
     try {
-      // Load opacity
       final opacityStr = await storage_api.loadSetting(key: _opacityKey);
       final opacity = opacityStr != null ? (double.tryParse(opacityStr) ?? 1.0) : 1.0;
 
-      // Load image from file
       final dir = _hollowDir();
       final file = File('${dir.path}/$_bgFileName');
       Uint8List? bytes;

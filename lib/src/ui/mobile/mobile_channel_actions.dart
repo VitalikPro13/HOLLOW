@@ -371,8 +371,8 @@ class _ChannelActionsSheetState extends State<_ChannelActionsSheet> {
     );
   }
 
-  /// Open the access-label picker for this channel (Custom mode). Mirrors
-  /// desktop: setting labels stamps the legacy tier to Admin+ Rust-side.
+  /// Opens the access-label picker for this channel. Setting labels stamps the
+  /// tier to Admin+ Rust-side.
   Future<void> _editGateLabels({required bool forVisibility}) async {
     final initial = forVisibility ? _visibilityLabels : _postingLabels;
     final picked = await showAccessLabelPicker(
@@ -438,7 +438,7 @@ class _ChannelActionsSheetState extends State<_ChannelActionsSheet> {
   }
 
   Future<void> _setVisibility(String value) async {
-    // A plain tier clears any label gate (Rust authors the clearing op too).
+    // A plain tier clears any label gate; Rust authors that op too.
     if (_visibilityLabels.isNotEmpty &&
         !await _confirmClearLabelGate(value)) {
       return;
@@ -489,8 +489,7 @@ class _ChannelActionsSheetState extends State<_ChannelActionsSheet> {
     widget.onChanged?.call();
   }
 
-  /// Widening access by dropping a label gate deserves a confirm (parity
-  /// with desktop channels_tab).
+  /// Confirms dropping a label gate, which widens access.
   Future<bool> _confirmClearLabelGate(String tier) async {
     final confirmed = await showHollowDialog<bool>(
       context: context,
@@ -526,10 +525,6 @@ class _ChannelActionsSheetState extends State<_ChannelActionsSheet> {
     };
   }
 }
-
-// ─────────────────────────────────────────────────
-// Reusable sheet components
-// ─────────────────────────────────────────────────
 
 class _BackHeader extends StatelessWidget {
   final String label;

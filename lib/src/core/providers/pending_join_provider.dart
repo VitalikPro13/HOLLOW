@@ -9,19 +9,15 @@ import 'package:hollow/src/ui/components/hollow_toast.dart';
 
 /// Every parked join we are holding, keyed by server id.
 ///
-/// A synchronous [Notifier] loaded once from `HollowShell._bootstrap` AFTER
-/// the node starts, never an `AsyncNotifier` that reads the store from
-/// `build()` (issue #58: the strip watches this on the first frame, and a
-/// build-time read races the store open).
+/// A synchronous [Notifier] loaded once from `HollowShell._bootstrap` AFTER the
+/// node starts: the strip watches it on the first frame (issue #58).
 class PendingJoinsNotifier extends Notifier<Map<String, PendingJoinInfo>> {
   @override
   Map<String, PendingJoinInfo> build() => const {};
 
   /// Reads the persisted rows. Call from `_bootstrap` after `startNode`.
   ///
-  /// A failure leaves whatever tiles the saved strip layout restored: the
-  /// rows live in Rust, and a transient read error is not a reason to tell
-  /// the user their join request is gone.
+  /// A failure leaves whatever tiles the saved strip layout restored.
   Future<void> load() async {
     try {
       final rows = await listPendingJoins();
@@ -94,10 +90,8 @@ final pendingJoinsProvider =
 
 /// Servers we were admitted to whose MLS group has not formed yet.
 ///
-/// Between `admitted` and `ready` the server is real, joinable and listed, but
-/// a member still has to be online with us once to add our leaf. RAM only: if
-/// the app restarts in that window the flair simply does not show, and the
-/// next co-presence completes the setup either way.
+/// Between `admitted` and `ready` the server is real and listed, but a member
+/// still has to be online with us once to add our leaf. RAM only.
 class AwaitingSetupNotifier extends Notifier<Set<String>> {
   @override
   Set<String> build() => const {};

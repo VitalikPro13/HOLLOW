@@ -1,22 +1,15 @@
 //! The app's client for the Hollow Shop (shop.anonlisten.com).
 //!
-//! READ-ONLY against the shop. This module fetches the public catalog and the
-//! preview art it names, and that is all it takes from the network. The only
-//! thing it WRITES anywhere is the local `redeem_codes` table, which holds the
-//! codes a `hollow://redeem/<code>` deep link carries until phase 2 can turn
-//! one into a blind-signed support credential.
+//! READ-ONLY against the shop: it fetches the public catalog and the preview art it
+//! names. The only thing it WRITES anywhere is the local `redeem_codes` table.
 //!
-//! **Nothing fetched here is ever stored on the asset rail.** A preview is a
-//! picture of something for sale, not something we own: it has no pack behind
-//! it, no licence row, no provenance, and it must never end up indistinguishable
-//! from art the buyer actually has. Owned art enters Hollow through exactly one
-//! door, [`crate::api::network::import_hollowpack`], which verifies a whole
-//! `.hollowpack` before a single byte lands. `fetch_shop_art` returns bytes to
-//! the caller and keeps none.
+//! **Nothing fetched here is ever stored on the asset rail.** A preview is a picture
+//! of something for sale, with no pack, licence or provenance behind it, and it must
+//! never end up indistinguishable from art the buyer actually has. Owned art enters
+//! Hollow through exactly one door, [`crate::api::network::import_hollowpack`].
 //!
-//! The catalog is parsed TOLERANTLY: a listing the shop adds a field to, or one
-//! whose files went bad, narrows or drops rather than failing the whole fetch.
-//! A wall that is one card short beats a wall that will not load.
+//! The catalog is parsed TOLERANTLY: a listing the shop adds a field to, or one whose
+//! files went bad, narrows or drops rather than failing the whole fetch.
 
 use flutter_rust_bridge::frb;
 use serde::{Deserialize, Deserializer};
@@ -37,9 +30,8 @@ const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STA
 /// The shop.
 pub const SHOP_ORIGIN: &str = "https://shop.anonlisten.com";
 
-/// Largest catalog document we will read. The live catalog is a few tens of
-/// kilobytes; 4 MB is room for a shop a hundred times its size and still a
-/// bound.
+/// Largest catalog document we will read. The live catalog is tens of kilobytes, so
+/// this is room for a shop a hundred times its size and still a bound.
 const MAX_CATALOG_BYTES: usize = 4 * 1024 * 1024;
 
 /// Most redeem codes one install keeps. A buyer has a handful; a hostile
@@ -48,10 +40,9 @@ const MAX_KEPT_REDEEM_CODES: u32 = 64;
 
 /// The shop origin.
 ///
-/// In DEBUG builds only, `HOLLOW_SHOP_ORIGIN` in the environment overrides it,
-/// which is how the local dev shop at `http://localhost:3000` is reached.
-/// Release builds ignore the variable: a store you can point elsewhere with an
-/// environment variable is a store somebody else can point elsewhere.
+/// In DEBUG builds only, `HOLLOW_SHOP_ORIGIN` overrides it, which is how the local
+/// dev shop is reached. Release builds ignore it: a store you can point elsewhere
+/// with an environment variable is a store somebody else can point elsewhere.
 #[frb]
 pub fn shop_origin() -> String {
     if cfg!(debug_assertions) {
@@ -108,9 +99,8 @@ pub struct ShopListing {
     pub price_cents: u32,
     /// Always two decimals: `$5` beside `$4.99` reads as a rounding.
     pub price_label: String,
-    /// The list price while the piece is on sale, 0 otherwise. `price_cents`
-    /// is always what a buyer pays; this is the number the card strikes
-    /// through beside it.
+    /// The list price while the piece is on sale, 0 otherwise. `price_cents` is always
+    /// what a buyer pays; this is the number the card strikes through beside it.
     pub was_cents: u32,
     /// [`Self::was_cents`] as the shop writes it, `""` when there is no sale.
     pub was_label: String,
@@ -120,9 +110,8 @@ pub struct ShopListing {
     pub files: Vec<ShopFile>,
     /// The one picture that IS this item, and its address on the shop.
     pub display_hash: String,
-    /// The still sibling of [`Self::display_hash`], for a viewer who asked for
-    /// stillness. `""` when the display file is already still (or when no
-    /// still was shipped: freezing an animation is not something we do).
+    /// The still sibling of [`Self::display_hash`], `""` when the display file is
+    /// already still or no still was shipped (freezing an animation is not our call).
     pub still_hash: String,
     /// The kind the card draws, `""` when the listing names none.
     pub primary_kind: String,
@@ -131,15 +120,13 @@ pub struct ShopListing {
     /// The display file is a wide strip (aspect 2:1 or wider) rather than a
     /// square.
     pub wide: bool,
-    /// The support credential's item hash for this listing (64-hex), or `""`
-    /// when the listing was put up before credentials existed. What
-    /// `list_own_support_creds` items compare against: "you support this".
+    /// The support credential's item hash (64-hex), `""` for a listing put up before
+    /// credentials existed. What `list_own_support_creds` items compare against.
     pub credential_item: String,
-    /// `{origin}/item/{slug}`: the listing's own address. A hash is the ART's
-    /// address, and a bundle carries the same frame hash as the single frame
-    /// on purpose, so a link by hash opened whichever listing the shop found
-    /// first (the bug Vitalik hit on 2026-09-02). The shop still redirects an
-    /// old hash link, single before set.
+    /// `{origin}/item/{slug}`: the listing's own address. A hash is the ART's address
+    /// and a bundle carries the same frame hash as the single frame, so a link by hash
+    /// opened whichever listing the shop found first. The shop still redirects an old
+    /// hash link, single before set.
     pub item_url: String,
 }
 
@@ -154,12 +141,10 @@ pub struct ShopCatalog {
 }
 
 // ── Wire shapes ───────────────────────────────────────────────────────
-//
-// Every field defaults and every unknown field is ignored, so a shop that
-// grows a column keeps working against an app that has not shipped yet. The
-// two helpers below make that per-FIELD and per-ELEMENT rather than
-// per-document: one listing written by a newer dashboard must not be able to
-// blank the catalog.
+// Every field defaults and every unknown field is ignored, so a shop that grows a
+// column keeps working against an app that has not shipped yet. The two helpers
+// below make that per-FIELD and per-ELEMENT rather than per-document: one listing
+// written by a newer dashboard must not blank the catalog.
 
 /// Deserialize a field, falling back to `Default` when it is the wrong type.
 fn lenient<'de, D, T>(d: D) -> Result<T, D::Error>
@@ -259,18 +244,16 @@ struct RawFile {
 }
 
 // ── Display rules (a port of the shop's own catalog.js) ───────────────
-//
-// These decide which file represents a piece. They are the SHOP's rules, not
-// ours: the card the app draws and the card the website draws must be the same
-// card, so this is a faithful port of `src/lib/server/catalog.js` and any
-// change belongs there first.
+// These decide which file represents a piece, and they are the SHOP's rules, not
+// ours: the card the app draws and the card the website draws must be the same card,
+// so this is a faithful port of `src/lib/server/catalog.js` and any change belongs
+// there first.
 
 /// The kinds a profile can wear, in the order a listing is represented by.
 const KIND_ORDER: [&str; 3] = ["frame", "avatar", "banner"];
 
-/// `(animated role, still role, base role)` for one kind. `anim` is the piece
-/// when it may move, `still` the sibling for a viewer who asked for stillness,
-/// `base` the single-file case.
+/// `(animated role, still role, base role)` for one kind: the piece when it may move,
+/// the sibling for a viewer who asked for stillness, and the single-file case.
 fn kind_roles(kind: &str) -> Option<(Option<&'static str>, Option<&'static str>, &'static str)> {
     match kind {
         "frame" => Some((None, None, "frame")),
@@ -291,8 +274,8 @@ fn kind_of_role(role: &str) -> Option<&'static str> {
     }
 }
 
-/// First file per role, in file order. A role is a slot, and a duplicate is a
-/// data problem the wall must not resolve by flickering between two pictures.
+/// First file per role, in file order. A role is a slot, and a duplicate is a data
+/// problem the wall must not resolve by flickering between two pictures.
 fn by_role<'a>(files: &'a [ShopFile], role: &str) -> Option<&'a ShopFile> {
     files.iter().find(|f| f.role == role)
 }
@@ -301,8 +284,7 @@ fn by_role<'a>(files: &'a [ShopFile], role: &str) -> Option<&'a ShopFile> {
 fn file_for_kind<'a>(files: &'a [ShopFile], kind: &str, reduced: bool) -> Option<&'a ShopFile> {
     let (anim_role, still_role, base_role) = kind_roles(kind)?;
     let still = still_role.and_then(|r| by_role(files, r));
-    // A viewer who asked for stillness gets the still, and only when one was
-    // actually shipped.
+    // The still only replaces the display when one was actually shipped.
     if reduced && still.is_some() {
         return still;
     }
@@ -313,16 +295,16 @@ fn file_for_kind<'a>(files: &'a [ShopFile], kind: &str, reduced: bool) -> Option
 /// The kind a listing is represented BY.
 fn primary_kind_of(kinds: &[String], files: &[ShopFile]) -> Option<&'static str> {
     let has = |k: &str| kinds.iter().any(|x| x == k);
-    // A SET leads with its banner: the 3:1 strip is the only shape wide enough
-    // to say that a bundle is more than one thing.
+    // A SET leads with its banner: the 3:1 strip is the only shape wide enough to say
+    // that a bundle is more than one thing.
     if kinds.len() >= 2 && has("banner") && file_for_kind(files, "banner", false).is_some() {
         return Some("banner");
     }
     KIND_ORDER
         .into_iter()
         .find(|k| has(k) && file_for_kind(files, k, false).is_some())
-        // A listing whose kinds do not match its files still has to hang
-        // somewhere, so the files get the last word.
+        // A listing whose kinds do not match its files still has to hang somewhere,
+        // so the files get the last word.
         .or_else(|| {
             KIND_ORDER
                 .into_iter()
@@ -351,9 +333,8 @@ fn price_label(cents: u32) -> String {
 
 // ── Sanitising ────────────────────────────────────────────────────────
 
-/// A slug is an address fragment we paste into a URL, so it gets the shape
-/// check rather than an escape: lowercase alphanumeric and dashes, starting
-/// with an alphanumeric.
+/// A slug is an address fragment we paste into a URL, so it gets a shape check rather
+/// than an escape: lowercase alphanumeric and dashes, starting with an alphanumeric.
 fn valid_slug(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= 64
@@ -362,9 +343,8 @@ fn valid_slug(s: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
 }
 
-/// Trim and cap a remote string at `max` CHARACTERS (never bytes: a cap that
-/// splits a multi-byte character is a panic waiting for its first non-Latin
-/// title).
+/// Trim and cap a remote string at `max` CHARACTERS, never bytes: a cap that splits a
+/// multi-byte character is a panic waiting for its first non-Latin title.
 fn clamp(s: &str, max: usize) -> String {
     let t = s.trim();
     if t.chars().count() <= max {
@@ -379,8 +359,8 @@ fn sanitize_file(raw: RawFile) -> Option<ShopFile> {
         return None;
     }
     let role = raw.role.trim().to_string();
-    // The role vocabulary is the pack format's and is not the shop's to
-    // extend: a role we cannot place is a file we cannot draw.
+    // The role vocabulary is the pack format's, not the shop's to extend: a role we
+    // cannot place is a file we cannot draw.
     Role::parse(&role).ok()?;
     let dim = |v: Option<f64>| -> u32 {
         v.filter(|n| n.is_finite() && *n > 0.0)
@@ -413,13 +393,13 @@ fn sanitize_listing(raw: RawListing, origin: &str) -> Option<ShopListing> {
 
     let files: Vec<ShopFile> = raw.files.into_iter().filter_map(sanitize_file).collect();
     if files.is_empty() {
-        // A piece with no picture cannot be hung, and a card with a broken
-        // image is worse than a wall that is one item shorter.
+        // A piece with no picture cannot be hung, and a card with a broken image is
+        // worse than a wall one item shorter.
         return None;
     }
 
-    // Declared kinds first, narrowed to the three that exist and deduped into
-    // the fixed order. A wall that reshuffles between two loads is not a wall.
+    // Declared kinds first, narrowed to the three that exist and deduped into the
+    // fixed order: a wall that reshuffles between two loads is not a wall.
     let declared: Vec<String> = raw.kinds.iter().map(|k| k.trim().to_string()).collect();
     let mut kinds: Vec<String> = KIND_ORDER
         .iter()
@@ -451,8 +431,8 @@ fn sanitize_listing(raw: RawListing, origin: &str) -> Option<ShopListing> {
     } else {
         0
     };
-    // A "was" that is not above the price is not a sale, whatever the shop
-    // sent: the card would strike through a number the buyer never saves.
+    // A "was" that is not above the price is not a sale, whatever the shop sent: the
+    // card would strike through a number the buyer never saves.
     let was_cents = if raw.was_cents.is_finite() {
         let w = raw.was_cents.round().clamp(0.0, u32::MAX as f64) as u32;
         if w > price_cents { w } else { 0 }
@@ -465,8 +445,8 @@ fn sanitize_listing(raw: RawListing, origin: &str) -> Option<ShopListing> {
         url: if valid_slug(&artist_slug) {
             format!("{origin}/@{artist_slug}")
         } else {
-            // A slug we will not build a URL out of costs the listing its
-            // artist link, never the listing.
+            // A slug we will not build a URL out of costs the listing its artist link,
+            // never the listing.
             String::new()
         },
         slug: artist_slug,
@@ -485,8 +465,8 @@ fn sanitize_listing(raw: RawListing, origin: &str) -> Option<ShopListing> {
         item_url: if valid_slug(&slug) {
             format!("{origin}/item/{slug}")
         } else {
-            // A slug we will not paste into a URL leaves the hash link, which
-            // the shop redirects to the listing it best matches.
+            // A slug we will not paste into a URL leaves the hash link, which the shop
+            // redirects to the listing it best matches.
             format!("{origin}/item/{display_hash}")
         },
         bundle: kinds.len() >= 2,
@@ -509,8 +489,8 @@ fn sanitize_listing(raw: RawListing, origin: &str) -> Option<ShopListing> {
     })
 }
 
-/// Turn one `/api/catalog.json` body into a catalog. Split from the fetch so
-/// the shop's shape is testable without network.
+/// Turn one `/api/catalog.json` body into a catalog. Split from the fetch so the
+/// shop's shape is testable without network.
 pub(crate) fn parse_catalog(body: &[u8], origin: &str) -> Result<ShopCatalog, String> {
     let raw: RawCatalog = serde_json::from_slice(body)
         .map_err(|e| format!("The shop sent a catalog Hollow could not read: {e}"))?;
@@ -529,18 +509,12 @@ pub(crate) fn parse_catalog(body: &[u8], origin: &str) -> Result<ShopCatalog, St
 
 /// The one HTTP client every shop request is made with.
 ///
-/// Two things are pinned here and nowhere else.
-///
-/// The User-Agent is plain and honest: the shop's logs are the shop's, and an
-/// app that lies about what it is cannot be blocked by a keeper who needs to.
-///
-/// Redirects are REFUSED outright. [`shop_origin`] is a pinned address, and a
-/// pinned origin that follows a 3xx is not pinned: whoever answers on it could
-/// walk the app to any host it liked, and `fetch_shop_art` would then be a
-/// general-purpose fetcher wearing the shop's name. A redirect surfaces
-/// through the ordinary status path instead, as "The shop answered with status
-/// 301". The shop serves https and redirects nothing, so this costs a live
-/// request nothing.
+/// The User-Agent is plain and honest: an app that lies about what it is cannot be
+/// blocked by a keeper who needs to. Redirects are REFUSED outright, because
+/// [`shop_origin`] is a pinned address and a pinned origin that follows a 3xx is not
+/// pinned: whoever answers could walk the app to any host, turning `fetch_shop_art`
+/// into a general-purpose fetcher wearing the shop's name. A redirect surfaces
+/// through the ordinary status path instead.
 fn shop_client() -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
         .user_agent(format!("Hollow/{}", super::updater::APP_VERSION))
@@ -549,9 +523,9 @@ fn shop_client() -> Result<reqwest::Client, String> {
         .map_err(|e| format!("Hollow could not start the request: {e}"))
 }
 
-/// GET `url` with a body cap that is checked BEFORE the body is read
-/// (Content-Length) and again as it arrives, so a server that lies about its
-/// length still cannot make us allocate past the cap.
+/// GET `url` with a body cap checked BEFORE the body is read (Content-Length) and
+/// again as it arrives, so a server that lies about its length still cannot make us
+/// allocate past the cap.
 async fn fetch_bounded(
     client: &reqwest::Client,
     url: &str,
@@ -601,9 +575,8 @@ async fn read_bounded(resp: reqwest::Response, max_bytes: usize) -> Result<Vec<u
 
 /// Fetch the shop's public catalog.
 ///
-/// Runs on [`get_http_runtime`], never the node runtime: reqwest resolves DNS
-/// on its runtime's blocking pool and the node's is routinely saturated by
-/// SQLCipher bursts, so a shared runtime turns a browse into a stall.
+/// Runs on [`get_http_runtime`], never the node runtime: reqwest resolves DNS on its
+/// runtime's blocking pool and the node's is routinely saturated by SQLCipher bursts.
 #[frb]
 pub fn fetch_shop_catalog() -> Result<ShopCatalog, String> {
     let origin = shop_origin();
@@ -625,10 +598,10 @@ pub fn fetch_shop_catalog() -> Result<ShopCatalog, String> {
 
 /// Check bytes that arrived from the shop against the hash that named them.
 ///
-/// Content addressing IS the integrity check here, exactly as it is on the
-/// asset rail: the shop hands out `/art/<sha256>`, so bytes that do not hash
-/// to that address are not the art, whatever answered. The container check on
-/// top of it keeps a non-WebP from ever reaching a decoder that assumes one.
+/// Content addressing IS the integrity check, exactly as on the asset rail: the shop
+/// hands out `/art/<sha256>`, so bytes that do not hash to that address are not the
+/// art, whatever answered. The container check keeps a non-WebP from reaching a
+/// decoder that assumes one.
 pub(crate) fn check_art_bytes(hash: &str, bytes: &[u8]) -> Result<(), String> {
     if hex::encode(Sha256::digest(bytes)) != hash {
         return Err("The shop sent art that does not match its hash".into());
@@ -641,9 +614,8 @@ pub(crate) fn check_art_bytes(hash: &str, bytes: &[u8]) -> Result<(), String> {
 
 /// Fetch one piece of preview art by its hash.
 ///
-/// The bytes are RETURNED and stored nowhere. Preview art is not owned art: it
-/// arrives with no pack, no licence and no provenance, and the rail is for
-/// things this install actually has. The caller renders it and lets it go.
+/// The bytes are RETURNED and stored nowhere: preview art arrives with no pack,
+/// licence or provenance, and the rail is for things this install actually has.
 #[frb]
 pub fn fetch_shop_art(hash: String) -> Result<Vec<u8>, String> {
     if !valid_emote_hash(&hash) {
@@ -672,10 +644,9 @@ pub struct KeptRedeemCode {
 
 /// The shape a Creem license key takes, and the whole gate on a deep link.
 ///
-/// `hollow://redeem/<code>` is remote-authored: anyone can put that link
-/// anywhere and get a click. Nothing downstream parses the code, so the shape
-/// check plus the row cap is the entire attack surface, and it stays that way
-/// until phase 2 gives the code a meaning.
+/// `hollow://redeem/<code>` is remote-authored: anyone can put that link anywhere and
+/// get a click. Nothing downstream parses the code, so the shape check plus the row
+/// cap is the entire attack surface.
 pub(crate) fn valid_redeem_code(code: &str) -> bool {
     (8..=128).contains(&code.len())
         && code
@@ -685,9 +656,8 @@ pub(crate) fn valid_redeem_code(code: &str) -> bool {
 
 /// Keep a redeem code from a `hollow://redeem/<code>` link.
 ///
-/// Returns whether it was newly kept; a code kept twice is a no-op rather than
-/// an error, because the buyer clicking their thank-you link again is not a
-/// mistake they should see a toast about.
+/// Returns whether it was newly kept; keeping one twice is a no-op rather than an
+/// error, because clicking a thank-you link again is not a mistake to toast about.
 #[frb]
 pub fn keep_redeem_code(code: String) -> Result<bool, String> {
     let code = code.trim().to_string();
@@ -697,8 +667,8 @@ pub fn keep_redeem_code(code: String) -> Result<bool, String> {
     let store = get_store();
     let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let ms = guard.as_ref().ok_or("Message store is not open")?;
-    // Already kept beats the cap: re-clicking a link the buyer already used
-    // must never be the thing that gets refused.
+    // Already kept beats the cap: re-clicking a link the buyer already used must
+    // never be the thing that gets refused.
     if ms.list_redeem_codes()?.iter().any(|(c, _)| *c == code) {
         return Ok(false);
     }
@@ -733,24 +703,18 @@ pub fn forget_redeem_code(code: String) -> Result<(), String> {
 }
 
 // ── Support credentials: redeem (phase 2) ─────────────────────────────
+// The one WRITE this module makes against the shop: redeeming a Creem license key
+// into a support credential. Two round trips, no cookies, no identity in the clear:
+// `/api/redeem/lookup` returns the listing's public facts and issuing key chain
+// (nothing burns), `/api/redeem` returns the blind signature and a one-shot pack
+// token (the code burns), `/api/redeem/pack/<token>` serves the .hollowpack once.
 //
-// The one WRITE this module makes against the shop: redeeming a Creem license
-// key into a support credential (design 5.3, 12.6, 13.23). Two round trips,
-// no cookies, no identity in the clear:
-//
-//   POST /api/redeem/lookup {code}     the listing's public facts and its
-//                                      issuing key chain; nothing burns
-//   POST /api/redeem {code, blinded}   the blind signature and a one-shot
-//                                      token for the pack; the code burns
-//   GET  /api/redeem/pack/<token>      the .hollowpack, once
-//
-// The identity never leaves this machine: the shop signs a BLINDED message
-// and cannot tell which master peer id it vouched for. What comes back is
-// verified against the root key pinned in `support_creds.rs` before it is
-// kept, and it is kept BEFORE the pack is fetched, because after the second
-// round trip the code is spent and the credential is the thing that was
-// bought. A pack that fails to arrive is a sentence in the outcome, not a
-// lost purchase: the Creem download carries the same pack.
+// The identity never leaves this machine: the shop signs a BLINDED message and cannot
+// tell which master peer id it vouched for. What comes back is verified against the
+// root key pinned in `support_creds.rs` before it is kept, and it is kept BEFORE the
+// pack is fetched, because after the second round trip the code is spent and the
+// credential is the thing that was bought. A pack that fails to arrive is a sentence
+// in the outcome, not a lost purchase: the Creem download carries the same pack.
 
 use crate::node::support_creds::{
     self, CredentialEntry, T_ITEM, T_TWITCH_FOLLOW, T_TWITCH_OWNER,
@@ -764,26 +728,22 @@ const MAX_PACK_BYTES: usize = 40 * 1024 * 1024;
 /// (design 5.6, off by default). New credentials inherit it.
 pub(crate) const SUPPORT_BADGE_SETTING: &str = "support_badge";
 
-/// `app_settings` key: the union this device published just before it hid,
-/// so a hide and an unhide round-trip even on a device whose own
-/// `support_creds_own` table is empty. Cleared once an unhide has written
-/// the marks back onto our profile row.
+/// `app_settings` key: the union this device published just before it hid, so a hide
+/// and an unhide round-trip even on a device whose own `support_creds_own` table is
+/// empty. Cleared once an unhide has written the marks back.
 pub(crate) const SUPPORT_SHELF_SETTING: &str = "support_creds_shelf";
 
-/// `app_settings` key: a JSON array of item hashes this device has removed.
-/// Local, because the table it shadows is local: it stops a copy of the same
-/// credential arriving on our own profile row from a sibling's announce and
-/// quietly bringing the mark back.
+/// `app_settings` key: a JSON array of item hashes this device has removed. Local,
+/// because the table it shadows is local: it stops a copy of the same credential
+/// arriving from a sibling's announce and quietly bringing the mark back.
 pub(crate) const SUPPORT_REMOVED_SETTING: &str = "support_creds_removed";
 
 /// `app_settings` key: whether this device holds our marks back entirely.
 ///
-/// Local to this device and NEVER on the wire. A hidden holder announces the
-/// explicit clear (`""`), which every receiver already reads as "no
-/// credentials"; there is no flag for a viewer to ignore, and no way for one
-/// to tell a holder who is hiding from a holder who never bought anything.
-/// The `support_creds_own` records are untouched, so switching it back
-/// republishes exactly what was there.
+/// Local to this device and NEVER on the wire. A hidden holder announces the explicit
+/// clear (`""`), which every receiver already reads as "no credentials", so there is
+/// no way to tell a holder who is hiding from one who never bought anything. The
+/// `support_creds_own` records are untouched, so switching back republishes them.
 pub(crate) const SUPPORT_HIDDEN_SETTING: &str = "support_hidden";
 
 /// What `redeem_lookup` learned about a code.
@@ -805,8 +765,8 @@ pub struct RedeemLookup {
     pub item: String,
     /// The file hashes the credential will vouch for.
     pub parts: Vec<String>,
-    /// This identity already holds a credential for this item (13.23): a
-    /// second redemption changes nothing, keep the code and gift it.
+    /// This identity already holds a credential for this item: a second redemption
+    /// changes nothing, so keep the code and gift it.
     pub already_supported: bool,
 }
 
@@ -817,8 +777,8 @@ pub struct RedeemOutcome {
     pub item: String,
     pub title: String,
     pub artist_name: String,
-    /// The pack, imported, when it arrived; `None` with `pack_error` set
-    /// when it did not. The credential is kept either way.
+    /// The pack, imported, when it arrived; `None` with `pack_error` set when it did
+    /// not. The credential is kept either way.
     pub imported: Option<super::network::HollowpackImport>,
     pub pack_error: String,
     /// Something to say that is not a failure: the pack's files and the
@@ -890,8 +850,8 @@ struct RawRedeem {
     message: String,
 }
 
-/// POST a JSON body and read a bounded answer. The status rides back with
-/// the bytes: a refusal is a sentence in a 4xx body and the caller wants it.
+/// POST a JSON body and read a bounded answer. The status rides back with the bytes:
+/// a refusal is a sentence in a 4xx body and the caller wants it.
 async fn post_json_bounded(
     client: &reqwest::Client,
     url: &str,
@@ -979,15 +939,14 @@ fn lookup_refusal(looked: &RawLookup) -> String {
     }
 }
 
-/// Our master peer id, which the credential binds. The node has to be up:
-/// the profile that carries the mark is announced through it.
+/// Our master peer id, which the credential binds. The node has to be up: the profile
+/// that carries the mark is announced through it.
 fn my_master_peer_id() -> Result<String, String> {
     super::network::get_local_peer_id().ok_or_else(|| "Hollow is still starting; try again in a moment".to_string())
 }
 
-/// The holder's badge preference, inherited by every new credential. ON
-/// until switched off (Vitalik, 2026-09-02: a mark is a badge), so an
-/// absent setting reads as on.
+/// The holder's badge preference, inherited by every new credential. ON until
+/// switched off, so an absent setting reads as on.
 fn support_badge_preference() -> bool {
     let store = get_store();
     let Ok(guard) = store.lock() else { return true };
@@ -1000,16 +959,15 @@ pub(crate) fn badge_on(setting: Option<&str>) -> bool {
     setting != Some("0")
 }
 
-/// The hide setting's reading: only an explicit "1" hides. An absent setting
-/// is a holder who never touched the switch, and their marks show.
+/// The hide setting's reading: only an explicit "1" hides. An absent setting is a
+/// holder who never touched the switch, and their marks show.
 pub(crate) fn hidden_on(setting: Option<&str>) -> bool {
     setting == Some("1")
 }
 
-/// A lookup answer after which the code is worth nothing to anyone: the
-/// shop burned it, refunded it, or has never heard of it. `nokey` (listed
-/// before support marks existed), `paused` and `rail` are not on this list,
-/// because the same code answers `ok` once the shop is ready.
+/// A lookup answer after which the code is worth nothing to anyone: burned, refunded
+/// or never heard of. `nokey`, `paused` and `rail` are NOT on this list, because the
+/// same code answers `ok` once the shop is ready.
 pub(crate) fn lookup_status_is_dead(status: &str) -> bool {
     matches!(status, "burned" | "refused" | "unknown")
 }
@@ -1026,9 +984,8 @@ pub fn redeem_lookup(code: String) -> Result<RedeemLookup, String> {
     let looked = get_http_runtime().block_on(lookup_remote(&origin, &code))?;
     let status = clamp(&looked.status, 16);
     if lookup_status_is_dead(&status) {
-        // A kept code the shop will never honour again does not sit in
-        // "Codes kept for later" (Vitalik, 2026-09-02). Best effort: the
-        // answer is the thing, and the code may never have been kept.
+        // A kept code the shop will never honour again does not sit in "Codes kept for
+        // later". Best effort: the code may never have been kept.
         let _ = forget_redeem_code(code.clone());
     }
     let l = &looked.listing;
@@ -1055,14 +1012,13 @@ pub fn redeem_lookup(code: String) -> Result<RedeemLookup, String> {
     })
 }
 
-/// Redeem a code: mint the credential, keep it, announce it, then fetch and
-/// import the pack.
+/// Redeem a code: mint the credential, keep it, announce it, then fetch and import
+/// the pack.
 ///
-/// Order matters. The chain the shop published is verified against the
-/// pinned root BEFORE the code is spent, so a shop with a broken key never
-/// burns a purchase. The credential is stored and announced BEFORE the pack
-/// is fetched, so a network hiccup after the burn costs a download the buyer
-/// also has in their email, never the mark.
+/// Order matters. The chain the shop published is verified against the pinned root
+/// BEFORE the code is spent, so a shop with a broken key never burns a purchase. The
+/// credential is stored and announced BEFORE the pack is fetched, so a network hiccup
+/// after the burn costs a download the buyer also has in their email, never the mark.
 #[frb]
 pub fn redeem_code(code: String) -> Result<RedeemOutcome, String> {
     let code = code.trim().to_string();
@@ -1179,24 +1135,20 @@ struct UnionEntry {
     redeemed_at: i64,
 }
 
-/// Everything this identity holds, as far as THIS device can tell: the rows
-/// it minted itself (with their names), then the shelf a hide put aside, then
-/// whatever a sibling's announce wrote onto our own profile row. Deduplicated
-/// by item with the first source winning, and minus the items this device has
-/// removed.
+/// Everything this identity holds, as far as THIS device can tell: the rows it minted
+/// itself, then the shelf a hide put aside, then whatever a sibling's announce wrote
+/// onto our own profile row. Deduplicated by item, first source winning, minus the
+/// items this device has removed.
 ///
-/// The profile row is the bridge between devices. `support_creds_own` is
-/// per-device and does not replicate, so without the row a sibling that
-/// redeemed one item would republish its own single row and wipe every mark
-/// the other device minted, for everyone. Nothing is trusted for being in the
-/// row: [`support_creds::keep_verified`] still drops every entry not signed
-/// for THIS master, so a transplanted entry someone pasted onto our profile
-/// never rides our announce.
+/// The profile row is the bridge between devices: `support_creds_own` is per-device
+/// and does not replicate, so without the row a sibling that redeemed one item would
+/// republish its single row and wipe every mark the other device minted, for
+/// everyone. Nothing is trusted for being in the row: [`support_creds::keep_verified`]
+/// still drops every entry not signed for THIS master.
 ///
-/// The one edge that stays: a mark removed on a device that did not mint it
-/// comes back if the MINTING device republishes later, because the tombstone
-/// is local and the table does not replicate. Removing it on the device that
-/// holds the row is final. A replicating table is a later unit.
+/// The one edge that stays: a mark removed on a device that did not mint it comes back
+/// if the MINTING device republishes, because the tombstone is local and the table
+/// does not replicate. Removing it on the device that holds the row is final.
 fn own_credential_union(
     ms: &crate::storage::MessageStore,
     master: &str,
@@ -1245,23 +1197,18 @@ fn own_credential_union(
     Ok(out)
 }
 
-/// The `support_creds` field this device should publish right now.
-///
-/// Split out of [`republish_support_creds`] so the rule is testable without a
-/// running node: the announce needs one, this does not.
+/// The `support_creds` field this device should publish right now. Split out of
+/// [`republish_support_creds`] so the rule is testable without a running node.
 pub(crate) fn published_creds_json(
     ms: &crate::storage::MessageStore,
     master: &str,
 ) -> Result<String, String> {
     if hidden_on(ms.load_setting(SUPPORT_HIDDEN_SETTING).ok().flatten().as_deref()) {
-        // "Hide my support marks" is about the SHOP marks (t = 1 and 2), so
-        // the filter is by type, not a clear of the whole field: a verified
-        // Twitch account is a different claim on the same field and its chip
-        // keeps showing. With no Twitch entry this is still the explicit
-        // clear, which is exactly what a holder with no credentials at all
-        // announces, so hiding stays indistinguishable from never having
-        // bought anything. The records stay where they are, and the shelf
-        // holds the rest.
+        // "Hide my support marks" is about the SHOP marks, so the filter is by type, not a
+        // clear of the whole field: a verified Twitch account is a different claim on the
+        // same field and its chip keeps showing. With no Twitch entry this is still the
+        // explicit clear, which is exactly what a holder with no credentials announces, so
+        // hiding stays indistinguishable from never having bought anything.
         let kept: Vec<CredentialEntry> = support_creds::parse_stored(&union_json(ms, master)?)
             .into_iter()
             .filter(|e| e.t == T_TWITCH_OWNER)
@@ -1271,24 +1218,21 @@ pub(crate) fn published_creds_json(
     union_json(ms, master)
 }
 
-/// The union this device would publish if it were not hiding: verified,
-/// deduplicated, capped and encoded.
-///
-/// Kept separate from [`published_creds_json`] because the shelf needs the
-/// marks THEMSELVES, and asking the publish path for them while hiding is on
+/// The union this device would publish if it were not hiding: verified, deduplicated,
+/// capped and encoded. Kept separate from [`published_creds_json`] because the shelf
+/// needs the marks THEMSELVES, and asking the publish path for them while hiding is on
 /// answers with the clear.
 fn union_json(ms: &crate::storage::MessageStore, master: &str) -> Result<String, String> {
-    // The glyph flag is decided HERE, from the setting, rather than read off
-    // whatever the entry was stored with: the entry may have arrived on our
-    // profile row from a device that answered the question differently, and
-    // the switch has to work from whichever device the holder is sitting at.
+    // The glyph flag is decided HERE, from the setting, rather than read off whatever
+    // the entry was stored with: the entry may have arrived from a device that answered
+    // differently, and the switch has to work from wherever the holder is sitting.
     let badge = badge_on(ms.load_setting(SUPPORT_BADGE_SETTING).ok().flatten().as_deref());
     let entries: Vec<CredentialEntry> = own_credential_union(ms, master)?
         .into_iter()
         .map(|u| CredentialEntry { badge, ..u.entry })
         .collect();
-    // The same filter every receiver applies, so what we announce is exactly
-    // what they will keep: verified, one per item, capped.
+    // The same filter every receiver applies, so what we announce is exactly what they
+    // will keep: verified, one per item, capped.
     let kept = support_creds::keep_verified(entries, master, &support_creds::root_verifying_key());
     Ok(support_creds::encode_entries(&kept))
 }
@@ -1312,21 +1256,16 @@ fn republish_to_row(
     Ok(json)
 }
 
-/// Hide or unhide, minus the announce. Split out so the round trip is
-/// testable without a node.
+/// Hide or unhide, minus the announce. Split out so the round trip is testable
+/// without a node.
 ///
-/// Hiding shelves the union FIRST, because the clear wipes our own profile
-/// row too and on a device whose table is empty the row was the only copy.
-/// Unhiding republishes the union (the shelf is part of it) and only then
-/// drops the shelf, so nothing is thrown away before it has been written
-/// back.
+/// Hiding shelves the union FIRST, because the clear wipes our own profile row too and
+/// on a device whose table is empty the row was the only copy. Unhiding republishes
+/// the union (the shelf is part of it) and only then drops the shelf.
 ///
-/// The shelf is filled from [`union_json`], never from what we would publish,
-/// and only on the way IN to hiding. A second hide while hiding is already on
-/// (a retried toggle, another surface sending the same value, a double press)
-/// would otherwise shelve the clear it publishes, and the next unhide on a
-/// device with an empty table would find nothing and announce the clear for
-/// good.
+/// The shelf is filled only on the way IN to hiding: a second hide while hiding is
+/// already on would otherwise shelve the clear it publishes, and the next unhide on a
+/// device with an empty table would find nothing and announce the clear for good.
 fn apply_hidden(
     ms: &crate::storage::MessageStore,
     master: &str,
@@ -1350,8 +1289,8 @@ fn apply_hidden(
 /// and remember that we did. The store half of [`remove_own_support_cred`].
 fn forget_own_cred(ms: &crate::storage::MessageStore, item: &str) -> Result<(), String> {
     ms.delete_own_support_cred(item)?;
-    // Only a real item hash earns a tombstone, so the setting cannot be grown
-    // by a caller passing junk.
+    // Only a real item hash earns a tombstone, so the setting cannot be grown by a
+    // caller passing junk.
     if !valid_emote_hash(item) {
         return Ok(());
     }
@@ -1384,10 +1323,9 @@ fn keep_own_cred_row(
     Ok(())
 }
 
-/// Ask the node to announce `json` as our `support_creds`.
-///
-/// Best effort by design: the row is already written, and the next profile
-/// save carries the field if the node is not up at this moment.
+/// Ask the node to announce `json` as our `support_creds`. Best effort by design: the
+/// row is already written, and the next profile save carries the field if the node is
+/// not up right now.
 pub(crate) fn announce_support_creds(master: &str, json: String) -> Result<(), String> {
     let cmd_tx = {
         let node = super::network::get_node();
@@ -1426,12 +1364,11 @@ pub(crate) fn announce_support_creds(master: &str, json: String) -> Result<(), S
     Ok(())
 }
 
-/// Rebuild our `support_creds` profile field, write it onto our profile row,
-/// and ask the node to announce it.
+/// Rebuild our `support_creds` profile field, write it onto our profile row, and ask
+/// the node to announce it.
 ///
-/// The row is written HERE, not only by the node: a later profile save from
-/// the UI passes `None` (preserve) for this field and reads the row, so the
-/// row has to be right even if the node is down at this moment.
+/// The row is written HERE, not only by the node: a later profile save from the UI
+/// passes `None` (preserve) for this field and reads the row.
 fn republish_support_creds() -> Result<(), String> {
     let master = my_master_peer_id()?;
     let json = {
@@ -1445,21 +1382,16 @@ fn republish_support_creds() -> Result<(), String> {
 
 
 // ── Twitch credentials: the shop as an OAuth verifier ─────────────────
+// The same chain as a redeemed mark with a different check at the top: instead of a
+// Creem licence key the shop validates a Twitch access token, reads the facts Twitch
+// reports, and blind-signs them under a key for exactly that `(type, item, period)`.
+// `/api/twitch/key` says what the credential will claim and which chain will sign it,
+// `/api/twitch/verify` returns the blind signature over OUR master id.
 //
-// The same chain as a redeemed mark, a different check at the top: instead of
-// a Creem licence key the shop validates a Twitch access token, reads the
-// facts Twitch itself reports, and blind-signs them under a key for exactly
-// that `(type, item, period)`. Two round trips, same shape as redeem:
-//
-//   POST /api/twitch/key     what the credential will say, and the chain
-//                            that will sign it; nothing is spent
-//   POST /api/twitch/verify  the blind signature over OUR master id
-//
-// The shop learns "login X (id Y) is verified in window N" or "user Y follows
-// channel Z at bucket B, tier T". It never learns a Hollow identity: the
-// message it signs is blinded. We learn nothing we have to trust: the chain
-// is checked against the root pinned in `support_creds.rs` BEFORE the second
-// round trip, and the finished entry is verified exactly as a viewer will.
+// The shop learns "login X is verified in window N" or "user Y follows channel Z",
+// never a Hollow identity, because the message it signs is blinded. We trust nothing:
+// the chain is checked against the root pinned in `support_creds.rs` BEFORE the
+// second round trip, and the finished entry is verified exactly as a viewer will.
 
 /// The `/api/twitch/key` answer.
 #[frb(ignore)]
@@ -1485,11 +1417,10 @@ pub(crate) struct RawTwitchKey {
 
 /// The two calls the Twitch flow makes, as a pair of closures.
 ///
-/// Two closures rather than a trait for one reason: the bridge scans every
-/// trait in `crate::api` and would generate a Dart class for this one, plus an
-/// opaque type for the `Option<&str>` in it. Nothing here crosses the FFI.
-/// The tests build one that answers from the TEST issuing keys, so the suite
-/// never touches the network; [`TwitchVerifier::http`] is the real one.
+/// Closures rather than a trait because the bridge scans every trait in `crate::api`
+/// and would generate a Dart class for this one plus an opaque type for its
+/// `Option<&str>`, and nothing here crosses the FFI. The tests build one that answers
+/// from the TEST issuing keys, so the suite never touches the network.
 #[frb(ignore)]
 #[allow(clippy::type_complexity)] // two request shapes, spelled out once
 pub(crate) struct TwitchVerifier<'a> {
@@ -1499,9 +1430,8 @@ pub(crate) struct TwitchVerifier<'a> {
     sign: Box<dyn Fn(&str, &str, Option<&str>, &str, u32, &[u8]) -> Result<Vec<u8>, String> + 'a>,
 }
 
-/// The sentence for one of the contract's status words. The shop's own
-/// message is used only for a word we do not know: these five are ours to
-/// word, and they are what the user reads.
+/// The sentence for one of the contract's status words. The shop's own message is
+/// used only for a word we do not know: these five are ours to word.
 fn twitch_refusal(status: u16, body: &[u8]) -> String {
     let said = serde_json::from_slice::<serde_json::Value>(body).ok();
     let word = said
@@ -1589,11 +1519,9 @@ impl TwitchVerifier<'static> {
 
 /// Mint one Twitch credential for `master`.
 ///
-/// Order matters, the same way it does for a redemption: the chain the shop
-/// published is verified against the PINNED root before the second round trip
-/// blinds anything, and the finished entry is verified exactly as a viewer
-/// will before it is stored. A shop with a broken key gets a refusal here, not
-/// a credential nobody can read.
+/// Order matters the same way a redemption's does: the chain the shop published is
+/// verified against the PINNED root before the second round trip blinds anything, and
+/// the finished entry is verified exactly as a viewer will before it is stored.
 pub(crate) fn mint_twitch_credential(
     verifier: &TwitchVerifier<'_>,
     kind: &str,
@@ -1612,9 +1540,8 @@ pub(crate) fn mint_twitch_credential(
         &answer.issuer, &answer.issuer_sig, &root,
     )
     .map_err(|e| format!("The shop's signing key did not check out, so nothing was verified: {e}"))?;
-    // A follow credential has to be about the channel we asked about: the
-    // owner's gate compares `parts[0]` to its own channel id, and a joiner
-    // that shipped a credential for some other channel would simply be
+    // A follow credential has to be about the channel we asked about: the owner's gate
+    // compares `parts[0]` to its own channel id, so one for another channel would be
     // refused with a confusing sentence.
     if broadcaster_id.is_some_and(|bid| chain.parts.first().map(String::as_str) != Some(bid)) {
         return Err("The shop answered about a different channel".into());
@@ -1644,10 +1571,10 @@ pub(crate) fn mint_twitch_credential(
 
 /// Drop every verified-account credential this device holds except `keep`.
 ///
-/// The cap is one, and [`support_creds::keep_verified`] keeps the FIRST that
-/// verifies — so a stale entry for an account the holder no longer uses would
-/// win over the fresh one. The tombstone goes with it, which is also what
-/// stops a sibling's older announce putting the old account back on our row.
+/// The cap is one and [`support_creds::keep_verified`] keeps the FIRST that verifies,
+/// so a stale entry for an account the holder no longer uses would win over the fresh
+/// one. The tombstone goes with it, which also stops a sibling's older announce
+/// putting the old account back.
 fn drop_other_twitch_owner_creds(
     ms: &crate::storage::MessageStore,
     master: &str,
@@ -1684,11 +1611,9 @@ fn drop_other_twitch_owner_creds(
     Ok(())
 }
 
-/// Verify OUR Twitch account and keep the credential.
-///
-/// Split from the `#[frb]` entry point so the whole flow is testable without
-/// a node or a network: hands back the login and the `support_creds` field
-/// the caller should announce.
+/// Verify OUR Twitch account and keep the credential. Split from the `#[frb]` entry
+/// point so the whole flow is testable without a node or a network: hands back the
+/// login and the `support_creds` field the caller should announce.
 pub(crate) fn verify_twitch_owner_with(
     verifier: &TwitchVerifier<'_>,
     token: &str,
@@ -1700,19 +1625,18 @@ pub(crate) fn verify_twitch_owner_with(
     let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let ms = guard.as_ref().ok_or("Message store is not open")?;
     drop_other_twitch_owner_creds(ms, master, Some(&entry.item))?;
-    // No slug (this is not a listing), the login as the title, and "twitch"
-    // as the artist: Settings reads the same table for every credential.
+    // No slug (this is not a listing), the login as the title, "twitch" as the artist:
+    // Settings reads the same table for every credential.
     keep_own_cred_row(ms, &entry, "", &login, "twitch")?;
     let json = republish_to_row(ms, master)?;
     Ok((login, json))
 }
 
-/// Forget every verified-account credential, for good. What Disconnect does
+/// Forget every verified-account credential, for good, which is what Disconnect does
 /// before it wipes the token: the chip must go with the connection.
 ///
-/// Answers the master and the field to announce, or `None` when the node is
-/// not up yet. The table is cleaned either way, so the credential does not
-/// come back at the next boot; only the announce waits.
+/// Answers the master and the field to announce, or `None` when the node is not up.
+/// The table is cleaned either way, so only the announce waits.
 pub(crate) fn forget_twitch_owner_creds() -> Result<Option<(String, String)>, String> {
     let master = super::network::get_local_peer_id();
     let store = get_store();
@@ -1743,13 +1667,11 @@ pub(crate) fn own_twitch_owner_entry() -> Option<CredentialEntry> {
         .find(|e| e.t == T_TWITCH_OWNER && support_creds::verify_entry(e, &master, &root).is_ok())
 }
 
-/// Every credential this identity holds, as far as this device can tell:
-/// the ones it minted first, with their names, then the ones that reached it
-/// on our own profile row from a sibling, which carry no names and no redeem
-/// date. Removed items are left out.
-///
-/// The announce cap is NOT applied here. The cap is about what rides a light
-/// profile announce; a holder of four marks is holding four.
+/// Every credential this identity holds, as far as this device can tell: the ones it
+/// minted first, with their names, then the ones that reached it on our own profile
+/// row from a sibling, which carry no names and no redeem date. Removed items are
+/// left out. The announce cap is NOT applied here: that cap is about what rides a
+/// light profile announce, and a holder of four marks is holding four.
 #[frb]
 pub fn list_own_support_creds() -> Result<Vec<OwnSupportCred>, String> {
     let master = super::network::get_local_peer_id();
@@ -1757,8 +1679,8 @@ pub fn list_own_support_creds() -> Result<Vec<OwnSupportCred>, String> {
     let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let ms = guard.as_ref().ok_or("Message store is not open")?;
     let badge = badge_on(ms.load_setting(SUPPORT_BADGE_SETTING).ok().flatten().as_deref());
-    // Before the node is up there is no master to verify against, and an
-    // unverified row entry is not something to show as ours.
+    // Before the node is up there is no master to verify against, and an unverified
+    // row entry is not something to show as ours.
     let Some(master) = master else {
         return Ok(ms
             .list_own_support_creds()?
@@ -1793,10 +1715,9 @@ pub fn support_badge_enabled() -> bool {
 
 /// Show, or stop showing, our marks next to our name. One profile save.
 ///
-/// The setting is the only copy of the answer: [`published_creds_json`]
-/// stamps it onto every entry it publishes, table and profile row alike, so
-/// the switch works from whichever device the holder is sitting at rather
-/// than only from the one that redeemed.
+/// The setting is the only copy of the answer: [`published_creds_json`] stamps it onto
+/// every entry it publishes, so the switch works from whichever device the holder is
+/// sitting at rather than only from the one that redeemed.
 #[frb]
 pub fn set_support_badge(show: bool) -> Result<(), String> {
     {
@@ -1821,10 +1742,9 @@ pub fn support_marks_hidden() -> bool {
 
 /// Hide, or stop hiding, our marks. One profile save.
 ///
-/// Hiding announces the explicit clear, so every peer drops what they stored
-/// and nobody can tell a holder who is hiding from somebody who never bought
-/// anything. The credentials themselves stay in the table, so switching it
-/// back publishes exactly what was there.
+/// Hiding announces the explicit clear, so every peer drops what they stored and
+/// nobody can tell a holder who is hiding from somebody who never bought anything.
+/// The credentials stay in the table, so switching back publishes what was there.
 #[frb]
 pub fn set_support_marks_hidden(hidden: bool) -> Result<(), String> {
     let master = my_master_peer_id()?;
@@ -1839,17 +1759,14 @@ pub fn set_support_marks_hidden(hidden: bool) -> Result<(), String> {
 
 /// Forget one of our credentials, for good.
 ///
-/// There is no way back: the code that minted it is spent (12.6), and the
-/// shop will not sign a second one for the same purchase. The files stay in
-/// the library; only the mark goes. Forgetting an item this identity never
-/// held is not an error, so a double press costs nothing.
+/// There is no way back: the code that minted it is spent and the shop will not sign
+/// a second one for the same purchase. The files stay in the library, only the mark
+/// goes, and forgetting an item this identity never held is not an error.
 ///
-/// The removal is remembered locally as well as applied, because the same
-/// credential can arrive again on our own profile row from a sibling. What
-/// that does NOT cover is the sibling itself: a mark removed on a device
-/// that did not mint it comes back if the MINTING device republishes, since
-/// `support_creds_own` does not replicate. Removing it where it was minted
-/// is final. See [`own_credential_union`].
+/// The removal is remembered locally as well as applied, because the same credential
+/// can arrive again on our own profile row from a sibling. It does NOT cover the
+/// sibling itself: a mark removed on a device that did not mint it comes back if the
+/// MINTING device republishes. Removing it where it was minted is final.
 #[frb]
 pub fn remove_own_support_cred(item: String) -> Result<(), String> {
     {
@@ -1883,8 +1800,7 @@ mod tests {
         hex::encode(Sha256::digest(bytes))
     }
 
-    /// A distinct 64-hex hash per test file, so the fixtures read as addresses
-    /// rather than as noise.
+    /// A distinct 64-hex hash per test file, so the fixtures read as addresses.
     fn h(tag: &str) -> String {
         let mut s = String::new();
         while s.len() < 64 {
@@ -2023,8 +1939,8 @@ mod tests {
             Some("banner")
         );
 
-        // (b) An avatar with an anim and a still displays the anim and names
-        //     the still as its reduced sibling.
+        // (b) An avatar with an anim and a still displays the anim and names the
+        //     still as its reduced sibling.
         let anim = h("3c");
         let still = h("4d");
         let avatar_files = vec![
@@ -2141,8 +2057,7 @@ mod tests {
         let err = check_art_bytes(&other, &bytes).expect_err("a mismatch must refuse");
         assert!(err.contains("does not match its hash"), "{err}");
 
-        // Right hash, wrong container: still refused, and the rail never sees
-        // a non-WebP.
+        // Right hash, wrong container: still refused, and the rail never sees a non-WebP.
         let not_webp = b"GIF89a this is not a webp at all".to_vec();
         let err = check_art_bytes(&sha_hex(&not_webp), &not_webp)
             .expect_err("a non-WebP must refuse");
@@ -2189,8 +2104,8 @@ mod tests {
         assert!(!valid_redeem_code("ABCDE%2FGHIJ"), "a percent is not a code");
     }
 
-    /// The 64-row cap lives at the API layer, so it is tested by driving the
-    /// `#[frb]` function against an installed in-memory store.
+    /// The 64-row cap lives at the API layer, so it is tested by driving the `#[frb]`
+    /// function against an installed in-memory store.
     #[test]
     fn redeem_codes_are_capped_at_sixty_four() {
         let _lock = crate::api::storage::store_test_lock();
@@ -2226,17 +2141,14 @@ mod tests {
     }
 
     // ── Support marks: hiding and removing ────────────────────────────
-    //
-    // These drive the pure half of the republish (`published_creds_json` and
-    // the store halves around it): the table, our own profile row, the shelf
-    // and the local settings in, the field to announce out. The announce
-    // itself needs a running node and stays best effort exactly as it is;
-    // what has to be right is the STRING, because `""` on the wire is the
-    // explicit clear every receiver already honours, and a device that
-    // publishes it by mistake wipes the holder's marks everywhere.
+    // These drive the pure half of the republish: the table, our own profile row, the
+    // shelf and the local settings in, the field to announce out. What has to be right
+    // is the STRING, because `""` on the wire is the explicit clear every receiver
+    // honours, and a device that publishes it by mistake wipes the holder's marks
+    // everywhere.
 
-    /// An in-memory store installed as the process-global one, with the lock
-    /// that keeps parallel tests from swapping it under each other.
+    /// An in-memory store installed as the process-global one, with the lock that keeps
+    /// parallel tests from swapping it under each other.
     fn with_test_store() -> std::sync::MutexGuard<'static, ()> {
         let lock = crate::api::storage::store_test_lock();
         crate::api::storage::set_test_store(
@@ -2375,8 +2287,7 @@ mod tests {
         let b = support_creds::testing::mint_for(master, &[h("22")]);
         with_store(|ms| seed_row(ms, master, &[a.clone(), b.clone()]));
 
-        // This device never redeemed anything: its own table is empty and the
-        // profile row a sibling wrote is all it has.
+        // This device never redeemed anything: the profile row a sibling wrote is all it has.
         assert!(with_store(|ms| ms.list_own_support_creds().expect("list")).is_empty());
         let json = with_store(|ms| published_creds_json(ms, master).expect("json"));
         let items = items_of(&json);
@@ -2387,8 +2298,7 @@ mod tests {
         );
         assert!(items.contains(&a.item) && items.contains(&b.item));
 
-        // Now this device redeems one of its own. It ADDS; it does not replace
-        // the two the other device minted.
+        // Now this device redeems one of its own. It ADDS, it does not replace.
         let c = support_creds::testing::mint_for(master, &[h("33")]);
         with_store(|ms| keep_own_cred_row(ms, &c, "third", "Third", "Ada").expect("keep"));
         let json = with_store(|ms| published_creds_json(ms, master).expect("json"));
@@ -2396,9 +2306,8 @@ mod tests {
         assert_eq!(items.len(), 3, "a redeem on a sibling must not wipe the rest: {json}");
         assert!(items.contains(&c.item));
 
-        // Settings lists the same union, so a sibling can manage what it can
-        // now publish. The `#[frb]` wrapper needs a running node for the
-        // master, so the union underneath it is what is checked here.
+        // Settings lists the same union, so a sibling can manage what it can now publish.
+        // The `#[frb]` wrapper needs a running node, so the union underneath is checked.
         let listed = with_store(|ms| own_credential_union(ms, master).expect("union"));
         assert_eq!(listed.len(), 3);
         assert!(
@@ -2420,8 +2329,8 @@ mod tests {
         let _lock = with_test_store();
         let master = "master-peer-transplant";
         let mine = support_creds::testing::mint_for(master, &[h("11")]);
-        // Minted for somebody else and sitting on our row: worthless, and the
-        // union must not launder it just because it is stored locally.
+        // Minted for somebody else and sitting on our row: the union must not launder it
+        // just because it is stored locally.
         let theirs = support_creds::testing::mint_for("somebody-else", &[h("22")]);
         with_store(|ms| seed_row(ms, master, &[theirs.clone(), mine.clone()]));
 
@@ -2511,9 +2420,8 @@ mod tests {
         let shelf = with_store(shelf_of);
         assert_eq!(items_of(&shelf).len(), 2, "the first hide shelves both: {shelf}");
 
-        // A retried toggle, another surface sending the same value, a double
-        // press: the shelf must not be overwritten with the clear that hiding
-        // publishes, because on this device the shelf is the only copy.
+        // A retried toggle or a double press must not overwrite the shelf with the clear
+        // hiding publishes, because on this device the shelf is the only copy.
         assert_eq!(
             with_store(|ms| apply_hidden(ms, master, true).expect("hide again")),
             "",
@@ -2542,8 +2450,8 @@ mod tests {
         let json = with_store(|ms| published_creds_json(ms, master).expect("json"));
         assert_eq!(items_of(&json), vec![b.item.clone()], "the removed mark leaves: {json}");
 
-        // The row still carries it, because the row is what a sibling wrote.
-        // A second republish must not let it back in.
+        // The row still carries it, because the row is what a sibling wrote, and a second
+        // republish must not let it back in.
         assert_eq!(items_of(&with_store(|ms| row_of(ms, master))).len(), 2);
         let again = with_store(|ms| published_creds_json(ms, master).expect("json"));
         assert_eq!(items_of(&again), vec![b.item.clone()], "the tombstone holds: {again}");

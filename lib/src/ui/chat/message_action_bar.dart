@@ -20,8 +20,7 @@ import 'package:hollow/src/ui/chat/emote_image.dart';
 import 'package:hollow/src/ui/chat/file_card_status.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-/// Coordinates action bar visibility across all messages in a list.
-/// Only one message can show its action bar at a time.
+/// Coordinates action bar visibility so only one message shows its bar.
 class MessageActionBarController extends ChangeNotifier {
   VoidCallback? _activeClose;
   Object? _activeKey;
@@ -40,7 +39,7 @@ class MessageActionBarController extends ChangeNotifier {
     }
   }
 
-  /// Dismiss the active hover overlay (e.g., on scroll).
+  /// Dismisses the active hover overlay, on scroll for instance.
   void dismissAll() {
     _activeClose?.call();
     _activeKey = null;
@@ -48,7 +47,7 @@ class MessageActionBarController extends ChangeNotifier {
   }
 }
 
-/// Place this above the message ListView to provide the shared controller.
+/// Provides the shared controller; goes above the message list.
 class MessageActionBarScope extends StatefulWidget {
   final Widget child;
   const MessageActionBarScope({super.key, required this.child});
@@ -76,12 +75,9 @@ class _MessageActionBarScopeState extends State<MessageActionBarScope> {
   Widget build(BuildContext context) => widget.child;
 }
 
-/// Wraps a message widget with hover-triggered overlays:
-/// - A highlight overlay (tint + teal right border for own messages)
-/// - An action bar overlay (edit button)
+/// Wraps a message with its hover highlight and action bar.
 ///
-/// Both are Overlay entries — they float on top and never touch the
-/// message's layout. The message container stays completely clean.
+/// Both are Overlay entries, so they never touch the message's layout.
 class MessageHoverWrapper extends ConsumerStatefulWidget {
   final Widget child;
   final bool isMe;
@@ -100,15 +96,14 @@ class MessageHoverWrapper extends ConsumerStatefulWidget {
   final VoidCallback? onCopyImage;
   final VoidCallback? onInfo;
 
-  /// Whether this message is currently pinned. Only affects wording: [onPin]
-  /// is a toggle either way. Surfaces without pins (DMs) leave it false.
+  /// Affects wording only: [onPin] is a toggle either way, and surfaces with no
+  /// pins leave this false.
   final bool isPinned;
 
   /// This message's file, when it has one. The bar mirrors the CARD through
-  /// `fileBarAction()`: offering Download while the card says "waiting for a
-  /// peer" is a button that visibly does nothing (tmp.txt item 1). Surfaces
-  /// with no live transfers (the archive viewers) leave it null and keep
-  /// today's plain Download.
+  /// `fileBarAction()`, because offering Download while the card says "waiting
+  /// for a peer" is a button that visibly does nothing. Surfaces with no live
+  /// transfers leave it null and keep the plain Download.
   final FileAttachment? fileAttachment;
 
   const MessageHoverWrapper({
@@ -142,10 +137,9 @@ class _MessageHoverWrapperState extends ConsumerState<MessageHoverWrapper> {
   bool _hovered = false;
   bool _barHovered = false;
 
-  /// Row-hover for descendants (see [HoverScope]) — an animated avatar or
-  /// avatar frame in this row plays while the pointer is anywhere over the
-  /// MESSAGE, not only over the 36px of artwork. A notifier, because this
-  /// wrapper drives its own overlays without rebuilding.
+  /// Row-hover for descendants (see [HoverScope]), so an animated avatar or
+  /// frame plays while the pointer is anywhere over the MESSAGE. A notifier,
+  /// because this wrapper drives its overlays without rebuilding.
   final ValueNotifier<bool> _rowHovered = ValueNotifier<bool>(false);
   OverlayEntry? _highlightEntry;
   OverlayEntry? _actionBarEntry;
@@ -168,7 +162,6 @@ class _MessageHoverWrapperState extends ConsumerState<MessageHoverWrapper> {
           widget.onEditCancel?.call();
           return KeyEventResult.handled;
         }
-        // Enter to save, Shift+Enter for newline.
         if (event.logicalKey == LogicalKeyboardKey.enter) {
           if (HardwareKeyboard.instance.isShiftPressed) {
             final sel = _editController.selection;
@@ -234,12 +227,11 @@ class _MessageHoverWrapperState extends ConsumerState<MessageHoverWrapper> {
     super.dispose();
   }
 
-  /// What the bar and the menu offer for this message's file, mirroring the
-  /// card through the one helper.
+  /// What the bar and menu offer for this message's file, mirroring the card.
   ///
-  /// `read`, not `watch`: the bar is an overlay built the moment the pointer
-  /// arrives, and watching the transfer map from a message row would rebuild
-  /// every row in the pane on every chunk of every unrelated download.
+  /// `read`, not `watch`: the bar is built the moment the pointer arrives, and
+  /// watching the transfer map would rebuild every row in the pane on every
+  /// chunk of every unrelated download.
   FileBarAction _fileAction() {
     final attachment = widget.fileAttachment;
     if (attachment == null) return FileBarAction.download;
@@ -249,7 +241,7 @@ class _MessageHoverWrapperState extends ConsumerState<MessageHoverWrapper> {
     );
   }
 
-  /// Cancel the outstanding ask, then let the card fall back to its plain
+  /// Cancels the outstanding ask and lets the card fall back to its plain
   /// Download button without waiting for the next event.
   Future<void> _stopWaitingForFile(String fileId) async {
     try {
@@ -261,8 +253,8 @@ class _MessageHoverWrapperState extends ConsumerState<MessageHoverWrapper> {
     }
   }
 
-  /// The stop tap for the bar and the menu, or null when this surface has no
-  /// file to stop asking for.
+  /// The stop tap for the bar and menu, null when there is no file to stop
+  /// asking for.
   VoidCallback? _stopWaitingTap() {
     final attachment = widget.fileAttachment;
     if (attachment == null) return null;
@@ -289,7 +281,6 @@ class _MessageHoverWrapperState extends ConsumerState<MessageHoverWrapper> {
     final hollow = HollowTheme.of(context);
     final screenWidth = overlayBox.size.width;
 
-    // --- Highlight overlay (exact match with message rect) ---
     _highlightEntry = OverlayEntry(
       builder: (context) => Positioned(
         left: offset.dx,
@@ -304,7 +295,6 @@ class _MessageHoverWrapperState extends ConsumerState<MessageHoverWrapper> {
       ),
     );
 
-    // --- Action bar overlay (top-right of message) ---
     final hasAnyAction = (widget.isMe && widget.messageId != null) ||
         widget.onReply != null ||
         widget.onReaction != null ||
@@ -313,7 +303,6 @@ class _MessageHoverWrapperState extends ConsumerState<MessageHoverWrapper> {
         widget.onCopyImage != null ||
         widget.onInfo != null;
     if (hasAnyAction) {
-      // Vertically center the action bar on the right side of the message.
       final double barTop = offset.dy + (size.height / 2) - 14;
       final double barRight =
           screenWidth - (offset.dx + size.width) + HollowSpacing.md;
@@ -374,8 +363,7 @@ class _MessageHoverWrapperState extends ConsumerState<MessageHoverWrapper> {
                       widget.onDownload?.call();
                     }
                   : null,
-              // The bar says what the card says: Download, Try again, a stop
-              // control, or nothing at all (tmp.txt item 1).
+              // The bar says what the card says.
               fileAction: _fileAction(),
               onStopWaiting: _stopWaitingTap(),
               onCopyImage: widget.onCopyImage != null
@@ -390,9 +378,8 @@ class _MessageHoverWrapperState extends ConsumerState<MessageHoverWrapper> {
                       widget.onInfo?.call();
                     }
                   : null,
-              // The hover bar shows the common actions; the rest of the menu
-              // (quick reactions, copy message ID, anything a surface wires up
-              // later) was reachable ONLY by right-clicking until this button.
+              // Without this button the rest of the menu is reachable only by
+              // right-clicking.
               onMore: (globalPosition) =>
                   _openContextMenu(globalPosition),
             ),
@@ -470,10 +457,9 @@ class _MessageHoverWrapperState extends ConsumerState<MessageHoverWrapper> {
 
   /// Opens the right-click menu at the pointer.
   ///
-  /// Every row is built from the callbacks this wrapper already holds, so all
-  /// seven surfaces that use it (DM chat, channel chat, guest chat, the four
-  /// archive viewers) get the menu without touching their call sites, and a
-  /// row can never offer an action the surface did not wire up.
+  /// Every row is built from the callbacks this wrapper already holds, so each
+  /// surface gets the menu without touching its call site and no row can offer
+  /// an action the surface did not wire up.
   void _openContextMenu(Offset globalPosition) {
     if (widget.isEditing) return;
     // Window coordinates are not overlay coordinates under interface zoom.
@@ -487,14 +473,12 @@ class _MessageHoverWrapperState extends ConsumerState<MessageHoverWrapper> {
     );
   }
 
-  /// [anchor] is the pointer position in overlay space. Rows that open a
-  /// second popup anchor to IT, not to this widget's context: the wrapper's
-  /// render box is the whole message row, whose origin sits at the far left
-  /// of the chat pane, so anchoring there threw the emoji picker across the
-  /// window instead of opening it where the menu was.
+  /// [anchor] is the pointer position in overlay space. A row opening a second
+  /// popup anchors to IT, never to this widget's context: the wrapper's render
+  /// box is the whole message row, whose origin is at the far left of the pane.
   List<HollowMenuEntry> _buildMenuEntries(Offset anchor) {
-    // Grouped, then joined with dividers, so an absent group never leaves a
-    // doubled or dangling separator behind.
+    // Grouped then joined with dividers, so an absent group leaves no doubled
+    // or dangling separator.
     final groups = <List<HollowMenuEntry>>[];
 
     final onReaction = widget.onReaction;
@@ -538,8 +522,8 @@ class _MessageHoverWrapperState extends ConsumerState<MessageHoverWrapper> {
           label: 'Copy image',
           onTap: widget.onCopyImage,
         ),
-      // Same rule as the hover bar: a menu row that re-asks for a file
-      // nobody can serve is the button that does nothing, one layer down.
+      // Same rule as the hover bar: a row that re-asks for a file nobody can
+      // serve is the button that does nothing, one layer down.
       if (widget.onDownload != null && fileAction != FileBarAction.none)
         HollowMenuItem(
           icon: LucideIcons.download,
@@ -613,8 +597,7 @@ class _MessageHoverWrapperState extends ConsumerState<MessageHoverWrapper> {
     }
 
     return GestureDetector(
-      // Right-click opens the full message menu (issue #61). Message Proof
-      // used to BE the right-click; it is now one row inside the menu.
+      // Right-click opens the full message menu (issue #61).
       onSecondaryTapUp: (details) => _openContextMenu(details.globalPosition),
       child: MouseRegion(
         onEnter: (_) => _onMessageEnter(),
@@ -679,7 +662,7 @@ class _MessageHoverWrapperState extends ConsumerState<MessageHoverWrapper> {
   }
 }
 
-/// The action bar content — emoji + reply + edit + delete buttons.
+/// The action bar's buttons.
 class _ActionBarContent extends StatelessWidget {
   final HollowTheme hollow;
   final VoidCallback? onCopy;
@@ -695,10 +678,10 @@ class _ActionBarContent extends StatelessWidget {
   /// What the file control offers, mirroring the card.
   final FileBarAction fileAction;
 
-  /// Cancels the outstanding ask (the [FileBarAction.stopWaiting] tap).
+  /// The [FileBarAction.stopWaiting] tap.
   final VoidCallback? onStopWaiting;
 
-  /// Opens the full message menu. Receives the button's WINDOW position, the
+  /// Opens the full message menu, receiving the button's WINDOW position, the
   /// same thing a right click hands over.
   final void Function(Offset globalPosition)? onMore;
 
@@ -837,11 +820,11 @@ class _ActionBarContent extends StatelessWidget {
   }
 }
 
-/// The bar's file control, mirroring the card (tmp.txt item 1).
+/// The bar's file control, mirroring the card.
 ///
-/// Download and Try again are the same action under different words; stop is
-/// a different action and gets a different glyph, because a tap on Download
-/// while the ask is queued re-issues a request that visibly does nothing.
+/// Download and Try again are one action under two words; stop is a different
+/// action and gets a different glyph, because Download while the ask is queued
+/// re-issues a request that visibly does nothing.
 class _FileActionButton extends StatelessWidget {
   final HollowTheme hollow;
   final FileBarAction action;
@@ -860,8 +843,8 @@ class _FileActionButton extends StatelessWidget {
     if (action == FileBarAction.none) return const SizedBox.shrink();
     final stop = action == FileBarAction.stopWaiting;
     final onTap = stop ? onStopWaiting : onDownload;
-    // A surface with no stop hook (an archive viewer) offers nothing rather
-    // than a control that cannot fire.
+    // A surface with no stop hook offers nothing rather than a control that
+    // cannot fire.
     if (onTap == null) return const SizedBox.shrink();
     final label = fileBarActionLabel(action);
     return HollowTooltip(
@@ -889,10 +872,8 @@ class _FileActionButton extends StatelessWidget {
   }
 }
 
-/// Overflow button: the whole message menu, without a right click.
-///
-/// Captures its own position so the menu opens under the button rather than
-/// at the far-left origin of the message row.
+/// Overflow button: the whole message menu without a right click. Captures its
+/// own position, or the menu opens at the far-left origin of the message row.
 class _MoreButton extends StatelessWidget {
   final HollowTheme hollow;
   final void Function(Offset globalPosition) onMore;
@@ -921,12 +902,9 @@ class _MoreButton extends StatelessWidget {
   }
 }
 
-/// The one-click reaction row at the top of the message context menu.
-///
-/// Complements rather than duplicates the hover bar's smiley: that opens the
-/// full picker, this is a single click for the common six. Same
-/// [kQuickReactionEmojis] the mobile action sheet uses, so the two surfaces
-/// never drift apart.
+/// The one-click reaction row at the top of the message context menu, on the
+/// same [kQuickReactionEmojis] the mobile action sheet uses so the two cannot
+/// drift. The hover bar's smiley opens the full picker instead.
 class _QuickReactionStrip extends StatelessWidget {
   final void Function(String emoji) onSelect;
 
@@ -963,7 +941,7 @@ class _QuickReactionStrip extends StatelessWidget {
   }
 }
 
-/// Emoji button that captures its global position for the picker anchor.
+/// Emoji button that captures its own position for the picker anchor.
 class _EmojiButton extends StatelessWidget {
   final HollowTheme hollow;
   final void Function(Offset globalPosition) onReaction;

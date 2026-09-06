@@ -1,14 +1,9 @@
 import 'package:flutter/material.dart';
 
-// ---------------------------------------------------------------------------
-// RevealClip — vertical/horizontal clip reveal ("carpet roll")
-// ---------------------------------------------------------------------------
-
 /// Reveals a child by animating a clip from one edge.
 ///
-/// When [animation] is `null` the child is rendered directly (zero overhead).
-/// [axis] controls the reveal direction: vertical = top→bottom,
-/// horizontal = left→right (or reverse with [alignment]).
+/// A null [animation] renders the child directly, at zero overhead. [axis] runs
+/// top to bottom or left to right, reversed by [alignment].
 class RevealClip extends StatelessWidget {
   final Animation<double>? animation;
   final Axis axis;
@@ -44,13 +39,8 @@ class RevealClip extends StatelessWidget {
   }
 }
 
-// ---------------------------------------------------------------------------
-// TypewriterText — character-by-character text reveal
-// ---------------------------------------------------------------------------
-
-/// Reveals text character by character over the [animation] interval.
-///
-/// When [animation] is `null`, displays the full text immediately.
+/// Reveals text character by character over the [animation] interval; a null
+/// animation shows the whole text at once.
 class TypewriterText extends StatelessWidget {
   final String text;
   final Animation<double>? animation;
@@ -89,13 +79,8 @@ class TypewriterText extends StatelessWidget {
   }
 }
 
-// ---------------------------------------------------------------------------
-// LineDrawDivider — width-expanding divider line
-// ---------------------------------------------------------------------------
-
-/// A divider that "draws" itself from one side to the other.
-///
-/// When [animation] is `null`, renders at full width immediately.
+/// A divider that "draws" itself from one side to the other; a null [animation]
+/// renders it at full width.
 class LineDrawDivider extends StatelessWidget {
   final Animation<double>? animation;
   final double height;
@@ -131,14 +116,8 @@ class LineDrawDivider extends StatelessWidget {
   }
 }
 
-// ---------------------------------------------------------------------------
-// StaggeredListItem — per-item fade+slide with stagger delay
-// ---------------------------------------------------------------------------
-
-/// Wraps a list item with a fade + slide entrance, staggered by [index].
-///
-/// When [parentAnimation] is `null`, renders the child directly.
-/// Uses [FadeTransition] and [SlideTransition] for GPU-composited rendering.
+/// Wraps a list item with a fade and slide entrance, staggered by [index]; a
+/// null [parentAnimation] renders the child directly.
 class StaggeredListItem extends StatelessWidget {
   final Animation<double>? parentAnimation;
   final int index;
@@ -159,7 +138,6 @@ class StaggeredListItem extends StatelessWidget {
   Widget build(BuildContext context) {
     if (parentAnimation == null) return child;
 
-    // Each item gets a stagger fraction of the total animation range.
     final itemDuration = 0.4;
     final totalStagger = 1.0 - itemDuration;
     final step =

@@ -1,27 +1,18 @@
-//! Custom emote byte replication — content-addressed pull protocol.
+//! Custom emote byte replication: content-addressed pull protocol.
 //!
-//! CRDT entries and message tokens carry only `(name, hash)`. The bytes live
-//! in the SQLCipher `emote_blobs` table and replicate on demand:
+//! CRDT entries and message tokens carry only `(name, hash)`. The bytes live in
+//! the SQLCipher `emote_blobs` table and replicate on demand: a client that must
+//! render an unknown hash asks ONE source (never a broadcast sweep), a holder
+//! answers `EmoteAssets` and names in `missing` whatever it does not hold, and
+//! the receiver re-verifies sha256(bytes) == hash and the size and container
+//! caps before caching.
 //!
-//!   1. a client that must render an unknown hash sends `EmoteRequest`
-//!      to ONE source (the DM sender's devices, or one member of the server
-//!      room) — never a broadcast sweep;
-//!   2. anyone holding the bytes answers `EmoteAssets` (the showcase bundle
-//!      codec: JSON map hash → base64), naming in `missing` whatever it does
-//!      not hold so the asker moves on instead of waiting;
-//!   3. the receiver re-verifies sha256(bytes) == hash, enforces size and
-//!      WebP-container caps, caches into `emote_blobs`, and emits
-//!      `EmoteAssetsReceived` so pending tokens re-render.
+//! An unanswered ask outlives the socket: [`PendingAsk`] resumes at every event
+//! that could have produced a holder, because a message replayed from the
+//! relay's offline ring renders its token before anybody is reachable.
 //!
-//! An unanswered ask does not die with the ask. [`PendingAsk`] outlives the
-//! socket, and the walk resumes at every event that could have produced a new
-//! holder: a peer joining a room, the relay's authoritative roster landing
-//! after a boot, or the twenty-second sweep. A message replayed from the
-//! relay's offline ring renders its token before anybody is reachable, so
-//! without that the bytes simply never came.
-//!
-//! Receivers NEVER fetch emote bytes over HTTP — FFZ/uploads exist only at
-//! authoring time on the sender's side (same privacy rule as link previews).
+//! Receivers NEVER fetch emote bytes over HTTP; FFZ and uploads exist only at
+//! authoring time on the sender's side (the link-preview privacy rule).
 
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
@@ -35,9 +26,8 @@ use super::types::{HavenMessage, NetworkEvent};
 use crate::hollow_log;
 
 /// Responder-side bound on hashes answered from one request (the largest
-/// per-kind request bound; requesters bound tighter via
-/// `AssetKind::max_request_hashes`). Per-blob receipt caps live in
-/// `AssetKind::recv_cap`.
+/// per-kind request bound; requesters bound tighter). Per-blob receipt caps live
+/// in `AssetKind::recv_cap`.
 const MAX_REQUEST_HASHES: usize = 20;
 
 /// Ceiling on outstanding pulls. Overflow evicts the oldest ask, so a burst
@@ -48,10 +38,9 @@ const MAX_PENDING_ASKS: usize = 512;
 /// the hash waits for the next reconnect or a new peer, nothing more.
 const MAX_ASK_CANDIDATES: usize = 4;
 
-/// Hashes one sweep may act on. Bounds both the burst of frames a single
-/// reconnect can produce and the work the sweep does ON THE EVENT LOOP:
-/// picking a holder walks the room tables, and a table near its 512 ceiling
-/// would otherwise do that walk hundreds of times inside one event.
+/// Hashes one sweep may act on. Bounds the burst a single reconnect produces and
+/// the work the sweep does ON THE EVENT LOOP: picking a holder walks the room
+/// tables, and a full table would otherwise be walked hundreds of times.
 const MAX_ASKS_PER_SWEEP: usize = 8;
 
 /// How long an ask sits unanswered before the retry sweep rotates it to the
@@ -61,13 +50,9 @@ pub(crate) const ASSET_RETRY_SECS: u64 = if cfg!(test) { 1 } else { 20 };
 
 /// One outstanding pull for a content hash, kept ACROSS reconnects.
 ///
-/// The old table was a per-connection "asked once" set, which meant a hash
-/// whose holder was offline at the moment the token first rendered never got
-/// asked for again: the message replayed from the relay's ring, the token
-/// drew its placeholder, the single ask fell into a room nobody was in, and
-/// nothing ever retried. This entry survives the socket; only `asked` is
-/// cleared on disconnect, because a new socket means a fresh set of
-/// candidates.
+/// A per-connection "asked once" set never re-asks a hash whose holder was
+/// offline when the token first rendered. Only `asked` is cleared on disconnect,
+/// because a new socket means a fresh set of candidates.
 pub(crate) struct PendingAsk {
     /// The kind WE recorded — `handle_emote_assets` sizes the receipt cap
     /// from this and never from anything the sender says.
@@ -83,10 +68,8 @@ pub(crate) struct PendingAsk {
 }
 
 /// Every holder we could still ask for this blob, best first and otherwise in
-/// ascending peer-id order so the walk is reproducible. Each entry carries
-/// the room the send must go out through: the DM lane keeps
-/// `send_raw_to_identity`'s room lookup, the server lane is the server room
-/// itself.
+/// ascending peer-id order so the walk is reproducible. Each entry carries the
+/// room the send has to go out through.
 fn ask_candidates(
     ask: &PendingAsk,
     ws_room_peers: &HashMap<String, HashSet<String>>,
@@ -121,8 +104,7 @@ fn ask_candidates(
 
 /// Ask the next unasked holder for each of `hashes`, ONE holder per hash (a
 /// sweep across every member is the bandwidth leak the profile rail already
-/// learned about). Hashes headed for the same holder ride ONE request,
-/// chunked by the kind's own per-request bound.
+/// learned about). Hashes headed for the same holder ride ONE request.
 fn dispatch_asks(
     ws_cmd_tx: &mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, HashSet<String>>,
@@ -220,10 +202,9 @@ pub(crate) fn retry_asks_for_peer(
     dispatch_asks(ws_cmd_tx, ws_room_peers, pending, &hashes, Some(peer_id), local_peer_str);
 }
 
-/// The relay's authoritative membership snapshot for a room
-/// (`WsEvent::RoomMembers`) landed. This is what closes the boot-ordering
-/// race: the offline-ring replay arrives BEFORE the room roster does, so the
-/// first ask goes nowhere and only this sweep has anyone to ask. Call it
+/// The relay's authoritative membership snapshot for a room landed. This closes
+/// the boot-ordering race: the offline-ring replay arrives BEFORE the roster, so
+/// the first ask goes nowhere and only this sweep has anyone to ask. Call it
 /// AFTER `ws_room_peers` has been updated with the snapshot.
 pub(crate) fn retry_asks_in_room(
     ws_cmd_tx: &mpsc::UnboundedSender<super::ws_client::WsCommand>,
@@ -251,8 +232,7 @@ pub(crate) fn retry_asks_in_room(
 /// Retry sweep: rotate any ask that has gone quiet to its next holder. Old
 /// clients answer a total miss with silence, so this is what covers them.
 ///
-/// Opens the store at most ONCE, and only when something is actually stale —
-/// an idle node ticks through here without touching SQLCipher at all.
+/// Opens the store at most ONCE, and only when something is actually stale.
 pub(crate) fn retry_stale_asks(
     ws_cmd_tx: &mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, HashSet<String>>,
@@ -309,10 +289,9 @@ pub(crate) fn reset_asked_on_disconnect(pending: &mut HashMap<String, PendingAsk
     }
 }
 
-/// Wire grammar for a custom-emote token: `[e:name:hash]` where `name` is
-/// 2-24 chars of `[a-z0-9_]` and `hash` is full SHA-256 hex. Used inline in
-/// message text AND as a reaction "emoji" string. Old clients render the
-/// raw token as text (graceful degradation).
+/// Wire grammar for a custom-emote token: `[e:name:hash]`, `name` 2-24 chars of
+/// `[a-z0-9_]` and `hash` full SHA-256 hex. Inline in message text AND as a
+/// reaction "emoji". Old clients render the raw token as text.
 pub(crate) fn parse_emote_token(s: &str) -> Option<(&str, &str)> {
     let inner = s.strip_prefix("[e:")?.strip_suffix(']')?;
     let (name, hash) = inner.split_once(':')?;
@@ -326,13 +305,10 @@ pub(crate) fn valid_reaction_emoji(s: &str) -> bool {
     (!s.is_empty() && s.len() <= 10) || parse_emote_token(s).is_some()
 }
 
-/// Wire grammar for a generalized asset token: `[a:kind:hash:w:h]` where
-/// `kind` is `s` (sticker) or `g` (GIF), `hash` is full SHA-256 hex, and
-/// `w`/`h` are the pixel dimensions (1..=4096) so receivers can reserve the
-/// exact box before the bytes arrive (no reflow). Emotes keep `[e:name:hash]`
-/// unchanged. Old clients render the raw token as text — same graceful
-/// degradation emotes shipped with. Dual-defined with Dart
-/// (`emote_image.dart::assetTokenRegex`) — keep in sync.
+/// Wire grammar for a generalized asset token: `[a:kind:hash:w:h]`, `kind` `s`
+/// (sticker) or `g` (GIF), `w`/`h` the pixel dimensions (1..=4096) so receivers
+/// reserve the exact box before the bytes arrive. Emotes keep `[e:name:hash]`.
+/// Dual-defined with Dart (`emote_image.dart::assetTokenRegex`), keep in sync.
 pub(crate) fn parse_asset_token(s: &str) -> Option<(AssetKind, &str, u32, u32)> {
     let inner = s.strip_prefix("[a:")?.strip_suffix(']')?;
     let mut parts = inner.splitn(4, ':');
@@ -350,10 +326,9 @@ pub(crate) fn parse_asset_token(s: &str) -> Option<(AssetKind, &str, u32, u32)> 
         .then_some((kind, hash, w, h))
 }
 
-/// Replace every well-formed `[e:name:hash]` token with `:name:` and every
-/// `[a:kind:hash:w:h]` asset token with `[GIF]` / `[Sticker]` — for
-/// notification surfaces that can only render plain text (iOS NSE push
-/// bodies). Malformed near-tokens pass through untouched.
+/// Replace every `[e:name:hash]` token with `:name:` and every asset token with
+/// `[GIF]` / `[Sticker]`, for notification surfaces that render plain text only
+/// (iOS NSE push bodies). Malformed near-tokens pass through untouched.
 pub(crate) fn emote_tokens_to_shortcodes(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
@@ -368,8 +343,7 @@ pub(crate) fn emote_tokens_to_shortcodes(text: &str) -> String {
         };
         out.push_str(&rest[..start]);
         let tail = &rest[start..];
-        // "[e:" / "[a:" and "]" are ASCII, so these byte offsets are char
-        // boundaries.
+        // "[e:" / "[a:" and "]" are ASCII, so these offsets are char boundaries.
         if let Some(end) = tail.find(']') {
             if is_emote {
                 if let Some((name, _)) = parse_emote_token(&tail[..=end]) {
@@ -404,12 +378,10 @@ pub(crate) fn webp_is_animated(bytes: &[u8]) -> bool {
     bytes.len() > 20 && &bytes[12..16] == b"VP8X" && (bytes[20] & 0x02) != 0
 }
 
-/// Outbound `NodeCommand::RequestEmotes`: pull bytes for hashes we don't
-/// have. Each new hash becomes a [`PendingAsk`] that OUTLIVES the socket, so
-/// a holder who was offline when the token first rendered still gets asked
-/// when it turns up. The entry records the kind WE are requesting the hash
-/// as, which is what `handle_emote_assets` sizes the receipt cap from. The
-/// sender never gets a say in the cap.
+/// Outbound `NodeCommand::RequestEmotes`: pull bytes for hashes we do not have.
+/// Each new hash becomes a [`PendingAsk`] that OUTLIVES the socket. The entry
+/// records the kind WE are requesting the hash as, which is what sizes the
+/// receipt cap; the sender never gets a say in it.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn handle_request_emotes(
     ws_cmd_tx: &mpsc::UnboundedSender<super::ws_client::WsCommand>,
@@ -440,11 +412,9 @@ pub(crate) fn handle_request_emotes(
                 if ask.peer_hint.is_none() {
                     ask.peer_hint = peer_hint.clone();
                 }
-                // The same hash asked for as a DIFFERENT kind is a new
-                // decision of OURS, not a retry of the old one: the cap that
-                // refused the last answer was ours, so every holder becomes a
-                // candidate again. (This is the emote-then-GIF path — the
-                // ceiling moves, the bytes were never the problem.)
+                // The same hash asked for as a DIFFERENT kind is a new decision
+                // of OURS, not a retry of the old one: the cap that refused the
+                // last answer was ours, so every holder is a candidate again.
                 if ask.kind != kind {
                     ask.kind = kind;
                     ask.asked.clear();
@@ -481,15 +451,12 @@ pub(crate) fn handle_request_emotes(
     dispatch_asks(ws_cmd_tx, ws_room_peers, pending, &ask_now, None, local_peer_str);
 }
 
-/// Inbound `EmoteRequest`: answer with whatever subset of the hashes we have
-/// cached locally. Anyone who has the bytes can serve them — content
-/// addressing makes every copy equally trustworthy.
+/// Inbound `EmoteRequest`: answer with whatever subset of the hashes we hold.
+/// Content addressing makes every copy equally trustworthy.
 ///
 /// A hash we do NOT hold is named in `missing` rather than passed over in
-/// silence, so the asker rotates to another holder straight away instead of
-/// waiting out its retry sweep. That makes an empty bundle a legitimate
-/// reply; the codec emits `{}` for it and every client, new or old, decodes
-/// that to nothing and moves on.
+/// silence, so the asker rotates to another holder instead of waiting out its
+/// sweep. An empty bundle is therefore a legitimate reply.
 pub(crate) fn handle_emote_request(
     ws_cmd_tx: &mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, HashSet<String>>,
@@ -512,10 +479,9 @@ pub(crate) fn handle_emote_request(
         asked_anything = true;
         match store.load_emote_blob(&h) {
             Ok(Some(bytes)) => {
-                // Budget the reply: with GIF-sized blobs cached, 20 hashes
-                // could otherwise balloon a single bundle to ~40 MB. Naming
-                // the overflow as missing sends the asker somewhere that can
-                // actually serve it.
+                // Budget the reply: with GIF-sized blobs cached, 20 hashes could
+                // balloon one bundle to ~40 MB. Naming the overflow as missing
+                // sends the asker somewhere that can actually serve it.
                 if reply_bytes + bytes.len() > MAX_BUNDLE_REPLY_BYTES {
                     missing.push(h);
                     continue;
@@ -539,14 +505,13 @@ pub(crate) fn handle_emote_request(
     );
 }
 
-/// Inbound `EmoteAssets`: only blobs we actually REQUESTED are accepted —
-/// the recorded kind sizes the cap (a sender can neither stuff our cache
-/// unsolicited nor push a GIF-sized blob at an emote-sized ask). Then verify
-/// (hash match via the bundle codec, WebP container), cache, notify the UI.
+/// Inbound `EmoteAssets`: only blobs we actually REQUESTED are accepted, and the
+/// recorded kind sizes the cap, so a sender can neither stuff our cache
+/// unsolicited nor push a GIF-sized blob at an emote-sized ask. Then verify hash
+/// and container, cache, notify the UI.
 ///
 /// A `missing` list rotates the ask onward, but only from a device this ask
-/// really did ask. Otherwise any member of a room could make us fan requests
-/// around the room by claiming not to hold things nobody asked it for.
+/// really did ask: otherwise any room member could make us fan requests around.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_emote_assets(
     ws_cmd_tx: &mpsc::UnboundedSender<super::ws_client::WsCommand>,
@@ -586,25 +551,20 @@ pub(crate) async fn handle_emote_assets(
             continue;
         };
         // SECURITY (SHOP-2, same class): the byte cap says nothing about the
-        // DECODED size, and every later reader of this blob decodes it (the
-        // public-channel banner thumb, for one). A blob that DECLARES a canvas
-        // over the ceiling is refused before it reaches the cache. A blob whose
-        // header we cannot read is left to the existing rule (container magic
-        // plus content hash, no decode) — a decoder rejects an unreadable
-        // header outright, so there is no allocation to bound there.
+        // DECODED size, and every later reader of this blob decodes it. A blob
+        // that DECLARES a canvas over the ceiling is refused before the cache. An
+        // unreadable header is left to the existing rule (container magic plus
+        // content hash), because a decoder rejects it outright anyway.
         let canvas_ok = crate::node::image_convert::webp_header_dimensions(&bytes)
             .is_none_or(|(w, h)| {
                 w <= crate::node::image_convert::MAX_DECODE_DIM
                     && h <= crate::node::image_convert::MAX_DECODE_DIM
             });
         if bytes.is_empty() || bytes.len() > kind.recv_cap() || !is_webp(&bytes) || !canvas_ok {
-            // Bytes we refuse are a MISS, not the end of the hunt. This used
-            // to delete the ask, and since the UI asks once a session and
-            // never asks again, one holder answering with garbage ended the
-            // search for that hash for good. Keep the entry and move it on,
-            // exactly the way a named `missing` moves it on — and only when
-            // the answer came from a device this ask really did ask, so an
-            // unasked peer can neither steer our walk nor delete our ask.
+            // Bytes we refuse are a MISS, not the end of the hunt: deleting the
+            // ask would let one holder answering with garbage end the search for
+            // that hash for good. Only when the answer came from a device this
+            // ask really did ask, so an unasked peer cannot steer our walk.
             if pending.get(&hash).is_some_and(|a| a.asked.contains(peer_str)) {
                 refused.push(hash);
             }
@@ -640,11 +600,10 @@ mod tests {
         MAX_BUNDLE_REPLY_BYTES,
     };
 
-    /// The worst legal reply this rail can be asked to build: four hashes at
-    /// the Profile receipt cap is 4 x 2 MB, which is EXACTLY the bundle
-    /// budget. Both halves of that arithmetic are easy to get off by one, and
-    /// the symptom would be silent - the fourth asset of a full profile-media
-    /// pull would simply never arrive, and the avatar would stay a still.
+    /// The worst legal reply this rail can be asked to build: four hashes at the
+    /// Profile receipt cap is EXACTLY the bundle budget. Both halves of that
+    /// arithmetic are easy to get off by one, and the symptom is silent: the
+    /// fourth asset of a full profile-media pull would simply never arrive.
     #[test]
     fn a_profile_bundle_at_the_budget_packs_and_survives_the_inbound_guard() {
         use sha2::{Digest, Sha256};
@@ -673,9 +632,8 @@ mod tests {
             })
             .collect();
 
-        // The responder's packing comparison, verbatim from
-        // `handle_emote_request`. The fourth asset lands ON the budget, and
-        // `>` rather than `>=` is what admits it.
+        // The responder's packing comparison, verbatim. The fourth asset lands ON
+        // the budget, and `>` rather than `>=` is what admits it.
         let mut reply_bytes = 0usize;
         let mut packed: Vec<(String, Vec<u8>)> = Vec::new();
         for (hash, bytes) in &assets {
@@ -723,7 +681,6 @@ mod tests {
         // Malformed near-tokens pass through untouched.
         assert_eq!(emote_tokens_to_shortcodes("[e:bad"), "[e:bad");
         assert_eq!(emote_tokens_to_shortcodes("[e:x:nothex]"), "[e:x:nothex]");
-        // Plain text untouched.
         assert_eq!(emote_tokens_to_shortcodes("no emotes"), "no emotes");
     }
 

@@ -2,12 +2,9 @@ import 'package:flutter/widgets.dart';
 import 'package:hollow/src/core/brand_icons.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-/// Platform glyphs for game-card platform chips.
-///
-/// PlayStation / Linux / Apple / Android come from the bundled SimpleIcons
-/// font; Windows, Xbox and Nintendo Switch were REMOVED from Simple Icons
-/// (trademark purge), so those three are drawn with CustomPaint. All glyphs
-/// are decorative — the chip they sit in carries the text label.
+/// Platform glyphs for game-card platform chips. Windows, Xbox and Nintendo
+/// Switch were REMOVED from Simple Icons, so those three are painted here. All
+/// of them are decorative: the chip carries the text label.
 class PlatformIcon extends StatelessWidget {
   final String slug;
   final double size;
@@ -74,7 +71,7 @@ class _WindowsPainter extends CustomPainter {
   void paint(Canvas canvas, Size size) {
     final s = size.shortestSide;
     final paint = Paint()..color = color;
-    // Slight inset so the mark doesn't feel heavier than font glyphs.
+    // Inset so the mark does not feel heavier than the font glyphs.
     final inset = s * 0.06;
     final gap = s * 0.09;
     final pane = (s - inset * 2 - gap) / 2;
@@ -109,8 +106,8 @@ class _XboxPainter extends CustomPainter {
     final r = s * 0.46;
     final rect = Offset.zero & size;
 
-    // Carving needs its own layer so BlendMode.clear cuts the sphere, not
-    // whatever the icon is drawn over.
+    // Its own layer, so BlendMode.clear cuts the sphere and not whatever the
+    // icon is drawn over.
     canvas.saveLayer(rect, Paint());
     canvas.drawCircle(c, r, Paint()..color = color);
 
@@ -119,7 +116,6 @@ class _XboxPainter extends CustomPainter {
       ..style = PaintingStyle.stroke
       ..strokeWidth = s * 0.14
       ..strokeCap = StrokeCap.round;
-    // The X's strokes bow slightly outward, like the real mark.
     final k = r * 0.62; // reach of each diagonal
     final bow = s * 0.10;
     final d1 = Path()
@@ -154,7 +150,6 @@ class _SwitchPainter extends CustomPainter {
     final left = (s - halfW * 2 - gap) / 2;
     final corner = Radius.circular(s * 0.24);
 
-    // Left Joy-Con: stroked, rounded on its outer (left) side.
     final stroke = s * 0.10;
     final leftRect = RRect.fromRectAndCorners(
       Rect.fromLTRB(
@@ -179,7 +174,6 @@ class _SwitchPainter extends CustomPainter {
       Paint()..color = color,
     );
 
-    // Right Joy-Con: filled, rounded on its outer (right) side, dot carved.
     final rightLeft = left + halfW + gap;
     canvas.saveLayer(rect, Paint());
     canvas.drawRRect(

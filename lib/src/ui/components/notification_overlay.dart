@@ -17,12 +17,9 @@ import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-/// Overlay that shows notification cards in the bottom-right corner.
-///
-/// Up to 3 cards stacked vertically. Each card shows a header
-/// (avatar + source name) and up to 5 accumulated messages.
-/// Cards auto-dismiss after 5 seconds, hover pauses the timer.
-/// Click navigates to the source conversation.
+/// Overlay that shows notification cards in the bottom-right corner: up to 3
+/// stacked, each holding up to 5 accumulated messages. They auto-dismiss after
+/// 5 seconds, hover pauses that, and a click opens the conversation.
 class NotificationOverlay extends ConsumerWidget {
   const NotificationOverlay({super.key});
 
@@ -30,16 +27,13 @@ class NotificationOverlay extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final cards = ref.watch(systemNotificationProvider);
 
-    // Opening a conversation retires its pending card — the user is reading
-    // it now; keeping the card up (or letting it replay) is redundant noise.
-    // Channel selection is written as part of the atomic server-switch batch
-    // (server + channel providers update in sequence), so read the settled
-    // pair post-frame instead of trusting the mid-batch listener value.
+    // Opening a conversation retires its pending card. Channel selection is
+    // written as part of the atomic server-switch batch, so read the settled
+    // pair post-frame rather than the mid-batch listener value.
     ref.listen<String?>(selectedPeerProvider, (_, peerId) {
       if (peerId == null) return;
-      // Post-frame: selection can be written during a build/init frame (e.g.
-      // notification-tap navigation), and dismissing the card writes provider
-      // state — not allowed while the tree is building.
+      // Selection can be written during a build frame, and dismissing writes
+      // provider state, which is not allowed while the tree is building.
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!context.mounted) return;
         ref.read(systemNotificationProvider.notifier).dismissDm(peerId);
@@ -60,8 +54,7 @@ class NotificationOverlay extends ConsumerWidget {
 
     if (cards.isEmpty) return const SizedBox.shrink();
 
-    // Stack cards from bottom, each card ~100px tall + 4px gap.
-    // Newest at bottom, oldest at top.
+    // Newest at the bottom, stacked upward.
     const cardHeight = 100.0;
     const gap = HollowSpacing.xxs;
 
@@ -136,7 +129,6 @@ class _NotificationCardWidgetState
   @override
   void didUpdateWidget(_NotificationCardWidget oldWidget) {
     super.didUpdateWidget(oldWidget);
-    // Reset timer when new messages arrive in this card.
     if (widget.card.messages.length != oldWidget.card.messages.length) {
       _restartDismissTimer();
     }
@@ -228,8 +220,8 @@ class _NotificationCardWidgetState
           },
           child: GestureDetector(
             onTap: _onTap,
-            // Emote pull context for message previews — a token from a chat
-            // the user doesn't have open may not have its bytes cached yet.
+            // A token from a chat the user does not have open may not have its
+            // bytes cached yet.
             child: EmoteScope(
               serverId: card.serverId,
               peerHint: card.peerId,
@@ -254,7 +246,6 @@ class _NotificationCardWidgetState
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  // Header
                   Padding(
                     padding: const EdgeInsets.fromLTRB(
                       HollowSpacing.md,
@@ -281,7 +272,6 @@ class _NotificationCardWidgetState
                             overflow: TextOverflow.ellipsis,
                           ),
                         ),
-                        // Close button
                         HollowPressable(
                           onTap: _dismiss,
                           borderRadius:
@@ -299,13 +289,11 @@ class _NotificationCardWidgetState
                     ),
                   ),
 
-                  // Divider
                   Container(
                     height: 1,
                     color: hollow.border.withValues(alpha: 0.5),
                   ),
 
-                  // Messages
                   Flexible(
                     child: Padding(
                       padding: const EdgeInsets.symmetric(
@@ -359,10 +347,8 @@ class _MessageRow extends StatelessWidget {
       fontSize: 12,
     );
 
-    // For DMs, don't repeat the sender name (it's in the header).
-    // For channels, show sender name since multiple people can send.
-    // Text.rich so emote tokens render as inline images instead of the
-    // raw [e:name:hash] wire form.
+    // A DM's header already names the sender; a channel needs it per row.
+    // Text.rich so emote tokens render as images, not the raw wire form.
     if (isDm) {
       return Text.rich(
         TextSpan(

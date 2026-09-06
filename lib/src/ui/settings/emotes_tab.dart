@@ -16,10 +16,9 @@ import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-/// Server settings → Emotes: the server's custom emote set.
-/// Everyone can view; add/remove needs MANAGE_EMOTES (Admin+ by default).
-/// Images are processed locally (≤64px WebP) and replicate content-addressed;
-/// the CRDT carries only (name, hash).
+/// The server's custom emote set. Everyone can view; add and remove need
+/// MANAGE_EMOTES. Images are processed locally and replicate
+/// content-addressed, so the CRDT carries only the name and hash.
 class EmotesTab extends ConsumerWidget {
   final String serverId;
 
@@ -37,8 +36,7 @@ class EmotesTab extends ConsumerWidget {
         hash: named.processed.hash,
         animated: named.processed.animated,
       );
-      // CrdtStore persists fire-and-forget; give the write a beat, then the
-      // ServerUpdated event also invalidates serverEmotesProvider.
+      // CrdtStore persists fire-and-forget, so the write needs a beat.
       await Future.delayed(const Duration(milliseconds: 150));
       ref.invalidate(serverEmotesProvider(serverId));
     } catch (e) {
@@ -139,12 +137,9 @@ class EmotesTab extends ConsumerWidget {
   }
 }
 
-/// Server settings → the server's sticker pack, under the emote set (same
-/// permission, same rail, same "bytes never ride the CRDT" rule).
-///
-/// Split out as its own widget rather than inlined so the mobile server
-/// settings route renders exactly this, instead of a second copy that would
-/// drift.
+/// The server's sticker pack: same permission, same rail, same "bytes never
+/// ride the CRDT" rule as the emote set. Its own widget so the mobile server
+/// settings route renders exactly this rather than a second copy.
 class ServerStickersSection extends ConsumerWidget {
   final String serverId;
   final bool canManage;
@@ -168,8 +163,7 @@ class ServerStickersSection extends ConsumerWidget {
         w: processed.w,
         h: processed.h,
       );
-      // CrdtStore persists fire-and-forget; give the write a beat — the
-      // ServerUpdated event invalidates the provider too.
+      // CrdtStore persists fire-and-forget, so the write needs a beat.
       await Future.delayed(const Duration(milliseconds: 150));
       ref.invalidate(serverStickersProvider(serverId));
     } catch (e) {

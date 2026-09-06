@@ -8,8 +8,7 @@ import 'gif_provider.dart';
 
 /// Local GIF library: recently used, favourites, and user-made lists for
 /// sorting favourites. Persisted as one JSON blob in the encrypted settings
-/// store (no schema migration to keep in step with Rust, and it never leaves
-/// the device — none of this is CRDT/wire state).
+/// store; it never leaves the device, so none of this is CRDT/wire state.
 const _kLibrarySettingKey = 'gif_library';
 
 const _kMaxRecents = 60;
@@ -20,11 +19,9 @@ const _kMaxCollections = 20;
 const kMaxGifListNameLength = 32;
 
 /// Media paths are stored RELATIVE to the proxy base and rebuilt against the
-/// CURRENT base on load. Two reasons, both load-bearing:
-///   * a stored absolute URL is a stored fetch target — a tampered row could
-///     point the thumbnail cache at a foreign host, which is exactly what the
-///     Rust-side origin check exists to prevent;
-///   * a self-hoster who changes their proxy keeps their favourites working.
+/// CURRENT base on load: a stored absolute URL is a stored fetch target, and a
+/// tampered row could point the thumbnail cache at a foreign host. It also
+/// keeps a self-hoster's favourites working when they change proxy.
 /// Shape mirrors gifs/.htaccess: `m/<id>.still.webp`, `m/<id>.sm.<ext>`.
 final _mediaPathRe =
     RegExp(r'^m/[A-Za-z0-9_-]{1,100}\.(?:still|sm)\.[a-z0-9]{2,5}$');
@@ -32,14 +29,11 @@ final _mediaPathRe =
 /// The pick-time source path shape, also from gifs/.htaccess: `f/<id>`.
 final _fullPathRe = RegExp(r'^f/[A-Za-z0-9_-]{1,100}$');
 
-/// DIRECT MODE is the exception to the rule above: Klipy CDN paths are opaque
-/// and cannot be rebuilt from an id, so those rows store the absolute https
-/// URL Rust already host-checked at parse time. The guard moves rather than
-/// disappearing — [GifLibraryNotifier.revalidate] re-asks Rust which stored
-/// locations may be fetched in the CURRENT configuration, and rows it refuses
-/// are hidden (never deleted: switch back and they return). The case that
-/// matters: a CDN URL saved with your own key must NOT be fetched after you
-/// go back to the proxy, which is the whole point of the proxy.
+/// DIRECT MODE is the exception: Klipy CDN paths are opaque and cannot be
+/// rebuilt from an id, so those rows store the absolute https URL Rust already
+/// host-checked. The guard moves rather than disappearing:
+/// [GifLibraryNotifier.revalidate] re-asks Rust which stored locations may be
+/// fetched now, and hides (never deletes) the rest.
 bool _isAbsoluteMedia(String v) => v.startsWith('https://');
 
 bool _validMediaLocation(String v, [RegExp? relativeShape]) =>
@@ -199,10 +193,9 @@ class GifLibrary {
   final List<SavedGif> favorites;
   final List<GifCollection> collections;
 
-  /// Stored media locations Rust refuses to fetch in the CURRENT
-  /// configuration. NEVER persisted and never removed from the lists above:
-  /// a row hidden because you dropped your Klipy key reappears when you put
-  /// it back. See [GifLibraryNotifier.revalidate].
+  /// Stored media locations Rust refuses to fetch in the CURRENT configuration.
+  /// NEVER persisted and never removed from the lists above: a row hidden because
+  /// you dropped your Klipy key reappears when you put it back.
   final Set<String> hiddenLocations;
 
   const GifLibrary({
@@ -285,9 +278,8 @@ class GifLibrary {
 class GifLibraryNotifier extends Notifier<GifLibrary> {
   @override
   GifLibrary build() {
-    // Changing the GIF SOURCE flips which stored rows may be fetched at all
-    // (see [revalidate]). ref.listen in build() is the registration point —
-    // an initState-style hook would silently no-op here.
+    // Changing the GIF SOURCE flips which stored rows may be fetched at all.
+    // ref.listen in build() is the registration point; an initState hook no-ops.
     ref.listen(gifDirectModeProvider, (_, _) => revalidate());
     ref.listen(gifMediaHostsProvider, (_, _) => revalidate());
     ref.listen(gifProxyUrlProvider, (_, _) => revalidate());
@@ -296,10 +288,9 @@ class GifLibraryNotifier extends Notifier<GifLibrary> {
 
   String get _base => ref.read(gifProxyUrlProvider);
 
-  /// Ask Rust which stored media locations may be fetched right now — the
-  /// proxy base, the user's own key and the media allowlist all feed that
-  /// answer — and hide the rest. Nothing is deleted; see
-  /// [GifLibrary.hiddenLocations].
+  /// Ask Rust which stored media locations may be fetched right now (the proxy
+  /// base, the user's own key and the media allowlist all feed that answer) and
+  /// hide the rest. Nothing is deleted; see [GifLibrary.hiddenLocations].
   Future<void> revalidate() async {
     try {
       final base = _base;
@@ -333,9 +324,8 @@ class GifLibraryNotifier extends Notifier<GifLibrary> {
   }
 
   /// Read the persisted library. Called from the shell's post-unlock boot
-  /// sequence (the settings store is not open before that), right after the
-  /// proxy URL is loaded so relative media paths resolve against the right
-  /// base.
+  /// sequence, right after the proxy URL is loaded so relative media paths
+  /// resolve against the right base.
   Future<void> loadCached() async {
     try {
       final raw = await storage_api.loadSetting(key: _kLibrarySettingKey);
@@ -347,9 +337,8 @@ class GifLibraryNotifier extends Notifier<GifLibrary> {
     }
   }
 
-  /// Fire-and-forget — losing a recents write is not worth blocking a pick,
-  /// and an un-awaited FFI future needs .catchError or it hits the zone
-  /// crash handler.
+  /// Fire-and-forget: losing a recents write is not worth blocking a pick, and an
+  /// un-awaited FFI future needs .catchError or it hits the zone crash handler.
   void _persist() {
     try {
       storage_api

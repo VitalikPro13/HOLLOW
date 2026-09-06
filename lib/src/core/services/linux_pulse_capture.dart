@@ -8,15 +8,12 @@ import 'package:ffi/ffi.dart';
 /// Linux-only microphone capture over libpulse-simple via dart:ffi.
 ///
 /// The `record` package's Linux backend shells out to `parecord`, which
-/// PipeWire-only systems don't ship. The PulseAudio CLIENT libraries are
-/// always present though (the flutter_webrtc fork already links libpulse for
-/// device enumeration), and pipewire-pulse serves the exact same protocol —
-/// so talk to the daemon directly. The blocking pa_simple reads run in a
-/// dedicated isolate; chunks arrive sized to ~100 ms of audio, which also
-/// paces the recorder UI's level meter.
-///
-/// Device ids are PulseAudio source names — exactly what the Linux device
-/// picker (`hollowLinuxAudioDevices`) stores in `audioInputDeviceProvider`.
+/// PipeWire-only systems do not ship, while the PulseAudio CLIENT libraries
+/// are always present and pipewire-pulse serves the same protocol, so we talk
+/// to the daemon directly. The blocking pa_simple reads run in a dedicated
+/// isolate and chunks arrive sized to about 100 ms, which also paces the
+/// recorder UI's level meter. Device ids are PulseAudio source names, exactly
+/// what the Linux device picker stores.
 class LinuxPulseCapture {
   LinuxPulseCapture._(this._events, this._chunks);
 
@@ -31,8 +28,8 @@ class LinuxPulseCapture {
   Stream<Uint8List> get chunks => _chunks.stream;
 
   /// Opens the capture stream and completes once audio is flowing. Throws
-  /// [LinuxPulseCaptureException] when the daemon rejects the stream (and the
-  /// fallback to the default source also failed) or the libraries are absent.
+  /// [LinuxPulseCaptureException] when the daemon rejects the stream and the
+  /// fallback to the default source also failed, or the libraries are absent.
   static Future<LinuxPulseCapture> start({
     String? device,
     int sampleRate = 16000,

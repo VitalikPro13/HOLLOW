@@ -8,9 +8,8 @@ bool get _isAndroid => !kIsWeb && Platform.isAndroid;
 
 int? _cachedSdkInt;
 
-/// The Android API level (`Build.VERSION.SDK_INT`), e.g. 24 = Android 7.0,
-/// 29 = Android 10. Cached after the first call (it never changes at runtime).
-/// Returns null off Android or if the query fails. Prime it once at startup so
+/// The Android API level (`Build.VERSION.SDK_INT`), cached after the first
+/// call. Null off Android or if the query fails. Prime it once at startup so
 /// synchronous callers (see [AndroidScreenAudioSupport]) have it ready.
 Future<int?> androidSdkInt() async {
   if (!_isAndroid) return null;
@@ -55,11 +54,9 @@ Future<void> releaseWifiLock() async {
   } catch (_) {}
 }
 
-/// The package that installed this APK (`com.android.vending` for Google
-/// Play), or null off Android, on a sideload that reports nothing, or if the
-/// query fails. Used by [ShopAvailability] to tell a store build from a
-/// sideload; a store always reports its own package, so null means "not a
-/// store".
+/// The package that installed this APK (`com.android.vending` for Play), or
+/// null off Android, on a sideload that reports nothing, or on failure. A store
+/// always reports its own package, so null means "not a store".
 Future<String?> androidInstallerPackage() async {
   if (!_isAndroid) return null;
   try {

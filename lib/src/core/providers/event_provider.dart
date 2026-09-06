@@ -73,8 +73,7 @@ import 'package:hollow/src/rust/api/network.dart';
 import 'package:hollow/src/rust/api/share.dart' as share_api;
 import 'package:hollow/src/ui/dialogs/twitch_join_dialog.dart' show showTwitchJoinDialog, handleTwitchJoinResult, showJoinRejectedDialog, showNsfwConfirmDialog;
 
-/// Listens to the Rust event stream and dispatches events
-/// to the appropriate providers.
+/// Listens to the Rust event stream and dispatches to the right providers.
 class EventStreamNotifier extends Notifier<bool> {
   StreamSubscription<NetworkEvent>? _subscription;
   final Map<String, Timer> _syncTimeouts = {};
@@ -86,24 +85,19 @@ class EventStreamNotifier extends Notifier<bool> {
   /// Maps share rootHash → file ID for bridging Share events to file transfer state.
   final Map<String, String> _shareToFileId = {};
 
-  /// Dedup: message IDs already processed via ChannelMessageReceived.
-  /// When a ChannelNotificationHint arrives with a message_id we've
-  /// already counted, we skip it to prevent double-counting.
+  /// Message IDs already processed via ChannelMessageReceived, so a
+  /// ChannelNotificationHint for the same id is not double-counted.
   final Set<String> _processedChannelMessageIds = {};
 
-  /// Servers that have completed their initial message sync.
-  /// Share-backed files are only auto-downloaded for live messages (post-sync),
-  /// not during the sync burst — prevents cache thrash on reconnection.
+  /// Servers that have completed their initial message sync. Share-backed files
+  /// auto-download only for live messages, never during the sync burst.
   final Set<String> _serverSyncDone = {};
-
 
   @override
   bool build() {
-    // Safety net: if this provider is ever disposed, release the Rust→Dart event
-    // subscription and any pending sync-timeout timers so they can't fire into a
-    // disposed notifier or keep the stream alive. (Normal teardown still goes
-    // through stop() via NodeNotifier.stop(); this guards the invalidate path.)
-    // Does NOT touch `state` — that throws post-dispose.
+    // Safety net: release the Rust->Dart subscription and pending sync timers so
+    // they can't fire into a disposed notifier. Normal teardown goes through
+    // stop(); this guards the invalidate path. Does NOT touch `state` (throws).
     ref.onDispose(() {
       _subscription?.cancel();
       _subscription = null;
@@ -116,10 +110,8 @@ class EventStreamNotifier extends Notifier<bool> {
   }
 
   /// Refresh the iOS push-hints cache (friend name + avatar) read by the
-  /// Notification Service Extension. Debounced + iOS-gated inside the cache, so
-  /// this is a cheap no-op on other platforms / under bursts. Sources the friend
-  /// list from `friendsProvider` (all known peers; the extension only ever looks
-  /// up the actual sender).
+  /// Notification Service Extension. Debounced + iOS-gated inside the cache,
+  /// so a cheap no-op elsewhere.
   void _refreshPushHints() {
     final friends = ref.read(friendsProvider);
     if (friends.isEmpty) return;
@@ -128,34 +120,27 @@ class EventStreamNotifier extends Notifier<bool> {
 
   bool _selfNuking = false;
 
-  /// Step 7 self-nuke: this device was revoked. Wipe the data dir + relaunch to a
-  /// clean Welcome. Mirrors the link "go back" flow (hollow_shell): we MARK a wipe
-  /// (the live node holds open SQLCipher handles, so deleting in-process fails on
-  /// Windows) and relaunch — the next launch's _bootstrap runs performPendingWipe()
-  /// BEFORE the node starts. Idempotent (guarded) since the event could repeat.
+  /// Step 7 self-nuke: this device was revoked. MARK a wipe and relaunch, because
+  /// the live node holds open SQLCipher handles and deleting in-process fails on
+  /// Windows; the next launch runs performPendingWipe() BEFORE the node starts.
+  /// Idempotent, since the event can repeat.
   Future<void> _selfNuke() async {
     if (_selfNuking) return;
     _selfNuking = true;
 
-    // CRITICAL — stash the wipe FIRST, before anything that can throw. A previous
-    // version showed the toast first via the plain `HollowToast.show(ctx, …)` form,
-    // which calls `Overlay.of(navKey.currentContext)` → throws "Null check operator
-    // used on a null value" (the Navigator's own context has no Overlay ANCESTOR;
-    // the Overlay is its CHILD). That exception aborted _selfNuke before the wipe was
-    // ever stashed, so the device never reset. Teardown is now unconditional and the
-    // toast is best-effort. See feedback_toast_from_nonwidget_overlaystate.
+    // Stash the wipe FIRST, before anything that can throw: a toast raised before
+    // it aborted _selfNuke and the device never reset. Teardown is unconditional,
+    // the toast best-effort. See feedback_toast_from_nonwidget_overlaystate.
     try {
       await storage_api.stashPendingWipe();
     } catch (e) {
       debugPrint('[HOLLOW] self-nuke stash failed: $e');
     }
 
-    // Best-effort toast — must NEVER abort the nuke. Insert directly into the root
-    // navigator's Overlay via `overlayState:` (the positional context is unused then).
+    // Best-effort toast; must NEVER abort the nuke. Insert via `overlayState:`.
     try {
       final overlay = hollowNavigatorKey.currentState?.overlay;
-      // overlay is freshly obtained AFTER the awaits above; binding the
-      // context to a local lets analyzers tie the mounted guard to the
+      // Bind the context to a local so analyzers tie the mounted guard to the
       // exact context used (S7115 / use_build_context_synchronously).
       final overlayContext = overlay?.context;
       if (overlay != null && overlayContext != null && overlayContext.mounted) {
@@ -170,10 +155,8 @@ class EventStreamNotifier extends Notifier<bool> {
       debugPrint('[HOLLOW] self-nuke toast failed (non-fatal): $e');
     }
 
-    // Give the toast a beat, then shut the node down and relaunch via the
-    // shared waiter-script helper (app_relaunch.dart) — a directly-spawned
-    // copy dies against the native single-instance forwarder while we're
-    // still shutting down.
+    // Relaunch via the shared waiter-script helper (app_relaunch.dart): a
+    // directly-spawned copy dies against the native single-instance forwarder.
     await Future<void>.delayed(const Duration(milliseconds: 1200));
     await relaunchApp();
   }
@@ -193,22 +176,17 @@ class EventStreamNotifier extends Notifier<bool> {
       },
     );
     state = true;
-    // Warm the device→identity map from the node's resolver (persisted links +
-    // our own devices) so attribution is correct before the first profile sync.
-    // The event stream can start BEFORE the node has finished hydrating its
-    // resolver from the DB, so a single immediate refresh can race and come back
-    // empty — and nothing would retry until a DeviceListUpdated event arrives
-    // (which only fires when a sibling re-sends its list over the network). That
-    // left the device list + multi-device presence/attribution stale after every
-    // app restart. Retry a few times so the warm-up catches the node once ready.
+    // Warm the device->identity map from the node's resolver so attribution is
+    // correct before the first profile sync. The event stream can start BEFORE
+    // the node hydrates its resolver, and nothing retries until a sibling
+    // re-sends its list, so retry a few times to catch the node once ready.
     _warmDeviceMaps();
   }
 
   void _warmDeviceMaps() {
     ref.read(deviceLinkProvider.notifier).refresh();
     ref.read(deviceLabelProvider.notifier).refresh();
-    // Re-pull shortly after in case the node's resolver wasn't hydrated yet on
-    // the first attempt. Cheap in-memory snapshots; idempotent.
+    // Cheap idempotent re-pull, in case the resolver wasn't hydrated yet.
     for (final ms in const [400, 1200, 3000]) {
       Future<void>.delayed(Duration(milliseconds: ms), () {
         if (_subscription == null) return; // stopped meanwhile
@@ -221,8 +199,7 @@ class EventStreamNotifier extends Notifier<bool> {
   void stop() {
     _subscription?.cancel();
     _subscription = null;
-    // Drain pending sync-timeout timers so they don't fire after the stream
-    // stops (each fires a ref.read into a now-idle notifier).
+    // Drain pending sync-timeout timers so none fires into a now-idle notifier.
     for (final t in _syncTimeouts.values) {
       t.cancel();
     }
@@ -240,26 +217,18 @@ class EventStreamNotifier extends Notifier<bool> {
     ref.invalidate(myPermissionsProvider(serverId));
     ref.invalidate(myRoleProvider(serverId));
     ref.invalidate(myMuteStatusProvider(serverId));
-    // CrdtStore persists via fire-and-forget mpsc, so getServerChannels (a DB
-    // read) races the actor's write — a single fixed delay was unreliable (worked
-    // on join because that path re-reads after the write lands, but flaky for a
-    // LIVE remote ChannelVisibilityChanged/ChannelPostingChanged). Refresh both
-    // the selected-server map AND the per-server snapshot on a ramp:
-    //   - channelListProvider: drives desktop shell + the open mobile chat route.
-    //   - serverChannelsProvider: drives the mobile Chats-tab list, which has NO
-    //     selected server (so channelListProvider can't help it). Both target the
-    //     same DB; the ramp lets the eventually-consistent write land.
+    // CrdtStore persists via fire-and-forget mpsc, so a DB read races the actor's
+    // write and a single fixed delay was unreliable. Refresh on a ramp:
+    // channelListProvider drives the desktop shell and open mobile chat route,
+    // serverChannelsProvider drives the mobile Chats tab, which has no selection.
     _reloadChannelsWithRetry(serverId);
     _evictVoiceIfInvisible(serverId);
   }
 
-  /// If we're currently in a VOICE channel on [serverId] that we can no longer
-  /// SEE (visibility tier raised, or we were demoted/kicked), hang up the call —
-  /// the UI equivalent of pressing Disconnect. Belt-and-suspenders next to the
-  /// Rust-side auto-leave: this runs the exact `leaveChannel()` teardown the
-  /// button does, so the call genuinely ends (closes PCs, stops mic/audio),
-  /// regardless of whether the Rust force-leave event lands. Re-checks on a short
-  /// ramp because role/channel state lands via the fire-and-forget CrdtStore.
+  /// If we're in a VOICE channel on [serverId] that we can no longer SEE, hang
+  /// up: the UI equivalent of pressing Disconnect. Belt-and-suspenders next to
+  /// the Rust auto-leave, so the call genuinely ends whether or not that event
+  /// lands. Re-checks on a ramp because role state lands via the CrdtStore.
   void _evictVoiceIfInvisible(String serverId) {
     const delays = [Duration(milliseconds: 150), Duration(milliseconds: 600),
         Duration(milliseconds: 1400)];
@@ -274,10 +243,8 @@ class EventStreamNotifier extends Notifier<bool> {
         final channels = ref.read(serverChannelsProvider(serverId)).valueOrNull;
         if (channels == null) return; // not loaded yet — a later tick re-checks
         final ch = channels[cid];
-        // Channel gone (deleted / we were kicked so we hold no channels) OR
-        // the Rust-computed predicate (tier + label gates + grants) now
-        // excludes us → leave. This snapshot re-reads post-ramp, so meCanSee
-        // is fresh.
+        // Channel gone (deleted / kicked) or the Rust-computed predicate now
+        // excludes us. This snapshot re-reads post-ramp, so meCanSee is fresh.
         final canSee = ch?.meCanSee ?? false;
         if (!canSee) {
           debugPrint('[HOLLOW-VC] Lost visibility to active voice channel $cid — hanging up');
@@ -288,19 +255,16 @@ class EventStreamNotifier extends Notifier<bool> {
   }
 
   /// Re-read channels for a server on a short ramp to defeat the CrdtStore
-  /// fire-and-forget write race. Refreshes the per-server snapshot (Chats-tab
-  /// list, any server) every tick; refreshes the selected-server map only while
-  /// that server is still selected. Cheap: each tick is one DB read.
+  /// fire-and-forget write race. The per-server snapshot refreshes every tick;
+  /// the selected-server map only while that server is still selected.
   void _reloadChannelsWithRetry(String serverId) {
     const delays = [Duration.zero, Duration(milliseconds: 120),
         Duration(milliseconds: 400), Duration(milliseconds: 1000)];
     for (final d in delays) {
       Future.delayed(d, () {
-        // Per-server snapshot — refresh regardless of selection (Chats tab).
         ref.invalidate(serverChannelsProvider(serverId));
-        // Mute state rides the same fire-and-forget CrdtStore write, so it
-        // needs the same ramp — a single immediate invalidate reads stale DB
-        // (the "switch tabs and it finally shows" bug).
+        // Mute state rides the same fire-and-forget write, so it needs the same
+        // ramp: a single immediate invalidate reads stale DB.
         ref.invalidate(mutedMembersProvider(serverId));
         ref.invalidate(myMuteStatusProvider(serverId));
         if (ref.read(selectedServerProvider) == serverId) {
@@ -312,8 +276,7 @@ class EventStreamNotifier extends Notifier<bool> {
   }
 
   void _dispatch(NetworkEvent event) {
-    // SECURITY: Wrap dispatch in try-catch to prevent unhandled exceptions
-    // from killing the event loop.
+    // SECURITY: an unhandled exception here would kill the event loop.
     try {
     switch (event) {
       case NetworkEvent_PeerDiscovered(:final peer):
@@ -321,9 +284,8 @@ class EventStreamNotifier extends Notifier<bool> {
             '[HOLLOW] Peer discovered: ${peer.peerId} at ${peer.addresses}');
         ref.read(peersProvider.notifier).addPeer(peer.peerId, peer.addresses);
         ref.read(connectionStatusProvider.notifier).onPeerConnected(peer.peerId);
-        // A peer we are in a call with is back in the relay's rooms, so the
-        // shortened hold-open window their absence justified no longer
-        // applies. See CallNotifier.handlePeerDisconnected.
+        // A peer we are in a call with is back in the relay's rooms, so the shortened
+        // hold-open window no longer applies. See CallNotifier.handlePeerDisconnected.
         ref.read(callProvider.notifier).handlePeerReconnected(peer.peerId);
 
       case NetworkEvent_TurnCredentials(
@@ -353,30 +315,19 @@ class EventStreamNotifier extends Notifier<bool> {
         // Don't deselect — friends stay visible when offline.
 
       case NetworkEvent_RoomCleared():
-        // Fired on an active-room SWITCH (legacy signaling-room model), NOT on
-        // connection loss. Do NOT clearAll() peers or null the selection: that
-        // blanked the mobile Chats tab / desktop chat pane during transient
-        // instability and flipped every conversation to "offline". Peers
-        // repopulate naturally via PeerJoined / Members on (re)join, and we keep
-        // the open conversation visible — consistent with PeerDisconnected /
-        // PeerExpired above ("friends stay visible when offline"). The relay's
-        // own state is the source of truth for who's online.
+        // Fired on an active-room SWITCH, NOT on connection loss. Do NOT clearAll()
+        // peers or null the selection: that blanked the chat pane during transient
+        // instability and flipped every conversation to "offline". Peers repopulate
+        // via PeerJoined / Members, and the relay's state is the source of truth.
         debugPrint('[HOLLOW] Room cleared (non-destructive — peers/selection preserved)');
 
       case NetworkEvent_Listening(:final address):
         debugPrint('[HOLLOW] Listening: $address');
 
       case NetworkEvent_MessageReceived(:final fromPeer, :final text, :final timestamp, :final messageId, :final replyToMid, :final linkPreview, :final signature, :final publicKey, :final isOwn, :final duplicate):
-        // MULTI-DEVICE: unread counts, the "seen" pointer, mute settings, and
-        // notifications all key on the MASTER identity (a conversation is with a
-        // person, not a device). NOTE: since the Rust `convo_peer` work, the main
-        // DM receive path already emits `fromPeer` RESOLVED to the master — only
-        // the legacy unsigned raw-text fallback (swarm.rs) still emits a device
-        // id. This resolve is therefore belt-and-braces (identityOf is a no-op on
-        // an already-master id); keeping it protects the unread pill against any
-        // future emit site that forgets to resolve (the original bug: a
-        // device-keyed `dmUnreadCounts` entry that `markDmSeen(master)` never
-        // cleared → a permanently-stuck pill).
+        // MULTI-DEVICE: unread counts, the seen pointer, mute and notifications key
+        // on the MASTER identity. Belt-and-braces (the main receive path already
+        // resolves), protecting the pill from a device-keyed entry markDmSeen misses.
         final dmMaster = ref.read(deviceLinkProvider).identityOf(fromPeer);
         ref.read(chatProvider.notifier).receiveMessage(
               fromPeer, text, timestamp, messageId, replyToMid,
@@ -385,29 +336,23 @@ class EventStreamNotifier extends Notifier<bool> {
               publicKey: publicKey,
               isOwn: isOwn,
             );
-        // A sibling echo of OUR OWN sent message: it's outgoing, so it must NOT
-        // mark the conversation unread, raise a notification, or be treated as
-        // the friend typing. Mirror it into the thread (above) and stop.
+        // A sibling echo of OUR OWN sent message: outgoing, so it must NOT mark the
+        // conversation unread, notify, or read as the friend typing.
         if (isOwn) {
-          // Our own send clears any lingering "friend is typing" + marks the DM
-          // read up to here (we just participated in it from another device).
+          // We just participated from another device, so clear typing and mark read.
           ref.read(typingProvider.notifier).clearTyping(dmMaster, dmMaster);
           ref.read(unreadProvider.notifier).markDmSeen(
               dmMaster, messageId.isNotEmpty ? messageId : null);
           break;
         }
         ref.read(typingProvider.notifier).clearTyping(fromPeer, fromPeer);
-        // A duplicate delivery (the row already existed in the DB — a sync
-        // batch or fetch-node insert beat the live message): the append above
-        // keeps an OPEN chat current (in-memory dedup by message_id makes it
-        // idempotent), but unread/notifications must NOT re-fire — a replay
-        // would double-count the pill and re-toast an already-seen message.
+        // A duplicate delivery (a sync batch or fetch-node insert beat the live
+        // message): the append stays idempotent, but unread and notifications must
+        // NOT re-fire or a replay double-counts the pill and re-toasts.
         if (duplicate) break;
-        // Track unread DM — only if not muted.
-        // Window must be visible AND viewing this DM to count as "viewing".
-        // "Active" = desktop focused (alt-tabbed away ≠ reading) / mobile
-        // foreground (backgrounded ≠ reading, even if a chat is open — without
-        // this, sitting in a chat then backgrounding suppressed its OS notif).
+        // Track unread DM, only if not muted. "Viewing" needs the window VISIBLE and
+        // ACTIVE: alt-tabbed away or backgrounded is not reading, and without the
+        // active check a backgrounded open chat suppressed its OS notification.
         final windowVisible = ref.read(windowVisibleProvider);
         final appActive = (Platform.isAndroid || Platform.isIOS)
             ? !ref.read(appLifecycleProvider).isBackground
@@ -424,7 +369,6 @@ class EventStreamNotifier extends Notifier<bool> {
           ref.read(unreadProvider.notifier).onDmMessage(
               dmMaster, messageId, isViewingDm);
         }
-        // System notification for DM.
         if (!isViewingDm && !isDmMuted) {
           ref.read(systemNotificationProvider.notifier).notifyDm(
                 fromPeerId: dmMaster,
@@ -433,11 +377,9 @@ class EventStreamNotifier extends Notifier<bool> {
                 messageId: messageId,
               );
         } else if (isViewingDm && !Platform.isAndroid && !Platform.isIOS) {
-          // The one path that produces NO notification and NO log downstream,
-          // because the notifier is never called. If this line shows up while
-          // the window was actually behind another app, `windowFocusedProvider`
-          // is stuck on true (a missed onWindowBlur) and THAT is the bug — not
-          // anything in the toast backend.
+          // The one path that produces NO notification and NO log downstream. If this
+          // shows while the window was behind another app, `windowFocusedProvider` is
+          // stuck on true (a missed onWindowBlur) and THAT is the bug.
           notifLog('DM suppressed by the viewing gate — '
               'visible=$windowVisible focused=$appActive');
         }
@@ -451,21 +393,17 @@ class EventStreamNotifier extends Notifier<bool> {
               publicKey: publicKey,
             );
         ref.read(typingProvider.notifier).clearTyping('$serverId:$channelId', fromPeer);
-        // Duplicate delivery (row already in DB via a sync batch) — the append
-        // above keeps an open pane current; unread/notifications must not
-        // re-fire. See the DM case.
+        // Duplicate delivery (row already in DB via a sync batch): the append keeps
+        // an open pane current, but unread and notifications must not re-fire.
         if (duplicate) break;
-        // Blocked sender: Rust already drops DM surfaces at ingest, but
-        // channel messages still flow (the pane hides them) — they must not
-        // produce unread badges or notification surfaces. Compare the
-        // sender's MASTER identity (block list is master-keyed).
+        // Blocked sender: Rust drops DM surfaces at ingest, but channel messages
+        // still flow, so they must not produce badges or notifications. Compare the
+        // sender's MASTER identity (the block list is master-keyed).
         final senderMasterBlocked = ref
             .read(blockedUsersProvider)
             .contains(ref.read(deviceLinkProvider).identityOf(fromPeer));
-        // Track unread channel message — only if not muted.
-        // Must be visible, viewing this channel, AND scrolled to bottom. Also
-        // require the app to be active (desktop focused / mobile foreground) —
-        // see the DM gate above.
+        // Track unread channel message only if not muted, visible, viewing, scrolled
+        // to bottom and app-active. See the DM gate above.
         final chAppActive = (Platform.isAndroid || Platform.isIOS)
             ? !ref.read(appLifecycleProvider).isBackground
             : ref.read(windowFocusedProvider);
@@ -484,10 +422,9 @@ class EventStreamNotifier extends Notifier<bool> {
             ref.read(profileProvider), localPeerId);
         final localNick =
             ref.read(serverNicknamesProvider(serverId))[localPeerId];
-        // `replyToOwn` (Rust-computed: parent row's author is US) — never
-        // `replyToMid`, which is a non-nullable String ('' when not a reply);
-        // the old `replyToMid != null` was a tautology that made EVERY message
-        // count as a mention, so "Mentions only" behaved like "All" (#42).
+        // `replyToOwn` (Rust-computed), never `replyToMid`, which is non-nullable
+        // ('' when not a reply): the old `!= null` was a tautology that made EVERY
+        // message a mention, so "Mentions only" behaved like "All" (#42).
         final isMentioned = text.contains('@everyone') ||
             text.contains('@$localName') ||
             (localNick != null && text.contains('@$localNick')) ||
@@ -504,7 +441,6 @@ class EventStreamNotifier extends Notifier<bool> {
           final toRemove = _processedChannelMessageIds.take(250).toList();
           _processedChannelMessageIds.removeAll(toRemove);
         }
-        // System notification for channel message.
         if (!isViewingChannel &&
             !isChannelMuted &&
             !isMentionFiltered &&
@@ -522,19 +458,15 @@ class EventStreamNotifier extends Notifier<bool> {
       case NetworkEvent_SessionEstablished(:final peerId):
         ref.read(peersProvider.notifier).markEncrypted(peerId);
         ref.read(connectionStatusProvider.notifier).onSessionEstablished(peerId);
-        // After re-key, clear any "Sync failed" status for servers where this
-        // peer is a member, so the UI recovers automatically.
+        // After re-key, clear "Sync failed" for servers where this peer is a member.
         _clearFailedSyncForPeer(peerId);
-        // Proactively establish WebRTC data channel for P2P file transfers.
         ref.read(webRtcProvider.notifier).ensureConnection(peerId);
 
       case NetworkEvent_MessageSent(
             :final toPeer, :final messageId, :final timestamp, :final signature, :final publicKey):
-        // Hydrate the optimistic in-memory entry with Rust's signed timestamp
-        // + sig/pk so the Message Proof dialog shows VERIFIED on fresh sends.
-        // The Dart-side DateTime.now() used at optimistic-add time can differ
-        // from Rust's SystemTime::now() by a few ms on machines with coarse
-        // OS timer resolution (e.g. VMs), breaking canonical payload parity.
+        // Hydrate the optimistic entry with Rust's signed timestamp + sig/pk so the
+        // Message Proof dialog shows VERIFIED on fresh sends: Dart's DateTime.now()
+        // can differ from Rust's by a few ms, breaking canonical payload parity.
         ref.read(chatProvider.notifier).hydrateSignature(
               toPeer, messageId, timestamp.toInt(), signature, publicKey,
             );
@@ -553,7 +485,6 @@ class EventStreamNotifier extends Notifier<bool> {
         ref.read(nodeProvider.notifier).state =
             ref.read(nodeProvider).copyWith(error: message);
 
-      // -- CRDT events (Phase 3) --
       case NetworkEvent_ServerCreated(:final serverId, :final name):
         debugPrint('[HOLLOW] Server created: $name ($serverId)');
         ref.read(serverListProvider.notifier).onServerCreated(serverId, name);
@@ -576,8 +507,7 @@ class EventStreamNotifier extends Notifier<bool> {
         ref.read(serverAvatarAnimProvider.notifier).onAssetsReceived(hashes);
         ref.read(avatarFrameProvider.notifier).onAssetsReceived(hashes);
         ref.read(profileAnimProvider.notifier).onAssetsReceived(hashes);
-        // GIF-sized blobs can grow the asset cache quickly — enforce the
-        // cap here too, not just on file downloads.
+        // GIF-sized blobs grow the asset cache fast, so the cap applies here too.
         _enforceStorageCaps();
 
       case NetworkEvent_ChannelAdded(
@@ -608,7 +538,6 @@ class EventStreamNotifier extends Notifier<bool> {
         debugPrint('[HOLLOW] Server deleted: $serverId');
         ref.read(serverListProvider.notifier).onServerDeleted(serverId);
         ref.read(serverStripLayoutProvider.notifier).onServerDeleted(serverId);
-        // Deselect if this was the active server.
         if (ref.read(selectedServerProvider) == serverId) {
           ref.read(selectedServerProvider.notifier).state = null;
           ref.read(selectedChannelProvider.notifier).state = null;
@@ -624,7 +553,6 @@ class EventStreamNotifier extends Notifier<bool> {
         debugPrint('[HOLLOW] Member left: $peerId in $serverId');
         final localId = ref.read(identityProvider).peerId;
         if (peerId == localId) {
-          // Local user was kicked — remove server from UI.
           ref.read(serverListProvider.notifier).onServerDeleted(serverId);
           ref.read(serverStripLayoutProvider.notifier).onServerDeleted(serverId);
           if (ref.read(selectedServerProvider) == serverId) {
@@ -644,14 +572,12 @@ class EventStreamNotifier extends Notifier<bool> {
         ref.read(serverAvatarAnimProvider.notifier).loadAnim(serverId);
         ref.read(serverBannerProvider.notifier).loadBanner(serverId);
         ref.invalidate(serverMembersProvider(serverId));
-        // Reload channels in case they changed while offline.
         if (ref.read(selectedServerProvider) == serverId) {
           ref.read(channelListProvider.notifier).loadForServer(serverId);
           ref.read(channelLayoutProvider.notifier).loadForServer(serverId);
         }
-        // Recompute server unread counts after CRDT sync. Runs for ALL
-        // servers (including selected) to pick up messages that arrived
-        // while the app was offline.
+        // Recompute server unread counts for ALL servers (including selected) to
+        // pick up messages that arrived while offline.
         crdt_api.getServerChannels(serverId: serverId).then((channels) {
           final channelIds = channels.map((c) => c.channelId).toList();
           ref.read(unreadProvider.notifier).recomputeServerUnread(
@@ -662,23 +588,19 @@ class EventStreamNotifier extends Notifier<bool> {
         debugPrint('[HOLLOW] Server joined: $name ($serverId)');
         handleTwitchJoinResult(success: true);
         ref.read(serverListProvider.notifier).onServerCreated(serverId, name);
-        // Order matters for a join that was PARKED: onServerCreated turns the
-        // pending tile into the real server IN PLACE, so it has to run while
-        // that tile still exists. Dropping the row first would leave the
-        // server appended at the end of the strip instead.
+        // Order matters for a PARKED join: onServerCreated turns the pending tile
+        // into the real server IN PLACE, so it must run while that tile exists.
+        // Dropping the row first would append the server at the end of the strip.
         ref.read(serverStripLayoutProvider.notifier).onServerCreated(serverId);
         ref.read(pendingJoinsProvider.notifier).remove(serverId);
-        // Auto-select the newly joined server and load its channels. Close any
-        // centre tab first — joining straight out of Browse Public Channels is
-        // a normal flow, and the tab would sit on top of the server we just
-        // selected (issue #28).
+        // Close any centre tab first: joining out of Browse Public Channels is a
+        // normal flow and the tab would sit on top of the server we just selected (#28).
         setShellTab(ref.read, null);
         ref.read(selectedServerProvider.notifier).state = serverId;
         ref.read(selectedPeerProvider.notifier).state = null;
         ref.read(serverSettingsOpenProvider.notifier).state = false;
         ref.read(channelListProvider.notifier).loadForServer(serverId).then((_) async {
           await ref.read(channelLayoutProvider.notifier).loadForServer(serverId);
-          // Auto-select first text channel in layout order after load completes.
           final joinedChannels = ref.read(channelListProvider);
           if (joinedChannels.isNotEmpty) {
             final layout = ref.read(channelLayoutProvider);
@@ -687,16 +609,14 @@ class EventStreamNotifier extends Notifier<bool> {
                     ?? joinedChannels.keys.first;
           }
         });
-        // Toast feedback (skip if Twitch dialog already showing success)
         final joinCtx = hollowNavigatorKey.currentContext;
         if (joinCtx != null) {
           HollowToast.show(joinCtx, 'Joined $name',
               type: HollowToastType.success);
         }
 
-      // Rust no longer emits this on the 15 second timeout — that path PARKS
-      // the join now. The arm stays for any other emitter (and for older
-      // nodes), which is why it must keep compiling.
+      // Rust no longer emits this on the 15 second timeout (that path PARKS the
+      // join). The arm stays for other emitters and older nodes.
       case NetworkEvent_ServerJoinFailed(:final serverId, :final reason):
         debugPrint('[HOLLOW] Server join failed: $serverId — $reason');
         final failCtx = hollowNavigatorKey.currentContext;
@@ -723,7 +643,6 @@ class EventStreamNotifier extends Notifier<bool> {
               ? ServerSyncStatus.retrying
               : ServerSyncStatus.syncing,
         );
-        // Timeout: if no progress/completion within 10s, clear syncing status.
         _syncTimeouts[serverId]?.cancel();
         _syncTimeouts[serverId] = Timer(const Duration(seconds: 10), () {
           final status = ref.read(serverSyncStatusProvider(serverId));
@@ -750,20 +669,17 @@ class EventStreamNotifier extends Notifier<bool> {
         final selectedServer = ref.read(selectedServerProvider);
         final selectedChannel = ref.read(selectedChannelProvider);
         if (newMessageCount > 0) {
-          // New messages arrived — clear cache so next channel view loads fresh from DB.
-          // Like DM sync: unconditional, no viewing-state dependency.
+          // New messages arrived: clear the cache so the next view loads fresh from DB.
           ref
               .read(channelChatProvider.notifier)
               .clearServerCache(serverId);
-          // If currently viewing this server, merge immediately for the selected channel.
           if (selectedServer == serverId && selectedChannel != null) {
             ref
                 .read(channelChatProvider.notifier)
                 .mergeFromDb(serverId, selectedChannel);
           }
         } else if (selectedServer == serverId && selectedChannel != null) {
-          // No new messages but reactions may have synced — just refresh
-          // reactions on existing in-memory messages (no sync trigger).
+          // No new messages, but reactions may have synced; refresh those only.
           ref
               .read(channelChatProvider.notifier)
               .reloadReactions(serverId, selectedChannel);
@@ -775,15 +691,11 @@ class EventStreamNotifier extends Notifier<bool> {
               .loadPins(serverId, selectedChannel);
         }
 
-        // Files are now downloaded on-demand when visible in viewport.
-        // See channel_chat_pane.dart _requestViewportFiles().
+        // Files are downloaded on demand when visible (channel_chat_pane.dart).
 
-        // Recompute unread counts from DB after sync — respects notification
-        // levels. ONLY when the sync actually inserted something: every
-        // channel-open fires a sync request, and an unconditional server-wide
-        // recount on the resulting no-op completion kept resurrecting stale
-        // counts for channels the user never touched (the "ghost unread on a
-        // sibling channel" cycle).
+        // Recompute unread counts from DB only when the sync actually inserted
+        // something: every channel open fires a sync, and an unconditional recount
+        // on a no-op completion resurrected stale counts for untouched channels.
         if (newMessageCount > 0) {
           debugPrint('[HOLLOW] Triggering recomputeServerUnread for $serverId (newMsgCount=$newMessageCount)');
           crdt_api.getServerChannels(serverId: serverId).then((channels) {
@@ -802,8 +714,7 @@ class EventStreamNotifier extends Notifier<bool> {
         _syncTimeouts.remove(serverId);
         ref.read(syncingPeersProvider.notifier).clearServer(serverId);
         ref.read(syncProgressProvider.notifier).clearServer(serverId);
-        // Transient decrypt failures during re-key → show "Retrying"
-        // instead of stuck "Failed" state.
+        // Transient decrypt failures during re-key show "Retrying", not "Failed".
         final isReKeying = error.contains('re-keying') ||
             error.contains('re-key');
         ref.read(syncStatusProvider.notifier).setStatus(
@@ -839,18 +750,16 @@ class EventStreamNotifier extends Notifier<bool> {
         debugPrint('[HOLLOW] DM sync completed for $peerId: $newMessageCount new messages');
         final chatNotifier = ref.read(chatProvider.notifier);
         if (newMessageCount > 0) {
-          // New messages arrived via sync — reload from DB to pick them up.
-          // loadHistory does an atomic state replace (no separate clear step),
-          // so live-delivered messages are never briefly wiped.
+          // New messages arrived via sync: reload from DB. loadHistory replaces state
+          // atomically, so live-delivered messages are never briefly wiped.
           chatNotifier.loadHistory(peerId).catchError((e) {
             debugPrint('[HOLLOW] Failed to load DM history after sync for $peerId: $e');
           });
           ref.read(unreadProvider.notifier).recomputeDmUnread(peerId);
           _requestMissingFilesForDm(peerId);
         }
-        // When newMessageCount == 0: do nothing. Live-delivered messages
-        // (from pending_messages queue) are already in memory via
-        // MessageReceived events. Clearing the cache would destroy them.
+        // newMessageCount == 0: do nothing. Live-delivered messages are already in
+        // memory, and clearing the cache would destroy them.
 
       case NetworkEvent_ProfileUpdated(:final peerId):
         debugPrint('[HOLLOW] Profile updated: $peerId');
@@ -858,38 +767,31 @@ class EventStreamNotifier extends Notifier<bool> {
         ref.read(avatarProvider.notifier).invalidate(peerId);
         ref.invalidate(bannerProvider(peerId));
         ref.invalidate(showcaseAssetsProvider(peerId));
-        // A re-announce is our one signal that this peer is reachable again,
-        // which is when a frame we asked for while they were offline can
-        // finally be pulled (the rail asks once per session).
+        // A re-announce is our one signal that this peer is reachable again, which
+        // is when a frame asked for while they were offline can finally be pulled.
         ref.read(avatarFrameProvider.notifier).onProfileUpdated(peerId);
         ref.read(profileAnimProvider.notifier).onProfileUpdated(peerId);
         _refreshPushHints();
 
       case NetworkEvent_DeviceListUpdated(:final masterPeerId):
-        // A friend's signed device list was ingested — refresh the Dart
-        // device→identity map so attribution/presence collapse picks it up.
+        // Refresh the Dart device->identity map so attribution picks the list up.
         debugPrint('[HOLLOW] Device list updated: $masterPeerId');
         ref.read(deviceLinkProvider.notifier).refresh();
         ref.read(deviceLabelProvider.notifier).refresh();
-        // The ingest may have RE-KEYED a friend row from a device id to this
-        // master (a friend added by temporary nickname was stranded under the
-        // device id). Reload so the now-master-keyed friend surfaces with the
-        // correct name/presence instead of a raw device id.
+        // The ingest may have RE-KEYED a friend row from a device id to this master
+        // (a friend added by temporary nickname was stranded under the device id).
         ref.read(friendsProvider.notifier).loadAll();
 
       case NetworkEvent_SecurityAlert(:final peerId, :final kind):
-        // Issue 1-C: a contact's identity changed in a way worth showing. Rust
-        // has already persisted + deduped it, so this only has to re-pull —
-        // the banner in their conversation is the durable surface, deliberately
-        // NOT a toast (a toast is missable and does not survive scrollback).
+        // A contact's identity changed in a way worth showing. Rust already persisted
+        // and deduped it; the banner in their conversation is the durable surface,
+        // deliberately NOT a toast (missable, and does not survive scrollback).
         debugPrint('[HOLLOW] Security alert for $peerId: $kind');
         ref.read(securityAlertsProvider.notifier).refresh();
 
       case NetworkEvent_SelfRevoked():
-        // Step 7: THIS device was revoked by the identity. Self-nuke — wipe the
-        // data dir + relaunch to a clean Welcome (mirrors the link "go back" flow
-        // in hollow_shell). The cryptographic cutoff already happened elsewhere;
-        // this is the honest teardown so no half-baked identity lingers.
+        // THIS device was revoked: wipe the data dir and relaunch to a clean Welcome.
+        // The cryptographic cutoff already happened; this is the honest teardown.
         debugPrint('[HOLLOW] This device was REVOKED — self-nuking');
         _selfNuke();
 
@@ -911,9 +813,8 @@ class EventStreamNotifier extends Notifier<bool> {
               publicKey: publicKey,
             );
 
-      // A link preview landed on a message that was sent before its fetch
-      // finished (issue #45). Deliberately NOT routed through applyEdit: the
-      // text is unchanged and editedAt stays null, so no "(edited)" badge.
+      // A link preview landed on a message sent before its fetch finished (#45).
+      // Deliberately NOT applyEdit: text is unchanged and editedAt stays null.
       case NetworkEvent_ChannelLinkPreviewUpdated(
             :final serverId, :final channelId, :final messageId, :final preview):
         debugPrint('[HOLLOW] Link preview for $messageId in $serverId/$channelId');
@@ -937,7 +838,6 @@ class EventStreamNotifier extends Notifier<bool> {
         ref.read(chatProvider.notifier).applyDelete(
             peerId, messageId, deletedAt);
 
-      // -- Emoji reaction events (Phase 3.5) --
       case NetworkEvent_ChannelReactionAdded(
             :final serverId, :final channelId, :final messageId, :final emoji, :final reactor):
         debugPrint('[HOLLOW] Reaction $emoji on $messageId by $reactor in $serverId/$channelId');
@@ -962,7 +862,6 @@ class EventStreamNotifier extends Notifier<bool> {
         ref.read(chatProvider.notifier).applyRemoveReaction(
             peerId, messageId, emoji, reactor);
 
-      // -- Friend events (Phase 3.5) --
       case NetworkEvent_FriendRequestReceived(:final peerId):
         debugPrint('[HOLLOW] Friend request received from $peerId');
         ref.read(friendsProvider.notifier).loadAll();
@@ -976,26 +875,22 @@ class EventStreamNotifier extends Notifier<bool> {
         ref.read(friendsProvider.notifier).loadAll();
 
       case NetworkEvent_FriendsBackfilled(:final count):
-        // Multi-device: a sibling device shared our identity's friend list and
-        // the node inserted `count` new friend rows. Reload so they appear and
-        // the device-collapse online status can resolve them (Phase 6).
+        // Multi-device: a sibling shared our identity's friend list and the node
+        // inserted rows. Reload so device-collapse online status can resolve them.
         debugPrint('[HOLLOW] Friends backfilled from sibling device: $count');
         ref.read(friendsProvider.notifier).loadAll();
 
       case NetworkEvent_FriendRemoved(:final peerId):
         debugPrint('[HOLLOW] Friend removed: $peerId');
         ref.read(friendsProvider.notifier).loadAll();
-        // Close chat if viewing the removed friend.
         if (ref.read(selectedPeerProvider) == peerId) {
           ref.read(selectedPeerProvider.notifier).state = null;
         }
-        // Close split pane if showing the removed friend.
         final splitState = ref.read(splitViewProvider);
         if (splitState.isSplit && splitState.rightPane?.peerId == peerId) {
           ref.read(splitViewProvider.notifier).closeSplit();
         }
 
-      // -- Temporary nickname events --
       case NetworkEvent_NicknameClaimed(:final nickname):
         ref.read(temporaryNicknameProvider.notifier).onClaimed(nickname);
 
@@ -1007,9 +902,8 @@ class EventStreamNotifier extends Notifier<bool> {
 
       case NetworkEvent_NicknameResolveFailed(:final nickname, :final error):
         debugPrint('[HOLLOW] Nickname resolve failed: $nickname — $error');
-        // User-visible failure: the add-friend UIs show an optimistic
-        // "Looking up nickname..." toast at send time — without this, a bad
-        // or expired nickname fails in total silence.
+        // User-visible failure: the add-friend UIs show an optimistic "Looking up
+        // nickname..." toast, so without this a bad nickname fails in total silence.
         final overlay = hollowNavigatorKey.currentState?.overlay;
         final overlayContext = overlay?.context;
         if (overlay != null && overlayContext != null && overlayContext.mounted) {
@@ -1023,7 +917,6 @@ class EventStreamNotifier extends Notifier<bool> {
           );
         }
 
-      // -- Multi-device device linking (Step 4) --
       case NetworkEvent_LinkCodeClaimed(:final code):
         ref.read(deviceLinkSyncProvider.notifier).onCodeClaimed(code);
 
@@ -1068,7 +961,6 @@ class EventStreamNotifier extends Notifier<bool> {
       case NetworkEvent_LinkPushComplete():
         ref.read(deviceLinkSyncProvider.notifier).onPushComplete();
 
-      // -- Relay connection events --
       case NetworkEvent_RelayDisconnected():
         ref.read(temporaryNicknameProvider.notifier).onDisconnected();
         ref.read(deviceLinkSyncProvider.notifier).onDisconnected();
@@ -1080,8 +972,7 @@ class EventStreamNotifier extends Notifier<bool> {
         ref
             .read(connectionStatusProvider.notifier)
             .onRelayStatusChanged('connected');
-        // A hangup we could not deliver while the relay was down: say it now,
-        // so a peer is never left sitting in a call we already left.
+        // A hangup we could not deliver while the relay was down: say it now.
         ref.read(callProvider.notifier).handleRelayReconnected();
 
       case NetworkEvent_RelayConnecting(:final reconnecting):
@@ -1089,12 +980,10 @@ class EventStreamNotifier extends Notifier<bool> {
             .read(connectionStatusProvider.notifier)
             .onRelayStatusChanged(reconnecting ? 'reconnecting' : 'connecting');
 
-      // -- Channel notification hints (unsubscribed channel awareness) --
       case NetworkEvent_ChannelNotificationHint(
             :final serverId, :final channelId, :final fromPeer,
             :final messageId,
             :final hasEveryone, :final mentionedNames, :final isReplyToOwn):
-        // Ignore own hints.
         final localPeerId = ref.read(identityProvider).peerId ?? '';
         if (fromPeer == localPeerId) break;
         // Blocked sender — no unread badges from blocked users (master-keyed).
@@ -1108,8 +997,7 @@ class EventStreamNotifier extends Notifier<bool> {
             ref.read(selectedServerProvider) == serverId &&
             ref.read(selectedChannelProvider) == channelId;
         if (isViewingChannel) break;
-        // Deterministic dedup: skip if we already processed this message
-        // via ChannelMessageReceived (subscribed channel).
+        // Deterministic dedup against ChannelMessageReceived on a subscribed channel.
         if (messageId.isNotEmpty && _processedChannelMessageIds.contains(messageId)) break;
         final channelNotifLevel = ref
             .read(notificationSettingsProvider.notifier)
@@ -1133,21 +1021,15 @@ class EventStreamNotifier extends Notifier<bool> {
             serverId, channelId, hintMid,
             false, isMention: isMentioned);
 
-      // -- Typing indicator events (Phase 3.5) --
       case NetworkEvent_TypingStarted(
             :final peerId, :final serverId, :final channelId):
-        // Multi-device (Phase 6): the typing event carries the sender's raw
-        // DEVICE peer_id, but DM threads (and the chat view's lookup) key on the
-        // sender's MASTER identity. Resolve it so the indicator matches the
-        // conversation key — otherwise a multi-device friend's "typing…" never
-        // shows. Single-device resolves to itself (no-op). Channel key is
-        // unchanged (serverId:channelId), but the stored typist is also collapsed
-        // to master so per-person channel typing attributes correctly.
+        // Multi-device: the typing event carries the sender's raw DEVICE id, but DM
+        // threads key on the MASTER identity, so resolve it or a multi-device
+        // friend's "typing..." never shows. Channel keys are unchanged.
         final typist = ref.read(deviceLinkProvider).identityOf(peerId);
         final key = serverId.isEmpty ? typist : '$serverId:$channelId';
         ref.read(typingProvider.notifier).setTyping(key, typist);
 
-      // -- Presence events (Phase 6.75) --
       case NetworkEvent_PeerStatusChanged(:final peerId, :final status):
         if (status == 'invisible') {
           ref.read(invisiblePeersProvider.notifier).setInvisible(peerId);
@@ -1155,7 +1037,6 @@ class EventStreamNotifier extends Notifier<bool> {
           ref.read(invisiblePeersProvider.notifier).setOnline(peerId);
         }
 
-      // -- Pinned message events (Phase 3.5) --
       case NetworkEvent_MessagePinned(
             :final serverId, :final channelId, :final messageId):
         debugPrint('[HOLLOW] Message pinned: $messageId in $serverId/$channelId');
@@ -1166,7 +1047,6 @@ class EventStreamNotifier extends Notifier<bool> {
         debugPrint('[HOLLOW] Message unpinned: $messageId in $serverId/$channelId');
         ref.read(pinnedProvider.notifier).applyUnpin(serverId, channelId, messageId);
 
-      // -- File transfer events (Phase 3.5) --
       case NetworkEvent_FileHeaderReceived(
             :final fileId, :final fileName, :final sizeBytes,
             :final isImage, :final width, :final height,
@@ -1190,10 +1070,8 @@ class EventStreamNotifier extends Notifier<bool> {
               videoThumb: videoThumb,
               shareRootHash: shareRootHash,
             );
-        // Guest live path: the public-channel file message's metadata arrives
-        // as this event right after the row itself — attach it so the card
-        // renders (a RAM-only no-op for rows that already carry one; member
-        // rows are rebuilt from the DB by _reloadChatForFile below anyway).
+        // Guest live path: the public-channel file message's metadata arrives right
+        // after the row, so attach it (a RAM-only no-op for rows that carry one).
         if (serverId.isNotEmpty && channelId.isNotEmpty && messageId.isNotEmpty) {
           final dotExt = fileName.contains('.') ? fileName.split('.').last : '';
           ref.read(channelChatProvider.notifier).attachFileMeta(
@@ -1263,34 +1141,29 @@ class EventStreamNotifier extends Notifier<bool> {
 
       case NetworkEvent_FileCompleted(:final fileId, :final diskPath):
         debugPrint('[HOLLOW] File completed: $fileId at $diskPath');
-        // Completed bytes reset the missing-file request throttle, so a file
-        // that later goes stale again gets fresh retry attempts.
+        // Completed bytes reset the missing-file throttle, so a later stale file retries.
         _fileRequestLast.remove(fileId);
         _fileRequestAttempts.remove(fileId);
         ref.read(fileTransferProvider.notifier).onFileCompleted(
               fileId, diskPath);
-        // Reload the chat that contains this file to show the image.
         _reloadChatForFile(fileId);
-        // Enforce the disk caps so the user-set limits are actually honored
-        // (both sliders were no-ops before this). Keeps signed headers — only
-        // the oldest heavy bytes are evicted. Fire-and-forget.
+        // Enforce the disk caps so the user-set limits are honored. Signed headers
+        // are kept; only the oldest heavy bytes are evicted.
         _enforceStorageCaps();
 
       case NetworkEvent_FileFailed(:final fileId, :final error):
         debugPrint('[HOLLOW] File failed: $fileId — $error');
         if (error == 'auto_download_off') {
-          // Auto-download gate decline (issue #41), not a real failure: pin
-          // the bubble on its manual Download button so neither the Rust WS
-          // poll nor the Dart WebRTC receive can flip it into a spinner
-          // while the unwanted push transits and is discarded.
+          // Auto-download gate decline (issue #41), not a real failure: pin the bubble
+          // on its manual Download button so neither the Rust WS poll nor the Dart
+          // WebRTC receive flips it into a spinner while the push is discarded.
           ref.read(fileTransferProvider.notifier).markDeclined(fileId);
         } else {
           ref.read(fileTransferProvider.notifier).onFileFailed(fileId, error);
         }
 
-      // Honest file card states (tmp.txt item 1): why the bytes are not here
-      // yet, so the card can say it instead of offering a button that would
-      // do nothing.
+      // Honest file card states: why the bytes are not here yet, so the card can
+      // say it instead of offering a button that would do nothing.
       case NetworkEvent_FileAvailability(
             :final fileId, :final state, :final peerId):
         debugPrint('[HOLLOW] File availability: $fileId — $state ($peerId)');
@@ -1298,13 +1171,11 @@ class EventStreamNotifier extends Notifier<bool> {
             .read(fileTransferProvider.notifier)
             .onFileAvailability(fileId, state, peerId);
         if (state == FileAvailabilityState.expired) {
-          // Rust has stamped expired_at on our own row; reload so the message
-          // re-renders from the DB as the expired card rather than a caption
-          // that a rebuild could lose.
+          // Rust stamped expired_at on our own row; reload so the message re-renders
+          // from the DB as the expired card rather than a caption a rebuild could lose.
           _reloadChatForFile(fileId);
         }
 
-      // -- Vault shard events (Phase 4) --
       case NetworkEvent_ShardStored(:final serverId, :final contentId,
             fromPeer: _):
         ref.read(vaultStatusProvider.notifier).onShardStored(
@@ -1322,7 +1193,6 @@ class EventStreamNotifier extends Notifier<bool> {
       case NetworkEvent_ShardRequestFailed():
         break;
 
-      // -- Vault upload/download pipeline events (Phase 4) --
       case NetworkEvent_VaultUploadProgress(:final serverId,
             :final contentId, :final phase, :final progress):
         ref.read(vaultStatusProvider.notifier).onUploadProgress(
@@ -1339,7 +1209,6 @@ class EventStreamNotifier extends Notifier<bool> {
             :final contentId, :final phase, :final progress):
         ref.read(vaultStatusProvider.notifier).onDownloadProgress(
               serverId, contentId, phase, progress);
-        // Also update file transfer provider so the file card shows vault phase.
         ref.read(fileTransferProvider.notifier).onVaultDownloadProgress(
               contentId, phase, progress);
       case NetworkEvent_VaultDownloadComplete(:final serverId,
@@ -1348,8 +1217,7 @@ class EventStreamNotifier extends Notifier<bool> {
               serverId, contentId);
         ref.read(fileTransferProvider.notifier).onVaultDownloadComplete(
               contentId, diskPath);
-        // Bridge to recovery pool: if pool is active for this server,
-        // this reconstruction was triggered by recovery shard transfer.
+        // Bridge to recovery pool: an active pool means recovery shard transfer.
         final activePool = ref.read(recoveryPoolProvider);
         if (activePool != null && activePool.isActive && activePool.serverId == serverId) {
           ref.read(recoveryPoolProvider.notifier).onFileRecovered(
@@ -1360,7 +1228,6 @@ class EventStreamNotifier extends Notifier<bool> {
         ref.read(vaultStatusProvider.notifier).onDownloadFailed(
               serverId, contentId, error);
 
-      // -- Vault rebalancing events (Phase 4) --
       case NetworkEvent_RebalanceStarted(:final serverId, :final shardsToMove):
         ref.read(downloadManagerStateProvider.notifier)
             .onRebalanceStarted(serverId, shardsToMove);
@@ -1371,7 +1238,6 @@ class EventStreamNotifier extends Notifier<bool> {
         ref.read(downloadManagerStateProvider.notifier)
             .onRebalanceCompleted(serverId);
 
-      // -- Connection status events --
       case NetworkEvent_KeyExchangeStarted(:final peerId):
         ref
             .read(connectionStatusProvider.notifier)
@@ -1383,12 +1249,10 @@ class EventStreamNotifier extends Notifier<bool> {
             .read(connectionStatusProvider.notifier)
             .onKeyExchangeProgress(peerId, stage);
 
-      // -- Vault guard events --
       case NetworkEvent_VaultUploadReplicationFallback(
             :final serverId, :final contentId, :final online, :final needed):
         debugPrint('[HOLLOW] Vault upload fallback: $online online < $needed needed for $contentId in $serverId — using replication');
 
-      // -- WebRTC events (Phase 5A) --
       case NetworkEvent_WebRtcSignal(
             :final peerId, :final signalType, :final payload, :final connId):
         ref.read(webRtcProvider.notifier).handleSignal(
@@ -1401,43 +1265,32 @@ class EventStreamNotifier extends Notifier<bool> {
               peerId, transferId, filePath, totalSize.toInt(), kind, shardIndex,
               chunkIndex: chunkIndex);
 
-      // -- Voice call events (Phase 5B) --
       case NetworkEvent_CallSignal(
             :final peerId, :final signalType, :final payload):
         // Multi-device: the relay reports the caller's DEVICE id, but the call UI
-        // (the floating pill, the DM the call belongs to) keys on the MASTER —
-        // same as every other per-person view. Without collapsing, a call from a
-        // multi-device friend showed under the raw device id (a "different DM"
-        // than the conversation you're in). Resolve to the master so all call
-        // state is master-consistent; replies go to the master and the Rust
-        // `pick_online_device` routes them back to the caller's online device.
-        // Single-device → identityOf returns the id unchanged (no-op).
+        // keys on the MASTER like every other per-person view, or a call from a
+        // multi-device friend shows under a "different DM" than the conversation.
         final callMaster =
             ref.read(deviceLinkProvider).identityOf(peerId);
         ref.read(callProvider.notifier).handleCallSignal(
               callMaster, signalType, payload);
 
-      // -- Voice channel events (Phase 5C) --
       case NetworkEvent_VoiceChannelJoined(
             :final serverId, :final channelId, :final peerId, :final isSelf):
         final vcNotifier = ref.read(voiceChannelProvider.notifier);
         final isNewArrival =
             vcNotifier.onPeerJoined(serverId, channelId, peerId);
-        // Conferences are virtual servers ('conf:...') with no channel list —
-        // their call renders in the Conferences tab, so never touch the
-        // selected-channel providers for them.
+        // Conferences are virtual servers ('conf:...') with no channel list, so
+        // never touch the selected-channel providers for them.
         final isConferenceJoin = serverId.startsWith('conf:');
-        // Self vs remote comes from RUST (the emitting handler knows) — never
-        // from comparing peerId to a local id: the id is the ROUTABLE DEVICE
-        // form and every local id-form guess here has self-dialed (self-ghost).
+        // Self vs remote comes from RUST, never from comparing peerId to a local id:
+        // the id is the ROUTABLE DEVICE form and every local guess has self-dialed.
         if (isSelf) {
           if (!isConferenceJoin) {
-            // Cache the currently selected channel so we can restore it on leave.
             vcNotifier.preVcChannelId = ref.read(selectedChannelProvider);
           }
           vcNotifier.onLocalJoined(serverId, channelId);
           if (!isConferenceJoin) {
-            // Auto-select the voice channel for the main pane.
             ref.read(selectedChannelProvider.notifier).state = channelId;
           }
         } else {
@@ -1455,10 +1308,8 @@ class EventStreamNotifier extends Notifier<bool> {
         final vcNotifier = ref.read(voiceChannelProvider.notifier);
         vcNotifier.onPeerLeft(serverId, channelId, peerId);
         if (isSelf) {
-          // Restore the channel that was selected before joining the VC.
-          // Fall back to first text channel if the cached one is gone.
-          // Conference leaves never touched channel selection on join, so
-          // there's nothing to restore ('conf:...' virtual servers).
+          // Restore the channel selected before joining, falling back to the first text
+          // channel. Conference leaves never touched channel selection.
           if (!serverId.startsWith('conf:') &&
               ref.read(selectedChannelProvider) == channelId) {
             final cached = vcNotifier.preVcChannelId;
@@ -1488,17 +1339,14 @@ class EventStreamNotifier extends Notifier<bool> {
         ref.read(voiceChannelProvider.notifier).handleSignal(
               peerId, signalType, payload, serverId, channelId);
 
-      // Media forwarder control plane (step 3): fwd_ingest_answer /
-      // fwd_egress_offer / fwd_error from the forwarder's Olm-direct lane.
-      // The provider gates on "fromPeer == the discovered forwarder AND the
-      // origin is watched + assigned".
+      // Media forwarder control plane: fwd_* frames from the forwarder's Olm-direct
+      // lane. The provider gates on sender == the discovered forwarder + assignment.
       case NetworkEvent_ForwarderSignal(
             :final fromPeer, :final signalType, :final payload):
         ref
             .read(voiceChannelProvider.notifier)
             .handleForwarderSignal(fromPeer, signalType, payload);
 
-      // -- Conference events (Zoom-style rooms) --
       case NetworkEvent_ConferenceJoinRequestReceived(
             :final confId, :final peerId, :final displayName,
             :final avatarHash):
@@ -1520,12 +1368,9 @@ class EventStreamNotifier extends Notifier<bool> {
       case NetworkEvent_ConferenceChatMessage(
             :final confId, :final senderPeerId, :final text,
             :final timestamp):
-        // Conference chat renders in the SAME ChannelChatPane as screen-share
-        // chat, under the RAM-only 'conf:<id>:main' key — never persisted,
-        // never touches unread machinery. senderPeerId is the authenticated
-        // MLS leaf credential (a device id); the pane collapses it to master
-        // for display. Message id derives from sender+stamp so an echo of an
-        // optimistic send dedups by message_id like every other chat surface.
+        // Conference chat renders in the SAME ChannelChatPane under the RAM-only
+        // 'conf:<id>:main' key: never persisted, never touches unread machinery.
+        // The message id derives from sender+stamp so an optimistic echo dedups.
         ref.read(channelChatProvider.notifier).receiveMessage(
               conferenceServerId(confId),
               kConferenceChannelId,
@@ -1544,7 +1389,6 @@ class EventStreamNotifier extends Notifier<bool> {
         unawaited(
             ref.read(conferenceProvider.notifier).onKicked(confId, byPeerId));
 
-      // -- Gossip relay tree events (Phase 5D) --
       case NetworkEvent_GossipConnect(:final peerId):
         ref.read(webRtcProvider.notifier).ensureConnection(peerId);
 
@@ -1568,8 +1412,7 @@ class EventStreamNotifier extends Notifier<bool> {
         );
 
       case NetworkEvent_GossipRelayOp(:final targets, :final payload):
-        // Tier 2 large-server scaling: fan a small CRDT-op frame to mesh
-        // neighbors over data channels (relay egress stays untouched).
+        // Tier 2 scaling: fan a CRDT-op frame to mesh neighbors over data channels.
         ref.read(webRtcProvider.notifier).relayGossipOp(
               targets: targets,
               payload: Uint8List.fromList(payload),
@@ -1587,7 +1430,6 @@ class EventStreamNotifier extends Notifier<bool> {
               serverId, epoch.toInt(), Uint8List.fromList(sframeKey),
               channelId: channelId);
 
-      // -- Recovery pool events --
       case NetworkEvent_RecoveryPoolCreated(:final serverId, :final inviteLink):
         ref.read(recoveryPoolProvider.notifier).onPoolCreated(serverId, inviteLink);
       case NetworkEvent_RecoveryPoolJoined(:final serverId):
@@ -1617,13 +1459,11 @@ class EventStreamNotifier extends Notifier<bool> {
         ref.read(recoveryPoolProvider.notifier).onFileRecovered(serverId, contentId, diskPath);
       case NetworkEvent_RecoveryPoolStopped(:final serverId):
         ref.read(recoveryPoolProvider.notifier).onPoolStopped(serverId);
-      // -- Hollow Share --
       case NetworkEvent_ShareManifestReady(
             :final rootHash, :final fileName, :final totalSize, :final chunkCount):
         debugPrint('[HOLLOW-SHARE] manifest ready: $fileName ($totalSize bytes, $chunkCount chunks) root=$rootHash');
         ref.read(shareTabProvider.notifier).handleShareManifestReady(rootHash, fileName, totalSize.toInt(), chunkCount);
 
-        // Auto-start download if this was triggered by a share_ref (hidden share).
         final pending = _pendingAutoDownloads.remove(rootHash);
         if (pending != null) {
           debugPrint('[HOLLOW-SHARE] Auto-starting download for share-backed file $rootHash');
@@ -1640,7 +1480,6 @@ class EventStreamNotifier extends Notifier<bool> {
             :final rootHash, :final chunksHave, :final chunksTotal, :final seeders, :final leechers, :final bytesPerSec):
         debugPrint('[HOLLOW-SHARE] progress $rootHash: $chunksHave/$chunksTotal chunks, $seeders seeders, $leechers leechers, $bytesPerSec B/s');
         ref.read(shareTabProvider.notifier).handleShareProgress(rootHash, chunksHave, chunksTotal, seeders, leechers, bytesPerSec.toInt());
-        // Bridge to file transfer state for share-backed files.
         final progressFileId = _shareToFileId[rootHash];
         if (progressFileId != null) {
           ref.read(fileTransferProvider.notifier).onFileProgress(
@@ -1653,7 +1492,6 @@ class EventStreamNotifier extends Notifier<bool> {
       case NetworkEvent_ShareCompleted(:final rootHash, :final diskPath):
         debugPrint('[HOLLOW-SHARE] completed $rootHash → $diskPath');
         ref.read(shareTabProvider.notifier).handleShareCompleted(rootHash, diskPath);
-        // Bridge to file transfer state for share-backed files.
         final completedFileId = _shareToFileId.remove(rootHash);
         if (completedFileId != null) {
           debugPrint('[HOLLOW-SHARE] Bridging share completion to file $completedFileId → $diskPath');
@@ -1682,9 +1520,8 @@ class EventStreamNotifier extends Notifier<bool> {
         debugPrint('[HOLLOW-SHARE] list: ${entries.length} entries');
         ref.read(shareTabProvider.notifier).handleShareList(entries);
       case NetworkEvent_ShareNeedWebRtc(:final peerId, :final hidden):
-        // Share rides its OWN peer connection, never the general hollow-data
-        // one — that connection carries TURN (and is TURN-only while "Always
-        // relay calls" is on), and Share must stay off the relay entirely.
+        // Share rides its OWN peer connection: the general one carries TURN (and is
+        // TURN-only under "Always relay calls"), and Share must stay off the relay.
         ref.read(webRtcProvider.notifier).ensureShareConnection(
               peerId,
               hidden
@@ -1796,8 +1633,7 @@ class EventStreamNotifier extends Notifier<bool> {
             );
           }
         } else if (reason.startsWith('nsfw_confirm:')) {
-          // Format: "nsfw_confirm:{server_name}". Not a hard rejection — show
-          // the consent gate; on "Proceed" re-join with nsfwConfirmed: true.
+          // Format: "nsfw_confirm:{server_name}". A consent gate, not a rejection.
           final serverName = reason.substring('nsfw_confirm:'.length);
           showNsfwConfirmDialog(
             ctx,
@@ -1813,7 +1649,6 @@ class EventStreamNotifier extends Notifier<bool> {
           }
         }
 
-      // -- Guest sync events (Public Channels Phase 3) --
       case NetworkEvent_PublicChannelListReceived(
             :final serverId, :final serverName, :final channels, :final serverAvatar,
             :final serverBannerThumb):
@@ -1854,11 +1689,9 @@ class EventStreamNotifier extends Notifier<bool> {
           for (final r in m.reactions) {
             reactions.putIfAbsent(r.emoji, () => []).add(r.peerId);
           }
-          // Metadata attachment — the card renders name/size/type; bytes
-          // arrive via requestPublicFile and light it up through
-          // fileTransferProvider state. `diskPath` is set ONLY when
-          // previewing our own server (the file is already on OUR disk), so
-          // the owner's preview renders instantly with no peer fetch.
+          // Metadata attachment: the card renders name/size/type and bytes arrive via
+          // requestPublicFile. `diskPath` is set ONLY when previewing our own server,
+          // so the owner's preview renders instantly with no peer fetch.
           final fm = m.fileMeta;
           final attachment = fm == null
               ? null
@@ -1893,17 +1726,15 @@ class EventStreamNotifier extends Notifier<bool> {
             replyToMid: m.replyTo,
             reactions: reactions,
             fileAttachment: attachment,
-            // Signature-covered on the Rust side before it reached us
-            // (guest_item_accepted binds the card into the check), so this
-            // renders like any member's card — and still fetches nothing.
+            // Signature-covered on the Rust side before it reached us, so this renders
+            // like any member's card and still fetches nothing.
             linkPreview: m.linkPreview,
           );
         }).toList();
         ref.read(channelChatProvider.notifier).setGuestMessages(
               serverId, channelId, chatMessages);
 
-        // Process sender profiles — inject into profileProvider so ChannelMessageBubble
-        // can display names/avatars for guest-synced peers.
+        // Inject sender profiles so guest-synced peers get names/avatars.
         if (senderProfiles.isNotEmpty) {
           final currentGuest = Map<String, GuestSenderProfile>.from(
               ref.read(guestSenderProfilesProvider));
@@ -1920,7 +1751,6 @@ class EventStreamNotifier extends Notifier<bool> {
             if (avatar != null) {
               ref.read(avatarProvider.notifier).setAvatar(p.peerId, avatar);
             }
-            // Inject into profileProvider if not already present (or has no display name)
             final existing = currentProfiles[p.peerId];
             if (p.name != null && p.name!.isNotEmpty &&
                 (existing == null || existing.displayName.isEmpty)) {
@@ -1934,10 +1764,8 @@ class EventStreamNotifier extends Notifier<bool> {
                 bannerBytes: null,
                 twitchUsername: existing?.twitchUsername ?? '',
                 showcaseBoard: existing?.showcaseBoard ?? '',
-                // Frames stay OFF the guest sync path (it ships a 64px avatar
-                // thumb and should stay minimal), so this only carries
-                // through a frame we already knew about. Same for the
-                // animated avatar/banner hashes.
+                // Frames stay OFF the guest sync path (it ships a 64px avatar thumb), so
+                // this only carries a frame we already knew. Same for the animated hashes.
                 avatarFrame: existing?.avatarFrame ?? '',
                 avatarAnim: existing?.avatarAnim ?? '',
                 bannerAnim: existing?.bannerAnim ?? '',
@@ -1959,9 +1787,7 @@ class EventStreamNotifier extends Notifier<bool> {
           );
         } else {
           ref.read(guestChannelMapProvider.notifier).removeChannel(serverId, channelId);
-          // Clear cached messages for the removed channel
           ref.read(channelChatProvider.notifier).clearGuestChannel(serverId, channelId);
-          // Deselect if active
           if (ref.read(guestSelectedChannelProvider) == channelId &&
               ref.read(guestSelectedServerProvider) == serverId) {
             ref.read(guestSelectedChannelProvider.notifier).state = null;
@@ -1975,11 +1801,8 @@ class EventStreamNotifier extends Notifier<bool> {
   }
 
   /// Per-file throttle for the missing-file sweeps: a request that produced no
-  /// bytes must not re-fire on every chat open / sync. RAM-only (fresh attempts
-  /// after an app restart); cleared per file on FileCompleted. Without this, an
-  /// id nobody holds anymore loops forever — and every answered ask makes the
-  /// holder re-stream the FULL file, which counts against the relay byte
-  /// budget in both directions.
+  /// bytes must not re-fire on every chat open. RAM-only, cleared on
+  /// FileCompleted; every answered ask re-streams the FULL file both ways.
   static final Map<String, DateTime> _fileRequestLast = {};
   static final Map<String, int> _fileRequestAttempts = {};
   static const _fileRequestCooldown = Duration(minutes: 10);
@@ -2000,13 +1823,10 @@ class EventStreamNotifier extends Notifier<bool> {
     return false;
   }
 
-  /// The peer_ids of OUR OWN other (sibling) devices that are currently online
-  /// (multi-device, Phase 6 / Step 5.1). A sibling is a valid P2P source for any
-  /// file we're missing — it holds the same `file_id` on its own disk. Used as a
-  /// fallback/parallel source for missing DM files so an image syncs even when the
-  /// conversation peer (friend) is offline. Empty on a single-device install
-  /// (no device resolves to our master but ourselves) → byte-for-byte old
-  /// behavior.
+  /// The peer_ids of OUR OWN other (sibling) devices currently online. A sibling
+  /// is a valid P2P source for any file we're missing (same `file_id` on its own
+  /// disk), used as a fallback when the conversation peer is offline. Empty on a
+  /// single-device install.
   List<String> _onlineSiblingDevices() {
     final myMaster = ref.read(identityProvider).peerId ?? '';
     if (myMaster.isEmpty) return const [];
@@ -2023,22 +1843,16 @@ class EventStreamNotifier extends Notifier<bool> {
     return out;
   }
 
-  /// Public entry: re-request any missing DM file bytes for a conversation when
-  /// its thread is opened. Closes the gap where a file whose LIVE WebRTC transfer
-  /// failed (ICE glare, drop) is never retried — the post-sync retry only fires
-  /// after a message-bearing `DmSyncCompleted`, so a file with metadata-but-no-
-  /// bytes stayed an empty bubble until something else triggered a sync. Sourced
-  /// from the friend AND our own online sibling devices (multi-device).
+  /// Public entry: re-request missing DM file bytes when a thread is opened.
+  /// Closes the gap where a file whose LIVE WebRTC transfer failed is never
+  /// retried. Sourced from the friend AND our own online sibling devices.
   Future<void> requestMissingDmFilesOnOpen(String peerId) =>
       _requestMissingFilesForDm(peerId);
 
-  /// Manually start a share-backed download (issue #41): the Download button
-  /// on an over-threshold or auto-download-off share-backed file. Registers
-  /// the same bridging state as the auto-download path so ShareManifestReady /
-  /// ShareProgress / ShareCompleted flow into the file-transfer UI. The share
-  /// ref comes from the persisted `files.share_ref_json` column, so this works
-  /// after a restart (a direct FileRequest cannot — its response is share-less
-  /// and our own size cap rejects it).
+  /// Manually start a share-backed download (issue #41). Registers the same
+  /// bridging state as the auto-download path. The share ref comes from the
+  /// persisted `files.share_ref_json`, so this works after a restart, which a
+  /// direct FileRequest cannot (its response is share-less and hits the size cap).
   Future<void> startManualShareDownload({
     required String fileId,
     required String rootHash,
@@ -2069,17 +1883,14 @@ class EventStreamNotifier extends Notifier<bool> {
     }
   }
 
-  /// Request missing files after DM sync completes — scoped to THIS
-  /// conversation only (the account-global sweep re-requested every missing id
-  /// from the DM peer on every chat open, and leaked unrelated file ids to
-  /// them).
+  /// Request missing files after DM sync, scoped to THIS conversation: the
+  /// account-global sweep leaked unrelated file ids to the DM peer.
   Future<void> _requestMissingFilesForDm(String peerId) async {
     await Future.delayed(const Duration(seconds: 1));
     try {
-      // Auto-download off for this DM (#41): the sweep IS the auto-download
-      // for offline-sent files — skip it; every file card offers a manual
-      // Download button instead. VOICE NOTES stay exempt (they behave like
-      // text), so a gated sweep still pulls those and nothing else.
+      // Auto-download off for this DM (#41): the sweep IS the auto-download for
+      // offline-sent files, so skip it and offer a manual Download button. VOICE
+      // NOTES stay exempt, since they behave like text.
       final gated = effectiveAutoDownloadMbRead(ref, 'dm:$peerId') == 0;
       var missingIds =
           await storage_api.getMissingFileIdsForDm(peerId: peerId);
@@ -2087,10 +1898,9 @@ class EventStreamNotifier extends Notifier<bool> {
         final voiceIds = <String>[];
         for (final id in missingIds) {
           final info = await storage_api.getFileMetadata(fileId: id);
-          // Name, extension and size all have to agree before a gated sweep
-          // pulls a file: a sender picks the name, so on its own it is an
-          // invitation to smuggle any bytes past the gate. The wire header's
-          // `voice` flag does not reach Dart yet (see isGenuineVoiceNote).
+          // Name, extension and size must all agree before a gated sweep pulls a
+          // file: the sender picks the name, so on its own it invites smuggling. The
+          // wire header's `voice` flag does not reach Dart yet (isGenuineVoiceNote).
           if (info != null &&
               isGenuineVoiceNote(
                 voice: true,
@@ -2104,14 +1914,10 @@ class EventStreamNotifier extends Notifier<bool> {
         missingIds = voiceIds;
       }
       if (missingIds.isEmpty) return;
-      // ONE source per sweep: the conversation peer (friend) when reachable —
-      // the canonical holder — else an online sibling device that backfilled
-      // the file (it holds the same bytes; covers the friend-offline gap where
-      // a synced image card stayed a placeholder forever). NEVER both in
-      // parallel: each holder re-encrypts its stream with its OWN AES key, so
-      // a second stream can only fail decrypt (see Rust handle_request_file),
-      // and every duplicate full-byte stream counts against the relay byte
-      // budget twice.
+      // ONE source per sweep: the conversation peer when reachable, else an online
+      // sibling that backfilled the file. NEVER both in parallel: each holder
+      // re-encrypts with its OWN AES key so a second stream can only fail decrypt,
+      // and a duplicate full-byte stream counts against the relay budget twice.
       final links = ref.read(deviceLinkProvider);
       final onlinePeers = ref.read(peersProvider);
       final friendOnline = onlinePeers.keys
@@ -2143,13 +1949,9 @@ class EventStreamNotifier extends Notifier<bool> {
     }
   }
 
-
-
-  /// When a file transfer completes, reload the chat that contains
-  /// the file message so the image preview renders.
-  /// Enforce the downloaded-files + vault cache caps after a download completes.
-  /// Reads the user-set caps and evicts oldest bytes over the limit (signed
-  /// headers are kept, so messages stay re-downloadable). Best-effort.
+  /// Reload the chat containing this file so the image preview renders, then
+  /// enforce the downloaded-files + vault cache caps. Signed headers are kept,
+  /// so messages stay re-downloadable. Best-effort.
   void _enforceStorageCaps() {
     final filesCap = ref.read(filesCacheCapProvider).valueOrNull ?? 5120;
     final vaultCap = ref.read(vaultCacheCapProvider).valueOrNull ?? 1024;
@@ -2175,7 +1977,6 @@ class EventStreamNotifier extends Notifier<bool> {
       final fileInfo = await storage_api.getFileMetadata(fileId: fileId);
       if (fileInfo == null) return;
       if (fileInfo.contextType == 'dm') {
-        // Reload the DM chat.
         await ref.read(chatProvider.notifier).loadHistory(fileInfo.contextId);
       } else if (fileInfo.contextType == 'channel') {
         // contextId is "serverId:channelId"
@@ -2190,10 +1991,8 @@ class EventStreamNotifier extends Notifier<bool> {
     }
   }
 
-  /// When a session is (re-)established with a peer, clear any "Sync failed"
-  /// Resolve channel name and show notification (async helper). `isMention`
-  /// is the ONE authoritative mention decision (computed at the event gate) —
-  /// notifyChannel used to re-derive it with a drifted copy of the check (#42).
+  /// Resolve channel name and show notification. `isMention` is the ONE
+  /// authoritative mention decision, computed at the event gate (#42).
   Future<void> _notifyChannelWithName(String serverId, String channelId,
       String fromPeer, String text, bool isMention, String messageId) async {
     String? chName = ref.read(channelListProvider)[channelId]?.name;
@@ -2218,8 +2017,8 @@ class EventStreamNotifier extends Notifier<bool> {
         );
   }
 
-  /// status for servers where that peer is a member, and re-trigger sync for
-  /// the active channel so the UI recovers automatically after re-key.
+  /// When a session is (re-)established with a peer, clear "Sync failed" for
+  /// servers where that peer is a member and re-trigger sync for the active channel.
   void _clearFailedSyncForPeer(String peerId) {
     final syncStatuses = ref.read(syncStatusProvider);
     final servers = ref.read(serverListProvider);
@@ -2228,24 +2027,20 @@ class EventStreamNotifier extends Notifier<bool> {
       final status = syncStatuses[serverId];
       if (status != ServerSyncStatus.failed) continue;
 
-      // Check if this peer is a member of this server.
       final membersAsync = ref.read(serverMembersProvider(serverId));
       final isMember = membersAsync.whenOrNull(
         data: (members) => members.any((m) => m.peerId == peerId),
       ) ?? false;
 
       if (isMember) {
-        // Clear the failed status — effective status will derive from peer count.
         ref.read(syncStatusProvider.notifier).setStatus(
             serverId, ServerSyncStatus.idle);
 
-        // Re-trigger sync for the currently viewed channel.
         final selectedServer = ref.read(selectedServerProvider);
         final selectedChannel = ref.read(selectedChannelProvider);
         if (selectedServer == serverId && selectedChannel != null) {
-          // .catchError, not try/catch: the call is fire-and-forget, so an
-          // async rejection (e.g. "Node is not running") would escape a sync
-          // try/catch and land in the zone crash handler.
+          // .catchError, not try/catch: the call is fire-and-forget, so an async
+          // rejection would escape a sync try/catch into the zone crash handler.
           requestChannelSync(
             serverId: serverId,
             channelId: selectedChannel,

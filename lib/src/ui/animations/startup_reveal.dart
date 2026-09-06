@@ -1,12 +1,9 @@
 import 'package:flutter/material.dart';
 
-/// Shares the master startup animation controller with the entire
-/// widget subtree via [InheritedWidget].
+/// Shares the master startup animation controller with the subtree.
 ///
-/// Child widgets call [StartupRevealScope.of] to get the controller
-/// (returns `null` after the animation completes — skip all wrapping).
-/// [StartupRevealScope.interval] creates a [CurvedAnimation] sub-interval
-/// for staggering child elements.
+/// Both accessors return null once the reveal is complete, which is the signal
+/// to render fully and skip the wrapping.
 class StartupRevealScope extends InheritedWidget {
   final AnimationController controller;
   final bool isComplete;
@@ -18,8 +15,7 @@ class StartupRevealScope extends InheritedWidget {
     required super.child,
   });
 
-  /// Returns the startup animation controller, or `null` if the reveal
-  /// is already complete (widgets should render fully, no animation).
+  /// Returns the startup animation controller, or null once it is complete.
   static AnimationController? of(BuildContext context) {
     final scope =
         context.dependOnInheritedWidgetOfExactType<StartupRevealScope>();
@@ -27,10 +23,8 @@ class StartupRevealScope extends InheritedWidget {
     return scope.controller;
   }
 
-  /// Create a [CurvedAnimation] for a sub-interval of the master timeline.
-  ///
-  /// Returns `null` when the reveal is complete — callers should render
-  /// their child fully when null.
+  /// Returns a [CurvedAnimation] over a sub-interval of the master timeline,
+  /// or null once the reveal is complete.
   static Animation<double>? interval(
     BuildContext context,
     double begin,

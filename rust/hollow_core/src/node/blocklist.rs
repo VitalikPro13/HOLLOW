@@ -1,16 +1,10 @@
 //! Local user block list (MASTER-keyed), enforced at ingest.
 //!
-//! Process-global mirror of the SQLCipher `blocked_peers` table (same shape as
-//! the resolver's REVOKED set) so the DM/friend-request/call hot paths do a
-//! lock-read instead of opening the DB per message. Warmed at node startup
-//! alongside `resolver::warm_from_links`; mutated only via the Block/Unblock
-//! node commands, which persist first and then update this set.
-//!
-//! Blocking is receiver-side self-protection: the blocked identity's traffic
-//! still arrives at the socket — these checks drop it before store + emit so
-//! it never reaches the DB, UI, or notifications. Always check via
-//! `is_blocked(sender_device_id)` — it collapses device→master through the
-//! resolver, so a blocked person can't sidestep the block from a second device.
+//! Process-global mirror of the SQLCipher `blocked_peers` table so the DM,
+//! friend-request and call hot paths do a lock-read instead of a DB open.
+//! Blocking is receiver-side: the traffic still arrives, and these checks drop
+//! it before store and emit. Always ask `is_blocked(sender_device_id)`, which
+//! collapses device to master, so a block survives a move to a second device.
 
 use std::collections::HashSet;
 use std::sync::{OnceLock, RwLock};

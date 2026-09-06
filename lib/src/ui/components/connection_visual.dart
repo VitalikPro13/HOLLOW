@@ -2,21 +2,17 @@ import 'package:flutter/widgets.dart';
 import 'package:hollow/src/core/providers/connection_status_provider.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 
-/// How an [OverallConnection] renders in a user panel: dot color, dot shape,
+/// How an [OverallConnection] renders in a user panel: dot colour, dot shape
 /// and the word beside it.
 ///
-/// Both user panels render from this ONE helper so the indicator can never
-/// disagree between layouts again. Before: the Dock bar coloured its dot from
-/// the LOCAL node status (green the instant the node booted, internet or not)
-/// while the Classic bar synthesised "Connecting…" whenever no other member of
-/// the selected server happened to be online — so switching layouts, or just
-/// opening your own server, appeared to change your connection state.
+/// Both user panels render from this ONE helper, so the indicator cannot
+/// disagree between layouts. Neither may read the local node status (green the
+/// instant the node boots, internet or not) or who else is online.
 class ConnectionVisual {
   final String label;
   final Color color;
 
-  /// Solid disc vs hollow ring. Shape is the non-color cue (a11y): only a
-  /// settled "connected" is filled.
+  /// Shape is the non-colour cue: only a settled "connected" is filled.
   final bool filled;
 
   const ConnectionVisual({
@@ -45,7 +41,7 @@ ConnectionVisual connectionVisual(
         color: hollow.success,
         filled: true,
       ),
-    // In progress — pulsing ring: something is happening, not settled yet.
+    // A pulsing ring: something is happening, not settled yet.
     OverallConnection.connecting ||
     OverallConnection.reconnecting ||
     OverallConnection.loading =>

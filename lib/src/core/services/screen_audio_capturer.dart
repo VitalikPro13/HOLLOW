@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'dart:io';
-// Prefixed alias so the top-level `pid` getter (this process's PID) is reachable
-// inside start(), where the `pid` parameter would otherwise shadow it.
+// Prefixed alias so start()'s `pid` parameter cannot shadow the top-level one.
 import 'dart:io' as io;
 import 'dart:typed_data';
 
@@ -13,29 +12,18 @@ void _log(String msg) {
 
 /// Out-of-process screen audio capturer for Windows and Linux.
 ///
-/// Spawns `screen_audio_capturer --mode pipe` as a child process.
-/// The exe captures the system output (Windows: WASAPI loopback; Linux:
-/// PulseAudio/PipeWire per-sink-input capture — both per-app capable, both
-/// excluding Hollow's own audio on entire-screen shares) → Opus encodes →
-/// writes framed binary packets to stdout. This process reads them and calls
-/// [onPacket].
-///
-/// Running in a separate process avoids libwebrtc's AudioDeviceModule
-/// interfering with the WASAPI capture (causes audio looping).
-///
-/// Wire protocol (stdout, binary):
-///   [uint16_le: payload_len][uint32_le: seq][...opus_bytes...]
-///
-/// Stop signal: write 'Q' to the process's stdin, or just kill it.
+/// A separate process because libwebrtc's AudioDeviceModule interferes with
+/// the WASAPI capture in-process and the audio loops. The child Opus-encodes
+/// and writes framed packets to stdout, `[uint16_le len][uint32_le seq][opus]`;
+/// writing 'Q' to its stdin stops it.
 class ScreenAudioCapturer {
   Process? _process;
   StreamSubscription? _stdoutSub;
   bool _active = false;
   int _packetCount = 0;
 
-  /// Residual bytes from the previous stdout chunk that didn't form a
-  /// complete frame. The wire protocol frames can be split across OS pipe
-  /// buffer boundaries.
+  /// Residual bytes from the previous stdout chunk: a frame can be split
+  /// across an OS pipe buffer boundary.
   final BytesBuilder _buffer = BytesBuilder(copy: false);
 
   bool get isActive => _active;
@@ -71,29 +59,20 @@ class ScreenAudioCapturer {
     return null;
   }
 
-  /// Start capturing audio. Opus packets are delivered via [onPacket].
-  /// Each packet is `[uint32_le: seq][...opus_bytes...]` — ready to send
-  /// over the data channel with the 0x03 type prefix.
+  /// Starts capturing. Opus packets reach [onPacket] as
+  /// `[uint32_le seq][opus]`, ready for the data channel behind its 0x03
+  /// prefix.
   ///
-  /// For a WINDOW share, [windowHwnd] is the window's HWND (the desktop source
-  /// `id`): the exe resolves HWND -> owning pid -> the app's audio-rendering
-  /// pids (the browser/Electron audio-service child process etc.), INCLUDE-
-  /// captures that set and mixes — so only that app's audio is sent, and a
-  /// silent app sends silence (NOT the whole system). This is preferred over
-  /// [pid] because libwebrtc does not reliably populate a window pid (it arrives
-  /// as 0). Requires Windows 10 2004+.
+  /// A WINDOW share passes [windowHwnd] (the desktop source `id`), never
+  /// [pid]: libwebrtc does not reliably populate a window pid. The exe
+  /// resolves it to the app's audio-rendering pids and INCLUDE-captures that
+  /// set, so a silent app sends silence and never the system mix. Windows
+  /// 10 2004+.
   ///
-  /// [pid] is an alternative per-app target when a window pid is already known.
-  ///
-  /// If NEITHER is set (sharing the whole screen) captures system-wide, but
-  /// EXCLUDES a process TREE so the call playback isn't re-captured and echoed
-  /// back to the remote peer (the Windows equivalent of the macOS share path's
-  /// excludesCurrentProcessAudio). By default the excluded tree is THIS process
-  /// (hollow.exe). When [excludePid] is given (the out-of-process voice-render
-  /// child's pid), that tree is excluded INSTEAD — the child is a descendant of
-  /// hollow.exe, so excluding it drops only the call voices it plays while
-  /// hollow.exe's own in-app media is still captured (Bug B). The exe falls back
-  /// to plain system loopback if EXCLUDE capture is unavailable (Windows < 2004).
+  /// With neither set (whole screen) it captures system-wide EXCLUDING one
+  /// process tree, so call playback is not re-captured and echoed back to the
+  /// peer: [excludePid]'s tree, the out-of-process voice-render child, when
+  /// given, otherwise our own. Plain loopback below Windows 2004.
   Future<bool> start({
     int pid = 0,
     int windowHwnd = 0,
@@ -110,15 +89,10 @@ class ScreenAudioCapturer {
 
     final args = ['--mode', 'pipe', '--duration', '0'];
     if (!Platform.isWindows) {
-      // Linux mirrors the Windows model via per-sink-input capture:
-      //  - window share -> the source id IS the X11 window id; the exe
-      //    resolves it to a pid (_NET_WM_PID) and INCLUDE-captures that
-      //    process tree's audio streams (silent/unresolvable app = silence,
-      //    never the system mix);
-      //  - entire screen -> capture everything EXCLUDING Hollow's own process
-      //    tree (anti-echo; also drops Hollow's in-app media, like the
-      //    Windows exclude-self fallback). Falls back to the whole monitor
-      //    inside the exe if per-sink-input capture can't start.
+      // Linux mirrors the Windows model through per-sink-input capture: a
+      // window share resolves the X11 window id to a pid and INCLUDE-captures
+      // its tree (an unresolvable app sends silence, never the system mix),
+      // entire-screen captures everything except Hollow's own tree.
       if (windowHwnd != 0) {
         args.addAll(['--window-xid', windowHwnd.toString()]);
       } else if (pid != 0) {
@@ -128,18 +102,14 @@ class ScreenAudioCapturer {
         args.addAll(['--exclude-pid', excludeTarget.toString()]);
       }
     } else if (windowHwnd != 0) {
-      // Per-app (window) share: hand the window HANDLE to the exe, which resolves
-      // it to the owning pid then the real audio-rendering pid set (browser audio
-      // service etc.) and INCLUDE-captures + mixes that set.
+      // The exe resolves the window HANDLE to the owning pid, then to the
+      // real audio-rendering pid set, and INCLUDE-captures that.
       args.addAll(['--window-hwnd', windowHwnd.toString()]);
     } else if (pid != 0) {
-      // Per-app share with a known pid.
       args.addAll(['--window-pid', pid.toString()]);
     } else {
-      // Whole-screen share: capture everything EXCLUDING one process tree. When a
-      // voice-render child exists, exclude IT (drops only the call voices it
-      // plays, keeps hollow.exe's media); otherwise exclude ourselves (legacy —
-      // also drops Hollow's own media, but no voices are out-of-process to keep).
+      // Exclude the voice-render child's tree when there is one, which drops
+      // only the call voices it plays; otherwise exclude ourselves.
       final excludeTarget = excludePid != 0 ? excludePid : io.pid;
       args.addAll(['--exclude-pid', excludeTarget.toString()]);
     }
@@ -163,9 +133,7 @@ class ScreenAudioCapturer {
 
     _active = true;
 
-    // Log stderr (diagnostics from the exe).
     _process!.stderr.transform(const SystemEncoding().decoder).listen((line) {
-      // Trim trailing newlines for cleaner log output.
       for (final l in line.split('\n')) {
         final trimmed = l.trim();
         if (trimmed.isNotEmpty) {
@@ -174,7 +142,6 @@ class ScreenAudioCapturer {
       }
     });
 
-    // Read framed binary packets from stdout.
     _packetCount = 0;
     _stdoutSub = _process!.stdout.listen((List<int> chunk) {
       _buffer.add(chunk is Uint8List ? chunk : Uint8List.fromList(chunk));
@@ -186,7 +153,6 @@ class ScreenAudioCapturer {
       _log('[SCREEN-AUDIO] stdout error: $e');
     });
 
-    // Monitor process exit.
     _process!.exitCode.then((code) {
       _log('[SCREEN-AUDIO] Process exited with code $code');
       _active = false;
@@ -196,23 +162,19 @@ class ScreenAudioCapturer {
     return true;
   }
 
-  /// Parse complete frames from the buffer and deliver them.
   void _drainFrames(void Function(Uint8List) onPacket) {
     final bytes = _buffer.takeBytes();
     int offset = 0;
 
     while (offset + 2 <= bytes.length) {
-      // Read payload length (uint16_le).
       final payloadLen = bytes[offset] | (bytes[offset + 1] << 8);
       final frameLen = 2 + payloadLen;
 
       if (offset + frameLen > bytes.length) {
-        // Incomplete frame — put remainder back in buffer.
         break;
       }
 
-      // Extract the payload: [seq_u32_le][opus_bytes...]
-      // This is exactly what the data channel expects.
+      // The payload is exactly what the data channel expects.
       final packet = Uint8List.sublistView(bytes, offset + 2, offset + frameLen);
       onPacket(packet);
 
@@ -224,7 +186,6 @@ class ScreenAudioCapturer {
       offset += frameLen;
     }
 
-    // Put any remaining incomplete bytes back.
     if (offset < bytes.length) {
       _buffer.add(Uint8List.sublistView(bytes, offset));
     }
@@ -237,13 +198,11 @@ class ScreenAudioCapturer {
 
     _log('[SCREEN-AUDIO] Stopping capture...');
 
-    // Signal graceful shutdown.
     try {
       _process?.stdin.add(Uint8List.fromList([0x51])); // 'Q'
       await _process?.stdin.flush();
     } catch (_) {}
 
-    // Give it a moment to exit cleanly.
     bool exited = false;
     try {
       final code = await _process?.exitCode.timeout(

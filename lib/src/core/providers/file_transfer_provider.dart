@@ -10,12 +10,10 @@ import 'package:path/path.dart' as p;
 
 import '../services/video_thumbnail_service.dart';
 
-/// Why the bytes of a file are not here yet, as Rust's pending-ask walk sees
-/// it (tmp.txt item 1: "honest file card states").
+/// Why the bytes of a file are not here yet, as Rust's pending-ask walk sees it.
 ///
-/// A file card whose bytes are missing used to show one Download button that
-/// could silently do nothing. Rust now says which of the four cases it is, so
-/// the card can explain itself instead of pretending.
+/// A card whose bytes are missing used to show one Download button that could
+/// silently do nothing; Rust now says which of the four cases it is.
 class FileAvailabilityState {
   /// A request is out to a holder and has not been answered yet.
   static const String requesting = 'requesting';
@@ -29,9 +27,8 @@ class FileAvailabilityState {
   /// The server's retention policy removed it.
   static const String expired = 'expired';
 
-  /// One of [requesting], [waiting], [gone], [expired]. Kept as a string
-  /// because it crosses the FFI as one; unknown values render as nothing
-  /// known, which is the old Download button.
+  /// One of [requesting], [waiting], [gone], [expired]. A string because it
+  /// crosses the FFI as one; unknown values render as the old Download button.
   final String state;
 
   /// The MASTER identity the state is about (empty when none): the holder
@@ -74,25 +71,20 @@ class FileTransferState {
   final bool isImage;
   final int? width;
   final int? height;
-  /// Video thumbnail back-reference (Phase 6.75 video preview).
-  /// When non-null, this file is a thumbnail image for the vault-stored video
-  /// identified by `videoThumb.cid`. The UI renders a play button overlay and
-  /// triggers a vault download on tap.
+  /// Video thumbnail back-reference: non-null means this file is a thumbnail
+  /// for the vault-stored video at `videoThumb.cid`, so the UI draws a play button.
   final network_api.VideoThumbRef? videoThumb;
   /// Share root hash — set for share-backed files (>34 MB channel files).
   final String? shareRootHash;
   /// Number of active seeders — updated from ShareProgress events.
   final int? seeders;
   /// Declined by the auto-download gate (issue #41). While true, progress from
-  /// ANY byte source (Rust WS poll, Dart WebRTC data-channel receive) is
-  /// ignored — the sender pushes regardless and the bytes are discarded, so
-  /// the bubble must keep showing the manual Download button, not a spinner.
-  /// Cleared when the user starts a manual download or the file completes.
+  /// ANY byte source is ignored: the sender pushes regardless and the bytes are
+  /// discarded, so the bubble must keep its Download button, not a spinner.
   final bool declined;
 
-  /// Why the bytes are not here yet (tmp.txt item 1). Null means nothing is
-  /// known, which is the plain Download button. Cleared the moment real bytes
-  /// move (progress, completion) or a header answers the ask.
+  /// Why the bytes are not here yet. Null means nothing is known, which is the
+  /// plain Download button. Cleared the moment real bytes move.
   final FileAvailabilityState? availability;
 
   const FileTransferState({
@@ -202,11 +194,10 @@ class FileTransferNotifier
     'mp4', 'webm', 'mov', 'mkv', 'avi', 'm4v',
   };
 
-  /// Initiate a file send.
-  /// [memberCount] is the server's member count — if >= 6, also triggers vault upload.
-  /// [isVoice] marks a recorded voice message — the FileHeader carries a
-  /// `voice` flag exempting it from the receiver's auto-download gate (the
-  /// wire name is the recorder's temp basename, so Rust can't tell).
+  /// Initiate a file send. [memberCount] >= 6 also triggers a vault upload.
+  /// [isVoice] marks a recorded voice message: the FileHeader carries a `voice`
+  /// flag exempting it from the receiver's auto-download gate (the wire name is
+  /// the recorder's temp basename, so Rust can't tell).
   Future<void> sendFile({
     String? peerId,
     String? serverId,
@@ -217,11 +208,9 @@ class FileTransferNotifier
     int memberCount = 0,
     bool isVoice = false,
   }) async {
-    // Extract filename for display.
     final parts = filePath.replaceAll('\\', '/').split('/');
     final fileName = parts.isNotEmpty ? parts.last : 'file';
 
-    // Add optimistic transfer state.
     final updated = Map<String, FileTransferState>.from(state);
     updated[messageId] = FileTransferState(
       fileId: messageId,
@@ -232,18 +221,14 @@ class FileTransferNotifier
     );
     state = updated;
 
-    // Detect video files for the Phase 6.75 vault video preview path.
     final ext = p.extension(filePath).toLowerCase().replaceFirst('.', '');
     final isVideo = _videoExtensions.contains(ext);
     final isVaultMode =
         serverId != null && channelId != null && memberCount >= 6;
 
-    // Phase 6.75: For ALL video files (vault or direct P2P), pre-extract a
-    // thumbnail so we know the source video's pixel dimensions. We pass these
-    // to the FileHeader's width/height fields so receivers can render the
-    // bubble at the correct aspect ratio without their own probe round-trip.
-    // The vault path (below) reuses the same VideoThumbnailResult to avoid
-    // a second extraction.
+    // Pre-extract a thumbnail for ALL video files so the FileHeader can carry the
+    // SOURCE pixel dimensions and receivers size the bubble without their own
+    // probe. The vault path reuses the same result to avoid a second extraction.
     VideoThumbnailResult? videoThumb;
     if (isVideo) {
       videoThumb = await VideoThumbnailService.extractVideoThumbnail(
@@ -256,11 +241,9 @@ class FileTransferNotifier
     }
 
     try {
-      // Large files (>34 MB) — DM or channel: host as a hidden Hollow Share for
-      // chunked P2P delivery, then send the FileHeader with share_ref so
-      // receivers download via Share. The caller has already shown the >34 MB
-      // confirmation dialog (see large_file_share_dialog.dart) before reaching
-      // here, so we always Share-route an oversized file (no silent reject).
+      // Large files (>34 MB): host as a hidden Hollow Share for chunked P2P
+      // delivery, then send the FileHeader with share_ref. The caller already
+      // showed the >34 MB confirmation, so an oversized file is never rejected here.
       final fileSize = File(filePath).lengthSync();
       const maxDirectSize = 34 * 1024 * 1024;
       if (fileSize > maxDirectSize) {
@@ -294,8 +277,7 @@ class FileTransferNotifier
         return;
       }
 
-      // Default path: P2P streaming for everything else (DMs, <6 servers,
-      // images in any server, non-video files in 6+ servers).
+      // Default path: P2P streaming for everything else.
       await network_api.sendFile(
         peerId: peerId,
         serverId: serverId,
@@ -304,23 +286,19 @@ class FileTransferNotifier
         messageId: messageId,
         messageText: messageText,
         vthumb: null,
-        // For videos, pass the source dimensions so the FileHeader carries
-        // them to receivers. None for non-videos (Rust extracts image dims
-        // itself). ffmpeg's stderr probe can yield 0x0 — Rust falls back to
-        // the poster frame's own dimensions in that case.
+        // Videos pass source dimensions so the FileHeader carries them; ffmpeg's
+        // stderr probe can yield 0x0, and Rust falls back to the poster frame's own.
         overrideWidth: videoThumb?.sourceWidth,
         overrideHeight: videoThumb?.sourceHeight,
         isVoice: isVoice,
-        // Poster frame for the receiver's bubble: Rust re-encodes it small
-        // and rides it on the FileHeader so the video shows a real preview
-        // (correct aspect included) before any bytes are downloaded.
+        // Poster frame for the receiver's bubble: Rust re-encodes it small and rides
+        // it on the FileHeader, so the video previews before any bytes download.
         posterBytes: videoThumb?.webpBytes,
       );
 
-      // For 6+ member servers (non-video): also trigger vault upload
-      // (erasure coding + shard distribution). P2P streaming delivers to online
-      // peers immediately; vault ensures offline peers can reconstruct later.
-      // Skipped for videos because _sendVaultVideo handles the vault upload itself.
+      // 6+ member servers (non-video) also trigger a vault upload: P2P streaming
+      // delivers to online peers now, the vault lets offline peers reconstruct
+      // later. Videos are skipped because _sendVaultVideo does its own.
       if (isVaultMode) {
         try {
           final contentId = await crdt_api.vaultUploadFile(
@@ -329,7 +307,6 @@ class FileTransferNotifier
             filePath: filePath,
             messageId: messageId,
           );
-          // Store contentId for vault status tracking.
           final withCid = Map<String, FileTransferState>.from(state);
           final current = withCid[messageId];
           if (current != null) {
@@ -355,20 +332,12 @@ class FileTransferNotifier
     }
   }
 
-  /// Vault video send pipeline (Phase 6.75).
+  /// Vault video send pipeline.
   ///
-  /// Order matters:
-  ///   1. Extract thumbnail (Dart-side, ffmpeg subprocess).
-  ///   2. Vault-upload the video to obtain its content_id (synchronous return,
-  ///      bounded by file-read + AES encrypt). The vault upload does NOT emit
-  ///      a FileHeader broadcast — only the vault shard distribution starts.
-  ///   3. Send the thumbnail via the existing image P2P path (sendFile), with
-  ///      `vthumb` set to point at the just-obtained content_id. The recipient
-  ///      sees one bubble: the thumbnail with a play button overlay.
-  ///
-  /// On thumbnail extraction failure (ffmpeg missing/crash/timeout), falls back
-  /// to the dual-call legacy path so the video still uploads — the recipient
-  /// sees a generic file card without the play button.
+  /// Order matters: extract the thumbnail, vault-upload the video for its
+  /// content_id (which emits no FileHeader broadcast), then send the thumbnail
+  /// through the image P2P path pointing at that id, so the recipient sees ONE
+  /// bubble. A thumbnail failure falls back to the legacy dual-call path.
   Future<void> _sendVaultVideo({
     required String serverId,
     required String channelId,
@@ -379,14 +348,12 @@ class FileTransferNotifier
     required String messageText,
     VideoThumbnailResult? preExtractedThumb,
   }) async {
-    // 1. Use the pre-extracted thumbnail from sendFile() if provided,
-    //    otherwise extract one now (may return null on any failure).
+    // Reuse sendFile()'s thumbnail if provided, else extract one now.
     final thumb = preExtractedThumb ??
         await VideoThumbnailService.extractVideoThumbnail(videoPath: filePath);
 
     if (thumb == null) {
-      // Fallback: thumbnail extraction failed → fall through to legacy
-      // dual-call path so the video at least uploads successfully.
+      // Extraction failed: fall through to the legacy dual-call path.
       debugPrint(
           '[HOLLOW] Video thumbnail extraction failed for $filePath — '
           'falling back to legacy file card path');
@@ -420,7 +387,6 @@ class FileTransferNotifier
       return;
     }
 
-    // 2. Vault-upload the video first to get its content_id.
     String contentId;
     try {
       contentId = await crdt_api.vaultUploadFile(
@@ -434,14 +400,12 @@ class FileTransferNotifier
       rethrow;
     }
 
-    // 3. Write the thumbnail to a temp .webp file so we can hand its path
-    //    to the existing sendFile FFI.
+    // Write the thumbnail to a temp .webp so the existing sendFile FFI can take it.
     final tempDir = await Directory.systemTemp.createTemp('hollow_vthumb_');
     final thumbPath = p.join(tempDir.path, '$messageId.webp');
     try {
       await File(thumbPath).writeAsBytes(thumb.webpBytes, flush: true);
 
-      // 4. Build the VideoThumbRef linking field.
       final videoStat = await File(filePath).stat();
       final vthumb = network_api.VideoThumbRef(
         cid: contentId,
@@ -451,13 +415,9 @@ class FileTransferNotifier
         durMs: thumb.durationMs,
       );
 
-      // 5. Send the thumbnail via the image P2P path with the link.
-      //    The recipient sees one bubble — the thumbnail .webp — that's
-      //    rendered by VideoMessageBubble because vthumb is non-null.
-      //    Pass the SOURCE VIDEO dimensions through override_width/height
-      //    so the FileHeader carries the correct aspect ratio (the thumbnail
-      //    .webp dimensions would be the scaled-down version, not what the
-      //    bubble should size to).
+      // Send the thumbnail through the image P2P path with the link. Pass the
+      // SOURCE VIDEO dimensions through override_width/height: the .webp's own
+      // size is the scaled-down one, not what the bubble should size to.
       await network_api.sendFile(
         peerId: null,
         serverId: serverId,
@@ -470,8 +430,7 @@ class FileTransferNotifier
         overrideHeight: thumb.sourceHeight,
       );
 
-      // 6. Update local FileTransferState with both contentId and videoThumb so
-      //    our own UI renders the play button immediately on the sender side.
+      // So our own UI renders the play button immediately on the sender side.
       final withVThumb = Map<String, FileTransferState>.from(state);
       final current = withVThumb[messageId];
       if (current != null) {
@@ -484,7 +443,6 @@ class FileTransferNotifier
       debugPrint(
           '[HOLLOW] Vault video sent: cid=$contentId thumb=${thumb.webpBytes.length} bytes');
     } finally {
-      // 7. Cleanup the temp dir + thumbnail file.
       try {
         await tempDir.delete(recursive: true);
       } catch (_) {}
@@ -532,11 +490,9 @@ class FileTransferNotifier
     return keyBytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
   }
 
-  /// Handle FileHeaderReceived event.
-  /// [isVaultMode] — if true (6+ member server), file data arrives via vault shards,
-  /// not P2P streaming, so we don't mark it as "downloading".
-  /// [videoThumb] — Phase 6.75 video preview link. When non-null, this file is a
-  /// thumbnail for a vault-stored video; the UI will render a play button.
+  /// Handle FileHeaderReceived. [isVaultMode] means data arrives via vault
+  /// shards, not P2P streaming, so it is not marked "downloading". [videoThumb]
+  /// links a thumbnail to its vault-stored video and draws a play button.
   void onFileHeaderReceived({
     required String fileId,
     required String fileName,
@@ -548,13 +504,11 @@ class FileTransferNotifier
     network_api.VideoThumbRef? videoThumb,
     String? shareRootHash,
   }) {
-    // Don't overwrite an existing entry (e.g., from a sync batch that already
-    // set isComplete, or a prior live transfer). Only create new entries.
+    // Don't overwrite an existing entry (a sync batch may have set isComplete).
     final existing = state[fileId];
     if (existing != null) {
-      // A header for a file we were asking about IS the positive answer to
-      // that ask, so the "Requesting..." caption has to go even though the
-      // entry itself is left alone.
+      // A header for a file we were asking about IS the answer to that ask, so
+      // the "Requesting..." caption goes even though the entry is left alone.
       if (existing.availability != null) {
         final cleared = Map<String, FileTransferState>.from(state);
         cleared[fileId] = existing.copyWith(clearAvailability: true);
@@ -571,9 +525,8 @@ class FileTransferNotifier
       isImage: isImage,
       width: width,
       height: height,
-      // Don't set isDownloading on header alone — it will be set when actual
-      // progress starts (FileProgress event) or by the download button.
-      // This prevents synced file metadata from showing "Downloading..." forever.
+      // Don't set isDownloading on the header alone, or synced metadata shows
+      // "Downloading..." forever; FileProgress or the button sets it.
       isDownloading: false,
       videoThumb: videoThumb,
       shareRootHash: shareRootHash,
@@ -603,13 +556,10 @@ class FileTransferNotifier
     state = updated;
   }
 
-  /// Record why the bytes are not here yet (tmp.txt item 1). Rust's ask walk
-  /// emits one of `requesting` / `waiting` / `gone` / `expired`; the card
-  /// reads it through `fileCardStatus()` and says so instead of offering a
-  /// button that would do nothing.
-  ///
-  /// Creates a minimal entry when none exists, the way [markDeclined] does —
-  /// a file that was never fetched has no transfer row of its own.
+  /// Record why the bytes are not here yet. Rust's ask walk emits one of
+  /// `requesting` / `waiting` / `gone` / `expired`, and the card says so instead
+  /// of offering a button that would do nothing. Creates a minimal entry when
+  /// none exists: a file that was never fetched has no transfer row.
   void onFileAvailability(String fileId, String availability, String peerId) {
     final current = state[fileId];
     if (current?.isComplete == true) return;
@@ -627,10 +577,9 @@ class FileTransferNotifier
     } else {
       updated[fileId] = current.copyWith(
         availability: next,
-        // We are the ones asking, so an old auto-download-gate pin must not
-        // survive to swallow the progress of the answer (issue #41): Rust
-        // re-stamps the receipt on every re-dispatch, and a stale `declined`
-        // here would drop the very bytes we asked for.
+        // We are the ones asking, so an old auto-download-gate pin must not survive
+        // to swallow the answer (issue #41): Rust re-stamps the receipt on every
+        // re-dispatch, and a stale `declined` would drop the bytes we asked for.
         declined: availability == FileAvailabilityState.requesting
             ? false
             : current.declined,
@@ -649,12 +598,11 @@ class FileTransferNotifier
     state = updated;
   }
 
-  /// Stop waiting for a file: cancel the outstanding ask in Rust, then drop
-  /// the local explanation so the card offers Download again immediately
-  /// rather than after the next event.
+  /// Stop waiting for a file: cancel the outstanding ask in Rust, then drop the
+  /// local explanation so the card offers Download again at once.
   ///
   /// Rethrows, so the caller can toast a failure: a cancel that silently did
-  /// nothing is the same broken promise this feature exists to end.
+  /// nothing is the broken promise this feature exists to end.
   Future<void> stopWaitingForFile(String fileId) async {
     await network_api.cancelFileRequest(fileId: fileId);
     clearAvailability(fileId);
@@ -670,16 +618,13 @@ class FileTransferNotifier
     state = updated;
   }
 
-  /// Handle FileProgress event.
   void onFileProgress(String fileId, int chunksReceived, int totalChunks) {
     final updated = Map<String, FileTransferState>.from(state);
     final current = state[fileId];
-    // Declined by the auto-download gate: the arriving bytes are being
-    // discarded — never surface their progress (issue #41).
+    // Declined by the gate: the arriving bytes are discarded, never surfaced (#41).
     if (current?.declined == true) return;
     if (current == null) {
-      // WebRTC race: progress arrived before FileHeader. Create a minimal entry
-      // so the UI shows the progress bar.
+      // WebRTC race: progress arrived before FileHeader, so make a minimal entry.
       updated[fileId] = FileTransferState(
         fileId: fileId,
         fileName: '',
@@ -712,7 +657,6 @@ class FileTransferNotifier
     state = updated;
   }
 
-  /// Handle FileCompleted event.
   void onFileCompleted(String fileId, String diskPath) {
     final current = state[fileId];
     final updated = Map<String, FileTransferState>.from(state);
@@ -750,7 +694,6 @@ class FileTransferNotifier
     state = updated;
   }
 
-  /// Handle FileFailed event.
   void onFileFailed(String fileId, String error) {
     final current = state[fileId];
     final updated = Map<String, FileTransferState>.from(state);
@@ -782,7 +725,6 @@ class FileTransferNotifier
     state = updated;
   }
 
-  /// Handle vault download complete.
   void onVaultDownloadComplete(String contentId, String diskPath) {
     final updated = Map<String, FileTransferState>.from(state);
     bool found = false;

@@ -22,61 +22,46 @@ void _log(String msg) {
   network_api.logFromDart(message: msg);
 }
 
-/// What the shared content mostly is — drives encoder tuning.
+/// What the shared content mostly is, which drives encoder tuning.
 ///
-/// [text]: code, documents, UI. Under pressure the encoder drops FRAMES and
-/// keeps resolution (blocky text is the visible failure mode); codec
-/// preference leans AV1/VP9 (screen-content compression); dialog defaults
-/// to 15 fps so each refresh gets a bigger bit budget.
-///
-/// [motion]: gameplay, video playback. Under pressure the encoder keeps
-/// FRAMERATE (a slideshow hurts more than blur); VP9-first; 60 fps default.
+/// [text] (code, documents, UI) drops FRAMES under pressure and keeps
+/// resolution, since blocky text is the visible failure mode; it prefers
+/// AV1/VP9 and defaults to 15 fps. [motion] (gameplay, video) keeps
+/// FRAMERATE instead, prefers VP9 and defaults to 60 fps.
 enum ScreenContentProfile { text, motion }
 
-/// Manages a dedicated RTCPeerConnection for one direction of screen sharing.
+/// Manages a dedicated RTCPeerConnection for ONE direction of screen sharing.
 ///
-/// Each screen share direction (local→remote, remote→local) gets its own
-/// instance. This avoids the transceiver conflicts that occur when screen
-/// sharing reuses the voice call's PC.
-///
-/// For outgoing (we share our screen): call [createOffer], then [handleAnswer].
-/// For incoming (they share their screen): call [handleOffer], renderer appears
-/// via [remoteRenderer].
+/// One instance per direction, because reusing the voice call's PC produces
+/// transceiver conflicts. Outgoing: [createOffer] then [handleAnswer].
+/// Incoming: [handleOffer], and the renderer appears via [remoteRenderer].
 class ScreenShareService {
   final String localPeerId;
   final Map<String, dynamic> iceServers;
 
-  /// True when this PC is a media-forwarder leg (step 3): an ingest to a
-  /// forwarder, or an egress attach from one. Labels the ICE-route log —
-  /// route probing can't distinguish a forwarder hop from a direct pair
-  /// (host↔host to a public forwarder looks "direct"; on an Always-relay
-  /// client the old label even read "TURN (relayed)" misleadingly — D6
-  /// follow-up #1).
+  /// True when this PC is a media-forwarder leg. Labels the ICE-route log:
+  /// route probing cannot tell a forwarder hop from a direct pair, and on an
+  /// Always-relay client the old label even read "TURN (relayed)".
   final bool forwarderLeg;
 
   RTCPeerConnection? _pc;
   MediaStream? _screenStream; // Local screen capture (outgoing only)
-  // Whether THIS service owns _screenStream and must stop+dispose it on close().
-  // True for createOffer (we captured it). FALSE for createOfferFromStream:
-  // there one capture is SHARED across many per-peer services (voice channels),
-  // so the provider owns it — disposing it here would (a) kill the share for
-  // every other peer and (b) double-free it (the provider disposes it too),
-  // which is the `corrupted size vs prev_size` heap abort on screen-share stop.
+  // Whether THIS service owns _screenStream and must dispose it on close().
+  // False for createOfferFromStream, where one capture is SHARED across many
+  // per-peer services: disposing it here kills every other peer's share and
+  // double-frees it, the `corrupted size vs prev_size` abort on share stop.
   bool _ownsScreenStream = true;
-  // Whether _remoteStream was SYNTHESIZED by us (createLocalMediaStream in the
-  // onTrack fallback) vs. handed to us by libwebrtc. We may only dispose the
-  // ones we synthesized; libwebrtc owns the event-provided streams.
+  // Whether _remoteStream was SYNTHESIZED by us. We may dispose only those;
+  // libwebrtc owns the event-provided streams.
   bool _remoteStreamIsSynthetic = false;
   RTCVideoRenderer? _localRenderer; // Self-preview of outgoing screen
   RTCVideoRenderer? _remoteRenderer; // Renderer for incoming screen
   MediaStream? _remoteStream;
   Timer? _screenTrackPoller;
 
-  // ICE candidate queue (same pattern as VoiceService).
   final List<RTCIceCandidate> _pendingCandidates = [];
   bool _remoteDescriptionSet = false;
 
-  // Callbacks
   void Function(RTCIceCandidate candidate)? onIceCandidate;
   void Function()? onConnected;
   void Function()? onDisconnected;
@@ -88,33 +73,27 @@ class ScreenShareService {
   RTCPeerConnection? get pc => _pc;
   bool get isActive => _pc != null;
 
-  /// True once the macOS system-audio Process Tap has been activated for this
-  /// share. Used so we tear it down exactly once on close.
+  /// True once the macOS system-audio tap is active, so we stop it once.
   bool _macSystemAudioActive = false;
 
-  /// Preferred audio output device — set by CallNotifier before handleOffer.
+  /// Preferred audio output device, set by CallNotifier before handleOffer.
   String? preferredAudioOutputDeviceId;
 
-  /// Content profile of the current outgoing share (set by both offer paths).
-  /// Will also drive the track contentHint once the fork exposes it.
+  /// Content profile of the current outgoing share, set by both offer paths.
   ScreenContentProfile _contentProfile = ScreenContentProfile.motion;
 
-  /// Last requested resolution/fps cap for the OUTGOING share (null on
-  /// incoming-only PCs). Used by the post-connect re-apply + verification.
+  /// Last requested resolution/fps cap for the OUTGOING share; null on an
+  /// incoming-only PC.
   int? _capWidth;
   int? _capHeight;
   int? _capFps;
 
-  /// Phase 3: this outgoing PC carries a 2-layer simulcast (forwarder ingest
-  /// legs only — rid 'f' at the cap + rid 'q' at half per axis). Cap changes
-  /// must keep BOTH layers consistent.
+  /// This outgoing PC carries a 2-layer simulcast (forwarder ingest legs
+  /// only). A cap change must keep BOTH layers consistent.
   bool _simulcast = false;
 
-  // --- Screen audio via out-of-process capturer (Windows) ---
   ScreenAudioCapturer? _screenAudioCapturer;
-  // --- Screen audio via ScreenCaptureKit (macOS 13.0–14.1) ---
   MacSckScreenAudioCapturer? _macSckAudioCapturer;
-  // --- Screen audio via native mobile capture + Rust Opus encode ---
   MobileScreenAudioCapturer? _mobileAudioCapturer;
 
 
@@ -124,19 +103,16 @@ class ScreenShareService {
     this.forwarderLeg = false,
   });
 
-  /// Effective per-viewer resolution cap (media forwarding step 1): the
-  /// share's chosen cap clamped to what THIS viewer's display can actually
-  /// show. Compared on orientation-normalized long/short edges so a portrait
-  /// phone isn't over-restricted watching a landscape share, then mapped back
-  /// into the share cap's orientation.
+  /// Effective per-viewer resolution cap: the share's cap clamped to what
+  /// THIS viewer's display can show. Compared on orientation-normalized
+  /// long/short edges so a portrait phone is not over-restricted watching a
+  /// landscape share, then mapped back into the share cap's orientation. A
+  /// 0x0 viewer size means unknown and leaves the share cap untouched.
   ///
-  /// A 0x0 viewer size means unknown (old client that doesn't send it) and
-  /// leaves the share cap untouched, preserving pre-step-1 behavior.
-  ///
-  /// There is deliberately NO per-viewer "Source quality" opt-out (removed
-  /// 2026-08-15): the clamp is keyed to the viewer's largest MONITOR, so it
-  /// already delivers every pixel they can display, and on a shared forwarder
-  /// branch there is no per-viewer encoder for an opt-out to apply to.
+  /// There is deliberately NO per-viewer "Source quality" opt-out: the clamp
+  /// is keyed to the viewer's largest MONITOR, so it already delivers every
+  /// pixel they can display, and on a shared forwarder branch there is no
+  /// per-viewer encoder for an opt-out to apply to.
   static (int, int) effectiveViewerCap(
     int shareMaxWidth,
     int shareMaxHeight,
@@ -159,15 +135,12 @@ class ScreenShareService {
         : (effShort, effLong);
   }
 
-  /// Phase-3 simulcast layer choice for ONE viewer on a forwarder branch:
-  /// true = serve the low layer (rid `q`, the full layer downscaled 2x per
-  /// axis), false = the full layer (rid `f`).
+  /// Simulcast layer choice for ONE viewer on a forwarder branch: true = the
+  /// low layer (rid `q`, downscaled 2x per axis), false = the full layer `f`.
   ///
-  /// [fullWidth]/[fullHeight] = the branch's ingest cap (the `f` layer).
-  /// [viewerCapWidth]/[viewerCapHeight] = that viewer's ALREADY-EFFECTIVE cap
-  /// (display clamped to the share cap) — the caller owns that math so this
-  /// stays the single half-cap comparison the field verified.
-  ///
+  /// [viewerCapWidth]/[viewerCapHeight] is that viewer's ALREADY-EFFECTIVE
+  /// cap; the caller owns that math so this stays the single half-cap
+  /// comparison the field verified.
   static bool viewerWantsLowLayer(
     int fullWidth,
     int fullHeight,
@@ -181,24 +154,14 @@ class ScreenShareService {
     return vLong * 2 <= fLong;
   }
 
-  /// Live-update the outgoing resolution cap on a negotiated sender — the
-  /// viewer changed what they can show / want (Source quality toggle,
-  /// re-sent screen_watch). Rides the same setParameters path the
-  /// post-connect enforcement uses, and writes _capWidth/_capHeight FIRST so
-  /// that enforcement re-applies THIS cap rather than reverting it.
+  /// Live-updates the outgoing resolution cap on a negotiated sender, for a
+  /// viewer whose display or wishes changed. Writes _capWidth/_capHeight
+  /// FIRST so post-connect enforcement re-applies THIS cap rather than
+  /// reverting it.
   ///
-  /// Returns false when the sender REJECTED the live change; the caller
-  /// must then renegotiate: tear down this service and send a fresh offer
-  /// with the new cap in the init encodings. Returns true when nothing
-  /// changed or the live update was accepted.
-  ///
-  /// History: on Windows EVERY live setParameters returned false 2026-07-20
-  /// → 2026-08-08. Root cause (phase 3): the native→Dart parameters map
-  /// materialized unset optionals (scalabilityMode "" / ssrc 0), and the
-  /// write-back turned them into set-but-invalid values — libwebrtc rejects
-  /// the whole call with INVALID_MODIFICATION. Fixed in the plugin
-  /// (flutter_peerconnection.cc); the renegotiate fallback stays as the
-  /// belt.
+  /// False when the sender REJECTED the change: the caller must then tear
+  /// this service down and renegotiate with the new cap in the init
+  /// encodings. True when nothing changed or the update was accepted.
   Future<bool> updateResolutionCap(int maxWidth, int maxHeight) async {
     if (_capFps == null) return false; // Incoming-only PC / no cap requested.
     if (_capWidth == maxWidth && _capHeight == maxHeight) return true;
@@ -214,18 +177,13 @@ class ScreenShareService {
     return ok;
   }
 
-  /// Wait for ICE gathering to complete and return the full local SDP.
+  /// Waits for ICE gathering and returns the full local SDP.
   ///
-  /// Media forwarding step 3: forwarder legs exchange COMPLETE SDPs — the
-  /// forwarder sits on a fixed public host candidate and has no trickle lane
-  /// (`FwdIce` is reserved, unimplemented). Call after createOfferFromStream
-  /// (ingest leg) or handleOffer (egress leg answer). Falls back to whatever
-  /// has gathered when the [timeout] lapses — a srflx candidate is usually in
-  /// well under a second.
-  /// A leg whose SDP leaves with zero candidates can never connect, and ICE
-  /// then fails SILENTLY (no state transitions at all — the port allocator
-  /// never activates the transport). Logging the count here is what turned
-  /// that into a one-line diagnosis; keep it.
+  /// Forwarder legs exchange COMPLETE SDPs: the forwarder sits on a fixed
+  /// public host candidate and has no trickle lane. Falls back to whatever
+  /// has gathered when [timeout] lapses. A leg whose SDP leaves with zero
+  /// candidates can never connect and ICE then fails SILENTLY, with no state
+  /// transitions at all, so the candidate count is logged here deliberately.
   Future<String?> gatheredLocalSdp(
       {Duration timeout = const Duration(seconds: 10)}) async {
     final pc = _pc;
@@ -233,11 +191,9 @@ class ScreenShareService {
     final deadline = DateTime.now().add(timeout);
     String? sdp;
     // Wait for CANDIDATES, not for gatheringState == complete: this fork
-    // routinely sits in `gathering` indefinitely even with candidates already
-    // in the local description, which turned every forwarder leg into a flat
-    // 10-second stall before the SDP was sent (field-measured 2026-08-06).
-    // One extra settle poll after the first candidate picks up the srflx that
-    // usually lands right behind the host one.
+    // routinely sits in `gathering` indefinitely with candidates already in
+    // the local description, which turned every forwarder leg into a flat
+    // 10-second stall. The settle poll picks up the srflx behind the host.
     var polls = 0;
     while (DateTime.now().isBefore(deadline)) {
       sdp = (await pc.getLocalDescription())?.sdp;
@@ -262,18 +218,15 @@ class ScreenShareService {
     return sdp;
   }
 
-  /// Apply resolution, framerate, and bitrate caps on the video sender's
-  /// encoding parameters. Even though getDisplayMedia now receives width/height
-  /// constraints, the desktop capturer may still deliver native-resolution
-  /// frames — this enforces the cap at the encoder level as a second layer.
+  /// Applies resolution, framerate and bitrate caps on the video sender's
+  /// encoding. The desktop capturer can still deliver native-resolution
+  /// frames despite the getDisplayMedia constraints, so this is layer two.
   ///
-  /// [captureWidth]/[captureHeight] override the track.getSettings() capture
-  /// size when the caller knows better (post-connect we read the true size
-  /// from media-source stats — getSettings is absent for desktop captures on
-  /// some platforms and the 1920x1080 fallback computes a wrong scale).
-  /// Returns whether the sender ACCEPTED the setParameters call (false on
-  /// no PC / no video sender / libwebrtc rejection — callers that need the
-  /// cap to actually change must renegotiate on false).
+  /// [captureWidth]/[captureHeight] override track.getSettings() when the
+  /// caller knows better: getSettings is absent for desktop captures on some
+  /// platforms and the 1920x1080 fallback computes a wrong scale. Returns
+  /// whether the sender ACCEPTED setParameters; a caller that needs the cap
+  /// to actually change must renegotiate on false.
   Future<bool> _applyResolutionCap(
       int maxWidth, int maxHeight, int fps, ScreenContentProfile profile,
       {int? captureWidth, int? captureHeight}) async {
@@ -290,11 +243,10 @@ class ScreenShareService {
           params.encodings = [RTCRtpEncoding()];
         }
 
-        // Text content must stay SHARP: under bandwidth/CPU pressure drop
-        // frames, never resolution (maintain-resolution is the W3C mapping
-        // for detail/text screen content). Motion content is the opposite —
-        // a slideshow hurts more than transient blur. The resolution cap
-        // itself is enforced by scaleResolutionDownBy below either way.
+        // Text must stay SHARP: under pressure drop frames, never
+        // resolution (maintain-resolution is the W3C mapping for
+        // detail/text screen content). Motion is the opposite, since a
+        // slideshow hurts more than transient blur.
         params.degradationPreference = profile == ScreenContentProfile.text
             ? RTCDegradationPreference.MAINTAIN_RESOLUTION
             : RTCDegradationPreference.MAINTAIN_FRAMERATE;
@@ -324,8 +276,8 @@ class ScreenShareService {
   }
 
   /// Capture dimensions from track.getSettings(), defaulting to 1920x1080
-  /// when the platform reports nothing (desktop captures often do). Logged
-  /// loudly because a wrong assumption here computes a wrong scale factor.
+  /// when the platform reports nothing. Logged loudly, because a wrong
+  /// assumption here computes a wrong scale factor.
   (int, int) _captureSizeOf(MediaStreamTrack track) {
     Map<dynamic, dynamic> settings = const {};
     try {
@@ -341,13 +293,11 @@ class ScreenShareService {
     return (w, h);
   }
 
-  /// Build the send encoding handed to addTransceiver. Supplying encodings at
-  /// transceiver-init time is the path libwebrtc guarantees to honor across
-  /// offer/answer (they become the sender's init parameters and are applied
-  /// when the sender attaches at negotiation) — a pre-negotiation
-  /// setParameters is NOT reliably carried across that transition, which is
-  /// how the receiver ended up with native resolution.
-  /// [rid] tags a simulcast layer (forwarder ingest legs, phase 3).
+  /// Builds the send encoding handed to addTransceiver. Encodings supplied
+  /// at transceiver-init time are the path libwebrtc reliably folds into the
+  /// sender across offer/answer; a pre-negotiation setParameters is NOT,
+  /// which is how the receiver ended up with native resolution. [rid] tags a
+  /// simulcast layer.
   RTCRtpEncoding _buildScreenSendEncoding(
       MediaStreamTrack track, int maxWidth, int maxHeight, int fps,
       {String? rid}) {
@@ -361,13 +311,10 @@ class ScreenShareService {
     return encoding;
   }
 
-  /// The two simulcast layers for a forwarder ingest leg (phase 3), LOW
-  /// FIRST: libwebrtc's rate allocator protects encodings[0] under
-  /// congestion, and the small layer is the one every branch viewer must be
-  /// able to keep receiving (a starved full layer drops its viewers onto the
-  /// low layer via the forwarder engine's dry-layer fallback). Rid names are
-  /// the forwarder contract: 'f' = full (the branch cap), 'q' = quarter
-  /// (half per axis).
+  /// The two simulcast layers for a forwarder ingest leg, LOW FIRST:
+  /// libwebrtc's rate allocator protects encodings[0] under congestion, and
+  /// the small layer is the one every branch viewer must keep receiving. Rid
+  /// names are the forwarder contract: 'f' = the branch cap, 'q' = half.
   List<RTCRtpEncoding> _buildSimulcastSendEncodings(
       MediaStreamTrack track, int maxWidth, int maxHeight, int fps) {
     final qW = maxWidth ~/ 2, qH = maxHeight ~/ 2;
@@ -379,8 +326,8 @@ class ScreenShareService {
     ];
   }
 
-  /// Configure one video encoding: downscale to the cap if the capture is
-  /// larger, pin the framerate, and set the bitrate tier for the target size.
+  /// Configures one encoding: downscale to the cap, pin the framerate, set
+  /// the bitrate tier for the target size.
   void _configureVideoEncoding(
     RTCRtpEncoding encoding,
     int captureWidth,
@@ -389,7 +336,6 @@ class ScreenShareService {
     int maxHeight,
     int fps,
   ) {
-    // Downscale if the capture is larger than the target.
     if (captureWidth > maxWidth || captureHeight > maxHeight) {
       final scaleW = captureWidth / maxWidth;
       final scaleH = captureHeight / maxHeight;
@@ -405,24 +351,17 @@ class ScreenShareService {
 
     final maxBitrateKbps = _maxBitrateKbpsFor(maxWidth, maxHeight);
     encoding.maxBitrate = maxBitrateKbps * 1000; // bps
-    // Floor the allocation too: after a congestion episode the bandwidth
-    // estimator ramps back slowly, and with no floor the encoder sits at a
-    // starvation bitrate long after the link recovers — text turns to QP
-    // mush with nothing pushing it back up.
+    // Floor the allocation too: after congestion the bandwidth estimator
+    // ramps back slowly, and with no floor the encoder sits at a starvation
+    // bitrate long after the link recovers, text turning to QP mush.
     final minBitrateKbps = _minBitrateKbpsFor(maxWidth, maxHeight);
     encoding.minBitrate = minBitrateKbps * 1000; // bps
     _log('[HOLLOW-SCREEN] Set bitrate=$minBitrateKbps-${maxBitrateKbps}kbps '
         'maxFramerate=${fps}fps for ${maxWidth}x$maxHeight');
   }
 
-  /// Bitrate tiers (screen share — higher than camera because
-  /// screen content has sharp edges/text that compress poorly):
-  ///   360p  →  800 kbps
-  ///   480p  → 1500 kbps
-  ///   720p  → 3000 kbps
-  ///  1080p  → 6000 kbps
-  ///  1440p  → 9000 kbps
-  ///  4K     → 15000 kbps
+  /// Bitrate tiers, higher than camera because screen content has sharp
+  /// edges and text that compress poorly.
   int _maxBitrateKbpsFor(int maxWidth, int maxHeight) {
     final pixels = maxWidth * maxHeight;
     if (pixels <= 640 * 360) {
@@ -440,9 +379,9 @@ class ScreenShareService {
     }
   }
 
-  /// Minimum bitrate floor per tier — high enough that the encoder is never
-  /// starved into blockiness by a stale low bandwidth estimate, low enough
-  /// not to overrun genuinely narrow (e.g. TURN-relayed) links.
+  /// Minimum bitrate floor per tier: high enough that a stale low bandwidth
+  /// estimate cannot starve the encoder into blockiness, low enough not to
+  /// overrun a genuinely narrow (TURN-relayed) link.
   int _minBitrateKbpsFor(int maxWidth, int maxHeight) {
     final pixels = maxWidth * maxHeight;
     if (pixels <= 640 * 360) {
@@ -460,12 +399,9 @@ class ScreenShareService {
     }
   }
 
-  // ---------------------------------------------------------------------------
   // Outgoing: we share our screen to the remote peer.
-  // ---------------------------------------------------------------------------
 
-  /// Capture screen, create a fresh RTCPeerConnection, add the screen track,
-  /// and return the SDP offer string.
+  /// Captures the screen, builds a fresh PC, and returns the SDP offer.
   Future<String> createOffer(
     String sourceId,
     int width,
@@ -479,20 +415,17 @@ class ScreenShareService {
         'profile=${profile.name}');
     _contentProfile = profile;
 
-    // Idempotent: tear down any prior PC/stream on this service before
-    // capturing a new one, so a re-share on the same instance can't strand the
-    // old PeerConnection's thread-set.
+    // Idempotent: tear down any prior PC and stream first, so a re-share on
+    // the same instance cannot strand the old PeerConnection's thread-set.
     if (_pc != null || _screenStream != null || _localRenderer != null) {
       await close();
     }
 
     await _requestMacCapturePermissionIfNeeded();
 
-    // Capture screen (+ optional system audio). Source enumeration is
-    // desktop-only; mobile captures THE screen (MediaProjection / ReplayKit).
-    // A Wayland portal-first share MUST NOT re-enumerate: the native side
-    // resolves the sentinel id without a source list, and enumerating here
-    // would pop an extra xdg-desktop-portal dialog.
+    // Source enumeration is desktop-only; mobile captures THE screen. A
+    // Wayland portal-first share MUST NOT re-enumerate: the native side
+    // resolves the sentinel id, and enumerating pops an extra portal dialog.
     if (!Platform.isAndroid &&
         !Platform.isIOS &&
         !DesktopCaptureSupport.isPortalSourceId(sourceId)) {
@@ -500,21 +433,15 @@ class ScreenShareService {
           types: DesktopCaptureSupport.sourceTypes);
     }
 
-    // macOS system-audio routing:
-    //  - 13.0+ : ScreenCaptureKit audio-only -> data channel (0x03), same as
-    //    Windows. Started later via startScreenAudioCapture. We deliberately do
-    //    NOT use the CoreAudio Process Tap (14.2+) — it injects audio into the
-    //    system default input, which the CoreAudio ADM (our voice-call ADM on
-    //    macOS) doesn't follow, so it fed 0 tracks. The data-channel path is
-    //    ADM-independent and uniform across all macOS versions.
-    //  - <13.0 : no capture API; the UI locks the toggle off, so shareAudio is
-    //    false here anyway.
-    // Windows, macOS 13.0+, Linux, and MOBILE send audio via the data channel —
-    // never request it in getDisplayMedia (the WASAPI/AudioSource path crashes
-    // on Windows, isn't available on macOS, yields nothing on Linux, and on
-    // mobile a WebRTC track would drag music through the voice-comm AEC/AGC).
-    // Android taps AudioPlaybackCapture, iOS the broadcast extension — both
-    // stream PCM to Dart, Rust Opus-encodes, 0x03 data channel.
+    // Audio never rides getDisplayMedia: the WASAPI path crashes on Windows,
+    // is unavailable on macOS, yields nothing on Linux, and on mobile a
+    // WebRTC track would drag music through the voice-comm AEC/AGC. Every
+    // platform sends share audio over the 0x03 data channel instead.
+    //
+    // On macOS that is ScreenCaptureKit, deliberately NOT the 14.2+ CoreAudio
+    // Process Tap, which injects into the system default input that our
+    // CoreAudio ADM does not follow and so fed 0 tracks. Below 13.0 there is
+    // no capture API at all and the UI locks the toggle off.
     final useDataChannelAudio = shareAudio &&
         (Platform.isWindows ||
             Platform.isLinux ||
@@ -525,7 +452,6 @@ class ScreenShareService {
 
     await _captureScreenStream(sourceId, width, height, fps, getDisplayAudio);
 
-    // SECURITY (Phase 6.25): Validate stream has video tracks.
     final videoTracks = _screenStream!.getVideoTracks();
     if (videoTracks.isEmpty) {
       _log('[HOLLOW-SCREEN] getDisplayMedia returned no video tracks — aborting');
@@ -536,19 +462,15 @@ class ScreenShareService {
     final screenTrack = videoTracks.first;
     _log('[HOLLOW-SCREEN] Got screen track: ${screenTrack.id}');
 
-    // Build a local self-preview renderer so the UI can show what we're
-    // sharing in the screen share view.
     _localRenderer = RTCVideoRenderer();
     await _localRenderer!.initialize();
     _localRenderer!.srcObject = _screenStream;
 
-    // Create PC.
     _pc = await createPeerConnection(iceServers);
     _setupCallbacks();
 
-    // Add screen video track WITH the resolution cap as init sendEncodings —
-    // the only pre-negotiation channel libwebrtc reliably folds into the
-    // sender at offer/answer (see _buildScreenSendEncoding).
+    // The cap rides the transceiver INIT encodings: the only pre-negotiation
+    // channel libwebrtc reliably folds into the sender at offer/answer.
     await _pc!.addTransceiver(
       track: screenTrack,
       init: RTCRtpTransceiverInit(
@@ -565,14 +487,12 @@ class ScreenShareService {
     await _applyContentHint(screenTrack);
     await _applyScreenCodecPreference(screenTrack, profile);
 
-    // Second layer: setParameters with the same cap (also carries the
-    // degradationPreference, which transceiver init cannot). Re-applied
-    // post-connect either way — see _scheduleResolutionCapEnforcement.
+    // Second layer: setParameters also carries degradationPreference, which
+    // transceiver init cannot. Re-applied post-connect either way.
     await _applyResolutionCap(width, height, fps, profile);
 
     await _addCapturedAudioTracks(shareAudio);
 
-    // Generate offer.
     final offer = await _pc!.createOffer();
     await _pc!.setLocalDescription(offer);
 
@@ -584,22 +504,18 @@ class ScreenShareService {
     return offer.sdp!;
   }
 
-  /// macOS / Android need explicit screen-capture permission before any
-  /// source enumeration. On macOS this triggers the System Settings →
-  /// Privacy & Security → Screen & System Audio Recording prompt; the
-  /// first attempt always returns false, the user grants access in
-  /// Settings, and the next launch reads granted. Web/Windows/Linux just
-  /// return true.
+  /// macOS and Android need explicit screen-capture permission before any
+  /// source enumeration. On macOS the first attempt always returns false,
+  /// the user grants in System Settings, and the next launch reads granted.
+  /// Web, Windows and Linux just return true.
   Future<void> _requestMacCapturePermissionIfNeeded() async {
     if (!Platform.isMacOS) return;
     try {
       final granted = await Helper.requestCapturePermission();
       _log('[HOLLOW-SCREEN] macOS screen recording permission: $granted');
       // Debug builds are ad-hoc signed and every rebuild gets a fresh
-      // signature, so TCC reports `granted=false` until the user re-grants.
-      // We still try the capture: ScreenCaptureKit will surface its own
-      // error (and possibly show the system prompt the first time) if
-      // access is truly denied — much friendlier than hard-aborting here.
+      // signature, so TCC reports granted=false until the user re-grants.
+      // Try the capture anyway: ScreenCaptureKit surfaces its own error.
     } catch (e) {
       _log('[HOLLOW-SCREEN] permission probe failed: $e');
     }
@@ -614,17 +530,16 @@ class ScreenShareService {
     bool getDisplayAudio,
   ) async {
     if (Platform.isAndroid) {
-      // Constraints are ignored by the Android plugin (MediaProjection
-      // captures the display at native size; the consent dialog handles
-      // permission). The encoder cap below does the downscaling.
+      // The Android plugin ignores constraints (MediaProjection captures at
+      // native size); the encoder cap below does the downscaling.
       _screenStream = await navigator.mediaDevices.getDisplayMedia({
         'video': true,
         'audio': false,
       });
     } else if (Platform.isIOS) {
-      // 'broadcast' selects the ReplayKit Broadcast Upload Extension path
-      // (system-blessed: whole screen + app audio, keeps running when Hollow
-      // is backgrounded) and auto-presents the RPSystemBroadcastPickerView.
+      // 'broadcast' selects the ReplayKit Broadcast Upload Extension: whole
+      // screen plus app audio, and it keeps running when Hollow is
+      // backgrounded. It auto-presents RPSystemBroadcastPickerView.
       _screenStream = await navigator.mediaDevices.getDisplayMedia({
         'video': {'deviceId': 'broadcast'},
         'audio': false,
@@ -641,25 +556,21 @@ class ScreenShareService {
         },
         'audio': getDisplayAudio,
       });
-      // The portal grant now exists (or was just re-used) — the next share
-      // this run can offer "same as last time" without a portal prompt.
+      // The portal grant now exists, so the next share this run can offer
+      // "same as last time" without a prompt.
       if (DesktopCaptureSupport.isPortalSourceId(sourceId)) {
         DesktopCaptureSupport.portalGrantLikely = true;
       }
     }
   }
 
-  /// Push the content profile down to the native encoder pipeline as a W3C
-  /// contentHint. Windows + Linux: the hint rides our patched libwebrtc
-  /// binaries (RTCVideoTrack::SetContentHint, vendored in third_party);
-  /// darwin/Android capture sources already carry the screencast flag
-  /// natively and have no wrapper hint API.
+  /// Pushes the content profile down as a W3C contentHint. The hint rides
+  /// our patched libwebrtc on Windows and Linux; darwin and Android capture
+  /// sources already carry the screencast flag natively.
   ///
-  /// text → 'detail' (screencast pipeline, explicitly). motion → '' (defer
-  /// to the source's is_screencast=true, which our patched desktop capture
-  /// source now sets — screencast pipeline with framerate-first
-  /// degradation). We deliberately never send 'motion': it would force the
-  /// CAMERA pipeline (denoising + QP quality scaler) back on.
+  /// text sets 'detail'; motion sets '' and defers to the source's
+  /// is_screencast. We deliberately never send 'motion': it would force the
+  /// CAMERA pipeline (denoising, QP quality scaler) back on.
   Future<void> _applyContentHint(MediaStreamTrack screenTrack) async {
     if (!Platform.isWindows && !Platform.isLinux) return;
     final hint = _contentProfile == ScreenContentProfile.text ? 'detail' : '';
@@ -672,17 +583,14 @@ class ScreenShareService {
     }
   }
 
-  /// Order codec preferences for the screen-share sender (desktop senders
-  /// only — mobile hardware encoder support varies; leave its defaults alone).
+  /// Orders codec preferences for a DESKTOP screen-share sender; mobile
+  /// hardware encoder support varies, so its defaults are left alone.
   ///
-  /// - macOS: VP8 first (Apple's H.264 hardware encoder can emit a profile
-  ///   that Windows libwebrtc's software decoder renders as pure black with
-  ///   no error; VP8 has no profile axis), VP9 second.
-  /// - Windows/Linux: VP9 first (≈2x VP8's quality-per-bit on screen
-  ///   content), VP8 as the universal fallback. For the TEXT profile AV1
-  ///   leads: it has actual screen-content tools (palette mode) and its
-  ///   software encode is cheap at text-profile framerates. Receivers
-  ///   without AV1/VP9 fall back through normal SDP negotiation.
+  /// macOS puts VP8 first because Apple's H.264 hardware encoder can emit a
+  /// profile that Windows libwebrtc's software decoder renders as pure black
+  /// with no error. Windows and Linux put VP9 first (about twice VP8's
+  /// quality-per-bit on screen content), and AV1 leads for TEXT, which has
+  /// real screen-content tools. Receivers without them fall back through SDP.
   Future<void> _applyScreenCodecPreference(
       MediaStreamTrack screenTrack, ScreenContentProfile profile,
       {bool vp8Only = false}) async {
@@ -694,9 +602,9 @@ class ScreenShareService {
 
       int rank(RTCRtpCodecCapability c) {
         final mime = c.mimeType.toLowerCase();
-        // Simulcast ingest legs (phase 3): VP8 first, unconditionally — the
-        // forwarder's layer-switch descriptor rewrite is VP8-only, and VP8
-        // is the codec the fwd lane is field-proven on.
+        // Simulcast ingest legs are VP8-only: the forwarder's layer-switch
+        // descriptor rewrite is VP8-only, and VP8 is what the lane is
+        // field-proven on.
         if (vp8Only) return mime == 'video/vp8' ? 0 : 1;
         if (Platform.isMacOS) {
           if (mime == 'video/vp8') return 0;
@@ -711,8 +619,8 @@ class ScreenShareService {
         return 3;
       }
 
-      // Stable bucket ordering (List.sort is not stable in Dart — rtx/red/
-      // ulpfec entries must keep their relative order).
+      // List.sort is not stable in Dart, and rtx/red/ulpfec entries must
+      // keep their relative order.
       final buckets = <int, List<RTCRtpCodecCapability>>{};
       for (final c in codecs) {
         buckets.putIfAbsent(rank(c), () => []).add(c);
@@ -736,8 +644,8 @@ class ScreenShareService {
     }
   }
 
-  /// Add any audio tracks getDisplayMedia delivered to the PC (macOS Process
-  /// Tap path). Logs when audio was requested but no track is available.
+  /// Adds any audio tracks getDisplayMedia delivered (macOS Process Tap
+  /// path). Logs when audio was requested but no track is available.
   Future<void> _addCapturedAudioTracks(bool shareAudio) async {
     final audioTracks = _screenStream!.getAudioTracks();
     _log('[HOLLOW-SCREEN] getDisplayMedia audio tracks: ${audioTracks.length}');
@@ -752,16 +660,13 @@ class ScreenShareService {
     }
   }
 
-  /// Create an offer using a pre-captured screen stream (for voice channels
-  /// where one capture is shared across multiple peer connections).
-  /// The caller manages the track poller centrally.
+  /// Creates an offer from a pre-captured screen stream, for voice channels
+  /// where one capture is shared across many peer connections. The caller
+  /// manages the track poller.
   ///
-  /// [simulcast] (phase 3, forwarder ingest legs only): encode TWO rid
-  /// layers — 'q' (half per axis, protected under congestion by riding
-  /// first) + 'f' (the cap) — so the forwarder engine can pick per-viewer
-  /// layers by packet selection. Simulcast legs are constrained to VP8: the
-  /// engine's layer-switch rewrite is VP8-descriptor-only, and VP8 is the
-  /// codec the whole forwarder lane is field-proven on.
+  /// [simulcast] encodes TWO rid layers, 'q' first so congestion protects
+  /// it, letting the forwarder engine pick per-viewer layers by packet
+  /// selection. Simulcast legs are constrained to VP8.
   Future<String> createOfferFromStream(
     MediaStream stream, {
     int maxWidth = 1920,
@@ -775,14 +680,13 @@ class ScreenShareService {
     _contentProfile = profile;
     _simulcast = simulcast;
 
-    // Idempotent: if this service already holds a PC (re-fired offer on
-    // reconnect), tear the old one down before building a new one so its
-    // libwebrtc thread-set can't leak.
+    // Idempotent: tear an existing PC down before building a new one, or its
+    // libwebrtc thread-set leaks on a re-fired offer.
     if (_pc != null || _localRenderer != null || _remoteRenderer != null) {
       await close();
     }
 
-    // The caller owns this shared capture stream — do NOT dispose it on close().
+    // The caller owns this shared capture stream; do NOT dispose it here.
     _ownsScreenStream = false;
     _screenStream = stream;
 
@@ -790,18 +694,14 @@ class ScreenShareService {
       final screenTrack = _screenStream!.getVideoTracks().first;
       _log('[HOLLOW-SCREEN] Using shared screen track: ${screenTrack.id}');
 
-      // Build a local self-preview renderer so the UI can show what we're
-      // sharing in the screen share view.
       _localRenderer = RTCVideoRenderer();
       await _localRenderer!.initialize();
       _localRenderer!.srcObject = _screenStream;
 
-      // Create PC.
       _pc = await createPeerConnection(iceServers);
       _setupCallbacks();
 
-      // Add screen video track WITH the resolution cap as init sendEncodings
-      // (see createOffer for why this must ride the transceiver init).
+      // The cap rides the transceiver init encodings (see createOffer).
       await _pc!.addTransceiver(
         track: screenTrack,
         init: RTCRtpTransceiverInit(
@@ -824,10 +724,10 @@ class ScreenShareService {
       await _applyScreenCodecPreference(screenTrack, profile,
           vp8Only: simulcast);
 
-      // Second layer: setParameters (degradationPreference + cap re-assert).
+      // Second layer: setParameters, degradationPreference and cap re-assert.
       await _applyResolutionCap(maxWidth, maxHeight, fps, profile);
 
-      // Add audio tracks if available (macOS Process Tap audio goes via tracks).
+      // macOS Process Tap audio arrives as tracks.
       final audioTracks = _screenStream!.getAudioTracks();
       if (audioTracks.isNotEmpty) {
         for (final track in audioTracks) {
@@ -836,24 +736,23 @@ class ScreenShareService {
         _log('[HOLLOW-SCREEN] Added ${audioTracks.length} audio track(s)');
       }
 
-      // Generate offer.
       final offer = await _pc!.createOffer();
       await _pc!.setLocalDescription(offer);
 
       _log('[HOLLOW-SCREEN] Offer created, SDP length=${offer.sdp?.length}');
 
-      // Note: no track poller here — caller manages centrally for shared stream.
+      // No track poller: the caller manages one for the shared stream.
       return offer.sdp!;
     } catch (e) {
-      // Dispose the partially-built PC/renderer (NOT the shared stream — we
-      // don't own it) before propagating.
+      // Dispose the partially-built PC and renderer, but not the shared
+      // stream, before propagating.
       _log('[HOLLOW-SCREEN] createOfferFromStream failed, tearing down: $e');
       await close();
       rethrow;
     }
   }
 
-  /// Handle the remote peer's SDP answer on our outgoing PC.
+  /// Handles the remote peer's SDP answer on our outgoing PC.
   Future<void> handleAnswer(String sdp) async {
     if (_pc == null) {
       _log('[HOLLOW-SCREEN] handleAnswer: no PC');
@@ -866,27 +765,23 @@ class ScreenShareService {
     await _flushPendingCandidates();
   }
 
-  // ---------------------------------------------------------------------------
   // Incoming: the remote peer shares their screen to us.
-  // ---------------------------------------------------------------------------
 
-  /// Handle the remote peer's SDP offer. Creates a PC, wires onTrack for the
-  /// remote screen renderer, and returns the SDP answer string.
+  /// Handles the remote peer's SDP offer, wires onTrack for the remote
+  /// screen renderer, and returns the SDP answer.
   Future<String> handleOffer(String sdp) async {
     _log('[HOLLOW-SCREEN] Handling incoming screen offer');
 
-    // Idempotent: a re-fired offer for the same peer must not strand the prior
-    // PC on this instance.
+    // Idempotent: a re-fired offer for the same peer must not strand the
+    // prior PC on this instance.
     if (_pc != null) {
       await close();
     }
 
     try {
-      // Create PC.
       _pc = await createPeerConnection(iceServers);
       _setupCallbacks();
 
-      // Wire remote track handler — this is where we get the screen video.
       _pc!.onTrack = (event) {
         _log('[HOLLOW-SCREEN] Remote track: ${event.track.kind} '
             'id=${event.track.id} streams=${event.streams.length}');
@@ -896,16 +791,14 @@ class ScreenShareService {
         }
       };
 
-      // Set remote description (the offer).
       await _pc!.setRemoteDescription(RTCSessionDescription(sdp, 'offer'));
       _remoteDescriptionSet = true;
       await _flushPendingCandidates();
 
-      // Create answer.
       final answer = await _pc!.createAnswer();
       await _pc!.setLocalDescription(answer);
 
-      // Route audio to the preferred output device (same as voice call).
+      // Route audio to the preferred output device, as a voice call does.
       if (preferredAudioOutputDeviceId != null) {
         try {
           await Helper.selectAudioOutput(preferredAudioOutputDeviceId!);
@@ -919,19 +812,15 @@ class ScreenShareService {
       _log('[HOLLOW-SCREEN] Answer created, SDP length=${answer.sdp?.length}');
       return answer.sdp!;
     } catch (e) {
-      // A throw here (e.g. unsupported remote SDP codec) leaves a live PC +
-      // its thread-set stranded. Dispose before propagating.
+      // A throw here (an unsupported remote SDP codec, say) leaves a live PC
+      // and its thread-set stranded. Dispose before propagating.
       _log('[HOLLOW-SCREEN] handleOffer failed, tearing down: $e');
       await close();
       rethrow;
     }
   }
 
-  // ---------------------------------------------------------------------------
-  // ICE
-  // ---------------------------------------------------------------------------
-
-  /// Add an ICE candidate. Queued if remote description isn't set yet.
+  /// Adds an ICE candidate, queued when the remote description is not set.
   Future<void> handleIceCandidate(
     String candidate,
     String? sdpMid,
@@ -945,24 +834,17 @@ class ScreenShareService {
     }
   }
 
-  // ---------------------------------------------------------------------------
-  // Screen audio capture (Windows data-channel streaming)
-  // ---------------------------------------------------------------------------
+  // Screen audio capture, streamed over the 0x03 data channel.
 
-  /// Start out-of-process system-audio capture + Opus encoding. Encoded packets
-  /// are delivered to [onPacket] for sending over the data channel (0x03).
+  /// Starts system-audio capture and Opus encoding; packets reach [onPacket]
+  /// for the data channel.
   ///
-  /// - Windows: WASAPI loopback exe (`--mode pipe`). A separate process avoids
-  ///   libwebrtc's AudioDeviceModule interfering with the WASAPI capture.
-  /// - Linux: same exe, `--mode pipe` with per-sink-input capture — window
-  ///   shares INCLUDE only the shared app's process tree (X id -> _NET_WM_PID),
-  ///   entire-screen EXCLUDES Hollow's own tree (anti-echo); whole-monitor
-  ///   capture is the in-exe fallback.
-  /// - macOS 13.0–14.1: ScreenCaptureKit audio-only capture -> exe `--mode
-  ///   encode`. (macOS 14.2+ uses the Process Tap -> WebRTC track in createOffer,
-  ///   never this method.)
-  /// - macOS < 13.0 / other: no-op (no capture API; the toggle is locked off
-  ///   in the UI for those versions).
+  /// Windows and Linux use the out-of-process exe, since a separate process
+  /// keeps libwebrtc's AudioDeviceModule out of the WASAPI capture; on Linux
+  /// a window share INCLUDEs only the shared app's process tree and an
+  /// entire-screen share EXCLUDEs Hollow's own, for anti-echo. macOS 13.0+
+  /// uses ScreenCaptureKit. Below that there is no capture API and the UI
+  /// locks the toggle off, so this is a no-op.
   Future<void> startScreenAudioCapture(
     String streamId, {
     String mode = 'system',
@@ -980,14 +862,13 @@ class ScreenShareService {
       return;
     }
 
-    // macOS 13.0+: ScreenCaptureKit audio path (Process Tap retired).
+    // macOS 13.0+: ScreenCaptureKit (the Process Tap is retired).
     if (Platform.isMacOS && MacOsScreenAudioSupport.hasSckAudio) {
       await _startMacSckAudioCapturer(onPacket);
       return;
     }
 
-    // Mobile: native capture (Android AudioPlaybackCapture / iOS broadcast
-    // extension audio) -> PCM to Dart -> Rust Opus encode -> onPacket.
+    // Mobile: native capture, PCM to Dart, Rust Opus encode, onPacket.
     if (Platform.isAndroid || Platform.isIOS) {
       await _startMobileAudioCapturer(onPacket);
       return;
@@ -1054,19 +935,13 @@ class ScreenShareService {
     }
   }
 
-  // ---------------------------------------------------------------------------
-  // Teardown
-  // ---------------------------------------------------------------------------
-
   /// Close the PC, stop tracks, dispose renderers. Safe to call multiple times.
   Future<void> close() async {
     _log('[HOLLOW-SCREEN] Closing screen share service');
 
-    // Stop the liveness watchdog FIRST: a planned teardown must never be
-    // reported as a suspected crash.
+    // Stop the watchdog FIRST: a planned teardown is not a suspected crash.
     _stopLivenessWatchdog();
 
-    // Stop screen audio capture before tearing down PC.
     await _stopScreenAudioCapture();
 
     await _disableMacSystemAudioTap();
@@ -1074,21 +949,18 @@ class ScreenShareService {
     _screenTrackPoller?.cancel();
     _screenTrackPoller = null;
 
-    // Teardown must be DEFENSIVE: each native disposal is wrapped so one
-    // failure can't abort the rest, leaking the PC/streams. On Linux
-    // `RTCVideoRenderer.dispose()` throws "VideoRendererDispose() texture not
-    // found!" when the texture is already gone — that uncaught throw used to
-    // crash the app on screen-share stop (it skipped the PC/stream cleanup).
-    // Null the field BEFORE awaiting so a re-entrant close() can't double-free.
+    // Teardown is DEFENSIVE: each native disposal is wrapped so one failure
+    // cannot abort the rest and leak the PC. On Linux `RTCVideoRenderer
+    // .dispose()` throws when the texture is already gone, and that uncaught
+    // throw used to crash the app on share stop. Null a field BEFORE
+    // awaiting so a re-entrant close() cannot double-free.
 
-    // Dispose local self-preview renderer first (before stream goes away).
     final localRenderer = _localRenderer;
     _localRenderer = null;
     await _disposeRendererSafely(localRenderer, 'local renderer');
 
     await _disposeOwnedScreenStream();
 
-    // Dispose remote renderer.
     final remoteRenderer = _remoteRenderer;
     _remoteRenderer = null;
     await _disposeRendererSafely(remoteRenderer, 'remote renderer');
@@ -1097,8 +969,7 @@ class ScreenShareService {
 
     await _closeAndDisposePc();
 
-    // Restore ownership defaults so the next use of this instance starts clean
-    // (createOffer captures+owns; createOfferFromStream re-sets false).
+    // Restore ownership defaults so the next use of this instance is clean.
     _ownsScreenStream = true;
     _remoteStreamIsSynthetic = false;
 
@@ -1110,8 +981,8 @@ class ScreenShareService {
     _simulcast = false;
   }
 
-  /// Tear down the macOS system audio tap first so the system default input
-  /// reverts before we stop the streams.
+  /// Tears down the macOS system audio tap first, so the system default
+  /// input reverts before we stop the streams.
   Future<void> _disableMacSystemAudioTap() async {
     if (!_macSystemAudioActive) return;
     try {
@@ -1136,10 +1007,9 @@ class ScreenShareService {
     }
   }
 
-  /// Stop local screen capture — ONLY if we own it. For createOfferFromStream
-  /// the capture is shared across many per-peer services and owned by the
-  /// provider; disposing it here kills every other peer's share AND double-frees
-  /// it (the provider disposes it too) → `corrupted size vs prev_size` abort.
+  /// Stops local screen capture ONLY if we own it. For createOfferFromStream
+  /// the capture is shared and owned by the provider: disposing it here
+  /// kills every other peer's share AND double-frees it.
   Future<void> _disposeOwnedScreenStream() async {
     final screenStream = _screenStream;
     final ownsScreenStream = _ownsScreenStream;
@@ -1156,9 +1026,9 @@ class ScreenShareService {
     }
   }
 
-  /// Dispose the remote stream ONLY if we synthesized it (createLocalMediaStream
-  /// fallback). libwebrtc owns the event-provided streams — disposing those
-  /// double-frees. We null the reference either way.
+  /// Disposes the remote stream ONLY if we synthesized it; libwebrtc owns
+  /// the event-provided ones and disposing those double-frees. The reference
+  /// is nulled either way.
   Future<void> _disposeSyntheticRemoteStream() async {
     final remoteStream = _remoteStream;
     final remoteSynthetic = _remoteStreamIsSynthetic;
@@ -1172,9 +1042,9 @@ class ScreenShareService {
     }
   }
 
-  /// Close PC. close() and dispose() get SEPARATE guards — if close() throws on
-  /// an already-failing native PC, dispose() (which frees the thread-set) must
-  /// still run, or the libwebrtc threads leak.
+  /// close() and dispose() get SEPARATE guards: if close() throws on an
+  /// already-failing native PC, dispose() must still run, or the libwebrtc
+  /// threads leak.
   Future<void> _closeAndDisposePc() async {
     final pc = _pc;
     _pc = null;
@@ -1197,10 +1067,6 @@ class ScreenShareService {
       types: DesktopCaptureSupport.sourceTypes,
     );
   }
-
-  // ---------------------------------------------------------------------------
-  // Private
-  // ---------------------------------------------------------------------------
 
   void _setupCallbacks() {
     _pc!.onIceCandidate = (candidate) {
@@ -1226,20 +1092,14 @@ class ScreenShareService {
         _stopLivenessWatchdog();
         onDisconnected?.call();
       case RTCPeerConnectionState.RTCPeerConnectionStateDisconnected:
-        // Hold, do not tear down.
+        // Hold, do not tear down. `disconnected` means ICE consent has gone
+        // unanswered for a couple of seconds, which a Wi-Fi stutter produces
+        // routinely and which clears itself most of the time; rebuilding
+        // here costs a visible blink and a fresh SFrame binding for nothing.
         //
-        // `disconnected` means ICE consent has gone unanswered for a couple of
-        // seconds, which a Wi-Fi stutter produces routinely and which clears
-        // itself most of the time. Firing the recovery ladder here rebuilt a
-        // leg that was about to heal, and every rebuild is a visible blink in
-        // the share plus a fresh SFrame binding.
-        //
-        // Nothing is lost by waiting, because the consent watchdog above is
-        // still running and is the STRICTER test: it declares the leg dead
-        // after three seconds of no inbound activity on the nominated pair,
-        // which is exactly what a genuinely dead leg looks like and is still
-        // ahead of libwebrtc's own 5 to 7 second expiry. A leg that recovers
-        // never reaches it.
+        // Nothing is lost by waiting: the consent watchdog above is the
+        // STRICTER test and declares a genuinely dead leg in about three
+        // seconds, still ahead of libwebrtc's own 5 to 7 second expiry.
         _log('[HOLLOW-SCREEN] transport disconnected — holding the leg while '
             'the consent watchdog decides');
       default:
@@ -1247,56 +1107,45 @@ class ScreenShareService {
     }
   }
 
-  // ---------------------------------------------------------------------------
-  // Fast failover: ICE-consent staleness watchdog
-  // ---------------------------------------------------------------------------
+  // Fast failover: when the peer at the other end CRASHES the recovery is
+  // same-second, but libwebrtc only gives up when ICE consent expires, about
+  // 5 to 7 seconds of frozen picture. This watchdog shortens that to under
+  // 3.5 s.
   //
-  // When the peer at the other end of a screen leg CRASHES, the recovery is
-  // same-second (field-proven) but the DETECTION is not: libwebrtc only gives
-  // up when ICE consent expires, which measured ~5-7 s of frozen picture. This
-  // watchdog shortens that to ~2.5-3.5 s.
-  //
-  // CRITICAL — the signal is ICE CONSENT, never media bytes. A static screen
-  // share is legitimately silent for minutes at a time, so "no frames" says
-  // nothing about liveness. ICE consent checks (STUN binding requests) run
-  // continuously regardless of media, so a candidate pair whose
-  // responses/packets stop advancing is genuinely unreachable.
-  //
-  // Conservative by construction: TWO consecutive stale polls are required,
-  // and a false positive costs one blink (the recovery paths are all
-  // idempotent re-requests) rather than a lost stream.
+  // CRITICAL: the signal is ICE CONSENT, never media bytes. A static screen
+  // share is legitimately silent for minutes, so "no frames" says nothing
+  // about liveness, while consent checks run continuously regardless of
+  // media. Two consecutive stale polls are required, and a false positive
+  // costs one blink rather than a lost stream.
 
   Timer? _livenessTimer;
 
-  /// Fingerprint of the nominated pair's inbound counters, and the local clock
-  /// reading when it last CHANGED. Staleness is "nothing has moved for N
-  /// seconds by OUR clock" — never a comparison against a timestamp reported
-  /// by the stats themselves, whose unit is not ours to assume (this fork
-  /// reports stats timestamps in MICROseconds; an earlier version of this
-  /// check compared one against `DateTime.now().millisecondsSinceEpoch`, went
-  /// permanently negative, and silently read as "always fresh" — the watchdog
-  /// never fired once in the field).
+  /// Fingerprint of the nominated pair's inbound counters, and OUR clock
+  /// reading when it last CHANGED. Never a comparison against a timestamp
+  /// the stats report: this fork reports them in MICROseconds, and an earlier
+  /// version compared one against `millisecondsSinceEpoch`, went permanently
+  /// negative and read as "always fresh" without ever firing.
   String? _livenessFingerprint;
   DateTime? _livenessLastMovement;
 
-  /// Timer.periodic does not await an async callback, so a slow `getStats()`
-  /// could otherwise overlap the next tick.
+  /// Timer.periodic does not await, so a slow `getStats()` could otherwise
+  /// overlap the next tick.
   bool _livenessPollInFlight = false;
 
   /// Logged once per PC: which inbound counters this build actually exposes.
   /// If none are, the watchdog disables itself loudly rather than pretending.
   bool _livenessMembersLogged = false;
 
-  /// How long every inbound counter must sit still before we call the leg
-  /// dead. ICE consent checks run about every 2.5 s and RTCP receiver reports
-  /// about every 1 s, so 3 s of total silence is well past normal quiet —
-  /// while still beating libwebrtc's own ~5-7 s consent expiry.
+  /// How long every inbound counter must sit still before the leg is called
+  /// dead. Consent checks run about every 2.5 s and RTCP receiver reports
+  /// about every 1 s, so 3 s is well past normal quiet while still beating
+  /// libwebrtc's own 5 to 7 second consent expiry.
   static const _kConsentStaleAfter = Duration(seconds: 3);
 
-  /// Inbound counters, most decisive first. Whichever exist are combined into
-  /// the fingerprint; all of them stall when the far end stops answering.
-  /// Deliberately NOT media-only counters alone — a static screen share is
-  /// legitimately silent, which is why ICE consent is the primary signal.
+  /// Inbound counters, most decisive first; whichever exist are combined
+  /// into the fingerprint. Deliberately not media-only counters: a static
+  /// screen share is legitimately silent, so ICE consent is the primary
+  /// signal.
   static const _kLivenessMembers = <String>[
     'responsesReceived',
     'requestsReceived',
@@ -1334,8 +1183,7 @@ class ScreenShareService {
           'pair for ${_kConsentStaleAfter.inSeconds}s — declaring the leg dead '
           'ahead of libwebrtc');
       // Deliberately does NOT close the PC: the callback owner decides what
-      // recovery means for its role (a viewer walks its ladder, a sharer
-      // reverts its branch), exactly as it does for a real ICE death.
+      // recovery means for its role, exactly as for a real ICE death.
       onDisconnected?.call();
     });
   }
@@ -1352,15 +1200,10 @@ class ScreenShareService {
   /// True when NOTHING has arrived on the nominated candidate pair for
   /// [_kConsentStaleAfter], measured on OUR clock.
   ///
-  /// Deliberately unit-agnostic: it only asks "did these counters change since
-  /// the last poll?", never "how old is this reported timestamp?". The stats
-  /// timestamps in this fork are microseconds, and mixing that with a
-  /// millisecond wall clock is what made the first version of this check read
-  /// as permanently fresh.
-  ///
-  /// The primary signal is ICE consent (`responsesReceived` / `requestsReceived`),
-  /// which keeps ticking regardless of media — a static screen share sends
-  /// almost nothing, so media counters alone would call a healthy leg dead.
+  /// Deliberately unit-agnostic: it asks only "did these counters change
+  /// since the last poll?". The primary signal is ICE consent, which keeps
+  /// ticking regardless of media, since a static screen share sends almost
+  /// nothing and media counters alone would call a healthy leg dead.
   Future<bool> _consentLooksStale(RTCPeerConnection pc) async {
     try {
       final stats = await pc.getStats();
@@ -1380,9 +1223,9 @@ class ScreenShareService {
       }
 
       if (parts.isEmpty) {
-        // This build exposes none of the counters we can reason about. Say so
-        // ONCE and stand down — a watchdog that silently never fires is worse
-        // than no watchdog, because it looks like it is working.
+        // This build exposes none of the counters we can reason about. Say
+        // so ONCE and stand down: a watchdog that silently never fires is
+        // worse than none, because it looks like it is working.
         if (!_livenessMembersLogged) {
           _livenessMembersLogged = true;
           _log('[HOLLOW-SCREEN] liveness watchdog DISABLED — candidate-pair '
@@ -1413,21 +1256,19 @@ class ScreenShareService {
       }
       return now.difference(since) >= _kConsentStaleAfter;
     } catch (_) {
-      // getStats throws once the PC is closed; the real state handler owns
-      // that case.
+      // getStats throws once the PC is closed; the state handler owns that.
       return false;
     }
   }
 
-  /// Post-connect enforcement + verification of the resolution cap (outgoing
-  /// shares only — no-op when no cap was requested on this PC).
+  /// Post-connect enforcement and verification of the resolution cap, for
+  /// outgoing shares only.
   ///
   /// A live setParameters on a NEGOTIATED sender is the one path the spec
-  /// requires to work, so 2s after connect we re-apply the cap — with the
-  /// true capture size read from media-source stats, since getSettings() can
-  /// be empty for desktop captures — and read the sender's parameters back.
-  /// 3s later we log what the encoder ACTUALLY emits (outbound-rtp
-  /// frameWidth/frameHeight) with a clear applied/not-applied verdict.
+  /// requires to work, so 2s after connect the cap is re-applied with the
+  /// true capture size from media-source stats (getSettings can be empty for
+  /// desktop captures) and read back; 3s later what the encoder ACTUALLY
+  /// emits is logged with an applied/not-applied verdict.
   void _scheduleResolutionCapEnforcement() {
     final screenPc = _pc;
     if (screenPc == null || _capWidth == null) return;
@@ -1483,12 +1324,10 @@ class ScreenShareService {
   Future<void> _logEncodedResolution(RTCPeerConnection screenPc) async {
     try {
       final stats = await screenPc.getStats();
-      // SIMULCAST: there is one outbound-rtp per LAYER. Reporting only the
-      // first one is how a dead `f` layer hid behind a healthy-looking
-      // "CAP APPLIED" for the q layer (field 2026-08-15) — the diagnostic said
-      // the cap was applied while the branch was actually serving half
-      // resolution. Report every layer, and judge the cap against the LARGEST
-      // one that is actually encoding.
+      // SIMULCAST has one outbound-rtp per LAYER. Reporting only the first
+      // is how a dead `f` layer hid behind a healthy-looking "CAP APPLIED"
+      // for the q layer, so every layer is reported and the cap judged
+      // against the LARGEST one that is actually encoding.
       final layers = <String>[];
       int? bestLong;
       int? bestW, bestH;
@@ -1516,7 +1355,7 @@ class ScreenShareService {
         return;
       }
       final capW = _capWidth, capH = _capHeight;
-      // Compare LONG edges so portrait window shares don't false-fail;
+      // Compare LONG edges so portrait window shares do not false-fail;
       // small tolerance for encoder rounding.
       final capLongEdge = (capW ?? 0) > (capH ?? 0) ? capW : capH;
       final verdict = bestLong == null
@@ -1533,8 +1372,7 @@ class ScreenShareService {
     }
   }
 
-  /// Log which ICE route (TURN/STUN/LAN) the connected PC ended up on.
-  /// Diagnostic only.
+  /// Logs which ICE route (TURN/STUN/LAN) the connected PC ended up on.
   void _scheduleIceRouteLog() {
     if (_pc == null) return;
     _logIceRoute();
@@ -1543,10 +1381,10 @@ class ScreenShareService {
   Future<void> _logIceRoute() async {
     // Resolve _pc per attempt — a renegotiation can replace it mid-probe.
     final route = await probeIceRoute(() => _pc);
-    // Forwarder legs get their own label (D6 follow-up #1): the probe's
-    // TURN/STUN/LAN taxonomy describes DIRECT lanes, and a blind-forwarder
-    // hop mislabels there (worst case "TURN (relayed)" on an Always-relay
-    // client — forwarder legs are exempt from forced TURN by design).
+    // Forwarder legs get their own label: the probe's TURN/STUN/LAN taxonomy
+    // describes DIRECT lanes and mislabels a blind-forwarder hop, worst case
+    // as "TURN (relayed)" on a client whose forwarder legs are in fact
+    // exempt from forced TURN.
     final prefix = forwarderLeg
         ? '[HOLLOW-SCREEN] ICE route: Forwarder leg (blind relay hop) — '
         : '[HOLLOW-SCREEN] ICE route: ';
@@ -1558,8 +1396,8 @@ class ScreenShareService {
   }
 
   Future<void> _handleRemoteVideoTrack(RTCTrackEvent event) async {
-    // Dispose any previously-synthesized remote stream before replacing it
-    // (a track-replace on renegotiation re-enters here). libwebrtc-owned
+    // Dispose any previously-synthesized remote stream before replacing it;
+    // a track-replace on renegotiation re-enters here. libwebrtc-owned
     // streams must NOT be disposed.
     final priorStream = _remoteStream;
     final priorSynthetic = _remoteStreamIsSynthetic;
@@ -1569,9 +1407,9 @@ class ScreenShareService {
 
     await _disposePriorSyntheticStream(priorStream, priorSynthetic);
 
-    // Create renderer. Null the field BEFORE awaiting dispose so a Linux
-    // "texture not found!" throw can't leave a stale half-disposed renderer
-    // that close() would then double-dispose.
+    // Null the field BEFORE awaiting dispose, so a Linux "texture not
+    // found!" throw cannot leave a half-disposed renderer that close()
+    // would then double-dispose.
     final oldRenderer = _remoteRenderer;
     _remoteRenderer = null;
     if (oldRenderer != null) {
@@ -1593,16 +1431,16 @@ class ScreenShareService {
     onRemoteTrackReady?.call();
   }
 
-  /// Pick the remote stream for the incoming video track: the event's stream,
-  /// a PC remote stream with video, or (last resort) a synthetic stream we own.
+  /// Picks the remote stream for the incoming video track: the event's
+  /// stream, a PC remote stream with video, or a synthetic stream we own.
   Future<void> _resolveRemoteStream(RTCTrackEvent event) async {
     if (event.streams.isNotEmpty) {
       _remoteStream = event.streams.first;
       _log('[HOLLOW-SCREEN] Using stream from onTrack '
           '(streams=${event.streams.length})');
     } else {
-      // Windows/libwebrtc may fire onTrack with streams=0.
-      // Try to find the stream from the PC's remote streams.
+      // Windows/libwebrtc may fire onTrack with streams=0; look for the
+      // stream among the PC's remote streams instead.
       _log('[HOLLOW-SCREEN] onTrack streams=0, checking PC remote streams');
       final found = _findRemoteVideoStream();
       if (found != null) {

@@ -1,15 +1,12 @@
 //! fwd_* admission decisions.
 //!
-//! The decision functions are PURE (no I/O, no engine state mutation) so the
-//! whole authorization surface is unit-testable: the engine gathers a view of
-//! the relevant state, asks, then applies.
+//! The decision functions are PURE (no I/O, no engine state) so the whole
+//! authorization surface is unit-testable: the engine gathers a view of the state,
+//! asks, then applies.
 //!
-//! Deliberately NO control-frame rate limiter (removed 2026-08-07): the
-//! per-peer token bucket that lived here dropped frames with zero trace —
-//! the silent-drop class the relay refuses (`feedback_relay_rules`) and a
-//! suspect in the vanished-large-frame field defect. Every refusal on this
-//! surface is an explicit `FwdError`; unwanted frames fail the cheap parse
-//! path and get logged.
+//! Deliberately NO control-frame rate limiter: a per-peer token bucket dropped
+//! frames with zero trace, the silent-drop class `feedback_relay_rules` refuses.
+//! Every refusal here is an explicit `FwdError`.
 
 use super::budget::{can_attach, can_register, BudgetCfg, FwdErrorCode};
 
@@ -19,19 +16,17 @@ pub(crate) struct StreamView {
     pub owner: String,
     pub sender_allowlisted: bool,
     pub egress_leg_count: u32,
-    /// Feeder election: the ONE peer the owner has delegated to supply this
-    /// stream's ingest instead of supplying it itself (empty = nobody, which
-    /// is the pre-feeder rule bit for bit). Set only from an owner-authored
-    /// `fwd_stream_register`.
+    /// Feeder election: the ONE peer the owner has delegated to supply this stream's
+    /// ingest instead of supplying it itself (empty = nobody, the pre-feeder rule bit
+    /// for bit). Set only from an owner-authored `fwd_stream_register`.
     pub feeder: String,
 }
 
 /// May `sender` register a stream claiming `origin_peer`?
 ///
-/// The origin peer MUST be the Olm-authenticated sender — this is the
-/// forwarder-side twin of the vc-lane spoof guard: with a shared SFrame group
-/// key, a spoofed registration would attribute the registrant's pixels to a
-/// victim.
+/// The origin peer MUST be the Olm-authenticated sender, the forwarder-side twin of
+/// the vc-lane spoof guard: with a shared SFrame group key, a spoofed registration
+/// would attribute the registrant's pixels to a victim.
 pub(crate) fn admit_register(
     origin_peer: &str,
     sender: &str,
@@ -47,8 +42,7 @@ pub(crate) fn admit_register(
     if origin_peer != sender {
         return Err(FwdErrorCode::NotAuthorized);
     }
-    // Idempotent re-register (allowlist replacement) bypasses the count caps —
-    // it creates nothing new.
+    // Idempotent re-register bypasses the count caps: it creates nothing new.
     if already_registered_by_sender {
         return Ok(());
     }
@@ -58,9 +52,8 @@ pub(crate) fn admit_register(
 /// May `sender` perform an owner-only operation (auth update, unregister) on a
 /// stream?
 ///
-/// STRICTLY the owner. A delegated feeder may SUPPLY the stream
-/// ([`admit_ingest_offer`]) but may never administer it — it cannot change who
-/// is allowed to watch, and it cannot tear the stream down.
+/// STRICTLY the owner. A delegated feeder may SUPPLY the stream but never
+/// administer it: it cannot change who may watch, nor tear the stream down.
 pub(crate) fn admit_owner_op(
     stream: Option<&StreamView>,
     sender: &str,
@@ -74,23 +67,17 @@ pub(crate) fn admit_owner_op(
 
 /// May `sender` supply this stream's INGEST (`fwd_ingest_offer`)?
 ///
-/// The owner always may. Additionally the owner may delegate exactly one
-/// FEEDER — a peer that already receives the stream and re-emits it into this
-/// forwarder, so the originator uploads one copy instead of two when a peer
-/// branch and this forwarder both serve viewers.
+/// The owner always may. The owner may additionally delegate exactly one FEEDER, a
+/// peer that already receives the stream and re-emits it here, so the originator
+/// uploads one copy instead of two.
 ///
-/// This is the ONE place the owner≡ingest binding loosens, so the rules are
-/// deliberately narrow:
-/// - the delegation is named by the OWNER, in an Olm-authenticated register
-///   (`admit_register` pins `origin_peer == sender`), so nobody can appoint
-///   themselves;
-/// - it grants SUPPLY only — [`admit_owner_op`] still gates auth/unregister;
-/// - an empty `feeder` (every pre-feeder client, and every stream that never
-///   elects one) reduces to the original owner-only rule exactly.
-///
-/// A malicious feeder can therefore only degrade availability, never read or
-/// forge: SFrame auth tags make tampered frames undecodable rather than
-/// attacker-controlled, and it never holds group keys.
+/// This is the ONE place the owner-is-ingest binding loosens, so the rules are
+/// narrow: the delegation is named by the OWNER in an Olm-authenticated register,
+/// so nobody can appoint themselves; it grants SUPPLY only, with
+/// [`admit_owner_op`] still gating auth and unregister; and an empty `feeder`
+/// reduces to the original owner-only rule exactly. A malicious feeder can
+/// therefore only degrade availability, never read or forge: it holds no group
+/// keys, and SFrame auth tags make tampered frames undecodable.
 pub(crate) fn admit_ingest_offer(
     stream: Option<&StreamView>,
     sender: &str,
@@ -122,9 +109,8 @@ pub(crate) fn admit_attach(
     can_attach(s.egress_leg_count, current_egress_bps, cfg)
 }
 
-/// May `sender` detach / answer an egress leg? (Must own one on that stream —
-/// the engine looks the leg up by sender, so existence IS ownership; this
-/// helper only maps absence to the right code.)
+/// May `sender` detach or answer an egress leg? The engine looks the leg up by
+/// sender, so existence IS ownership; this only maps absence to the right code.
 pub(crate) fn admit_viewer_op(has_leg: bool) -> Result<(), FwdErrorCode> {
     if has_leg {
         Ok(())
@@ -222,8 +208,7 @@ mod tests {
 
     #[test]
     fn feeder_may_never_administer_the_stream() {
-        // The whole security argument of feeder election: supply, never
-        // authority. A feeder cannot change the allowlist or unregister.
+        // The whole security argument of feeder election: supply, never authority.
         let v = view_with_feeder("owner", "feeder");
         assert_eq!(
             admit_owner_op(Some(&v), "feeder"),
@@ -234,8 +219,7 @@ mod tests {
 
     #[test]
     fn empty_feeder_is_never_a_wildcard() {
-        // Defensive: an empty feeder field must not match an empty/absent
-        // sender id or anything else.
+        // Defensive: an empty feeder field must not match an empty or absent sender id.
         let v = view_with_feeder("owner", "");
         assert_eq!(
             admit_ingest_offer(Some(&v), ""),

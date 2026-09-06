@@ -19,8 +19,8 @@ import 'package:hollow/src/ui/components/member_search_picker.dart';
 import 'package:hollow/src/ui/settings/settings_shared.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-/// Grant duration options: (label, seconds); 0 = until revoked. Exported for
-/// tests (mirrors kMuteDurationOptions).
+/// Grant duration options as (label, seconds); 0 means until revoked. Public
+/// for the tests.
 const kGrantDurationOptions = <(String, int)>[
   ('15 minutes', 900),
   ('1 hour', 3600),
@@ -28,9 +28,8 @@ const kGrantDurationOptions = <(String, int)>[
   ('Until revoked', 0),
 ];
 
-/// Temporary channel access manager: active grants (with remaining time +
-/// revoke) and a member picker → duration flow to add one. The grant removes
-/// itself at expiry — no cleanup clutter.
+/// Temporary channel access manager: the active grants and a member picker to
+/// add one. A grant removes itself at expiry.
 Future<void> showChannelGrantsDialog(
   BuildContext context, {
   required String serverId,
@@ -189,10 +188,9 @@ class _ChannelGrantsDialogState extends ConsumerState<_ChannelGrantsDialog> {
           children: [
             membersAsync.when(
               data: (members) {
-                // Exclude members who already hold a grant, and yourself.
-                // (Members who can already see via tier/labels are NOT
-                // excluded — computing that per-member would re-implement
-                // the Rust predicate; a redundant grant is harmless.)
+                // Members who can already see via tier or labels are NOT
+                // excluded: computing that per-member would re-implement the
+                // Rust predicate, and a redundant grant is harmless.
                 final candidates = members
                     .where((m) =>
                         !granted.contains(m.peerId) && m.peerId != myPeerId)
@@ -275,8 +273,8 @@ class _ChannelGrantsDialogState extends ConsumerState<_ChannelGrantsDialog> {
         peerId: peerId,
         durationSecs: durationSecs,
       );
-      // set_* only queues into the CrdtStore actor — give the write a beat
-      // before re-reading (same 100ms convention as the labels tab).
+      // set_* only queues into the CrdtStore actor, so the write needs a beat
+      // before any re-read.
       await Future.delayed(const Duration(milliseconds: 150));
       ref.invalidate(channelGrantsProvider(_key));
       if (mounted) {

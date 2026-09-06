@@ -1,19 +1,15 @@
-/// Data models for the Hollow Help center.
+/// Data models for the Hollow Help center, shaped
+/// Manifest → Module → Lesson → Section.
 ///
-/// A lesson is ONE scrollable page made of [GuidesSection]s (each an optional
-/// small inline image + a markdown text block). Content ships bundled in
-/// `assets/help/manifest.json` and is loaded locally (no network).
-///
-/// Shape: Manifest → Module → Lesson → Section.
+/// Content ships bundled in `assets/help/manifest.json` and is loaded locally,
+/// never over the network.
 library;
 
-/// One section of a lesson: an optional inline image + a markdown text block.
+/// One section of a lesson: an optional inline image and a markdown block.
 class GuidesSection {
-  /// Optional asset path for a small inline image (e.g. an icon screenshot).
-  /// Null for text-only sections (the common case).
+  /// Asset path for a small inline image; null for a text-only section.
   final String? media;
 
-  /// Markdown body for this section.
   final String text;
 
   const GuidesSection({this.media, required this.text});
@@ -26,7 +22,7 @@ class GuidesSection {
 
 /// A single lesson: a titled page of stacked sections.
 class GuidesLesson {
-  /// Stable id, e.g. "1.1". Used for search + deep links.
+  /// Stable id, e.g. "1.1", used by search and deep links.
   final String id;
   final String title;
   final List<GuidesSection> sections;
@@ -46,7 +42,7 @@ class GuidesLesson {
       );
 }
 
-/// A module: a titled group of lessons (a help category).
+/// A titled group of lessons, shown as a help category.
 class GuidesModule {
   final String id;
   final String title;

@@ -92,10 +92,8 @@ class SplitViewNotifier extends Notifier<SplitViewState> {
     if (!state.isSplit) return;
     final rightCtx = state.rightPane;
     if (closedPane == 0 && rightCtx != null) {
-      // Left pane closed → right pane becomes primary.
       state = SplitViewState(pendingMigration: rightCtx);
     } else {
-      // Right pane closed → left pane stays as-is.
       state = const SplitViewState();
     }
   }

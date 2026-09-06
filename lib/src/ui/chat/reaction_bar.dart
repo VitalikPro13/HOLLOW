@@ -4,18 +4,16 @@ import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/chat/emote_image.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 
-/// Displays emoji reaction pills below a message.
-/// Tapping a pill toggles the current user's reaction.
-/// Sorted by count descending, then by earliest addition (chronological).
+/// Emoji reaction pills below a message, sorted by count and then by earliest
+/// addition.
 class ReactionBar extends StatelessWidget {
-  /// Emoji -> list of peer IDs who reacted.
+  /// Emoji to the peer ids that reacted with it.
   final Map<String, List<String>> reactions;
 
-  /// The current user's peer ID, to highlight their reactions.
+  /// Highlights this peer's own reactions.
   final String localPeerId;
 
-  /// Called when the user taps a reaction pill to toggle it.
-  /// Null in read-only mode (archive viewer) — pills render but aren't tappable.
+  /// Null in read-only mode, where pills render but do not take taps.
   final void Function(String emoji)? onToggleReaction;
 
   const ReactionBar({
@@ -31,7 +29,7 @@ class ReactionBar extends StatelessWidget {
 
     final hollow = HollowTheme.of(context);
 
-    // Sort by count descending. Entries maintain insertion order for tie-breaking.
+    // Insertion order breaks ties, so equal counts stay chronological.
     final sorted = reactions.entries.toList()
       ..sort((a, b) => b.value.length.compareTo(a.value.length));
 

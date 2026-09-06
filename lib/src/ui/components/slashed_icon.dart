@@ -3,16 +3,13 @@ import 'package:flutter/material.dart';
 /// An icon with a diagonal cut through it, drawn the way Lucide's `*Off`
 /// glyphs are cut.
 ///
-/// Lucide ships `bellOff`, `eyeOff`, `cloudOff` and friends but no
-/// `downloadOff`, and the honest way to say "stop this download" is a struck
-/// download arrow, not a `ban` circle or an `x` (both of which read as
-/// "delete" or "error" next to a row of message actions). So the slash is
-/// drawn here, over any base icon, at Lucide's own proportions.
+/// Lucide has no `downloadOff`, and a `ban` circle or an `x` reads as "delete"
+/// or "error" next to a row of message actions, so the slash is drawn here over
+/// any base icon at Lucide's own proportions.
 ///
-/// The trick that makes it read as a CUT rather than a scribble: a slightly
-/// wider stroke in the SURFACE colour goes down first, clearing a gap through
-/// the glyph, and the visible stroke is drawn on top of that gap. Pass the
-/// colour of whatever the icon sits on as [backgroundColor].
+/// It reads as a CUT rather than a scribble because a slightly wider stroke in
+/// the SURFACE colour goes down first and clears a gap through the glyph, so
+/// [backgroundColor] must be whatever the icon sits on.
 class SlashedIcon extends StatelessWidget {
   final IconData icon;
   final double size;
@@ -75,7 +72,6 @@ class _SlashPainter extends CustomPainter {
     // Lucide draws at a 24 box with a stroke of 2 and its slashes inset by 2.
     final strokeWidth = side * 2 / 24;
     final inset = side * 2.5 / 24;
-    // Top-right to bottom-left.
     final start = Offset(size.width - inset, inset);
     final end = Offset(inset, size.height - inset);
 

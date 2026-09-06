@@ -1,22 +1,12 @@
-//! One WebRTC leg (ingest or egress): the sans-IO str0m pump, ported from the
-//! passed D2 spike (`rust/spike_str0m/src/main.rs` — see
-//! reports/MEDIA_FORWARDING_PLAN.md §7 for the field-test evidence).
+//! One WebRTC leg (ingest or egress): the sans-IO str0m pump.
 //!
-//! Spike-proven invariants preserved verbatim:
-//! - WSAECONNRESET tolerated on BOTH UDP send and recv (a bounced ICE check's
-//!   ICMP error surfaces on a later call and killed the leg right after "ICE
-//!   Connected" otherwise). Harmless on Linux, load-bearing when this module
-//!   embeds in-app on Windows in phase 2.
-//! - `Event::MediaAdded` fires only for REMOTELY-added media — the egress
-//!   leg's own SendOnly video line is tracked via the `Mid` returned by
-//!   `add_media()`.
-//! - Packets pass through with seq/timestamp UNTOUCHED (one source per
-//!   stream; payload is SFrame ciphertext end to end); wallclock = arrival
-//!   time; `.nackable(true)` puts each packet in str0m's own RTX cache, which
-//!   serves egress NACKs — no hand-rolled packet ring (spike criterion 3
-//!   passed with loss injected post-cache).
-//! - PT translation by (codec, clock_rate) between the legs' independently
-//!   numbered `codec_config().params()` spaces.
+//! Invariants that are load-bearing and easy to undo: WSAECONNRESET is tolerated
+//! on BOTH UDP send and recv (a bounced ICE check's ICMP error surfaces on a later
+//! call and otherwise kills a Windows leg right after "ICE Connected");
+//! `Event::MediaAdded` fires only for REMOTELY-added media, so an egress leg holds
+//! its own video line by the `Mid` from `add_media()`; packets pass through with
+//! seq/timestamp UNTOUCHED and `.nackable(true)`, so str0m's own RTX cache serves
+//! egress NACKs; and PT translation is by full codec spec, never codec name.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -43,9 +33,9 @@ pub(crate) enum LegCmd {
     AcceptOffer(String, oneshot::Sender<Result<String, String>>),
     /// Egress leg: the viewer answered our offer.
     AcceptAnswer(String),
-    /// Ingest leg: a downstream viewer wants a keyframe (PLI, pre-aggregated
-    /// by the stream's 1 s min-interval task). `Some(rid)` targets that
-    /// simulcast layer's source; `None`/unknown rid = every source seen.
+    /// Ingest leg: a downstream viewer wants a keyframe, pre-aggregated by the
+    /// stream's 1 s min-interval task. `Some(rid)` targets that simulcast layer's
+    /// source, `None` or an unknown rid every source seen.
     RequestKeyframe(Option<Rid>),
     /// Engine-initiated teardown.
     Shutdown,
@@ -61,24 +51,19 @@ pub(crate) struct LegEnded {
 /// What this leg advertises in its SDP (built by the engine per leg).
 #[derive(Clone, Copy)]
 pub(crate) struct Advertise {
-    /// The primary advertised address — also what `Receive::destination`
-    /// reports for every inbound datagram (str0m matches it against local
-    /// candidates; the socket binds 0.0.0.0 so `local_addr()` never matches).
-    /// VPS: the fixed public IP. Embedded peer forwarder: the LAN IP of the
-    /// default-route interface.
+    /// The primary advertised address, and what `Receive::destination` reports for
+    /// every inbound datagram: str0m matches it against local candidates and the
+    /// socket binds 0.0.0.0, so `local_addr()` never matches.
     pub host: SocketAddr,
-    /// STUN server for embedded mode: the leg discovers its NAT mapping from
-    /// its own socket and advertises it as a SECOND host candidate. `None` on
-    /// the VPS (public host candidate is sufficient).
+    /// STUN server for embedded mode: the leg discovers its NAT mapping and
+    /// advertises it as a SECOND host candidate. `None` on the VPS.
     pub stun: Option<SocketAddr>,
 }
 
-/// Build an rtp-mode Rtc advertising the leg's candidates. `mapped` (embedded
-/// peer forwarders only) is the socket's NAT mapping discovered via STUN,
-/// advertised as a second HOST candidate — deliberately host-typ, mirroring
-/// how the VPS advertises a public address the socket doesn't literally bind
-/// ("identical when the iface carries the IP, distinct behind 1:1 NAT"): the
-/// remote just sends checks to it and the reply comes from the same socket.
+/// Build an rtp-mode Rtc advertising the leg's candidates. `mapped` is the socket's
+/// STUN-discovered NAT mapping (embedded forwarders only), advertised as a second
+/// HOST candidate: the remote sends checks to it and the reply comes from the same
+/// socket, exactly as the VPS advertises an address it does not literally bind.
 fn build_rtc(adv: Advertise, mapped: Option<SocketAddr>) -> Result<Rtc, String> {
     let mut rtc = Rtc::builder().set_rtp_mode(true).build(Instant::now());
     let cand = Candidate::host(adv.host, "udp").map_err(|e| e.to_string())?;
@@ -96,17 +81,15 @@ fn build_rtc(adv: Advertise, mapped: Option<SocketAddr>) -> Result<Rtc, String> 
     Ok(rtc)
 }
 
-/// Embedded mode: discover the socket's NAT mapping before building the Rtc.
-/// Runs inside the leg task so the engine loop never blocks on it (≤ ~1.2 s
-/// worst case, one relay RTT typical).
+/// Embedded mode: discover the socket's NAT mapping before building the Rtc. Runs
+/// inside the leg task so the engine loop never blocks on it (~1.2 s worst case).
 async fn discover_mapped(socket: &UdpSocket, adv: Advertise) -> Option<SocketAddr> {
     let stun = adv.stun?;
     super::stun::discover_mapped_addr(socket, stun).await
 }
 
-/// Run an ingest leg on an already-bound socket. Answers the sharer's offer
-/// (via `LegCmd::AcceptOffer`), fans every RtpPacket into the stream's
-/// broadcast channel, forwards aggregated keyframe requests upstream.
+/// Run an ingest leg on an already-bound socket: answer the sharer's offer, fan
+/// every RtpPacket into the stream, forward aggregated keyframe requests upstream.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_ingest_leg(
     socket: UdpSocket,
@@ -133,16 +116,14 @@ pub(crate) async fn run_ingest_leg(
     )
     .await
     {
-        // Aggregate-only logging: which stream died is visible to the engine,
-        // never logged with peer identities here.
+        // Aggregate-only: which stream died, never a peer identity.
         hollow_log!("[HOLLOW-FWD] ingest leg ended: {e}");
     }
     let _ = ended_tx.send(ended);
 }
 
-/// Run an egress leg: creates the SendOnly video offer (sent to the viewer via
-/// the oneshot), then forwards fanned packets after the viewer answers.
-/// `want_low` = the sharer put this viewer on the LOW simulcast layer.
+/// Run an egress leg: offer SendOnly video through the oneshot, then forward fanned
+/// packets once the viewer answers. `want_low` = the sharer put it on the LOW layer.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_egress_leg(
     socket: UdpSocket,
@@ -167,8 +148,8 @@ pub(crate) async fn run_egress_leg(
     };
 
     let mut sdp = rtc.sdp_api();
-    // Keep the mid: MediaAdded events fire only for REMOTELY-added media, so
-    // this is the only handle to our own outgoing video line.
+    // MediaAdded fires only for remotely-added media, so the mid is the only
+    // handle to our own outgoing video line.
     let mid = sdp.add_media(MediaKind::Video, Direction::SendOnly, None, None, None);
     let Some((offer, pending)) = sdp.apply() else {
         let _ = offer_tx.send(Err("nothing to offer".into()));
@@ -196,20 +177,12 @@ pub(crate) async fn run_egress_leg(
 }
 
 /// Translate an ingest-leg PT to the egress leg's PT for the SAME codec
-/// configuration. The two SDP negotiations number payload types
-/// independently, so a packet's PT is only meaningful on the leg that
-/// negotiated it.
+/// configuration; the two SDP negotiations number payload types independently.
 ///
-/// CRITICAL — the FULL `CodecSpec` must match, format params included, with
-/// (codec, clock_rate) only as a last-resort fallback. Several codecs appear
-/// MULTIPLE times in one PT space with different formats: VP9 twice
-/// (profile-id 0 and 2), H264 seven times (packetization-mode +
-/// profile-level-id combinations). Matching on (codec, clock_rate) alone can
-/// therefore relabel a profile-0 VP9 stream as profile-2 — the receiver's
-/// depacketizer accepts the packets, the decoder produces nothing, and the
-/// viewer sees a BLACK SCREEN while byte counters climb happily. Field-
-/// diagnosed 2026-08-06 (a VP9-preferring sharer; the D2 spike had only ever
-/// exercised VP8, which is unambiguous).
+/// The FULL `CodecSpec` must match, format params included, with (codec,
+/// clock_rate) only as a last resort: VP9 appears twice in one PT space (profile-id
+/// 0 and 2) and H264 seven times, so a codec-name match can relabel profile-0 VP9
+/// as profile-2, the decoder produces nothing, and the viewer sees a BLACK SCREEN.
 pub(crate) fn map_pt(
     ingest: &[(Pt, CodecSpec)],
     egress: &[(Pt, CodecSpec)],
@@ -220,8 +193,8 @@ pub(crate) fn map_pt(
     if let Some((p, _)) = egress.iter().find(|(_, s)| s == spec) {
         return Some(*p);
     }
-    // Fallback: same codec + clock rate. Better than dropping the stream, but
-    // a format mismatch may not decode — logged by the caller.
+    // Fallback: same codec + clock rate. A format mismatch may not decode, so the
+    // caller logs it.
     egress
         .iter()
         .find(|(_, s)| s.codec == spec.codec && s.clock_rate == spec.clock_rate)
@@ -237,9 +210,8 @@ fn pt_space(rtc: &Rtc) -> Vec<(Pt, CodecSpec)> {
         .collect()
 }
 
-/// The shared sans-IO pump: drain poll_output, select over UDP / commands /
-/// fanout / timeout. Direct port of the spike's `pump` minus the loss
-/// injection, with counters + connected-flag reporting added.
+/// The shared sans-IO pump: drain poll_output, then select over UDP, commands,
+/// fanout and timeout.
 #[allow(clippy::too_many_arguments)]
 async fn pump(
     rtc: &mut Rtc,
@@ -267,21 +239,14 @@ async fn pump(
     let mut pt_map: HashMap<Pt, (Option<Pt>, bool)> = HashMap::new();
     let mut warned_no_tx = false;
     let mut saw_inbound = false;
-    // The ingest stream's SSRC, learned from its packets. `stream_rx_by_mid`
-    // is the primary handle for upstream keyframe requests, but it can miss
-    // (no MediaAdded yet, rid-less lookup); an SSRC we have literally seen on
-    // the wire always resolves.
+    // The ingest stream's SSRC, learned from its packets: `stream_rx_by_mid` can
+    // miss (no MediaAdded yet, rid-less lookup), a seen SSRC always resolves.
     let mut ingest_ssrc: Option<Ssrc> = None;
-    // Ingest: each source's simulcast layer, resolved once per SSRC (the RID
-    // header extension stops arriving after RTCP establishes the SSRC —
-    // str0m's StreamRx keeps the mapping). Tags every fanned packet.
+    // Ingest: each source's simulcast layer, resolved once per SSRC because the RID
+    // header extension stops arriving once RTCP establishes the SSRC.
     let mut ssrc_rids: HashMap<Ssrc, Option<Rid>> = HashMap::new();
-    // Egress: layer selection + rewrite state (phase-3 simulcast). The
-    // desired layer starts from the sharer's low_viewers choice (contract
-    // rids "f"/"q" — rid-less old-sharer sources pass through regardless);
-    // the dry-layer fallback below re-desires when the wanted layer never
-    // flows (e.g. libwebrtc disabled it under CPU pressure), and the leg
-    // returns home once the ideal layer flows steadily again.
+    // Egress layer selection. The dry-layer fallback re-desires when the wanted
+    // layer never flows, and the leg returns home once the ideal flows steadily.
     let ideal = Rid::from(if want_low { RID_LOW } else { RID_FULL });
     let mut select = LayerSelect::new(Some(ideal));
     let mut layer_last_seen: HashMap<Rid, Instant> = HashMap::new();
@@ -294,22 +259,14 @@ async fn pump(
     let mut last_switch_kf: Option<Instant> = None;
     let mut last_redesire_check = Instant::now();
     let mut logged_layer: Option<Rid> = None;
-    // CRITICAL: inbound packets must be reported with the ADVERTISED candidate
-    // address as their destination — str0m matches `Receive.destination`
-    // against local candidates, and the socket binds 0.0.0.0 (its local_addr
-    // never equals the public host candidate). Reporting local_addr here made
-    // str0m silently discard every inbound STUN check: both legs sat
-    // "unconnected" while the clients' ICE timed out (first field test,
-    // 2026-08-06). The spike dodged it by binding the LAN IP directly.
+    // CRITICAL: inbound packets must carry the ADVERTISED candidate address as their
+    // destination. str0m matches `Receive.destination` against local candidates and the
+    // socket binds 0.0.0.0, so local_addr makes it discard every inbound STUN check.
     let local = public_addr;
 
     loop {
-        // Drain outputs until Timeout — but never for more than a bounded
-        // number of outputs per pass. An egress leg fed by a live ingest can
-        // otherwise stay inside this loop indefinitely and never reach the
-        // select below, i.e. never read its socket, i.e. never see the peer's
-        // ICE checks. Bailing early with a 1 ms deadline just re-enters
-        // poll_output on the next tick; nothing is lost.
+        // Bounded outputs per pass: an egress leg fed by a live ingest would otherwise
+        // never read its socket, i.e. never see the peer's ICE checks.
         let mut drained = 0u32;
         let deadline = loop {
             if drained >= 256 {
@@ -318,9 +275,8 @@ async fn pump(
             drained += 1;
             match rtc.poll_output().map_err(|e| e.to_string())? {
                 Output::Transmit(t) => {
-                    // Windows UDP: sends can surface WSAECONNRESET from a
-                    // PRIOR bounced datagram (ICMP port unreachable — ICE
-                    // checks to dead candidates guarantee some). Not fatal.
+                    // Windows UDP: sends can surface WSAECONNRESET from a PRIOR
+                    // bounced datagram (an ICE check to a dead candidate). Not fatal.
                     if let Err(e) = socket.send_to(&t.contents, t.destination).await {
                         if e.kind() != std::io::ErrorKind::ConnectionReset {
                             return Err(e.to_string());
@@ -346,27 +302,13 @@ async fn pump(
                             if is_ingest { "ingest" } else { "egress" },
                             public_addr.port()
                         );
-                        // A freshly connected viewer needs an I-frame NOW.
-                        // Don't wait for its own PLI to arrive and survive the
-                        // trip: ask upstream ourselves the moment the leg is
-                        // usable (idempotent — the stream's aggregator
-                        // rate-limits and coalesces). Target the layer this
-                        // leg wants; an unresolvable rid (old sharer, no
-                        // simulcast) falls back to every source at the ingest.
+                        // A freshly connected viewer needs an I-frame NOW rather than its own
+                        // PLI; the stream's aggregator coalesces, so asking is idempotent.
                         if !is_ingest {
                             let _ = wiring.kf_tx.send(select.desired());
                         } else {
-                            // A freshly connected INGEST is either the first
-                            // supply of this stream or a REPLACEMENT (a re-offer,
-                            // or a feeder taking over from the owner). In the
-                            // replacement case every existing egress leg is mid-GOP
-                            // on a source that just went away, so ask the new
-                            // supplier for an I-frame immediately — otherwise the
-                            // audience waits for a spontaneous keyframe, which
-                            // screen-share encoders essentially never emit
-                            // (measured 2m50s of black in the field).
-                            // Layer-less: at handover we want whatever the new
-                            // supplier can give, on every layer it carries.
+                            // A freshly connected INGEST may be a REPLACEMENT, leaving every
+                            // egress leg mid-GOP, and encoders rarely emit a spontaneous keyframe.
                             let _ = wiring.kf_tx.send(None);
                         }
                     }
@@ -386,10 +328,8 @@ async fn pump(
                         if ingest_ssrc != Some(ssrc) {
                             ingest_ssrc = Some(ssrc);
                         }
-                        // Resolve this source's simulcast layer ONCE per SSRC
-                        // (ext when present, else str0m's Mid+Rid mapping).
-                        // Cache only positive hits — a late resolution must
-                        // still be able to land.
+                        // Resolve the layer ONCE per SSRC, caching only positive hits so a
+                        // late resolution can still land.
                         let rid = match ssrc_rids.get(&ssrc) {
                             Some(r) => *r,
                             None => {
@@ -398,8 +338,7 @@ async fn pump(
                                 });
                                 if let Some(r) = r {
                                     ssrc_rids.insert(ssrc, Some(r));
-                                    // The decisive simulcast field log: one
-                                    // line per layer, codec-plane only.
+                                    // One line per layer, codec-plane only.
                                     hollow_log!(
                                         "[HOLLOW-FWD] ingest layer '{r}' mapped (ssrc {})",
                                         *ssrc
@@ -427,17 +366,13 @@ async fn pump(
             r = socket.recv_from(&mut buf) => {
                 let (n, source) = match r {
                     Ok(v) => v,
-                    // Windows UDP quirk: a prior send that bounced (ICMP port
-                    // unreachable, e.g. an ICE check to a dead candidate)
-                    // surfaces as WSAECONNRESET on the NEXT recv. Ignore —
-                    // the killed-leg symptom this caused was "ingest ICE:
-                    // Connected" immediately followed by leg death.
+                    // Windows UDP: a prior bounced send (ICMP port unreachable from an ICE
+                    // check to a dead candidate) surfaces as WSAECONNRESET here. Not fatal.
                     Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => continue,
                     Err(e) => return Err(e.to_string()),
                 };
-                // Decisive diagnostic for a leg that never connects: did the
-                // peer's ICE checks reach us at all? (No peer id, no payload —
-                // the source port only, which the peer chose.)
+                // Decisive for a leg that never connects: did the peer's ICE checks
+                // reach us at all? Source port only, no peer id, no payload.
                 if !saw_inbound {
                     saw_inbound = true;
                     hollow_log!(
@@ -469,8 +404,7 @@ async fn pump(
                         match result {
                             Ok(answer) => {
                                 let _ = reply.send(Ok(answer.to_sdp_string()));
-                                // Snapshot the ingest leg's negotiated PT space
-                                // for egress-side PT translation.
+                                // Snapshot the ingest PT space for egress-side translation.
                                 *wiring.ingest_params.lock().unwrap() = pt_space(rtc);
                             }
                             Err(e) => {
@@ -490,15 +424,8 @@ async fn pump(
                         }
                     }
                     LegCmd::RequestKeyframe(rid) => {
-                        // A viewer joining mid-stream can only start decoding
-                        // from a keyframe, and screen-share encoders emit them
-                        // very rarely on their own — a request that fails to
-                        // reach the sharer costs the viewer MINUTES of black
-                        // screen (field-measured 2m50s, 2026-08-06). A layer-
-                        // targeted request resolves that rid's SSRC from the
-                        // wire-learned map (simulcast layers are independent
-                        // encoders); otherwise: every seen source, then the
-                        // mid, then the last seen SSRC.
+                        // A viewer joining mid-stream can only start decoding at a keyframe and
+                        // encoders rarely emit one, so a lost request costs it MINUTES of black.
                         let mut api = rtc.direct_api();
                         let pli = str0m::media::KeyframeRequestKind::Pli;
                         let target = rid.and_then(|r| {
@@ -563,8 +490,8 @@ async fn pump(
                         first_fanout = Some(now);
                     }
                     if let Some(r) = rid {
-                        // Track the ideal layer's continuous-flow window for
-                        // the upgrade rule (a >1 s gap restarts it).
+                        // The ideal layer's continuous-flow window for the upgrade rule; a
+                        // gap over 1 s restarts it.
                         if r == ideal {
                             let gap = layer_last_seen
                                 .get(&r)
@@ -575,10 +502,8 @@ async fn pump(
                         }
                         layer_last_seen.insert(r, now);
                     }
-                    // Layer policy (throttled): dry fallback, upgrade home,
-                    // pending-switch keyframe nudges. Runs on EVERY fanned
-                    // packet — including ones this leg drops — so a dry
-                    // current layer is detected as long as ANY layer flows.
+                    // Layer policy (throttled). Runs on EVERY fanned packet, dropped ones
+                    // included, so a dry current layer is seen as long as ANY layer flows.
                     if now.duration_since(last_redesire_check) >= Duration::from_millis(500) {
                         last_redesire_check = now;
                         const DRY: Duration = Duration::from_millis(2500);
@@ -589,10 +514,8 @@ async fn pump(
                         };
                         let desired = select.desired();
                         if starving {
-                            // The layer we want is dry — ride whatever flows
-                            // (libwebrtc can disable a simulcast layer under
-                            // CPU/bandwidth pressure; a foreign sharer may
-                            // use rids outside the f/q contract).
+                            // The layer we want is dry, so ride whatever flows: libwebrtc disables
+                            // layers under pressure and a foreign sharer may ignore the f/q rids.
                             let flowing = layer_last_seen.iter().find(|(r, t)| {
                                 Some(**r) != desired
                                     && now.duration_since(**t) < Duration::from_secs(1)
@@ -603,24 +526,16 @@ async fn pump(
                                     desired.map(|d| d.to_string()).unwrap_or_default()
                                 );
                                 if desired == Some(ideal) {
-                                    // We are falling OFF the ideal layer: if the
-                                    // climb-back we just made failed to stick, make
-                                    // the next one wait longer (anti-flap).
+                                    // Falling OFF the ideal layer: if the climb-back we just
+                                    // made failed to stick, make the next one wait longer.
                                     upgrade_gate.on_fallback(now);
                                 }
                                 select.set_desired(Some(*r));
                                 let _ = wiring.kf_tx.send(Some(*r));
                             }
                         } else if desired != Some(ideal)
-                            // The ideal layer must be flowing RIGHT NOW, not
-                            // just "since a while ago": `ideal_flowing_since`
-                            // resets only when an ideal-layer packet arrives
-                            // after a gap — a COMPLETELY dry layer leaves it
-                            // stale, and without this freshness gate the leg
-                            // flipped its desire back to a dead layer one
-                            // second after falling off it, nagging upstream
-                            // PLIs at a layer the encoder had disabled
-                            // (field-hit run A, 2026-08-14).
+                            // The ideal layer must be flowing RIGHT NOW: `ideal_flowing_since` only
+                            // resets on an ideal packet after a gap, so a dry layer leaves it stale.
                             && layer_last_seen
                                 .get(&ideal)
                                 .is_some_and(|t| now.duration_since(*t) < Duration::from_secs(1))
@@ -643,19 +558,16 @@ async fn pump(
                             let _ = wiring.kf_tx.send(select.desired());
                         }
                     }
-                    // Translate the ingest leg's PT to this leg's PT for the
-                    // same codec CONFIGURATION — the two SDP negotiations
-                    // number payload types independently (see map_pt on why
-                    // the format params must match, not just the codec).
+                    // Translate the ingest PT to this leg's PT for the same codec
+                    // CONFIGURATION (see map_pt on why the format params must match).
                     let ingest_pt = pkt.header.payload_type;
                     let (mapped, is_vp8) = *pt_map.entry(ingest_pt).or_insert_with(|| {
                         let ingest = wiring.ingest_params.lock().unwrap();
                         let egress = pt_space(rtc);
                         let ingest_spec = ingest.iter().find(|(p, _)| *p == ingest_pt).map(|(_, s)| *s);
                         let out = map_pt(&ingest, &egress, ingest_pt);
-                        // Once per distinct PT: the mapping decision, so a
-                        // silent black screen can never again cost a field
-                        // test. Codec identity only — no addresses, no ids.
+                        // Once per distinct PT: the mapping decision, codec identity only,
+                        // so a silent black screen can never again cost a field test.
                         match (ingest_spec, out) {
                             (Some(s), Some(p)) => {
                                 let exact = egress.iter().any(|(ep, es)| *ep == p && es == &s);
@@ -676,10 +588,8 @@ async fn pump(
                         (out, ingest_spec.is_some_and(|s| s.codec == Codec::Vp8))
                     });
                     let Some(egress_pt) = mapped else { continue };
-                    // Simulcast layer selection + rewrite. A rid-less source
-                    // (every old sharer) passes through byte-identically —
-                    // seq/ts untouched, no descriptor patch, exactly the
-                    // shipped phase-1/2 path.
+                    // Simulcast layer selection + rewrite. A rid-less source passes
+                    // through byte-identically: seq/ts untouched, no descriptor patch.
                     let verdict = select.on_packet(
                         rid,
                         *pkt.seq_no,
@@ -697,11 +607,9 @@ async fn pump(
                     last_forwarded = Some(now);
                     let mut api = rtc.direct_api();
                     if let Some(tx) = api.stream_tx_by_mid(mid, None) {
-                        // Payload is SFrame ciphertext end to end (the VP8
-                        // descriptor patched across a layer switch rides in
-                        // the clear BEFORE the encrypted frame). wallclock =
-                        // arrival time; nackable(true) = str0m's own RTX
-                        // cache serves egress NACKs.
+                        // Payload is SFrame ciphertext end to end (a patched VP8 descriptor
+                        // rides in the clear BEFORE the encrypted frame). wallclock = arrival
+                        // time; nackable(true) means str0m's RTX cache serves egress NACKs.
                         counters
                             .egress_bytes
                             .fetch_add(pkt.payload.len() as u64, Ordering::Relaxed);
@@ -773,9 +681,8 @@ mod tests {
         assert_eq!(map_pt(&ingest, &egress_no_vp8, Pt::from(96)), None);
     }
 
-    /// The black-screen regression: a codec present MULTIPLE times with
-    /// different format params must map profile-for-profile, never to the
-    /// first entry that merely shares the codec name.
+    /// A codec present MULTIPLE times with different format params must map
+    /// profile-for-profile, never to the first entry sharing the codec name.
     #[test]
     fn pt_translation_respects_format_params() {
         let ingest = vec![(Pt::from(98), vp9(0)), (Pt::from(100), vp9(2))];

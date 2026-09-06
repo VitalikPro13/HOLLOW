@@ -5,27 +5,21 @@ import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-/// Toast type determines the icon and accent color.
 enum HollowToastType { success, error, info }
 
-/// Hollow-branded toast notification — slides up from bottom, auto-dismisses.
-///
-/// Only one toast visible at a time. New toast replaces any existing one.
-/// Replaces Material SnackBar everywhere.
+/// Hollow-branded toast, replacing Material's SnackBar everywhere. Only one is
+/// visible at a time, and a new one replaces it.
 class HollowToast {
   HollowToast._();
 
   static OverlayEntry? _currentEntry;
 
-  /// Show a toast at the bottom of the screen.
+  /// Shows a toast at the bottom of the screen.
   ///
-  /// Pass [overlayState] to insert into a specific Overlay directly (e.g. the
-  /// root navigator's Overlay obtained from a GlobalKey). This is required when
-  /// calling from non-widget code (providers/notifiers) where the only handle
-  /// is the Navigator key — `Overlay.of(navKey.currentContext)` throws because
-  /// the Navigator's own context has no Overlay ancestor (the Overlay is its
-  /// child). When [overlayState] is omitted, the Overlay is resolved from
-  /// [context] as before.
+  /// [overlayState] is REQUIRED from non-widget code, where the only handle is
+  /// the Navigator key: `Overlay.of(navKey.currentContext)` throws, because the
+  /// Navigator's own context has no Overlay ancestor. Omitted, the Overlay
+  /// resolves from [context].
   static void show(
     BuildContext context,
     String message, {
@@ -33,7 +27,6 @@ class HollowToast {
     Duration duration = const Duration(seconds: 3),
     OverlayState? overlayState,
   }) {
-    // Dismiss any existing toast immediately.
     _dismiss();
 
     final overlay = overlayState ?? Overlay.of(context);
@@ -46,7 +39,6 @@ class HollowToast {
         type: type,
         onControllerReady: (c) {
           controller = c;
-          // Auto-dismiss after duration.
           Future.delayed(duration, () {
             if (entry.mounted) {
               controller.reverse().then((_) {
@@ -144,8 +136,8 @@ class _HollowToastWidgetState extends State<_HollowToastWidget>
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
     final iconColor = _colorForType(widget.type, hollow);
-    // Float above the keyboard, and on phones above the 56px bottom nav
-    // (+ gesture inset) so toasts never cover nav icons.
+    // Above the keyboard, and on phones above the bottom nav and its gesture
+    // inset, so a toast never covers the nav icons.
     final media = MediaQuery.of(context);
     final isMobileLayout = media.size.width < 600;
     final navClearance =

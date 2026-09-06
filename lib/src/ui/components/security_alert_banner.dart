@@ -14,12 +14,11 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 /// Persistent warning strip for a conversation whose contact's identity changed
 /// (Issue 1-C).
 ///
-/// Deliberately NOT a toast. A toast is missable — it fires once, possibly while
-/// the window is unfocused, and then it is gone. This sits pinned above the
-/// message list until the user acts on it, so it survives scrollback AND app
-/// restarts (the alert is DB-backed, loaded at shell startup).
+/// Deliberately NOT a toast, which fires once and may do so while the window is
+/// unfocused. This stays pinned above the message list until the user acts on
+/// it, and survives restarts because the alert is DB-backed.
 ///
-/// Renders nothing when there is nothing outstanding, so it is safe to place
+/// Renders nothing when nothing is outstanding, so it is safe to place
 /// unconditionally in the chat column.
 class SecurityAlertBanner extends ConsumerWidget {
   /// The conversation partner — device or master id, resolved internally.
@@ -39,8 +38,8 @@ class SecurityAlertBanner extends ConsumerWidget {
       master,
     );
 
-    // A new device is the signal that carries an attack shape; a re-key is
-    // informational. If both are outstanding, lead with the stronger one.
+    // A new device carries the attack shape and a re-key is informational, so
+    // with both outstanding the stronger one leads.
     final hasNewDevice =
         alerts.any((a) => a.kind == SecurityAlertKind.newDevice);
     final color = hasNewDevice ? hollow.warning : hollow.textSecondary;
@@ -72,9 +71,8 @@ class SecurityAlertBanner extends ConsumerWidget {
                 color: hollow.textPrimary,
                 fontSize: 12,
               ),
-              // Bounded so a large text scale can't grow the banner into the
-              // message area — the full wording is repeated on the Verify
-              // screen, which this button leads to.
+              // Bounded so a large text scale cannot grow the banner into the
+              // message area; the Verify screen repeats the full wording.
               maxLines: 3,
               overflow: TextOverflow.ellipsis,
             ),

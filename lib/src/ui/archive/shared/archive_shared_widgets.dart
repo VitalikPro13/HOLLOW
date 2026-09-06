@@ -10,8 +10,6 @@ import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/dialogs/message_proof_dialog.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-// ── Search bar for archive viewers ──────────────────────────────
-
 class ArchiveSearchBar extends StatefulWidget {
   final int matchCount;
   final int currentMatch;
@@ -79,9 +77,9 @@ class ArchiveSearchBarState extends State<ArchiveSearchBar> {
             ),
           ),
           const SizedBox(width: HollowSpacing.sm),
-          // Plain (non-flex) child: a Flexible here shares the Row's free
-          // space 50/50 with the Expanded field, halving the text field
-          // whenever the counter appears.
+          // Plain, non-flex: a Flexible here would share the Row's free space
+          // with the Expanded field and halve the text field whenever the
+          // counter appears.
           if (_controller.text.isNotEmpty)
             Text(
               widget.matchCount > 0
@@ -131,8 +129,6 @@ class ArchiveSearchBarState extends State<ArchiveSearchBar> {
   }
 }
 
-// ── Deleted message overlay ─────────────────────────────────────
-
 class ArchiveDeletedOverlay extends StatelessWidget {
   final DateTime hiddenAt;
   final Widget child;
@@ -179,17 +175,15 @@ class ArchiveDeletedOverlay extends StatelessWidget {
   }
 }
 
-// ── Edit history indicator ──────────────────────────────────────
-
-/// Shows "Edited N times -> view history" below a message bubble.
-/// Tapping expands a timeline of every prior version.
+/// Shows "Edited N times -> view history" below a message bubble, expanding to
+/// a timeline of every prior version.
 class EditHistoryIndicator extends StatefulWidget {
   final List<ArchiveEditEntry> edits;
   final String? senderPeerId;
   final String? proofContext;
   final String? proofMsgType;
-  /// Original message signature/publicKey/timestamp — needed to verify the
-  /// first edit's oldText (the original message text before any edits).
+  /// Needed to verify the first edit's oldText, which is the message before any
+  /// edit and is covered by the original signature.
   final String? originalSignature;
   final String? originalPublicKey;
   final int? originalTimestampMs;
@@ -259,11 +253,9 @@ class _EditHistoryIndicatorState extends State<EditHistoryIndicator> {
                     '${e.editedAt.hour.toString().padLeft(2, '0')}:${e.editedAt.minute.toString().padLeft(2, '0')}';
                 final dateStr =
                     '${e.editedAt.year}-${e.editedAt.month.toString().padLeft(2, '0')}-${e.editedAt.day.toString().padLeft(2, '0')}';
-                // The displayed text is e.oldText (what the message was before
-                // this edit). The signature that covers e.oldText is:
-                //   - For i==0: the original message signature (before any edits)
-                //   - For i>0: the previous edit's signature (which signed its newText,
-                //     and previous newText == current oldText)
+                // The row shows e.oldText, and the signature that covers it is
+                // the original message's for i==0, else the previous edit's:
+                // that one signed its newText, which is this row's oldText.
                 final String? proofSig;
                 final String? proofPk;
                 final int? proofTs;

@@ -1,18 +1,15 @@
 import 'dart:io';
 
-/// Shared per-row perf helpers for message bubbles. These run inside chat
-/// list itemBuilders — once per visible row per rebuild — so no fresh RegExp
-/// compiles or sync disk stats belong there.
+/// Shared per-row perf helpers for message bubbles. These run inside chat list
+/// itemBuilders, once per visible row per rebuild, so no fresh RegExp compile
+/// or sync disk stat belongs there.
 
-/// Strips fenced code blocks before hollow:// link extraction. Hoisted:
-/// bubbles used to compile a fresh RegExp per row per rebuild.
+/// Strips fenced code blocks before hollow:// link extraction.
 final RegExp codeBlockRegex = RegExp(r'```[\s\S]*?```');
 
-/// Positive-only cache for reply-thumbnail file existence. `existsSync` is a
-/// synchronous disk stat on the UI thread — fine once, not per row per
-/// rebuild. Only positives are cached: an existing file is stable (deletion
-/// degrades to the image error fallback), while a missing file can APPEAR
-/// when its download completes, so negatives must be re-checked.
+/// Positive-only cache for reply-thumbnail file existence. A hit is stable
+/// (deletion degrades to the image error fallback) but a miss can turn into a
+/// hit when a download completes, so negatives are never cached.
 final Set<String> _knownExistingFiles = <String>{};
 
 bool cachedFileExists(String path) {

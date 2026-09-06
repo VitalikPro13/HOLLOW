@@ -43,8 +43,8 @@ class _RingtoneClipEditorDialogState
   bool _loaded = false;
   StreamSubscription? _posSub;
 
-  // Deterministic pseudo-waveform bars (stable per file). Real PCM decode is
-  // overkill here — the strip is for visual context of the selection window.
+  // A deterministic pseudo-waveform, stable per file: the strip only gives the
+  // selection window visual context, so a real PCM decode is overkill.
   late final List<double> _bars;
 
   @override
@@ -57,7 +57,7 @@ class _RingtoneClipEditorDialogState
   List<double> _generateBars(String seedSource, int count) {
     final rng = Random(seedSource.hashCode);
     return List<double>.generate(count, (i) {
-      // Gentle envelope so it reads as audio, not noise.
+      // A gentle envelope, so it reads as audio rather than noise.
       final envelope = 0.35 + 0.65 * sin((i / count) * pi);
       return (0.15 + rng.nextDouble() * 0.85) * envelope;
     });
@@ -121,7 +121,8 @@ class _RingtoneClipEditorDialogState
     return '${m.toString().padLeft(2, '0')}:${s.toString().padLeft(2, '0')}.$ms';
   }
 
-  /// Move the start handle, keeping start < end and clip ≤ max.
+  /// Moves the start handle, keeping start below end and the clip under the
+  /// maximum.
   void _setStart(double v) {
     setState(() {
       _start = v.clamp(0.0, _totalDuration);
@@ -130,7 +131,8 @@ class _RingtoneClipEditorDialogState
     });
   }
 
-  /// Move the end handle, keeping end > start and clip ≤ max.
+  /// Moves the end handle, keeping end above start and the clip under the
+  /// maximum.
   void _setEnd(double v) {
     setState(() {
       _end = v.clamp(0.0, _totalDuration);
@@ -139,7 +141,7 @@ class _RingtoneClipEditorDialogState
     });
   }
 
-  /// Shift the whole window by [delta] seconds, preserving its length.
+  /// Shifts the whole window by [delta] seconds, preserving its length.
   void _nudgeWindow(double delta) {
     final len = _end - _start;
     var newStart = (_start + delta).clamp(0.0, _totalDuration - len);
@@ -192,7 +194,6 @@ class _RingtoneClipEditorDialogState
               ),
             ),
             const SizedBox(height: HollowSpacing.sm),
-            // Scrubbable waveform with draggable selection window.
             _WaveformSelector(
               bars: _bars,
               total: _totalDuration,
@@ -203,11 +204,9 @@ class _RingtoneClipEditorDialogState
               barColor: hollow.border,
               onStart: _setStart,
               onEnd: _setEnd,
-              // Pan the window so it starts at [s], preserving its length.
               onWindow: (s) => _nudgeWindow(s - _start),
             ),
             const SizedBox(height: HollowSpacing.md),
-            // Numeric start / end with +/- nudge for precision on long tracks.
             Row(
               children: [
                 Expanded(
@@ -252,7 +251,6 @@ class _RingtoneClipEditorDialogState
               ],
             ),
             const SizedBox(height: HollowSpacing.sm),
-            // Move the whole window in larger steps (handy on long tracks).
             Row(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
@@ -305,8 +303,8 @@ class _RingtoneClipEditorDialogState
       ),
       actions: [
         if (_loaded)
-          // Single full-width row so Preview sits on the LEFT and the
-          // Cancel/Save pair stays on the right (a bare Wrap right-aligns all).
+          // One full-width row, because a bare Wrap right-aligns everything and
+          // Preview belongs on the left.
           SizedBox(
             width: double.infinity,
             child: Row(
@@ -345,7 +343,7 @@ class _RingtoneClipEditorDialogState
   }
 }
 
-/// A label + value box flanked by − / + nudge buttons (0.5s steps).
+/// A label and value box flanked by nudge buttons.
 class _NudgeField extends StatelessWidget {
   final String label;
   final String value;
@@ -429,8 +427,8 @@ class _StepButton extends StatelessWidget {
   }
 }
 
-/// Waveform strip with a draggable selection window. Dragging near an edge
-/// moves that handle; dragging the middle pans the whole window.
+/// Waveform strip with a draggable selection window: near an edge the drag
+/// moves that handle, in the middle it pans the window.
 class _WaveformSelector extends StatefulWidget {
   final List<double> bars;
   final double total;
@@ -483,7 +481,6 @@ class _WaveformSelectorState extends State<_WaveformSelector> {
       _drag = 2;
       _panAnchor = t - widget.start;
     } else {
-      // Tap outside: move nearest handle to here.
       _drag = (t < widget.start) ? -1 : 1;
       if (_drag == -1) {
         widget.onStart(t);
@@ -515,11 +512,9 @@ class _WaveformSelectorState extends State<_WaveformSelector> {
     return LayoutBuilder(
       builder: (context, constraints) {
         final width = constraints.maxWidth;
-        // Drag-to-scrub waveform — a screen reader can't meaningfully drag this
-        // to set the clip window; the accessible path is the labeled Start/End
-        // nudge fields below it. Keep the gesture for sighted users but exclude
-        // the painted surface from the semantics tree so it isn't an
-        // unlabeled, unusable node.
+        // A screen reader cannot meaningfully drag this, and the accessible
+        // path is the labelled nudge fields below, so the painted surface stays
+        // out of the semantics tree rather than being an unusable node.
         return ExcludeSemantics(
           child: GestureDetector(
           behavior: HitTestBehavior.opaque,
@@ -593,7 +588,6 @@ class _WaveformPainter extends CustomPainter {
       canvas.drawRRect(r, inWindow ? inPaint : outPaint);
     }
 
-    // Selection window outline.
     final winPaint = Paint()
       ..color = accent.withValues(alpha: 0.12)
       ..style = PaintingStyle.fill;
@@ -606,7 +600,6 @@ class _WaveformPainter extends CustomPainter {
     canvas.drawLine(Offset(startX, 4), Offset(startX, size.height - 4), handlePaint);
     canvas.drawLine(Offset(endX, 4), Offset(endX, size.height - 4), handlePaint);
 
-    // Playhead.
     if (playhead != null) {
       final px = (playhead!.clamp(0.0, total) / total) * size.width;
       final pPaint = Paint()

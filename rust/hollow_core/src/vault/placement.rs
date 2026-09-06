@@ -14,11 +14,9 @@ pub struct ShardPlacement {
 
 /// Compute deterministic shard placements for erasure-coded content.
 ///
-/// For each shard 0..n, computes XOR distance to each eligible member and assigns
-/// to the closest member that hasn't exceeded their weighted shard cap.
-///
-/// Members with pledge == 0 are excluded. Members are sorted internally for
-/// deterministic tie-breaking across all peers.
+/// For each shard, the closest eligible member by XOR distance that has not exceeded
+/// its weighted cap. Members with pledge == 0 are excluded, and the list is sorted
+/// internally so tie-breaking is deterministic across peers.
 pub fn compute_shard_placements(
     content_id: &str,
     n: usize,
@@ -29,7 +27,6 @@ pub fn compute_shard_placements(
         return Vec::new();
     }
 
-    // Sort + filter to eligible members (non-zero pledge)
     let mut eligible: Vec<&String> = members
         .iter()
         .filter(|m| pledges.get(*m).copied().unwrap_or(0) > 0)
@@ -57,7 +54,6 @@ pub fn compute_shard_placements(
         })
         .collect();
 
-    // Pre-compute SHA-256(peer_id) for each member
     let peer_hashes: HashMap<&String, [u8; 32]> = eligible
         .iter()
         .map(|m| (*m, Sha256::digest(m.as_bytes()).into()))
@@ -75,7 +71,6 @@ pub fn compute_shard_placements(
             .try_into()
             .expect("shard_key is 32 bytes");
 
-        // XOR distance for each member, sorted ascending (closest first)
         let mut scored: Vec<(&String, [u8; 32])> = eligible
             .iter()
             .map(|m| {
@@ -89,7 +84,6 @@ pub fn compute_shard_placements(
             .collect();
         scored.sort_by(|a, b| a.1.cmp(&b.1));
 
-        // Pick closest member not exceeding their cap
         let mut placed = false;
         for (peer, _) in &scored {
             let count = assignments.get(peer).copied().unwrap_or(0);

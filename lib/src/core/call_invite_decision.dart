@@ -1,10 +1,8 @@
 /// What to do with an inbound call invite.
 ///
-/// Pure so the ORDER of the checks can be pinned by a test. It shipped wrong:
-/// the busy guard ran before the glare check, and `ringing` is not `idle`, so
-/// the glare branch was unreachable. Two people pressing Call at the same
-/// moment busy-rejected each other and neither call connected, with the code
-/// written to handle it sitting right underneath, never reached.
+/// Pure so the ORDER of the checks can be pinned by a test: the busy guard
+/// once ran before the glare check, and since `ringing` is not `idle` the glare
+/// branch was unreachable and simultaneous callers busy-rejected each other.
 enum InviteAction {
   /// Both sides dialled at once and we are the polite one: abandon our own
   /// outgoing invite and take theirs, exactly like any normal incoming call.
@@ -23,17 +21,13 @@ enum InviteAction {
 
 /// Decide what an inbound invite means.
 ///
-/// [ringingOutgoingToSamePerson] must be computed through the device→master
-/// resolver, never by comparing raw peer ids: an outgoing call targets a
-/// MASTER while an inbound signal carries the sender's DEVICE, so a raw `==`
-/// silently reports "not glare" for every multi-device peer. When the device
-/// map has not loaded yet it reads false and we land on [InviteAction.busy],
-/// which is the old behaviour rather than a wrong one.
+/// [ringingOutgoingToSamePerson] must be computed through the device->master
+/// resolver, never by comparing raw peer ids: an outgoing call targets a MASTER
+/// while an inbound signal carries the sender's DEVICE. An unloaded device map
+/// reads false and lands on [InviteAction.busy], the old behaviour.
 ///
-/// [ourMaster] and [theirMaster] must BOTH be master identities. The tiebreak
-/// only works if the two ends compare the same pair of strings: our master
-/// against their device would let both sides conclude they are polite, and
-/// then nobody is calling anybody.
+/// [ourMaster] and [theirMaster] must BOTH be masters: the tiebreak only works
+/// if the two ends compare the same pair of strings.
 InviteAction decideInviteAction({
   required bool ringingOutgoingToSamePerson,
   required bool idle,

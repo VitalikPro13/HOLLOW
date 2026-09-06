@@ -12,17 +12,14 @@ import 'package:hollow/src/ui/shell/user_context_menu.dart';
 
 /// Opens the user profile card for [peerId] from inside a chat message.
 ///
-/// Chat is wrapped in a [SelectionArea]; per project rules the tap must come
-/// from a full widget (GestureDetector + MouseRegion), and the resulting popup
-/// must NOT be a raw OverlayEntry on touch platforms. On mobile we use the
-/// modal bottom sheet; on desktop the anchored overlay card (same as the
-/// member panel), positioned near the tapped widget.
+/// Chat sits inside a [SelectionArea], so the tap comes from a full widget and
+/// the popup is never a raw OverlayEntry on touch: mobile gets the modal sheet,
+/// desktop the anchored card.
 ///
-/// Pass [serverId] from channel contexts: the sender's server membership
-/// (role, labels, nickname) is resolved at tap time so the chat popup matches
-/// the member panel. DMs pass none — no server, no roles. The Twitch chip is
-/// not plumbed through here at all: it draws from the subject's own verified
-/// credential (`twitchLoginProvider`), wherever the card is opened from.
+/// [serverId] resolves the sender's membership (role, labels, nickname) at tap
+/// time, so the chat popup matches the member panel; DMs pass none. The Twitch
+/// chip draws from the subject's own verified credential wherever the card is
+/// opened from.
 void showChatProfile(
   BuildContext context,
   WidgetRef ref, {
@@ -54,11 +51,10 @@ void showChatProfile(
     return;
   }
 
-  // A closure, not a point: the card re-reads it when the window is resized
-  // so it stays on the name it belongs to (issue #54).
+  // A closure, not a point: the card re-reads it on a window resize so it stays
+  // on the name it belongs to (issue #54).
   Offset anchorOf() {
     final pos = overlayAnchorOf(context);
-    // Anchor just below the tapped name/avatar.
     return Offset(pos.dx, pos.dy + 24);
   }
 
@@ -75,7 +71,6 @@ void showChatProfile(
 }
 
 /// Wraps [child] so tapping it opens the profile card for [peerId].
-/// Use for sender avatars and names inside message rows.
 class ProfileTapTarget extends ConsumerWidget {
   final String peerId;
   final String? nickname;
@@ -102,10 +97,8 @@ class ProfileTapTarget extends ConsumerWidget {
       label: (name != null && name.isNotEmpty)
           ? "Open $name's profile"
           : 'Open profile',
-      // Right-clicking a sender name or avatar opens the user menu (issue
-      // #61, phase 3). Desktop only: on touch the profile sheet already
-      // carries these actions, and a long press here would fight the message
-      // action sheet the row above it owns.
+      // Desktop only (issue #61): on touch the profile sheet already carries
+      // these actions, and a long press would fight the message action sheet.
       child: ContextMenuTarget(
         enabled: !Platform.isAndroid && !Platform.isIOS,
         semanticLabel: 'User actions',

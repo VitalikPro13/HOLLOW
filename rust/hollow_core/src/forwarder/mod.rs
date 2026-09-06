@@ -1,23 +1,12 @@
-//! Hollow media forwarder (media forwarding step 3, D3).
-//!
-//! A blind packet relay for SFrame-encrypted screen-share RTP: one ingest leg
-//! per stream fans ciphertext packets to N egress legs (`B + B·k` relay cost
-//! instead of TURN's `2·B·k`). The forwarder terminates only the hop-by-hop
-//! DTLS-SRTP layer — payloads stay encrypted under the ORIGINATOR's SFrame
-//! sender key end-to-end, it can never read or tamper with media, and it holds
-//! no group keys (it is not a Hollow node: no CRDT, no MLS, no storage, no
-//! sync). Relay philosophy applied to live media: availability helper, never
-//! authority.
-//!
-//! Control plane: Olm-encrypted `fwd_*` envelopes (`node/types.rs`) inside the
-//! dedicated `fwd:{peer_id}` relay room. Media plane: str0m (rtp mode) over
-//! its own UDP port range — spike-proven against our libwebrtc m144 fork
-//! (`reports/MEDIA_FORWARDING_PLAN.md` §7, D2).
-//!
-//! Identity: ONE Ed25519 keypair (`forwarder.key`), master == device.
-//! Rotation = mint a NEW identity + update the relay's `--forwarder-peer-id`,
-//! never re-key the same peer_id (clients pin the Olm identity key and would
-//! raise SecurityAlerts).
+//! Hollow media forwarder: a blind packet relay for SFrame-encrypted screen-share
+//! RTP, one ingest leg fanning ciphertext to N egress legs (`B + B·k` instead of
+//! TURN's `2·B·k`). It terminates only the hop-by-hop DTLS-SRTP layer, holds no
+//! group keys and is not a Hollow node, so it can never read or tamper with media:
+//! availability helper, never authority. Control plane is Olm-encrypted `fwd_*`
+//! envelopes in the `fwd:{peer_id}` room, media plane str0m in rtp mode. Identity
+//! is ONE keypair (`forwarder.key`); rotation mints a NEW identity and updates the
+//! relay's `--forwarder-peer-id`, because re-keying the same peer_id trips clients'
+//! pinned Olm identity key and raises SecurityAlerts.
 
 pub(crate) mod budget;
 pub(crate) mod dispatch;
@@ -40,8 +29,8 @@ fn default_port_max() -> u16 { 40199 }
 fn default_streams_global() -> u32 { 16 }
 fn default_streams_per_sender() -> u32 { 4 }
 fn default_legs_per_stream() -> u32 { 32 }
-/// Default egress budget: 400 Mbps — comfortable headroom under the VPS's
-/// 1 Gbps port while leaving room for the relay's own traffic.
+/// Default egress budget: 400 Mbps, headroom under the VPS's 1 Gbps port with room
+/// left for the relay's own traffic.
 fn default_egress_bps() -> u64 { 400_000_000 }
 
 /// Forwarder configuration (TOML file + env overrides — see
@@ -50,16 +39,14 @@ fn default_egress_bps() -> u64 { 400_000_000 }
 pub struct ForwarderConfig {
     /// Relay domain (WSS signaling), e.g. "relay.anonlisten.com".
     pub relay_domain: String,
-    /// Relay license key. None on the open public relay; kept for
-    /// self-hosters running license-gated relays. Env override:
+    /// Relay license key, `None` on the open public relay. Env override:
     /// `HOLLOW_FWD_LICENSE_KEY`.
     #[serde(default)]
     pub license_key: Option<String>,
     /// Data directory (identity keypair, Olm DB, debug log).
     pub data_dir: String,
-    /// The public IP advertised in ICE host candidates. Sockets bind
-    /// 0.0.0.0; this is what rides the SDP. EMPTY = embedded peer forwarder
-    /// (auto-advertise: LAN IP + per-leg STUN mapping from `stun_server`).
+    /// The public IP advertised in ICE host candidates; sockets bind 0.0.0.0. EMPTY
+    /// means an embedded peer forwarder (LAN IP + per-leg STUN mapping instead).
     pub public_ip: String,
     /// STUN server ("host:port") for embedded auto-advertise mode. The VPS
     /// never sets this — its public host candidate is sufficient.
@@ -82,8 +69,8 @@ pub struct ForwarderConfig {
 }
 
 impl ForwarderConfig {
-    /// Load from a TOML file, then apply env overrides (secrets stay out of
-    /// the world-readable config: `HOLLOW_FWD_LICENSE_KEY`).
+    /// Load from a TOML file, then apply env overrides so secrets stay out of the
+    /// world-readable config.
     pub fn load(path: &str) -> Result<Self, String> {
         let text = std::fs::read_to_string(path)
             .map_err(|e| format!("cannot read config {path}: {e}"))?;
@@ -101,16 +88,12 @@ impl ForwarderConfig {
     }
 }
 
-/// Embedded peer-forwarder engine (media forwarding step 3 phase 2): spawn
-/// ONLY `engine::run` — no identity, no DB, no Olm, no signaling loop. The
-/// swarm bridges the fwd_* lane in (`node/embedded_forwarder.rs`): inbound
-/// envelopes arrive already Olm-authenticated through the node's dispatch,
-/// outbound `OutSignal`s ride the node's own send path through `fwd:{self}`.
+/// Embedded peer-forwarder engine: spawns ONLY `engine::run`, with no identity, DB,
+/// Olm or signaling loop, because the swarm bridges the fwd_* lane in
+/// (`node/embedded_forwarder.rs`).
 ///
-/// Caps are deliberately small: this is a member's desktop, not the VPS —
-/// 2 streams, 4 legs per stream (up to 3 remote downstream viewers per the
-/// phase-2 policy + the forwarder's own display leg), ephemeral UDP ports,
-/// no bps budget (the leg count IS the budget at one stream copy per leg).
+/// Caps are deliberately small: this is a member's desktop, not the VPS, and with
+/// one stream copy per leg the leg count IS the budget.
 pub(crate) fn spawn_embedded_engine(
     stun_server: Option<String>,
 ) -> (
@@ -158,21 +141,18 @@ fn load_or_mint_identity(data_dir: &std::path::Path) -> Result<NativeKeypair, St
     Ok(keypair)
 }
 
-/// Run the forwarder. Returns only on a fatal error (bad config, license
-/// refused, storage failure) — the signaling loop reconnects forever
-/// otherwise.
+/// Run the forwarder. Returns only on a fatal error (bad config, license refused,
+/// storage failure); the signaling loop reconnects forever otherwise.
 pub async fn run(cfg: ForwarderConfig) -> Result<(), String> {
     crate::identity::set_data_dir(cfg.data_dir.clone())?;
     crate::log::init();
     let data_dir = crate::identity::data_dir()?;
     let keypair = load_or_mint_identity(&data_dir)?;
     let peer_id = keypair.peer_id();
-    // THE line the operator needs: this peer_id goes into the relay's
-    // --forwarder-peer-id (D4 discovery).
+    // The operator pastes this peer_id into the relay's --forwarder-peer-id.
     hollow_log!("[HOLLOW-FWD] forwarder peer_id: {peer_id}");
 
-    // DB passphrase derived from the keypair (the swarm.rs pattern) — the key
-    // file IS the secret; the DB just follows it.
+    // The key file IS the secret; the DB passphrase just follows it.
     let proto = keypair.to_protobuf_encoding()?;
     let passphrase = hex::encode(&proto[..32]);
     let db_path = data_dir
@@ -181,7 +161,6 @@ pub async fn run(cfg: ForwarderConfig) -> Result<(), String> {
         .ok_or("invalid data dir encoding")?
         .to_string();
 
-    // Olm state: load persisted pickles or start a fresh account.
     let olm = {
         let store = crate::storage::MessageStore::open(&db_path, &passphrase)?;
         match store.load_olm_account()? {
@@ -196,8 +175,7 @@ pub async fn run(cfg: ForwarderConfig) -> Result<(), String> {
     if let Ok(pickle) = olm.account_pickle_json() {
         crypto_store.save_account(pickle);
     }
-    // master == device: seed the resolver with our single identity so any
-    // shared code paths that resolve ids behave.
+    // master == device: seed the resolver so shared id-resolving paths behave.
     crate::node::resolver::seed_self(&peer_id, &[peer_id.clone()]);
 
     let cfg = Arc::new(cfg);

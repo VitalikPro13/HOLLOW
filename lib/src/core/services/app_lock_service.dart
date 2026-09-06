@@ -4,17 +4,15 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:local_auth/local_auth.dart';
 
-/// App Lock helper: stores the lock-type marker and (optionally) the secret
+/// App Lock helper: stores the lock-type marker and, optionally, the secret
 /// released by a successful biometric prompt.
 ///
-/// The identity itself stays protected by the Rust-side Argon2id + AES-GCM
-/// flow (`identity_api.enablePasswordProtection`) — a PIN is simply a numeric
-/// secret fed through the exact same pipeline. Biometric unlock works by
-/// keeping a copy of that secret in the OS-encrypted store (Android Keystore /
-/// iOS Keychain) and only reading it after `local_auth` succeeds.
-///
-/// The lock-type marker lives in secure storage too (NOT SQLCipher) because
-/// it must be readable BEFORE the identity is unlocked, at app launch.
+/// A PIN is just a numeric secret fed through the same Rust Argon2id + AES-GCM
+/// flow that protects the identity; biometric unlock keeps a copy of that
+/// secret in the OS-encrypted store and reads it only after `local_auth`
+/// succeeds. The lock-type marker lives in secure storage rather than
+/// SQLCipher because it must be readable BEFORE the identity is unlocked, at
+/// app launch.
 class AppLockService {
   static final AppLockService _instance = AppLockService._();
   factory AppLockService() => _instance;
@@ -95,7 +93,7 @@ class AppLockService {
     await disableBiometric();
   }
 
-  /// Show the OS biometric prompt (no secret involved). Used to verify the
+  /// Shows the OS biometric prompt with no secret involved, to verify the
   /// sensor works before trusting it for unlocks.
   Future<bool> promptBiometric(
       {String reason = 'Confirm fingerprint / Face ID'}) async {

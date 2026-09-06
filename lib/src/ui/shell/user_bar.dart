@@ -21,8 +21,7 @@ import 'package:hollow/src/ui/dialogs/mnemonic_dialog.dart';
 import 'package:hollow/src/ui/dialogs/user_settings_dialog.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-/// Bottom bar in the channel sidebar showing the local user's identity and status.
-/// Mirrors Discord's bottom-left user panel.
+/// Bottom bar in the channel sidebar, showing the local identity and status.
 class UserBar extends ConsumerWidget {
   const UserBar({super.key});
 
@@ -40,17 +39,16 @@ class UserBar extends ConsumerWidget {
         ? displayNameForPeer(localProfile, localPeerId)
         : '---';
 
-    // MY connection state — the same source of truth the Dock bar uses, so the
-    // indicator reads identically in both layouts. It is never derived from
-    // whether OTHER people happen to be online: sitting alone in your own
-    // server is still "Online".
+    // MY connection state, the same source the Dock bar uses so both layouts
+    // read identically. Never derived from whether OTHER people are online:
+    // sitting alone in your own server is still "Online".
     final amInvisible = ref.watch(invisibleModeProvider);
     final overall = ref.watch(overallConnectionProvider);
     var visual = connectionVisual(hollow, overall, invisible: amInvisible);
 
-    // Connected + a server open: the sync pipeline for THAT server is the more
-    // specific thing to report (it only ever refines "Online", never contradicts
-    // it — a stalled sync can't mean "not connected").
+    // With a server open, its sync pipeline is the more specific thing to
+    // report. It only ever REFINES "Online": a stalled sync cannot mean "not
+    // connected".
     if (!amInvisible && overall.isOnline && selectedServerId != null) {
       final syncStatus = ref.watch(serverSyncStatusProvider(selectedServerId));
       visual = switch (syncStatus) {
@@ -88,9 +86,8 @@ class UserBar extends ConsumerWidget {
         if (roomBudget.usage > 0.5)
           _RoomBudgetBar(budget: roomBudget),
         Container(
-      // min-height, not a fixed 52: the a11y Phase 3 pattern for chrome bars.
-      // Even with the label scale capped at 1.3 below, name + status stacked
-      // in a hard 52px box overflowed by 2px at any OS text size >= 1.3 —
+      // A minimum, not a fixed height: even with the label scale capped below,
+      // name and status stacked in a hard box overflow at a large OS text size,
       // which desktop passes through unclamped.
       constraints: const BoxConstraints(minHeight: 52),
       padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.sm + 2),
@@ -102,7 +99,6 @@ class UserBar extends ConsumerWidget {
       ),
       child: Row(
         children: [
-          // Avatar
           if (localPeerId != null)
             HollowAvatar(peerId: localPeerId, size: 32)
           else
@@ -117,7 +113,6 @@ class UserBar extends ConsumerWidget {
 
           const SizedBox(width: HollowSpacing.sm),
 
-          // Peer ID + status
           Expanded(
             child: HollowTooltip(
               message: localPeerId ?? 'Loading...',
@@ -125,8 +120,8 @@ class UserBar extends ConsumerWidget {
                 borderRadius: BorderRadius.circular(hollow.radiusSm),
                 onTap: () {
                   if (localPeerId != null) {
-                    // Card's bottom edge just above the user bar; re-read on
-                    // resize so it stays there (issue #54).
+                    // The card's bottom edge sits just above the user bar,
+                    // re-read on resize so it stays there (issue #54).
                     showProfileCardPopup(
                       context: context,
                       ref: ref,
@@ -142,9 +137,8 @@ class UserBar extends ConsumerWidget {
                 padding: const EdgeInsets.symmetric(
                   vertical: HollowSpacing.xs,
                 ),
-                // a11y Phase 3: this user panel is fixed-height chrome (52px);
-                // cap its label scale (like a tab bar) so the two lines stay in
-                // the bar at high OS text size. Content areas honor full 2.0×.
+                // Fixed-height chrome, so the label scale is capped and the two
+                // lines stay in the bar at high OS text size.
                 child: MediaQuery.withClampedTextScaling(
                   maxScaleFactor: 1.3,
                   child: Column(
@@ -167,18 +161,15 @@ class UserBar extends ConsumerWidget {
                         StatusDot(
                           color: statusColor,
                           size: 7,
-                          // Shape cue: only a settled "Online" is a solid disc.
-                          // Everything else is a hollow ring — the adjacent
-                          // status word labels it.
+                          // Shape cue: only a settled "Online" is a solid disc,
+                          // and the adjacent status word labels the rest.
                           filled: statusFilled,
                           semanticLabel: statusText,
                         ),
                         const SizedBox(width: HollowSpacing.xs),
-                        // Flexible + ellipsis: a bare Text here overflowed
-                        // the 240px sidebar by 36px once the OS text size
-                        // grew a long status ("Connecting…", "Reconnecting…")
-                        // past the room left beside the avatar and the three
-                        // trailing icons.
+                        // A bare Text here overflows the sidebar once the OS
+                        // text size grows a long status past the room left
+                        // beside the avatar and the trailing icons.
                         Flexible(
                           child: Text(
                             statusText,
@@ -198,10 +189,8 @@ class UserBar extends ConsumerWidget {
             ),
           ),
 
-          // Downloads
           const DownloadIconButton(iconSize: 16),
 
-          // Settings
           HollowTooltip(
             message: 'Settings',
             child: HollowPressable(
@@ -217,7 +206,6 @@ class UserBar extends ConsumerWidget {
             ),
           ),
 
-          // Recovery key button
           if (identity.mnemonic != null)
             HollowTooltip(
               message: 'Recovery phrase',

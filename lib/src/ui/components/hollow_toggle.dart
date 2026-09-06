@@ -3,17 +3,13 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/ui/components/hollow_focus_ring.dart';
 
-/// Hollow-styled toggle switch — spring physics thumb, smooth track crossfade.
-///
-/// Track: 36x20px pill. Thumb: 16px circle with subtle shadow.
-/// Uses spring animation for satisfying bounce.
+/// Hollow-styled toggle switch, with a spring thumb and a track crossfade.
 class HollowToggle extends StatefulWidget {
   final bool value;
   final ValueChanged<bool>? onChanged;
 
-  /// Screen-reader label describing what this switch controls (e.g. "Reduce
-  /// motion"). The on/off state is announced automatically via the toggled
-  /// semantic; the label gives it a name.
+  /// Names what this switch controls; the on/off state announces itself through
+  /// the toggled semantic.
   final String? semanticLabel;
 
   const HollowToggle({
@@ -94,8 +90,8 @@ class _HollowToggleState extends State<HollowToggle>
         borderRadius: BorderRadius.circular(10),
         onActivate: isDisabled ? null : () => widget.onChanged!(!widget.value),
         child: Semantics(
-          // Switch role: announces on/off state via `toggled`. The semantic
-          // onTap mirrors the gesture so Voice Control can flip it.
+          // The semantic onTap mirrors the gesture, so Voice Control can flip
+          // it.
           toggled: widget.value,
           enabled: !isDisabled,
           label: widget.semanticLabel,

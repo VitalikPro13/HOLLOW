@@ -38,11 +38,9 @@ import 'package:hollow/src/ui/settings/manage_member_dialog.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:url_launcher/url_launcher.dart';
 
-/// Rendering density for [ProfileCardBody].
-///
-/// `compact` is the anchored hover popup (mini card); `full` is the wide
-/// profile dialog. Both render the SAME sections from the same data so the
-/// two surfaces can never drift apart visually — full is simply roomier.
+/// Rendering density for [ProfileCardBody]: `compact` is the anchored popup,
+/// `full` the profile dialog. Both render the SAME sections from the same data,
+/// so the two surfaces cannot drift apart.
 enum ProfileCardDensity { compact, full }
 
 /// Deterministic banner color from peer ID (shifted hue from avatar).
@@ -52,16 +50,12 @@ Color _bannerColorFromId(String id) {
   return HSLColor.fromAHSL(1.0, hue.toDouble(), 0.45, 0.35).toColor();
 }
 
-/// The shared profile card content: banner + avatar + identity header +
-/// merged chip row + about + actions + peer-id footer.
+/// The shared profile card content, and ALWAYS the self-contained centre card:
+/// showcase boards are flanking panels owned by the profile dialog, never
+/// columns inside this one.
 ///
-/// This is ALWAYS the self-contained center card. Showcase boards are
-/// separate flanking panels owned by the profile dialog — never columns
-/// inside this card.
-///
-/// The HOST owns the outer container (popup card / dialog surface) and passes
-/// [dismissHost] so buttons that open other dialogs can close it first.
-/// [onExpand] (compact only) shows the "View full profile" affordance.
+/// The HOST owns the outer container and passes [dismissHost], so a button that
+/// opens another dialog can close it first.
 class ProfileCardBody extends ConsumerStatefulWidget {
   final String peerId;
   final String? nickname;
@@ -120,12 +114,9 @@ class _ProfileCardBodyState extends ConsumerState<ProfileCardBody> {
     final hasOverride = primaryOverride != null && primaryOverride.isNotEmpty;
     final primaryName = hasOverride ? primaryOverride : shownName;
 
-    // Density metrics. The full card is deliberately GENEROUS — showcase
-    // panels flank it, so it has to carry real presence on a desktop screen.
-    // Both banner heights are their host's width / 2.5, which is the ONE
-    // ratio every user banner surface, the banner cropper and Rust's
-    // 1200x480 storage agree on: 300 (kProfileCardPopupWidth) and 560
-    // (kProfileDialogCenterWidth). Change a host width and this moves with it.
+    // Both banner heights are their host's width / 2.5, the ONE ratio every
+    // banner surface, the cropper and Rust's 1200x480 storage agree on, so a
+    // change of host width moves them.
     final bannerHeight = _compact ? 120.0 : 224.0;
     final avatarSize = _compact ? 64.0 : 110.0;
     final ringWidth = _compact ? 3.0 : 4.0;
@@ -136,19 +127,16 @@ class _ProfileCardBodyState extends ConsumerState<ProfileCardBody> {
 
     final chips = _buildChips(hollow);
     final twitchChip = _twitchChip();
-    // The support badge (design 5.6, amended 2026-09-02): ONE chip for every
-    // credential the profile carries, worn or not, in the band under the
-    // banner before the integration chip. The compact card gets the icon
-    // alone so it never runs into the avatar's overhang; the full card
-    // spells the artist out.
+    // ONE chip for every credential the profile carries, worn or not. The
+    // compact card gets the icon alone, so it never runs into the avatar's
+    // overhang.
     final marks = ref.watch(supportMarksProvider(widget.peerId));
     final cornerChips = <Widget>[
       if (marks.isNotEmpty)
         SupportMarksChip(peerId: widget.peerId, compact: _compact),
       if (twitchChip != null) twitchChip,
     ];
-    // Compact only needs to know WHETHER a board exists (for the hint);
-    // the dialog decodes and renders the actual blocks.
+    // Compact only needs to know WHETHER a board exists, for the hint.
     final hasBoard = _compact &&
         !ShowcaseBoard.decode(profile?.showcaseBoard).isEmpty;
 
@@ -156,7 +144,6 @@ class _ProfileCardBodyState extends ConsumerState<ProfileCardBody> {
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        // ── Header: banner with the avatar breaking its bottom edge ──
         Stack(
           clipBehavior: Clip.none,
           children: [
@@ -189,8 +176,7 @@ class _ProfileCardBodyState extends ConsumerState<ProfileCardBody> {
                 ),
               )
             else if (!_compact)
-              // The full dialog's counterpart of the popup's expand arrows:
-              // same chip, inward arrows, closes the dialog.
+              // The full dialog's counterpart of the popup's expand chip.
               Positioned(
                 top: HollowSpacing.xs + 2,
                 right: HollowSpacing.xs + 2,
@@ -233,8 +219,7 @@ class _ProfileCardBodyState extends ConsumerState<ProfileCardBody> {
           ],
         ),
 
-        // ── Corner band (both densities): the integration chip alone owns
-        // the space right of the avatar, directly under the banner. Action
+        // The integration chip alone owns the space right of the avatar; action
         // buttons live below About Me, never up here.
         SizedBox(
           height: avatarOverhang + (_compact ? 8 : 20),
@@ -260,7 +245,6 @@ class _ProfileCardBodyState extends ConsumerState<ProfileCardBody> {
                 ),
         ),
 
-        // ── Identity block: left-aligned name / presence / status ──
         Padding(
           padding: EdgeInsets.symmetric(horizontal: hPad),
           child: Column(
@@ -303,9 +287,8 @@ class _ProfileCardBodyState extends ConsumerState<ProfileCardBody> {
                       fontSize: _compact ? 11 : 12,
                     ),
                   ),
-                  // Issue 1-D: the badge only ever appears for a contact whose
-                  // safety number the user confirmed out of band. Carries an
-                  // ICON as well as colour so it is not colour-only.
+                  // Only ever for a contact whose safety number the user
+                  // confirmed out of band, and never colour-only.
                   if (!isMe && ref.watch(isPeerVerifiedProvider(widget.peerId))) ...[
                     const SizedBox(width: HollowSpacing.sm),
                     Icon(LucideIcons.shieldCheck,
@@ -320,8 +303,8 @@ class _ProfileCardBodyState extends ConsumerState<ProfileCardBody> {
                       ),
                     ),
                   ],
-                  // Friends state lives up here (the action area only shows
-                  // a friend BUTTON for the not-yet-friends states).
+                  // The action area only shows a friend BUTTON for the states
+                  // that are not yet friends.
                   if (isFriendAccepted) ...[
                     const SizedBox(width: HollowSpacing.sm),
                     Icon(LucideIcons.userCheck,
@@ -352,7 +335,6 @@ class _ProfileCardBodyState extends ConsumerState<ProfileCardBody> {
                 ),
               ],
 
-              // ── One merged chip row: role + labels ──
               if (chips.isNotEmpty) ...[
                 SizedBox(
                     height:
@@ -369,10 +351,8 @@ class _ProfileCardBodyState extends ConsumerState<ProfileCardBody> {
                       _compact ? HollowSpacing.sm + 2 : HollowSpacing.md + 2),
               Container(height: 1, color: hollow.border),
 
-              // ── About ──
               ..._aboutSection(hollow, aboutMe),
 
-              // ── Actions (full): below About Me ──
               if (!_compact) ...[
                 const SizedBox(height: HollowSpacing.md + 2),
                 if (isMe)
@@ -387,7 +367,6 @@ class _ProfileCardBodyState extends ConsumerState<ProfileCardBody> {
                       isFriendAccepted: isFriendAccepted),
               ],
 
-              // ── Showcase hint (compact): the mini card stays mini ──
               if (_compact && widget.onExpand != null && hasBoard) ...[
                 const SizedBox(height: HollowSpacing.sm),
                 Center(
@@ -418,7 +397,6 @@ class _ProfileCardBodyState extends ConsumerState<ProfileCardBody> {
                 ),
               ],
 
-              // ── Actions (compact): one primary + a utility icon strip ──
               if (_compact) ...[
                 const SizedBox(height: HollowSpacing.sm),
                 if (isMe)
@@ -437,7 +415,6 @@ class _ProfileCardBodyState extends ConsumerState<ProfileCardBody> {
           ),
         ),
 
-        // ── Peer ID footer ──
         SizedBox(height: _compact ? HollowSpacing.sm : HollowSpacing.lg),
         _PeerIdFooter(peerId: widget.peerId, compact: _compact),
         SizedBox(height: _compact ? 4 : HollowSpacing.md + 2),
@@ -481,7 +458,7 @@ class _ProfileCardBodyState extends ConsumerState<ProfileCardBody> {
   // Role + labels + Twitch merged into a single species of chip.
   List<Widget> _buildChips(HollowTheme hollow) {
     final chips = <Widget>[];
-    // Every power role shows — Member included, for consistency.
+    // Every power role shows, Member included.
     final role = widget.role;
     if (role != null && role.isNotEmpty) {
       chips.add(_ProfileChip(
@@ -494,8 +471,8 @@ class _ProfileCardBodyState extends ConsumerState<ProfileCardBody> {
       chips.add(_ProfileChip(
         text: label.name,
         color: parseProfileLabelColor(label.color),
-        // Access labels (channel-gating, staff-assigned) carry a shield so
-        // they read differently from cosmetic tags.
+        // Access labels carry a shield, so they read differently from cosmetic
+        // tags.
         icon: label.access ? LucideIcons.shieldCheck : null,
         compact: _compact,
       ));
@@ -503,13 +480,11 @@ class _ProfileCardBodyState extends ConsumerState<ProfileCardBody> {
     return chips;
   }
 
-  /// The Twitch integration chip — placed in the corner band under the
-  /// banner (not in the role/label row): integrations get their own spot.
+  /// The Twitch integration chip, in the corner band rather than the role row.
   ///
-  /// Drawn ONLY from a verified account credential (`twitchLoginProvider`).
-  /// The old `twitch_username` profile field is a self-declaration any
-  /// modified client can write, so it renders nothing at all rather than a
-  /// chip that says "claims to be" (Vitalik, 2026-09-03).
+  /// Drawn ONLY from a verified account credential. The `twitch_username`
+  /// profile field is a self-declaration any modified client can write, so it
+  /// renders nothing at all rather than a chip that says "claims to be".
   Widget? _twitchChip() {
     final twitch = ref.watch(twitchLoginProvider(widget.peerId));
     if (twitch == null || twitch.isEmpty) return null;
@@ -545,10 +520,9 @@ class _ProfileCardBodyState extends ConsumerState<ProfileCardBody> {
     );
   }
 
-  /// Blocking opens a confirm dialog — dismiss the host (hover popup /
-  /// profile dialog) first, like the nickname flow, so the dialog isn't
-  /// stacked under a transient popup. The helper reads providers through the
-  /// nav context's container, so it survives this widget's disposal.
+  /// Dismisses the host first, so the confirm dialog is not stacked under a
+  /// transient popup. The helper reads providers through the nav context's
+  /// container, so it survives this widget's disposal.
   void _openBlockConfirm(String masterId) {
     final name = displayNameForPeer(
         ref.read(profileProvider)[widget.peerId], widget.peerId);
@@ -565,18 +539,16 @@ class _ProfileCardBodyState extends ConsumerState<ProfileCardBody> {
     showReportUserDialog(navContext, masterId: masterId, displayName: name);
   }
 
-  /// Same host-dismiss pattern as nickname/block/report: the hover popup is
-  /// transient and would sit on top of (or vanish out from under) the verify
-  /// screen. Capture the root nav context BEFORE dismissing, since dismissing
-  /// disposes this widget's own context.
+  /// Captures the root nav context BEFORE dismissing the host, because
+  /// dismissing disposes this widget's own context.
   void _openVerifyDialog(String masterId) {
     final navContext = Navigator.of(context, rootNavigator: true).context;
     widget.dismissHost();
     showVerifyContactDialog(navContext, peerId: masterId);
   }
 
-  /// The provider writes run BEFORE dismissing — dismissing disposes this
-  /// widget (and its ref) when hosted in the raw-OverlayEntry popup.
+  /// The provider writes run BEFORE dismissing, which disposes this widget and
+  /// its ref when hosted in the raw-OverlayEntry popup.
   void _openDm(String masterId) {
     openDmConversation(ref, masterId);
     widget.dismissHost();
@@ -588,9 +560,8 @@ class _ProfileCardBodyState extends ConsumerState<ProfileCardBody> {
     showManageMemberDialog(navContext, serverId: serverId, peerId: masterId);
   }
 
-  /// Whether the local user holds ANY member-management capability over this
-  /// profile in [ProfileCardBody.serverId] (advisory UI gating — the dialog
-  /// and Rust `op_allowed` re-check per section).
+  /// Whether the local user holds ANY member-management capability here.
+  /// Advisory only: the dialog and Rust's `op_allowed` re-check per section.
   bool _canManageMember() {
     final serverId = widget.serverId;
     if (serverId == null) return false;
@@ -623,10 +594,8 @@ class _ProfileCardBodyState extends ConsumerState<ProfileCardBody> {
     ];
   }
 
-  /// Actions for someone else's card, both densities: ONE primary button
-  /// (Message for friends, otherwise the friend-state action) over a strip
-  /// of tooltipped utility icons — the card stays a profile, not a button
-  /// stack.
+  /// Actions for someone else's card: ONE primary button over a strip of
+  /// tooltipped utility icons, so the card stays a profile, not a button stack.
   List<Widget> _memberActions(
     HollowTheme hollow,
     String master,
@@ -636,8 +605,7 @@ class _ProfileCardBodyState extends ConsumerState<ProfileCardBody> {
     final isBlocked = ref.watch(blockedUsersProvider).contains(master);
     final isVerified = ref.watch(isPeerVerifiedProvider(master));
     return [
-      // Primary slot: Message for friends (mirroring the mobile profile
-      // sheet's gate), else Add Friend / Accept Request / Request Sent.
+      // Message for friends, mirroring the mobile profile sheet's gate.
       if (isFriendAccepted)
         HollowButton.filled(
           onPressed: () => _openDm(master),
@@ -649,8 +617,7 @@ class _ProfileCardBodyState extends ConsumerState<ProfileCardBody> {
       else
         ProfileFriendAction(peerId: widget.peerId, expand: true),
       SizedBox(height: _compact ? HollowSpacing.sm : HollowSpacing.md),
-      // Utility strip: every icon carries a tooltip AND a semantic label
-      // (icon-only controls always need purpose labels).
+      // Every icon carries a tooltip AND a semantic label.
       Row(
         children: [
           _cardIconAction(
@@ -703,9 +670,8 @@ class _ProfileCardBodyState extends ConsumerState<ProfileCardBody> {
   Widget _iconGap() =>
       SizedBox(width: _compact ? HollowSpacing.xs : HollowSpacing.sm);
 
-  /// One square in the utility strip. Neutral border for every action —
-  /// intent rides the icon tint (error for block/report) so the strip reads
-  /// as one calm row instead of competing outlined buttons.
+  /// One square in the utility strip. Every action keeps a neutral border and
+  /// intent rides the icon tint, so the strip reads as one calm row.
   Widget _cardIconAction(
     HollowTheme hollow, {
     required IconData icon,
@@ -758,8 +724,8 @@ class _Banner extends ConsumerWidget {
       end: Alignment.bottomRight,
       colors: [fallbackColor, fallbackColor.withValues(alpha: 0.7)],
     );
-    // The animated variant off the asset rail when we hold it, else the
-    // still from the profile blob (see [watchAnimatedBanner]).
+    // The animated variant off the asset rail when we hold it, else the still
+    // from the profile blob.
     final bannerBytes = watchAnimatedBanner(ref, peerId) ??
         ref.watch(bannerProvider(peerId)).valueOrNull;
     if (bannerBytes != null && bannerBytes.isNotEmpty) {
@@ -908,14 +874,13 @@ class ProfileFriendAction extends ConsumerWidget {
     final hollow = HollowTheme.of(context);
     final friendInfo = ref.watch(friendsProvider)[peerId];
 
-    // A `declined` row (a sticky reject tombstone) is neither pending nor
-    // accepted — treat it like no row at all: show "Add Friend", so the
-    // person can be re-added and never renders as an accepted friend.
+    // A `declined` row is a sticky reject tombstone, neither pending nor
+    // accepted, so it reads as no row at all and the person can be re-added.
     if (friendInfo == null ||
         (friendInfo.status != 'pending' && friendInfo.status != 'accepted')) {
       return HollowButton.outline(
-        // Success feedback is the button itself flipping to "Request Sent"
-        // (provider refresh); failure needs an explicit toast.
+        // Success shows as the button flipping to "Request Sent"; failure needs
+        // an explicit toast.
         onPressed: () async {
           try {
             await ref.read(friendsProvider.notifier).sendRequest(peerId);
