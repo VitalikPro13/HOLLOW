@@ -43,7 +43,11 @@ void FlutterWebRTC::HandleMethodCall(
         GetValue<EncodableMap>(*method_call.arguments());
     const EncodableMap options = findMap(params, "options");
     std::string severityStr = findString(options, "logSeverity");
-    if (severityStr.empty() == false) {
+    // Every Dart call passes the listener's severity, "none" unless someone
+    // asked for logs. "none" must not replace the stderr sink installed at
+    // construction (flutter_webrtc_base.cc), or libwebrtc goes silent after
+    // the first method call.
+    if (severityStr.empty() == false && severityStr != "none") {
       RTCLoggingSeverity severity = str2LogSeverity(severityStr);
       initLoggerCallback(severity);
     }

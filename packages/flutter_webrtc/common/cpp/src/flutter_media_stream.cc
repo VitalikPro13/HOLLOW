@@ -5,6 +5,9 @@
 
 #include "flutter_utf8_sanitize.h"
 #include "task_runner.h"
+#ifdef __linux__
+#include "../../../linux/hollow_pulse_devices.h"
+#endif
 
 #define DEFAULT_WIDTH 1280
 #define DEFAULT_HEIGHT 720
@@ -13,6 +16,21 @@
 namespace flutter_webrtc_plugin {
 
 namespace {
+
+#ifdef __linux__
+void SelectPulseDevice(FlutterWebRTCBase* base, TaskRunner* runner,
+                       const std::string& id, bool input,
+                       std::unique_ptr<MethodResultProxy> result) {
+  auto reply = std::shared_ptr<MethodResultProxy>(std::move(result));
+  base->audio_op_queue().Post("selectPulseDevice", [id, input, reply, runner]() {
+    const bool selected = hollow_pulse::SelectDevice(id, input);
+    runner->EnqueueTask([selected, reply]() {
+      if (selected) reply->Success();
+      else reply->Error("AudioDeviceUnavailable", "The selected audio device is unavailable.");
+    });
+  });
+}
+#endif
 
 std::string SanitizeDeviceIdFromAudioBuffers(const char* name, const char* guid) {
   const std::string raw = (guid != nullptr && strlen(guid) > 0)
@@ -189,8 +207,8 @@ void FlutterMediaStream::GetUserAudio(const EncodableMap& constraints,
   // deviceId
 
   if (enable_audio) {
-    char strRecordingName[256];
-    char strRecordingGuid[256];
+    char strRecordingName[256] = {};
+    char strRecordingGuid[256] = {};
     int playout_devices = base_->audio_device_->PlayoutDevices();
     int recording_devices = base_->audio_device_->RecordingDevices();
 
@@ -205,15 +223,15 @@ void FlutterMediaStream::GetUserAudio(const EncodableMap& constraints,
       }
     }
 
-    if (sourceId == "") {
+    if (sourceId == "" && recording_devices > 0) {
       base_->audio_device_->RecordingDeviceName(0, strRecordingName,
                                                 strRecordingGuid);
       sourceId = SanitizeDeviceIdFromAudioBuffers(strRecordingName,
                                                   strRecordingGuid);
     }
 
-    char strPlayoutName[256];
-    char strPlayoutGuid[256];
+    char strPlayoutName[256] = {};
+    char strPlayoutGuid[256] = {};
     for (uint16_t i = 0; i < playout_devices; i++) {
       base_->audio_device_->PlayoutDeviceName(i, strPlayoutName,
                                               strPlayoutGuid);
@@ -458,6 +476,10 @@ void FlutterMediaStream::GetSources(std::unique_ptr<MethodResultProxy> result) {
 void FlutterMediaStream::SelectAudioOutput(
     const std::string& device_id,
     std::unique_ptr<MethodResultProxy> result) {
+#ifdef __linux__
+  SelectPulseDevice(base_, base_->task_runner_, device_id, false, std::move(result));
+  return;
+#endif
   char deviceName[256];
   char deviceGuid[256];
   int playout_devices = base_->audio_device_->PlayoutDevices();
@@ -483,6 +505,10 @@ void FlutterMediaStream::SelectAudioOutput(
 void FlutterMediaStream::SelectAudioInput(
     const std::string& device_id,
     std::unique_ptr<MethodResultProxy> result) {
+#ifdef __linux__
+  SelectPulseDevice(base_, base_->task_runner_, device_id, true, std::move(result));
+  return;
+#endif
   char deviceName[256];
   char deviceGuid[256];
   int playout_devices = base_->audio_device_->RecordingDevices();

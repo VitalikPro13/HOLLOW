@@ -1,6 +1,7 @@
 use std::collections::{HashMap, VecDeque};
 
 use openmls::prelude::*;
+use openmls::framing::errors::{MessageDecryptionError, SecretTreeError};
 use openmls::prelude::tls_codec::{Serialize as TlsSerialize, Deserialize as TlsDeserialize};
 use openmls_basic_credential::SignatureKeyPair;
 use openmls_rust_crypto::OpenMlsRustCrypto;
@@ -518,6 +519,16 @@ impl MlsManager {
         server_id: &str,
         ciphertext: &[u8],
     ) -> Result<(Vec<u8>, String), String> {
+        self.decrypt_fresh(server_id, ciphertext)?
+            .ok_or_else(|| "MLS message generation already consumed".to_string())
+    }
+
+    /// A consumed generation is a replay, not evidence that the group needs recovery.
+    pub fn decrypt_fresh(
+        &mut self,
+        server_id: &str,
+        ciphertext: &[u8],
+    ) -> Result<Option<(Vec<u8>, String)>, String> {
         let group = self.groups.get_mut(server_id)
             .ok_or_else(|| format!("No MLS group for server {server_id}"))?;
 
@@ -528,9 +539,13 @@ impl MlsManager {
             .try_into_protocol_message()
             .map_err(|e| format!("Not a protocol message: {e:?}"))?;
 
-        let processed = group
-            .process_message(&self.provider, protocol_msg)
-            .map_err(|e| format!("MLS process_message failed: {e:?}"))?;
+        let processed = match group.process_message(&self.provider, protocol_msg) {
+            Ok(processed) => processed,
+            Err(ProcessMessageError::ValidationError(ValidationError::UnableToDecrypt(
+                MessageDecryptionError::SecretTreeError(SecretTreeError::SecretReuseError),
+            ))) => return Ok(None),
+            Err(e) => return Err(format!("MLS process_message failed: {e:?}")),
+        };
 
         let sender_credential = processed.credential();
         let sender_peer_id = String::from_utf8_lossy(
@@ -539,7 +554,7 @@ impl MlsManager {
 
         match processed.into_content() {
             ProcessedMessageContent::ApplicationMessage(app_msg) => {
-                Ok((app_msg.into_bytes(), sender_peer_id))
+                Ok(Some((app_msg.into_bytes(), sender_peer_id)))
             }
             ProcessedMessageContent::ProposalMessage(_) => {
                 Err("Received proposal instead of application message".to_string())
@@ -803,6 +818,12 @@ mod tests {
         let (decrypted, sender) = bob.decrypt("server1", &ciphertext).unwrap();
         assert_eq!(decrypted, plaintext.to_vec());
         assert_eq!(sender, "12D3KooWAlice");
+
+        assert!(bob.decrypt_fresh("server1", &ciphertext).unwrap().is_none());
+        let next = alice.encrypt("server1", b"fresh after replay").unwrap();
+        assert_eq!(bob.decrypt_fresh("server1", &next).unwrap().unwrap().0,
+            b"fresh after replay");
+        assert!(bob.decrypt_fresh("server1", b"invalid ciphertext").is_err());
 
         // Bob encrypts, Alice decrypts.
         let bob_msg = b"Hello from Bob!";

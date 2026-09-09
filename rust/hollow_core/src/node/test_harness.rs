@@ -542,6 +542,7 @@ impl MockRelay {
                 }
             }
             WsCommand::SendToRoomTopic { room_code, topic, data } => {
+                let data = inner.on_the_wire(from, data);
                 // Tee into the channel's ring buffer when registered (relay
                 // offline catch-up), mirroring the real relay.
                 let key = (room_code.clone(), topic.clone());
@@ -2064,6 +2065,7 @@ async fn server_join_forms_mls_and_channel_message_decrypts() {
 
     drain_events(&mut j);
 
+    relay.set_recording(&o.device_id, true);
     o.cmd_tx
         .send(NodeCommand::SendChannelMessage {
             server_id: server_id.clone(),
@@ -2087,6 +2089,20 @@ async fn server_join_forms_mls_and_channel_message_decrypts() {
     let row = msgs.iter().find(|m| m.text == "hello channel").expect("message stored");
     assert_eq!(row.sender_master, o_master, "channel message attributed to owner master");
     assert!(!row.is_mine, "received message is not is_mine on the joiner");
+
+    let frame = relay.recorded_frames(&o.device_id).into_iter().find(|frame| {
+        matches!(serde_json::from_slice::<super::types::HavenMessage>(frame),
+            Ok(super::types::HavenMessage::MlsChannelMessage { .. }))
+    }).expect("recorded MLS ciphertext");
+    let epoch = j.mls_epoch(&server_id).await;
+    for _ in 0..4 {
+        relay.inject(&server_id, &o.device_id, &j.device_id, frame.clone());
+        sleep_ms(2100).await;
+    }
+    assert_eq!(j.mls_epoch(&server_id).await, epoch,
+        "replayed consumed generations must not evict a healthy MLS group");
+    assert_eq!(o.mls_epoch(&server_id).await, epoch,
+        "replays must not make the coordinator remove and re-add a member");
 }
 
 // A PUBLIC channel broadcasts signed PLAINTEXT and the relay frame's `from` is the

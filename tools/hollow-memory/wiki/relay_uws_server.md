@@ -967,16 +967,26 @@ ulimit -n 500000
 
 ## Docker self-hosting
 
-Files in `relay-uws/`: `Dockerfile`, `docker-compose.yml`, `.env.example`, `turnserver.conf.example`.
+Files in `relay-uws/`: `Dockerfile`, `docker-compose.yml`, `.env.example`, `turnserver.conf.example`, `keys/`, plus three systemd unit templates in `deploy/`.
 
 Docker Compose runs three services:
-- **relay** — builds from Dockerfile (multi-stage: debian bookworm build → slim runtime), TLS on port 443, certs from shared volume
-- **certbot** — auto-provisions Let's Encrypt certs, renews every 12h, copies to shared volume
+- **relay** — builds from Dockerfile (multi-stage: debian bookworm build → slim runtime), TLS on port 443, certs from shared volume, `ulimits: core: 0`
+- **certbot** — provisions Let's Encrypt certs, wakes every 12h, and does its copy/chown/chmod/touch work inside a `--deploy-hook` so it only acts on a real renewal
 - **coturn** — TURN server on host network (ports 3478/5349)
 
-Self-hoster setup: `cp .env.example .env` (edit domain/IP/secret), `cp turnserver.conf.example turnserver.conf` (edit realm/secret), `docker compose up -d`.
+Self-hoster setup: `cp .env.example .env` (edit domain/IP/secret), `cp turnserver.conf.example turnserver.conf` (edit realm/secret), `git submodule update --init --recursive` (the Dockerfile COPYs `uWebSockets/` and `uSockets/`, neither present on a plain clone), `docker compose up -d`.
 
 The relay binary is SSL-only (`uWS::SSLApp`) — cannot run without TLS certs. No `--no-tls` mode exists. This is intentional: every self-hosted relay is TLS-secured by default.
+
+**The container runs as uid/gid 999 (`hollow`), so certbot must hand the certs over.** `USER hollow` arrived with fb05bb7 (2026-08-03, semgrep hardening) and nothing re-tested the cert path: `cp` out of `live/` produces root:root 0600 copies, so the relay could not read its own private key and Docker self-hosting was broken outright until #70/#74 (2026-09-09). The uid is pinned in the Dockerfile precisely so the certbot `chown 999:999` is deterministic.
+
+**License keys mount a DIRECTORY, never the file.** `./keys:/keys:ro` with `--keys-file /keys/keys.json`. A single-file bind mount binds the inode, so any editor that writes-and-renames (vim, `sed -i`, most of them) leaves the container reading an inode that no longer exists: `try_reload`'s mtime check never changes and the 30 s hot reload silently never fires again. `relay-uws/keys/.keep` keeps the directory in the tree, and `keys.json` is gitignored (`.gitignore:124`), so a self-hoster cannot commit their keys by accident.
+
+**No fd store, so no restart persistence on this path.** The snapshot handoff needs `NotifyAccess=main` + `FileDescriptorStoreMax=1` on the unit that owns the relay process, and under compose systemd owns the `docker compose` client instead. Every `docker compose restart relay` therefore empties the offline buffers, topic rings and push tokens. Never restart the relay on a timer: `deploy/hollow-relay-cert-renewed.path` watches the deploy hook's touch file so it fires only on an actual renewal. Core dumps are barred with `ulimits: core: 0` in the compose file, NOT `LimitCORE=` on the unit, which would only bound the compose client and not the relay in the container.
+
+The `deploy/` templates assume the repo cloned at `/opt/HOLLOW` and a `hollow` user in the docker group.
+
+**Nothing tests this path.** Neither `.github/workflows/ci.yml` nor `scripts/fleet.ps1` exercises Docker; it runs only on self-hosters' machines, which is how the privkey bug survived a month unnoticed. Known gap as of 2026-09-09: a failed initial `certonly` leaves the certbot container parked in its sleep loop looking healthy while the relay crash-loops on missing certs (no `set -e`).
 
 ---
 

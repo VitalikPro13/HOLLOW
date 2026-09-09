@@ -66,6 +66,22 @@
 #   pwsh scripts/fleet.ps1 -Onboard -Peers a,b   # mobile welcome flow, stamp the fixtures
 #   pwsh scripts/fleet.ps1 -Live -Peers a,b
 #   pwsh scripts/fleet_send.ps1 -Command '[{"peer":"a","op":"look"}]'
+#
+# ## The Linux backend (pwsh on a Linux desktop)
+#
+# Bundle copies under build/fleet/<peer> (`flutter build linux --debug -t
+# integration_test/ui_probe_test.dart`), fixtures and run directories under
+# ~/hollow_fleet, the same scenario files and send script. Each instance runs
+# on its own session bus (dbus-run-session): the runner registers a fixed
+# GApplication id for hollow:// links, so on the shared bus a second copy
+# would forward its command line to the first and exit. Driven over SSH, the
+# graphical session's DISPLAY and XAUTHORITY must be exported first. stderr
+# is kept per instance (native-stderr.log): a native death on Linux is
+# written there and nowhere else.
+#
+#   DISPLAY=:1 XAUTHORITY=/run/user/1000/gdm/Xauthority pwsh scripts/fleet.ps1 -Build -Peers a,b
+#   pwsh scripts/fleet.ps1 -Onboard -Fresh -Peers a,b
+#   pwsh scripts/fleet.ps1 -Live -Peers a,b
 
 param(
     # A file in scripts\probe_scenarios\fleet (without .json).
@@ -129,6 +145,10 @@ if (Test-SimBackend) {
     $fixtureRoot = Join-Path (Join-Path $HOME 'hollow_fleet') 'fixtures'
     $runRoot     = $null
     $buildOutput = Join-Path (Join-Path (Join-Path $repoRoot 'build') 'ios') (Join-Path 'iphonesimulator' 'Runner.app')
+} elseif (Test-LinuxBackend) {
+    $fixtureRoot = Join-Path (Get-LinuxFleetHome) 'fixtures'
+    $runRoot     = Join-Path (Get-LinuxFleetHome) 'run'
+    $buildOutput = Join-Path $repoRoot 'build/linux/x64/debug/bundle'
 } else {
     $fixtureRoot = Join-Path $env:TEMP 'hollow_fleet\fixtures'
     $runRoot     = Join-Path $env:TEMP 'hollow_fleet\run'
@@ -254,6 +274,12 @@ function Invoke-Build {
         if ($LASTEXITCODE -ne 0) { throw "flutter build failed with $LASTEXITCODE" }
         return
     }
+    if (Test-LinuxBackend) {
+        Write-Step 'building the probe target as a Linux bundle'
+        & flutter build linux --debug -t integration_test/ui_probe_test.dart
+        if ($LASTEXITCODE -ne 0) { throw "flutter build failed with $LASTEXITCODE" }
+        return
+    }
     Write-Step 'building the probe target as a standalone exe'
     & flutter build windows --debug -t integration_test/ui_probe_test.dart
     if ($LASTEXITCODE -ne 0) { throw "flutter build failed with $LASTEXITCODE" }
@@ -269,7 +295,8 @@ function Test-PeerStaged($peer) {
         $null = & xcrun simctl get_app_container $udid com.anonlisten.hollow 2>$null
         return ($LASTEXITCODE -eq 0)
     }
-    return (Test-Path (Join-Path (Join-Path $stageRoot $peer) 'hollow.exe'))
+    $exe = if (Test-LinuxBackend) { 'hollow' } else { 'hollow.exe' }
+    return (Test-Path (Join-Path (Join-Path $stageRoot $peer) $exe))
 }
 
 function Stage-Peer($peer) {
@@ -286,6 +313,10 @@ function Stage-Peer($peer) {
     }
     $dest = Join-Path $stageRoot $peer
     Write-Step "staging $peer"
+    if (Test-LinuxBackend) {
+        Copy-Mirror $buildOutput $dest
+        return
+    }
     # /MIR so a rebuild's deletions propagate, and it only copies what actually
     # changed - a restage after an incremental build is under a second. The
     # debug symbols and import libraries are ~25 MB per copy and nothing loads
@@ -423,6 +454,33 @@ function Start-Peer($peer) {
     $env:UI_PROBE_SCENARIO_FILE = ''
     $env:UI_PROBE_STEPS = ''
 
+    if (Test-LinuxBackend) {
+        if (-not $env:DISPLAY) {
+            throw 'DISPLAY is not set. Export the graphical session DISPLAY and XAUTHORITY before launching the fleet (for example DISPLAY=:1 XAUTHORITY=/run/user/1000/gdm/Xauthority).'
+        }
+        # Own session bus per instance (Test-LinuxBackend). stdout and stderr
+        # go to FILES through a launcher script, never through a pipe held by
+        # this process: a native death says its last words on stderr, and a
+        # pipe whose reader has exited turns every later Rust log line into
+        # EPIPE (which was a panic per line until lib.rs stopped using
+        # eprintln!, 2026-09-09).
+        # The launcher wraps dbus-run-session, not the other way round: the bus
+        # daemon inherits stdio too, and a pipe it keeps open holds every
+        # caller of this script until the fleet stops.
+        $launcher = Join-Path $out 'launch.sh'
+        $lines = @(
+            '#!/bin/sh',
+            ('exec dbus-run-session -- "{0}" >"{1}" 2>"{2}" </dev/null' -f (Join-Path $dest 'hollow'),
+                (Join-Path $out 'native-stdout.log'), (Join-Path $out 'native-stderr.log'))
+        )
+        [System.IO.File]::WriteAllText($launcher, (($lines -join "`n") + "`n"))
+        & chmod +x $launcher
+        $proc = Start-Process -FilePath $launcher -WorkingDirectory $dest -PassThru
+        $script:processes[$peer] = $proc
+        Write-Step "launched $peer (pid $($proc.Id), own session bus) data=$data"
+        return
+    }
+
     # NO -RedirectStandardOutput/-RedirectStandardError here, however much
     # they look like the right way to capture a dead instance's last words.
     # They flip Start-Process into inherit-handles mode, so every launched
@@ -464,8 +522,9 @@ function Wait-Ready($peers) {
 # a bug.
 function Set-FleetWindows($peers) {
     if (-not $Tile) { return }
-    # Simulator.app lays its device windows out itself.
-    if (Test-SimBackend) { return }
+    # Simulator.app lays its device windows out itself; on Linux the window
+    # manager does, and the probe's screenshots are taken inside the app.
+    if (-not (Test-WindowsBackend)) { return }
     if (-not ('HollowWin32.Native' -as [type])) {
         Add-Type -Namespace HollowWin32 -Name Native -MemberDefinition @'
 [DllImport("user32.dll")] public static extern bool MoveWindow(IntPtr h, int x, int y, int w, int t, bool repaint);
@@ -659,7 +718,7 @@ try {
         # replaying the twenty steps that worked.
         if ($scenarioFailed) { Write-Step 'left running so you can look at it' 'Yellow' }
         Write-Step "instances up (idle timeout ${IdleMinutes}m). Drive them with:" 'Cyan'
-        if (Test-SimBackend) {
+        if (-not (Test-WindowsBackend)) {
             Write-Host '  pwsh scripts/fleet_send.ps1 -Command ''[{"peer":"a","op":"look"}]'''
             Write-Host '  pwsh scripts/fleet.ps1 -Scenario <name> -Attach'
             Write-Host '  pwsh scripts/fleet.ps1 -Stop'

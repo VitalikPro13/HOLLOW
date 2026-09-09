@@ -1,7 +1,9 @@
+import 'dart:async';
 import 'dart:math';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
+import 'connection_status_provider.dart';
 
 /// Phases of the multi-device device-linking flow (Step 4). Honest about what is
 /// actually happening — no fabricated per-category progress.
@@ -128,8 +130,37 @@ final deviceLinkSyncProvider =
 const _codeAlphabet = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
 
 class DeviceLinkSyncNotifier extends Notifier<DeviceLinkState> {
+  Timer? _waitingTimer;
+  bool _disposed = false;
+
   @override
-  DeviceLinkState build() => const DeviceLinkState();
+  DeviceLinkState build() {
+    _disposed = false;
+    ref.onDispose(() {
+      _disposed = true;
+      _waitingTimer?.cancel();
+    });
+    listenSelf((previous, next) {
+      if (next.phase != LinkPhase.waiting) _waitingTimer?.cancel();
+    });
+    return const DeviceLinkState();
+  }
+
+  bool _beginWaiting(DeviceLinkState next) {
+    _waitingTimer?.cancel();
+    if (!ref.read(overallConnectionProvider).isOnline) {
+      state = const DeviceLinkState(phase: LinkPhase.failed,
+          error: 'Hollow is not connected to the relay yet. Wait until it is online and try again.');
+      return false;
+    }
+    state = next;
+    _waitingTimer = Timer(const Duration(seconds: 60), () {
+      if (state.phase != LinkPhase.waiting) return;
+      state = state.copyWith(phase: LinkPhase.failed,
+          error: 'Your other device did not answer. Check that both devices are online, then try again with a fresh code.');
+    });
+    return true;
+  }
 
   String _generateCode() {
     final rng = Random.secure();
@@ -157,22 +188,36 @@ class DeviceLinkSyncNotifier extends Notifier<DeviceLinkState> {
   /// (Empty device) Resolve a code shown on the populated device and request its
   /// snapshot with the chosen scope.
   Future<void> enterCode(String code, {required bool includeVault, required bool includeFiles}) async {
-    state = DeviceLinkState(phase: LinkPhase.waiting, code: code.toUpperCase());
-    await network_api.resolveLinkCode(
-      code: code.toUpperCase(),
-      includeVault: includeVault,
-      includeFiles: includeFiles,
-    );
+    if (!_beginWaiting(DeviceLinkState(phase: LinkPhase.waiting, code: code.toUpperCase()))) return;
+    final attempt = state;
+    try {
+      await network_api.resolveLinkCode(
+        code: code.toUpperCase(),
+        includeVault: includeVault,
+        includeFiles: includeFiles,
+      );
+    } catch (_) {
+      if (!_disposed && identical(state, attempt)) {
+        onLinkFailed('Could not request the link. Check your connection and try again.');
+      }
+    }
   }
 
   /// (Empty device, mnemonic path) Pull from an already-known online sibling.
   Future<void> pullFromSibling(String peerId, {required bool includeVault, required bool includeFiles}) async {
-    state = DeviceLinkState(phase: LinkPhase.waiting, peerId: peerId);
-    await network_api.requestLinkSnapshot(
-      targetPeer: peerId,
-      includeVault: includeVault,
-      includeFiles: includeFiles,
-    );
+    if (!_beginWaiting(DeviceLinkState(phase: LinkPhase.waiting, peerId: peerId))) return;
+    final attempt = state;
+    try {
+      await network_api.requestLinkSnapshot(
+        targetPeer: peerId,
+        includeVault: includeVault,
+        includeFiles: includeFiles,
+      );
+    } catch (_) {
+      if (!_disposed && identical(state, attempt)) {
+        onLinkFailed('Could not request the link. Check your connection and try again.');
+      }
+    }
   }
 
   /// (Populated device) Accept an inbound request and push the snapshot.
@@ -219,6 +264,8 @@ class DeviceLinkSyncNotifier extends Notifier<DeviceLinkState> {
         return 'Invalid code format.';
       case 'taken':
         return 'Code already in use.';
+      case 'too_many_attempts':
+        return 'Too many attempts. Wait a minute and try again.';
       default:
         return 'Link error: $error';
     }

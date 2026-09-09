@@ -13,6 +13,7 @@ import 'package:hollow/src/rust/api/identity.dart' as identity_api;
 import 'package:hollow/src/rust/frb_generated.dart';
 import 'package:hollow/src/ui/app.dart';
 import 'package:integration_test/integration_test.dart';
+import 'package:hollow/src/core/services/video_backend.dart';
 import 'package:window_manager/window_manager.dart';
 
 import 'probe/probe_env.dart';
@@ -137,6 +138,9 @@ void main() {
       } catch (e) {
         debugPrint('[ui-probe] window_manager init failed: $e');
       }
+      // The same decoder choice as main(), so a fleet Play tap exercises what
+      // users run (the plugin registrant alone gives mdk its defaults).
+      registerVideoBackend();
     }
   });
 

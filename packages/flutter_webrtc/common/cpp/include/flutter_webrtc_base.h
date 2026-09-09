@@ -171,6 +171,9 @@ class FlutterWebRTCBase {
 
  protected:
   scoped_refptr<RTCPeerConnectionFactory> factory_;
+  // Linux only: never closed, so the media engine's reference count never
+  // reaches zero (see the constructor).
+  scoped_refptr<RTCPeerConnection> anchor_peerconnection_;
   scoped_refptr<RTCAudioDevice> audio_device_;
   scoped_refptr<RTCVideoDevice> video_device_;
   scoped_refptr<RTCDesktopDevice> desktop_device_;

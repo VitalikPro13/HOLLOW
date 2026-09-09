@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/app_relaunch.dart';
 import 'package:hollow/src/core/providers/device_link_sync_provider.dart';
+import 'package:hollow/src/core/providers/connection_status_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
@@ -328,6 +329,7 @@ class _DeviceLinkContentState extends ConsumerState<_DeviceLinkContent> {
   }
 
   Widget _enterCode(HollowTheme hollow) {
+    final online = ref.watch(overallConnectionProvider).isOnline;
     return Column(
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -358,13 +360,16 @@ class _DeviceLinkContentState extends ConsumerState<_DeviceLinkContent> {
           style: HollowTypography.caption.copyWith(color: hollow.textSecondary, fontSize: 11),
         ),
         const SizedBox(height: HollowSpacing.lg),
+        if (!online)
+          Text('Hollow is not connected to the relay yet.',
+              style: HollowTypography.caption.copyWith(color: hollow.textSecondary)),
         Row(
           mainAxisAlignment: MainAxisAlignment.end,
           children: [
             HollowButton.ghost(onPressed: _close, child: const Text('Cancel')),
             const SizedBox(width: HollowSpacing.sm),
             HollowButton.filled(
-              onPressed: () {
+              onPressed: !online ? null : () {
                 final code = _codeController.text.trim();
                 if (code.length == 6) {
                   // Scope is decided by the populated device.

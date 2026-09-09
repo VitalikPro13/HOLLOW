@@ -116,6 +116,7 @@ class FileTransferState {
   /// [clearAvailability] is the only way back to "nothing known": the plain
   /// `??` merge below can never null a field out.
   FileTransferState copyWith({
+    int? totalChunks,
     int? chunksReceived,
     bool? isComplete,
     bool? isDownloading,
@@ -133,7 +134,7 @@ class FileTransferState {
       fileId: fileId,
       fileName: fileName,
       sizeBytes: sizeBytes,
-      totalChunks: totalChunks,
+      totalChunks: totalChunks ?? this.totalChunks,
       chunksReceived: chunksReceived ?? this.chunksReceived,
       isComplete: isComplete ?? this.isComplete,
       isSending: isSending,
@@ -622,7 +623,7 @@ class FileTransferNotifier
     final updated = Map<String, FileTransferState>.from(state);
     final current = state[fileId];
     // Declined by the gate: the arriving bytes are discarded, never surfaced (#41).
-    if (current?.declined == true) return;
+    if (current?.declined == true || current?.isComplete == true) return;
     if (current == null) {
       // WebRTC race: progress arrived before FileHeader, so make a minimal entry.
       updated[fileId] = FileTransferState(
@@ -635,17 +636,11 @@ class FileTransferNotifier
       );
     } else if (current.totalChunks == 0 && totalChunks > 0) {
       // For streamed transfers, chunks represent MB received / MB total.
-      updated[fileId] = FileTransferState(
-        fileId: current.fileId,
-        fileName: current.fileName,
-        sizeBytes: current.sizeBytes,
+      updated[fileId] = current.copyWith(
         totalChunks: totalChunks,
         chunksReceived: chunksReceived,
-        isSending: current.isSending,
         isDownloading: true, // Active progress → actively downloading.
-        isImage: current.isImage,
-        width: current.width,
-        height: current.height,
+        clearAvailability: true,
       );
     } else {
       // Bytes are moving: whatever the card was explaining is over.

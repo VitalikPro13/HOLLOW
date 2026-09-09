@@ -10808,8 +10808,9 @@ async fn handle_incoming_request(
                     Err(e) => { hollow_log!("[HOLLOW-MLS] Base64 decode failed: {e}"); return; }
                 };
 
-                match mls_mgr.decrypt(&group_key, &ciphertext) {
-                    Ok((plaintext, sender_peer_id)) => {
+                match mls_mgr.decrypt_fresh(&group_key, &ciphertext) {
+                    Ok(None) => return,
+                    Ok(Some((plaintext, sender_peer_id))) => {
                         *mls_dirty = true;
                         mls_decrypt_failures.remove(&group_key); // Reset failure counter on success.
                         hollow_log!("[HOLLOW-TOPIC] DECRYPT ok for {group_key}, sender(leaf)={sender_peer_id}");

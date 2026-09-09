@@ -461,3 +461,59 @@ their control, `tap type:_FriendsManager > semantics:Close` + `wait_for gone typ
 (the Friends manager is a Material dialog, not a `HollowDialog`, so the `dialog` target does not see
 it), and the scope is not optional: a bare `semantics:Close` matches the window title bar's close
 button first in tree order, and that tap ends the process (it did). Predates the simulator work.
+
+## The Linux backend: the same fleet on Vitalik's laptop (2026-09-09)
+
+`fleet_lib.ps1` picks `linux` from `$IsLinux`; the machine is the real Ubuntu laptop
+(`ssh yrov@192.168.18.38`, GNOME on X11, memory `reference_linux_laptop_ssh`), pwsh 7.6.6 lives
+in `~/powershell` with a symlink in `~/.local/bin`, and every command runs over SSH with the
+graphical session exported: `DISPLAY=:1 XAUTHORITY=/run/user/1000/gdm/Xauthority
+XDG_RUNTIME_DIR=/run/user/1000`.
+
+```
+pwsh -NoProfile -File scripts/fleet.ps1 -Build -Peers a,b          # flutter build linux --debug -t integration_test/ui_probe_test.dart, rsync-stage
+pwsh -NoProfile -File scripts/fleet.ps1 -Onboard -Fresh -Peers a,b
+pwsh -NoProfile -File scripts/fleet.ps1 -Scenario friend_dm -Keep -Peers a,b     # 39 s
+pwsh -NoProfile -File scripts/fleet.ps1 -Scenario voice_channel -Attach          # 1:31, creates and deletes fleet-vc
+pwsh -NoProfile -File scripts/fleet_send.ps1 -Command "$(cat /tmp/steps.json)"
+```
+Redirect every fleet run to a FILE (`> /tmp/x.log 2>&1`); a pipe from SSH is held open by the
+instances' bus daemon until the fleet stops.
+
+**What differs, and only this:**
+
+- **Bundle copies** under `build/fleet/<peer>` from `build/linux/x64/debug/bundle`, mirrored with
+  rsync; fixtures and run directories under `~/hollow_fleet/{fixtures,run}/<peer>` (tmp is
+  emptied on reboot). The app's own log is `~/hollow_fleet/run/<peer>/hollow_debug.log`.
+- **One session bus per instance.** The runner registers a fixed GApplication id for hollow://
+  links, so on the shared bus the second copy would hand its command line to the first and exit
+  before drawing a frame. `Start-Peer` writes `build/fleet_out/<peer>/launch.sh` = `exec
+  dbus-run-session -- hollow >native-stdout.log 2>native-stderr.log </dev/null` and starts THAT.
+  The launcher is the outer process on purpose: an earlier shape redirected only the app, and
+  the bus daemon inherited the launching pwsh's stdout pipe, which held every later caller.
+- **stdio to files, never a pipe.** `-RedirectStandardError` on Start-Process gave each instance
+  a pipe owned by the launching pwsh; when it exited, every Rust log line panicked on EPIPE and
+  the node died while the window stayed up (memory `feedback_linux_stderr_epipe_panic`, fixed in
+  `hollow_log!` too). `native-stderr.log` is also where libwebrtc's own warnings land
+  (`[WEBRTC-NATIVE]`, `HOLLOW_WEBRTC_LOG=info` widens them), because the probe never runs
+  `main()` and so never installs the Dart forwarder.
+- **No window tiling**; screenshots are painted inside the app as everywhere else.
+- **Yama `ptrace_scope=1`**: `gdb -p` on an instance is refused without sudo. Thread names in
+  `/proc/<pid>/task/*/comm` and `pw-dump` did the job instead.
+
+**Call evidence on Linux** (no journey script yet, `call_exp.sh` in the session scratchpad was
+the shape): mute the laptop's mic and speaker at the PipeWire level first (`wpctl set-mute
+@DEFAULT_AUDIO_SOURCE@ 1`, same for `@DEFAULT_AUDIO_SINK@`, both instances share them), then
+`tap semantics:Start voice call`, `wait_for text:Accept`, `tap text:Accept`, `wait_for
+semantics:End call` on both, `wait 12000`, `tap semantics:Mute`, `tap semantics:End call`.
+Truth: `[HOLLOW-STATS] OUTBOUND-AUDIO packetsSent` per peer (about 250 per 5 s is healthy),
+`pw-dump` nodes of `media.class Stream/*` with `application.name WEBRTC VoiceEngine` keyed by
+`application.process.id` (one Input and one Output per instance in a call), and
+`cat /proc/<pid>/task/*/comm | grep -c webrtc_audio_mo` (two once the audio module initialised).
+This is how the #72 root cause was found (memory `project_linux_call_audio_adm_init`).
+
+**voice_channel.json** (rung 3): a creates `fleet-vc`, adds a voice channel `vc-test` through
+`semantics:Create channel` + `dialog > text:Voice` (a new server has only `#general`), invites b,
+both `open_channel vc-test` and wait for `semantics:Disconnect`, 15 s together, leave, delete.
+The connection gate is `wait_for provider:connection equals:connected`, not `text:Connected`,
+because an attached run may be sitting in a chat where that text is not on screen.

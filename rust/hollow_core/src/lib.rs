@@ -62,7 +62,10 @@ pub(crate) mod log {
     }
 
     pub fn write(msg: &str) {
-        eprintln!("{msg}");
+        // Never eprintln!: it panics when stderr cannot be written, and on
+        // Linux a closed terminal leaves the app alive (SIGHUP is ignored)
+        // with a dead pty, so every log line would panic the task that logs.
+        let _ = writeln!(std::io::stderr().lock(), "{msg}");
         if let Some(file) = LOG_FILE.get() {
             if let Ok(mut f) = file.lock() {
                 let now = std::time::SystemTime::now()

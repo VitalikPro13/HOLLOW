@@ -190,9 +190,14 @@ jobs:
   sonar:
     name: Analyze
     needs: rust
-    # Dependabot runs never receive repository secrets, so SONAR_TOKEN is
-    # empty there and the scan can only fail.
-    if: github.actor != 'dependabot[bot]'
+    # Neither a Dependabot run nor a pull request from a fork receives
+    # repository secrets, so SONAR_TOKEN is empty and the scan can only fail
+    # with "Not authorized". A fork's commits are analysed when they land on
+    # main, not before.
+    if: >-
+      github.actor != 'dependabot[bot]'
+      && (github.event_name != 'pull_request'
+      || github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
 
     steps:

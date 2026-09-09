@@ -500,7 +500,7 @@ impl MessageStore {
              ON channel_messages (server_id, channel_id, sender_id, timestamp, text)
              WHERE message_id IS NULL;"
         ).unwrap_or_else(|e| {
-            eprintln!("[HOLLOW] channel_messages legacy dedup migration failed: {e}");
+            crate::hollow_log!("[HOLLOW] channel_messages legacy dedup migration failed: {e}");
         });
 
         // -- CRDT tables (Phase 3) --
@@ -932,7 +932,7 @@ impl MessageStore {
                 INSERT INTO channel_messages_fts(rowid, text) VALUES (new.id, new.text);
             END;"
         ).unwrap_or_else(|e| {
-            eprintln!("[HOLLOW] FTS5 setup failed (non-fatal): {e}");
+            crate::hollow_log!("[HOLLOW] FTS5 setup failed (non-fatal): {e}");
         });
 
         // One-time FTS backfill for databases that existed before FTS was added.
@@ -948,7 +948,7 @@ impl MessageStore {
                 "INSERT OR IGNORE INTO messages_fts(messages_fts) VALUES('rebuild');
                  INSERT OR IGNORE INTO channel_messages_fts(channel_messages_fts) VALUES('rebuild');"
             ).unwrap_or_else(|e| {
-                eprintln!("[HOLLOW] FTS5 rebuild failed (non-fatal): {e}");
+                crate::hollow_log!("[HOLLOW] FTS5 rebuild failed (non-fatal): {e}");
             });
             let _ = conn.execute(
                 "INSERT OR REPLACE INTO app_settings (key, value) VALUES ('fts_backfilled', '1')",

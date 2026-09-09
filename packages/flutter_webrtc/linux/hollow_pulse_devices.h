@@ -7,6 +7,9 @@
 
 namespace hollow_pulse {
 
+// Call before libwebrtc creates any PulseAudio clients (Flatpak PIDs are not unique).
+void InitializeRouting();
+
 struct AudioDevice {
   std::string id;    // PulseAudio source/sink name (stable identifier)
   std::string name;  // human-readable description
@@ -19,6 +22,9 @@ struct AudioDevice {
 // Monitor sources (sink loopbacks) are excluded from inputs.
 bool EnumerateDevices(std::vector<AudioDevice>* inputs,
                       std::vector<AudioDevice>* outputs);
+
+// Routes this process's existing and future streams, without changing OS defaults.
+bool SelectDevice(const std::string& device_id, bool input);
 
 }  // namespace hollow_pulse
 

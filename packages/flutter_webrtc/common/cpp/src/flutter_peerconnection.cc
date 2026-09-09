@@ -1368,6 +1368,13 @@ void FlutterPeerConnectionObserver::OnAddTrack(
 void FlutterPeerConnectionObserver::OnTrack(
     scoped_refptr<RTCRtpTransceiver> transceiver) {
   auto receiver = transceiver->receiver();
+  auto track = receiver->track();
+  if (track) {
+    // Unified Plan permits tracks without a stream. Volume and renderer
+    // lookups must still resolve the track sent in this event.
+    std::lock_guard<std::mutex> lock(remote_tracks_mutex_);
+    remote_tracks_[track->id().std_string()] = track;
+  }
   EncodableMap params;
   EncodableList streams_info;
   auto streams = receiver->streams();
@@ -1389,6 +1396,11 @@ void FlutterPeerConnectionObserver::OnTrack(
 void FlutterPeerConnectionObserver::OnRemoveTrack(
     scoped_refptr<RTCRtpReceiver> receiver) {
   auto track = receiver->track();
+  if (!track) return;
+  {
+    std::lock_guard<std::mutex> lock(remote_tracks_mutex_);
+    remote_tracks_.erase(track->id().std_string());
+  }
 
   EncodableMap params;
   params[EncodableValue("event")] = "onRemoveTrack";
@@ -1463,6 +1475,11 @@ scoped_refptr<RTCMediaStream> FlutterPeerConnectionObserver::MediaStreamForId(
 
 scoped_refptr<RTCMediaTrack> FlutterPeerConnectionObserver::MediaTrackForId(
     const std::string& id) {
+  {
+    std::lock_guard<std::mutex> lock(remote_tracks_mutex_);
+    auto track = remote_tracks_.find(id);
+    if (track != remote_tracks_.end()) return track->second;
+  }
   for (auto it = remote_streams_.begin(); it != remote_streams_.end(); it++) {
     auto remoteStream = (*it).second;
     auto audio_tracks = remoteStream->audio_tracks();

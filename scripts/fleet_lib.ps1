@@ -10,16 +10,20 @@
 # before using anything here.
 #
 # Windows PowerShell 5.1: no pwsh-only syntax. The same files run under pwsh 7
-# on the Mac mini, where the backend is the iOS Simulator (see Test-SimBackend).
+# on the Mac mini, where the backend is the iOS Simulator (see Test-SimBackend),
+# and under pwsh 7 on a Linux desktop, where bundle copies are driven the way
+# Windows drives exe copies (see Test-LinuxBackend).
 
 # pwsh 7.4+ turns a non-zero native exit code into a terminating error while
 # $ErrorActionPreference is Stop. Half of simctl's normal answers are non-zero
 # ("already booted", "not installed"), so the exit codes are read by hand.
 $PSNativeCommandUseErrorActionPreference = $false
 
-# Which machine this is. Windows PowerShell 5.1 has no $IsMacOS, so the variable
-# is simply absent there and reads as false.
-if ($IsMacOS) { $script:FleetBackend = 'sim' } else { $script:FleetBackend = 'windows' }
+# Which machine this is. Windows PowerShell 5.1 has no $IsMacOS or $IsLinux, so
+# both are simply absent there and read as false.
+if ($IsMacOS) { $script:FleetBackend = 'sim' }
+elseif ($IsLinux) { $script:FleetBackend = 'linux' }
+else { $script:FleetBackend = 'windows' }
 
 # The iOS Simulator backend: one simulator per peer (named hollow-<peer>), the
 # probe target installed into each, the data directory and the probe output
@@ -29,8 +33,19 @@ if ($IsMacOS) { $script:FleetBackend = 'sim' } else { $script:FleetBackend = 'wi
 # Platform.environment is empty on iOS.
 function Test-SimBackend { return $script:FleetBackend -eq 'sim' }
 
+# The Linux backend: a bundle copy per peer under build/fleet, each launched on
+# its OWN session bus (dbus-run-session). The runner registers one fixed
+# GApplication id for deep links, so on a shared bus the second instance would
+# hand its command line to the first and exit before drawing a frame.
+function Test-LinuxBackend { return $script:FleetBackend -eq 'linux' }
+function Test-WindowsBackend { return $script:FleetBackend -eq 'windows' }
+
+# Fixtures and run directories on Linux live under $HOME like on the Mac: a
+# reboot empties /tmp and would take the fixture identities with it.
+function Get-LinuxFleetHome { return (Join-Path $HOME 'hollow_fleet') }
+
 # The shell a child fleet run is started with.
-function Get-PowerShellExe { if (Test-SimBackend) { return 'pwsh' } else { return 'powershell' } }
+function Get-PowerShellExe { if (Test-WindowsBackend) { return 'powershell' } else { return 'pwsh' } }
 
 $script:SimUdids = @{}
 
@@ -120,9 +135,9 @@ function Get-SimAppPid($udid) {
 }
 
 # Mirrors one directory into another, deletions included, skipping the lock
-# file. robocopy on Windows, rsync on the Mac.
+# file. robocopy on Windows, rsync everywhere else.
 function Copy-Mirror($source, $destination) {
-    if (Test-SimBackend) {
+    if (-not (Test-WindowsBackend)) {
         New-Item -ItemType Directory -Path $destination -Force | Out-Null
         & rsync -a --delete --exclude 'hollow.lock' "$source/" "$destination/"
         if ($LASTEXITCODE -ne 0) { throw "rsync $source -> $destination failed with $LASTEXITCODE" }
@@ -199,6 +214,11 @@ function Get-CrashTail($peer) {
                 $lines += $simLog
             }
         }
+    } elseif (Test-LinuxBackend) {
+        # The app logs into its data directory on Linux, and a native death
+        # says its last words on stderr, which Start-Peer keeps per instance.
+        $sources += @{ name = 'hollow_debug'; path = (Join-Path (Join-Path (Join-Path (Get-LinuxFleetHome) 'run') $peer) 'hollow_debug.log') }
+        $sources += @{ name = 'native-stderr'; path = (Join-Path $outDir 'native-stderr.log') }
     } else {
         $sources += @{ name = 'hollow_debug'; path = (Join-Path (Join-Path $script:FleetStageRoot $peer) 'hollow_debug.log') }
     }

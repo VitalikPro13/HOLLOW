@@ -31,6 +31,22 @@ class MediaDeviceNative extends MediaDevices {
   Future<MediaStream> getUserMedia(
       Map<String, dynamic> mediaConstraints) async {
     try {
+      final audio = mediaConstraints['audio'];
+      if (WebRTC.platformIsLinux && (audio == true || audio is Map)) {
+        String sourceId = '';
+        if (audio is Map) {
+          final optional = audio['optional'];
+          if (optional is List) {
+            for (final option in optional) {
+              if (option is Map && option['sourceId'] is String) {
+                sourceId = option['sourceId'] as String;
+                break;
+              }
+            }
+          }
+        }
+        await WebRTC.invokeMethod('selectAudioInput', {'deviceId': sourceId});
+      }
       final response = await WebRTC.invokeMethod(
         'getUserMedia',
         <String, dynamic>{'constraints': mediaConstraints},

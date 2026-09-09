@@ -10,8 +10,50 @@
 #include "helper.h"
 
 #include <cstdio>
+#include <cstdlib>
+#include <string>
+#include "rtc_logging.h"
+#ifdef __linux__
+#include "../../../linux/hollow_pulse_devices.h"
+#endif
 
 namespace flutter_webrtc_plugin {
+
+namespace {
+
+// getenv is a hard error under MSVC's /WX (C4996).
+std::string EnvValue(const char* name) {
+#ifdef _WIN32
+  char* value = nullptr;
+  size_t len = 0;
+  std::string out;
+  if (_dupenv_s(&value, &len, name) == 0 && value) {
+    out = value;
+    free(value);
+  }
+  return out;
+#else
+  const char* value = std::getenv(name);
+  return value ? std::string(value) : std::string();
+#endif
+}
+
+void InstallStderrLogSink() {
+  libwebrtc::RTCLoggingSeverity severity = libwebrtc::Warning;
+  const std::string s = EnvValue("HOLLOW_WEBRTC_LOG");
+  if (s == "verbose") severity = libwebrtc::Verbose;
+  else if (s == "info") severity = libwebrtc::Info;
+  else if (s == "error") severity = libwebrtc::Error;
+  else if (s == "none") severity = libwebrtc::None;
+  libwebrtc::LibWebRTCLogging::setLogSink(
+      severity, [](const libwebrtc::string& message) {
+        const std::string text = message.std_string();
+        std::fprintf(stderr, "[WEBRTC-NATIVE] %s%s", text.c_str(),
+                     (!text.empty() && text.back() == '\n') ? "" : "\n");
+      });
+}
+
+}  // namespace
 
 const char* kEventChannelName = "FlutterWebRTC.Event";
 
@@ -84,6 +126,15 @@ FlutterWebRTCBase::FlutterWebRTCBase(BinaryMessenger* messenger,
                                      TextureRegistrar* textures,
                                      TaskRunner *task_runner)
     : messenger_(messenger), task_runner_(task_runner), textures_(textures) {
+#ifdef __linux__
+  hollow_pulse::InitializeRouting();
+#endif
+  // libwebrtc's warnings and errors on stderr from the first line: the audio
+  // device module initialises inside LibWebRTC::Initialize(), before Dart can
+  // install a sink, and a silent failure there is a call with no audio and no
+  // explanation anywhere (Linux PulseAudio, 2026-09-09). HOLLOW_WEBRTC_LOG
+  // widens it (verbose, info) or silences it (none).
+  InstallStderrLogSink();
   LibWebRTC::Initialize();
   factory_ = LibWebRTC::CreateRTCPeerConnectionFactory();
   factory_->Initialize();
@@ -99,11 +150,27 @@ FlutterWebRTCBase::FlutterWebRTCBase(BinaryMessenger* messenger,
     audio_processing_->SetCapturePostProcessing(capture_gain_processor_);
   }
   event_channel_ = EventChannelProxy::Create(messenger_, task_runner_, kEventChannelName);
+#ifdef __linux__
+  // The engine terminates the audio device module when its last
+  // PeerConnection is destroyed and re-initialises it for the next one
+  // (ConnectionContext::media_engine_reference_count_), and libwebrtc's
+  // PulseAudio module cannot start recording after that cycle: every call
+  // that followed a closed connection was silent, with a 10 s stall per
+  // stream (2026-09-09). One connection that is never closed keeps the
+  // module alive. It has no transport until an offer exists, so it costs
+  // nothing on the network.
+  anchor_peerconnection_ =
+      factory_->Create(configuration_, RTCMediaConstraints::Create());
+#endif
 }
 
 FlutterWebRTCBase::~FlutterWebRTCBase() {
   // Drain queued audio ops while the factory/tracks are still alive.
   audio_op_queue_.Shutdown();
+  if (anchor_peerconnection_) {
+    factory_->Delete(anchor_peerconnection_);
+    anchor_peerconnection_ = nullptr;
+  }
   LibWebRTC::Terminate();
   // Deleted after Terminate() so the audio pipeline no longer references it.
   if (capture_gain_processor_) {

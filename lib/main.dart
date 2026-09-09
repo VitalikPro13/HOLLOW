@@ -6,7 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/rust_licenses.dart';
-import 'package:fvp/fvp.dart' as fvp;
+import 'package:hollow/src/core/services/video_backend.dart';
 import 'package:hollow/src/core/providers/member_panel_provider.dart';
 import 'package:hollow/src/core/providers/webrtc_provider.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
@@ -14,6 +14,7 @@ import 'package:hollow/src/rust/api/identity.dart' as identity_api;
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 import 'package:hollow/src/rust/frb_generated.dart';
 import 'package:hollow/src/core/perf_sentinel.dart';
+import 'package:hollow/src/core/services/webrtc_native_log.dart';
 import 'package:hollow/src/core/services/deep_link_service.dart';
 import 'package:hollow/src/core/services/tray_service.dart';
 import 'package:hollow/src/core/frame_schedule_probe.dart';
@@ -169,6 +170,7 @@ Future<void> main(List<String> args) async {
 
   // Frame-stall logger plus slow platform-channel watchdog. Anomalies only.
   PerfSentinel.init();
+  WebRtcNativeLog.start();
   // One burst, 20s in, naming what keeps asking for frames on an idle window.
   binding.startBurst(sink: PerfSentinel.emit);
 
@@ -182,11 +184,7 @@ Future<void> main(List<String> args) async {
     }
   }
 
-  // fvp provides the video_player backend on desktop, where the official
-  // plugin has no native support.
-  if (Platform.isWindows || Platform.isLinux || Platform.isMacOS) {
-    fvp.registerWith();
-  }
+  registerVideoBackend();
 
   final container = ProviderContainer();
   _container = container;

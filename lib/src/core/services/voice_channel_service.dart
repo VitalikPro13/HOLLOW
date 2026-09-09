@@ -1052,7 +1052,8 @@ class VoiceChannelService {
       if (!await _captureCameraStream()) return null;
     }
 
-    final videoTrack = _localVideoStream!.getVideoTracks().first;
+    final videoTrack = _localVideoStream?.getVideoTracks().firstOrNull;
+    if (videoTrack == null) return null;
 
     await _addCameraTrackToPeers(videoTrack);
 
@@ -1097,6 +1098,14 @@ class VoiceChannelService {
         'audio': false,
         'video': videoConstraints,
       });
+      if (_localVideoStream!.getVideoTracks().isEmpty) {
+        final emptyStream = _localVideoStream!;
+        _localVideoStream = null;
+        _isCameraOn = false;
+        await emptyStream.dispose();
+        _vcLog('[HOLLOW-VC] Camera capture returned no video track');
+        return false;
+      }
       _capturedCameraDeviceId = preferredCameraDeviceId;
       _isCameraOn = true;
       _vcLog('[HOLLOW-VC] Camera started, tracks=${_localVideoStream!.getVideoTracks().length}');
@@ -1576,7 +1585,12 @@ class VoiceChannelService {
           if (!_remoteVideoRenderers.containsKey(peerId)) {
             _vcLog('[HOLLOW-VC] Found video track without renderer for $peerId — creating');
             final stream = await createLocalMediaStream('video-$peerId');
-            stream.addTrack(receiver.track!);
+            try {
+              await stream.addTrack(receiver.track!);
+            } catch (_) {
+              await stream.dispose();
+              rethrow;
+            }
 
             final renderer = RTCVideoRenderer();
             await renderer.initialize();

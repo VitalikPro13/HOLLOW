@@ -97,7 +97,7 @@ Current Progress: No comments, honestly. Way too much for my own sanity, but ton
 | UI | Flutter (Dart) on Windows, macOS, Linux, Android, iOS |
 | Backend | Rust via flutter_rust_bridge FFI |
 | DM Encryption | vodozemac (Olm / Double Ratchet) |
-| Server Encryption | OpenMLS 0.8 |
+| Server Encryption | OpenMLS 0.9 |
 | Media Encryption | SFrame (AES-128-GCM) |
 | Voice/Video | WebRTC (peer-to-peer) |
 | Local Storage | SQLCipher (encrypted SQLite) |

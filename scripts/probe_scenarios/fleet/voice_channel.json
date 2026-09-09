@@ -1,0 +1,76 @@
+{
+  "_": [
+    "Rung 3 of the fleet ladder: a server voice channel with both peers in it.",
+    "",
+    "a creates a server and a voice channel, invites b, both join it, sit in",
+    "it for 15 s, then leave. Audio truth is NOT in the widget tree: read each",
+    "peer's hollow_debug.log for [HOLLOW-VC] lines and, on Linux, pw-dump for a",
+    "WEBRTC VoiceEngine Input and Output stream per instance while both are in",
+    "the channel (memory project_fleet_linux_backend). Two instances on one",
+    "machine share the mic and speaker, so mute both at the PipeWire level",
+    "before running (wpctl set-mute @DEFAULT_AUDIO_SOURCE@ 1, same for the sink).",
+    "",
+    "Written 2026-09-09 for issue #72, where the reporter's voice channel was",
+    "silent both ways while a direct call had audio.",
+    "",
+    "run: pwsh scripts/fleet.ps1 -Scenario voice_channel -Attach"
+  ],
+  "peers": ["a", "b"],
+  "steps": [
+    { "peer": "all", "op": "wait_for", "provider": "connection", "equals": "connected", "timeout_ms": 120000 },
+
+    { "peer": "a", "op": "tap", "target": "semantics:Create a server" },
+    { "peer": "a", "op": "enter_text", "target": "hint:My Awesome Server", "value": "fleet-vc" },
+    { "peer": "a", "op": "tap", "target": "text:Create", "index": 0 },
+    { "peer": "a", "op": "wait_for", "target": "server:fleet-vc", "timeout_ms": 30000 },
+    { "peer": "a", "op": "open_server", "name": "fleet-vc" },
+    { "peer": "a", "op": "wait_for", "target": "channel:general", "timeout_ms": 30000 },
+
+    { "peer": "a", "op": "log", "message": "a new server has only #general, so the voice channel is created first and rides the join snapshot to b" },
+    { "peer": "a", "op": "tap", "target": "semantics:Create channel", "index": 0 },
+    { "peer": "a", "op": "tap", "target": "dialog > text:Voice", "index": 0 },
+    { "peer": "a", "op": "enter_text", "target": "dialog > type:TextField", "value": "vc-test" },
+    { "peer": "a", "op": "tap", "target": "dialog > text:Create", "index": 0 },
+    { "peer": "a", "op": "wait_for", "target": "channel:vc-test", "timeout_ms": 30000 },
+
+    { "peer": "a", "op": "right_click", "target": "server:fleet-vc" },
+    { "peer": "a", "op": "tap", "target": "menu > text:Invite people" },
+    { "peer": "a", "op": "wait_for", "target": "type:SelectableText", "timeout_ms": 20000 },
+    { "peer": "a", "op": "capture", "target": "type:SelectableText", "as": "INVITE" },
+    { "peer": "a", "op": "key", "value": "escape" },
+
+    { "peer": "b", "op": "tap", "target": "semantics:Create a server" },
+    { "peer": "b", "op": "enter_text", "target": "hint:Invite link or server ID", "value": "${INVITE}" },
+    { "peer": "b", "op": "tap", "target": "text:Join", "index": 0 },
+    { "peer": "b", "op": "wait_for", "target": "server:fleet-vc", "timeout_ms": 90000 },
+    { "peer": "b", "op": "open_server", "name": "fleet-vc" },
+    { "peer": "b", "op": "wait_for", "target": "channel:vc-test", "timeout_ms": 30000 },
+
+    { "peer": "a", "op": "wait_for", "target": "text:probe-b", "timeout_ms": 60000 },
+
+    { "peer": "a", "op": "open_channel", "name": "vc-test" },
+    { "peer": "a", "op": "wait_for", "target": "semantics:Disconnect", "timeout_ms": 30000 },
+    { "peer": "b", "op": "open_channel", "name": "vc-test" },
+    { "peer": "b", "op": "wait_for", "target": "semantics:Disconnect", "timeout_ms": 30000 },
+
+    { "peer": "a", "op": "log", "message": "15 s in the channel together: SFrame keys, ICE and the audio streams settle in the logs" },
+    { "peer": "all", "op": "wait", "ms": 15000 },
+    { "peer": "all", "op": "shot", "name": "in_voice_channel" },
+    { "peer": "all", "op": "dump", "name": "in_voice_channel" },
+
+    { "peer": "a", "op": "tap", "target": "semantics:Disconnect", "index": 0 },
+    { "peer": "a", "op": "wait_for", "gone": "semantics:Disconnect", "timeout_ms": 30000 },
+    { "peer": "b", "op": "tap", "target": "semantics:Disconnect", "index": 0 },
+    { "peer": "b", "op": "wait_for", "gone": "semantics:Disconnect", "timeout_ms": 30000 }
+  ],
+  "cleanup": [
+    { "peer": "a", "op": "right_click", "target": "server:fleet-vc" },
+    { "peer": "a", "op": "tap", "target": "menu > text:Server settings" },
+    { "peer": "a", "op": "tap", "target": "text:Danger", "index": 0 },
+    { "peer": "a", "op": "tap", "target": "text:Delete server", "index": 0 },
+    { "peer": "a", "op": "log", "message": "index 1: index 0 is the dialog's TITLE, and tapping a title silently does nothing" },
+    { "peer": "a", "op": "tap", "target": "dialog > text:Delete server", "index": 1 },
+    { "peer": "a", "op": "wait_for", "gone": "server:fleet-vc", "timeout_ms": 30000 },
+    { "peer": "b", "op": "wait_for", "gone": "server:fleet-vc", "timeout_ms": 90000 }
+  ]
+}

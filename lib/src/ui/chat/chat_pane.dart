@@ -1,7 +1,8 @@
-﻿import 'dart:async';
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:hollow/src/ui/components/hollow_menu.dart';
 import 'package:hollow/src/ui/components/overlay_anchor.dart';
 import 'package:flutter/services.dart';
 import 'package:hollow/src/ui/chat/chat_drop_zone.dart';
@@ -2895,97 +2896,37 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
   }
 
   void _showVolumePopup(BuildContext context, Offset globalPosition) {
-    final position = overlayPositionOf(context, globalPosition);
-    final hollow = HollowTheme.of(context);
-    final overlay = Overlay.of(context);
-    OverlayEntry? entry;
-
-    void remove() {
-      entry?.remove();
-      entry = null;
-    }
-
-    entry = OverlayEntry(
-      builder: (ctx) {
-        return Stack(
-          children: [
-            Positioned.fill(
-              child: GestureDetector(
-                onTap: remove,
-                behavior: HitTestBehavior.opaque,
-                child: const SizedBox.expand(),
-              ),
-            ),
-            Positioned(
-              left: position.dx,
-              top: position.dy,
-              child: Material(
-                color: hollow.elevated,
-                borderRadius: BorderRadius.circular(hollow.radiusSm),
-                elevation: 4,
-                child: StatefulBuilder(
-                  builder: (ctx, setPopupState) {
-                    return Padding(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 6, vertical: 2),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(LucideIcons.volume2,
-                              size: 12, color: hollow.textSecondary),
-                          SizedBox(
-                            width: 110,
-                            height: 24,
-                            child: SliderTheme(
-                              data: SliderThemeData(
-                                activeTrackColor: hollow.accent,
-                                inactiveTrackColor: hollow.border,
-                                thumbColor: hollow.accent,
-                                overlayColor:
-                                    hollow.accent.withValues(alpha: 0.08),
-                                trackHeight: 2,
-                                thumbShape: const RoundSliderThumbShape(
-                                    enabledThumbRadius: 4),
-                                overlayShape: const RoundSliderOverlayShape(
-                                    overlayRadius: 8),
-                              ),
-                              child: Slider(
-                                value: _remoteVolume,
-                                min: 0.0,
-                                max: 2.0,
-                                onChanged: (v) {
-                                  setPopupState(() {});
-                                  setState(() => _remoteVolume = v);
-                                  ref.read(callProvider.notifier)
-                                      .setRemoteVolume(v);
-                                },
-                              ),
-                            ),
-                          ),
-                          SizedBox(
-                            width: 28,
-                            child: Text(
-                              '${(_remoteVolume * 100).round()}%',
-                              style: HollowTypography.caption.copyWith(
-                                color: hollow.textSecondary,
-                                fontSize: 10,
-                              ),
-                              textAlign: TextAlign.right,
-                            ),
-                          ),
-                        ],
-                      ),
-                    );
-                  },
-                ),
-              ),
-            ),
-          ],
-        );
-      },
+    var volume = _remoteVolume;
+    final peerId = widget.peerId;
+    showHollowMenu(
+      context: context,
+      anchor: overlayPositionOf(context, globalPosition),
+      builder: (menuContext, menuRef) => [
+        HollowMenuCustom(StatefulBuilder(builder: (popupContext, setPopupState) {
+          final hollow = HollowTheme.of(popupContext);
+          final call = menuRef.watch(callProvider);
+          return Row(children: [
+            Icon(LucideIcons.volume2, size: 14, color: hollow.textSecondary),
+            Expanded(child: Slider(
+              value: volume,
+              min: 0,
+              max: 2,
+              label: '${(volume * 100).round()}%',
+              onChanged: call.peerId == peerId ? (value) {
+                setPopupState(() => volume = value);
+                if (mounted) setState(() => _remoteVolume = value);
+                menuRef.read(callProvider.notifier).setRemoteVolume(value)
+                    .catchError((Object error) {
+                  debugPrint('[HOLLOW-VOICE] Volume change failed: $error');
+                });
+              } : null,
+            )),
+            Text('${(volume * 100).round()}%',
+                style: HollowTypography.caption.copyWith(color: hollow.textSecondary)),
+          ]);
+        })),
+      ],
     );
-
-    overlay.insert(entry!);
   }
 
   /// Puts the speaking ring on a call video tile (issue #37). The ring is an

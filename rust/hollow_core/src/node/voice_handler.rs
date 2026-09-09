@@ -1079,7 +1079,9 @@ pub(crate) async fn handle_voice_channel_send_signal(
     } else {
         // Targeted SDP/ICE: Olm encrypted + SendDirect.
         let env_json = serde_json::to_string(&envelope).unwrap_or_default();
-        send_encrypted_message(olm, crypto_store, &peer_id, &env_json, event_tx, ws_cmd_tx, ws_room_peers).await;
+        super::crypto_handler::send_encrypted_message_in_room(
+            olm, crypto_store, &peer_id, &server_id, &env_json, event_tx, ws_cmd_tx,
+        ).await;
     }
 }
 
