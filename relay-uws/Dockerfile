@@ -28,7 +28,8 @@ COPY --from=builder /build/build/hollow-relay /usr/local/bin/hollow-relay
 # setcap the systemd deployment uses), so the process drops to an unprivileged
 # account and a relay compromise does not hand over the container.
 RUN setcap cap_net_bind_service=+ep /usr/local/bin/hollow-relay \
-    && useradd --system --no-create-home --shell /usr/sbin/nologin hollow
+    && groupadd --system --gid 999 hollow \
+    && useradd --system --uid 999 --gid 999 --no-create-home --shell /usr/sbin/nologin hollow
 
 EXPOSE 443
 

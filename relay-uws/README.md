@@ -93,13 +93,28 @@ The output is a single binary: `build/hollow-relay` (~636 KB).
 
 ## Docker (self-hosting)
 
+### Requirements
+
+1. Create a user to run the Docker container (we assume "hollow" in the examples).
+2. Add the user to the Docker group.
+3. If you have SELinux installed be sure persistent storage is properly
+   labeled. This ensures the services running on the container can write
+   to their mounted storage.
+4. Install Docker Engine with the Docker Compose Plugin.
+5. Clone this repo in /opt and make hollow the owner of all the files.
+
+Note: `docker compose up` will build the hollow-relay binary as part of the startup process. There is no need to install the dependencies or run through the build process above.
+
 ```bash
 cp .env.example .env              # edit with your domain, IP, TURN secret
 cp turnserver.conf.example turnserver.conf  # edit realm + secret + allowed-peer-ip (your public IPs)
+git submodule update --init --recursive
 docker compose up -d
 ```
 
 This starts the relay (TLS on 443), certbot (auto Let's Encrypt), and coturn (TURN on 3478). See `.env.example` for configuration.
+
+After the relay is up and running you can use the provided systemd unit file as a template to ensure the service starts up after reboots. See `deploy/hollow-relay-docker-compose.service` Additionally install `deploy/hollow-relay-cert-renewed.path` and `deploy/hollow-relay-cert-renewed.service` if you want to handle cert renewals gracefully. 
 
 ## Running (manual)
 
@@ -140,6 +155,8 @@ TURN_SECRET=your_secret ./build/hollow-relay \
   "keys": ["key1", "key2", "key3"]
 }
 ```
+
+Where keyN is four groups of four characters [A-Z0-9] separated by hyphens. (eg. AB12-CD32-BA30-LJ50)
 
 The file is hot-reloaded every 30 seconds. Removing a key revokes the active connection using it.
 

@@ -191,3 +191,6 @@ igdb/covers/
 gifs/config.php
 gifs/gifs.db*
 gifs/m/
+
+# Cert Renewal state
+.relay-cert-renewed

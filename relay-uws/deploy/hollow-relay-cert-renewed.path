@@ -1,0 +1,9 @@
+[Unit]
+Description=Restart Hollow Relay when TLS certificate is renewed
+
+[Path]
+PathChanged=/opt/HOLLOW/relay-uws/deploy/cert-renewed/.relay-cert-renewed
+Unit=hollow-relay-cert-renewed.service
+
+[Install]
+WantedBy=multi-user.target

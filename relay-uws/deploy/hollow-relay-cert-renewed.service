@@ -1,0 +1,9 @@
+[Unit]
+Description=Restart Hollow Relay after TLS certificate renewal
+After=docker.service
+
+[Service]
+Type=oneshot
+User=hollow
+WorkingDirectory=/opt/HOLLOW/relay-uws
+ExecStart=/usr/bin/docker compose restart relay

@@ -1,6 +1,8 @@
 services:
   relay:
     build: .
+    ulimits:
+      core: 0
     ports:
       - "443:443"
     environment:
@@ -16,9 +18,13 @@ services:
       - /certs/fullchain.pem
       - --key-file
       - /certs/privkey.pem
+     ## Uncomment below to use keys.json for license based gating.
+     ## See the "License keys format" in relay-uws/README.md
+     # - --keys-file
+     # - /keys/keys.json
     volumes:
       - certs:/certs:ro
-      - ./keys.json:/data/keys.json:ro
+      - ./keys:/keys:ro
     restart: unless-stopped
 
   certbot:
@@ -26,19 +32,32 @@ services:
     volumes:
       - certs:/etc/letsencrypt
       - certbot-www:/var/www/certbot
-    entrypoint: >
-      sh -c "
-        certbot certonly --standalone --non-interactive --agree-tos
-          --email ${CERTBOT_EMAIL}
-          -d ${RELAY_DOMAIN}
-          --cert-path /etc/letsencrypt/fullchain.pem
-          --key-path /etc/letsencrypt/privkey.pem
-        && cp /etc/letsencrypt/live/${RELAY_DOMAIN}/fullchain.pem /etc/letsencrypt/fullchain.pem
-        && cp /etc/letsencrypt/live/${RELAY_DOMAIN}/privkey.pem /etc/letsencrypt/privkey.pem
-        && while :; do sleep 12h; certbot renew --quiet
-          && cp /etc/letsencrypt/live/${RELAY_DOMAIN}/fullchain.pem /etc/letsencrypt/fullchain.pem
-          && cp /etc/letsencrypt/live/${RELAY_DOMAIN}/privkey.pem /etc/letsencrypt/privkey.pem; done
-      "
+      - ./deploy/cert-renewed:/renew-signal
+    entrypoint:
+      - sh
+      - -c
+      - |
+        certbot certonly --standalone --non-interactive --agree-tos \
+          --email "${CERTBOT_EMAIL}" \
+          -d "${RELAY_DOMAIN}" \
+          --deploy-hook "cp /etc/letsencrypt/live/${RELAY_DOMAIN}/fullchain.pem /etc/letsencrypt/fullchain.pem && \
+        cp /etc/letsencrypt/live/${RELAY_DOMAIN}/privkey.pem /etc/letsencrypt/privkey.pem && \
+        chown 999:999 /etc/letsencrypt/fullchain.pem /etc/letsencrypt/privkey.pem && \
+        chmod 600 /etc/letsencrypt/privkey.pem && \
+        chmod 644 /etc/letsencrypt/fullchain.pem && \
+        touch /renew-signal/.relay-cert-renewed"
+
+        while :; do
+          sleep 12h
+          certbot renew --quiet \
+            --deploy-hook "cp /etc/letsencrypt/live/${RELAY_DOMAIN}/fullchain.pem /etc/letsencrypt/fullchain.pem && \
+        cp /etc/letsencrypt/live/${RELAY_DOMAIN}/privkey.pem /etc/letsencrypt/privkey.pem && \
+        chown 999:999 /etc/letsencrypt/fullchain.pem /etc/letsencrypt/privkey.pem && \
+        chmod 600 /etc/letsencrypt/privkey.pem && \
+        chmod 644 /etc/letsencrypt/fullchain.pem && \
+        touch /renew-signal/.relay-cert-renewed"
+        done
+    restart: unless-stopped
     ports:
       - "80:80"
 
