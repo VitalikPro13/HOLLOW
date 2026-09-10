@@ -28,6 +28,7 @@ import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/server_folder_popup.dart';
 import 'package:hollow/src/ui/dialogs/invite_dialog.dart';
+import 'package:hollow/src/core/providers/relay_domain_provider.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// The right-click menu for one server icon in the strip.
@@ -96,7 +97,11 @@ List<HollowMenuEntry> _serverIconEntries(
       icon: LucideIcons.userPlus,
       label: 'Invite people',
       onTap: () =>
-          showInviteDialog(context, webServerInviteLink(serverId), serverId),
+          showInviteDialog(
+              context,
+              webServerInviteLink(serverId,
+                  relay: menuRef.read(relayDomainProvider)),
+              serverId),
     ),
     HollowMenuItem(
       icon: LucideIcons.settings,

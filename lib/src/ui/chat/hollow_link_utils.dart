@@ -6,13 +6,23 @@ const String hollowWebJoinBase = 'https://hollow.anonlisten.com/join';
 /// Canonical shareable server invite. Hollow renders it as a Join card, a
 /// browser bounces it to hollow://, and anyone without Hollow gets a download
 /// page.
-String webServerInviteLink(String serverId) =>
-    '$hollowWebJoinBase#server=$serverId';
+String webServerInviteLink(String serverId, {required String relay}) =>
+    '$hollowWebJoinBase#server=$serverId${_relayParam(relay, '&')}';
 
 /// Canonical shareable conference invite, on the same fragment rule: the conf
 /// id never reaches any server log.
-String webConferenceInviteLink(String confId) =>
-    '$hollowWebJoinBase#conf=$confId';
+String webConferenceInviteLink(String confId, {required String relay}) =>
+    '$hollowWebJoinBase#conf=$confId${_relayParam(relay, '&')}';
+
+/// Rooms are ephemeral, so their invite skips the website bounce.
+String roomInviteLink(String roomCode, {required String relay}) =>
+    'hollow://join?room=$roomCode${_relayParam(relay, '&')}';
+
+String _relayParam(String? relay, String sep) {
+  final host = relay == null ? null : normalizeRelayHost(relay);
+  if (host == null) return '';
+  return '${sep}relay=${Uri.encodeQueryComponent(host)}';
+}
 
 final _hollowLinkRegex = RegExp(r'hollow://[^\s<>"' "'" r')\]}]+');
 final _webJoinRegex =
@@ -22,6 +32,73 @@ final _inviteIdRegex = RegExp(r'^[A-Za-z0-9_-]{1,128}$');
 /// A Hollow Shop support code. Longer floor than an invite id, because these
 /// are typed out of a receipt email and a two-character code is a typo.
 final _redeemCodeRegex = RegExp(r'^[A-Za-z0-9_-]{8,128}$');
+
+final _hostLabelRegex = RegExp(r'^[a-z0-9]([a-z0-9-]*[a-z0-9])?$');
+final _ipv6InnerRegex = RegExp(r'^[0-9a-f:.]+$');
+
+/// Reduces anything a self-hoster might paste or stamp into an invite to the
+/// bare `host` or `host:port` the relay URLs are built from, or null when it is
+/// not a host at all.
+///
+/// Everything downstream (the setting, the link param, the dialog text) holds
+/// this one shape, so a link and a setting typed differently still compare
+/// equal.
+String? normalizeRelayHost(String input) {
+  var s = input.trim().toLowerCase();
+  for (final scheme in const ['wss://', 'ws://', 'https://', 'http://']) {
+    if (s.startsWith(scheme)) {
+      s = s.substring(scheme.length);
+      break;
+    }
+  }
+  while (s.endsWith('/')) {
+    s = s.substring(0, s.length - 1);
+  }
+  if (s.endsWith('/ws')) s = s.substring(0, s.length - 3);
+  while (s.endsWith('/')) {
+    s = s.substring(0, s.length - 1);
+  }
+  if (s.isEmpty) return null;
+
+  String host;
+  String port = '';
+  if (s.startsWith('[')) {
+    final close = s.indexOf(']');
+    if (close < 0) return null;
+    final inner = s.substring(1, close);
+    if (!inner.contains(':') || !_ipv6InnerRegex.hasMatch(inner)) return null;
+    host = s.substring(0, close + 1);
+    port = s.substring(close + 1);
+  } else {
+    final colon = s.indexOf(':');
+    if (colon >= 0) {
+      // A second colon means a bare IPv6, which must be bracketed to be
+      // distinguishable from a port.
+      if (s.indexOf(':', colon + 1) >= 0) return null;
+      host = s.substring(0, colon);
+      port = s.substring(colon);
+    } else {
+      host = s;
+    }
+    if (host.length > 253) return null;
+    for (final label in host.split('.')) {
+      if (label.isEmpty ||
+          label.length > 63 ||
+          !_hostLabelRegex.hasMatch(label)) {
+        return null;
+      }
+    }
+  }
+
+  if (port.isNotEmpty) {
+    if (!port.startsWith(':')) return null;
+    final digits = port.substring(1);
+    if (digits.isEmpty || digits.length > 5) return null;
+    final value = int.tryParse(digits);
+    if (value == null || value < 1 || value > 65535) return null;
+  }
+  return '$host$port';
+}
 
 /// Cheap gate for per-row bubble builds, so the extractor's regexes never run
 /// on the overwhelmingly common no-link message.
@@ -45,10 +122,15 @@ class HollowLink {
   final String fullUrl;
   final String id;
 
+  /// Relay the inviter was on. Null means an old link, never "the official
+  /// relay": every invite Hollow builds stamps its sender's current relay.
+  final String? relay;
+
   const HollowLink({
     required this.type,
     required this.fullUrl,
     required this.id,
+    this.relay,
   });
 }
 
@@ -59,7 +141,15 @@ HollowLink? classifyHollowLink(String url) {
   final uri = Uri.tryParse(url);
   if (uri == null) return null;
 
+  String? relayOf(Map<String, String> params) {
+    final raw = params['relay'];
+    if (raw == null || raw.isEmpty) return null;
+    return normalizeRelayHost(raw);
+  }
+
   if (uri.scheme == 'hollow') {
+    final params = uri.queryParameters;
+    final relay = relayOf(params);
     if (uri.host == 'share') {
       final payload = uri.path.length > 1 ? uri.path.substring(1) : '';
       if (payload.isNotEmpty) {
@@ -67,20 +157,32 @@ HollowLink? classifyHollowLink(String url) {
             type: HollowLinkType.share, fullUrl: url, id: payload);
       }
     } else if (uri.host == 'join') {
-      final serverId = uri.queryParameters['server'];
-      final roomCode = uri.queryParameters['room'];
+      final serverId = params['server'];
+      final roomCode = params['room'];
       if (serverId != null && serverId.isNotEmpty) {
         return HollowLink(
-            type: HollowLinkType.serverInvite, fullUrl: url, id: serverId);
+          type: HollowLinkType.serverInvite,
+          fullUrl: 'hollow://join?server=$serverId${_relayParam(relay, '&')}',
+          id: serverId,
+          relay: relay,
+        );
       } else if (roomCode != null && roomCode.isNotEmpty) {
         return HollowLink(
-            type: HollowLinkType.roomInvite, fullUrl: url, id: roomCode);
+          type: HollowLinkType.roomInvite,
+          fullUrl: 'hollow://join?room=$roomCode${_relayParam(relay, '&')}',
+          id: roomCode,
+          relay: relay,
+        );
       }
     } else if (uri.host == 'conference') {
       final confId = uri.path.length > 1 ? uri.path.substring(1) : '';
       if (confId.isNotEmpty && _inviteIdRegex.hasMatch(confId)) {
         return HollowLink(
-            type: HollowLinkType.conference, fullUrl: url, id: confId);
+          type: HollowLinkType.conference,
+          fullUrl: 'hollow://conference/$confId${_relayParam(relay, '?')}',
+          id: confId,
+          relay: relay,
+        );
       }
     } else if (uri.host == 'redeem') {
       // The shop builds these with encodeURIComponent, so the code arrives
@@ -95,8 +197,8 @@ HollowLink? classifyHollowLink(String url) {
         );
       }
     } else if (uri.host == 'recovery') {
-      final server = uri.queryParameters['server'];
-      final token = uri.queryParameters['token'];
+      final server = params['server'];
+      final token = params['token'];
       if (server != null &&
           server.isNotEmpty &&
           token != null &&
@@ -118,28 +220,32 @@ HollowLink? classifyHollowLink(String url) {
         params.addAll(Uri.splitQueryString(uri.fragment));
       } catch (_) {}
     }
+    final relay = relayOf(params);
     final serverId = params['server'];
     final roomCode = params['room'];
     if (serverId != null && _inviteIdRegex.hasMatch(serverId)) {
       return HollowLink(
         type: HollowLinkType.serverInvite,
-        fullUrl: 'hollow://join?server=$serverId',
+        fullUrl: 'hollow://join?server=$serverId${_relayParam(relay, '&')}',
         id: serverId,
+        relay: relay,
       );
     }
     if (roomCode != null && _inviteIdRegex.hasMatch(roomCode)) {
       return HollowLink(
         type: HollowLinkType.roomInvite,
-        fullUrl: 'hollow://join?room=$roomCode',
+        fullUrl: 'hollow://join?room=$roomCode${_relayParam(relay, '&')}',
         id: roomCode,
+        relay: relay,
       );
     }
     final confId = params['conf'];
     if (confId != null && _inviteIdRegex.hasMatch(confId)) {
       return HollowLink(
         type: HollowLinkType.conference,
-        fullUrl: 'hollow://conference/$confId',
+        fullUrl: 'hollow://conference/$confId${_relayParam(relay, '?')}',
         id: confId,
+        relay: relay,
       );
     }
   }
@@ -154,11 +260,18 @@ HollowLink? classifyHollowLink(String url) {
 /// falls back to the trimmed input. EVERY join or browse input bar goes through
 /// this rather than hand-parsing `Uri.queryParameters`, which never sees the
 /// FRAGMENT the web form carries its id in.
-String inviteIdFromInput(String input, HollowLinkType type) {
+String inviteIdFromInput(String input, HollowLinkType type) =>
+    inviteFromInput(input, type).id;
+
+/// [inviteIdFromInput] plus the relay the link named, for the join paths that
+/// must offer a relay switch before they can reach the invite at all.
+({String id, String? relay}) inviteFromInput(String input, HollowLinkType type) {
   final trimmed = input.trim();
   final link = classifyHollowLink(trimmed);
-  if (link != null && link.type == type) return link.id;
-  return trimmed;
+  if (link != null && link.type == type) {
+    return (id: link.id, relay: link.relay);
+  }
+  return (id: trimmed, relay: null);
 }
 
 List<HollowLink> extractHollowLinks(String text) {

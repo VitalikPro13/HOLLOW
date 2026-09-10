@@ -84,6 +84,8 @@ import 'package:hollow/src/core/providers/gif_provider.dart';
 import 'package:hollow/src/core/providers/link_preview_settings_provider.dart';
 import 'package:hollow/src/core/providers/relay_domain_provider.dart';
 import 'package:hollow/src/core/providers/relay_status_provider.dart';
+import 'package:hollow/src/ui/chat/hollow_link_utils.dart';
+import 'package:hollow/src/ui/dialogs/relay_switch_dialog.dart';
 import 'package:hollow/src/core/providers/app_shortcuts_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/core/services/hotkeys/hotkey_binding.dart';
@@ -747,6 +749,26 @@ class _HollowShellState extends ConsumerState<HollowShell>
     return result == true;
   }
 
+  /// Replays the invite a relay switch parked, now that the node is up on the
+  /// new relay. Consumed exactly once: cleared BEFORE it is acted on, so a
+  /// failure cannot make it reappear at every launch.
+  Future<void> _resumeInviteAfterRelaySwitch() async {
+    String? parked;
+    try {
+      parked = await storage_api.loadSetting(key: kPendingInviteAfterSwitchKey);
+      if (parked == null || parked.isEmpty) return;
+      await storage_api.saveSetting(
+          key: kPendingInviteAfterSwitchKey, value: '');
+    } catch (_) {
+      return;
+    }
+    final link = classifyHollowLink(parked);
+    // The user switched back before it could run: dropping it beats joining a
+    // relay they have left.
+    if (link?.relay != normalizeRelayHost(ref.read(relayDomainProvider))) return;
+    DeepLinkService.instance.handleUrl(parked);
+  }
+
   Future<void> _bootstrap() async {
     if (_initialized) return;
     _initialized = true;
@@ -853,6 +875,9 @@ class _HollowShellState extends ConsumerState<HollowShell>
       await ref.read(savedRelayListProvider.notifier).addRelay(welcomeResult.relayDomain);
     }
     final relayDomain = ref.read(relayDomainProvider);
+    // The status feed announces the OFFICIAL relay, and its eager fetch can
+    // beat the domain we just loaded.
+    ref.read(statusProvider.notifier).onRelayLoaded();
     await network_api.setRelayUrl(domain: relayDomain);
     await ref.read(licenseKeyProvider.notifier).loadCached();
 
@@ -987,6 +1012,7 @@ class _HollowShellState extends ConsumerState<HollowShell>
     // HTTP call, and it is non-fatal: fetchRelayStatus swallows errors and
     // answers license-not-required.
     final relayStatus = await fetchRelayStatus(domain: relayDomain);
+    ref.read(relayStatusProvider.notifier).set(relayStatus);
     if (relayStatus.licenseRequired) {
       var cachedKey = ref.read(licenseKeyProvider);
       if (cachedKey == null && mounted) {
@@ -1005,6 +1031,8 @@ class _HollowShellState extends ConsumerState<HollowShell>
     }
 
     await ref.read(nodeProvider.notifier).start();
+
+    await _resumeInviteAfterRelaySwitch();
 
     // The node starts with forwarding OFF, so the loaded setting is mirrored in.
     ref.read(peerForwardingProvider.notifier).pushToNode();

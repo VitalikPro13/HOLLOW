@@ -17,8 +17,8 @@ All fields have defaults and can be overridden via CLI args:
 | Field | Default | CLI Flag | Description |
 |-------|---------|----------|-------------|
 | `port` | `443` | `--port` | TLS listen port |
-| `public_ip` | (empty) | `--public-ip` | Public IP for signaling responses |
-| `domain` | `"relay.anonlisten.com"` | `--domain` | Domain name |
+| `public_ip` | (empty) | `--public-ip` | DEAD. Parsed and never read; the flag is kept only so old unit files keep starting, and it is out of `print_help` |
+| `domain` | `"relay.anonlisten.com"` | `--domain` | The public host clients connect to. `turn_uris()` builds the TURN URIs from it |
 | `keys_file` | `"keys.json"` | `--keys-file` | License keys JSON file path |
 | `cert_file` | `/etc/letsencrypt/live/relay.anonlisten.com/fullchain.pem` | `--cert-file` | TLS certificate (fullchain) |
 | `key_file` | `/etc/letsencrypt/live/relay.anonlisten.com/privkey.pem` | `--key-file` | TLS private key |
@@ -841,6 +841,8 @@ The generation itself (unchanged, now WS-only):
 
 The three TURN URIs cover: UDP (fastest), TCP fallback, and TLS-wrapped (for restrictive networks). The Dart client MUST split these into separate `IceServer` entries due to flutter_webrtc's native `CreateIceServers` limitations.
 
+**The host comes from `--domain`, via `turn_uris()` in `src/turn_uris.h` (0.12).** It was a hardcoded `relay.anonlisten.com` string literal until then, so every self-hosted relay handed its own clients the official host's TURN server, which rejects them: TURN had never once worked off relay.anonlisten.com. `turn_host()` strips a trailing `:port` (the WSS port is not the TURN port) while keeping IPv6 brackets, and leaves a bare IPv6 literal alone. Unit tested in `test/test_turn_uris.cpp`.
+
 ### GET /server-stats — Server statistics
 
 Returns real-time server resource utilization. Cached for 5 seconds.
@@ -874,11 +876,15 @@ Returns real-time server resource utilization. Cached for 5 seconds.
 ```json
 {
   "license_required": true,
-  "version": "0.1.0"
+  "version": "0.12.0",
+  "turn": true,
+  "forwarder": true
 }
 ```
 
 The Dart client checks this endpoint on startup. If `license_required` is true and the user hasn't cached a key, the app shows the license key input dialog.
+
+`version` is `HOLLOW_RELAY_VERSION` in `src/version.h`; it read `"0.1.0"` from the day the endpoint was written until 0.12. `turn` is `!turn_secret.empty()` and `forwarder` is `!forwarder_peer_id.empty()`, so both report what this relay is CONFIGURED with, not whether coturn or the forwarder process is actually alive. That is the honest signal the app has: a self-hoster who runs without coturn is told to leave `TURN_SECRET` empty so the two agree. `setup_http_handlers` takes `const Config&` for exactly this (the parameter existed unused before).
 
 ---
 
@@ -967,14 +973,28 @@ ulimit -n 500000
 
 ## Docker self-hosting
 
-Files in `relay-uws/`: `Dockerfile`, `docker-compose.yml`, `.env.example`, `turnserver.conf.example`, `keys/`, plus three systemd unit templates in `deploy/`.
+Files in `relay-uws/`: `Dockerfile`, `docker-compose.yml`, `.env.example`, `SELF_HOSTING.md` (the single user-facing guide), `keys/`, the hook scripts in `deploy/certbot/` and `deploy/coturn/`, `deploy/harden-host.sh`, plus the systemd unit templates in `deploy/`.
 
-Docker Compose runs three services:
-- **relay** — builds from Dockerfile (multi-stage: debian bookworm build → slim runtime), TLS on port 443, certs from shared volume, `ulimits: core: 0`
-- **certbot** — provisions Let's Encrypt certs, wakes every 12h, and does its copy/chown/chmod/touch work inside a `--deploy-hook` so it only acts on a real renewal
-- **coturn** — TURN server on host network (ports 3478/5349)
+Rewritten for 0.12. ONE file a self-hoster edits: `.env`. `turnserver.conf.example` is GONE (coturn takes flags only, from `deploy/coturn/coturn-start.sh`), and so are `deploy/hollow-relay-cert-renewed.path`/`.service` (the relay hot-reloads its certificate, so a renewal restarts nothing).
 
-Self-hoster setup: `cp .env.example .env` (edit domain/IP/secret), `cp turnserver.conf.example turnserver.conf` (edit realm/secret), `git submodule update --init --recursive` (the Dockerfile COPYs `uWebSockets/` and `uSockets/`, neither present on a plain clone), `docker compose up -d`.
+Five services:
+- **certbot-init**: one-shot, `network_mode: host`, entrypoint `deploy/certbot/issue.sh`. Everything else that matters depends on it with `condition: service_completed_successfully`, and it runs under `set -eu`, so a failed issuance stops the stack at `docker compose up` instead of parking a healthy-looking certbot next to a crash-looping relay (the pre-0.12 bug).
+- **certbot-renew**: `renew-loop.sh`, `sleep 12h` forever, then `certbot renew --deploy-hook /hooks/install-certs.sh`. The challenge method is stored in the lineage, so DuckDNS and IP certificates renew the way they were issued with no flags repeated here.
+- **duckdns**: `duckdns-updater.sh`. Exits 0 immediately unless `RELAY_HOST` ends in `.duckdns.org` with a token; otherwise pushes `ip=` (empty, so DuckDNS records the caller's address) every 5 minutes.
+- **relay**: `--domain ${RELAY_HOST}`, keys and reports paths always passed (an absent `keys.json` is an open relay, so no commented-out YAML), `logging: driver: journald`, healthcheck `curl -fsk https://127.0.0.1/health` (curl added to the runtime stage for it).
+- **coturn**: `profiles: [turn]`, host network, `user: "999:999"` so it can read the same certificate copy the relay reads, flags only, peer lock as on production.
+
+Three certificate modes, picked from `RELAY_HOST` by `cert_mode()` in `deploy/certbot/lib.sh`: a `.duckdns.org` name with a token goes DNS-01 through the DuckDNS TXT API (the ONLY mode that works with no port 80, so the only one testable on the NAT'd build VM); an IPv4 or IPv6 literal goes `--standalone --ip-address ... --preferred-profile shortlived` (Let's Encrypt issues IP certificates only under that profile, 6-day lifetime, hence the 12 h renew loop); anything else is a plain `--standalone -d`. `--cert-name relay` pins the lineage to `live/relay/` so no script ever interpolates a hostname into a path. A `RELAY_HOST` carrying a port is REFUSED up front. `OWN_CERT_DIR` short-circuits all of it.
+
+`install_pair()` copies to `<name>.pem.new`, chowns 999:999, then renames, so the relay's reload check never stats a half-written file.
+
+Two traps the first real bring-up found, both fixed:
+- **coturn's `--log-file=/dev/null` created a file.** coturn appends a date and rotates unless `--simple-log` is passed, so the flag produced a real `/dev/null_2026-09-10.log` and every TURN session would have landed on the disk. `--simple-log` is now mandatory alongside it.
+- **Clearing `CERTBOT_STAGING` kept the staging certificate.** `--keep-until-expiring` sees a valid lineage and skips, so the relay came back up serving an untrusted certificate. `issue.sh` now compares the requested service against `renewal/relay.conf` and runs `certbot delete --cert-name relay` when they differ.
+
+coturn also gained a `depends_on: certbot-init` gate; without it it started before any certificate existed and could not serve `turns:` on 5349.
+
+`deploy/harden-host.sh` is the production host setup as a script (ufw, volatile journald, no swap, no core dumps, NTP, fail2ban, unattended-upgrades, key-only SSH but ONLY when the invoking user already has an `authorized_keys`). Idempotent, `--print` dry-run.
 
 The relay binary is SSL-only (`uWS::SSLApp`) — cannot run without TLS certs. No `--no-tls` mode exists. This is intentional: every self-hosted relay is TLS-secured by default.
 
@@ -982,11 +1002,11 @@ The relay binary is SSL-only (`uWS::SSLApp`) — cannot run without TLS certs. N
 
 **License keys mount a DIRECTORY, never the file.** `./keys:/keys:ro` with `--keys-file /keys/keys.json`. A single-file bind mount binds the inode, so any editor that writes-and-renames (vim, `sed -i`, most of them) leaves the container reading an inode that no longer exists: `try_reload`'s mtime check never changes and the 30 s hot reload silently never fires again. `relay-uws/keys/.keep` keeps the directory in the tree, and `keys.json` is gitignored (`.gitignore:124`), so a self-hoster cannot commit their keys by accident.
 
-**No fd store, so no restart persistence on this path.** The snapshot handoff needs `NotifyAccess=main` + `FileDescriptorStoreMax=1` on the unit that owns the relay process, and under compose systemd owns the `docker compose` client instead. Every `docker compose restart relay` therefore empties the offline buffers, topic rings and push tokens. Never restart the relay on a timer: `deploy/hollow-relay-cert-renewed.path` watches the deploy hook's touch file so it fires only on an actual renewal. Core dumps are barred with `ulimits: core: 0` in the compose file, NOT `LimitCORE=` on the unit, which would only bound the compose client and not the relay in the container.
+**No fd store, so no restart persistence on this path.** The snapshot handoff needs `NotifyAccess=main` + `FileDescriptorStoreMax=1` on the unit that owns the relay process, and under compose systemd owns the `docker compose` client instead. Every `docker compose restart relay` therefore empties the offline buffers, topic rings and push tokens. This is exactly why the certificate reload landed in `main.cpp` (60 s timer, mtime compare, pair validated in a scratch `SSL_CTX` before the live one is touched, OpenSSL applies it to NEW connections only): a renewal used to restart the relay every ~60 days and empty everything with it. Core dumps are barred with `ulimits: core: 0` in the compose file, NOT `LimitCORE=` on the unit, which would only bound the compose client and not the relay in the container.
 
 The `deploy/` templates assume the repo cloned at `/opt/HOLLOW` and a `hollow` user in the docker group.
 
-**Nothing tests this path.** Neither `.github/workflows/ci.yml` nor `scripts/fleet.ps1` exercises Docker; it runs only on self-hosters' machines, which is how the privkey bug survived a month unnoticed. Known gap as of 2026-09-09: a failed initial `certonly` leaves the certbot container parked in its sleep loop looking healthy while the relay crash-loops on missing certs (no `set -e`).
+**What is and is not tested.** `turn_uris()` and the snapshot codec have unit tests (`relay-uws/test/`, plain g++ one-liners). The compose stack was brought up end to end on the Linux build VM (2026-09-10) against the real DuckDNS name `hollowtest.duckdns.org`, staging then production: a wrong token makes `certbot-init` exit 1, `docker compose up -d` exit 1 and the relay stay at `created` with `StartedAt` zero; the correct token issues, the relay comes up healthy, and `curl --resolve` reaches it with NO `-k`; a forced renewal is picked up by the running relay (`[main] TLS certificate reloaded`, new serial, `RestartCount=0`, `StartedAt` unchanged); a repeat `up` re-issues nothing; `turnutils_uclient` with relay-computed credentials allocates 20/20 through the peer lock and a wrong password is refused. No-TURN mode was then proven on the same stack: `COMPOSE_PROFILES=` plus an empty `TURN_SECRET` leaves nothing on 3478 or 5349 and `/relay-status` answers `turn:false` while the certificate and the lineage are untouched. The DuckDNS DNS-01 path is the one that mattered there, because the VM is behind NAT and http-01 cannot reach it. On that rig bring the stack up with `docker compose up -d --scale duckdns=0`: `stop duckdns` is too late, the updater fires its first update the moment the service starts and rewrites the hand-set A record to the home public address. Still untested anywhere: the IP-address certificate mode (needs a host with port 80 reachable, which the NAT'd VM is not), `OWN_CERT_DIR`, and `harden-host.sh` applied for real (the VM has no sudo password; `--print` only). CI does not exercise Docker at all.
 
 ---
 

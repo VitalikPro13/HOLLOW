@@ -792,6 +792,12 @@ class CallNotifier extends Notifier<CallState> {
     // peer connection, mic and camera running, and an undisposed PC costs about
     // 200 MB per session (`feedback_webrtc_close_dispose_eventchannel`).
     await endCall();
+    // AFTER the teardown, or the toast rides an overlay that is about to be
+    // rebuilt (`feedback_toast_from_nonwidget_overlaystate`).
+    _showToast(ref.read(iceConfigProvider.notifier).hasTurnCredentials
+        ? 'The connection was lost and the call ended.'
+        : 'The call could not connect. This relay has no TURN server, so '
+            'calls need a direct route between you.');
   }
 
   /// One-shot "direct whenever direct is possible" repair for the call PC.

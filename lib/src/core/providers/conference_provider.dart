@@ -78,7 +78,8 @@ class ConferenceRoom {
         createdAt: info.createdAt.toInt(),
       );
 
-  String get inviteLink => webConferenceInviteLink(confId);
+  String inviteLink(String relay) =>
+      webConferenceInviteLink(confId, relay: relay);
 }
 
 /// Someone knocking on the host's waiting room. Carries the display name and

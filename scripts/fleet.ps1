@@ -5,6 +5,7 @@
 #   powershell -File scripts\fleet.ps1 -Build            # build + stage the copies
 #   powershell -File scripts\fleet.ps1 -Onboard          # make the fixture identities
 #   powershell -File scripts\fleet.ps1 -Onboard -Fresh   # ... from BRAND-NEW keys
+#   powershell -File scripts\fleet.ps1 -Onboard -Relay my.relay.example  # ... on a self-hosted relay
 #   powershell -File scripts\fleet.ps1 -Live             # boot and leave them up
 #   powershell -File scripts\fleet.ps1 -Scenario dm_hello -Attach   # reuse them
 #   powershell -File scripts\fleet.ps1 -Stop
@@ -101,6 +102,12 @@ param(
     # request against inbox:{master} for three days, so a stable identity keeps
     # replaying earlier runs' requests into later ones. Meaningless on its own.
     [switch]$Fresh,
+    # With -Onboard: point every peer of this run at a self-hosted relay by
+    # typing it into the welcome dialog's Advanced field. A relay is chosen
+    # before an identity exists and is stamped into the fixture with it, so
+    # this is the only moment a fleet peer can be pointed anywhere else. Peers
+    # that need DIFFERENT relays take one -Onboard call each.
+    [string]$Relay = '',
     # Boot the fleet and leave it listening, for driving by hand.
     [switch]$Live,
     # Use the instances that are ALREADY running instead of booting: no reboot,
@@ -205,6 +212,12 @@ if ($Stop) {
 # silently do nothing while the caller believed it had new keys.
 if ($Fresh -and -not $Onboard) {
     throw '-Fresh only means something with -Onboard. Use: -Onboard -Fresh -Peers a,b'
+}
+
+# Same reason: the welcome dialog only exists while there is no identity yet,
+# so -Relay without -Onboard would silently leave every peer where it was.
+if ($Relay -and -not $Onboard) {
+    throw '-Relay only means something with -Onboard. Use: -Onboard -Fresh -Peers a -Relay my.relay.example'
 }
 
 # --------------------------------------------------------------------------
@@ -643,6 +656,14 @@ $onboardSteps = @(
     @{ op = 'dump'; name = 'onboarded' }
 )
 if (Test-SimBackend) { $onboardSteps = $onboardStepsMobile }
+
+# The relay is chosen BEFORE the identity is created, in the welcome dialog's
+# own Advanced field, and the choice is stamped into the fixture with the keys.
+if ($Relay) {
+    $onboardSteps = @($onboardSteps[0]) + (Get-RelayWelcomeSteps $Relay) +
+        @($onboardSteps[1..($onboardSteps.Count - 1)])
+    Write-Step "onboarding onto relay $Relay" 'Yellow'
+}
 
 # --------------------------------------------------------------------------
 # Run

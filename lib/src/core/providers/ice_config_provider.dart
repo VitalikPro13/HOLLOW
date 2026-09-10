@@ -81,6 +81,10 @@ class IceConfigNotifier extends Notifier<Map<String, dynamic>> {
     };
   }
 
+  /// Whether a relayed path is available at all. A relay with no TURN server
+  /// never sends credentials, and a call there needs a direct route.
+  bool get hasTurnCredentials => _turnUris.isNotEmpty;
+
   /// Called by the event dispatcher when relay TURN credentials arrive.
   void setTurnCredentials({
     required String username,

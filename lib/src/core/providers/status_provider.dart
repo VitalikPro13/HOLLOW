@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/providers/relay_domain_provider.dart';
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 import 'package:hollow/src/rust/api/updater.dart' as updater_api;
 
@@ -228,7 +229,31 @@ class StatusNotifier extends Notifier<StatusState> {
   /// the banner + home card every 60s.
   String? _lastAppliedJson;
 
+  /// Called once the persisted relay domain has loaded, because the eager
+  /// fetch in [build] can run before it and a self-hoster would briefly see the
+  /// official relay's notice.
+  void onRelayLoaded() {
+    if (_isSelfHosted) {
+      _lastAppliedJson = null;
+      state = state.copyWith(status: SystemStatus.healthy, hasFetched: true);
+    } else if (!state.hasFetched) {
+      unawaited(_doFetch());
+    }
+  }
+
+  /// The feed announces the OFFICIAL relay. Someone on their own relay is not
+  /// affected by it and must never be told their network is down.
+  bool get _isSelfHosted =>
+      ref.read(relayDomainProvider) != kDefaultRelayDomain;
+
   Future<bool> _doFetch() async {
+    if (_isSelfHosted) {
+      _lastAppliedJson = null;
+      if (!(state.hasFetched && identical(state.status, SystemStatus.healthy))) {
+        state = state.copyWith(status: SystemStatus.healthy, hasFetched: true);
+      }
+      return false;
+    }
     try {
       final bustCache = DateTime.now().millisecondsSinceEpoch;
       // Plain fetch: status.json is display-only and has no signature sidecar

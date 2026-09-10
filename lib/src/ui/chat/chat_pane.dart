@@ -93,6 +93,7 @@ import 'package:hollow/src/core/brand_icons.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import 'package:hollow/src/ui/chat/chat_pane_shared.dart';
+import 'package:hollow/src/ui/dialogs/no_turn_dialog.dart';
 
 // The twins' shared building blocks live in chat_pane_shared.dart, re-exported
 // here for the existing consumers (mobile routes, archive viewers).
@@ -1554,6 +1555,8 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
   }
 
   Future<void> _startDmCall({required bool withVideo}) async {
+    if (!await ensureTurnForCall(context, ref)) return;
+    if (!mounted) return;
     if (!await _confirmLeaveVoiceForCall()) return;
     await ref
         .read(callProvider.notifier)

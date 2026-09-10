@@ -44,6 +44,7 @@ import 'package:hollow/src/ui/mobile/mobile_labels_route.dart';
 import 'package:hollow/src/ui/mobile/mobile_twitch_settings_route.dart';
 import 'package:hollow/src/ui/settings/server_template.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
+import 'package:hollow/src/core/providers/relay_domain_provider.dart';
 import 'package:atlas_icons/atlas_icons.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
@@ -1132,7 +1133,8 @@ class _MobileServerSettingsRouteState
                     icon: LucideIcons.link,
                     label: 'Invite',
                     onTap: () {
-                      final link = webServerInviteLink(widget.serverId);
+                      final link = webServerInviteLink(widget.serverId,
+                          relay: ref.read(relayDomainProvider));
                       showInviteDialog(context, link, widget.serverId);
                     },
                   ),

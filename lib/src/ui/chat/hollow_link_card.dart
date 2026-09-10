@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:hollow/src/core/providers/relay_domain_provider.dart';
 import 'package:hollow/src/core/providers/conference_provider.dart';
 import 'package:hollow/src/core/providers/room_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
@@ -24,6 +25,7 @@ import 'package:hollow/src/ui/share/paste_link_dialog.dart';
 import 'package:hollow/src/core/shop_availability.dart';
 import 'package:hollow/src/ui/share/share_card.dart';
 import 'package:hollow/src/ui/shop/redeem_code_dialog.dart';
+import 'package:hollow/src/ui/dialogs/relay_switch_dialog.dart';
 
 class HollowLinkCard extends ConsumerWidget {
   final HollowLink link;
@@ -181,7 +183,7 @@ class _ServerInviteCard extends ConsumerWidget {
 
     return _cardContainer(
       hollow: hollow,
-      onTap: alreadyJoined ? null : () => _handleJoin(context),
+      onTap: alreadyJoined ? null : () => _handleJoin(context, ref),
       child: Row(
         children: [
           Icon(LucideIcons.server, size: 20, color: hollow.accent),
@@ -218,6 +220,7 @@ class _ServerInviteCard extends ConsumerWidget {
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                   ),
+                if (!alreadyJoined) _RelayHint(relay: link.relay),
               ],
             ),
           ),
@@ -243,7 +246,7 @@ class _ServerInviteCard extends ConsumerWidget {
           else
             HollowButton.filled(
               compact: true,
-              onPressed: () => _handleJoin(context),
+              onPressed: () => _handleJoin(context, ref),
               child: const Text('Join'),
             ),
         ],
@@ -251,8 +254,11 @@ class _ServerInviteCard extends ConsumerWidget {
     );
   }
 
-  void _handleJoin(BuildContext context) {
-    crdt_api.joinServer(serverId: link.id, nsfwConfirmed: false);
+  Future<void> _handleJoin(BuildContext context, WidgetRef ref) async {
+    if (!await ensureRelayForInvite(context, ref, link)) return;
+    if (!context.mounted) return;
+    crdt_api.joinServer(serverId: link.id, nsfwConfirmed: false)
+        .catchError((_) {});
     HollowToast.show(context, 'Joining server...', type: HollowToastType.info);
   }
 }
@@ -267,7 +273,7 @@ class _RoomInviteCard extends ConsumerWidget {
 
     return _cardContainer(
       hollow: hollow,
-      onTap: () => _handleJoin(ref),
+      onTap: () => _handleJoin(context, ref),
       child: Row(
         children: [
           Icon(LucideIcons.messageCircle, size: 20, color: hollow.accent),
@@ -294,13 +300,14 @@ class _RoomInviteCard extends ConsumerWidget {
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                 ),
+                _RelayHint(relay: link.relay),
               ],
             ),
           ),
           const SizedBox(width: HollowSpacing.sm),
           HollowButton.filled(
             compact: true,
-            onPressed: () => _handleJoin(ref),
+            onPressed: () => _handleJoin(context, ref),
             child: const Text('Join'),
           ),
         ],
@@ -308,7 +315,8 @@ class _RoomInviteCard extends ConsumerWidget {
     );
   }
 
-  void _handleJoin(WidgetRef ref) {
+  Future<void> _handleJoin(BuildContext context, WidgetRef ref) async {
+    if (!await ensureRelayForInvite(context, ref, link)) return;
     ref.read(roomProvider.notifier).join(link.fullUrl);
   }
 }
@@ -398,6 +406,7 @@ class _ConferenceInviteCard extends ConsumerWidget {
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                 ),
+                _RelayHint(relay: link.relay),
               ],
             ),
           ),
@@ -412,7 +421,9 @@ class _ConferenceInviteCard extends ConsumerWidget {
     );
   }
 
-  void _handleJoin(BuildContext context, WidgetRef ref) {
+  Future<void> _handleJoin(BuildContext context, WidgetRef ref) async {
+    if (!await ensureRelayForInvite(context, ref, link)) return;
+    if (!context.mounted) return;
     if (Platform.isAndroid || Platform.isIOS) {
       // On mobile the lobby lives in the Conferences screen.
       Navigator.of(context, rootNavigator: true).push(hollowMobileRoute(
@@ -476,6 +487,33 @@ class _RecoveryLinkCard extends ConsumerWidget {
             child: const Text('Open'),
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// Names the relay an invite came from when it is not the one we are on, so a
+/// Join that ends in a restart is never a surprise.
+class _RelayHint extends ConsumerWidget {
+  const _RelayHint({required this.relay});
+
+  final String? relay;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final target = relay;
+    if (target == null ||
+        normalizeRelayHost(ref.watch(relayDomainProvider)) == target) {
+      return const SizedBox.shrink();
+    }
+    final hollow = HollowTheme.of(context);
+    return Padding(
+      padding: const EdgeInsets.only(top: 2),
+      child: Text(
+        'On $target',
+        style: HollowTypography.caption.copyWith(color: hollow.textTertiary),
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
       ),
     );
   }

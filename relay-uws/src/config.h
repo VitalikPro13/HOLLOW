@@ -5,6 +5,7 @@
 
 struct Config {
     uint16_t port = 443;
+    // unused, kept so old unit files keep starting
     std::string public_ip;
     std::string domain = "relay.anonlisten.com";
     std::string keys_file = "keys.json";
@@ -21,10 +22,9 @@ struct Config {
 
 inline void print_help() {
     fprintf(stderr,
-        "hollow-relay — uWebSockets C++ relay for Hollow\n\n"
+        "hollow-relay, the uWebSockets C++ relay for Hollow\n\n"
         "  --port <port>         Listen port (default: 443)\n"
-        "  --public-ip <ip>      Public IP address\n"
-        "  --domain <domain>     Domain name (default: relay.anonlisten.com)\n"
+        "  --domain <host>       Public host clients connect to; used for the TURN URIs (default: relay.anonlisten.com)\n"
         "  --keys-file <path>    License keys JSON file (default: keys.json)\n"
         "  --reports-file <path> User reports JSON file (default: reports.json)\n"
         "  --cert-file <path>    TLS certificate file\n"

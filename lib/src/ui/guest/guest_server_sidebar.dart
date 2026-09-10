@@ -19,6 +19,7 @@ import 'package:hollow/src/ui/components/hollow_menu.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
+import 'package:hollow/src/ui/dialogs/relay_switch_dialog.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 class GuestServerSidebar extends ConsumerStatefulWidget {
@@ -38,13 +39,14 @@ class _GuestServerSidebarState extends ConsumerState<GuestServerSidebar> {
     super.dispose();
   }
 
-  void _submitAdd() {
+  Future<void> _submitAdd() async {
     final input = _addController.text.trim();
     if (input.isEmpty) return;
 
     // Invite link (hollow:// or web /join#server=), raw ID, or legacy
     // fallbacks (any URL with a ?server= query, else the last path segment).
-    String serverId = inviteIdFromInput(input, HollowLinkType.serverInvite);
+    final invite = inviteFromInput(input, HollowLinkType.serverInvite);
+    String serverId = invite.id;
     if (serverId == input) {
       final serverParam = Uri.tryParse(input)?.queryParameters['server'];
       if (serverParam != null && serverParam.isNotEmpty) {
@@ -53,6 +55,12 @@ class _GuestServerSidebarState extends ConsumerState<GuestServerSidebar> {
         serverId = input.split('/').last;
       }
     }
+
+    if (!await ensureRelayForInviteId(context, ref,
+        type: HollowLinkType.serverInvite, id: serverId, relay: invite.relay)) {
+      return;
+    }
+    if (!mounted) return;
 
     final notifier = ref.read(savedGuestServersProvider.notifier);
     final realtimeCount = notifier.realtimeCount;

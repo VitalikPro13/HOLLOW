@@ -81,7 +81,8 @@ void main() {
       expect(web!.type, HollowLinkType.conference);
       expect(web.fullUrl, 'hollow://conference/abcdef0123456789');
       // Round-trip: the generated invite classifies back to the same id.
-      final generated = webConferenceInviteLink('abcdef0123456789');
+      final generated = webConferenceInviteLink('abcdef0123456789',
+          relay: 'relay.anonlisten.com');
       expect(classifyHollowLink(generated)!.id, 'abcdef0123456789');
     });
 
@@ -130,8 +131,8 @@ void main() {
   });
 
   test('webServerInviteLink builds fragment form', () {
-    expect(webServerInviteLink('abc'),
-        'https://hollow.anonlisten.com/join#server=abc');
+    expect(webServerInviteLink('abc', relay: 'relay.anonlisten.com'),
+        'https://hollow.anonlisten.com/join#server=abc&relay=relay.anonlisten.com');
   });
 
   group('inviteIdFromInput', () {
@@ -213,6 +214,190 @@ void main() {
       expect(links.length, 1);
       expect(links.first.type, HollowLinkType.redeem);
       expect(links.first.id, 'ABCDE-FGHIJ-12345');
+    });
+  });
+
+  group('relay hint', () {
+    test('hollow:// server invite carries the relay', () {
+      final link = classifyHollowLink(
+          'hollow://join?server=abc123&relay=myrelay.duckdns.org');
+      expect(link!.type, HollowLinkType.serverInvite);
+      expect(link.id, 'abc123');
+      expect(link.relay, 'myrelay.duckdns.org');
+      expect(link.fullUrl,
+          'hollow://join?server=abc123&relay=myrelay.duckdns.org');
+    });
+
+    test('web fragment server invite carries the relay', () {
+      final link = classifyHollowLink(
+          'https://hollow.anonlisten.com/join#server=abc123&relay=myrelay.duckdns.org');
+      expect(link!.relay, 'myrelay.duckdns.org');
+      expect(link.fullUrl,
+          'hollow://join?server=abc123&relay=myrelay.duckdns.org');
+    });
+
+    test('room invite carries the relay in both forms', () {
+      final native =
+          classifyHollowLink('hollow://join?room=r0om1234&relay=box.example.com');
+      expect(native!.type, HollowLinkType.roomInvite);
+      expect(native.relay, 'box.example.com');
+      expect(native.fullUrl,
+          'hollow://join?room=r0om1234&relay=box.example.com');
+      final web = classifyHollowLink(
+          'https://hollow.anonlisten.com/join#room=r0om1234&relay=box.example.com');
+      expect(web!.fullUrl, native.fullUrl);
+    });
+
+    test('conference carries the relay in both forms', () {
+      final native = classifyHollowLink(
+          'hollow://conference/abcdef0123456789?relay=box.example.com');
+      expect(native!.type, HollowLinkType.conference);
+      expect(native.id, 'abcdef0123456789');
+      expect(native.relay, 'box.example.com');
+      expect(native.fullUrl,
+          'hollow://conference/abcdef0123456789?relay=box.example.com');
+      final web = classifyHollowLink(
+          'https://hollow.anonlisten.com/join#conf=abcdef0123456789&relay=box.example.com');
+      expect(web!.fullUrl, native.fullUrl);
+    });
+
+    test('absent relay leaves the link and its canonical form unchanged', () {
+      final link = classifyHollowLink('hollow://join?server=abc123');
+      expect(link!.relay, isNull);
+      expect(link.fullUrl, 'hollow://join?server=abc123');
+      expect(classifyHollowLink('hollow://conference/abcdef0123456789')!.relay,
+          isNull);
+    });
+
+    test('an invalid relay is dropped and the link still classifies', () {
+      final link = classifyHollowLink(
+          'hollow://join?server=abc123&relay=not%20a%20host/path');
+      expect(link!.type, HollowLinkType.serverInvite);
+      expect(link.id, 'abc123');
+      expect(link.relay, isNull);
+      expect(link.fullUrl, 'hollow://join?server=abc123');
+    });
+
+    test('bracketed IPv6 relay round trips', () {
+      final built = webServerInviteLink('abc123', relay: '[2001:db8::1]:8443');
+      final link = classifyHollowLink(built);
+      expect(link!.relay, '[2001:db8::1]:8443');
+      expect(classifyHollowLink(link.fullUrl)!.relay, '[2001:db8::1]:8443');
+    });
+
+    test('builders stamp the relay', () {
+      expect(webServerInviteLink('abc', relay: 'r.example.com'),
+          'https://hollow.anonlisten.com/join#server=abc&relay=r.example.com');
+      expect(webConferenceInviteLink('abc', relay: 'r.example.com'),
+          'https://hollow.anonlisten.com/join#conf=abc&relay=r.example.com');
+      expect(roomInviteLink('code42', relay: 'r.example.com'),
+          'hollow://join?room=code42&relay=r.example.com');
+    });
+
+    test('extractHollowLinks dedups one invite across both relay forms', () {
+      final links = extractHollowLinks(
+          'a hollow://join?server=abc123&relay=r.example.com b '
+          'https://hollow.anonlisten.com/join#server=abc123&relay=r.example.com');
+      expect(links, hasLength(1));
+      expect(links.single.relay, 'r.example.com');
+    });
+
+    test('the same invite on two relays stays two cards', () {
+      final links = extractHollowLinks(
+          'a hollow://join?server=abc123&relay=one.example.com b '
+          'hollow://join?server=abc123&relay=two.example.com');
+      expect(links, hasLength(2));
+    });
+  });
+
+  group('inviteFromInput', () {
+    test('returns the id and the relay', () {
+      final parsed = inviteFromInput(
+          '  hollow://join?server=abc123&relay=r.example.com  ',
+          HollowLinkType.serverInvite);
+      expect(parsed.id, 'abc123');
+      expect(parsed.relay, 'r.example.com');
+    });
+
+    test('a raw id has no relay', () {
+      final parsed = inviteFromInput('  abc123  ', HollowLinkType.serverInvite);
+      expect(parsed.id, 'abc123');
+      expect(parsed.relay, isNull);
+    });
+
+    test('a mismatched link type is not unwrapped', () {
+      const conf = 'https://hollow.anonlisten.com/join#conf=abc123';
+      final parsed = inviteFromInput(conf, HollowLinkType.serverInvite);
+      expect(parsed.id, conf);
+      expect(parsed.relay, isNull);
+    });
+  });
+
+  group('normalizeRelayHost', () {
+    test('plain hostname', () {
+      expect(normalizeRelayHost('relay.anonlisten.com'), 'relay.anonlisten.com');
+      expect(
+          normalizeRelayHost('  MyRelay.DuckDNS.org '), 'myrelay.duckdns.org');
+      expect(normalizeRelayHost('localhost'), 'localhost');
+      expect(normalizeRelayHost('my-relay.example.co.uk'),
+          'my-relay.example.co.uk');
+    });
+
+    test('strips a scheme', () {
+      expect(normalizeRelayHost('wss://relay.example.com'), 'relay.example.com');
+      expect(normalizeRelayHost('ws://relay.example.com'), 'relay.example.com');
+      expect(
+          normalizeRelayHost('https://relay.example.com'), 'relay.example.com');
+      expect(
+          normalizeRelayHost('http://relay.example.com'), 'relay.example.com');
+    });
+
+    test('strips a trailing slash or /ws', () {
+      expect(normalizeRelayHost('relay.example.com/'), 'relay.example.com');
+      expect(
+          normalizeRelayHost('wss://relay.example.com/ws'), 'relay.example.com');
+      expect(normalizeRelayHost('relay.example.com/ws/'), 'relay.example.com');
+    });
+
+    test('port', () {
+      expect(normalizeRelayHost('relay.example.com:8443'),
+          'relay.example.com:8443');
+      expect(normalizeRelayHost('wss://relay.example.com:1/ws'),
+          'relay.example.com:1');
+      expect(normalizeRelayHost('relay.example.com:65535'),
+          'relay.example.com:65535');
+      expect(normalizeRelayHost('relay.example.com:0'), isNull);
+      expect(normalizeRelayHost('relay.example.com:65536'), isNull);
+      expect(normalizeRelayHost('relay.example.com:abc'), isNull);
+      expect(normalizeRelayHost('relay.example.com:'), isNull);
+    });
+
+    test('IPv4', () {
+      expect(normalizeRelayHost('192.168.1.10'), '192.168.1.10');
+      expect(normalizeRelayHost('192.168.1.10:8443'), '192.168.1.10:8443');
+    });
+
+    test('bracketed IPv6 only', () {
+      expect(normalizeRelayHost('[2001:db8::1]'), '[2001:db8::1]');
+      expect(normalizeRelayHost('[2001:DB8::1]:8443'), '[2001:db8::1]:8443');
+      expect(normalizeRelayHost('2001:db8::1'), isNull);
+      expect(normalizeRelayHost('::1'), isNull);
+      expect(normalizeRelayHost('[2001:db8::1'), isNull);
+    });
+
+    test('rejects paths, spaces and junk', () {
+      expect(normalizeRelayHost('relay.example.com/path'), isNull);
+      expect(normalizeRelayHost('relay example.com'), isNull);
+      expect(normalizeRelayHost(''), isNull);
+      expect(normalizeRelayHost('   '), isNull);
+      expect(normalizeRelayHost('relay..example.com'), isNull);
+      expect(normalizeRelayHost('-relay.example.com'), isNull);
+      expect(normalizeRelayHost('relay.example.com-'), isNull);
+      expect(normalizeRelayHost('user@relay.example.com'), isNull);
+      expect(normalizeRelayHost('relay.example.com?x=1'), isNull);
+      expect(normalizeRelayHost('relay_x.example.com'), isNull);
+      final tooLong = List.filled(20, 'abcdefghijkl').join('.');
+      expect(normalizeRelayHost('$tooLong.example.com'), isNull);
     });
   });
 }

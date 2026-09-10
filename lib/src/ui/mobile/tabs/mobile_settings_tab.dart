@@ -6,6 +6,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/app_relaunch.dart';
 import 'package:hollow/src/core/brand_icons.dart';
 import 'package:hollow/src/core/hollow_data_dir.dart';
 import 'package:hollow/src/core/providers/profile_anim_provider.dart';
@@ -72,6 +73,9 @@ import 'package:hollow/src/core/shop_availability.dart';
 import 'package:hollow/src/ui/shell/system_status_banner.dart';
 import 'package:hollow/src/ui/shop/owned_art_panel.dart';
 import 'package:hollow/src/ui/shop/shop_dashboard.dart';
+import 'package:hollow/src/ui/chat/hollow_link_utils.dart';
+import 'package:hollow/src/core/providers/relay_status_provider.dart';
+import 'package:hollow/src/ui/components/relay_no_turn_chip.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 class MobileSettingsTab extends ConsumerWidget {
@@ -1578,10 +1582,19 @@ class _NetworkTabState extends ConsumerState<_NetworkTab> {
                           ],
                         ),
                         if (domain == _initialRelay)
-                          Text('Currently active',
-                              style: HollowTypography.caption.copyWith(
-                                color: hollow.textSecondary, fontSize: 10,
-                              )),
+                          Row(
+                            children: [
+                              Text('Currently active',
+                                  style: HollowTypography.caption.copyWith(
+                                    color: hollow.textSecondary, fontSize: 10,
+                                  )),
+                              if (ref.watch(relayStatusProvider)?.turn ==
+                                  false) ...[
+                                const SizedBox(width: HollowSpacing.xs),
+                                const RelayNoTurnChip(compact: true),
+                              ],
+                            ],
+                          ),
                       ],
                     ),
                   ),
@@ -1621,8 +1634,15 @@ class _NetworkTabState extends ConsumerState<_NetworkTab> {
               HollowButton.filled(
                 compact: true,
                 onPressed: () {
-                  final domain = _relayController.text.trim();
-                  if (domain.isEmpty) return;
+                  final raw = _relayController.text.trim();
+                  if (raw.isEmpty) return;
+                  final domain = normalizeRelayHost(raw);
+                  if (domain == null) {
+                    HollowToast.show(context,
+                        'Enter a relay address such as myrelay.duckdns.org',
+                        type: HollowToastType.error);
+                    return;
+                  }
                   if (relays.contains(domain)) {
                     HollowToast.show(context, 'Already in list',
                         type: HollowToastType.error);
@@ -1659,11 +1679,10 @@ class _NetworkTabState extends ConsumerState<_NetworkTab> {
             expand: true,
             onPressed: () async {
               await ref.read(relayDomainProvider.notifier).setDomain(_selectedRelay);
-              try {
-                await network_api.notifyShutdown();
-              } catch (_) {}
-              await Future.delayed(const Duration(milliseconds: 200));
-              SystemNavigator.pop();
+              await ref
+                  .read(savedRelayListProvider.notifier)
+                  .addRelay(_selectedRelay);
+              await exitForRelaySwitch();
             },
             child: const Text('Apply & close app'),
           ),

@@ -73,13 +73,26 @@ void ReportsState::save_if_dirty() {
     j["counts"] = std::move(c);
 
     std::string tmp = file_path + ".tmp";
+    bool ok = false;
     {
         std::ofstream f(tmp, std::ios::trunc);
-        if (!f.is_open()) return;  // keep dirty — retry on the next flush
-        f << j.dump(2);
-        if (!f.good()) return;
+        if (f.is_open()) {
+            f << j.dump(2);
+            ok = f.good();
+        }
     }
-    if (::rename(tmp.c_str(), file_path.c_str()) != 0) return;
+    if (ok) ok = ::rename(tmp.c_str(), file_path.c_str()) == 0;
+    if (!ok) {
+        // Stays dirty, so a path that becomes writable still saves. The line
+        // is logged once because the flush runs every five minutes.
+        if (!save_failed_logged) {
+            fprintf(stderr, "[reports] Cannot write %s, keeping reports in memory only\n",
+                    file_path.c_str());
+            save_failed_logged = true;
+        }
+        return;
+    }
+    save_failed_logged = false;
     dirty = false;
     // No content logging — the file itself is the operator's view.
 }

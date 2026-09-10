@@ -32,6 +32,7 @@ import 'package:hollow/src/ui/settings/security_section.dart';
 import 'package:hollow/src/ui/settings/shortcuts_section.dart';
 import 'package:hollow/src/ui/settings/storage_settings_cards.dart';
 import 'package:hollow/src/ui/settings/updates_section.dart';
+import 'package:hollow/src/ui/chat/hollow_link_utils.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 bool _settingsDialogOpen = false;
@@ -582,9 +583,7 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
   Future<void> _applyRelayAndRestart() async {
     await ref.read(relayDomainProvider.notifier).setDomain(_selectedRelay);
     await ref.read(savedRelayListProvider.notifier).addRelay(_selectedRelay);
-    // Only via the shared waiter: a directly-spawned copy dies against the
-    // native single-instance forwarder while this one is still shutting down.
-    await relaunchApp();
+    await exitForRelaySwitch();
   }
 
   Future<void> _removeRelay(String domain) async {
@@ -595,8 +594,15 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
   }
 
   Future<void> _submitNewRelay() async {
-    final domain = _newRelayController.text.trim();
-    if (domain.isEmpty) return;
+    final raw = _newRelayController.text.trim();
+    if (raw.isEmpty) return;
+    final domain = normalizeRelayHost(raw);
+    if (domain == null) {
+      HollowToast.show(
+          context, 'Enter a relay address such as myrelay.duckdns.org',
+          type: HollowToastType.error);
+      return;
+    }
     final list = ref.read(savedRelayListProvider);
     if (list.contains(domain)) return;
     await ref.read(savedRelayListProvider.notifier).addRelay(domain);

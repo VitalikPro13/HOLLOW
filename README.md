@@ -71,7 +71,7 @@ Your identity is a cryptographic keypair. Zero registrations. One recovery phras
 - **Distributed storage (Vault)**: erasure-coded encrypted shards distributed across server members. Files survive even when individual peers go offline
 - **Servers and channels**: create communities with text channels, voice channels, roles, and permissions. All state synchronized via CRDTs with no authoritative server. Optional: secure Twitch verification to limit members only to your followers/subs
 - **Public channels**: you can make a server channel public, so anyone with the server ID or join link can read it without joining. You can use a viewer inside the app or on the [website](https://hollow.anonlisten.com/)
-- **Custom relay support**: self-host your own relay for a fully isolated network. One `docker compose up` and you're running
+- **Custom relay support**: self-host your own relay for a fully isolated network: a VPS, a free DuckDNS name, one `.env` file and `docker compose up`
 - **Cryptographic identity**: Ed25519 keypair from a BIP-39 mnemonic. No accounts, no passwords, no email or phone verification
 - **Full local data retention**: the Archive tab shows every message saved in your local database, and you can export them
 - **Verifiable messages**: every message is Ed25519-signed. Exported conversations are cryptographically unforgeable
@@ -106,16 +106,16 @@ Current Progress: No comments, honestly. Way too much for my own sanity, but ton
 
 ## Self-Hosting
 
-Hollow supports self-hosted relays for fully isolated networks. Only the people connected to your relay can reach each other, and the official network is not involved.
+Hollow supports self-hosted relays for fully isolated networks. Only the people connected to your relay can reach each other, and the official network is not involved. You need a VPS with a public IP and about twenty minutes. The address can be a free DuckDNS name, so there is nothing to buy, and the certificate is obtained and renewed for you.
 
 ```bash
-cd relay-uws
-cp .env.example .env              # set your domain, IP, TURN secret
-cp turnserver.conf.example turnserver.conf
+git clone --recurse-submodules https://github.com/VitalikPro13/HOLLOW.git
+cd HOLLOW/relay-uws
+cp .env.example .env              # set your address, TURN secret and email
 docker compose up -d
 ```
 
-In the Hollow app, enter your relay domain during setup or in Settings. See [relay-uws/README.md](relay-uws/README.md) for full documentation.
+Then point the app at it in Settings, under Network. [relay-uws/SELF_HOSTING.md](relay-uws/SELF_HOSTING.md) is the full guide, including what a self-hosted relay does not have.
 
 ## Documentation
 

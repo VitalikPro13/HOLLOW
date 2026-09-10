@@ -3,3 +3,7 @@
 # loud: one CRLF conversion on a Windows checkout and every Linux client
 # rejects our repo signature.
 flatpak/hollow-flatpak.gpg binary
+
+# The relay hook scripts run inside Linux containers and on the relay host. A
+# CRLF checkout on Windows makes the shebang line unusable.
+relay-uws/**/*.sh text eol=lf

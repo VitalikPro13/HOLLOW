@@ -42,6 +42,8 @@ import 'package:hollow/src/ui/mobile/mobile_conferences_route.dart';
 import 'package:hollow/src/ui/mobile/mobile_voice_channel_route.dart';
 import 'package:hollow/src/ui/mobile/mobile_server_settings_route.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
+import 'package:hollow/src/core/providers/relay_domain_provider.dart';
+import 'package:hollow/src/ui/dialogs/relay_switch_dialog.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:flutter/services.dart';
 
@@ -1604,12 +1606,21 @@ class _NewConversationDialogState
     super.dispose();
   }
 
-  void _handleJoin() {
+  Future<void> _handleJoin() async {
     final input = _joinController.text.trim();
     if (input.isEmpty) return;
 
     // Accepts a hollow:// link, a web /join#server= link or a raw server id.
-    final serverId = inviteIdFromInput(input, HollowLinkType.serverInvite);
+    final invite = inviteFromInput(input, HollowLinkType.serverInvite);
+    final serverId = invite.id;
+
+    if (!await ensureRelayForInviteId(context, ref,
+        type: HollowLinkType.serverInvite,
+        id: serverId,
+        relay: invite.relay)) {
+      return;
+    }
+    if (!mounted) return;
 
     Navigator.of(context).pop();
     crdt_api.joinServer(serverId: serverId, nsfwConfirmed: false);
@@ -1871,7 +1882,8 @@ class _ServerContextSheet extends ConsumerWidget {
             label: 'Invite',
             onTap: () {
               Navigator.pop(context);
-              final link = webServerInviteLink(serverId);
+              final link = webServerInviteLink(serverId,
+                  relay: ref.read(relayDomainProvider));
               showInviteDialog(context, link, serverId);
             },
           ),

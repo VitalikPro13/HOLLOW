@@ -1677,6 +1677,28 @@ async fn expect_dm_pair_ready(relay: &MockRelay, a: &TestNode, b: &TestNode, sec
     );
 }
 
+/// Two devices of ONE master are ready to sync once their Olm session is confirmed
+/// and both sit in the master's inbox room, which is the room sibling traffic rides
+/// when the master has no friends and so no DM room.
+async fn expect_siblings_ready(relay: &MockRelay, a: &TestNode, b: &TestNode, secs: u64) {
+    expect_olm_confirmed(a, b, secs).await;
+    let room = format!("inbox:{}", a.master_id);
+    let ok = wait_until(secs, async || {
+        let members = relay.room_devices(&room);
+        members.contains(&a.device_id) && members.contains(&b.device_id)
+    })
+    .await;
+    assert!(
+        ok,
+        "siblings {} and {} never both joined {} within {}s, got {:?}",
+        a.device_id,
+        b.device_id,
+        room,
+        secs,
+        relay.room_devices(&room),
+    );
+}
+
 /// Wait until `holder`'s MLS group for `group_id` carries `leaf`'s device, and
 /// panic with the leaf list if it never does. `group_id` is a `server_id`, or
 /// `subgroup_id(server, channel)` for a per-channel group.
@@ -11651,10 +11673,11 @@ async fn personal_emotes_converge_across_siblings() {
     let c_dev = NativeKeypair::from_secret_bytes(&seed_bytes(C_DEV)).peer_id();
     super::resolver::seed_self(&m_master, &[b_dev.clone(), c_dev.clone()]);
 
+    // Spawn stagger against the symmetric KeyBundle glare (counted in BUDGET_MS).
     let mut b = spawn_node_with_friends(&relay, M_MASTER, B_DEV, &[]).await;
     sleep_ms(1500).await;
     let mut c = spawn_node_with_friends(&relay, M_MASTER, C_DEV, &[]).await;
-    sleep_ms(3000).await;
+    expect_siblings_ready(&relay, &b, &c, 15).await;
     drain_events(&mut b);
     drain_events(&mut c);
 
@@ -11740,6 +11763,7 @@ async fn personal_emotes_converge_across_siblings() {
     // A device that was OFFLINE for the change converges with NO manual action: the
     // verification push hands it the full set the moment it is back.
     relay.set_online(&c.device_id, false);
+    // B has no live probe for "saw C leave"; a settle (counted in BUDGET_MS).
     sleep_ms(500).await;
     drain_events(&mut b);
     drain_events(&mut c);
@@ -11759,6 +11783,8 @@ async fn personal_emotes_converge_across_siblings() {
         })
         .await
         .unwrap();
+    // The delta must have gone out unanswered before C returns, and a send to
+    // nobody has no signal (counted in BUDGET_MS).
     sleep_ms(500).await;
     relay.set_online(&c.device_id, true);
 
@@ -11797,6 +11823,7 @@ async fn personal_emote_sync_from_non_sibling_is_dropped() {
     let b_master = NativeKeypair::from_secret_bytes(&seed_bytes(B_MASTER)).peer_id();
     let x_master = NativeKeypair::from_secret_bytes(&seed_bytes(X_MASTER)).peer_id();
 
+    // Spawn stagger against the symmetric KeyBundle glare (counted in BUDGET_MS).
     let mut b = spawn_node_with_friends(&relay, B_MASTER, B_MASTER, &[&x_master]).await;
     sleep_ms(1500).await;
     let x = spawn_node_with_friends(&relay, X_MASTER, X_MASTER, &[&b_master]).await;
@@ -20006,8 +20033,9 @@ fn harness_fixed_sleep_budget_does_not_grow() {
     // The cap moves only for sleeps with nothing to poll: an ABSENCE proof, a settle
     // whose only signal is a running node's DB, the spawn stagger, and the auto-download
     // advert window that has no live probe. Every such sleep says so at its own call
-    // site, which is where the reason for the current number lives.
-    const BUDGET_MS: u64 = 604_000;
+    // site, which is where the reason for the current number lives. 2026-09-10: the
+    // personal-emote tests added two staggers and two send-to-nobody settles (3.3 s).
+    const BUDGET_MS: u64 = 607_300;
 
     let src = include_str!("test_harness.rs");
     // Built from pieces so this scan does not count its own source text.

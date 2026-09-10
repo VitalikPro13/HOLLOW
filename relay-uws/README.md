@@ -19,6 +19,7 @@ The relay is a lightweight message router. It keeps nothing on disk, cannot decr
 - **TURN credential generation**: time-limited HMAC-SHA1 credentials for NAT traversal via coturn (`/turn-credentials`).
 - **License key gating**: optional closed-beta access control via a `keys.json` file, with 30-second hot-reload and active connection revocation.
 - **Server stats**: live memory, bandwidth, and online user count via `/server-stats` (reads `/proc` on Linux).
+- **Capability advertisement**: `/relay-status` answers `license_required` (an access key is needed to connect), `version` (the relay's version), `turn` (this relay can issue TURN credentials, i.e. `TURN_SECRET` is set) and `forwarder` (a media forwarder is configured). The app reads it before connecting, so it knows what to ask for and what to tell the user is missing.
 
 ## Performance
 
@@ -65,10 +66,11 @@ Two more things on the host keep "never on disk" literally true, because the rel
 - **No swap.** A swapfile lets the kernel page relay memory, ciphertext and peer ids included, onto the SSD. The production box runs with none.
 - **No core dumps.** `LimitCORE=0` on the unit (and apport disabled on the host), or a crash writes the whole heap to disk.
 
-Under Docker there is no fd store, so the handoff no-ops and buffers end with the container. The codec has its own unit test:
+Under Docker there is no fd store, so the buffers end with the container; certificate renewals no longer restart it. The codec has its own unit test:
 
 ```bash
 cd test && g++ -std=c++17 -I../src test_snapshot_codec.cpp -o test_snapshot_codec && ./test_snapshot_codec
+cd test && g++ -std=c++17 -I../src test_turn_uris.cpp -o test_turn_uris && ./test_turn_uris
 ```
 
 A side effect worth knowing: the relay now exits cleanly. It used to close only its listen socket on SIGTERM, and the periodic timers plus every open connection kept the event loop alive until systemd's 90-second stop timeout killed it, so a restart was a 90-second brownout for new connections. It is now well under a second.
@@ -93,28 +95,9 @@ The output is a single binary: `build/hollow-relay` (~636 KB).
 
 ## Docker (self-hosting)
 
-### Requirements
+`docker compose up -d` builds the relay, gets a Let's Encrypt certificate, keeps it renewed, and runs coturn alongside it. Configuration is one `.env` file, and the address can be a free DuckDNS name, your VPS IP, or your own domain.
 
-1. Create a user to run the Docker container (we assume "hollow" in the examples).
-2. Add the user to the Docker group.
-3. If you have SELinux installed be sure persistent storage is properly
-   labeled. This ensures the services running on the container can write
-   to their mounted storage.
-4. Install Docker Engine with the Docker Compose Plugin.
-5. Clone this repo in /opt and make hollow the owner of all the files.
-
-Note: `docker compose up` will build the hollow-relay binary as part of the startup process. There is no need to install the dependencies or run through the build process above.
-
-```bash
-cp .env.example .env              # edit with your domain, IP, TURN secret
-cp turnserver.conf.example turnserver.conf  # edit realm + secret + allowed-peer-ip (your public IPs)
-git submodule update --init --recursive
-docker compose up -d
-```
-
-This starts the relay (TLS on 443), certbot (auto Let's Encrypt), and coturn (TURN on 3478). See `.env.example` for configuration.
-
-After the relay is up and running you can use the provided systemd unit file as a template to ensure the service starts up after reboots. See `deploy/hollow-relay-docker-compose.service` Additionally install `deploy/hollow-relay-cert-renewed.path` and `deploy/hollow-relay-cert-renewed.service` if you want to handle cert renewals gracefully. 
+**[SELF_HOSTING.md](SELF_HOSTING.md) is the guide.** It covers picking an address, hardening the host, the `.env` fields, pointing the app at your relay, what a self-hosted relay does not have (phone push, the media forwarder, restart persistence), and troubleshooting.
 
 ## Running (manual)
 
@@ -122,14 +105,14 @@ After the relay is up and running you can use the provided systemd unit file as 
 # With TLS (production)
 ./build/hollow-relay \
   --port 443 \
-  --public-ip 1.2.3.4 \
+  --domain relay.example.com \
   --cert-file /etc/letsencrypt/live/relay.example.com/fullchain.pem \
   --key-file /etc/letsencrypt/live/relay.example.com/privkey.pem
 
 # With license keys + TURN
 TURN_SECRET=your_secret ./build/hollow-relay \
   --port 443 \
-  --public-ip 1.2.3.4 \
+  --domain relay.example.com \
   --keys-file keys.json \
   --cert-file /path/to/fullchain.pem \
   --key-file /path/to/privkey.pem
@@ -140,9 +123,9 @@ TURN_SECRET=your_secret ./build/hollow-relay \
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--port` | `443` | Listen port |
-| `--public-ip` | *(none)* | Public IP of this server |
-| `--domain` | `relay.anonlisten.com` | Domain name |
+| `--domain` | `relay.anonlisten.com` | Public host clients connect to. The TURN URIs handed to clients are built from it, so a self-hosted relay must set it |
 | `--keys-file` | `keys.json` | License keys JSON path |
+| `--reports-file` | `reports.json` | User report counts JSON path |
 | `--cert-file` | `/etc/letsencrypt/live/relay.anonlisten.com/fullchain.pem` | TLS certificate chain |
 | `--key-file` | `/etc/letsencrypt/live/relay.anonlisten.com/privkey.pem` | TLS private key |
 | `--forwarder-peer-id` | *(none)* | Media forwarder peer_id advertised via `get_media_forwarder` (startup-load; restart on rotation) |
@@ -176,20 +159,20 @@ sudo setcap cap_net_bind_service=+ep ./build/hollow-relay
 
 A sample systemd service file is provided in `deploy/hollow-relay.service`. Keep its `NotifyAccess`, `FileDescriptorStoreMax` and `LimitCORE` lines (see [Restart persistence](#restart-persistence)).
 
-For certificate renewal, use certbot with a deploy hook:
+### Certificate reload
 
-```bash
-# /etc/letsencrypt/renewal-hooks/deploy/reload-relay.sh
-#!/bin/bash
-systemctl restart hollow-relay
-```
+The relay checks its certificate and key every 60 seconds and reloads them when either file changes, so a renewal costs nothing and restarts nothing. OpenSSL applies a replaced pair to new connections only, and existing connections keep their session. The pair is validated in a throwaway context first, so a copy caught half-written leaves the old certificate serving and logs `[main] TLS certificate reload failed, keeping the previous one`.
+
+No deploy hook that restarts the relay is needed, and none should be added: a restart empties the offline buffers (see [Restart persistence](#restart-persistence)).
 
 ## Architecture
 
 ```
 src/
-  main.cpp           Entry point, CLI parsing, timer setup, shutdown
+  main.cpp           Entry point, CLI parsing, timer setup, certificate reload, shutdown
   config.h           Config struct
+  version.h          Version reported by /relay-status
+  turn_uris.h        TURN URIs built from --domain (unit tested)
   state.h            All shared state (single-threaded, no locks)
   crypto.h/.cpp      Ed25519 (libsodium), HMAC-SHA1 (OpenSSL), base64
   license.h/.cpp     License key load/validate/hot-reload/revocation

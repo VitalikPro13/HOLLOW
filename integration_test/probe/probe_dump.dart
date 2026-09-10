@@ -22,6 +22,7 @@ import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_tooltip.dart';
 import 'package:hollow/src/core/providers/node_provider.dart';
+import 'package:hollow/src/core/providers/relay_domain_provider.dart';
 
 import 'probe_targets.dart';
 
@@ -393,6 +394,12 @@ class ProbeDump {
       }
     }
 
+    // Which relay this instance is pointed at. The bootstrap reads it, so it
+    // always exists by the time anything is drivable, and it is the only thing
+    // that says whether a relay switch actually took.
+    final relayDomain = read(relayDomainProvider);
+    if (relayDomain != null) out['relayDomain'] = relayDomain;
+
     final friends = read(friendsProvider);
     if (friends != null) {
       out['friends'] = [
@@ -524,6 +531,9 @@ class ProbeDump {
     }
     if (providers['connection'] != null) {
       buffer.writeln('- connection: ${providers['connection']}');
+    }
+    if (providers['relayDomain'] != null) {
+      buffer.writeln('- relay: ${providers['relayDomain']}');
     }
     final friends = providers['friends'] as List?;
     if (friends != null) {

@@ -1,10 +1,49 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+
 class RelayStatus {
   final bool licenseRequired;
-  const RelayStatus({this.licenseRequired = false});
+
+  /// Null on a relay too old to report the field, which is not the same as
+  /// "no": every chip that reads these stays hidden while they are unknown.
+  final String? version;
+  final bool? turn;
+  final bool? forwarder;
+
+  const RelayStatus({
+    this.licenseRequired = false,
+    this.version,
+    this.turn,
+    this.forwarder,
+  });
+
+  factory RelayStatus.fromJson(Map<String, dynamic> json) {
+    final version = json['version'];
+    final turn = json['turn'];
+    final forwarder = json['forwarder'];
+    return RelayStatus(
+      licenseRequired: json['license_required'] == true,
+      version: version is String && version.isNotEmpty ? version : null,
+      turn: turn is bool ? turn : null,
+      forwarder: forwarder is bool ? forwarder : null,
+    );
+  }
 }
+
+/// What the relay we are on said about itself at startup, or null before the
+/// one fetch lands and on a relay that never answered.
+class RelayStatusNotifier extends Notifier<RelayStatus?> {
+  @override
+  RelayStatus? build() => null;
+
+  void set(RelayStatus status) => state = status;
+}
+
+final relayStatusProvider =
+    NotifierProvider<RelayStatusNotifier, RelayStatus?>(
+        RelayStatusNotifier.new);
 
 Future<RelayStatus> fetchRelayStatus({required String domain}) async {
   final client = HttpClient();
@@ -22,10 +61,7 @@ Future<RelayStatus> fetchRelayStatus({required String domain}) async {
         return const RelayStatus();
       }
 
-      final json = jsonDecode(body) as Map<String, dynamic>;
-      return RelayStatus(
-        licenseRequired: json['license_required'] == true,
-      );
+      return RelayStatus.fromJson(jsonDecode(body) as Map<String, dynamic>);
     }()
         .timeout(const Duration(seconds: 6));
   } catch (_) {

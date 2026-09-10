@@ -15,6 +15,7 @@ import 'package:hollow/src/ui/components/hollow_focus_ring.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/core/providers/relay_domain_provider.dart';
+import 'package:hollow/src/ui/chat/hollow_link_utils.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 typedef WelcomeResult = ({String action, String relayDomain});
@@ -86,9 +87,20 @@ class _WelcomeContentState extends State<_WelcomeContent> {
     }
   }
 
-  String get _relayDomain {
+  /// Null when what is typed is not a host, so a typo never starts the node
+  /// on a relay the user did not mean.
+  String? get _relayDomain {
     final text = _relayController.text.trim();
-    return text.isEmpty ? kDefaultRelayDomain : text;
+    return text.isEmpty ? kDefaultRelayDomain : normalizeRelayHost(text);
+  }
+
+  bool _relayIsUsable() {
+    if (_relayDomain != null) return true;
+    HollowToast.show(
+        context, 'Enter a relay address such as myrelay.duckdns.org',
+        type: HollowToastType.error);
+    setState(() => _showAdvanced = true);
+    return false;
   }
 
   @override
@@ -152,11 +164,13 @@ class _WelcomeContentState extends State<_WelcomeContent> {
 
     // A large backup takes seconds, and frozen silence on the first-run screen
     // reads as a hang.
+    if (!_relayIsUsable()) return;
     setState(() => _restoring = true);
     try {
       await storage_api.importBackup(backupPath: path, passphrase: passphrase);
       if (!mounted) return;
-      Navigator.of(context).pop((action: 'restored_backup', relayDomain: _relayDomain));
+      Navigator.of(context)
+          .pop((action: 'restored_backup', relayDomain: _relayDomain!));
     } catch (e) {
       if (!mounted) return;
       HollowToast.show(context, 'Import failed: $e', type: HollowToastType.error);
@@ -294,7 +308,11 @@ class _WelcomeContentState extends State<_WelcomeContent> {
           title: 'Create New Identity',
           subtitle: 'Generate a new identity with a fresh recovery phrase',
           hollow: hollow,
-          onTap: () => Navigator.of(context).pop((action: 'create_new', relayDomain: _relayDomain)),
+          onTap: () {
+            if (!_relayIsUsable()) return;
+            Navigator.of(context)
+                .pop((action: 'create_new', relayDomain: _relayDomain!));
+          },
         ),
 
         const SizedBox(height: HollowSpacing.sm),
@@ -310,7 +328,11 @@ class _WelcomeContentState extends State<_WelcomeContent> {
           title: 'Link a device',
           subtitle: 'Sync from your other device with a 6-digit code',
           hollow: hollow,
-          onTap: () => Navigator.of(context).pop((action: 'link_device', relayDomain: _relayDomain)),
+          onTap: () {
+            if (!_relayIsUsable()) return;
+            Navigator.of(context)
+                .pop((action: 'link_device', relayDomain: _relayDomain!));
+          },
         ),
 
         const SizedBox(height: HollowSpacing.sm),

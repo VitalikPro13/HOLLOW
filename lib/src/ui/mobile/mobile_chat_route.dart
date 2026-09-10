@@ -78,6 +78,7 @@ import 'package:hollow/src/core/services/voice_message_recorder.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
+import 'package:hollow/src/ui/dialogs/no_turn_dialog.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
 
@@ -3432,6 +3433,8 @@ class _DmCallButtons extends ConsumerWidget {
         );
         if (confirmed != true || !context.mounted) return;
       }
+      if (!await ensureTurnForCall(context, ref)) return;
+      if (!context.mounted) return;
       await ref
           .read(callProvider.notifier)
           .startCall(peerId, withVideo: withVideo);

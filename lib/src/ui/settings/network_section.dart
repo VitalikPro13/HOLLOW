@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/gif_provider.dart';
 import 'package:hollow/src/core/providers/link_preview_settings_provider.dart';
 import 'package:hollow/src/core/providers/relay_domain_provider.dart';
+import 'package:hollow/src/core/providers/relay_status_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
@@ -13,6 +14,7 @@ import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_focus_ring.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
+import 'package:hollow/src/ui/components/relay_no_turn_chip.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/settings/settings_shared.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -65,7 +67,9 @@ class NetworkSettingsView extends ConsumerWidget {
           ),
           const SizedBox(height: HollowSpacing.sm),
           for (final domain in ref.watch(savedRelayListProvider)) ...[
-            _buildRelayRow(hollow, domain),
+            _buildRelayRow(hollow, domain,
+                noTurn: domain == initialRelay &&
+                    ref.watch(relayStatusProvider)?.turn == false),
             const SizedBox(height: HollowSpacing.xs),
           ],
           if (showAddRelay)
@@ -139,7 +143,8 @@ class NetworkSettingsView extends ConsumerWidget {
     ]);
   }
 
-  Widget _buildRelayRow(HollowTheme hollow, String domain) {
+  Widget _buildRelayRow(HollowTheme hollow, String domain,
+      {required bool noTurn}) {
     final isSelected = domain == selectedRelay;
     final isActive = domain == initialRelay;
     final isOfficial = domain == kDefaultRelayDomain;
@@ -218,6 +223,10 @@ class NetworkSettingsView extends ConsumerWidget {
                     ),
                   ),
                 ),
+              if (noTurn) ...[
+                const SizedBox(width: HollowSpacing.sm),
+                const RelayNoTurnChip(),
+              ],
               if (!isOfficial) ...[
                 const SizedBox(width: HollowSpacing.sm),
                 GestureDetector(
@@ -994,3 +1003,4 @@ class _LinkPreviewSettingsCardState
     );
   }
 }
+

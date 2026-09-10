@@ -917,6 +917,12 @@ class ProbeRunner {
             'Readable now: ${known.join(", ")}');
       }
       value = held is String ? held : jsonEncode(held);
+    } else if (from == 'count') {
+      // How MANY widgets a target matches, as a value a script can branch on.
+      // Two stacked dialogs each carry a Cancel, and only the topmost one may
+      // be tapped, so the index a step needs is not knowable when it is
+      // written.
+      value = '${ProbeTargets.resolve('${step['target']}').evaluate().length}';
     } else if (from == 'clipboard') {
       final data = await tester.runAsync(
           () => Clipboard.getData(Clipboard.kTextPlain));

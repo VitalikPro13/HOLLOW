@@ -1,5 +1,6 @@
 #include "http_handlers.h"
 #include "json.hpp"
+#include "version.h"
 #include <cmath>
 #include <cstdio>
 #include <fstream>
@@ -144,17 +145,20 @@ static void handle_server_stats(HttpResponse* res, RelayState& state) {
     res->end(state.stats_cache.cached_json);
 }
 
-static void handle_relay_status(HttpResponse* res, RelayState& state) {
+static void handle_relay_status(HttpResponse* res, RelayState& state,
+                                const Config& config) {
     cors_headers(res);
     json resp = {
         {"license_required", state.license.enabled},
-        {"version", "0.1.0"}
+        {"version", HOLLOW_RELAY_VERSION},
+        {"turn", !config.turn_secret.empty()},
+        {"forwarder", !config.forwarder_peer_id.empty()}
     };
     res->end(resp.dump());
 }
 
 void setup_http_handlers(uWS::SSLApp& app, RelayState& state,
-                         const Config& /*config*/) {
+                         const Config& config) {
     app.options("/*", [](HttpResponse* res, HttpRequest* /*req*/) {
         res->writeHeader("Access-Control-Allow-Origin", "*");
         res->writeHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
@@ -170,7 +174,7 @@ void setup_http_handlers(uWS::SSLApp& app, RelayState& state,
         handle_server_stats(res, state);
     });
 
-    app.get("/relay-status", [&state](HttpResponse* res, HttpRequest* /*req*/) {
-        handle_relay_status(res, state);
+    app.get("/relay-status", [&state, &config](HttpResponse* res, HttpRequest* /*req*/) {
+        handle_relay_status(res, state, config);
     });
 }

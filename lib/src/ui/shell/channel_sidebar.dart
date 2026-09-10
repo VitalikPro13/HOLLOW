@@ -54,6 +54,7 @@ import 'package:hollow/src/ui/shell/voice_channel_panel.dart';
 import 'package:hollow/src/ui/sidebar/peer_card.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
+import 'package:hollow/src/core/providers/relay_domain_provider.dart';
 
 /// Full height of the server banner header (issue #25) when the sidebar has
 /// room for it; under pressure it yields, see [bannerHeaderHeight].
@@ -399,22 +400,24 @@ class ChannelSidebar extends StatelessWidget {
           if (selectedServer != null) ...[
             HollowTooltip(
               message: 'Invite people',
-              child: HollowPressable(
-                semanticLabel: 'Invite people',
-                onTap: () {
-                  // Web form: clickable anywhere, since the browser bounces
-                  // into the app, and new clients still render a Join card.
-                  final link =
-                      webServerInviteLink(selectedServer!.serverId);
-                  showInviteDialog(
-                      context, link, selectedServer!.serverId);
-                },
-                borderRadius: BorderRadius.circular(hollow.radiusSm),
-                padding: const EdgeInsets.all(HollowSpacing.xs),
-                child: Icon(
-                  LucideIcons.userPlus,
-                  size: 16,
-                  color: hollow.textSecondary,
+              child: Consumer(
+                builder: (context, ref, _) => HollowPressable(
+                  semanticLabel: 'Invite people',
+                  onTap: () {
+                    // Web form: clickable anywhere, since the browser bounces
+                    // into the app, and new clients still render a Join card.
+                    final link = webServerInviteLink(selectedServer!.serverId,
+                        relay: ref.read(relayDomainProvider));
+                    showInviteDialog(
+                        context, link, selectedServer!.serverId);
+                  },
+                  borderRadius: BorderRadius.circular(hollow.radiusSm),
+                  padding: const EdgeInsets.all(HollowSpacing.xs),
+                  child: Icon(
+                    LucideIcons.userPlus,
+                    size: 16,
+                    color: hollow.textSecondary,
+                  ),
                 ),
               ),
             ),
@@ -625,7 +628,8 @@ class _ServerContentState extends State<_ServerContent> {
                 onOpenSettings: w.onOpenSettings,
                 onInvite: () {
                   // The same web-form link the header's invite button copies.
-                  final link = webServerInviteLink(w.serverId);
+                  final link = webServerInviteLink(w.serverId,
+                      relay: ref.read(relayDomainProvider));
                   showInviteDialog(context, link, w.serverId);
                 },
                 anchor: anchor,

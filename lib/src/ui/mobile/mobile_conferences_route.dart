@@ -14,6 +14,7 @@ import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/mobile/mobile_page_route.dart';
 import 'package:hollow/src/ui/mobile/mobile_voice_channel_route.dart';
 import 'package:hollow/src/ui/components/hollow_tooltip.dart';
+import 'package:hollow/src/core/providers/relay_domain_provider.dart';
 import 'package:hollow/src/ui/shell/conference_dashboard.dart'
     show
         conferenceDenyMessage,
@@ -238,7 +239,8 @@ class _MobileConferencesRouteState
               HollowPressable(
                 semanticLabel: 'Copy invite link for ${room.name}',
                 onTap: () {
-                  Clipboard.setData(ClipboardData(text: room.inviteLink));
+                  Clipboard.setData(ClipboardData(
+                      text: room.inviteLink(ref.read(relayDomainProvider))));
                   HollowToast.show(context, 'Invite link copied',
                       type: HollowToastType.success);
                 },

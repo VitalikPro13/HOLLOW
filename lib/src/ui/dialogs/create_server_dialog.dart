@@ -1,4 +1,5 @@
 ﻿import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:hollow/src/ui/app.dart' show hollowNavigatorKey;
 import 'package:hollow/src/theme/hollow_spacing.dart';
@@ -10,6 +11,7 @@ import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
+import 'package:hollow/src/ui/dialogs/relay_switch_dialog.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Shows a dialog to join or create a server.
@@ -27,7 +29,7 @@ void showCreateServerDialog(BuildContext context) {
           ? (screenWidth - HollowSpacing.xl * 2).clamp(0.0, 600.0)
           : 400.0;
 
-      final joinSection = Column(
+      final joinSection = Consumer(builder: (context, joinRef, _) => Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -60,17 +62,17 @@ void showCreateServerDialog(BuildContext context) {
               fontSize: 12,
             ),
             onSubmitted: (_) {
-              _handleJoin(dialogContext, joinController);
+              _handleJoin(dialogContext, joinRef, joinController);
             },
           ),
           const SizedBox(height: HollowSpacing.md),
           HollowButton.filled(
-            onPressed: () => _handleJoin(dialogContext, joinController),
+            onPressed: () => _handleJoin(dialogContext, joinRef, joinController),
             expand: true,
             child: const Text('Join'),
           ),
         ],
-      );
+      ));
 
       final createSection = Column(
         mainAxisSize: MainAxisSize.min,
@@ -193,13 +195,20 @@ void showCreateServerDialog(BuildContext context) {
   );
 }
 
-void _handleJoin(BuildContext context, TextEditingController controller) {
+Future<void> _handleJoin(BuildContext context, WidgetRef ref,
+    TextEditingController controller) async {
   final input = controller.text.trim();
   if (input.isEmpty) return;
 
   // Accepts a hollow:// link, a web /join# link or a raw server id.
-  final serverId = inviteIdFromInput(input, HollowLinkType.serverInvite);
+  final invite = inviteFromInput(input, HollowLinkType.serverInvite);
+  final serverId = invite.id;
 
+  if (!await ensureRelayForInviteId(context, ref,
+      type: HollowLinkType.serverInvite, id: serverId, relay: invite.relay)) {
+    return;
+  }
+  if (!context.mounted) return;
   Navigator.of(context).pop();
   // Fire-and-forget FFI: an un-awaited Future's rejection hits the zone crash
   // handler (feedback_ffi_fire_and_forget_catcherror).

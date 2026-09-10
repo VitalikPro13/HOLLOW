@@ -1050,6 +1050,13 @@ File: `lib/src/core/providers/relay_domain_provider.dart`
 - `setDomain(String)` — writes to DB + updates state.
 - Read by all providers that build relay URLs (ICE config, relay status, relay stats).
 - Passed to Rust via `network_api.setRelayUrl(domain:)` before `start_node()`.
+- Values are normalised by `normalizeRelayHost()` (`hollow_link_utils.dart`, 2026-09-10): scheme and trailing `/ws` stripped, lowercased, `name` | IPv4 | `[ipv6]` with an optional `:port`. Both Settings add-relay fields and the welcome dialog refuse anything else.
+- A relay change exits through ONE path, `exitForRelaySwitch()` (`app_relaunch.dart`): desktop `relaunchApp()`, mobile notifyShutdown + `SystemNavigator.pop()`.
+
+### relayStatusProvider -- `NotifierProvider<RelayStatusNotifier, RelayStatus?>` (2026-09-10)
+- `relay_status_provider.dart`. What `/relay-status` said at boot: `licenseRequired`, `version`, `turn`, `forwarder` (the last three nullable = an old relay, treated as unknown, never as false). Fetched ONCE in `_bootstrap`, set right after the fetch.
+- Read by the `No TURN server` chip on the active relay row (both Settings screens), by the pre-dial guard `ensureTurnForCallFromRef` (`no_turn_dialog.dart`; blocks a DM call, a mobile call and a VC join ONLY when `turn == false` AND Always relay calls is on), and by nothing else.
+- `StatusNotifier` (status.json banner) gates its fetch on `relayDomainProvider == kDefaultRelayDomain` via `onRelayLoaded()`: a self-hoster never sees the official relay's maintenance notice.
 
 ### savedRelayListProvider -- `NotifierProvider<SavedRelayListNotifier, List<String>>`
 - List of saved relay domains for the Settings UI selector.

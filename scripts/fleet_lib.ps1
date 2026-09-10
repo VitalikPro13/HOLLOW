@@ -169,6 +169,23 @@ function Expand-FleetVars($value) {
     return $value
 }
 
+# The welcome dialog's Advanced relay field, as steps.
+#
+# The relay a peer talks to is chosen ONCE, before its identity exists, and it
+# is stamped into the fixture with everything else; there is no other moment a
+# fleet peer can be pointed at a self-hosted relay. Shared so fleet.ps1's
+# -Relay and the journey scripts fill the same field the same way.
+# An empty domain means the official relay and produces no steps at all.
+function Get-RelayWelcomeSteps($relayDomain) {
+    if (-not $relayDomain) { return @() }
+    return @(
+        @{ op = 'tap'; target = 'text:Advanced'; index = 0 },
+        @{ op = 'wait_for'; target = 'hint:relay.anonlisten.com'; timeout_ms = 10000 },
+        @{ op = 'enter_text'; target = 'hint:relay.anonlisten.com'; value = $relayDomain },
+        @{ op = 'wait_for'; target = "text:$relayDomain"; timeout_ms = 10000 }
+    )
+}
+
 # A fleet instance is identified by where its exe lives, so nothing here can
 # ever match a real Hollow the user happens to have open.
 function Get-PeerProcess($peer) {

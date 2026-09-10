@@ -1129,11 +1129,14 @@ Statistics are cached for 5 seconds to avoid excessive filesystem reads. This en
 The relay domain is fully configurable, enabling self-hosted, relay-independent operation:
 
 - **Default relay:** `relay.anonlisten.com` (operated by AnonListen).
-- **Custom relay:** Clients can select an alternative relay domain at first launch or in settings. All WebSocket, STUN, TURN, and signaling URLs are derived from the configured relay domain.
-- **Persistence:** The selected relay domain is stored in the local encrypted database. A saved relay list allows switching between known relays.
-- **Docker deployment:** The relay can be self-hosted via Docker with automated TLS (certbot) and an integrated coturn TURN server.
+- **Custom relay:** Clients can select an alternative relay address at first launch or in settings. The address is a host name, a bare IP address, or either with a port; the WebSocket and STUN URLs are derived from it, and the TURN URIs are handed out by the relay itself, built from the address the relay was started with, so a self-hosted relay always points its clients at its own TURN server.
+- **Persistence:** The selected relay address is stored in the local encrypted database. A saved relay list allows switching between known relays.
+- **Capability advertisement:** A relay answers an unauthenticated `/relay-status` query with what it offers: whether an access key is required, its version, whether it can issue TURN credentials, and whether a media forwarder is configured. A client reads it before connecting and adapts: it labels a relay without TURN, refuses to start a relayed-only call on it, and names the cause when a call fails for lack of a relayed path. A relay too old to answer the newer fields is treated as unknown, never as absent.
+- **Docker deployment:** The relay can be self-hosted via Docker with automated TLS (Let's Encrypt, including certificates for bare IP addresses and DNS-validated certificates for free dynamic-DNS names) and an optional coturn TURN server. The relay reloads a renewed certificate in place; renewal never restarts it. A relay requires a publicly trusted certificate: clients reject self-signed ones.
 
-Since the relay is a zero-knowledge pipe, switching relays is transparent to the protocol: the same identity, encryption, and CRDT synchronization work identically regardless of which relay is used. A censorious or unavailable relay can be replaced without any protocol changes.
+Each relay is an island. Two clients on different relays cannot reach each other, and relays never talk to each other. An invite therefore names its relay alongside the server, room or conference it points to, stamped by the inviter's client from the relay it is connected to. A client that receives an invite for a different relay asks the user whether to switch, states which relay it would move to, and never switches silently: a link that could move someone onto a stranger's relay unasked would be a phishing shape, since that relay observes IP addresses, timing and room membership even though it can read nothing. Older links carry no relay and are opened on the client's current one.
+
+Since the relay is a zero-knowledge pipe, switching relays is transparent to the protocol: the same identity, encryption, and CRDT synchronization work identically regardless of which relay is used. A censorious or unavailable relay can be replaced without any protocol changes. What a self-hosted relay does not provide is documented rather than emulated: push wake-ups for mobile clients (they require platform push credentials held only by the official deployment), the media forwarder, and buffer persistence across a relay restart.
 
 ### 12.12 Temporary Nicknames
 

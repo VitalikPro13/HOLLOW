@@ -1,3 +1,6 @@
+# Starts the self-hosted relay stack on boot. Assumes the repository at
+# /opt/HOLLOW and a user named hollow in the docker group. See
+# relay-uws/SELF_HOSTING.md.
 [Unit]
 Description=Hollow Relay
 Requires=docker.service

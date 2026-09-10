@@ -25,6 +25,8 @@ import 'package:hollow/src/ui/components/hollow_toggle.dart';
 import 'package:hollow/src/ui/components/hollow_tooltip.dart';
 import 'package:hollow/src/ui/components/ptt_mic_visual.dart';
 import 'package:hollow/src/ui/dialogs/screen_share_dialog.dart';
+import 'package:hollow/src/core/providers/relay_domain_provider.dart';
+import 'package:hollow/src/ui/dialogs/relay_switch_dialog.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Human-readable joiner-side denial message.
@@ -306,7 +308,7 @@ class _RoomCard extends ConsumerWidget {
           HollowButton.ghost(
             compact: true,
             icon: const Icon(LucideIcons.link, size: 14),
-            onPressed: () => _copyLink(context),
+            onPressed: () => _copyLink(context, ref),
             child: const Text('Copy link'),
           ),
           const SizedBox(width: HollowSpacing.sm),
@@ -372,8 +374,9 @@ class _RoomCard extends ConsumerWidget {
     );
   }
 
-  void _copyLink(BuildContext context) {
-    Clipboard.setData(ClipboardData(text: room.inviteLink));
+  void _copyLink(BuildContext context, WidgetRef ref) {
+    Clipboard.setData(ClipboardData(
+        text: room.inviteLink(ref.read(relayDomainProvider))));
     HollowToast.show(context, 'Invite link copied',
         type: HollowToastType.success);
   }
@@ -594,7 +597,7 @@ class _JoinConferenceDialogState extends ConsumerState<_JoinConferenceDialog> {
     super.dispose();
   }
 
-  void _join() {
+  Future<void> _join() async {
     final text = _controller.text.trim();
     if (text.isEmpty) return;
     String? confId;
@@ -620,6 +623,13 @@ class _JoinConferenceDialogState extends ConsumerState<_JoinConferenceDialog> {
       setState(() => _error = 'Paste a meeting link or its id');
       return;
     }
+    if (!await ensureRelayForInviteId(context, ref,
+        type: HollowLinkType.conference,
+        id: confId,
+        relay: link?.relay)) {
+      return;
+    }
+    if (!mounted) return;
     Navigator.of(context).pop();
     unawaited(ref
         .read(conferenceProvider.notifier)
@@ -926,7 +936,8 @@ class _CallView extends ConsumerWidget {
               compact: true,
               icon: const Icon(LucideIcons.link, size: 14),
               onPressed: () {
-                final link = webConferenceInviteLink(conf.activeConfId!);
+                final link = webConferenceInviteLink(conf.activeConfId!,
+                    relay: ref.read(relayDomainProvider));
                 Clipboard.setData(ClipboardData(text: link));
                 HollowToast.show(context, 'Invite link copied',
                     type: HollowToastType.success);

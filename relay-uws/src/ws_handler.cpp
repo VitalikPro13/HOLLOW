@@ -2,6 +2,7 @@
 #include "crypto.h"
 #include "device_list.h"
 #include "validate.h"
+#include "turn_uris.h"
 #include "json.hpp"
 #include <cstdio>
 #include <cstring>
@@ -2239,11 +2240,7 @@ static void handle_text_message(SSLWebSocket* ws, PerSocketData* data,
                            {"username", username},
                            {"password", password},
                            {"ttl", ttl},
-                           {"uris", {
-                               "turn:relay.anonlisten.com:3478",
-                               "turn:relay.anonlisten.com:3478?transport=tcp",
-                               "turns:relay.anonlisten.com:5349"
-                           }}});
+                           {"uris", turn_uris(config.domain)}});
         }
     } else if (type == "get_media_forwarder") {
         // Media forwarder discovery (media forwarding step 3) — mirrors

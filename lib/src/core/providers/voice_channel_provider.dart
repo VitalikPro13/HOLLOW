@@ -38,6 +38,7 @@ import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/ui/app.dart' show hollowNavigatorKey;
 import 'package:hollow/src/ui/components/hollow_toast.dart';
+import 'package:hollow/src/ui/dialogs/no_turn_dialog.dart';
 
 /// Log to hollow_debug.log; console-only when the FFI isn't up (tests).
 void _vcLog(String msg) {
@@ -589,7 +590,28 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
   }
 
   /// Join a voice channel. If already in one, leave it first.
+  /// One warning per join: every unreachable member trips the same give-up,
+  /// and a toast per leg would bury the channel.
+  bool _noTurnWarned = false;
+
+  void _warnNoTurnOnce() {
+    if (_noTurnWarned) return;
+    if (ref.read(iceConfigProvider.notifier).hasTurnCredentials) return;
+    _noTurnWarned = true;
+    final overlay = hollowNavigatorKey.currentState?.overlay;
+    if (overlay == null) return;
+    HollowToast.show(
+      overlay.context,
+      'Could not reach some members directly. This relay has no TURN server, '
+      'so voice needs a direct route.',
+      type: HollowToastType.error,
+      overlayState: overlay,
+    );
+  }
+
   Future<void> joinChannel(String serverId, String channelId) async {
+    if (!await ensureTurnForCallFromRef(ref)) return;
+    _noTurnWarned = false;
     // While a voice session is live the relay socket retries every second
     // instead of backing off toward thirty, so a blinking Wi-Fi is back fast.
     RealtimeSessionFlag.acquire('voice-channel');
@@ -741,6 +763,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     // A member on a bad connection is labelled on their own tile only.
     svc.onLinkHealth = (peerId, snapshot) =>
         ref.read(vcLinkHealthProvider.notifier).setFor(peerId, snapshot);
+    svc.onLegGiveUp = (_) => _warnNoTurnOnce();
     // See the DM twin: an ICE restart offer needs the relay to carry it, so a
     // restart fired while our own relay link is down is a wasted attempt.
     svc.canSignal = () =>
@@ -1109,6 +1132,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
 
   /// Leave the current voice channel.
   Future<void> leaveChannel() async {
+    _noTurnWarned = false;
     RealtimeSessionFlag.release('voice-channel');
     if (!state.isInVoiceChannel || _leaving) return;
     _leaving = true;

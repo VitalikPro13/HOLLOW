@@ -8,6 +8,7 @@ import 'package:hollow/src/core/providers/peers_provider.dart';
 import 'package:hollow/src/core/providers/selected_peer_provider.dart';
 import 'package:hollow/src/core/providers/service_providers.dart';
 import 'package:hollow/src/ui/chat/hollow_link_utils.dart';
+import 'package:hollow/src/core/providers/relay_domain_provider.dart';
 
 class RoomNotifier extends Notifier<String?> {
   @override
@@ -43,7 +44,7 @@ class RoomNotifier extends Notifier<String?> {
 
     final roomCode = _generateRoomCode();
     await join(roomCode);
-    return 'hollow://join?room=$roomCode';
+    return roomInviteLink(roomCode, relay: ref.read(relayDomainProvider));
   }
 
   static String _generateRoomCode() {

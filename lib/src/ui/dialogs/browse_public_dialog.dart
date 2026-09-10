@@ -13,6 +13,7 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
+import 'package:hollow/src/ui/dialogs/relay_switch_dialog.dart';
 
 void showBrowsePublicDialog(BuildContext context, WidgetRef ref) {
   final controller = TextEditingController();
@@ -89,14 +90,15 @@ void showBrowsePublicDialog(BuildContext context, WidgetRef ref) {
   );
 }
 
-void _browse(
-    BuildContext context, WidgetRef ref, TextEditingController controller) {
+Future<void> _browse(BuildContext context, WidgetRef ref,
+    TextEditingController controller) async {
   final input = controller.text.trim();
   if (input.isEmpty) return;
 
   // Accepts a hollow:// link, a web /join# link, a raw id, or the legacy
   // fallbacks (a ?server= query, else the last path segment).
-  String serverId = inviteIdFromInput(input, HollowLinkType.serverInvite);
+  final invite = inviteFromInput(input, HollowLinkType.serverInvite);
+  String serverId = invite.id;
   if (serverId == input) {
     final serverParam = Uri.tryParse(input)?.queryParameters['server'];
     if (serverParam != null && serverParam.isNotEmpty) {
@@ -105,6 +107,12 @@ void _browse(
       serverId = input.split('/').last;
     }
   }
+
+  if (!await ensureRelayForInviteId(context, ref,
+      type: HollowLinkType.serverInvite, id: serverId, relay: invite.relay)) {
+    return;
+  }
+  if (!context.mounted) return;
 
   // Realtime by default, manual once the cap is reached.
   final notifier = ref.read(savedGuestServersProvider.notifier);

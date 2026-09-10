@@ -19,6 +19,8 @@ struct ReportsState {
 
     std::string file_path;
     bool dirty = false;
+    // One log line per unwritable path, not one every flush.
+    bool save_failed_logged = false;
 
     bool load_from_file(const std::string& path);
     // Atomic write (tmp + rename); no-op unless dirty. Keeps dirty set on

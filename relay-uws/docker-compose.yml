@@ -1,73 +1,103 @@
 services:
+  # Gets the certificate once and exits. The relay waits for it to succeed, so
+  # a failed issuance stops the stack where you can see it.
+  certbot-init:
+    image: certbot/certbot:v5.8.0
+    # Host networking, so port 80 is bound only for the seconds an http-01
+    # challenge takes and is free the rest of the time.
+    network_mode: host
+    restart: "no"
+    entrypoint: /hooks/issue.sh
+    env_file: .env
+    volumes:
+      - certs:/etc/letsencrypt
+      - ./deploy/certbot:/hooks:ro
+      # Compose cannot mount a path conditionally, so this falls back to a
+      # directory that always exists. The scripts read it only when
+      # OWN_CERT_DIR is set.
+      - ${OWN_CERT_DIR:-./deploy/certbot}:/own-certs:ro
+
+  certbot-renew:
+    image: certbot/certbot:v5.8.0
+    network_mode: host
+    restart: unless-stopped
+    entrypoint: /hooks/renew-loop.sh
+    env_file: .env
+    depends_on:
+      certbot-init:
+        condition: service_completed_successfully
+    volumes:
+      - certs:/etc/letsencrypt
+      - ./deploy/certbot:/hooks:ro
+      - ${OWN_CERT_DIR:-./deploy/certbot}:/own-certs:ro
+
+  # Keeps a DuckDNS name pointing at this machine. Exits straight away for any
+  # other kind of address.
+  duckdns:
+    image: certbot/certbot:v5.8.0
+    restart: on-failure
+    entrypoint: /hooks/duckdns-updater.sh
+    env_file: .env
+    volumes:
+      - ./deploy/certbot:/hooks:ro
+
   relay:
     build: .
-    ulimits:
-      core: 0
+    depends_on:
+      certbot-init:
+        condition: service_completed_successfully
     ports:
       - "443:443"
     environment:
-      - TURN_SECRET=${TURN_SECRET}
+      - TURN_SECRET=${TURN_SECRET:-}
     command:
       - --port
       - "443"
-      - --public-ip
-      - ${PUBLIC_IP}
       - --domain
-      - ${RELAY_DOMAIN}
+      - ${RELAY_HOST}
+      - --keys-file
+      - /keys/keys.json
+      - --reports-file
+      - /data/reports.json
       - --cert-file
       - /certs/fullchain.pem
       - --key-file
       - /certs/privkey.pem
-     ## Uncomment below to use keys.json for license based gating.
-     ## See the "License keys format" in relay-uws/README.md
-     # - --keys-file
-     # - /keys/keys.json
     volumes:
       - certs:/certs:ro
       - ./keys:/keys:ro
+      - data:/data
+    ulimits:
+      core: 0
+    # Container logs otherwise accumulate on disk under /var/lib/docker; the
+    # host script keeps the journal in RAM.
+    logging:
+      driver: journald
+    healthcheck:
+      test: ["CMD", "curl", "-fsk", "https://127.0.0.1/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     restart: unless-stopped
-
-  certbot:
-    image: certbot/certbot:latest
-    volumes:
-      - certs:/etc/letsencrypt
-      - certbot-www:/var/www/certbot
-      - ./deploy/cert-renewed:/renew-signal
-    entrypoint:
-      - sh
-      - -c
-      - |
-        certbot certonly --standalone --non-interactive --agree-tos \
-          --email "${CERTBOT_EMAIL}" \
-          -d "${RELAY_DOMAIN}" \
-          --deploy-hook "cp /etc/letsencrypt/live/${RELAY_DOMAIN}/fullchain.pem /etc/letsencrypt/fullchain.pem && \
-        cp /etc/letsencrypt/live/${RELAY_DOMAIN}/privkey.pem /etc/letsencrypt/privkey.pem && \
-        chown 999:999 /etc/letsencrypt/fullchain.pem /etc/letsencrypt/privkey.pem && \
-        chmod 600 /etc/letsencrypt/privkey.pem && \
-        chmod 644 /etc/letsencrypt/fullchain.pem && \
-        touch /renew-signal/.relay-cert-renewed"
-
-        while :; do
-          sleep 12h
-          certbot renew --quiet \
-            --deploy-hook "cp /etc/letsencrypt/live/${RELAY_DOMAIN}/fullchain.pem /etc/letsencrypt/fullchain.pem && \
-        cp /etc/letsencrypt/live/${RELAY_DOMAIN}/privkey.pem /etc/letsencrypt/privkey.pem && \
-        chown 999:999 /etc/letsencrypt/fullchain.pem /etc/letsencrypt/privkey.pem && \
-        chmod 600 /etc/letsencrypt/privkey.pem && \
-        chmod 644 /etc/letsencrypt/fullchain.pem && \
-        touch /renew-signal/.relay-cert-renewed"
-        done
-    restart: unless-stopped
-    ports:
-      - "80:80"
 
   coturn:
-    image: coturn/coturn:latest
+    image: coturn/coturn:4.18
+    profiles: [turn]
     network_mode: host
-    volumes:
-      - ./turnserver.conf:/etc/turnserver.conf:ro
     restart: unless-stopped
+    # Without the certificate it cannot serve turns: on 5349.
+    depends_on:
+      certbot-init:
+        condition: service_completed_successfully
+    entrypoint: /hooks/coturn-start.sh
+    env_file: .env
+    # Same uid as the relay, which is the uid the certificate is copied to.
+    user: "999:999"
+    volumes:
+      - certs:/certs:ro
+      - ./deploy/coturn:/hooks:ro
 
 volumes:
   certs:
-  certbot-www:
+  data:

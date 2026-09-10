@@ -189,6 +189,9 @@ class VoiceChannelService {
   /// Publish a peer leg's health for the UI.
   void Function(String peerId, LinkHealthSnapshot snapshot)? onLinkHealth;
 
+  /// A leg spent its whole hold-open window without connecting.
+  void Function(String peerId)? onLegGiveUp;
+
   /// Whether our relay link can carry a renegotiation offer right now,
   /// injected so the service never reaches into Riverpod.
   bool Function()? canSignal;
@@ -1886,6 +1889,7 @@ class VoiceChannelService {
       canSignal: canSignal,
       onGiveUp: () {
         _vcLog('[HOLLOW-VC] $peerId: hold-open window spent, closing the leg');
+        onLegGiveUp?.call(peerId);
         unawaited(closePeer(peerId).then((_) {
           // `closePeer` stops the watchdog, and a stopped watchdog publishes
           // a HEALTHY snapshot, which would wipe the flair off a member we

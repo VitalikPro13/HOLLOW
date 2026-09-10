@@ -84,7 +84,7 @@ Desktop-only, for the same reason the Settings card is (sandboxed mobile roots; 
 ### Top-level functions
 
 **`_handleJoin(context, controller)`**
-- Parses input via `inviteIdFromInput(input, HollowLinkType.serverInvite)` (`hollow_link_utils.dart`) — accepts `hollow://join?server=`, web `https://hollow.anonlisten.com/join#server=` (fragment or query), or raw ID. ALL join/browse input bars use this helper; hand-parsing `Uri.queryParameters` misses the fragment form (2026-07-14 fix)
+- Parses input via `inviteIdFromInput(input, HollowLinkType.serverInvite)` (`hollow_link_utils.dart`) — accepts `hollow://join?server=`, web `https://hollow.anonlisten.com/join#server=` (fragment or query), or raw ID. ALL join/browse input bars use this helper; hand-parsing `Uri.queryParameters` misses the fragment form (2026-07-14 fix). Since 2026-09-10 the bars use `inviteFromInput` (id + the link's `relay` hint) and pass through `ensureRelayForInviteId` before joining: every builder (`webServerInviteLink`, `webConferenceInviteLink`, `roomInviteLink`) takes `required relay:` and stamps the SENDER's current relay, and a hint that differs from `relayDomainProvider` opens the ONE dialog in `relay_switch_dialog.dart` (`This server lives on another relay`, ghost Cancel, filled `Switch and restart`), which NEVER auto-switches; on confirm the canonical link is parked under the setting `pending_invite_after_switch`, the relay is switched and the app exits, and `_bootstrap` replays it once through `DeepLinkService.handleUrl` after the node starts. The in-chat Join card shows `On <host>` for a differing relay (not on an already-joined server card). Memory `project_self_hosting_overhaul_2026_09`
 - Calls `crdt_api.joinServer(serverId:)`
 - Shows info toast "Joining server..."
 

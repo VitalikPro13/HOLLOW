@@ -21,6 +21,7 @@ import 'package:hollow/src/ui/chat/hollow_link_utils.dart';
 import 'package:hollow/src/ui/components/hollow_menu.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
+import 'package:hollow/src/core/providers/relay_domain_provider.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// What the tile, the row and the menu all call the two states.
@@ -102,7 +103,7 @@ void showPendingJoinMenu({
         HollowMenuItem(
           icon: LucideIcons.link,
           label: 'Copy invite link',
-          onTap: () => copyPendingJoinInvite(context, serverId),
+          onTap: () => copyPendingJoinInvite(context, ref, serverId),
         ),
         HollowMenuItem(
           icon: LucideIcons.trash2,
@@ -141,7 +142,7 @@ void showPendingJoinSheet({
         },
         onCopy: () {
           Navigator.pop(sheetContext);
-          copyPendingJoinInvite(context, serverId);
+          copyPendingJoinInvite(context, ref, serverId);
         },
         onDiscard: () {
           Navigator.pop(sheetContext);
@@ -270,8 +271,11 @@ class _SheetRow extends StatelessWidget {
 
 /// The invite is all we have of this server, so copying it is how the user
 /// asks somebody who IS a member to come online.
-void copyPendingJoinInvite(BuildContext context, String serverId) {
-  Clipboard.setData(ClipboardData(text: webServerInviteLink(serverId)));
+void copyPendingJoinInvite(
+    BuildContext context, WidgetRef ref, String serverId) {
+  Clipboard.setData(ClipboardData(
+      text: webServerInviteLink(serverId,
+          relay: ref.read(relayDomainProvider))));
   HollowToast.show(context, 'Invite link copied',
       type: HollowToastType.success);
 }

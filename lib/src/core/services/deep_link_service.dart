@@ -17,6 +17,7 @@ import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/dialogs/recovery_pool_dialog.dart';
+import 'package:hollow/src/ui/dialogs/relay_switch_dialog.dart';
 import 'package:hollow/src/ui/mobile/mobile_conferences_route.dart';
 import 'package:hollow/src/ui/mobile/mobile_page_route.dart';
 import 'package:hollow/src/core/shop_availability.dart';
@@ -80,6 +81,13 @@ class DeepLinkService {
     for (final uri in queued) {
       _onUri(uri);
     }
+  }
+
+  /// Feeds a link in as if the OS had just delivered it. The relay hand-off
+  /// replays the invite it parked here after the restart.
+  void handleUrl(String url) {
+    final uri = Uri.tryParse(url);
+    if (uri != null) _onUri(uri);
   }
 
   void _onUri(Uri uri) {
@@ -146,6 +154,8 @@ class DeepLinkService {
       _toast('Already a member of this server', HollowToastType.info);
       return;
     }
+    if (!await _relayReady(context, link)) return;
+    if (!context.mounted) return;
 
     final confirmed = await _confirmDialog(
       context,
@@ -166,6 +176,8 @@ class DeepLinkService {
 
   Future<void> _confirmJoinConference(
       BuildContext context, HollowLink link) async {
+    if (!await _relayReady(context, link)) return;
+    if (!context.mounted) return;
     final confirmed = await _confirmDialog(
       context,
       title: 'Join Conference?',
@@ -193,6 +205,8 @@ class DeepLinkService {
   }
 
   Future<void> _confirmJoinRoom(BuildContext context, HollowLink link) async {
+    if (!await _relayReady(context, link)) return;
+    if (!context.mounted) return;
     final confirmed = await _confirmDialog(
       context,
       title: 'Join Room?',
@@ -202,6 +216,15 @@ class DeepLinkService {
     );
     if (confirmed != true) return;
     _container?.read(roomProvider.notifier).join(link.fullUrl);
+  }
+
+  /// The relay dialog REPLACES the join confirm when a switch is needed: the
+  /// user is answering the same question one step earlier.
+  Future<bool> _relayReady(BuildContext context, HollowLink link) async {
+    final container = _container;
+    if (container == null) return true;
+    return RelaySwitch.ofContainer(container)
+        .ensureRelayForInvite(context, link);
   }
 
   Future<bool?> _confirmDialog(

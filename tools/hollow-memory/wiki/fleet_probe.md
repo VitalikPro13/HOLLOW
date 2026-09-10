@@ -529,3 +529,103 @@ What is not obvious:
 - iOS has no self-relaunch: the app stashes and exits, the harness relaunches, the import runs before the node starts.
 - `wait_for` sees built widgets only: run the channel half with everyone in #general, then move everyone to the DM surface for the DM half, or a delivered DM reads as a failed wait.
 - The cross-platform pairs (Windows master to iOS sub-device and the reverse) were driven by hand with one `fleet_send` session per fleet, the code captured on one side and typed on the other. The script carries sim and linux branches, but no iOS to iOS run has exercised them end to end yet.
+
+## Two relays (`-Relay`, `fleet_relay_switch.ps1`, 2026-09-10)
+
+Self-hosting means an invite is only half an address: the server id says WHAT, the relay says WHERE.
+A fleet that only ever talks to `relay.anonlisten.com` cannot see any of that, so peers can now be
+onboarded onto a relay of their own and a journey drives an invite across the boundary.
+
+**`fleet.ps1 -Relay <host>`** types the host into the welcome dialog's own Advanced field before the
+identity is created, for every peer of that run. That is the only moment there is: a relay is chosen
+in the welcome flow, and the choice is stamped into the fixture along with the keys, so a peer's
+relay is fixed for as long as its fixture is. Peers that need DIFFERENT relays therefore take one
+`-Onboard` call each, and the shared step builder lives in `fleet_lib.ps1`
+(`Get-RelayWelcomeSteps`) so the journey scripts fill the same field the same way:
+
+```
+powershell -File scripts\fleet.ps1 -Onboard -Fresh -Peers a -Relay my.duckdns.org
+powershell -File scripts\fleet.ps1 -Onboard -Fresh -Peers b,c
+powershell -File scripts\fleet.ps1 -Live -Peers a,b,c
+```
+
+`-Relay` without `-Onboard` throws: the welcome dialog only exists while there is no identity, so it
+would otherwise silently leave every peer where it was. `fleet_device_link.ps1 -EdgeGates` already
+used this field by hand for its offline refusal; both now go through one builder.
+
+**What the journey proves** (`scripts\fleet_relay_switch.ps1 -RelayHost <host>`, peers a on the
+self-hosted relay, b and c on the official one): G1 the invite a creates carries `relay=` and the
+URL-encoded host, so the link is self-describing. G2 b pastes it, is warned by name, cancels, and
+NOTHING about b changed - same relay, same pid, no server in the dump ten seconds later (the one
+fixed wait in the script, because a server that must not arrive cannot be polled for). G3 c accepts,
+switches, comes back on the new relay, is asked to confirm the invite it saved, joins, and talks to
+a both ways. G4 the mirror image: an invite made on the official relay warns c, which now lives on
+the other one. G5 (only with `-NoTurnRelay`, since it is a claim about the relay under test) the
+`No TURN server` chip and the refusal to start a call with "Always relay calls" on. `-TurnGateOnly`
+runs G5 by itself against the data directories a full run left behind, for the second pass after
+the relay is restarted without TURN: it never restores a fixture, because that would put c back on
+the official relay, and it treats an existing a/c friendship as done rather than re-requesting it.
+Gates it does not own report `n/a`, not `SKIP`, so a failure is never blamed on a gate nobody ran.
+
+**The warning dialog's body is one `Text.rich`**, so the host inside it is not a `text:` target: the
+assertion is `expect_text`, which falls back to `textContaining(findRichText: true)` and does see
+rich text. Evidence (`dump`, `shot`) is taken BEFORE that assertion, so a failing one still leaves a
+picture of what was on screen.
+
+**The relaunch is the same shape as the device link's G5.** Accepting the switch saves the invite,
+writes the relay and calls `relaunchApp()`, so the tap is the LAST thing that copy of c is told:
+the live loop replays the INBOX from line 0 on boot, so `Reset-PeerMailbox` has to hand the mailbox
+over before the replacement starts, and it must never be called on an instance that will keep
+running. The script then polls up to 120 s for a NEW pid plus `live-ready`, falls back to
+`Stop-Peer` + `Restart-Peer`, and the report line says which path ran. The tap itself is wrapped:
+an instance that exits before answering is a normal outcome here, not a failure.
+
+**Two dialogs can be stacked** (the "+" join dialog and the relay warning over it) and both may
+carry the same word, so `Invoke-TopDialogTap` reads the match count first and taps the LAST one -
+routes are pushed in tree order. `capture` grew `from: "count"` for exactly this: how many widgets
+a target matches, as a value a script can branch on. The provider snapshot grew `relayDomain`, so
+`wait_for provider:relayDomain` and `capture from:provider key:relayDomain` both answer "which relay
+is this instance actually on", which the screen only shows in one settings row.
+
+**How the second relay was addressed for this proof.** The DuckDNS name was pointed BY HAND at a LAN
+address, the machine that forwards 443 into the VM, so the fleet on the Windows box resolves it
+directly with no hairpin. The compose stack's own duckdns updater has to be stopped while that
+holds, or it rewrites the record to the public egress address every five minutes and the run dies
+mid-journey looking like a relay outage. Reproducing this anywhere else means pointing the name at
+whatever host forwards 443 into the relay, and checking from the machine that will drive the fleet
+that the name resolves there AND that a TLS handshake on 443 validates: a relay that is up on the VM
+but unreachable from the driving machine fails the first gate as "a never reached Connected", which
+reads like an app bug and is not one.
+
+The script pre-flights the relay itself before booting anything: it resolves the name from the
+driving machine and completes a TLS handshake on 443 with default validation, printing the
+certificate's subject, issuer and expiry.
+
+**Green on Windows 2026-09-10, six of six in 3:58** against a self-hosted relay 0.12.0 on the Linux
+VM (`hollowtest.duckdns.org`, TURN on, so G5 reported `n/a`): that whole time includes minting the
+three identities on their two relays, so a rerun with `-KeepIdentities` against a live fleet is
+shorter. The invite that crossed was
+`https://hollow.anonlisten.com/join#server=<id>&relay=hollowtest.duckdns.org`, and c took the
+self-relaunch path (Rust waiter, pid 3972 to 3368) rather than the fallback. One thing the run
+taught: the `Switch and restart` tap does NOT answer, because the process is gone before the probe
+can write to its outbox, which is why the tap sits in a try/catch with `Reset-PeerMailbox` in the
+`finally` rather than being treated as a failed step.
+
+**G5 green the same day on the second pass**, the relay restarted with TURN off, and it cost two runs
+to learn why: **`/relay-status` is fetched exactly ONCE per launch** (`hollow_shell` `_bootstrap`),
+so a peer that was already running when the relay changed mode still holds the answer it got at its
+own startup, and the chip is correctly hidden for a stale `turn:true`. The first `-TurnGateOnly` run
+drove the live peers and failed G5a for that reason and no other: the dump showed the active row
+built and on screen (`hollowtest.duckdns.org` with `Currently active` under it) and the peer's own
+log showed it HAD learned the truth on the WS path (`TURN credentials unavailable: TURN not
+configured`), which is a different channel from the one the chip reads. `-TurnGateOnly` now
+relaunches its peers on their existing data directories, and any future gate that reads relay status
+has to do the same.
+
+**A cleanup that cannot tell whether it worked will leak.** The friendship G5 has to create was being
+removed by a right-click and a menu item that do not exist: the control is an icon button on the
+friend row (`semantics:Remove friend`, no confirmation, and the sidebar's friends bar carries one
+too, so index 0 and a wait on `text:No friends yet`). Both steps were soft, so cleanup reported PASS
+while a and c stayed friends. The removal is now a helper that returns whether the friendship is
+actually gone, the cleanup gate fails when it is not, and the gate is named for everything the run
+creates rather than only its servers.
