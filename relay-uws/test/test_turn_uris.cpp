@@ -2,7 +2,7 @@
 // a client that asks for TURN credentials.
 //
 // The property that matters is "the URIs name THIS relay". They were hardcoded
-// to relay.anonlisten.com until 0.12, so TURN never worked on a self-hosted
+// to relay.anonlisten.com until 0.11.1, so TURN never worked on a self-hosted
 // relay: every self-hoster's clients were handed the official host and were
 // rejected there. The host also has to survive the four shapes a relay address
 // arrives in, brackets and ports included, because a bare IPv6 literal or a

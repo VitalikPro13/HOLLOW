@@ -601,7 +601,7 @@ The script pre-flights the relay itself before booting anything: it resolves the
 driving machine and completes a TLS handshake on 443 with default validation, printing the
 certificate's subject, issuer and expiry.
 
-**Green on Windows 2026-09-10, six of six in 3:58** against a self-hosted relay 0.12.0 on the Linux
+**Green on Windows 2026-09-10, six of six in 3:58** against a self-hosted relay 0.11.1 on the Linux
 VM (`hollowtest.duckdns.org`, TURN on, so G5 reported `n/a`): that whole time includes minting the
 three identities on their two relays, so a rerun with `-KeepIdentities` against a live fleet is
 shorter. The invite that crossed was

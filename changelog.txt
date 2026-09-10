@@ -1,3 +1,42 @@
+v0.11.1 - Linux Call Audio, Self-Hosted Relays, Personal Emotes & Relay Restarts
+
+LINUX
+
+- Calls carry audio again, in direct messages and in voice channels
+- Fixed pressing play on a received video killing the app
+- Fixed the Flatpak refusing to start after a profile was erased or the app was killed
+- Closing the terminal Hollow was started from no longer leaves a window that does nothing
+- Picking a file now falls back to a system dialog when the desktop portal does not answer, instead of failing silently
+
+SELF-HOSTING
+
+- Setting up your own relay is now one settings file, and one guide covers every way to get a certificate
+- TURN now works on a self-hosted relay instead of pointing at the official one
+- A renewed certificate is picked up without restarting the relay
+- Every invite carries the relay it was made on, and opening one from another relay asks first rather than switching on its own
+- Settings marks a relay without TURN, and a call that cannot find a relayed path says so instead of ending in silence
+- The maintenance banner for the official relay no longer shows to people running their own
+
+RELAY
+
+- Messages waiting for somebody who was offline now survive a relay restart, so an update no longer drops them
+- A phone keeps its push notifications across a relay restart too
+- Restarting a relay is now immediate instead of taking a minute and a half
+
+EMOTES
+
+- Fixed a new custom emote not saving from the desktop picker unless you pressed Enter
+- Your personal emotes now follow you to your other devices
+
+FRIENDS
+
+- Fixed a removed friend being added back by an accept that arrived late
+
+SERVERS & CHANNELS
+
+- Voice channels now offer visibility and temporary access in the mobile server settings
+- Who can post is no longer offered on voice channels, where it never did anything
+
 v0.11 - Call Resilience, Offline Friend Requests, Offline Server Joins, Signed Server Operations & Linux Auto-Updates (BREAKING for calls and servers)
 
 BREAKING CHANGE: 0.11 cannot share a server, a one-to-one call, or a Twitch-gated join with 0.10.1 or older. Every change to a server is signed now and an unsigned one is refused, so members on different versions stop agreeing on the server. Call setup is encrypted now and a call signal in the clear is refused, so a call between versions fails outright. Direct messages, files, server voice channels and screen shares still work, but everyone in a server should update together.

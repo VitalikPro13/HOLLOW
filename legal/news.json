@@ -1,5 +1,11 @@
 [
   {
+    "id": "2026-09-10-v0111",
+    "date": "September 10, 2026",
+    "title": "v0.11.1 - Linux Call Audio, Self-Hosted Relays, Personal Emotes & Relay Restarts",
+    "body": "Linux got a bit upgrade on the call stability. Lots of issues with it are now patched within the libwebrtc engine. Self-hosting also got improved with the new [guide](https://github.com/VitalikPro13/HOLLOW/blob/main/relay-uws/SELF_HOSTING.md) that explains everything you need to get your own network up and running. Plus other fixes. Nice!"
+  },
+  {
     "id": "2026-09-06-v011",
     "date": "September 06, 2026",
     "title": "v0.11 - Call Resilience, Offline Friend Requests, Offline Server Joins, Signed Server Operations & Linux Auto-Updates (BREAKING for calls and servers)",

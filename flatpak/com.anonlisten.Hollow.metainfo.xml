@@ -20,9 +20,9 @@
   <launchable type="desktop-id">com.anonlisten.Hollow.desktop</launchable>
   <content_rating type="oars-1.1" />
   <releases>
-    <release version="0.9.4" date="2026-08-04">
+    <release version="0.11.1" date="2026-09-10">
       <description>
-        <p>Alpha release: screen share, link previews, etc.</p>
+        <p>Linux fixes</p>
       </description>
     </release>
   </releases>

@@ -841,7 +841,7 @@ The generation itself (unchanged, now WS-only):
 
 The three TURN URIs cover: UDP (fastest), TCP fallback, and TLS-wrapped (for restrictive networks). The Dart client MUST split these into separate `IceServer` entries due to flutter_webrtc's native `CreateIceServers` limitations.
 
-**The host comes from `--domain`, via `turn_uris()` in `src/turn_uris.h` (0.12).** It was a hardcoded `relay.anonlisten.com` string literal until then, so every self-hosted relay handed its own clients the official host's TURN server, which rejects them: TURN had never once worked off relay.anonlisten.com. `turn_host()` strips a trailing `:port` (the WSS port is not the TURN port) while keeping IPv6 brackets, and leaves a bare IPv6 literal alone. Unit tested in `test/test_turn_uris.cpp`.
+**The host comes from `--domain`, via `turn_uris()` in `src/turn_uris.h` (0.11.1).** It was a hardcoded `relay.anonlisten.com` string literal until then, so every self-hosted relay handed its own clients the official host's TURN server, which rejects them: TURN had never once worked off relay.anonlisten.com. `turn_host()` strips a trailing `:port` (the WSS port is not the TURN port) while keeping IPv6 brackets, and leaves a bare IPv6 literal alone. Unit tested in `test/test_turn_uris.cpp`.
 
 ### GET /server-stats — Server statistics
 
@@ -876,7 +876,7 @@ Returns real-time server resource utilization. Cached for 5 seconds.
 ```json
 {
   "license_required": true,
-  "version": "0.12.0",
+  "version": "0.11.1",
   "turn": true,
   "forwarder": true
 }
@@ -884,7 +884,7 @@ Returns real-time server resource utilization. Cached for 5 seconds.
 
 The Dart client checks this endpoint on startup. If `license_required` is true and the user hasn't cached a key, the app shows the license key input dialog.
 
-`version` is `HOLLOW_RELAY_VERSION` in `src/version.h`; it read `"0.1.0"` from the day the endpoint was written until 0.12. `turn` is `!turn_secret.empty()` and `forwarder` is `!forwarder_peer_id.empty()`, so both report what this relay is CONFIGURED with, not whether coturn or the forwarder process is actually alive. That is the honest signal the app has: a self-hoster who runs without coturn is told to leave `TURN_SECRET` empty so the two agree. `setup_http_handlers` takes `const Config&` for exactly this (the parameter existed unused before).
+`version` is `HOLLOW_RELAY_VERSION` in `src/version.h`; it read `"0.1.0"` from the day the endpoint was written until 0.11.1. `turn` is `!turn_secret.empty()` and `forwarder` is `!forwarder_peer_id.empty()`, so both report what this relay is CONFIGURED with, not whether coturn or the forwarder process is actually alive. That is the honest signal the app has: a self-hoster who runs without coturn is told to leave `TURN_SECRET` empty so the two agree. `setup_http_handlers` takes `const Config&` for exactly this (the parameter existed unused before).
 
 ---
 
@@ -975,10 +975,10 @@ ulimit -n 500000
 
 Files in `relay-uws/`: `Dockerfile`, `docker-compose.yml`, `.env.example`, `SELF_HOSTING.md` (the single user-facing guide), `keys/`, the hook scripts in `deploy/certbot/` and `deploy/coturn/`, `deploy/harden-host.sh`, plus the systemd unit templates in `deploy/`.
 
-Rewritten for 0.12. ONE file a self-hoster edits: `.env`. `turnserver.conf.example` is GONE (coturn takes flags only, from `deploy/coturn/coturn-start.sh`), and so are `deploy/hollow-relay-cert-renewed.path`/`.service` (the relay hot-reloads its certificate, so a renewal restarts nothing).
+Rewritten for 0.11.1. ONE file a self-hoster edits: `.env`. `turnserver.conf.example` is GONE (coturn takes flags only, from `deploy/coturn/coturn-start.sh`), and so are `deploy/hollow-relay-cert-renewed.path`/`.service` (the relay hot-reloads its certificate, so a renewal restarts nothing).
 
 Five services:
-- **certbot-init**: one-shot, `network_mode: host`, entrypoint `deploy/certbot/issue.sh`. Everything else that matters depends on it with `condition: service_completed_successfully`, and it runs under `set -eu`, so a failed issuance stops the stack at `docker compose up` instead of parking a healthy-looking certbot next to a crash-looping relay (the pre-0.12 bug).
+- **certbot-init**: one-shot, `network_mode: host`, entrypoint `deploy/certbot/issue.sh`. Everything else that matters depends on it with `condition: service_completed_successfully`, and it runs under `set -eu`, so a failed issuance stops the stack at `docker compose up` instead of parking a healthy-looking certbot next to a crash-looping relay (the pre-0.11.1 bug).
 - **certbot-renew**: `renew-loop.sh`, `sleep 12h` forever, then `certbot renew --deploy-hook /hooks/install-certs.sh`. The challenge method is stored in the lineage, so DuckDNS and IP certificates renew the way they were issued with no flags repeated here.
 - **duckdns**: `duckdns-updater.sh`. Exits 0 immediately unless `RELAY_HOST` ends in `.duckdns.org` with a token; otherwise pushes `ip=` (empty, so DuckDNS records the caller's address) every 5 minutes.
 - **relay**: `--domain ${RELAY_HOST}`, keys and reports paths always passed (an absent `keys.json` is an open relay, so no commented-out YAML), `logging: driver: journald`, healthcheck `curl -fsk https://127.0.0.1/health` (curl added to the runtime stage for it).

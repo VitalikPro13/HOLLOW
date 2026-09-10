@@ -36,7 +36,7 @@ flutter_rust_bridge_codegen generate --rust-input "crate::api" --rust-root "rust
 pwsh scripts\build_release.ps1  # full pipeline (-SkipBuild to repackage)
 pwsh scripts\sign_release.ps1  # sign every .exe/.dll in Release
 ```
-**Certum signing:** CNG binding self-heals; output `installer\Output\` (`reference_certum_signing_procedure`). **Linux release = BOTH artifacts uploaded + `scripts/publish_flatpak_repo.sh` (VM, own GPG-signed OSTree repo, NEVER Flathub) BEFORE the LAST step `scripts\sign_manifest.ps1`** (key OUTSIDE repo, `project_update_integrity`, `project_linux_auto_update`). **Zips: .NET '/' zipping, NEVER Compress-Archive** (`feedback_compress_archive_backslash_zip`).
+**Releases: load the `release` skill FIRST** (the whole flow incl. the go-live gate; `reference_release_pipeline`). **Certum signing:** CNG binding self-heals; output `installer\Output\` (`reference_certum_signing_procedure`). **Linux release = BOTH artifacts uploaded + `scripts/publish_flatpak_repo.sh` (VM, own GPG-signed OSTree repo, NEVER Flathub) BEFORE the LAST step `scripts\sign_manifest.ps1`** (key OUTSIDE repo, `project_update_integrity`, `project_linux_auto_update`). **Zips: .NET '/' zipping, NEVER Compress-Archive** (`feedback_compress_archive_backslash_zip`).
 
 ## Hollow Design System
 All UI = custom Hollow widgets, no Material defaults (`src/ui/components/`): HollowPressable/Button (`.filled/.ghost/.outline/.danger`)/TextField/Dialog (`showHollowDialog()`)/Tooltip/Toast/Toggle, StatusDot, StatBar.

@@ -1,21 +1,21 @@
 {
-  "latest": "0.11.0",
+  "latest": "0.11.1",
   "versions": [
     {
-      "version": "0.11.0",
-      "date": "September 6, 2026",
-      "url_windows": "https://anonlisten.com/hollow/releases/hollow-0.11.0-win64.zip",
-      "url_windows_setup": "https://anonlisten.com/hollow/releases/hollow-0.11.0-win64-setup.exe",
-      "url_macos": "https://anonlisten.com/hollow/releases/hollow-0.11.0-macos.zip",
-      "url_macos_dmg": "https://anonlisten.com/hollow/releases/hollow-0.11.0.dmg",
-      "url_linux": "https://anonlisten.com/hollow/releases/hollow-0.11.0-linux-x86_64.flatpak",
-      "url_linux_targz": "https://anonlisten.com/hollow/releases/hollow-0.11.0-linux.tar.gz",
-      "url_android": "https://anonlisten.com/hollow/releases/hollow-0.11.0-android.apk",
-      "notes": "Call Resilience, Offline Friend Requests, Offline Server Joins, Signed Server Operations & Linux Auto-Updates",
-      "sha256_windows": "a9f4400759b41fd37974ec288e3c964dfef0b2e382ce099f3dbe393c52c340f0",
-      "sha256_macos": "05375b02a50533cce1155e6eb6f352330802dfea082910b716bbaebb3ec0164f",
-      "sha256_linux": "810552c1c59bfb9ce1a24b29587340403a40c59be6013c68d1f6b95cb8985387",
-      "sha256_linux_targz": "548228aab608060eb86c6addbf95817b0489ee1ec0f847b68da9ade121f12723"
+      "version": "0.11.1",
+      "date": "September 10, 2026",
+      "url_windows": "https://anonlisten.com/hollow/releases/hollow-0.11.1-win64.zip",
+      "url_windows_setup": "https://anonlisten.com/hollow/releases/hollow-0.11.1-win64-setup.exe",
+      "url_macos": "https://anonlisten.com/hollow/releases/hollow-0.11.1-macos.zip",
+      "url_macos_dmg": "https://anonlisten.com/hollow/releases/hollow-0.11.1.dmg",
+      "url_linux": "https://anonlisten.com/hollow/releases/hollow-0.11.1-linux-x86_64.flatpak",
+      "url_linux_targz": "https://anonlisten.com/hollow/releases/hollow-0.11.1-linux.tar.gz",
+      "url_android": "https://anonlisten.com/hollow/releases/hollow-0.11.1-android.apk",
+      "notes": "Linux Call Audio, Self-Hosted Relays, Personal Emotes & Relay Restarts",
+      "sha256_windows": "c297d6f0b953ece15465fb78e2d1a4b984e5533a30886410ee4b60bc2cd41778",
+      "sha256_macos": "00b22904a826757e0cdfbd9fb01d98b981e5d1b03f805dd4df99edf1f92f36a1",
+      "sha256_linux": "ff82d7771f6eafe4d288a79d5afe22981460e2ce55e6b93ff36094714137449c",
+      "sha256_linux_targz": "914588b265d8b0eda859012871a955ee29c2804fbc13c4da176982164198b321"
     }
   ]
 }
