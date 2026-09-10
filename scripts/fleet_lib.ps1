@@ -352,8 +352,10 @@ function Start-FreshFleet($peers) {
     # Print the identity each peer came back with. It is the proof that this run
     # is not talking to the last one's mailbox, and it costs one step per peer.
     foreach ($peer in $peerList) {
+        # The connection PROVIDER, not the word: the mobile shell's home tab
+        # never prints "Connected", and the desktop one only off the chat.
         $ready = Send-FleetStep $peer ([pscustomobject]@{
-            op = 'wait_for'; target = 'text:Connected'; timeout_ms = 120000
+            op = 'wait_for'; provider = 'connection'; equals = 'connected'; timeout_ms = 120000
         }) 180
         if (-not $ready.ok) { throw "$peer onboarded but never reached Connected: $($ready.message)" }
         $name = 'FRESH_' + $peer.ToUpper()

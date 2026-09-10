@@ -14,33 +14,29 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
 /// The shop origin.
 ///
-/// In DEBUG builds only, `HOLLOW_SHOP_ORIGIN` in the environment overrides it,
-/// which is how the local dev shop at `http://localhost:3000` is reached.
-/// Release builds ignore the variable: a store you can point elsewhere with an
-/// environment variable is a store somebody else can point elsewhere.
+/// In DEBUG builds only, `HOLLOW_SHOP_ORIGIN` overrides it, which is how the local
+/// dev shop is reached. Release builds ignore it: a store you can point elsewhere
+/// with an environment variable is a store somebody else can point elsewhere.
 Future<String> shopOrigin() => RustLib.instance.api.crateApiShopShopOrigin();
 
 /// Fetch the shop's public catalog.
 ///
-/// Runs on [`get_http_runtime`], never the node runtime: reqwest resolves DNS
-/// on its runtime's blocking pool and the node's is routinely saturated by
-/// SQLCipher bursts, so a shared runtime turns a browse into a stall.
+/// Runs on [`get_http_runtime`], never the node runtime: reqwest resolves DNS on its
+/// runtime's blocking pool and the node's is routinely saturated by SQLCipher bursts.
 Future<ShopCatalog> fetchShopCatalog() =>
     RustLib.instance.api.crateApiShopFetchShopCatalog();
 
 /// Fetch one piece of preview art by its hash.
 ///
-/// The bytes are RETURNED and stored nowhere. Preview art is not owned art: it
-/// arrives with no pack, no licence and no provenance, and the rail is for
-/// things this install actually has. The caller renders it and lets it go.
+/// The bytes are RETURNED and stored nowhere: preview art arrives with no pack,
+/// licence or provenance, and the rail is for things this install actually has.
 Future<Uint8List> fetchShopArt({required String hash}) =>
     RustLib.instance.api.crateApiShopFetchShopArt(hash: hash);
 
 /// Keep a redeem code from a `hollow://redeem/<code>` link.
 ///
-/// Returns whether it was newly kept; a code kept twice is a no-op rather than
-/// an error, because the buyer clicking their thank-you link again is not a
-/// mistake they should see a toast about.
+/// Returns whether it was newly kept; keeping one twice is a no-op rather than an
+/// error, because clicking a thank-you link again is not a mistake to toast about.
 Future<bool> keepRedeemCode({required String code}) =>
     RustLib.instance.api.crateApiShopKeepRedeemCode(code: code);
 
@@ -57,24 +53,21 @@ Future<void> forgetRedeemCode({required String code}) =>
 Future<RedeemLookup> redeemLookup({required String code}) =>
     RustLib.instance.api.crateApiShopRedeemLookup(code: code);
 
-/// Redeem a code: mint the credential, keep it, announce it, then fetch and
-/// import the pack.
+/// Redeem a code: mint the credential, keep it, announce it, then fetch and import
+/// the pack.
 ///
-/// Order matters. The chain the shop published is verified against the
-/// pinned root BEFORE the code is spent, so a shop with a broken key never
-/// burns a purchase. The credential is stored and announced BEFORE the pack
-/// is fetched, so a network hiccup after the burn costs a download the buyer
-/// also has in their email, never the mark.
+/// Order matters. The chain the shop published is verified against the pinned root
+/// BEFORE the code is spent, so a shop with a broken key never burns a purchase. The
+/// credential is stored and announced BEFORE the pack is fetched, so a network hiccup
+/// after the burn costs a download the buyer also has in their email, never the mark.
 Future<RedeemOutcome> redeemCode({required String code}) =>
     RustLib.instance.api.crateApiShopRedeemCode(code: code);
 
-/// Every credential this identity holds, as far as this device can tell:
-/// the ones it minted first, with their names, then the ones that reached it
-/// on our own profile row from a sibling, which carry no names and no redeem
-/// date. Removed items are left out.
-///
-/// The announce cap is NOT applied here. The cap is about what rides a light
-/// profile announce; a holder of four marks is holding four.
+/// Every credential this identity holds, as far as this device can tell: the ones it
+/// minted first, with their names, then the ones that reached it on our own profile
+/// row from a sibling, which carry no names and no redeem date. Removed items are
+/// left out. The announce cap is NOT applied here: that cap is about what rides a
+/// light profile announce, and a holder of four marks is holding four.
 Future<List<OwnSupportCred>> listOwnSupportCreds() =>
     RustLib.instance.api.crateApiShopListOwnSupportCreds();
 
@@ -84,10 +77,9 @@ Future<bool> supportBadgeEnabled() =>
 
 /// Show, or stop showing, our marks next to our name. One profile save.
 ///
-/// The setting is the only copy of the answer: [`published_creds_json`]
-/// stamps it onto every entry it publishes, table and profile row alike, so
-/// the switch works from whichever device the holder is sitting at rather
-/// than only from the one that redeemed.
+/// The setting is the only copy of the answer: [`published_creds_json`] stamps it onto
+/// every entry it publishes, so the switch works from whichever device the holder is
+/// sitting at rather than only from the one that redeemed.
 Future<void> setSupportBadge({required bool show_}) =>
     RustLib.instance.api.crateApiShopSetSupportBadge(show_: show_);
 
@@ -99,26 +91,22 @@ Future<bool> supportMarksHidden() =>
 
 /// Hide, or stop hiding, our marks. One profile save.
 ///
-/// Hiding announces the explicit clear, so every peer drops what they stored
-/// and nobody can tell a holder who is hiding from somebody who never bought
-/// anything. The credentials themselves stay in the table, so switching it
-/// back publishes exactly what was there.
+/// Hiding announces the explicit clear, so every peer drops what they stored and
+/// nobody can tell a holder who is hiding from somebody who never bought anything.
+/// The credentials stay in the table, so switching back publishes what was there.
 Future<void> setSupportMarksHidden({required bool hidden}) =>
     RustLib.instance.api.crateApiShopSetSupportMarksHidden(hidden: hidden);
 
 /// Forget one of our credentials, for good.
 ///
-/// There is no way back: the code that minted it is spent (12.6), and the
-/// shop will not sign a second one for the same purchase. The files stay in
-/// the library; only the mark goes. Forgetting an item this identity never
-/// held is not an error, so a double press costs nothing.
+/// There is no way back: the code that minted it is spent and the shop will not sign
+/// a second one for the same purchase. The files stay in the library, only the mark
+/// goes, and forgetting an item this identity never held is not an error.
 ///
-/// The removal is remembered locally as well as applied, because the same
-/// credential can arrive again on our own profile row from a sibling. What
-/// that does NOT cover is the sibling itself: a mark removed on a device
-/// that did not mint it comes back if the MINTING device republishes, since
-/// `support_creds_own` does not replicate. Removing it where it was minted
-/// is final. See [`own_credential_union`].
+/// The removal is remembered locally as well as applied, because the same credential
+/// can arrive again on our own profile row from a sibling. It does NOT cover the
+/// sibling itself: a mark removed on a device that did not mint it comes back if the
+/// MINTING device republishes. Removing it where it was minted is final.
 Future<void> removeOwnSupportCred({required String item}) =>
     RustLib.instance.api.crateApiShopRemoveOwnSupportCred(item: item);
 
@@ -211,8 +199,8 @@ class RedeemLookup {
   /// The file hashes the credential will vouch for.
   final List<String> parts;
 
-  /// This identity already holds a credential for this item (13.23): a
-  /// second redemption changes nothing, keep the code and gift it.
+  /// This identity already holds a credential for this item: a second redemption
+  /// changes nothing, so keep the code and gift it.
   final bool alreadySupported;
 
   const RedeemLookup({
@@ -268,8 +256,8 @@ class RedeemOutcome {
   final String title;
   final String artistName;
 
-  /// The pack, imported, when it arrived; `None` with `pack_error` set
-  /// when it did not. The credential is kept either way.
+  /// The pack, imported, when it arrived; `None` with `pack_error` set when it did
+  /// not. The credential is kept either way.
   final HollowpackImport? imported;
   final String packError;
 
@@ -437,9 +425,8 @@ class ShopListing {
   /// Always two decimals: `$5` beside `$4.99` reads as a rounding.
   final String priceLabel;
 
-  /// The list price while the piece is on sale, 0 otherwise. `price_cents`
-  /// is always what a buyer pays; this is the number the card strikes
-  /// through beside it.
+  /// The list price while the piece is on sale, 0 otherwise. `price_cents` is always
+  /// what a buyer pays; this is the number the card strikes through beside it.
   final int wasCents;
 
   /// [`Self::was_cents`] as the shop writes it, `""` when there is no sale.
@@ -452,9 +439,8 @@ class ShopListing {
   /// The one picture that IS this item, and its address on the shop.
   final String displayHash;
 
-  /// The still sibling of [`Self::display_hash`], for a viewer who asked for
-  /// stillness. `""` when the display file is already still (or when no
-  /// still was shipped: freezing an animation is not something we do).
+  /// The still sibling of [`Self::display_hash`], `""` when the display file is
+  /// already still or no still was shipped (freezing an animation is not our call).
   final String stillHash;
 
   /// The kind the card draws, `""` when the listing names none.
@@ -467,16 +453,14 @@ class ShopListing {
   /// square.
   final bool wide;
 
-  /// The support credential's item hash for this listing (64-hex), or `""`
-  /// when the listing was put up before credentials existed. What
-  /// `list_own_support_creds` items compare against: "you support this".
+  /// The support credential's item hash (64-hex), `""` for a listing put up before
+  /// credentials existed. What `list_own_support_creds` items compare against.
   final String credentialItem;
 
-  /// `{origin}/item/{slug}`: the listing's own address. A hash is the ART's
-  /// address, and a bundle carries the same frame hash as the single frame
-  /// on purpose, so a link by hash opened whichever listing the shop found
-  /// first (the bug Vitalik hit on 2026-09-02). The shop still redirects an
-  /// old hash link, single before set.
+  /// `{origin}/item/{slug}`: the listing's own address. A hash is the ART's address
+  /// and a bundle carries the same frame hash as the single frame, so a link by hash
+  /// opened whichever listing the shop found first. The shop still redirects an old
+  /// hash link, single before set.
   final String itemUrl;
 
   const ShopListing({

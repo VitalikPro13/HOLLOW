@@ -10,38 +10,28 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
 /// The 60-digit safety number shared by this identity and `peer_id`.
 ///
-/// Both people see the IDENTICAL number, so verification is a single "do these
-/// match?" — there is no yours/theirs ordering to get wrong.
-///
-/// Derived purely from the two MASTER Ed25519 keys, so it is stable across
-/// reinstalls and across the contact adding or removing devices. It changes only
-/// when the master identity does — i.e. when it is genuinely a different person.
+/// Both people see the IDENTICAL number, and it is derived from the two MASTER
+/// keys only, so it survives reinstalls and device changes and moves only when
+/// the person does.
 Future<String> safetyNumberWith({required String peerId}) =>
     RustLib.instance.api.crateApiVerificationSafetyNumberWith(peerId: peerId);
 
 /// Group a 60-digit safety number into 12 blocks of 5 for display.
 ///
-/// Lives in Rust so desktop and mobile cannot drift into showing the same
-/// number two different ways — two people comparing differently-grouped digits
-/// is exactly the confusion this screen exists to remove. Input that is not the
-/// expected length is returned untouched rather than mangled.
+/// In Rust so desktop and mobile cannot show the same number two different ways.
+/// Input that is not 60 digits is returned untouched.
 String formatSafetyNumber({required String number}) =>
     RustLib.instance.api.crateApiVerificationFormatSafetyNumber(number: number);
 
-/// Compare a number the contact read out (or pasted) against `expected`.
-///
-/// Both sides are normalized to digits first, so spacing, line breaks or a
-/// trailing newline never produce a false mismatch. A false alarm on a security
-/// screen teaches users to ignore it.
+/// Compare a number the contact read out against `expected`, ignoring spacing.
 bool safetyNumbersMatch({required String expected, required String provided}) =>
     RustLib.instance.api.crateApiVerificationSafetyNumbersMatch(
       expected: expected,
       provided: provided,
     );
 
-/// Mark a contact as identity-verified (their safety number was confirmed out
-/// of band). Stored against the MASTER identity, so it survives their device
-/// changes — which is the whole point of a master-derived safety number.
+/// Mark a contact as identity-verified, stored against the MASTER identity so it
+/// survives their device changes.
 Future<void> setPeerVerified({required String peerId}) =>
     RustLib.instance.api.crateApiVerificationSetPeerVerified(peerId: peerId);
 
@@ -57,8 +47,7 @@ Future<bool> isPeerVerified({required String peerId}) =>
 Future<List<(String, PlatformInt64)>> getVerifiedPeers() =>
     RustLib.instance.api.crateApiVerificationGetVerifiedPeers();
 
-/// All recorded alerts, newest first — read AND dismissed alike, so the history
-/// survives scrollback rather than vanishing on dismiss.
+/// All recorded alerts, newest first, read and dismissed alike.
 Future<List<SecurityAlertFfi>> getSecurityAlerts() =>
     RustLib.instance.api.crateApiVerificationGetSecurityAlerts();
 
@@ -68,8 +57,7 @@ Future<void> acknowledgeSecurityAlert({required String alertId}) => RustLib
     .api
     .crateApiVerificationAcknowledgeSecurityAlert(alertId: alertId);
 
-/// Mark every outstanding alert for one contact as read (the conversation
-/// banner's Dismiss, which speaks for all of them at once).
+/// Mark every outstanding alert for one contact as read.
 Future<void> acknowledgeSecurityAlertsForPeer({required String peerId}) =>
     RustLib.instance.api.crateApiVerificationAcknowledgeSecurityAlertsForPeer(
       peerId: peerId,
@@ -83,9 +71,8 @@ class SecurityAlertFfi {
   /// MASTER peer_id of the contact the alert is about.
   final String peerId;
 
-  /// `new_device` (a device joined their identity — the one that carries an
-  /// attack signal) or `identity_key_changed` (a device re-keyed, i.e. they
-  /// reinstalled).
+  /// `new_device` (a device joined their identity, the signal an attack shows
+  /// up in) or `identity_key_changed` (a device re-keyed, i.e. a reinstall).
   final String kind;
 
   /// The device id that appeared, or the device whose key changed.

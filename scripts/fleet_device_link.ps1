@@ -34,6 +34,9 @@
 #   G6  b is now a's MASTER: same identity, the server and its history, the
 #       friend, the DM history, and two devices in both device lists.
 #   G7  LIVE fan-out afterwards, every direction reported on its own.
+#   G8  personal emotes converge (issue #76): a uploads one through the
+#       picker, b lists it with its image, a removes it and b drops it, then
+#       the reverse direction.
 #
 # ## -EdgeGates: the two refusals
 #
@@ -90,6 +93,12 @@ $runTag = $script:FleetVars.RUN
 $runRoot = Join-Path $env:TEMP 'hollow_fleet\run'
 $server = "fleet-link-$runTag"
 $journeyPeers = if ($EdgeGates) { @('a', 'b') } else { @('a', 'b', 'c') }
+# G8's picked image: a 16x16 PNG carried inline so every backend has it, and
+# names that fit the emote grammar (lowercase a-z, 0-9, _, at most 24).
+$emotePngBase64 = 'iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAAJcEhZcwAADsMAAA7DAcdvqGQAAABNSURBVDhPY7hjY/OfEjycDfh/nQEDY1OH1QBsmmEYXS2GAdg0oWNk9dQ1AJtibBhZzyDzAgxj0wTD6GqxGgDCxGgGYZwGEIsH2gCb/wBSPnarPKl6tgAAAABJRU5ErkJggg=='
+$emoteFixture = Join-Path $script:FleetOutRoot "emote-$runTag.png"
+$emoteA = 'pea' + ($runTag.ToLower() -replace '[^a-z0-9_]', '')
+$emoteB = 'peb' + ($runTag.ToLower() -replace '[^a-z0-9_]', '')
 # a and c are the ones that onboard; b must have NO identity on disk or the
 # welcome dialog never appears and the enter-code screen is unreachable.
 $fixturePeers = if ($EdgeGates) { @('a') } else { @('a', 'c') }
@@ -119,6 +128,10 @@ if ($EdgeGates) {
     $script:Gates['G7b c channel post after the link reaches a AND b']              = 'SKIP'
     $script:Gates['G7c b channel post reaches a (sibling) AND c']                   = 'SKIP'
     $script:Gates['G7d b DM to c reaches c AND a (sibling)']                        = 'SKIP'
+    $script:Gates['G8a a uploads a personal emote and its Mine tab lists it']       = 'SKIP'
+    $script:Gates['G8b b lists the emote and its image arrived']                    = 'SKIP'
+    $script:Gates['G8c a removes it and b stops listing it']                        = 'SKIP'
+    $script:Gates['G8d b uploads one and a lists it with its image']                = 'SKIP'
     $script:CleanupGate = 'C  cleanup: a deleted the server it created'
 }
 $script:Gates[$script:CleanupGate] = 'SKIP'
@@ -299,14 +312,30 @@ function Start-PeerProcess($peer, $wipeData) {
     # No -RedirectStandardOutput/-RedirectStandardError, ever: they flip
     # Start-Process into inherit-handles mode and every instance then holds a
     # duplicate of this script's stdout pipe, so the script never returns.
-    $proc = Start-Process -FilePath (Join-Path $dest 'hollow.exe') -WorkingDirectory $dest -PassThru
+    if (Test-LinuxBackend) {
+        # The same launcher fleet.ps1 uses: its own session bus per instance and
+        # stdio to files, never a pipe this script holds.
+        $launcher = Join-Path $out 'launch.sh'
+        $lines = @(
+            '#!/bin/sh',
+            ('exec dbus-run-session -- "{0}" >"{1}" 2>"{2}" </dev/null' -f (Join-Path $dest 'hollow'),
+                (Join-Path $out 'native-stdout.log'), (Join-Path $out 'native-stderr.log'))
+        )
+        [System.IO.File]::WriteAllText($launcher, (($lines -join "`n") + "`n"))
+        & chmod +x $launcher
+        $proc = Start-Process -FilePath $launcher -WorkingDirectory $dest -PassThru
+    } else {
+        $proc = Start-Process -FilePath (Join-Path $dest 'hollow.exe') -WorkingDirectory $dest -PassThru
+    }
     $what = if ($wipeData) { 'an EMPTY data dir' } else { 'its EXISTING data dir' }
     Say "launched $peer (pid $($proc.Id)) on $what"
 
     $deadline = (Get-Date).AddSeconds($BootTimeoutSeconds)
     while ((Get-Date) -lt $deadline) {
         if (Test-PeerLive $peer) { Say "$peer is live" 'Green'; return }
-        if (-not (Get-PeerProcess $peer)) { throw "peer $peer died on launch.`n" + (Get-CrashTail $peer) }
+        # The handle, not a path lookup: a process still initialising hides its
+        # path and reads as dead for a poll or two.
+        if ($proc.HasExited) { throw "peer $peer died on launch.`n" + (Get-CrashTail $peer) }
         Start-Sleep -Milliseconds 300
     }
     throw "peer $peer never came live.`n" + (Get-CrashTail $peer)
@@ -489,6 +518,49 @@ function Send-Dm($peer, $body) {
     throw "[$peer] the DM composer never produced a row for '$body' after 3 attempts"
 }
 
+# The emoji picker is an OverlayEntry on desktop and a bottom sheet on the
+# mobile shell; the tab and upload labels inside are the same on both.
+function Open-MineTab($peer) {
+    $button = if (Test-SimBackend) { 'semantics:Emoji' } else { 'semantics:Insert emoji' }
+    Step $peer @{ op = 'wait_for'; target = $button; timeout_ms = 30000 }
+    Step $peer @{ op = 'tap'; target = $button }
+    Step $peer @{ op = 'wait_for'; target = 'semantics:Mine emotes tab'; timeout_ms = 15000 }
+    Step $peer @{ op = 'tap'; target = 'semantics:Mine emotes tab' }
+    Step $peer @{ op = 'wait'; ms = 500 }
+}
+
+# Both hosts close on a tap outside the picker, and the top-left corner is
+# never under it (it hangs off the composer at the bottom).
+function Close-Picker($peer) {
+    Invoke-SoftStep $peer @{ op = 'tap_at'; x = 40; y = 120 } | Out-Null
+    Invoke-SoftStep $peer @{ op = 'wait_for'; gone = 'semantics:Mine emotes tab'; timeout_ms = 5000 } | Out-Null
+}
+
+# Uploads the fixture as a personal emote named $name and leaves the picker
+# open on the Mine tab. `arm_image_pick` answers the pick, because the native
+# dialog is an OS modal the probe cannot see.
+function Invoke-EmoteUpload($peer, $name) {
+    Open-MineTab $peer
+    Step $peer @{ op = 'arm_image_pick'; path = $emoteFixture }
+    Step $peer @{ op = 'tap'; target = 'semantics:Upload a personal emote image' }
+    Step $peer @{ op = 'wait_for'; target = 'dialog > text:Name this emote'; timeout_ms = 15000 }
+    Step $peer @{ op = 'enter_text'; target = 'dialog > field'; value = $name }
+    Step $peer @{ op = 'tap'; target = 'dialog > text:Save' }
+    $listed = Invoke-SoftStep $peer @{ op = 'wait_for'; target = "semantics:Emote $name"; timeout_ms = 20000 }
+    if (-not $listed.ok) { Add-Note "$peer's Mine tab never listed $name after Save" }
+    return $listed.ok
+}
+
+# The Mine tab on $peer lists $name AND its image has arrived (the image's
+# own label only exists once the bytes came over the asset rail).
+function Wait-MineEmote($peer, $name, $timeoutMs = 60000) {
+    $listed = Invoke-SoftStep $peer @{ op = 'wait_for'; target = "semantics:Emote $name"; timeout_ms = $timeoutMs }
+    if (-not $listed.ok) { Add-Note "$peer's Mine tab never listed $name"; return $false }
+    $image = Invoke-SoftStep $peer @{ op = 'wait_for'; target = "semantics::${name}: emote"; timeout_ms = $timeoutMs }
+    if (-not $image.ok) { Add-Note "$peer listed $name but its image never arrived over the asset rail"; return $false }
+    return $true
+}
+
 function Send-Channel($peer, $channel, $body) {
     for ($attempt = 1; $attempt -le 3; $attempt++) {
         Step $peer @{ op = 'tap'; target = "hint:Message #$channel" }
@@ -545,6 +617,11 @@ function Close-Settings($peer) {
     }
     $open = Invoke-SoftStep $peer @{ op = 'wait_for'; target = 'type:_UserSettingsContent'; timeout_ms = 1500 }
     if (-not $open.ok) { return }
+    # Escape first: after a failed gate the link-code screen still covers the
+    # Close button, and a tap that cannot reach it used to sink the cleanup.
+    Invoke-SoftStep $peer @{ op = 'key'; value = 'escape' } | Out-Null
+    $gone = Invoke-SoftStep $peer @{ op = 'wait_for'; gone = 'type:_UserSettingsContent'; timeout_ms = 3000 }
+    if ($gone.ok) { return }
     Step $peer @{ op = 'tap'; target = 'type:_UserSettingsContent > semantics:Close'; index = 0 }
     Step $peer @{ op = 'wait_for'; gone = 'type:_UserSettingsContent'; timeout_ms = 10000 }
 }
@@ -845,8 +922,35 @@ try {
         Step a @{ op = 'tap'; target = 'text:Send data'; index = 0 }
         Step a @{ op = 'wait_for'; target = 'text:Data sent'; timeout_ms = 180000 }
         Step a @{ op = 'shot'; name = "link-$runTag-a-sent" }
-        Step b @{ op = 'wait_for'; target = 'text:Device linked'; timeout_ms = 120000 }
-        Step b @{ op = 'shot'; name = "link-$runTag-b-linked" }
+        $bData = Get-PeerDataDir 'b'
+        $blob = Join-Path $bData 'pending_link.hollow'
+        $codeFile = Join-Path $bData 'pending_link.code'
+        $blobSeen = $false
+        $blobBytes = 0
+        $oldPid = 0
+        if (Test-LinuxBackend) {
+            # On Linux the copy that replaces b boots about four seconds after
+            # the stash and truncates the outbox as it starts, so the "Device
+            # linked" answer is never read here. The stash on disk is the proof
+            # the bytes crossed, and the mailbox is handed over the moment it
+            # appears, while the doomed process is still showing the done view.
+            for ($i = 0; $i -lt 480; $i++) {
+                if ((Test-Path $blob) -and (Test-Path $codeFile)) {
+                    $blobSeen = $true
+                    $blobBytes = (Get-Item $blob).Length
+                    break
+                }
+                Start-Sleep -Milliseconds 250
+            }
+            if (-not $blobSeen) { throw 'b never stashed pending_link.hollow after a reported Data sent' }
+            $bProc = Get-PeerProcess b
+            $oldPid = if ($bProc) { $bProc.Id } else { 0 }
+            Backup-PeerArtifacts b 'pre-relaunch'
+            Reset-PeerMailbox b
+        } else {
+            Step b @{ op = 'wait_for'; target = 'text:Device linked'; timeout_ms = 120000 }
+            Step b @{ op = 'shot'; name = "link-$runTag-b-linked" }
+        }
         Set-Gate 'G4 a reached Data sent and b reached Device linked' 'PASS'
         Say 'PASS G4: the snapshot crossed' 'Green'
 
@@ -856,23 +960,20 @@ try {
         # the stash is read NOW and the out directory is handed over before the
         # copy that replaces this one starts reading the inbox from line 0.
         Say '5/7 b restarts itself to import the snapshot'
-        $bData = Get-PeerDataDir 'b'
-        $blob = Join-Path $bData 'pending_link.hollow'
-        $codeFile = Join-Path $bData 'pending_link.code'
-        $blobSeen = $false
-        $blobBytes = 0
-        for ($i = 0; $i -lt 40; $i++) {
-            if ((Test-Path $blob) -and (Test-Path $codeFile)) {
-                $blobSeen = $true
-                $blobBytes = (Get-Item $blob).Length
-                break
+        if (-not (Test-LinuxBackend)) {
+            for ($i = 0; $i -lt 40; $i++) {
+                if ((Test-Path $blob) -and (Test-Path $codeFile)) {
+                    $blobSeen = $true
+                    $blobBytes = (Get-Item $blob).Length
+                    break
+                }
+                Start-Sleep -Milliseconds 250
             }
-            Start-Sleep -Milliseconds 250
+            $bProc = Get-PeerProcess b
+            $oldPid = if ($bProc) { $bProc.Id } else { 0 }
+            Backup-PeerArtifacts b 'pre-relaunch'
+            Reset-PeerMailbox b
         }
-        $bProc = Get-PeerProcess b
-        $oldPid = if ($bProc) { $bProc.Id } else { 0 }
-        Backup-PeerArtifacts b 'pre-relaunch'
-        Reset-PeerMailbox b
         if ($blobSeen) {
             Say "b stashed pending_link.hollow ($blobBytes bytes) + pending_link.code" 'Green'
         } else {
@@ -1006,6 +1107,50 @@ try {
         Step b @{ op = 'dump'; name = 'g7_b' }
         Step c @{ op = 'dump'; name = 'g7_c' }
         foreach ($peer in $journeyPeers) { Step $peer @{ op = 'shot'; name = "link-$runTag-$peer-g7" } }
+
+        # ---- G8: personal emotes converge between the two devices ---------
+        Say '8/8 personal emotes: upload on one device, listed with its image on the other'
+        [System.IO.File]::WriteAllBytes($emoteFixture, [Convert]::FromBase64String($emotePngBase64))
+        foreach ($peer in @('a', 'b')) {
+            Step $peer @{ op = 'open_server'; name = $server }
+            Step $peer @{ op = 'open_channel'; name = 'general' }
+        }
+
+        $upA = Invoke-EmoteUpload a $emoteA
+        Set-Gate 'G8a a uploads a personal emote and its Mine tab lists it' $(if ($upA) { 'PASS' } else { 'FAIL' })
+
+        Open-MineTab b
+        $seenB = Wait-MineEmote b $emoteA
+        Set-Gate 'G8b b lists the emote and its image arrived' $(if ($seenB) { 'PASS' } else { 'FAIL' })
+        Step b @{ op = 'shot'; name = "link-$runTag-b-g8-listed" }
+        Close-Picker b
+
+        # a's picker is still open on its Mine tab from the upload.
+        $removedA = $false
+        $rc = Invoke-SoftStep a @{ op = 'right_click'; target = "semantics:Emote $emoteA" }
+        if ($rc.ok) {
+            $item = Invoke-SoftStep a @{ op = 'wait_for'; target = 'text:Remove from my emotes'; timeout_ms = 5000 }
+            if ($item.ok) {
+                Invoke-SoftStep a @{ op = 'tap'; target = 'text:Remove from my emotes' } | Out-Null
+                $removedA = (Invoke-SoftStep a @{ op = 'wait_for'; gone = "semantics:Emote $emoteA"; timeout_ms = 15000 }).ok
+            }
+        }
+        if (-not $removedA) { Add-Note "a could not remove $emoteA from its own Mine tab" }
+        Close-Picker a
+        Open-MineTab b
+        $goneB = Invoke-SoftStep b @{ op = 'wait_for'; gone = "semantics:Emote $emoteA"; timeout_ms = 60000 }
+        if (-not $goneB.ok) { Add-Note "b still lists $emoteA after a removed it" }
+        Set-Gate 'G8c a removes it and b stops listing it' $(if ($removedA -and $goneB.ok) { 'PASS' } else { 'FAIL' })
+        Close-Picker b
+
+        $upB = Invoke-EmoteUpload b $emoteB
+        if (-not $upB) { Add-Note "b's own upload of $emoteB did not land" }
+        Open-MineTab a
+        $seenA = Wait-MineEmote a $emoteB
+        Set-Gate 'G8d b uploads one and a lists it with its image' $(if ($upB -and $seenA) { 'PASS' } else { 'FAIL' })
+        foreach ($peer in @('a', 'b')) { Step $peer @{ op = 'shot'; name = "link-$runTag-$peer-g8" } }
+        Close-Picker a
+        Close-Picker b
     }
     Say 'the journey ran to the end' 'Green'
 } catch {

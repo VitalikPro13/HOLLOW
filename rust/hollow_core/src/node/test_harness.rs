@@ -11628,6 +11628,257 @@ async fn server_emote_replicates_and_bytes_pull_on_demand() {
     drop(j);
 }
 
+// Personal ("Mine") emotes converge between a user's OWN devices: a delta after an
+// add or a remove fans to the online siblings, the receiver pulls any blob it is
+// missing over the asset rail, and a device that was OFFLINE for the change catches
+// up from the full set pushed at sibling verification. Per-name last-write-wins on
+// `added_at`, with an empty hash as the removal tombstone.
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn personal_emotes_converge_across_siblings() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    const M_MASTER: u8 = 169;
+    const B_DEV: u8 = 189;
+    const C_DEV: u8 = 199;
+    let m_master = NativeKeypair::from_secret_bytes(&seed_bytes(M_MASTER)).peer_id();
+    let b_dev = NativeKeypair::from_secret_bytes(&seed_bytes(B_DEV)).peer_id();
+    let c_dev = NativeKeypair::from_secret_bytes(&seed_bytes(C_DEV)).peer_id();
+    super::resolver::seed_self(&m_master, &[b_dev.clone(), c_dev.clone()]);
+
+    let mut b = spawn_node_with_friends(&relay, M_MASTER, B_DEV, &[]).await;
+    sleep_ms(1500).await;
+    let mut c = spawn_node_with_friends(&relay, M_MASTER, C_DEV, &[]).await;
+    sleep_ms(3000).await;
+    drain_events(&mut b);
+    drain_events(&mut c);
+
+    use sha2::{Digest, Sha256};
+    let (emote_bytes, _animated) = {
+        let img = image::RgbaImage::from_pixel(32, 32, image::Rgba([40, 180, 90, 255]));
+        let mut png = Vec::new();
+        img.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .expect("encode test png");
+        super::image_convert::process_emote_image(&png).expect("process emote")
+    };
+    let hash = hex::encode(Sha256::digest(&emote_bytes));
+    b.store().save_emote_blob(&hash, &emote_bytes, false).expect("B caches its own blob");
+    let added_at = b
+        .store()
+        .add_personal_emote("pe_one", &hash, false, "upload")
+        .expect("B adds a personal emote");
+
+    b.cmd_tx
+        .send(NodeCommand::SyncPersonalEmotes {
+            emotes: vec![super::types::PersonalEmoteEntry {
+                name: "pe_one".to_string(),
+                hash: hash.clone(),
+                animated: false,
+                source: "upload".to_string(),
+                added_at,
+            }],
+        })
+        .await
+        .unwrap();
+
+    let c_updated = wait_event(&mut c, std::time::Duration::from_secs(10), |ev| {
+        matches!(ev, NetworkEvent::PersonalEmotesUpdated)
+    })
+    .await;
+    assert!(c_updated, "the sibling must be told its personal emote set changed");
+    let c_rows = c.store().list_personal_emotes().expect("C lists personal emotes");
+    assert!(
+        c_rows.iter().any(|(n, h, ..)| n == "pe_one" && *h == hash),
+        "C must hold the added emote with the same hash, got {c_rows:?}"
+    );
+
+    // The metadata replicated, the BYTES did not: C pulls them over the asset rail.
+    let c_got_bytes = wait_event(&mut c, std::time::Duration::from_secs(15), |ev| {
+        matches!(ev, NetworkEvent::EmoteAssetsReceived { hashes } if hashes.contains(&hash))
+    })
+    .await;
+    assert!(c_got_bytes, "C must pull the emote bytes from its own sibling");
+    assert!(
+        c.store().has_emote_blob(&hash).unwrap(),
+        "the pulled blob must be cached on C"
+    );
+
+    // Removal is a tombstone that travels the same way.
+    drain_events(&mut c);
+    let removed_at = b
+        .store()
+        .remove_personal_emote("pe_one")
+        .expect("B removes the emote")
+        .expect("a live row was removed");
+    b.cmd_tx
+        .send(NodeCommand::SyncPersonalEmotes {
+            emotes: vec![super::types::PersonalEmoteEntry {
+                name: "pe_one".to_string(),
+                hash: String::new(),
+                animated: false,
+                source: String::new(),
+                added_at: removed_at,
+            }],
+        })
+        .await
+        .unwrap();
+    let c_removed = wait_event(&mut c, std::time::Duration::from_secs(10), |ev| {
+        matches!(ev, NetworkEvent::PersonalEmotesUpdated)
+    })
+    .await;
+    assert!(c_removed, "the removal must reach the sibling");
+    assert!(
+        c.store().list_personal_emotes().unwrap().is_empty(),
+        "a tombstone must take the name out of C's live set"
+    );
+
+    // A device that was OFFLINE for the change converges with NO manual action: the
+    // verification push hands it the full set the moment it is back.
+    relay.set_online(&c.device_id, false);
+    sleep_ms(500).await;
+    drain_events(&mut b);
+    drain_events(&mut c);
+    let two_at = b
+        .store()
+        .add_personal_emote("pe_two", &hash, false, "upload")
+        .expect("B adds a second emote while C is away");
+    b.cmd_tx
+        .send(NodeCommand::SyncPersonalEmotes {
+            emotes: vec![super::types::PersonalEmoteEntry {
+                name: "pe_two".to_string(),
+                hash: hash.clone(),
+                animated: false,
+                source: "upload".to_string(),
+                added_at: two_at,
+            }],
+        })
+        .await
+        .unwrap();
+    sleep_ms(500).await;
+    relay.set_online(&c.device_id, true);
+
+    let c_caught_up = wait_event(&mut c, std::time::Duration::from_secs(15), |ev| {
+        matches!(ev, NetworkEvent::PersonalEmotesUpdated)
+    })
+    .await;
+    assert!(
+        c_caught_up,
+        "a sibling that missed the delta must converge from the verification push alone"
+    );
+    let c_rows = c.store().list_personal_emotes().expect("C lists personal emotes");
+    assert!(
+        c_rows.iter().any(|(n, ..)| n == "pe_two"),
+        "C must hold the emote added while it was offline, got {c_rows:?}"
+    );
+
+    drop(b);
+    drop(c);
+}
+
+// The personal emote set is a VERIFIED-SELF channel: a peer of another identity
+// that shares a room with us can send the same frame and must change nothing.
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn personal_emote_sync_from_non_sibling_is_dropped() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    const B_MASTER: u8 = 213;
+    const X_MASTER: u8 = 255;
+    let b_master = NativeKeypair::from_secret_bytes(&seed_bytes(B_MASTER)).peer_id();
+    let x_master = NativeKeypair::from_secret_bytes(&seed_bytes(X_MASTER)).peer_id();
+
+    let mut b = spawn_node_with_friends(&relay, B_MASTER, B_MASTER, &[&x_master]).await;
+    sleep_ms(1500).await;
+    let x = spawn_node_with_friends(&relay, X_MASTER, X_MASTER, &[&b_master]).await;
+    expect_dm_pair_ready(&relay, &b, &x, 15).await;
+    drain_events(&mut b);
+
+    let frame = serde_json::to_vec(&super::types::HavenMessage::PersonalEmoteSync {
+        emotes: vec![super::types::PersonalEmoteEntry {
+            name: "planted".to_string(),
+            hash: "b".repeat(64),
+            animated: false,
+            source: "upload".to_string(),
+            added_at: 9_999_999_999_999,
+        }],
+    })
+    .expect("serialize");
+    let dm_room = super::types::dm_room_code(&b_master, &x_master);
+    relay.inject_direct(&dm_room, &x.device_id, &b.device_id, frame);
+
+    let leaked = wait_event(&mut b, std::time::Duration::from_secs(3), |ev| {
+        matches!(ev, NetworkEvent::PersonalEmotesUpdated)
+    })
+    .await;
+    assert!(!leaked, "a stranger's PersonalEmoteSync must not be applied");
+    assert!(
+        b.store().list_personal_emotes().unwrap().is_empty(),
+        "a stranger must never be able to write our personal emote set"
+    );
+
+    drop(b);
+    drop(x);
+}
+
+// Per-name last-write-wins: the newer `added_at` decides, tombstones take the name
+// out of the live set, and a local re-add (which stamps now) wins over both.
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn personal_emote_lww_keeps_the_newer_row() {
+    let _g = test_guard();
+    let tmp = tempfile::tempdir().expect("tmp");
+    let db_path = tmp.path().join("messages.db").to_str().unwrap().to_string();
+    let kp = NativeKeypair::from_secret_bytes(&seed_bytes(169));
+    let passphrase = passphrase_for(&kp);
+    let store = crate::storage::MessageStore::open(&db_path, &passphrase).expect("open store");
+
+    let h1 = "1".repeat(64);
+    let h2 = "2".repeat(64);
+
+    assert!(
+        store.merge_personal_emote_entry("lww", &h1, false, "upload", 10).unwrap(),
+        "the first row applies"
+    );
+    assert!(
+        !store.merge_personal_emote_entry("lww", &h2, false, "upload", 5).unwrap(),
+        "an OLDER row must be refused, not applied"
+    );
+    let rows = store.list_personal_emotes().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].1, h1, "the newer hash must survive the stale merge");
+
+    assert!(
+        store.merge_personal_emote_entry("lww", "", false, "", 20).unwrap(),
+        "a newer tombstone applies"
+    );
+    assert!(
+        store.list_personal_emotes().unwrap().is_empty(),
+        "a tombstoned name must leave the live set"
+    );
+    assert_eq!(
+        store.list_personal_emote_entries().unwrap().len(),
+        1,
+        "the tombstone row itself must be KEPT so an away sibling still learns the removal"
+    );
+
+    let added_at = store.add_personal_emote("lww", &h2, false, "upload").unwrap();
+    assert!(added_at > 20, "a local add stamps now, so it outranks the tombstone");
+    let rows = store.list_personal_emotes().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].1, h2, "the re-add must be visible again");
+}
+
 // Server sticker packs: StickerAdded replicates hash-keyed metadata to a joined
 // member who pulls the BYTES at AssetKind::Sticker, a member without MANAGE_EMOTES
 // is refused, transparency survives the round trip, and StickerRemoved converges.

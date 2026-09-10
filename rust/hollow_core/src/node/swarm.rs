@@ -136,6 +136,41 @@ async fn ensure_olm_session_and_drain(
     }
 }
 
+/// Push our WHOLE personal emote set (tombstones included) to a verified sibling.
+/// Rows only: a name the sibling cannot render pulls its bytes over the asset rail.
+fn send_personal_emotes_to_sibling(
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    peer_id: &str,
+    db_path: &str,
+    db_passphrase: &str,
+) -> usize {
+    let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) else {
+        return 0;
+    };
+    let Ok(rows) = store.list_personal_emote_entries() else {
+        return 0;
+    };
+    if rows.is_empty() {
+        return 0;
+    }
+    let emotes: Vec<PersonalEmoteEntry> = rows
+        .into_iter()
+        .map(|(name, hash, animated, source, added_at)| PersonalEmoteEntry {
+            name, hash, animated, source, added_at,
+        })
+        .collect();
+    let count = emotes.len();
+    hollow_log!(
+        "[HOLLOW-MULTIDEV] Sharing {count} personal emote row(s) with sibling {peer_id}"
+    );
+    send_message_to_peer(
+        ws_cmd_tx, ws_room_peers,
+        peer_id, HavenMessage::PersonalEmoteSync { emotes },
+    );
+    count
+}
+
 /// Run the full sibling-convergence machinery for a peer we have
 /// CRYPTOGRAPHICALLY PROVEN is our own other device (it already resolves to us,
 /// or it answered a [`HavenMessage::SiblingProveRequest`] with a valid
@@ -242,6 +277,9 @@ fn on_verified_sibling(
             }
         }
     }
+    send_personal_emotes_to_sibling(
+        ws_cmd_tx, ws_room_peers, peer_id, db_path, db_passphrase,
+    );
     // Pull theirs too (in case WE are the empty device).
     hollow_log!(
         "[HOLLOW-MULTIDEV] Sibling {peer_id} verified — requesting their friend list"
@@ -1391,6 +1429,22 @@ async fn run_event_loop(
                                     "[HOLLOW-SYNC] Source device {source_device_id} not in any room — is it online?"
                                 );
                             }
+                        }
+                    }
+
+                    NodeCommand::SyncPersonalEmotes { emotes } => {
+                        let count = emotes.len();
+                        let data = serde_json::to_vec(
+                            &HavenMessage::PersonalEmoteSync { emotes },
+                        ).unwrap_or_default();
+                        if !data.is_empty() {
+                            let sent = sync_handler::fan_to_own_siblings(
+                                &ws_cmd_tx, &ws_room_peers,
+                                &local_peer_str, &device_peer_id, data,
+                            );
+                            hollow_log!(
+                                "[HOLLOW-MULTIDEV] Personal emote delta ({count} row(s)) fanned to {sent} sibling device(s)"
+                            );
                         }
                     }
 
@@ -12563,6 +12617,61 @@ async fn handle_incoming_request(
             }
         }
 
+        HavenMessage::PersonalEmoteSync { emotes: incoming } => {
+            // Multi-device: the personal emote set converges only between our OWN
+            // devices. A non-self sender is trying to plant emotes on us.
+            if !super::resolver::same_identity(peer_str, local_peer_str) {
+                hollow_log!(
+                    "[HOLLOW-MULTIDEV] Dropped PersonalEmoteSync from non-self peer {peer_str}"
+                );
+                return;
+            }
+            let rows: Vec<PersonalEmoteEntry> = incoming.into_iter().take(512).collect();
+            let mut applied = 0usize;
+            let mut missing: Vec<String> = Vec::new();
+            if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+                for e in &rows {
+                    if !crate::crdt::valid_emote_name(&e.name)
+                        || !(e.hash.is_empty() || crate::crdt::valid_emote_hash(&e.hash))
+                        || e.source.len() > 64
+                        || e.added_at < 0
+                    {
+                        continue;
+                    }
+                    let changed = store
+                        .merge_personal_emote_entry(
+                            &e.name, &e.hash, e.animated, &e.source, e.added_at,
+                        )
+                        .unwrap_or(false);
+                    if !changed {
+                        continue;
+                    }
+                    applied += 1;
+                    if !e.hash.is_empty() && !store.has_emote_blob(&e.hash).unwrap_or(false) {
+                        missing.push(e.hash.clone());
+                    }
+                }
+            }
+            let pulled = missing.len();
+            if pulled > 0 {
+                // Hint OUR OWN master: the rail turns it into our online sibling
+                // devices, and its retry re-asks when the next one reconnects.
+                emotes::handle_request_emotes(
+                    ws_cmd_tx, ws_room_peers, pending_asset_asks,
+                    missing, super::assets::AssetKind::Emote,
+                    None, Some(local_peer_str.to_string()),
+                    local_peer_str, db_path, db_passphrase,
+                );
+            }
+            if applied > 0 {
+                let _ = event_tx.send(NetworkEvent::PersonalEmotesUpdated).await;
+            }
+            hollow_log!(
+                "[HOLLOW-MULTIDEV] Sibling {peer_str} shared {} personal emote row(s): {applied} applied, {pulled} blob(s) pulled",
+                rows.len()
+            );
+        }
+
         HavenMessage::FriendListRequest => {
             // Multi-device (Phase 6): a sibling asked for our friend list. Reply
             // ONLY to our own other device (verified-self). Pull companion to the
@@ -12639,8 +12748,12 @@ async fn handle_incoming_request(
                     }
                 }
             }
+            // 3) And the personal emote set, which converges the same way.
+            let emotes_sent = send_personal_emotes_to_sibling(
+                ws_cmd_tx, ws_room_peers, peer_str, db_path, db_passphrase,
+            );
             hollow_log!(
-                "[HOLLOW-SYNC] Manual state-sync from {peer_str}: announced {announced} server(s) + {friends_sent} friend(s)"
+                "[HOLLOW-SYNC] Manual state-sync from {peer_str}: announced {announced} server(s) + {friends_sent} friend(s) + {emotes_sent} personal emote row(s)"
             );
         }
 

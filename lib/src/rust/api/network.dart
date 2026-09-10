@@ -18,13 +18,11 @@ Future<void> setLicenseKey({String? key}) =>
 
 /// Tell the relay client that a real-time session (DM call, voice channel,
 /// conference) is live, or has ended.
-///
-/// The only thing this changes is the reconnect policy: while it is true the
-/// socket retries every second instead of backing off toward thirty. A call
-/// recovering from a network blip needs an ICE restart, that offer rides this
-/// socket, and the call's hold-open window is measured in tens of seconds, so a
-/// socket asleep in a long backoff is the difference between a call that
-/// recovers and one that is given up on. See `ws_client::REALTIME_ACTIVE`.
+/// The only thing this changes is the reconnect policy: while true the socket
+/// retries every second instead of backing off toward thirty. A call recovering
+/// from a blip needs an ICE restart offer over this socket within tens of seconds,
+/// so a socket asleep in a long backoff is the difference between a call that
+/// recovers and one that is given up on.
 ///
 /// Safe to call repeatedly with the same value. Dart refcounts the sessions and
 /// only pushes the edges.
@@ -48,11 +46,9 @@ Future<void> setAutoDownloadConfig({
   overridesJson: overridesJson,
 );
 
-/// Configure (or clear) the anti-censorship REALITY proxy. Call BEFORE
-/// start_node() — like set_relay_url, it seeds a global that start_node reads to
-/// launch the `shoes` tunnel. Passing all-empty / null fields disables the proxy
-/// (direct connection). Takes effect on the next node start (toggling at runtime
-/// requires a node restart, same as changing the relay domain).
+/// Configure (or clear) the anti-censorship REALITY proxy. Call BEFORE start_node():
+/// it seeds a global that start_node reads to launch the `shoes` tunnel, so a
+/// runtime change needs a node restart. All-empty fields disable the proxy.
 Future<void> setProxyConfig({
   required bool enabled,
   required String server,
@@ -69,9 +65,7 @@ Future<void> setProxyConfig({
   sni: sni,
 );
 
-/// Start the libp2p node with mDNS peer discovery and E2EE.
-/// Uses the persistent identity from disk.
-/// Returns the local peer ID as a string.
+/// Start the node with the persistent identity from disk. Returns the local peer ID.
 Future<String> startNode() => RustLib.instance.api.crateApiNetworkStartNode();
 
 /// Stream network events to Dart in real time.
@@ -79,8 +73,7 @@ Future<String> startNode() => RustLib.instance.api.crateApiNetworkStartNode();
 Stream<NetworkEvent> watchNetworkEvents() =>
     RustLib.instance.api.crateApiNetworkWatchNetworkEvents();
 
-/// Poll for the next network event. Returns None if no event is available.
-/// Fallback for when streaming is not active.
+/// Poll for the next network event, the fallback for when streaming is not active.
 Future<NetworkEvent?> pollNetworkEvent() =>
     RustLib.instance.api.crateApiNetworkPollNetworkEvent();
 
@@ -88,8 +81,7 @@ Future<NetworkEvent?> pollNetworkEvent() =>
 Future<String?> getLocalPeerId() =>
     RustLib.instance.api.crateApiNetworkGetLocalPeerId();
 
-/// Get the Olm identity fingerprint (Curve25519 base64).
-/// Returns None if the node hasn't started.
+/// Get the Olm identity fingerprint (Curve25519 base64), `None` before start.
 Future<String?> getOlmFingerprint() =>
     RustLib.instance.api.crateApiNetworkGetOlmFingerprint();
 
@@ -100,11 +92,9 @@ Future<String> getLocalPublicKey() =>
 
 /// Resolve a (possibly per-device) peer_id to its MASTER identity peer_id.
 ///
-/// Dart calls this to collapse a friend's multiple device peer_ids into one
-/// person for display/attribution. Unknown peers (single-device installs, or a
-/// peer whose signed device list we haven't ingested yet) resolve to themselves,
-/// so this is safe to call on any id. Reads the running node's in-memory resolver
-/// — no DB hit.
+/// Collapses a friend's device peer_ids into one person for display. Unknown peers
+/// resolve to themselves, so this is safe on any id, and it reads the running
+/// node's in-memory resolver with no DB hit.
 Future<String> identityFor({required String peerId}) =>
     RustLib.instance.api.crateApiNetworkIdentityFor(peerId: peerId);
 
@@ -112,70 +102,56 @@ Future<String> identityFor({required String peerId}) =>
 /// to the PERSISTED device links in SQLCipher when the in-memory resolver is
 /// still cold.
 ///
-/// The push-tap navigation path needs this (HOLLOW_PLAN "iOS DM push opens a
-/// different chat"): a cold-start notification tap is buffered and fires the
-/// moment the mobile shell mounts, which can be BEFORE the node's event loop
-/// task has warmed the in-memory resolver from the DB — `identity_for` then
-/// resolves the friend's DEVICE id to itself (no error, so callers can't tell a
-/// cold miss from a genuine single-device peer) and the DM opens a device-keyed
-/// empty thread. The NSE proves the link IS on disk at tap time (it warms from
-/// `device_links` and stores the fetched DM under the master), so a direct DB
-/// read closes the race. Any failure (locked identity, DB open error) degrades
-/// to identity-passthrough — same contract as `identity_for`.
+/// The push-tap path needs the fallback: a cold-start tap fires the moment the
+/// shell mounts, which can be BEFORE the event loop warmed the resolver, and
+/// `identity_for` would then resolve the friend's DEVICE id to itself (no error, so
+/// callers cannot tell a cold miss from a genuine single-device peer) and open a
+/// device-keyed empty thread. Any failure degrades to identity-passthrough.
 Future<String> identityForPersisted({required String peerId}) =>
     RustLib.instance.api.crateApiNetworkIdentityForPersisted(peerId: peerId);
 
 /// Snapshot every known (device → master) link for the Dart attribution layer.
 ///
-/// Dart builds a `device_link_provider` from this and refreshes it whenever a
-/// `DeviceListUpdated` event fires. A single-device install returns only
-/// self-mappings (or an empty list), so the provider is a no-op there.
+/// Dart builds a `device_link_provider` from this and refreshes it on
+/// `DeviceListUpdated`. A single-device install returns only self-mappings.
 Future<List<DeviceLink>> getDeviceLinks() =>
     RustLib.instance.api.crateApiNetworkGetDeviceLinks();
 
-/// Full sibling teardown ("Reset Device List"): tombstone EVERY device except the
-/// one we're running on, in a single master-signed version bump, and PROPAGATE it —
-/// friends converge and drop the revoked siblings (and can never un-revoke them),
-/// each revoked sibling self-nukes (wipe + relaunch) on ingest, and we drop their
-/// Olm sessions + MLS leaves. This is the permanent fix for accumulated ghost
-/// devices from link/re-link cycles (the old version did a blunt LOCAL wipe of the
-/// device-list table, which the grow-only union-merge simply regrew from siblings
-/// on the next profile exchange — so ghosts came right back). Requires the node to
-/// be running. After this, only THIS device remains; re-link others fresh.
+/// Full sibling teardown: tombstone EVERY device except this one in a single
+/// master-signed version bump and PROPAGATE it, so friends drop the revoked
+/// siblings and can never un-revoke them, each revoked sibling self-nukes on
+/// ingest, and their Olm sessions and MLS leaves go. A blunt LOCAL wipe cannot
+/// work: the grow-only union merge regrows the ghosts from siblings on the next
+/// profile exchange. Requires a running node; re-link the others fresh afterwards.
 Future<void> resetDeviceLists() =>
     RustLib.instance.api.crateApiNetworkResetDeviceLists();
 
-/// The transport peer_id of the device this app is RUNNING on (Step 8). Distinct
-/// from `get_local_peer_id`, which returns the MASTER identity. Dart uses this to
-/// mark "This device" in the Devices panel and to hide its "Remove" button (a
-/// device can't revoke itself). Returns `None` if no device key exists yet.
+/// The transport peer_id of the device this app is RUNNING on, distinct from
+/// `get_local_peer_id` (the MASTER). Dart marks "This device" with it and hides its
+/// Remove button, since a device cannot revoke itself. `None` before a device key
+/// exists.
 Future<String?> getLocalDevicePeerId() =>
     RustLib.instance.api.crateApiNetworkGetLocalDevicePeerId();
 
-/// Revoke one of OUR OWN devices (Step 7, lost/stolen). Bumps our master-signed
-/// device list with the device tombstoned + drops the Olm session + (where we
-/// coordinate) removes its MLS leaf from shared servers. Manual-only; rejected for
-/// the device we're running on or an id that isn't ours. Friends converge via the
-/// re-broadcast device list and can never un-revoke it with a stale (lower-version)
-/// list. The node must be running.
+/// Revoke one of OUR OWN devices (lost or stolen): bump our master-signed device
+/// list with the device tombstoned, drop its Olm session and, where we coordinate,
+/// remove its MLS leaf. Rejected for the device we are running on or an id that is
+/// not ours. Friends can never un-revoke it with a stale lower-version list.
 Future<void> revokeDevice({required String devicePeerId}) => RustLib
     .instance
     .api
     .crateApiNetworkRevokeDevice(devicePeerId: devicePeerId);
 
-/// Multi-device MANUAL state sync (Security → Your Devices "Sync from this
-/// device"). Ask the chosen SOURCE sibling (`source_device_id`) to re-announce
-/// all its servers + re-share its friends to THIS device. Deterministic,
-/// user-triggered escape hatch for when the automatic sibling sync didn't
-/// converge. The source must be online.
+/// Manual state sync: ask the chosen SOURCE sibling to re-announce all its servers
+/// and re-share its friends to THIS device. The deterministic escape hatch for when
+/// automatic sibling sync did not converge; the source must be online.
 Future<void> requestStateSync({required String sourceDeviceId}) => RustLib
     .instance
     .api
     .crateApiNetworkRequestStateSync(sourceDeviceId: sourceDeviceId);
 
 /// Set (or clear, when `label` is empty) the local human label for a device.
-/// Local-only — not synced or signed, so a person's two devices may show different
-/// labels for the same third device.
+/// Local-only, so a person's two devices may show different labels for a third.
 Future<void> setDeviceLabel({
   required String devicePeerId,
   required String label,
@@ -190,14 +166,9 @@ Future<List<DeviceLabel>> getDeviceLabels() =>
 
 /// Verify an Ed25519 message signature against a canonical payload.
 ///
-/// Used by the Message Proof dialog ("The RAT Files") to show real-time
-/// VERIFIED / INVALID status. Pure crypto — no node state needed.
-///
-/// Arguments:
-/// - `sender_peer_id`: the sender's PeerId (Base58btc)
-/// - `signature_b64`: base64-encoded Ed25519 signature
-/// - `public_key_b64`: base64-encoded protobuf public key
-/// - `canonical_payload`: the signing payload string (e.g. "hollow-msg:dm:...")
+/// Used by the Message Proof dialog to show live VERIFIED / INVALID status. Pure
+/// crypto, no node state. `canonical_payload` is the signing payload string, e.g.
+/// "hollow-msg:dm:...".
 Future<bool> verifyMessageProof({
   required String senderPeerId,
   required String signatureB64,
@@ -212,16 +183,13 @@ Future<bool> verifyMessageProof({
 
 /// v2 verification for the Message Proof dialog (no v1 fallback since 0.8.5).
 ///
-/// The v2 payload binds the message's structured fields (mid / reply_to /
-/// file_id / order_us / link-preview digest), which live in the DB row — so
-/// this loads the row by `message_id` and builds the canonical payload in
-/// RUST, keeping the grammar single-sourced instead of mirroring it in Dart.
-/// An EDITED row verifies against its edit signature (edited_at + current
-/// text), same rule as every other verifier.
+/// The v2 payload binds the row's structured fields (mid, reply_to, file_id,
+/// order_us, link-preview digest), so this loads the row by `message_id` and builds
+/// the canonical payload in RUST, keeping the grammar single-sourced instead of
+/// mirrored in Dart. An EDITED row verifies against its edit signature.
 ///
-/// - `msg_type`: "dm" | "ch"
-/// - `context`: recipient MASTER peer_id for DMs, "server_id:channel_id" for
-///   channels (same values the v1 dialog already computes).
+/// `msg_type` is "dm" | "ch"; `context` is the recipient MASTER peer_id for DMs and
+/// "server_id:channel_id" for channels.
 Future<MessageProofV2> verifyMessageProofV2({
   required String msgType,
   required String context,
@@ -234,21 +202,16 @@ Future<MessageProofV2> verifyMessageProofV2({
   messageId: messageId,
 );
 
-/// Fetch OpenGraph metadata for a URL and return a link preview the sender
-/// can embed in their next outgoing message. Fails silently at every step —
-/// the caller should treat errors as "no preview" and send the message as
-/// plain text.
+/// Fetch OpenGraph metadata for a URL and return a link preview the sender can
+/// embed in their next message. Fails silently at every step, so the caller treats
+/// errors as "no preview".
 ///
-/// Runs on the dedicated HTTP runtime, never the node runtime: an authoring
-/// fetch is arbitrary third-party I/O on an unknown-latency host, and parking
-/// it on the node runtime lets a slow site compete with the SQLCipher
-/// blocking pool. Same rule the GIF / FFZ / IGDB / sticker fetchers follow.
+/// Runs on the dedicated HTTP runtime, never the node runtime: an authoring fetch
+/// is third-party I/O on an unknown-latency host and would compete with the
+/// SQLCipher blocking pool.
 ///
-/// **Privacy:** This MUST only be called on the sender side. Receivers
-/// render the preview from embedded data and never fetch the URL. See
-/// `node::link_preview` for the full contract.
-///
-/// Phase 6.75.
+/// **Privacy:** sender side ONLY. Receivers render from embedded data and never
+/// fetch the URL.
 Future<LinkPreviewRef> fetchLinkPreview({required String url}) =>
     RustLib.instance.api.crateApiNetworkFetchLinkPreview(url: url);
 
@@ -267,8 +230,7 @@ Future<void> sendMessage({
   linkPreview: linkPreview,
 );
 
-/// Send a text message to a server channel.
-/// The message will be encrypted and sent to all connected server members.
+/// Send a text message to a server channel, encrypted to all connected members.
 Future<void> sendChannelMessage({
   required String serverId,
   required String channelId,
@@ -309,14 +271,11 @@ Future<void> editDmMessage({
   newText: newText,
 );
 
-/// Configure the social-preview proxy base URL (None/empty = direct, the
-/// default). Persisted on the Dart side and pushed at startup, like
-/// [`crate::api::gifs::set_gif_proxy_url`].
-///
-/// Empty is not a degraded mode: X and TikTok lookups go straight to the
-/// upstream public APIs, which is what ships. Setting this hands those
-/// lookups to a service that speaks the same normalized shape, for anyone who
-/// would rather the upstream never saw their IP at all. Issue #45.
+/// Configure the social-preview proxy base URL (None or empty = direct, the
+/// default). Empty is not a degraded mode: X and TikTok lookups go straight to the
+/// upstream public APIs. Setting this hands those lookups to a service speaking the
+/// same normalized shape, for anyone who would rather the upstream never saw their
+/// IP.
 Future<void> setEmbedProxyUrl({String? base}) =>
     RustLib.instance.api.crateApiNetworkSetEmbedProxyUrl(base: base);
 
@@ -324,16 +283,12 @@ Future<void> setEmbedProxyUrl({String? base}) =>
 /// sent, without editing it.
 ///
 /// This exists for the send-beat-the-fetch race: the compose box fetches OG
-/// metadata in the background, and a fast sender used to lose the card
-/// entirely. Call this when the fetch lands after the send. `preview: None`
-/// clears the card, which is what an edit that removed the URL wants.
+/// metadata in the background and a fast sender used to lose the card entirely.
+/// `preview: None` clears it, which is what an edit that removed the URL wants.
 ///
-/// The row is re-signed over its unchanged text/timestamp with the new
-/// preview digest, so it keeps verifying. `edited_at` is untouched: a late
-/// card must not make the bubble say "(edited)".
-///
-/// Only the message's author can attach — the command is dropped otherwise.
-/// Issue #45.
+/// The row is re-signed over its unchanged text and timestamp with the new preview
+/// digest, so it keeps verifying, and `edited_at` is untouched: a late card must
+/// not make the bubble say "(edited)". Only the author may attach.
 Future<void> attachChannelLinkPreview({
   required String serverId,
   required String channelId,
@@ -346,7 +301,7 @@ Future<void> attachChannelLinkPreview({
   preview: preview,
 );
 
-/// DM twin of [`attach_channel_link_preview`]. Issue #45.
+/// DM twin of [`attach_channel_link_preview`].
 Future<void> attachDmLinkPreview({
   required String peerId,
   required String messageId,
@@ -357,8 +312,8 @@ Future<void> attachDmLinkPreview({
   preview: preview,
 );
 
-/// Delete (hide) a channel message. Broadcasts the deletion to all server members.
-/// The message stays in the DB (Rat Files evidence) but is hidden from UI.
+/// Delete (hide) a channel message for all members. The row stays in the DB as
+/// evidence but is hidden from the UI.
 Future<void> deleteChannelMessage({
   required String serverId,
   required String channelId,
@@ -452,10 +407,9 @@ Future<void> sendFriendRequestByNickname({required String nickname}) => RustLib
 Future<void> claimNickname({required String nickname}) =>
     RustLib.instance.api.crateApiNetworkClaimNickname(nickname: nickname);
 
-/// File a user report with the relay (category: "spam", "harassment",
-/// "illegal_content", or "impersonation"). Fire-and-forget; the relay keeps
-/// only per-(target, category) counts and dedups one report per reporter per
-/// target per category via hashed keys — it never stores who reported whom.
+/// File a user report with the relay ("spam", "harassment", "illegal_content" or
+/// "impersonation"). Fire-and-forget: the relay keeps only per-(target, category)
+/// counts, dedups via hashed keys, and never stores who reported whom.
 Future<void> reportUser({required String target, required String category}) =>
     RustLib.instance.api.crateApiNetworkReportUser(
       target: target,
@@ -466,10 +420,9 @@ Future<void> reportUser({required String target, required String category}) =>
 Future<void> releaseNickname() =>
     RustLib.instance.api.crateApiNetworkReleaseNickname();
 
-/// (Populated device) Claim a 6-char link code on the relay + join its rendezvous
-/// room, so an empty sibling can pull your data by entering the code. The code
-/// (echoed back via the `LinkCodeClaimed` event) should be generated client-side
-/// from an unambiguous alphabet and displayed with a 5-minute countdown.
+/// (Populated device) Claim a 6-char link code on the relay and join its rendezvous
+/// room, so an empty sibling can pull your data by entering it. The code is
+/// generated client-side and displayed with a 5-minute countdown.
 Future<void> claimLinkCode({required String code}) =>
     RustLib.instance.api.crateApiNetworkClaimLinkCode(code: code);
 
@@ -517,46 +470,35 @@ Future<void> acceptLinkPush({
 Future<void> declineLinkPush({required String targetPeer}) =>
     RustLib.instance.api.crateApiNetworkDeclineLinkPush(targetPeer: targetPeer);
 
-/// Load a peer's cached profile directly from SQLCipher for push notification display.
-/// Works without a running node — opens its own DB connection.
-/// Returns None if the peer has no cached profile or identity is locked.
+/// Load a peer's cached profile straight from SQLCipher for push display. Works
+/// without a running node; `None` when there is no profile or identity is locked.
 Future<PushProfile?> getPushProfile({required String peerId}) =>
     RustLib.instance.api.crateApiNetworkGetPushProfile(peerId: peerId);
 
-/// Nudge the LIVE full node to (re)join the DM room for `sender_peer_id` so
-/// the relay replays that room's buffered offline DMs to it (Android push
-/// path). The FCM background isolate shares its process with the still-
-/// running full node, so `start_fetch_node` refuses to start — but the live
-/// node itself can collect the buffered ciphertext: joining the DM room
-/// triggers the relay replay, and if the WS is a doze-killed zombie the
-/// queued JoinRoom rides the reconnect (send failure → pending_commands →
-/// reconnect). The live receive path then decrypts, persists, and emits
-/// MessageReceived — the MAIN isolate (alive, since the node is) shows the
-/// content notification through the normal routing (mute + dedup respected).
+/// Nudge the LIVE full node to (re)join the DM room for `sender_peer_id` so the
+/// relay replays that room's buffered offline DMs.
 ///
-/// Returns Ok(true) when a live node accepted the command, Ok(false) when no
-/// node is running (caller should use the fetch node instead).
+/// The FCM background isolate shares its process with the still-running full node,
+/// so `start_fetch_node` refuses to start; the live node can collect the buffered
+/// ciphertext instead, and a queued JoinRoom rides the reconnect if the WS is a
+/// doze-killed zombie. Returns Ok(false) when no node is running, in which case the
+/// caller should use the fetch node.
 Future<bool> nudgeLiveDmFetch({required String senderPeerId}) => RustLib
     .instance
     .api
     .crateApiNetworkNudgeLiveDmFetch(senderPeerId: senderPeerId);
 
 /// Channel-wake sibling of [`nudge_live_dm_fetch`]: ask the LIVE full node to
-/// (re)join an arbitrary relay room (the server room for a channel push) so
-/// the relay replays that room's buffered ciphertext to it. Same rationale:
-/// on Android the backgrounded app keeps the full node registered, so the
-/// fetch node refuses to start; the queued JoinRoom rides the WS reconnect if
-/// the socket is a doze-killed zombie. Returns Ok(false) when no node runs.
+/// (re)join the server room for a channel push so the relay replays its buffered
+/// ciphertext. Returns Ok(false) when no node runs.
 Future<bool> nudgeLiveRoomJoin({required String roomCode}) =>
     RustLib.instance.api.crateApiNetworkNudgeLiveRoomJoin(roomCode: roomCode);
 
 /// Start a lightweight invisible fetch node to receive buffered messages.
 ///
-/// DM wake (`server_room` = None): joins only the DM room for sender_peer_id
-/// and decrypts via Olm. Channel wake (`server_room` = Some(server_id)): joins
-/// the server room and decrypts buffered channel messages via MLS (or reads
-/// signed public-channel plaintext).
-/// Cannot run while the full node is active. Blocks the calling thread.
+/// DM wake (`server_room` = None) joins only the DM room and decrypts via Olm; a
+/// channel wake joins the server room and decrypts via MLS or signed public
+/// plaintext. Cannot run while the full node is active. Blocks the calling thread.
 Future<List<FetchedMessage>> startFetchNode({
   required String senderPeerId,
   required int timeoutSecs,
@@ -576,22 +518,19 @@ Future<void> registerPushToken({
   platform: platform,
 );
 
-/// Register per-server/channel push notification prefs with the relay.
-/// `prefs_json` = {"<server_id>": {"level": "all|mentions|nothing",
-/// "channels": {"<channel_id>": "all|mentions|nothing"}}}. RAM-only on the
-/// relay; re-sent automatically on every reconnect. The relay filters channel
-/// pushes against these BEFORE contacting FCM/APNs (iOS alert pushes cannot be
-/// suppressed after delivery).
+/// Register per-server/channel push prefs with the relay: `{"<server_id>":
+/// {"level": "all|mentions|nothing", "channels": {...}}}`. RAM-only and re-sent on
+/// every reconnect. The relay filters channel pushes against these BEFORE
+/// contacting FCM/APNs, because an iOS alert push cannot be suppressed after
+/// delivery.
 Future<void> setPushPrefs({required String prefsJson}) =>
     RustLib.instance.api.crateApiNetworkSetPushPrefs(prefsJson: prefsJson);
 
-/// Opt in/out of the relay's extended offline DM delivery ("offline inbox").
-/// When enabled, the relay keeps Olm-encrypted DM text + FileHeader frames
-/// addressed to this device for `retention_secs` (relay clamps to 1h..7d)
-/// instead of the 24h push baseline, and replays them on the next connect —
-/// delivered entries are deleted relay-side. Text and file METADATA only,
-/// never file bytes. RAM-only registry: ws_client re-registers automatically
-/// on every reconnect; Dart must call this once per app start (and on change).
+/// Opt in or out of the relay's extended offline DM delivery. When enabled the
+/// relay keeps Olm-encrypted DM text and FileHeader frames for this device for
+/// `retention_secs` (clamped to 1h..7d) instead of the 24h push baseline and
+/// replays them on the next connect, deleting what it delivers. Text and file
+/// METADATA only, never bytes. RAM-only, so Dart calls this once per app start.
 Future<void> setOfflineInbox({
   required bool enabled,
   required PlatformInt64 retentionSecs,
@@ -611,9 +550,8 @@ Future<PushChannelMeta?> getPushChannelMeta({
   channelId: channelId,
 );
 
-/// Send a typing indicator to peers. Ephemeral, not stored.
-/// For DMs: server_id = "", channel_id = peer ID.
-/// For channels: server_id and channel_id as normal.
+/// Send a typing indicator, ephemeral and never stored. DMs pass server_id = ""
+/// and the peer id as channel_id.
 Future<void> sendTypingIndicator({
   required String serverId,
   required String channelId,
@@ -626,9 +564,8 @@ Future<void> sendTypingIndicator({
 Future<void> setInvisible({required bool invisible}) =>
     RustLib.instance.api.crateApiNetworkSetInvisible(invisible: invisible);
 
-/// Subscribe to specific channels in a server for topic-based relay routing.
-/// Only messages for subscribed channels are delivered in real-time.
-/// Unsubscribed channel messages are synced on-demand when navigating to them.
+/// Subscribe to specific channels for topic-based relay routing: only subscribed
+/// channels arrive in real time, the rest sync on demand when opened.
 Future<void> subscribeChannels({
   required String serverId,
   required List<String> channelIds,
@@ -637,8 +574,7 @@ Future<void> subscribeChannels({
   channelIds: channelIds,
 );
 
-/// Request message sync for a specific channel from all connected server members.
-/// Called when the user opens a channel to catch up on missed messages.
+/// Request message sync for one channel from all connected server members.
 Future<void> requestChannelSync({
   required String serverId,
   required String channelId,
@@ -647,21 +583,16 @@ Future<void> requestChannelSync({
   channelId: channelId,
 );
 
-/// Notify all connected peers that we're shutting down gracefully.
-/// Call this before closing the app so peers can immediately update their state.
-/// Update our display name, status, about me, and optionally avatar/banner —
-/// saves to DB and broadcasts to all connected peers.
-/// `showcase_board`: None = unchanged, Some("") = clear, Some(json) = set.
-/// `showcase_assets`: None = unchanged, Some(empty list) = clear, else the
-/// full replacement asset set for the board.
-/// `avatar_frame`: None = unchanged, Some("") = clear, Some(id) = set — a
-/// built-in `b:<hue>` or the 64-hex hash of a frame blob already stored by
-/// [`process_and_store_avatar_frame`] (issue #54). Never bytes.
-/// `avatar_anim` / `banner_anim`: the same three states for the ANIMATED
-/// variants, whose bytes ride the asset rail — pass the hash returned by
-/// [`process_and_store_avatar_anim`] / [`process_and_store_banner_anim`] and
-/// its `still` as the matching `avatar_bytes` / `banner_bytes`. A still-only
-/// pick must pass `Some("")` so a previous animation is dropped.
+/// Notify all connected peers that we are shutting down, so they update state at
+/// once. Call before closing the app.
+/// Update our profile: save to the DB and broadcast to connected peers.
+///
+/// Every optional field is three-state: `None` = unchanged, `Some("")` = clear,
+/// `Some(v)` = set. `avatar_frame` is a built-in `b:<hue>` or the 64-hex hash of a
+/// blob stored by [`process_and_store_avatar_frame`], never bytes; `avatar_anim` /
+/// `banner_anim` name hashes whose bytes ride the asset rail, and their `still` must
+/// be passed as the matching `avatar_bytes` / `banner_bytes`. A still-only pick must
+/// pass `Some("")` so a previous animation is dropped.
 Future<void> updateProfile({
   required String displayName,
   required String status,
@@ -696,11 +627,12 @@ Future<Uint8List> processAvatar({required List<int> rawBytes}) =>
     RustLib.instance.api.crateApiNetworkProcessAvatar(rawBytes: rawBytes);
 
 /// Process a user-picked image or GIF into an AVATAR FRAME and cache it
-/// content-addressed under `AssetKind::Frame` (issue #54). The caller then
-/// names the returned hash in `update_profile(avatar_frame: Some(hash))`;
-/// the bytes ride the asset rail on demand, never the profile push.
+/// content-addressed under `AssetKind::Frame`. The caller then names the returned
+/// hash in `update_profile(avatar_frame: ...)`; the bytes ride the asset rail on
+/// demand, never the profile push.
 ///
-/// Errors are user-facing: over the cap, or the authoring gate that a frame's
+/// Errors are user-facing: over the cap, or the authoring gate that a frame's middle
+/// has to be see-through, since frames paint IN FRONT of the avatar.
 /// middle has to be see-through (frames paint IN FRONT of the avatar).
 Future<ProcessedFrame> processAndStoreAvatarFrame({
   required List<int> rawBytes,
@@ -708,13 +640,13 @@ Future<ProcessedFrame> processAndStoreAvatarFrame({
   rawBytes: rawBytes,
 );
 
-/// Process a user-picked animated image into an ANIMATED AVATAR and cache it
-/// content-addressed under `AssetKind::Profile`. The caller then names the
-/// returned hash in `update_profile(avatar_anim: Some(hash))` and passes
-/// `still` as `avatar_bytes`; the animation rides the asset rail on demand,
+/// Process a user-picked animated image into an ANIMATED AVATAR cached under
+/// `AssetKind::Profile`. The caller names the hash in `update_profile(avatar_anim:
+/// ...)` and passes `still` as `avatar_bytes`; the animation rides the asset rail,
 /// never the profile push.
 ///
-/// Errors are user-facing: over the 2 MB cap even after the quality ladder, or
+/// Errors are user-facing: over the 2 MB cap even after the quality ladder, or too
+/// many frames to hold decoded.
 /// too many frames to hold decoded (a screen recording used as profile art).
 Future<ProcessedProfileMedia> processAndStoreAvatarAnim({
   required List<int> rawBytes,
@@ -730,26 +662,21 @@ Future<ProcessedProfileMedia> processAndStoreBannerAnim({
   rawBytes: rawBytes,
 );
 
-/// Import a `.hollowpack` bought from the artist shop: verify it whole, put
-/// its files on the asset rail exactly as they arrived, and record what was
-/// bought and from whom.
+/// Import a `.hollowpack` bought from the artist shop: verify it whole, put its
+/// files on the asset rail exactly as they arrived, and record what was bought and
+/// from whom. Importing does NOT touch the profile; wearing the art is separate.
 ///
-/// The bytes are stored AS-IS and are never re-encoded. That is the whole
-/// point of the format: the shop ran the app's own encoders, the art's
-/// identity is the SHA-256 of those processed bytes, and a second generation
-/// through a lossy encoder would mint a different hash and orphan the support
-/// credential phase 2 binds to the first one.
+/// The bytes are stored AS-IS and never re-encoded: the art's identity is the
+/// SHA-256 of the processed bytes the shop's encoders produced, and a second
+/// generation through a lossy encoder would mint a different hash and orphan the
+/// support credential bound to the first.
 ///
-/// Verification is [`crate::hollowpack::verify_pack`], the same call
-/// `hollowpack inspect` makes, and it refuses the WHOLE pack rather than
-/// dropping a bad file: the caps on file count and size, the recomputed
-/// SHA-256 against what the manifest claims, the decoded dimensions against
-/// the role's ceiling, and the see-through-centre gate re-applied to any
-/// frame so a hand-built pack cannot smuggle one past the picker. Nothing is
-/// written anywhere until every file has passed.
-///
-/// Importing does NOT touch the profile. Wearing the art is a separate,
-/// deliberate step.
+/// Verification is [`crate::hollowpack::verify_pack`], the same call `hollowpack
+/// inspect` makes, and it refuses the WHOLE pack rather than dropping a bad file:
+/// caps on file count and size, recomputed SHA-256 against the manifest, decoded
+/// dimensions against the role's ceiling, and the see-through-centre gate re-applied
+/// so a hand-built pack cannot smuggle a frame past the picker. Nothing is written
+/// until every file has passed.
 Future<HollowpackImport> importHollowpack({required String path}) =>
     RustLib.instance.api.crateApiNetworkImportHollowpack(path: path);
 
@@ -757,58 +684,44 @@ Future<HollowpackImport> importHollowpack({required String path}) =>
 Future<List<OwnedArt>> listOwnedArt() =>
     RustLib.instance.api.crateApiNetworkListOwnedArt();
 
-/// One-shot migration for a profile authored BEFORE animated media moved to
-/// the asset rail: the animation used to sit in `avatar`/`banner` as raw
-/// source bytes and rode every profile push. Converts ours in place — the
-/// animation onto the rail under its hash, a 512px / 1200x480 still into the
-/// blob — and re-announces once.
+/// One-shot migration for a profile authored BEFORE animated media moved to the
+/// asset rail, where the animation sat in `avatar`/`banner` as raw source bytes and
+/// rode every profile push. Converts ours in place and re-announces once.
 ///
-/// Without this the bandwidth win only lands for people who happen to re-pick
-/// their avatar, and everyone else keeps re-shipping megabytes of unchanged
-/// GIF on every reconnect. Called once from the Dart bootstrap after the node
-/// starts; a settings marker makes it idempotent, and a conversion FAILURE
-/// still sets the marker — a source we cannot convert keeps working exactly as
-/// it did, it just never becomes cheap.
+/// Without it the bandwidth win only lands for people who re-pick their avatar and
+/// everyone else keeps re-shipping megabytes of unchanged GIF on every reconnect. A
+/// settings marker makes it idempotent, and a conversion FAILURE still sets the
+/// marker: a source we cannot convert keeps working, it just never becomes cheap.
 ///
 /// Returns true when something was actually converted.
 Future<bool> migrateProfileMediaOnce() =>
     RustLib.instance.api.crateApiNetworkMigrateProfileMediaOnce();
 
 /// Process a raw image into banner format (2.5:1, at most 1200x480 WebP).
-/// Returns processed bytes.
 Future<Uint8List> processBanner({required List<int> rawBytes}) =>
     RustLib.instance.api.crateApiNetworkProcessBanner(rawBytes: rawBytes);
 
 Future<void> notifyShutdown() =>
     RustLib.instance.api.crateApiNetworkNotifyShutdown();
 
-/// Join a room via the signaling service.
-/// Registers our addresses and bootstraps from other peers in the room.
+/// Join a room via the signaling service, registering our addresses and
+/// bootstrapping from other peers in the room.
 Future<void> joinRoom({required String roomCode}) =>
     RustLib.instance.api.crateApiNetworkJoinRoom(roomCode: roomCode);
 
 /// Stop the running node.
 Future<void> stopNode() => RustLib.instance.api.crateApiNetworkStopNode();
 
-/// Send a file to a DM peer or server channel.
-/// `peer_id`: target peer (for DMs, empty for channels).
-/// `server_id` + `channel_id`: target channel (for servers, empty for DMs).
-/// `vthumb`: optional video thumbnail back-reference. When set, the file at
-///           `file_path` is a thumbnail image for the vault-stored video
-///           identified by `vthumb.cid`. Phase 6.75 video preview.
-/// `override_width` / `override_height`: Phase 6.75 video preview — when the
-///           file at `file_path` is a video, Dart passes the video's pixel
-///           dimensions here so the FileHeader carries them and receivers can
-///           render the bubble at the correct aspect ratio. Ignored for image
-///           files (Rust extracts those dimensions itself).
-/// `is_voice`: true for recorded voice messages — the FileHeader carries a
-///           `voice` flag exempting them from the receiver's auto-download
-///           gate (the wire name is the recorder's temp basename, so Dart
-///           must say so explicitly).
-/// `poster_bytes`: for videos, the ffmpeg-extracted first-frame image (any
-///           format the image crate decodes). Rust re-encodes it into the
-///           FileHeader's small `thumb` poster and uses its dimensions when
-///           `override_width`/`height` are absent.
+/// Send a file to a DM peer (`peer_id`) or a server channel (`server_id` +
+/// `channel_id`); the unused side is empty.
+///
+/// `vthumb` marks the file as the thumbnail for a vault-stored video.
+/// `override_width`/`override_height` carry a video's pixel dimensions so receivers
+/// render the right aspect ratio (ignored for images, whose dimensions Rust reads).
+/// `is_voice` must be set explicitly for recorded voice messages, because the wire
+/// name is the recorder's temp basename and the flag is what exempts them from the
+/// receiver's auto-download gate. `poster_bytes` is a video's extracted first frame,
+/// re-encoded here into the FileHeader's small poster.
 Future<void> sendFile({
   String? peerId,
   String? serverId,
@@ -854,14 +767,13 @@ Future<void> requestFileFromPeer({
 ///
 /// The receipt goes with the ask on purpose. An answer already in flight then
 /// arrives with no receipt to bypass anything, so the size cap and the
-/// auto-download gate judge it exactly as they judge an unsolicited push,
-/// which is what "stop waiting" means. Nothing is emitted: the card clears its
-/// own state on the tap, and an event here would race it.
+/// auto-download gate judge it exactly as they judge an unsolicited push, which is
+/// what "stop waiting" means. Nothing is emitted: the card clears its own state on
+/// the tap and an event here would race it.
 Future<void> cancelFileRequest({required String fileId}) =>
     RustLib.instance.api.crateApiNetworkCancelFileRequest(fileId: fileId);
 
-/// Convert a WebP image file to another format (PNG/JPEG).
-/// Used for "Save As" functionality.
+/// Convert a WebP image file to another format (PNG/JPEG) for "Save As".
 Future<Uint8List> convertImageFormat({
   required String sourcePath,
   required String targetFormat,
@@ -888,9 +800,9 @@ Future<void> webrtcPeerDisconnected({required String peerId}) =>
 
 /// Notify Rust that the DEDICATED Hollow Share data channel is open with a peer.
 ///
-/// Tracked in its own set: Share runs a second, STUN-only peer connection so
-/// its bytes never ride the relay (HOLLOW_PLAN §7A). Reporting it as a general
-/// channel would let Rust schedule Share chunks over the TURN-capable one.
+/// Tracked in its own set: Share runs a second, STUN-only peer connection so its
+/// bytes never ride the relay, and reporting it as a general channel would let Rust
+/// schedule Share chunks over the TURN-capable one.
 Future<void> webrtcSharePeerConnected({required String peerId}) => RustLib
     .instance
     .api
@@ -903,8 +815,8 @@ Future<void> webrtcSharePeerDisconnected({required String peerId}) => RustLib
     .crateApiNetworkWebrtcSharePeerDisconnected(peerId: peerId);
 
 /// Notify Rust that a Share chunk transfer failed on the Share data channel.
-/// Kept apart from [`webrtc_transfer_failed`], which also evicts the peer from
-/// the general set and drives the WS relay retry — neither applies to Share.
+/// Kept apart from [`webrtc_transfer_failed`], which also evicts the peer from the
+/// general set and drives the WS relay retry; neither applies to Share.
 Future<void> webrtcShareTransferFailed({
   required String transferId,
   required String peerId,
@@ -915,8 +827,7 @@ Future<void> webrtcShareTransferFailed({
   error: error,
 );
 
-/// Send a WebRTC signaling message (SDP offer/answer or ICE candidate) to a peer.
-/// Rust routes it through the WSS relay to the target peer.
+/// Send a WebRTC signaling message to a peer, routed through the WSS relay.
 Future<void> webrtcSendSignal({
   required String peerId,
   required String signalType,
@@ -929,8 +840,8 @@ Future<void> webrtcSendSignal({
   connId: connId,
 );
 
-/// Notify Rust that a WebRTC file transfer completed (receiver side).
-/// Rust will decrypt and process the received file.
+/// Notify Rust that a WebRTC file transfer completed (receiver side), so it can
+/// decrypt and process the file.
 Future<void> webrtcTransferComplete({
   required String transferId,
   required String tempPath,
@@ -945,10 +856,8 @@ Future<void> webrtcTransferComplete({
   shardIndex: shardIndex,
 );
 
-/// Notify Rust that a WebRTC share-chunk transfer completed.
-/// Distinct from `webrtc_transfer_complete` because share chunks need a
-/// 32-bit chunk_index (a single share can have up to 4 billion chunks).
-/// Routes into share_handler verify+decrypt+write path.
+/// Notify Rust that a WebRTC share-chunk transfer completed. Distinct from
+/// `webrtc_transfer_complete` because share chunks need a 32-bit chunk_index.
 Future<void> webrtcShareChunkComplete({
   required String transferId,
   required String tempPath,
@@ -961,8 +870,7 @@ Future<void> webrtcShareChunkComplete({
   chunkIndex: chunkIndex,
 );
 
-/// Notify Rust that a WebRTC file send completed (sender side).
-/// Rust cleans up the temp encrypted file.
+/// Notify Rust that a WebRTC file send completed, so it cleans up the temp file.
 Future<void> webrtcSendComplete({required String transferId}) => RustLib
     .instance
     .api
@@ -1023,10 +931,10 @@ Future<void> voiceChannelSendSignal({
   payload: payload,
 );
 
-/// SFrame heal (issue #27): the voice cryptors report sustained decrypt
-/// failures against `peer_id`. Re-emits the current MLS epoch key; with
-/// `escalate` the node also re-bootstraps the MLS group (non-authority) or
-/// removes + re-adds the failing peer's leaves (authority).
+/// SFrame heal: the voice cryptors report sustained decrypt failures against
+/// `peer_id`, so re-emit the current MLS epoch key. With `escalate` the node also
+/// re-bootstraps the MLS group (non-authority) or removes and re-adds the failing
+/// peer's leaves (authority).
 Future<void> voiceSframeHeal({
   required String serverId,
   required String channelId,
@@ -1039,12 +947,10 @@ Future<void> voiceSframeHeal({
   escalate: escalate,
 );
 
-/// Send an Olm-encrypted `fwd_*` control signal to a media forwarder inside
-/// its `fwd:{peer_id}` relay room. Signal types are whitelisted to the
-/// client-sendable set (`fwd_stream_register` / `fwd_stream_auth` /
-/// `fwd_stream_unregister` / `fwd_ingest_offer` / `fwd_attach` / `fwd_detach`
-/// / `fwd_egress_answer`); payload is JSON with a REQUIRED `origin` object.
-/// Queues + fires a signed KeyRequest when no Olm session exists yet.
+/// Send an Olm-encrypted `fwd_*` control signal to a media forwarder in its
+/// `fwd:{peer_id}` room. Signal types are whitelisted to the client-sendable set and
+/// the JSON payload requires an `origin` object. Queues and fires a signed
+/// KeyRequest when no Olm session exists yet.
 Future<void> forwarderSendSignal({
   required String forwarderPeerId,
   required String signalType,
@@ -1055,9 +961,8 @@ Future<void> forwarderSendSignal({
   payload: payload,
 );
 
-/// Join a media forwarder's dedicated relay room (`fwd:{peer_id}`) so fwd
-/// control signals can flow. Pure transport join — never touches the DM
-/// conversation-pane state the generic room join carries.
+/// Join a media forwarder's dedicated relay room so fwd control signals can flow.
+/// Pure transport join: it never touches DM conversation-pane state.
 Future<void> joinForwarderRoom({required String forwarderPeerId}) => RustLib
     .instance
     .api
@@ -1070,20 +975,17 @@ Future<void> leaveForwarderRoom({required String forwarderPeerId}) => RustLib
     .api
     .crateApiNetworkLeaveForwarderRoom(forwarderPeerId: forwarderPeerId);
 
-/// Embedded peer forwarder (media forwarding step 3 phase 2): mirror the
-/// "Peer media forwarding" Settings toggle into the node. Desktop-only in
-/// effect — the command is a no-op on mobile / non-forwarder builds.
+/// Mirror the "Peer media forwarding" Settings toggle into the node. Desktop-only
+/// in effect: a no-op on mobile and non-forwarder builds.
 Future<void> setPeerForwardingEnabled({required bool enabled}) => RustLib
     .instance
     .api
     .crateApiNetworkSetPeerForwardingEnabled(enabled: enabled);
 
-/// Embedded peer forwarder: declare (or withdraw) willingness to forward the
-/// screen share identified by `(origin_peer, kind)` — set with `active: true`
-/// when a `vc_screen_watch` advertises `fwd_capable`, cleared when that watch
-/// ends. The embedded engine only ever accepts a `fwd_stream_register` whose
-/// origin matches an active expectation: a peer forwarder forwards ONLY
-/// streams its user explicitly watches.
+/// Declare (or withdraw) willingness to forward the screen share identified by
+/// `(origin_peer, kind)`, set when a `vc_screen_watch` advertises `fwd_capable`. The
+/// embedded engine only accepts a `fwd_stream_register` whose origin matches an
+/// active expectation: a peer forwarder forwards ONLY streams its user watches.
 Future<void> setForwarderExpectation({
   required String originPeer,
   required String kind,
@@ -1094,14 +996,11 @@ Future<void> setForwarderExpectation({
   active: active,
 );
 
-/// Feeder election (media forwarding, §9.6): start or stop FEEDING another
-/// forwarder with a stream this client's embedded engine already forwards.
-///
-/// Called on a branch head when the stream's OWNER delegates it via
-/// `vc_screen_assign{feed_target}`. The far forwarder still applies its own
-/// admission — it only accepts our ingest because the owner named us as its
-/// `feeder` in an owner-authenticated register — so this grants no authority
-/// the owner had not already granted.
+/// Feeder election: start or stop FEEDING another forwarder with a stream this
+/// client's embedded engine already forwards, on a branch head whose stream OWNER
+/// delegated it. The far forwarder still applies its own admission and accepts our
+/// ingest only because the owner named us as `feeder` in an owner-authenticated
+/// register, so this grants no authority the owner had not already granted.
 Future<void> setForwarderFeed({
   required String originPeer,
   required String kind,
@@ -1123,8 +1022,8 @@ Future<void> webrtcPingReport({required String peerId, required int rttMs}) =>
       rttMs: rttMs,
     );
 
-/// Report the ICE route class of a live data-channel connection (Tier 3
-/// reachability-aware overlay): `is_direct` = host/srflx/LAN vs TURN-relayed.
+/// Report the ICE route class of a live data-channel connection: `is_direct` =
+/// host/srflx/LAN rather than TURN-relayed.
 Future<void> webrtcRouteReport({
   required String peerId,
   required bool isDirect,
@@ -1133,10 +1032,9 @@ Future<void> webrtcRouteReport({
   isDirect: isDirect,
 );
 
-/// Hand back a gossip CRDT-op frame (type byte 0x04) received on a data
-/// channel. Tier 2 large-server scaling: the op is ingested through the same
-/// validated path as a relay CrdtOpBroadcast and re-flooded to our own mesh
-/// neighbors only if it was new.
+/// Hand back a gossip CRDT-op frame received on a data channel. It is ingested
+/// through the same validated path as a relay CrdtOpBroadcast and re-flooded to our
+/// own mesh neighbours only if it was new.
 Future<void> webrtcGossipOpReceived({
   required String senderPeerId,
   required List<int> payload,
@@ -1235,9 +1133,8 @@ class FetchedMessage {
   final PlatformInt64 timestamp;
   final String messageId;
 
-  /// On-disk path to the message's image, if this DM carried an inlined image
-  /// that the fetch node decrypted and wrote. Lets the push notification show
-  /// a BigPicture preview. None for text-only messages.
+  /// On-disk path to the message's image when this DM carried an inlined one, so the
+  /// notification can show a BigPicture preview. `None` for text-only.
   final String? imagePath;
 
   /// Set for channel messages (channel wake): owning server.
@@ -1291,8 +1188,8 @@ class GuestFileMetaFfi {
   final int? width;
   final int? height;
 
-  /// Set ONLY when previewing our own server (local branch) and the file is
-  /// complete on OUR disk — the card renders it without any peer fetch.
+  /// Set ONLY when previewing our own server and the file is complete on OUR disk,
+  /// so the card renders without any peer fetch.
   final String? diskPath;
 
   const GuestFileMetaFfi({
@@ -1376,9 +1273,8 @@ class GuestSyncMessageFfi {
   /// Attachment metadata (never bytes) — Dart builds the file card from it.
   final GuestFileMetaFfi? fileMeta;
 
-  /// The message's link preview card. Signature-covered before it got here
-  /// (`guest_item_accepted`), so the guest browser renders it like any
-  /// member would — and, as everywhere else, without fetching the URL.
+  /// The message's link preview card, signature-covered before it got here, so the
+  /// guest browser renders it like a member would and never fetches the URL.
   final LinkPreviewRef? linkPreview;
 
   const GuestSyncMessageFfi({
@@ -1430,16 +1326,15 @@ class GuestSyncMessageFfi {
           linkPreview == other.linkPreview;
 }
 
-/// One file that came out of a `.hollowpack`, with every value RECOMPUTED
-/// from the bytes rather than read out of the pack's manifest.
+/// One file that came out of a `.hollowpack`, with every value RECOMPUTED from the
+/// bytes rather than read out of the pack's manifest.
 class HollowpackFile {
   /// `frame`, `avatar`, `avatar_anim`, `avatar_still`, `banner`,
   /// `banner_anim` or `banner_still`.
   final String role;
 
-  /// 64-hex SHA-256 of the bytes. This IS the art's identity: it is what
-  /// `update_profile(avatar_frame: ...)` names and what peers pull on the
-  /// asset rail.
+  /// 64-hex SHA-256 of the bytes. This IS the art's identity: what `update_profile`
+  /// names and what peers pull on the asset rail.
   final String hash;
   final BigInt bytes;
   final int w;
@@ -1523,13 +1418,9 @@ class HollowpackImport {
 }
 
 /// FFI-facing link preview for a URL embedded in a message.
-///
-/// Generated by the sender (fetch OG tags, download + compress thumbnail to
-/// lossy WebP Q=50) and travels with the message. Receivers render the card
-/// directly from these fields and NEVER make an HTTP request to the
-/// previewed URL — this is a privacy property, not a cache optimization.
-///
-/// Phase 6.75 link previews. See HOLLOW_PLAN.md.
+/// Generated by the SENDER and carried with the message. Receivers render from
+/// these fields and NEVER request the previewed URL, which is a privacy property,
+/// not a cache optimization.
 class LinkPreviewRef {
   /// The URL that was previewed.
   final String url;
@@ -1562,9 +1453,8 @@ class LinkPreviewRef {
   /// Post author line, e.g. `"Jane Doe (@jane)"`. Social adapters only.
   final String? author;
 
-  /// Where the post's video lives: either a direct `.mp4`/`.webm` (plays
-  /// inline on tap) or the media page itself (opens in the browser). Never
-  /// fetched to render the card, never autoplayed.
+  /// Where the post's video lives: a direct `.mp4`/`.webm` that plays inline on tap,
+  /// or the media page. Never fetched to render the card, never autoplayed.
   final String? videoUrl;
 
   /// Video width, for the card's aspect ratio.
@@ -1631,15 +1521,13 @@ class MessageProofV2 {
   final bool hasSignature;
   final bool valid;
 
-  /// 2 = verified against the v2 payload (structured fields covered),
-  /// 0 = did not verify. `1` (legacy v1, text only) is no longer produced —
-  /// v1 verification was dropped in 0.8.5; the variant is kept out of the
-  /// contract rather than out of the range so old Dart builds that switch on
-  /// `== 2` keep behaving correctly.
+  /// 2 = verified against the v2 payload, 0 = did not verify. `1` (legacy v1, text
+  /// only) is no longer produced; the variant stays out of the contract rather than
+  /// out of the range so old Dart builds that switch on `== 2` keep behaving.
   final int sigVersion;
 
-  /// The canonical v2 payload string — displayed and exported by the dialog
-  /// whether or not it verified.
+  /// The canonical v2 payload string, displayed and exported whether or not it
+  /// verified.
   final String canonicalPayload;
 
   /// The row's signed fields, for the exported proof JSON.
@@ -1774,12 +1662,16 @@ sealed class NetworkEvent with _$NetworkEvent {
   const factory NetworkEvent.serverUpdated({required String serverId}) =
       NetworkEvent_ServerUpdated;
 
-  /// Custom emote bytes arrived and were verified + cached — Dart
-  /// invalidates the hash-keyed emote image providers so pending
-  /// `[e:name:hash]` tokens re-render as images.
+  /// Custom emote bytes arrived and verified, so Dart invalidates the hash-keyed
+  /// providers and pending `[e:name:hash]` tokens re-render as images.
   const factory NetworkEvent.emoteAssetsReceived({
     required List<String> hashes,
   }) = NetworkEvent_EmoteAssetsReceived;
+
+  /// The personal emote set changed through a sibling device, so Dart
+  /// invalidates `personalEmotesProvider`.
+  const factory NetworkEvent.personalEmotesUpdated() =
+      NetworkEvent_PersonalEmotesUpdated;
   const factory NetworkEvent.channelAdded({
     required String serverId,
     required String channelId,
@@ -1818,9 +1710,9 @@ sealed class NetworkEvent with _$NetworkEvent {
     required String reason,
   }) = NetworkEvent_ServerJoinFailed;
 
-  /// Nobody was online to answer, so the request was PARKED (persisted +
-  /// deposited into the server room's join ring). Not a failure: the UI
-  /// shows a pending tile that survives a restart.
+  /// Nobody was online to answer, so the request was PARKED (persisted plus
+  /// deposited in the server room's join ring). Not a failure: the pending tile
+  /// survives a restart.
   const factory NetworkEvent.serverJoinParked({required String serverId}) =
       NetworkEvent_ServerJoinParked;
 
@@ -1865,9 +1757,9 @@ sealed class NetworkEvent with _$NetworkEvent {
   const factory NetworkEvent.deviceListUpdated({required String masterPeerId}) =
       NetworkEvent_DeviceListUpdated;
 
-  /// A contact's identity changed in a way worth showing (Issue 1-C): a new
-  /// device joined their identity, or one of their devices re-keyed. `peer_id`
-  /// is the MASTER; `kind` is `new_device` or `identity_key_changed`.
+  /// A contact's identity changed in a way worth showing: a new device joined their
+  /// identity, or one re-keyed. `peer_id` is the MASTER, `kind` is `new_device` or
+  /// `identity_key_changed`.
   const factory NetworkEvent.securityAlert({
     required String peerId,
     required String kind,
@@ -1895,9 +1787,8 @@ sealed class NetworkEvent with _$NetworkEvent {
     String? publicKey,
   }) = NetworkEvent_DmMessageEdited;
 
-  /// A link preview landed on an existing message (issue #45). NOT an edit:
-  /// `edited_at` is untouched, so the bubble must not gain an "(edited)"
-  /// badge. `preview: None` means the card was cleared.
+  /// A link preview landed on an existing message. NOT an edit: `edited_at` is
+  /// untouched, so the bubble must not gain an "(edited)" badge. `None` clears it.
   const factory NetworkEvent.channelLinkPreviewUpdated({
     required String serverId,
     required String channelId,
@@ -2024,8 +1915,8 @@ sealed class NetworkEvent with _$NetworkEvent {
     required String serverId,
     required String channelId,
 
-    /// Video thumbnail back-reference (Phase 6.75 video preview).
-    /// Present when the received FileHeader is a thumbnail for a vault video.
+    /// Video thumbnail back-reference, present when the FileHeader is a thumbnail
+    /// for a vault video.
     VideoThumbRef? videoThumb,
 
     /// Hidden Share back-reference for large files / progressive video streaming.
@@ -2050,9 +1941,9 @@ sealed class NetworkEvent with _$NetworkEvent {
     required String error,
   }) = NetworkEvent_FileFailed;
 
-  /// Honest file-card state for a file whose bytes are not on disk.
-  /// `state`: "requesting" | "waiting" | "gone" | "expired". `peer_id` is the
-  /// MASTER identity the state is about ("" when none).
+  /// Honest file-card state for a file whose bytes are not on disk. `state` is
+  /// "requesting" | "waiting" | "gone" | "expired"; `peer_id` is the MASTER the
+  /// state is about, "" when none.
   const factory NetworkEvent.fileAvailability({
     required String fileId,
     required String state,
@@ -2213,10 +2104,9 @@ sealed class NetworkEvent with _$NetworkEvent {
     required String payload,
   }) = NetworkEvent_CallSignal;
 
-  /// `is_self` = our own join/leave, decided by the Rust handler that knows.
-  /// Dart branches on this flag — never on comparing peer_id to a local id
-  /// (peer_id is the ROUTABLE DEVICE id; id-form guessing caused the
-  /// self-ghost dial bug).
+  /// `is_self` = our own join/leave, decided by the Rust handler that knows. Dart
+  /// branches on this flag, never on comparing peer_id to a local id: peer_id is the
+  /// ROUTABLE DEVICE id, and id-form guessing caused the self-ghost dial bug.
   const factory NetworkEvent.voiceChannelJoined({
     required String serverId,
     required String channelId,
@@ -2237,9 +2127,8 @@ sealed class NetworkEvent with _$NetworkEvent {
     required String payload,
   }) = NetworkEvent_VoiceChannelSignal;
 
-  /// Client-bound `fwd_*` signal from a media forwarder (`fwd_ingest_answer`
-  /// / `fwd_egress_offer` / `fwd_error`). Dart must gate on "from_peer == the
-  /// discovered forwarder AND origin is watched+assigned" before acting.
+  /// Client-bound `fwd_*` signal from a media forwarder. Dart must gate on "from the
+  /// discovered forwarder AND origin watched+assigned" before acting.
   const factory NetworkEvent.forwarderSignal({
     required String fromPeer,
     required String signalType,
@@ -2269,9 +2158,8 @@ sealed class NetworkEvent with _$NetworkEvent {
     required String channelId,
   }) = NetworkEvent_GossipRelayFile;
 
-  /// Send a small gossip frame (type byte 0x04 on 'hollow-data') to each
-  /// target's open data channel. Tier 2 large-server scaling: CRDT ops
-  /// flood peer-to-peer instead of paying the relay's O(N) egress.
+  /// Send a small gossip frame (type byte 0x04) to each target's open data channel,
+  /// so CRDT ops flood peer-to-peer instead of paying the relay's O(N) egress.
   const factory NetworkEvent.gossipRelayOp({
     required List<String> targets,
     required Uint8List payload,
@@ -2283,10 +2171,9 @@ sealed class NetworkEvent with _$NetworkEvent {
     required List<String> gossipNeighbors,
   }) = NetworkEvent_VoiceChannelModeChanged;
 
-  /// MLS epoch changed — SFrame key for voice E2EE.
-  /// `channel_id` is set when the key belongs to a restricted channel's MLS
-  /// subgroup (per-channel subgroups voice); Dart routes it to that voice
-  /// channel's cryptor only. `None` = the server-wide group key.
+  /// MLS epoch changed, so the SFrame key for voice E2EE moved. `channel_id` set =
+  /// a restricted channel's subgroup key, routed to that channel's cryptor only;
+  /// `None` = the server-wide group key.
   const factory NetworkEvent.mlsEpochChanged({
     required String serverId,
     required BigInt epoch,
@@ -2517,13 +2404,12 @@ class OwnedArt {
 /// A frame blob that has been processed and cached locally, ready to be
 /// named in `update_profile(avatar_frame: ...)`.
 class ProcessedFrame {
-  /// 64-hex SHA-256 of the processed bytes — the frame's identity, and what
-  /// rides the profile announce.
+  /// 64-hex SHA-256 of the processed bytes: the frame's identity, and what rides the
+  /// profile announce.
   final String hash;
   final bool animated;
 
-  /// The processed bytes, so the picker can preview exactly what everyone
-  /// else will see without a round trip back through the blob store.
+  /// The processed bytes, so the picker previews exactly what everyone else sees.
   final Uint8List bytes;
 
   const ProcessedFrame({
@@ -2548,17 +2434,16 @@ class ProcessedFrame {
 /// An animated avatar or banner that has been processed and cached locally,
 /// ready to be named in `update_profile(avatar_anim: ...)`.
 class ProcessedProfileMedia {
-  /// 64-hex SHA-256 of the ANIMATED bytes — the identity that rides the
-  /// profile announce, and what peers pull on the asset rail.
+  /// 64-hex SHA-256 of the ANIMATED bytes: the identity that rides the announce and
+  /// what peers pull on the asset rail.
   final String hash;
 
-  /// The animated WebP, so the picker previews exactly what everyone else
-  /// will see without a round trip back through the blob store.
+  /// The animated WebP, so the picker previews exactly what everyone else sees.
   final Uint8List bytes;
 
-  /// The STILL companion (frame 0, same ceiling). This is what the caller
-  /// must pass as `avatar_bytes` / `banner_bytes`: it stays inside the
-  /// pushed profile so old clients and the guest thumb still see a face.
+  /// The STILL companion (frame 0, same ceiling), which the caller must pass as
+  /// `avatar_bytes` / `banner_bytes`: it stays inside the pushed profile so old
+  /// clients and the guest thumb still see a face.
   final Uint8List still;
 
   const ProcessedProfileMedia({
@@ -2611,10 +2496,9 @@ class PushChannelMeta {
   final String serverName;
   final String channelName;
 
-  /// Effective LOCAL notification level for this channel ("all" / "mentions"
-  /// / "nothing") — channel override falling back to the server default.
-  /// Lets the Android background handler drop a push whose relay-side filter
-  /// was stale.
+  /// Effective LOCAL level for this channel (channel override, else the server
+  /// default), so the Android background handler can drop a push whose relay-side
+  /// filter was stale.
   final String notifLevel;
 
   const PushChannelMeta({
@@ -2746,13 +2630,8 @@ class SyncSenderProfileFfi {
 }
 
 /// FFI-facing video thumbnail back-reference.
-///
-/// When a `FileHeaderReceived` event carries this, the file is a thumbnail
-/// image for an underlying video stored in the vault. Dart side uses these
-/// fields to render the play button overlay, format duration/size badges,
-/// and trigger `vault_download_file(cid)` when the user taps play.
-///
-/// Phase 6.75 video preview in chats. See HOLLOW_PLAN.md.
+/// Present on a `FileHeaderReceived` when the file is a thumbnail for a video in
+/// the vault; Dart renders the play overlay and calls `vault_download_file(cid)`.
 class VideoThumbRef {
   /// Vault content_id (sha256 of ciphertext) of the underlying video.
   final String cid;

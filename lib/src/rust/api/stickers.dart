@@ -14,16 +14,14 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 String stickerToken({required String hash, required int w, required int h}) =>
     RustLib.instance.api.crateApiStickersStickerToken(hash: hash, w: w, h: h);
 
-/// The authoring caps Dart should enforce in its own UI copy, rather than
-/// mirroring the numbers (same rule as `default_role_permissions`):
-/// `[per server, per pack, packs, vault total, label chars]`.
+/// The authoring caps Dart enforces in its own UI copy rather than mirroring the
+/// numbers: `[per server, per pack, packs, vault total, label chars]`.
 Uint32List stickerLimits() =>
     RustLib.instance.api.crateApiStickersStickerLimits();
 
-/// Process a user-picked image (PNG/JPG/WebP/GIF, still or animated) into a
-/// sticker blob and cache it locally. Re-encoding here IS the sanitization
-/// step — the same argument emotes and GIFs make. Caller then registers it
-/// via [add_personal_sticker] or [add_server_sticker].
+/// Process a user-picked image into a sticker blob and cache it locally. Re-encoding
+/// here IS the sanitization step, the same argument emotes and GIFs make. The caller
+/// then registers it via [add_personal_sticker] or [add_server_sticker].
 Future<ProcessedSticker> processAndStoreSticker({
   required List<int> rawBytes,
 }) => RustLib.instance.api.crateApiStickersProcessAndStoreSticker(
@@ -56,9 +54,8 @@ Future<void> removePersonalSticker({
   hash: hash,
 );
 
-/// Delete a whole pack. The blobs stay cached — they are content-addressed
-/// and a message you already sent still points at them; the asset LRU
-/// reclaims them once nothing references them.
+/// Delete a whole pack. The blobs stay cached, because they are content-addressed and
+/// a message you already sent still points at them; the asset LRU reclaims them.
 Future<void> removePersonalStickerPack({required String pack}) =>
     RustLib.instance.api.crateApiStickersRemovePersonalStickerPack(pack: pack);
 
@@ -72,8 +69,8 @@ Future<void> renamePersonalStickerPack({
   to: to,
 );
 
-/// The whole vault, pack-major and oldest-first inside each pack — upload
-/// order IS pack order, which is what makes a multi-part pack readable.
+/// The whole vault, pack-major and oldest-first inside each pack: upload order IS pack
+/// order, which is what makes a multi-part pack readable.
 Future<List<PersonalSticker>> listPersonalStickers() =>
     RustLib.instance.api.crateApiStickersListPersonalStickers();
 
@@ -82,9 +79,8 @@ Future<List<PersonalSticker>> listPersonalStickers() =>
 Future<List<ServerSticker>> getServerStickers({required String serverId}) =>
     RustLib.instance.api.crateApiStickersGetServerStickers(serverId: serverId);
 
-/// Add (or re-label) a sticker in a server's set — `MANAGE_EMOTES`, the same
-/// permission as emotes. The blob must already be cached locally so this
-/// node can serve members' pull requests.
+/// Add (or re-label) a sticker in a server's set, under `MANAGE_EMOTES`. The blob must
+/// already be cached locally so this node can serve members' pull requests.
 Future<void> addServerSticker({
   required String serverId,
   required String hash,
@@ -137,10 +133,10 @@ Future<List<String>> stickerCategories() =>
 /// send format, and cache it as a `kind='sticker'` asset blob. Feed
 /// hash/w/h into [sticker_token].
 ///
-/// Same fetcher discipline as GIFs: proxy mode ignores `source_url` and
-/// builds `{base}f/{id}` itself; direct mode resolves the variants our own
-/// parse registered, falling back to `source_url` only on a registry miss
-/// and only through the media host allowlist.
+/// Same fetcher discipline as GIFs: proxy mode ignores `source_url` and builds
+/// `{base}f/{id}` itself, while direct mode resolves the variants our own parse
+/// registered and falls back to `source_url` only on a registry miss, through the
+/// media host allowlist.
 Future<StoredGif> stickerFetchAndStore({
   required String id,
   String? sourceUrl,
@@ -165,15 +161,12 @@ Future<StickerPackPreview> previewStickerPack({required String path}) =>
 /// Import a `.hollow-pack` into the personal vault under [into_pack] (empty =
 /// the name the file carries).
 ///
-/// Every byte here is attacker-controlled, so nothing in the manifest is
-/// trusted for anything load-bearing:
-///   * the blob is keyed by the hash we COMPUTE, and an entry whose bytes do
-///     not hash to their claimed name is rejected outright;
-///   * `w`/`h` are re-derived from the decoded image, because those two
-///     numbers go straight into the wire token;
-///   * entry paths are never joined — the hash names the file we read;
-///   * the vault caps are enforced per row, so a huge pack fills up to the
-///     limit and reports the remainder as rejected rather than failing whole.
+/// Every byte here is attacker-controlled, so nothing in the manifest is trusted: the
+/// blob is keyed by the hash we COMPUTE and an entry whose bytes do not hash to their
+/// claimed name is rejected, `w`/`h` are re-derived from the decoded image because
+/// they go straight into the wire token, entry paths are never joined, and the vault
+/// caps are enforced per row so a huge pack fills to the limit and reports the rest
+/// as rejected rather than failing whole.
 Future<StickerPackImportResult> importStickerPack({
   required String path,
   required String intoPack,
@@ -347,10 +340,9 @@ class StickerPackPreview {
 
   /// Stickers the file claims to carry.
   ///
-  /// CLAIMS, not a promise: the count comes from the manifest and every
-  /// entry still has to survive import validation. No thumbnail ships with
-  /// this on purpose — previewing would mean handing un-validated bytes to
-  /// an image decoder before we have checked a single one of them.
+  /// CLAIMS, not a promise: the count comes from the manifest and every entry still
+  /// has to survive import validation. No thumbnail ships with this on purpose, since
+  /// previewing would hand un-validated bytes to an image decoder.
   final int count;
 
   const StickerPackPreview({

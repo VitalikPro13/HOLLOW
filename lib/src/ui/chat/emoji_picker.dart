@@ -1,7 +1,7 @@
 import 'dart:convert';
 import 'dart:io' show Platform;
+import 'dart:typed_data';
 
-import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:hollow/src/ui/components/edge_scroll_row.dart';
 import 'package:hollow/src/ui/components/overlay_anchor.dart';
@@ -9,7 +9,10 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../../core/providers/emote_provider.dart';
+import '../../core/providers/identity_provider.dart';
+import '../../core/services/image_pick.dart';
 import '../../rust/api/emotes.dart' as emotes_api;
+import '../../rust/api/network.dart' as network_api;
 import '../../rust/api/storage.dart' as storage_api;
 import '../../theme/hollow_spacing.dart';
 import '../../theme/hollow_theme.dart';
@@ -36,6 +39,16 @@ const kQuickReactionEmojis = [
   '\u{1F480}', // skull
 ];
 
+/// Puts one line in hollow_debug.log. Emote upload used to fail with nothing
+/// written anywhere a bug report could reach.
+void _logLine(String line) {
+  // Fire-and-forget FFI: an unstarted bridge throws synchronously while a
+  // rejection lands on the zone handler, so both are swallowed here.
+  try {
+    network_api.logFromDart(message: line).catchError((_) {});
+  } catch (_) {}
+}
+
 /// The unified emoji and emote picker: the Unicode set, the server's custom
 /// emotes, the user's personal ones, and an FFZ browse tab whose import is
 /// authoring-time only, through our own website cache.
@@ -51,6 +64,10 @@ void showEmojiPicker({
   final overlay = Overlay.of(context);
   late OverlayEntry entry;
   final anim = PopupAnimationController();
+  // A dialog route renders BEHIND a raw OverlayEntry (the Navigator re-stacks
+  // foreign entries on top at every push), so the picker steps aside while a
+  // modal flow of its own runs and comes back with the result.
+  final hidden = ValueNotifier<bool>(false);
 
   // A rapid double-tap fires onSelect twice before the removal frame builds
   // out, and a second remove() on an already-removed entry crashes.
@@ -62,6 +79,7 @@ void showEmojiPicker({
     anim.dismiss(() {
       entry.remove();
       entry.dispose();
+      hidden.dispose();
     });
   }
 
@@ -72,6 +90,7 @@ void showEmojiPicker({
       anchorPosition: anchorPosition,
       anim: anim,
       serverId: serverId,
+      hidden: hidden,
       onSelect: (emoji) {
         final first = !removed;
         teardown();
@@ -243,6 +262,7 @@ class _EmojiPickerOverlay extends StatelessWidget {
   final Offset anchorPosition;
   final PopupAnimationController anim;
   final String? serverId;
+  final ValueNotifier<bool> hidden;
   final void Function(String emoji) onSelect;
   final VoidCallback onDismiss;
 
@@ -250,6 +270,7 @@ class _EmojiPickerOverlay extends StatelessWidget {
     required this.anchorPosition,
     required this.anim,
     required this.serverId,
+    required this.hidden,
     required this.onSelect,
     required this.onDismiss,
   });
@@ -279,7 +300,11 @@ class _EmojiPickerOverlay extends StatelessWidget {
           .clamp(8.0, (screenSize.height - pickerHeight - 8).clamp(8.0, double.infinity));
     }
 
-    return Stack(
+    return ValueListenableBuilder<bool>(
+      valueListenable: hidden,
+      builder: (_, offstage, child) =>
+          Offstage(offstage: offstage, child: child),
+      child: Stack(
       children: [
         Positioned.fill(
           child: GestureDetector(
@@ -316,6 +341,7 @@ class _EmojiPickerOverlay extends StatelessWidget {
                   child: EmojiPickerBody(
                     serverId: serverId,
                     onSelect: onSelect,
+                    onModalFlow: (busy) => hidden.value = busy,
                   ),
                 ),
               ),
@@ -323,6 +349,7 @@ class _EmojiPickerOverlay extends StatelessWidget {
           ),
         ),
       ],
+      ),
     );
   }
 }
@@ -331,10 +358,15 @@ class EmojiPickerBody extends ConsumerStatefulWidget {
   final String? serverId;
   final void Function(String emoji) onSelect;
 
+  /// Set by a host that cannot sit under a dialog route (the desktop
+  /// OverlayEntry): true while one of the picker's own dialogs is up.
+  final void Function(bool busy)? onModalFlow;
+
   const EmojiPickerBody({
     super.key,
     required this.serverId,
     required this.onSelect,
+    this.onModalFlow,
   });
 
   @override
@@ -536,7 +568,10 @@ class _EmojiPickerBodyState extends ConsumerState<EmojiPickerBody> {
     final filtered = _search.isEmpty
         ? emotes
         : emotes.where((e) => e.name.contains(_search)).toList();
-    return Column(
+    // A personal emote uploaded on another device knows its hash before its
+    // bytes arrive, and our own siblings are the only holders to ask.
+    final me = ref.watch(identityProvider.select((s) => s.peerId));
+    final body = Column(
       children: [
         Expanded(
           child: filtered.isEmpty
@@ -586,10 +621,25 @@ class _EmojiPickerBodyState extends ConsumerState<EmojiPickerBody> {
         ),
       ],
     );
+    if (me == null || me.isEmpty) return body;
+    return EmoteScope(peerHint: me, child: body);
+  }
+
+  /// Runs a flow that opens a dialog with the host stepped aside, and brings it
+  /// back afterwards. Without this the dialog sat behind the desktop picker: its
+  /// Save button could not be clicked, and the first click that reached the
+  /// barrier tore the picker down mid-flow, so the emote never landed (#76).
+  Future<T> _withHostHidden<T>(Future<T> Function() flow) async {
+    widget.onModalFlow?.call(true);
+    try {
+      return await flow();
+    } finally {
+      if (mounted) widget.onModalFlow?.call(false);
+    }
   }
 
   Future<void> _uploadPersonalEmote() async {
-    final named = await pickAndNameEmote(context);
+    final named = await _withHostHidden(() => pickAndNameEmote(context));
     if (named == null || !mounted) return;
     try {
       await emotes_api.addPersonalEmote(
@@ -600,6 +650,7 @@ class _EmojiPickerBodyState extends ConsumerState<EmojiPickerBody> {
       );
       ref.invalidate(personalEmotesProvider);
     } catch (e) {
+      _logLine('[HOLLOW-EMOTE] add failed: $e');
       if (mounted) {
         HollowToast.show(context, e.toString().replaceFirst('Exception: ', ''),
             type: HollowToastType.error);
@@ -680,7 +731,8 @@ class _EmojiPickerBodyState extends ConsumerState<EmojiPickerBody> {
       if (name.length > 24) name = name.substring(0, 24);
       if (name.length < 2) {
         if (!mounted) return;
-        final picked = await promptEmoteName(context, hash: processed.hash);
+        final picked = await _withHostHidden(
+            () => promptEmoteName(context, hash: processed.hash));
         if (picked == null) return;
         name = picked;
       }
@@ -957,13 +1009,19 @@ class _EmojiCell extends StatelessWidget {
 /// toast on a processing failure.
 Future<({emotes_api.ProcessedEmote processed, String name})?> pickAndNameEmote(
     BuildContext context) async {
-  final result = await FilePicker.platform.pickFiles(
-    type: FileType.custom,
-    allowedExtensions: ['png', 'jpg', 'jpeg', 'webp', 'gif'],
-    withData: true,
-  );
-  final bytes = result?.files.single.bytes;
-  if (bytes == null) return null;
+  Uint8List? picked;
+  try {
+    picked = await pickImageBytes(
+        extensions: const ['png', 'jpg', 'jpeg', 'webp', 'gif']);
+  } catch (_) {
+    if (context.mounted) {
+      HollowToast.show(context, 'Could not open the file picker',
+          type: HollowToastType.error);
+    }
+    return null;
+  }
+  if (picked == null) return null;
+  final bytes = picked;
 
   Object? processError;
   // Listener-less once the dialog closes, so a late update is a no-op.
@@ -1000,6 +1058,7 @@ Future<({emotes_api.ProcessedEmote processed, String name})?> pickAndNameEmote(
   if (name == null) return null; // cancelled
   if (name.isEmpty) {
     // The dialog's sentinel for Save pressed after processing failed.
+    _logLine('[HOLLOW-EMOTE] processing failed: $processError');
     if (context.mounted) {
       HollowToast.show(
           context, '$processError'.replaceFirst('Exception: ', ''),
@@ -1032,80 +1091,109 @@ Future<String?> _promptEmoteNameImpl(
   required Widget preview,
   String initial = '',
   Future<Object?>? processing,
-}) async {
-  final controller = TextEditingController(text: initial);
-  final name = await showHollowDialog<String>(
+}) {
+  return showHollowDialog<String>(
     context: context,
-    builder: (ctx) {
-      String? error;
-      var saving = false;
-      return StatefulBuilder(
-        builder: (ctx, setState) {
-          final hollow = HollowTheme.of(ctx);
-          Future<void> submit() async {
-            if (saving) return;
-            final name = controller.text.trim().toLowerCase();
-            if (!_emoteNameRegex.hasMatch(name)) {
-              setState(() => error = '2-24 characters, only a-z, 0-9 and _');
-              return;
-            }
-            if (processing != null) {
-              setState(() => saving = true);
-              final ok = await processing;
-              if (!ctx.mounted) return;
-              if (ok == null) {
-                Navigator.pop(ctx, '');
-                return;
-              }
-            }
-            if (ctx.mounted) Navigator.pop(ctx, name);
-          }
-
-          return HollowDialog(
-            title: 'Name this emote',
-            content: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                preview,
-                const SizedBox(height: HollowSpacing.sm),
-                HollowTextField(
-                  controller: controller,
-                  hintText: 'emote_name',
-                  autofocus: true,
-                  errorText: error,
-                  onSubmitted: (_) => submit(),
-                ),
-                const SizedBox(height: HollowSpacing.xs),
-                Text(
-                  'Used as :name: (2-24 characters: a-z, 0-9, _)',
-                  style: HollowTypography.caption
-                      .copyWith(color: hollow.textTertiary),
-                ),
-              ],
-            ),
-            actions: [
-              HollowButton.ghost(
-                onPressed: saving ? null : () => Navigator.of(ctx).pop(),
-                child: const Text('Cancel'),
-              ),
-              HollowButton.filled(
-                onPressed: saving ? null : submit,
-                child: saving
-                    ? SizedBox(
-                        width: 14,
-                        height: 14,
-                        child: CircularProgressIndicator(
-                            strokeWidth: 2, color: hollow.textSecondary),
-                      )
-                    : const Text('Save'),
-              ),
-            ],
-          );
-        },
-      );
-    },
+    builder: (_) => _EmoteNameDialog(
+      preview: preview,
+      initial: initial,
+      processing: processing,
+    ),
   );
-  controller.dispose();
-  return name;
+}
+
+/// Owns the text controller so it dies with the route: disposing it as soon as
+/// the pop future resolved hit the field's rebuild during the exit animation.
+class _EmoteNameDialog extends StatefulWidget {
+  final Widget preview;
+  final String initial;
+  final Future<Object?>? processing;
+
+  const _EmoteNameDialog({
+    required this.preview,
+    required this.initial,
+    required this.processing,
+  });
+
+  @override
+  State<_EmoteNameDialog> createState() => _EmoteNameDialogState();
+}
+
+class _EmoteNameDialogState extends State<_EmoteNameDialog> {
+  late final TextEditingController _controller =
+      TextEditingController(text: widget.initial);
+  String? _error;
+  bool _saving = false;
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  Future<void> _submit() async {
+    if (_saving) return;
+    final name = _controller.text.trim().toLowerCase();
+    if (!_emoteNameRegex.hasMatch(name)) {
+      setState(() => _error = '2-24 characters, only a-z, 0-9 and _');
+      return;
+    }
+    final processing = widget.processing;
+    if (processing != null) {
+      setState(() => _saving = true);
+      final ok = await processing;
+      if (!mounted) return;
+      if (ok == null) {
+        Navigator.pop(context, '');
+        return;
+      }
+    }
+    if (mounted) Navigator.pop(context, name);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
+    return HollowDialog(
+      title: 'Name this emote',
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          widget.preview,
+          const SizedBox(height: HollowSpacing.sm),
+          HollowTextField(
+            controller: _controller,
+            hintText: 'emote_name',
+            autofocus: true,
+            errorText: _error,
+            onSubmitted: (_) => _submit(),
+          ),
+          const SizedBox(height: HollowSpacing.xs),
+          Text(
+            'Used as :name: (2-24 characters: a-z, 0-9, _)',
+            style:
+                HollowTypography.caption.copyWith(color: hollow.textTertiary),
+          ),
+        ],
+      ),
+      actions: [
+        HollowButton.ghost(
+          onPressed: _saving ? null : () => Navigator.of(context).pop(),
+          child: const Text('Cancel'),
+        ),
+        HollowButton.filled(
+          onPressed: _saving ? null : _submit,
+          child: _saving
+              ? SizedBox(
+                  width: 14,
+                  height: 14,
+                  child: CircularProgressIndicator(
+                      strokeWidth: 2, color: hollow.textSecondary),
+                )
+              : const Text('Save'),
+        ),
+      ],
+    );
+  }
 }

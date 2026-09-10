@@ -26,9 +26,8 @@ Future<void> shareCreateFromFile({required String sourcePath}) => RustLib
 Future<void> shareOpenLink({required String link}) =>
     RustLib.instance.api.crateApiShareShareOpenLink(link: link);
 
-/// Begin downloading after ShareManifestReady.
-/// When `sequential` is true, chunks are fetched in order (0, 1, 2, ...)
-/// instead of rarest-first. Used for progressive video streaming.
+/// Begin downloading after ShareManifestReady. `sequential` fetches chunks in order
+/// instead of rarest-first, for progressive video streaming.
 Future<void> shareStartDownload({
   required String rootHash,
   required String saveDir,
@@ -65,9 +64,8 @@ Future<void> shareRemove({
   deleteFile: deleteFile,
 );
 
-/// Start a hidden Share download from raw root_hash + key (no link URL parsing).
-/// Used by the receiver when a FileHeader carries a ShareRef.
-/// Joins the swarm room, fetches manifest, and starts sequential download.
+/// Start a hidden Share download from a raw root_hash and key, which is what a receiver
+/// does when a FileHeader carries a ShareRef.
 Future<void> shareStartFromRef({
   required String rootHash,
   required String keyHex,
@@ -93,9 +91,8 @@ Future<void> shareList() => RustLib.instance.api.crateApiShareShareList();
 Future<BigInt> evictVaultCache({required List<String> exemptPaths}) =>
     RustLib.instance.api.crateApiShareEvictVaultCache(exemptPaths: exemptPaths);
 
-/// Move a completed share-backed file from vault_cache to ~/.hollow/files/
-/// and enable seeding. Returns the new file path.
-/// Used by "Keep & Seed" button on video/file cards.
+/// Move a completed share-backed file out of the vault cache into the files directory
+/// and enable seeding, behind the "Keep & Seed" action. Returns the new path.
 Future<String> shareKeepAndSeed({required String rootHash}) =>
     RustLib.instance.api.crateApiShareShareKeepAndSeed(rootHash: rootHash);
 

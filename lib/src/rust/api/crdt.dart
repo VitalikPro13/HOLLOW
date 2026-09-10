@@ -14,17 +14,13 @@ Future<String> createServer({required String name}) =>
 
 /// Create a channel in a server. Returns the NEW channel's id.
 ///
-/// The id is minted here rather than inside the handler, because the caller
-/// needs it in the same breath: "create a channel in this category" puts the
-/// new channel into the layout, and the layout is written before any event
-/// comes back. This used to return the string "pending", so that write left a
-/// dangling layout entry — the category looked right (the unplaced channel is
-/// drawn straight after it) while nothing was actually in it, and collapsing
-/// the category left the channel behind.
+/// The id is minted here rather than inside the handler because the caller needs it
+/// in the same breath: "create a channel in this category" writes the layout before
+/// any event comes back, and a placeholder id left a dangling layout entry.
 ///
-/// The channel itself is still created asynchronously, and a permission
-/// failure still drops the whole thing, so a caller that stores this id must
-/// tolerate an id that never materialises. Layout normalisation does: it drops
+/// The channel itself is still created asynchronously and a permission failure drops
+/// the whole thing, so a caller that stores this id must tolerate one that never
+/// materialises. Layout normalisation does: it drops references to missing channels.
 /// references to channels that do not exist.
 Future<String> createChannel({
   required String serverId,
@@ -53,9 +49,9 @@ Future<List<ServerFfi>> getJoinedServers() =>
 
 /// Every join still waiting for an answer, plus the ones a member rejected.
 ///
-/// Reads the local DB like [get_joined_servers] does: these rows are written
-/// by the node's CrdtStore actor and only ever read here, so a snapshot on the
-/// FRB thread is exactly the tile's data source.
+/// Reads the local DB like [get_joined_servers]: these rows are written by the node's
+/// CrdtStore actor and only ever read here, so a snapshot on the FRB thread is
+/// exactly the tile's data source.
 Future<List<PendingJoinFfi>> listPendingJoins() =>
     RustLib.instance.api.crateApiCrdtListPendingJoins();
 
@@ -72,13 +68,11 @@ Future<void> retryPendingJoin({required String serverId}) =>
 
 /// Get channels for a specific server.
 ///
-/// Prefers a LIVE clone of the event loop's in-memory state (the copy that
-/// ENFORCES — request/reply over `GetServerStateSnapshot`): the CrdtStore
-/// flush is async fire-and-forget and `ServerUpdated` fires BEFORE it lands,
-/// so the old DB-snapshot read racing a fresh toggle write returned the
-/// PREVIOUS value and reverted optimistic UI (#44 "toggle twice to stick").
-/// Falls back to the persisted DB snapshot when the node isn't running (or
-/// the reply times out) so early-startup callers keep working.
+/// Prefers a LIVE clone of the event loop's in-memory state, the copy that ENFORCES:
+/// the CrdtStore flush is async fire-and-forget and `ServerUpdated` fires BEFORE it
+/// lands, so a DB-snapshot read racing a fresh toggle returned the PREVIOUS value and
+/// reverted optimistic UI. Falls back to the persisted snapshot when the node is not
+/// running, so early-startup callers keep working.
 Future<List<ChannelFfi>> getServerChannels({required String serverId}) =>
     RustLib.instance.api.crateApiCrdtGetServerChannels(serverId: serverId);
 
@@ -126,12 +120,10 @@ Future<void> updateServerSetting({
   value: value,
 );
 
-/// Set a server avatar. Processes the raw image to a still 128x128 WebP
-/// stored base64 in `settings["server_avatar"]` (old clients + the public
-/// sync thumb read only this). An ANIMATED source (GIF / animated WebP)
-/// additionally produces a 128px animated WebP cached content-addressed
-/// with kind='avatar' — `settings["server_avatar_anim"]` carries ONLY its
-/// hash and the bytes ride the asset rail, never the CRDT.
+/// Set a server avatar. Processes the raw image to a still 128x128 WebP stored base64
+/// in `settings["server_avatar"]`, which old clients and the public sync thumb read.
+/// An ANIMATED source additionally produces a 128px animated WebP cached
+/// content-addressed, with only its HASH in `settings["server_avatar_anim"]`.
 Future<void> setServerAvatar({
   required String serverId,
   required List<int> rawBytes,
@@ -556,10 +548,9 @@ Future<int> getRolePermissions({
   role: role,
 );
 
-/// Default permissions bitmask for a role name — the single source of truth
-/// for the Dart Roles UIs (Reset button + pre-load fallback). Pure function,
-/// no store needed. "owner" → ALL; unknown strings fall back to Member
-/// (MemberRole::from_str semantics).
+/// Default permissions bitmask for a role name, the single source of truth for the
+/// Dart Roles UIs. Pure function: "owner" gets ALL, unknown strings fall back to
+/// Member.
 int defaultRolePermissions({required String role}) =>
     RustLib.instance.api.crateApiCrdtDefaultRolePermissions(role: role);
 
@@ -641,10 +632,10 @@ Future<String> vaultDownloadFile({
 
 /// Channel info for FFI (Dart-visible).
 ///
-/// `me_can_see` / `me_can_post` are computed HERE with the full Rust
-/// predicate (tier ladder + label gates + unexpired grants + SEND_MESSAGES
-/// bit) so Dart never re-implements the access ladder. Mute is NOT folded
-/// into `me_can_post` — it stays a separate signal (`get_muted_members`).
+/// `me_can_see` / `me_can_post` are computed HERE with the full Rust predicate (tier
+/// ladder, label gates, unexpired grants, SEND_MESSAGES bit) so Dart never
+/// re-implements the access ladder. Mute is NOT folded into `me_can_post`: it stays
+/// a separate signal.
 class ChannelFfi {
   final String channelId;
   final String name;
@@ -837,12 +828,11 @@ class MutedMemberFfi {
           permanent == other.permanent;
 }
 
-/// A join that has not completed yet, for the pending tile (Dart-visible).
+/// A join that has not completed yet, for the pending tile.
 ///
-/// `state` is `pending` (waiting for a member to come back) or `rejected` (a
-/// member answered no; `reason` says which gate). `last_deposited_at` is when
-/// the request was last written into the server room's join ring, 0 while the
-/// join is still live.
+/// `state` is `pending` or `rejected` (`reason` says which gate refused), and
+/// `last_deposited_at` is when the request was last written into the server room's
+/// join ring, 0 while the join is still live.
 class PendingJoinFfi {
   final String serverId;
   final PlatformInt64 requestedAt;
@@ -878,10 +868,9 @@ class PendingJoinFfi {
           lastDepositedAt == other.lastDepositedAt;
 }
 
-/// Animated server icon as seen locally. The CRDT carries only the hash;
-/// bytes live in the content-addressed asset store (kind='avatar') and
-/// replicate via the asset rail — never through the CRDT. The still icon
-/// is separate (`get_server_avatar`).
+/// Animated server icon as seen locally. The CRDT carries only the hash; the bytes
+/// live in the content-addressed asset store and replicate via the asset rail, never
+/// through the CRDT. The still icon is separate.
 class ServerAvatarAnimData {
   /// 64-hex SHA-256 of the processed animated WebP bytes.
   final String hash;
@@ -904,9 +893,8 @@ class ServerAvatarAnimData {
           bytes == other.bytes;
 }
 
-/// Server banner as seen locally. The CRDT carries only the hash; bytes
-/// live in the content-addressed asset store (kind='banner') and replicate
-/// via the asset rail — never through the CRDT.
+/// Server banner as seen locally. The CRDT carries only the hash; the bytes live in
+/// the content-addressed asset store and replicate via the asset rail.
 class ServerBannerData {
   /// 64-hex SHA-256 of the processed WebP bytes.
   final String hash;

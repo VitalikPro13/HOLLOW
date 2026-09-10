@@ -41,6 +41,6 @@ pub(crate) mod webp_anim;
 mod test_harness;
 
 pub(crate) use crdt_store::CrdtStore;
-pub(crate) use types::{new_channel_id, LinkPreviewRef, NetworkEvent, NodeCommand, RichCard, SendFilePayload, ShareRef, SignedDeviceList, VaultUploadFilePayload, VideoThumbRef};
+pub(crate) use types::{new_channel_id, LinkPreviewRef, NetworkEvent, NodeCommand, PersonalEmoteEntry, RichCard, SendFilePayload, ShareRef, SignedDeviceList, VaultUploadFilePayload, VideoThumbRef};
 pub(crate) use crypto_handler::verify_message_signature;
 pub(crate) use swarm::spawn_node;

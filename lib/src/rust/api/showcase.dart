@@ -17,15 +17,13 @@ Future<List<GameSearchResult>> showcaseGameSearch({required String query}) =>
 Future<GameCardDetails?> showcaseGameDetails({required PlatformInt64 gameId}) =>
     RustLib.instance.api.crateApiShowcaseShowcaseGameDetails(gameId: gameId);
 
-/// Download a game cover / company logo FROM OUR CDN (authoring-time only)
-/// and process it into a content-addressed showcase asset (≤400px lossy
-/// WebP — alpha survives, so transparent logos stay transparent).
+/// Download a game cover or company logo FROM OUR CDN (authoring-time only) and
+/// process it into a content-addressed showcase asset (400px lossy WebP, alpha kept).
 Future<ShowcaseAsset> showcaseFetchCover({required String url}) =>
     RustLib.instance.api.crateApiShowcaseShowcaseFetchCover(url: url);
 
-/// Download landscape key art FROM OUR CDN (authoring-time only). Processed
-/// at the artwork budget (≤800px lossy WebP) — it's the card's hero image,
-/// so the cover's 400px thumbnail cap would visibly blur it.
+/// Download landscape key art FROM OUR CDN (authoring-time only), at the artwork
+/// budget of 800px: it is the card's hero image, so the cover's cap would blur it.
 Future<ShowcaseAsset> showcaseFetchKeyArt({required String url}) =>
     RustLib.instance.api.crateApiShowcaseShowcaseFetchKeyArt(url: url);
 
@@ -39,13 +37,10 @@ Future<ShowcaseAsset> processShowcaseArtwork({required List<int> rawBytes}) =>
 Future<List<ShowcaseAsset>> getShowcaseAssets({required String peerId}) =>
     RustLib.instance.api.crateApiShowcaseGetShowcaseAssets(peerId: peerId);
 
-/// Card details for ONE picked game (?id= mode). [details_json] is the
-/// endpoint's `details` object verbatim (description, requirements,
-/// platforms, metacritic, release date, achievements, deduped dev/publisher
-/// credits with logo URLs + social links, copyright, store links, key-art
-/// URL) — baked into the block at authoring so a viewer fetches NOTHING.
-/// [logo_urls]/[artwork_url] are surfaced (CDN-filtered) so the composer can
-/// fetch + bundle the images and rewrite the baked JSON to asset hashes.
+/// Card details for ONE picked game. [details_json] is the endpoint's `details` object
+/// verbatim, baked into the block at authoring so a viewer fetches NOTHING.
+/// [logo_urls]/[artwork_url] are surfaced (CDN-filtered) so the composer can bundle
+/// the images and rewrite the baked JSON to asset hashes.
 class GameCardDetails {
   final String detailsJson;
   final List<String> logoUrls;
@@ -71,9 +66,8 @@ class GameCardDetails {
           artworkUrl == other.artworkUrl;
 }
 
-/// One row of the FAST search response (?q=) — basics only. Card details
-/// are fetched separately via [showcase_game_details] when the user actually
-/// picks a game (one pick = one enrichment request; searching stays instant).
+/// One row of the FAST search response, basics only. Card details are fetched
+/// separately when the user picks a game, so searching stays instant.
 class GameSearchResult {
   final PlatformInt64 id;
   final String name;

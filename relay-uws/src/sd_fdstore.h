@@ -24,7 +24,7 @@ inline bool notify(const std::string& msg, int fd) {
     if (!path || (path[0] != '/' && path[0] != '@')) return false;
     sockaddr_un addr{};
     addr.sun_family = AF_UNIX;
-    size_t plen = strlen(path);
+    size_t plen = strnlen(path, sizeof(addr.sun_path));
     if (plen >= sizeof(addr.sun_path)) return false;
     memcpy(addr.sun_path, path, plen);
     if (path[0] == '@') addr.sun_path[0] = 0;  // abstract namespace

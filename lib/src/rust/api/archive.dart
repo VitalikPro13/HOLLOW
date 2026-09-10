@@ -8,9 +8,8 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`
 
-/// Export a DM conversation as a `.hollow-archive` file.
-/// `file_mode`: "full", "images_only", or "placeholder".
-/// Returns the file size in bytes on success.
+/// Export a DM conversation as a `.hollow-archive` file. `file_mode` is "full",
+/// "images_only" or "placeholder"; returns the file size in bytes.
 Future<BigInt> exportDmArchive({
   required String peerId,
   required String outputPath,
@@ -21,9 +20,8 @@ Future<BigInt> exportDmArchive({
   fileMode: fileMode,
 );
 
-/// Export a channel conversation as a `.hollow-archive` file.
-/// `file_mode`: "full", "images_only", or "placeholder".
-/// Returns the file size in bytes on success.
+/// Export a channel conversation as a `.hollow-archive` file. `file_mode` is "full",
+/// "images_only" or "placeholder"; returns the file size in bytes.
 Future<BigInt> exportChannelArchive({
   required String serverId,
   required String channelId,
@@ -38,10 +36,9 @@ Future<BigInt> exportChannelArchive({
   fileMode: fileMode,
 );
 
-/// Export all text channels of a server as a single `.hollow-archive` file.
-/// `channels_json`: JSON array of `[{"channel_id": "...", "channel_name": "..."}]`.
-/// `file_mode`: "full", "images_only", or "placeholder".
-/// Returns the file size in bytes on success.
+/// Export every text channel of a server as one `.hollow-archive` file.
+/// `channels_json` is `[{"channel_id": "...", "channel_name": "..."}]`; returns the
+/// file size in bytes.
 Future<BigInt> exportServerArchive({
   required String serverId,
   required String serverName,
@@ -61,8 +58,8 @@ Future<BigInt> exportServerArchive({
 Future<ArchiveVerifyResult> verifyArchive({required String archivePath}) =>
     RustLib.instance.api.crateApiArchiveVerifyArchive(archivePath: archivePath);
 
-/// Load a `.hollow-archive` file for rendering in the POV viewer.
-/// Full parse: returns all messages, edits, deletions, files, and verification results.
+/// Load a `.hollow-archive` file for the viewer: every message, edit, deletion, file
+/// and verification result.
 Future<ArchiveData> loadArchive({required String archivePath}) =>
     RustLib.instance.api.crateApiArchiveLoadArchive(archivePath: archivePath);
 

@@ -510,6 +510,9 @@ class EventStreamNotifier extends Notifier<bool> {
         // GIF-sized blobs grow the asset cache fast, so the cap applies here too.
         _enforceStorageCaps();
 
+      case NetworkEvent_PersonalEmotesUpdated():
+        ref.invalidate(personalEmotesProvider);
+
       case NetworkEvent_ChannelAdded(
             :final serverId, :final channelId, :final name, :final channelType):
         debugPrint('[HOLLOW] Channel added: $name ($channelId) type=$channelType in $serverId');

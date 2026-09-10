@@ -167,6 +167,21 @@ pub(crate) struct FriendListEntry {
     pub requested_at: i64,
 }
 
+/// One row of the personal emote set as shared between SIBLINGS. An empty
+/// `hash` is a tombstone: the name was removed at `added_at`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PersonalEmoteEntry {
+    pub name: String,
+    #[serde(default)]
+    pub hash: String,
+    #[serde(default)]
+    pub animated: bool,
+    #[serde(default)]
+    pub source: String,
+    #[serde(default)]
+    pub added_at: i64,
+}
+
 /// Events emitted by the network node.
 pub(crate) enum NetworkEvent {
     PeerDiscovered { peer: DiscoveredPeer },
@@ -198,6 +213,8 @@ pub(crate) enum NetworkEvent {
     ServerUpdated { server_id: String },
     /// Emote bytes arrived and were cached; Dart invalidates its hash-keyed cache.
     EmoteAssetsReceived { hashes: Vec<String> },
+    /// A sibling changed the personal emote set; Dart re-reads its emote list.
+    PersonalEmotesUpdated,
     ChannelAdded { server_id: String, channel_id: String, name: String, channel_type: String },
     ChannelRemoved { server_id: String, channel_id: String },
     ChannelRenamed { server_id: String, channel_id: String, new_name: String },
@@ -867,6 +884,9 @@ pub(crate) enum NodeCommand {
     /// Ask the chosen SOURCE sibling to re-announce all its servers and re-share
     /// its friends to us. `source_device_id` is that device's peer_id.
     RequestStateSync { source_device_id: String },
+    /// Fan a personal emote change (one row after an add/remove, or the full set)
+    /// to our OWN other devices. Bytes never ride it; they pull over the asset rail.
+    SyncPersonalEmotes { emotes: Vec<PersonalEmoteEntry> },
     // -- Push notifications --
     RegisterPushToken { token: String, platform: String },
     /// Register per-server/channel push notification prefs with the relay
@@ -1157,6 +1177,7 @@ impl NodeCommand {
             Self::RevokeDevice { .. } => "RevokeDevice",
             Self::ResetDeviceLists => "ResetDeviceLists",
             Self::RequestStateSync { .. } => "RequestStateSync",
+            Self::SyncPersonalEmotes { .. } => "SyncPersonalEmotes",
             Self::RegisterPushToken { .. } => "RegisterPushToken",
             Self::SetPushPrefs { .. } => "SetPushPrefs",
             Self::SetOfflineInbox { .. } => "SetOfflineInbox",
@@ -1794,6 +1815,18 @@ pub(crate) enum HavenMessage {
     /// for when automatic sibling sync did not converge. Verified-self only.
     #[serde(rename = "sibling_state_sync_request")]
     SiblingStateSyncRequest,
+
+    /// Multi-device: one device shares personal ("Mine") emote rows with a SIBLING
+    /// of the same master. A delta after an add or remove and the full set on
+    /// sibling verification are the SAME message, because the receiver merges row
+    /// by row (per-name last-write-wins on `added_at`, empty hash = tombstone).
+    /// Carries no bytes: a missing blob is pulled over the asset rail. Sent
+    /// DIRECTLY, only after `resolver::same_identity` confirms our own device.
+    #[serde(rename = "personal_emote_sync")]
+    PersonalEmoteSync {
+        #[serde(default)]
+        emotes: Vec<PersonalEmoteEntry>,
+    },
 
     // -- Multi-device sibling proof handshake (anti-mis-link) --
 

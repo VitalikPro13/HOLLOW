@@ -16,9 +16,8 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 Future<void> setGifProxyUrl({String? base}) =>
     RustLib.instance.api.crateApiGifsSetGifProxyUrl(base: base);
 
-/// Set (or clear, with None/empty) the user's own Klipy API key. A key
-/// present IS direct mode — one piece of state, so there is no "enabled but
-/// no key" way to be broken.
+/// Set (or clear) the user's own Klipy API key. A key present IS direct mode: one
+/// piece of state, so there is no "enabled but no key" way to be broken.
 Future<void> setGifApiKey({String? key}) =>
     RustLib.instance.api.crateApiGifsSetGifApiKey(key: key);
 
@@ -41,21 +40,18 @@ Future<List<String>> defaultGifMediaHosts() =>
 Future<List<String>> gifBlockedMediaHosts() =>
     RustLib.instance.api.crateApiGifsGifBlockedMediaHosts();
 
-/// Per-URL verdicts, in input order: may the client fetch this media URL in
-/// the CURRENT configuration? Always true under the active proxy base; in
-/// direct mode also true for allowlisted hosts.
+/// Per-URL verdicts, in input order: may the client fetch this media URL in the
+/// CURRENT configuration? Always true under the active proxy base, and in direct mode
+/// also for allowlisted hosts.
 ///
-/// The saved GIF library asks this about the absolute URLs it stores for
-/// direct-mode picks. Going back to proxy mode MUST hide them: fetching a
-/// Klipy CDN URL while in proxy mode would defeat the entire point of proxy
-/// mode, and a stale favourite is not a licence to do it. Dart asks rather
-/// than duplicating the rule (same reason as `default_role_permissions`).
+/// The saved GIF library asks this about the URLs it stored for direct-mode picks.
+/// Going back to proxy mode MUST hide them: fetching a Klipy CDN URL while in proxy
+/// mode would defeat the point of proxy mode, and a stale favourite is no licence.
 Future<List<bool>> gifMediaUrlsPermitted({required List<String> urls}) =>
     RustLib.instance.api.crateApiGifsGifMediaUrlsPermitted(urls: urls);
 
-/// The default content rating. Dart owns rating POLICY (user setting, then
-/// clamped for non-NSFW servers) and passes the result per call, so a rating
-/// change can never serve results cached under another rating.
+/// The default content rating. Dart owns rating POLICY and passes the result per call,
+/// so a rating change can never serve results cached under another rating.
 Future<String> defaultGifRating() =>
     RustLib.instance.api.crateApiGifsDefaultGifRating();
 
@@ -83,19 +79,13 @@ Future<GifPage> gifTrending({required int page, required String rating}) =>
 Future<List<String>> gifCategories() =>
     RustLib.instance.api.crateApiGifsGifCategories();
 
-/// Download a picked GIF's full-quality source, re-encode it into the
-/// ≤480px/≤2MB send format, and cache it as a `kind='gif'` asset blob.
+/// Download a picked GIF's full-quality source, re-encode it into the 480px / 2 MB send
+/// format, and cache it as a `kind='gif'` asset blob.
 ///
-/// PROXY MODE ignores `source_url` entirely and builds `{base}f/{id}` — the
-/// fetcher is structurally incapable of being pointed anywhere else.
-///
-/// DIRECT MODE resolves the variants OUR OWN parse registered for `id`, and
-/// only if that RAM registry has no entry — a favourite saved in an earlier
-/// session, which is the one case the registry cannot cover — falls back to
-/// `source_url`, and then only if it passes the media host allowlist. That
-/// allowlist is the guard in direct mode either way: every URL there comes
-/// from Klipy's opaque CDN, so provenance cannot be re-derived, only
-/// constrained.
+/// PROXY MODE ignores `source_url` entirely and builds `{base}f/{id}`. DIRECT MODE
+/// resolves the variants OUR OWN parse registered for `id`, and only when that RAM
+/// registry has no entry (a favourite from an earlier session) falls back to
+/// `source_url`, and then only if it passes the media host allowlist.
 Future<StoredGif> gifFetchAndStore({required String id, String? sourceUrl}) =>
     RustLib.instance.api.crateApiGifsGifFetchAndStore(
       id: id,
@@ -117,10 +107,9 @@ class GifItem {
   /// Small animated variant (~150px WebP or GIF) — hover/viewport preview.
   final String smUrl;
 
-  /// Best-quality source, used at PICK time only. Carried on the item so a
-  /// favourite saved in a direct-mode session can still be sent months
-  /// later, when the in-RAM variant registry is long gone — see
-  /// `gif_fetch_and_store`.
+  /// Best-quality source, used at PICK time only. Carried on the item so a favourite
+  /// saved in a direct-mode session still sends months later, when the in-RAM
+  /// registry is long gone.
   final String fullUrl;
 
   const GifItem({

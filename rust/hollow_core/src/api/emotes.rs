@@ -136,6 +136,18 @@ fn request_asset_kind(
 
 // ── Personal (global) emote set ───────────────────────────────────────
 
+/// Best-effort fan of personal emote rows to our own other devices. A node that
+/// is not running simply misses this delta; the full set goes out again the next
+/// time a sibling is verified.
+fn sync_personal_emotes_to_siblings(entries: Vec<node::PersonalEmoteEntry>) {
+    let node = get_node();
+    let Ok(guard) = node.lock() else { return };
+    let Some(cmd_tx) = guard.as_ref().map(|n| n.cmd_tx.clone()) else { return };
+    drop(guard);
+    let rt = get_runtime();
+    let _ = rt.block_on(cmd_tx.send(node::NodeCommand::SyncPersonalEmotes { emotes: entries }));
+}
+
 #[frb]
 pub fn add_personal_emote(
     name: String,
@@ -150,18 +162,41 @@ pub fn add_personal_emote(
     if !crate::crdt::valid_emote_hash(&hash) {
         return Err("Invalid emote hash".into());
     }
-    let store = get_store();
-    let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
-    let ms = guard.as_ref().ok_or("Message store is not open")?;
-    ms.add_personal_emote(&name, &hash, animated, &source)
+    let added_at = {
+        let store = get_store();
+        let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+        let ms = guard.as_ref().ok_or("Message store is not open")?;
+        ms.add_personal_emote(&name, &hash, animated, &source)?
+    };
+    sync_personal_emotes_to_siblings(vec![node::PersonalEmoteEntry {
+        name,
+        hash,
+        animated,
+        source,
+        added_at,
+    }]);
+    Ok(())
 }
 
 #[frb]
 pub fn remove_personal_emote(name: String) -> Result<(), String> {
-    let store = get_store();
-    let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
-    let ms = guard.as_ref().ok_or("Message store is not open")?;
-    ms.remove_personal_emote(&normalize_name(&name))
+    let name = normalize_name(&name);
+    let removed_at = {
+        let store = get_store();
+        let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+        let ms = guard.as_ref().ok_or("Message store is not open")?;
+        ms.remove_personal_emote(&name)?
+    };
+    if let Some(added_at) = removed_at {
+        sync_personal_emotes_to_siblings(vec![node::PersonalEmoteEntry {
+            name,
+            hash: String::new(),
+            animated: false,
+            source: String::new(),
+            added_at,
+        }]);
+    }
+    Ok(())
 }
 
 #[frb]

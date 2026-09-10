@@ -31,10 +31,9 @@ Future<IdentityInfo> restoreIdentityFromMnemonic({required String phrase}) =>
       phrase: phrase,
     );
 
-/// Unlock the identity file for this session.
-/// For plaintext identities: loads directly (password ignored).
-/// For encrypted identities: decrypts using password and/or OS keychain.
-/// Must be called before open_message_store() or start_node().
+/// Unlock the identity file for this session, before `open_message_store()` or
+/// `start_node()`. A plaintext identity loads directly and ignores `password`; an
+/// encrypted one decrypts with the password and/or the OS keychain.
 Future<IdentityInfo> unlockIdentity({String? password}) =>
     RustLib.instance.api.crateApiIdentityUnlockIdentity(password: password);
 
@@ -43,10 +42,9 @@ Future<IdentityInfo> unlockIdentity({String? password}) =>
 Future<void> lockIdentity() =>
     RustLib.instance.api.crateApiIdentityLockIdentity();
 
-/// Enable password protection on the current identity.
-/// If `require_on_launch` is true (flags=0x01), the password is required every launch.
-/// If false (flags=0x03), the password-derived key is also stored in OS keychain
-/// for silent unlock — identity is encrypted but app opens normally on this device.
+/// Enable password protection. With `require_on_launch` the password is needed every
+/// launch; without it the password-derived key is also stored in the OS keychain, so
+/// the identity is encrypted but the app opens normally on this device.
 Future<void> enablePasswordProtection({
   required String password,
   required bool requireOnLaunch,
@@ -72,10 +70,9 @@ Future<void> removePasswordProtection({required String password}) => RustLib
     .api
     .crateApiIdentityRemovePasswordProtection(password: password);
 
-/// Toggle whether the password is required on each app launch.
-/// When true (flags=0x01): password prompt on every launch.
-/// When false (flags=0x03): password-derived key cached in OS keychain, silent unlock.
-/// Requires the identity to already be password-protected and unlocked.
+/// Toggle whether the password is required on each launch: on means a prompt every
+/// time, off caches the password-derived key in the OS keychain for a silent unlock.
+/// The identity must already be password-protected and unlocked.
 Future<void> setRequirePasswordOnLaunch({required bool require}) => RustLib
     .instance
     .api
@@ -98,10 +95,9 @@ Future<ProtectionStatus> getIdentityProtectionStatus() =>
 
 /// Protection status of the identity file inside an ARBITRARY data root.
 ///
-/// The profile switcher (issue #47) needs to know whether the profile it is
-/// about to erase is protected, and that profile is by definition not the one
-/// this process unlocked, so `get_identity_protection_status` (which only ever
-/// looks at the running `data_dir()`) cannot answer it.
+/// The profile switcher needs to know whether the profile it is about to erase is
+/// protected, and that profile is by definition not the one this process unlocked, so
+/// `get_identity_protection_status` cannot answer it.
 Future<ProtectionStatus> identityProtectionStatusAt({
   required String dataDir,
 }) => RustLib.instance.api.crateApiIdentityIdentityProtectionStatusAt(
@@ -111,11 +107,10 @@ Future<ProtectionStatus> identityProtectionStatusAt({
 /// Verify that `password` (or, when it is None, a key this machine's keystore
 /// already holds) really unwraps the identity file in `data_dir`.
 ///
-/// A GATE, not an unlock: it never touches the session key and never heals the
-/// keystore slots, so asking about another profile cannot disturb the running
-/// one. A plaintext identity has nothing to prove and answers true. A wrong
-/// password is `Ok(false)`, not an error - only a missing or malformed file
-/// errors.
+/// A GATE, not an unlock: it never touches the session key and never heals the keystore
+/// slots, so asking about another profile cannot disturb the running one. A plaintext
+/// identity answers true, a wrong password is `Ok(false)`, and only a missing or
+/// malformed file errors.
 Future<bool> verifyIdentityPasswordAt({
   required String dataDir,
   String? password,

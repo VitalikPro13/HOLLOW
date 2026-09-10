@@ -13,6 +13,7 @@ import 'package:hollow/src/core/providers/channel_provider.dart'
     show selectedChannelProvider;
 import 'package:hollow/src/core/providers/server_provider.dart'
     show selectedServerProvider;
+import 'package:hollow/src/core/services/image_pick.dart';
 import 'package:hollow/src/rust/api/storage.dart' as storage;
 import 'package:hollow/src/ui/app.dart' show hollowNavigatorKey;
 import 'package:hollow/src/ui/chat/chat_drop_zone.dart';
@@ -53,6 +54,7 @@ import 'probe_targets.dart';
 /// | `capture` | `as`, `target` or `from` | reads a value out of the app |
 /// | `import_pack` | `path` | imports a `.hollowpack` into the running app |
 /// | `attach_file` | `path` | stages a file on the composer, as a drop does |
+/// | `arm_image_pick` | `path` | answers the next image pick with that file |
 /// | `channel_rows` | `serverId`, `channelId`, `limit` | the DB behind a channel |
 /// | `log` | `message` | a note in the results |
 /// | `quit` | | ends a live session |
@@ -293,6 +295,7 @@ class ProbeRunner {
   /// nothing, so a shot of them only duplicates the previous frame, and `shot`
   /// has already written one under the name that was asked for.
   bool _visualOp(String op) => !const {
+        'arm_image_pick',
         'dump',
         'log',
         'shot',
@@ -449,6 +452,9 @@ class ProbeRunner {
       case 'attach_file':
         return _attachFile(step);
 
+      case 'arm_image_pick':
+        return _armImagePick(step);
+
       case 'channel_rows':
         return _channelRows(step);
 
@@ -515,6 +521,21 @@ class ProbeRunner {
     zone.onFileDropped(path, name, size);
     await settle(frames: step['frames'] as int? ?? 30);
     return 'attached $name ($size bytes)';
+  }
+
+  /// Answers the NEXT image pick (emote or sticker upload) with this file.
+  ///
+  /// Deliberately NOT `FilePicker`: the native picker is a modal owned by the
+  /// OS, which a widget test can neither open nor answer.
+  Future<String> _armImagePick(Map<String, dynamic> step) async {
+    final path = '${step['path'] ?? ''}';
+    if (path.isEmpty) throw _ProbeFailure('arm_image_pick needs a "path"');
+    final file = File(path);
+    if (!file.existsSync()) throw _ProbeFailure('no file at "$path"');
+    final bytes = await file.readAsBytes();
+    debugArmedImagePick = () async => bytes;
+    final name = path.split(RegExp(r'[\\/]')).last;
+    return 'armed $name (${bytes.length} bytes)';
   }
 
   /// Reads the channel's rows straight out of the local database, so a

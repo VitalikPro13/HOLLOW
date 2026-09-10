@@ -9,13 +9,11 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
 // These functions are ignored because they are not marked as `pub`: `build_snapshot_bytes`, `derive_db_key_public`, `derive_db_key`, `dir_size_bytes`, `export_backup_bytes`, `get_peer_id`, `get_store`, `import_backup_bytes`, `import_snapshot_bytes`, `pending_link_blob_path`, `pending_link_code_path`, `pending_wipe_marker_path`, `referenced_asset_hashes`, `snapshot_state_summary`, `stash_pending_link`, `stored_file_to_ffi`
 
-/// Open the encrypted message database. Must be called after identity is loaded.
-/// Typically called once at app start (after `load_or_create_identity`).
+/// Open the encrypted message database, once at app start after the identity loads.
 Future<void> openMessageStore() =>
     RustLib.instance.api.crateApiStorageOpenMessageStore();
 
-/// Load recent messages for a peer from the local database.
-/// Returns messages ordered oldest-first, up to `limit`.
+/// Load recent messages for a peer, oldest-first, up to `limit`.
 Future<List<StoredMessage>> loadMessages({
   required String peerId,
   required int limit,
@@ -24,13 +22,13 @@ Future<List<StoredMessage>> loadMessages({
   limit: limit,
 );
 
-/// Load ALL DM messages for a peer, including soft-deleted (hidden_at set).
-/// No limit, ordered oldest-first. Used by the archive "My Data" viewer.
+/// Load ALL DM messages for a peer including hidden ones, oldest-first and unlimited,
+/// for the archive viewer.
 Future<List<StoredMessage>> loadAllDmMessages({required String peerId}) =>
     RustLib.instance.api.crateApiStorageLoadAllDmMessages(peerId: peerId);
 
-/// Load ALL channel messages, including soft-deleted (hidden_at set).
-/// No limit, ordered oldest-first. Used by the archive "My Data" viewer.
+/// Load ALL channel messages including hidden ones, oldest-first and unlimited, for
+/// the archive viewer.
 Future<List<StoredChannelMessage>> loadAllChannelMessages({
   required String serverId,
   required String channelId,
@@ -39,8 +37,7 @@ Future<List<StoredChannelMessage>> loadAllChannelMessages({
   channelId: channelId,
 );
 
-/// Load edit history for a batch of message IDs.
-/// Returns a flat list of edits sorted by edited_at ASC.
+/// Load edit history for a batch of message IDs, flat and sorted by edited_at.
 Future<List<StoredMessageEdit>> loadMessageEdits({
   required List<String> messageIds,
 }) => RustLib.instance.api.crateApiStorageLoadMessageEdits(
@@ -51,10 +48,9 @@ Future<List<StoredMessageEdit>> loadMessageEdits({
 Future<int> countDmMessages({required String peerId}) =>
     RustLib.instance.api.crateApiStorageCountDmMessages(peerId: peerId);
 
-/// Count all visible DM messages across every conversation. Drives the Home
-/// stats card — an honest multi-device sync-comparison number (DMs fully
-/// converge across a person's devices; channel messages are lazy-paged and
-/// would diverge, so they are deliberately not counted there).
+/// Count all visible DM messages across every conversation, the Home card's honest
+/// multi-device comparison number: DMs fully converge across a person's devices,
+/// while lazy-paged channel messages would diverge.
 Future<int> countAllDmMessages() =>
     RustLib.instance.api.crateApiStorageCountAllDmMessages();
 
@@ -99,14 +95,12 @@ Future<void> saveSetting({required String key, required String value}) =>
 Future<String?> loadSetting({required String key}) =>
     RustLib.instance.api.crateApiStorageLoadSetting(key: key);
 
-/// Load ALL settings whose key starts with `prefix` in ONE call — replaces
-/// the per-key startup scans (`notif:*`, `seen:*`) that cost one FFI
-/// round-trip per server/channel/DM.
+/// Load ALL settings whose key starts with `prefix` in ONE call, replacing the
+/// per-key startup scans that cost one FFI round-trip per server, channel and DM.
 Future<List<SettingEntry>> loadSettingsWithPrefix({required String prefix}) =>
     RustLib.instance.api.crateApiStorageLoadSettingsWithPrefix(prefix: prefix);
 
-/// Count unread DM messages newer than the given last-seen message ID.
-/// Only counts non-hidden messages from the other peer (is_mine = 0).
+/// Count unread, non-hidden DM messages newer than the last-seen message ID.
 Future<int> countUnreadDm({
   required String peerId,
   required String lastSeenMessageId,
@@ -115,8 +109,7 @@ Future<int> countUnreadDm({
   lastSeenMessageId: lastSeenMessageId,
 );
 
-/// Count unread channel messages newer than the given last-seen message ID.
-/// Only counts non-hidden messages from other members (is_mine = 0).
+/// Count unread, non-hidden channel messages newer than the last-seen message ID.
 Future<int> countUnreadChannel({
   required String serverId,
   required String channelId,
@@ -162,10 +155,9 @@ Future<List<String>> getDmPeerIds() =>
 Future<List<FriendFfi>> loadFriends({String? status}) =>
     RustLib.instance.api.crateApiStorageLoadFriends(status: status);
 
-/// Block an identity (MASTER-keyed). Persists the row and warms the in-memory
-/// set the Rust ingest guards read, so it takes effect immediately. Purely
-/// local — the blocked peer learns nothing. Pass any of the peer's ids; it is
-/// collapsed to the master via the resolver.
+/// Block an identity (MASTER-keyed): persists the row and warms the in-memory set the
+/// Rust ingest guards read, so it takes effect immediately. Purely local, so the
+/// blocked peer learns nothing. Any of their ids works; it is collapsed to the master.
 Future<void> blockPeer({required String peerId}) =>
     RustLib.instance.api.crateApiStorageBlockPeer(peerId: peerId);
 
@@ -248,8 +240,7 @@ Future<void> markFileComplete({
   diskPath: diskPath,
 );
 
-/// Get file_ids from messages that have no completed file on disk.
-/// Used to find files that need downloading after message sync.
+/// file_ids from messages with no completed file on disk, for post-sync downloads.
 Future<List<String>> getMissingFileIds() =>
     RustLib.instance.api.crateApiStorageGetMissingFileIds();
 
@@ -309,9 +300,9 @@ Future<BigInt> evictFilesCache({
 Future<BigInt> clearVaultCache() =>
     RustLib.instance.api.crateApiStorageClearVaultCache();
 
-/// Enforce the cache caps (files/ + vault_cache/ + the asset blob cache).
-/// Called after a download completes so the user-set caps are actually
-/// honored (the sliders were no-ops before this). Returns total bytes freed.
+/// Enforce the cache caps (files/, vault_cache/ and the asset blob cache) after a
+/// download completes, so the user-set sliders are actually honoured. Returns bytes
+/// freed.
 Future<BigInt> enforceStorageCaps({
   required BigInt filesCapMb,
   required BigInt vaultCacheCapMb,
@@ -343,11 +334,10 @@ Future<String?> getMnemonic() =>
 /// Check if an identity key file exists on disk.
 Future<bool> hasIdentity() => RustLib.instance.api.crateApiStorageHasIdentity();
 
-/// Delete the on-disk identity + local DB so the next launch shows the Welcome
-/// screen fresh. Used to discard a THROWAWAY identity created for the "Link a
-/// device" first-run flow when the user cancels it. Best-effort — missing files
-/// are ignored. The caller must restart the app afterward (the live DB handle
-/// is still open). DESTRUCTIVE: only call on a throwaway with no real data.
+/// Delete the on-disk identity and local DB so the next launch shows a fresh Welcome.
+/// Used to discard the THROWAWAY identity of a cancelled "Link a device" flow.
+/// DESTRUCTIVE: only call on a throwaway with no real data, and restart afterwards,
+/// because the live DB handle is still open.
 Future<void> deleteIdentity() =>
     RustLib.instance.api.crateApiStorageDeleteIdentity();
 
@@ -377,10 +367,9 @@ Future<void> importBackup({
 Future<bool> hasPendingLink() =>
     RustLib.instance.api.crateApiStorageHasPendingLink();
 
-/// (Receiver, at launch BEFORE start_node) Import a stashed link blob via the exact
-/// same pipeline as a manual `.hollow` restore: delete the throwaway identity,
-/// decrypt with the stashed code, extract into the data dir, then clean up the
-/// stash. After this the bootstrap proceeds as a normal restored-backup launch.
+/// (Receiver, at launch BEFORE start_node) Import a stashed link blob through the same
+/// pipeline as a manual `.hollow` restore, then clean up the stash. After this the
+/// bootstrap proceeds as a normal restored-backup launch.
 Future<void> importPendingLink() =>
     RustLib.instance.api.crateApiStorageImportPendingLink();
 
@@ -393,11 +382,9 @@ Future<void> stashPendingWipe() =>
 Future<bool> hasPendingWipe() =>
     RustLib.instance.api.crateApiStorageHasPendingWipe();
 
-/// (At launch, BEFORE start_node) Delete every file/dir in the data dir so the next
-/// Welcome starts from a truly clean slate. Preserves nothing identity-bearing:
-/// removes `identity.key`/`identity.device`, `messages.db*`, `device_lists`, any
-/// stashed `pending_link.*`, `vault/`, `files/`, etc. Keeps only the wipe marker
-/// itself (removed last) and any `*.lock` single-instance guard. Idempotent.
+/// (At launch, BEFORE start_node) Delete every file and directory in the data dir so
+/// the next Welcome starts from a clean slate, keeping only the wipe marker (removed
+/// last) and any single-instance lock. Idempotent.
 Future<void> performPendingWipe() =>
     RustLib.instance.api.crateApiStoragePerformPendingWipe();
 
@@ -647,10 +634,8 @@ class StoredFileInfo {
   final String? diskPath;
   final PlatformInt64? expiredAt;
 
-  /// Video thumbnail back-reference (Phase 6.75 video preview).
-  /// When non-null, this file is a thumbnail image for a vault-stored video.
-  /// The Dart UI uses this to render a play button overlay and trigger the
-  /// vault download on tap.
+  /// Back-reference to the vault-stored video this file is a thumbnail for, which the
+  /// UI uses to draw the play overlay and start the vault download on tap.
   final VideoThumbRef? videoThumb;
 
   /// Persisted share swarm root hash for share-backed (>34 MB) files —
@@ -660,9 +645,8 @@ class StoredFileInfo {
   /// Persisted share AES key (hex) paired with `share_root_hash`.
   final String? shareKeyHex;
 
-  /// Tiny base64 WebP placeholder thumbnail — rendered blurred under the
-  /// Download button while the real bytes are gated/undownloaded (issue #41
-  /// carry-over).
+  /// Tiny base64 WebP placeholder, rendered blurred under the Download button while
+  /// the real bytes are gated or undownloaded.
   final String? thumbB64;
 
   const StoredFileInfo({
@@ -930,22 +914,19 @@ class UserProfile {
   /// Showcase board JSON (profile blocks; empty = no board).
   final String showcaseBoard;
 
-  /// Avatar frame ID (issue #54). `""` = none, `"b:<hue>"` = a built-in
-  /// procedural frame, 64-hex = an asset-rail blob hash whose bytes are
-  /// pulled on demand via `request_assets(kind: "frame")`.
+  /// Avatar frame ID (issue #54): `""` = none, `"b:<hue>"` = built-in, 64-hex = an
+  /// asset-rail blob hash pulled on demand.
   final String avatarFrame;
 
-  /// Asset-rail hash of this person's ANIMATED avatar; `""` = still only.
-  /// `avatar_bytes` above is the STILL companion — the animation is pulled
-  /// via `request_assets(kind: "profile")` and painted over it when held.
+  /// Asset-rail hash of this person's ANIMATED avatar, `""` = still only.
+  /// `avatar_bytes` above is the STILL companion the animation is painted over.
   final String avatarAnim;
 
   /// Asset-rail hash of this person's ANIMATED banner; `""` = still only.
   final String bannerAnim;
 
-  /// Support credentials (artist shop): the verified JSON array as stored,
-  /// `""` for none. Entries are `{t, item, parts, badge, ...}`; a renderer
-  /// lights a mark next to art whose hash is in `parts` and worn.
+  /// Support credentials: the verified JSON array as stored, `""` for none. A renderer
+  /// lights a mark next to art whose hash is in an entry's `parts` and is worn.
   final String supportCreds;
 
   const UserProfile({

@@ -4121,17 +4121,34 @@ impl MessageStore {
         Ok(count > 0)
     }
 
+    /// A local write must outrank whatever stamp the row already carries, or a
+    /// sibling whose clock runs ahead keeps winning the merge on the other device.
+    fn next_personal_emote_stamp(&self, name: &str) -> i64 {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        let held: i64 = self
+            .conn
+            .query_row(
+                "SELECT added_at FROM personal_emotes WHERE name = ?1",
+                params![name],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+        now.max(held + 1)
+    }
+
+    /// Returns the `added_at` stamp it wrote, which the sibling sync sends as the
+    /// row's version: a local add is always the newest write of that name.
     pub fn add_personal_emote(
         &self,
         name: &str,
         hash: &str,
         animated: bool,
         source: &str,
-    ) -> Result<(), String> {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as i64)
-            .unwrap_or(0);
+    ) -> Result<i64, String> {
+        let now = self.next_personal_emote_stamp(name);
         self.conn
             .execute(
                 "INSERT INTO personal_emotes (name, hash, animated, source, added_at)
@@ -4142,25 +4159,82 @@ impl MessageStore {
                 params![name, hash, animated as i64, source, now],
             )
             .map_err(|e| format!("Failed to add personal emote: {e}"))?;
-        Ok(())
+        Ok(now)
     }
 
-    pub fn remove_personal_emote(&self, name: &str) -> Result<(), String> {
-        self.conn
+    /// Tombstones the name (empty hash) instead of deleting the row, and returns
+    /// the removal stamp when a live row was there. Tombstones are never collected:
+    /// a sibling that was offline still has to learn the removal.
+    pub fn remove_personal_emote(&self, name: &str) -> Result<Option<i64>, String> {
+        let now = self.next_personal_emote_stamp(name);
+        let changed = self
+            .conn
             .execute(
-                "DELETE FROM personal_emotes WHERE name = ?1",
-                params![name],
+                "UPDATE personal_emotes SET hash = '', animated = 0, source = '', added_at = ?2
+                 WHERE name = ?1 AND hash != ''",
+                params![name, now],
             )
             .map_err(|e| format!("Failed to remove personal emote: {e}"))?;
-        Ok(())
+        Ok(if changed > 0 { Some(now) } else { None })
     }
 
-    /// All personal emotes as (name, hash, animated, source), newest first.
+    /// Every row including tombstones, as (name, hash, animated, source, added_at).
+    pub fn list_personal_emote_entries(
+        &self,
+    ) -> Result<Vec<(String, String, bool, String, i64)>, String> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT name, hash, animated, source, added_at FROM personal_emotes
+                 ORDER BY added_at DESC",
+            )
+            .map_err(|e| format!("Failed to prepare personal emote query: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)? != 0,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, i64>(4)?,
+                ))
+            })
+            .map_err(|e| format!("Failed to query personal emotes: {e}"))?;
+        collect_rows(rows, "personal emote")
+    }
+
+    /// Merges one sibling row under per-name last-write-wins; `false` = ours is
+    /// newer and nothing changed.
+    pub fn merge_personal_emote_entry(
+        &self,
+        name: &str,
+        hash: &str,
+        animated: bool,
+        source: &str,
+        added_at: i64,
+    ) -> Result<bool, String> {
+        let changed = self
+            .conn
+            .execute(
+                "INSERT INTO personal_emotes (name, hash, animated, source, added_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(name) DO UPDATE SET
+                     hash = excluded.hash, animated = excluded.animated,
+                     source = excluded.source, added_at = excluded.added_at
+                 WHERE excluded.added_at > personal_emotes.added_at",
+                params![name, hash, animated as i64, source, added_at],
+            )
+            .map_err(|e| format!("Failed to merge personal emote: {e}"))?;
+        Ok(changed > 0)
+    }
+
+    /// All live personal emotes as (name, hash, animated, source), newest first.
     pub fn list_personal_emotes(&self) -> Result<Vec<(String, String, bool, String)>, String> {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT name, hash, animated, source FROM personal_emotes ORDER BY added_at DESC",
+                "SELECT name, hash, animated, source FROM personal_emotes
+                 WHERE hash != '' ORDER BY added_at DESC",
             )
             .map_err(|e| format!("Failed to prepare personal emote query: {e}"))?;
         let rows = stmt

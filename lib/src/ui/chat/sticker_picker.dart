@@ -12,6 +12,7 @@ import '../../core/providers/member_panel_provider.dart';
 import '../../core/providers/server_provider.dart';
 import '../../core/providers/sticker_provider.dart';
 import '../../core/services/gif_thumb_cache.dart';
+import '../../core/services/image_pick.dart';
 import '../../rust/api/gifs.dart' as gifs_api;
 import '../../rust/api/stickers.dart' as stickers_api;
 import '../../theme/hollow_spacing.dart';
@@ -35,12 +36,17 @@ import 'sticker_pack_card.dart' show kStickerPackExtension;
 /// its name is its identity, while a sticker is only ever picked visually.
 Future<stickers_api.ProcessedSticker?> pickAndProcessSticker(
     BuildContext context) async {
-  final result = await FilePicker.platform.pickFiles(
-    type: FileType.custom,
-    allowedExtensions: ['png', 'jpg', 'jpeg', 'webp', 'gif'],
-    withData: true,
-  );
-  final bytes = result?.files.single.bytes;
+  Uint8List? bytes;
+  try {
+    bytes = await pickImageBytes(
+        extensions: const ['png', 'jpg', 'jpeg', 'webp', 'gif']);
+  } catch (_) {
+    if (context.mounted) {
+      HollowToast.show(context, 'Could not open the file picker',
+          type: HollowToastType.error);
+    }
+    return null;
+  }
   if (bytes == null) return null;
   try {
     return await stickers_api.processAndStoreSticker(rawBytes: bytes);

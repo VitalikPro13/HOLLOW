@@ -6,7 +6,7 @@
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `ffz_query`, `normalize_name`, `parse_ffz_rows`, `request_asset_kind`
+// These functions are ignored because they are not marked as `pub`: `ffz_query`, `normalize_name`, `parse_ffz_rows`, `request_asset_kind`, `sync_personal_emotes_to_siblings`
 
 /// Wire token for an emote, as inserted into message text / reactions.
 String emoteToken({required String name, required String hash}) =>

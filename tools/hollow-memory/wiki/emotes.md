@@ -60,7 +60,7 @@ The DIMENSION ceiling `MAX_DECODE_DIM` (4096/side) is the separate, tighter REMO
 
 **SQLCipher tables** (`storage/messages.rs`):
 - `emote_blobs (hash PK, bytes, animated, added_at)` — content-addressed cache, shared across servers/DMs. CRUD: `save_emote_blob` / `load_emote_blob` / `has_emote_blob`.
-- `personal_emotes (name PK, hash, animated, source, added_at)` — the user's global set; `source` = `upload` | `ffz:<id>`. LOCAL only (no sibling sync yet). CRUD: `add/remove/list_personal_emotes`.
+- `personal_emotes (name PK, hash, animated, source, added_at)` — the user's global set; `source` = `upload` | `ffz:<id>`. Converges between the user's OWN devices since issue #76 (see "Personal emote sibling sync" below): `added_at` is the per-name LWW version, a row with `hash = ''` is a removal tombstone (kept forever), `list_personal_emotes` hides tombstones, `list_personal_emote_entries` returns everything, `merge_personal_emote_entry` is the gated remote write. CRUD: `add/remove/list_personal_emotes` (add returns its stamp, remove tombstones and returns it).
 
 ## Rust: Server Sets (CRDT)
 
@@ -367,8 +367,11 @@ column could only ever be set at upload time.
 
 ## Known Follow-ups
 
-Personal-emote and personal-sticker sibling sync; revisit the composer button
-row (emoji / GIF / sticker is three buttons on a narrow phone).
+Personal-STICKER sibling sync (emotes converge since #76, the sticker vault is
+still local-only); the mobile fleet has no friend-adding branch for
+`fleet_device_link.ps1` (no iOS to iOS run has ever passed G1), so its G8 gates
+are proven on Windows and Linux; revisit the composer button row (emoji / GIF /
+sticker is three buttons on a narrow phone).
 
 ## Avatar Frames (issue #54, 2026-08-22)
 
@@ -515,3 +518,53 @@ The requesting side no longer asks once per connection (that rule left a ring-re
 - **Dart:** unchanged except `ChatAssetImage`'s semantics, "GIF"/"Sticker" once bytes are present and "GIF loading"/"Sticker loading" while the box is reserved (what the fleet `wait_for`s).
 - **Tests:** harness `asset_pull_retries_when_the_holder_comes_online`, `asset_pull_rotates_to_another_holder_after_a_miss`, `asset_pull_asks_are_bounded_per_connection`, `asset_pull_ignores_missing_from_a_peer_we_did_not_ask`, `emote_request_for_unheld_hashes_answers_missing`, `asset_pull_rotates_after_invalid_bytes` (the first two and the last shown failing first). Fleet `scripts/fleet_asset_offline.ps1`, four gates: friends, GIF sent to a closed receiver, receiver returns with the sender up, receiver returns with the sender away and the picture lands when the sender relaunches.
 
+
+## Personal emote sibling sync and the desktop upload fix (issue #76, 2026-09-10)
+
+The report said "Linux client can't create custom emoji": Mine > Upload did nothing and
+nothing was logged, while Android worked. The fleet found the real cause on Windows, and it
+is every DESKTOP: the picker is a raw OverlayEntry and the Navigator re-stacks foreign
+entries on top at every push, so the "Name this emote" dialog rendered BEHIND the picker.
+Its Save button was not hit-testable, the click that reached the picker's barrier tore the
+picker down mid-flow, and `_uploadPersonalEmote` then bailed on `!mounted`. No error, no
+log. Android is a bottom sheet (a route), so the dialog sits above it there.
+
+- **Picker steps aside for its own dialogs.** `showEmojiPicker` owns a `ValueNotifier<bool>
+  hidden`; `_EmojiPickerOverlay` wraps its Stack in `Offstage` bound to it, and
+  `EmojiPickerBody.onModalFlow` (null for the mobile sheet) flips it. Every flow that opens
+  a dialog goes through `_withHostHidden` (upload, FFZ import name prompt). The picker comes
+  back on stage with the new emote listed. Widget test
+  `test/widget/emoji_picker_upload_test.dart` pins it (offstage while the dialog is up, add
+  lands, no exception).
+- **The name dialog owns its controller** (`_EmoteNameDialog`): disposing the
+  `TextEditingController` right after the pop future resolved hit the field's rebuild during
+  the exit animation (debug assertion "used after being disposed", then a framework
+  `_dependents.isEmpty` cascade). Pre-existing, reachable only once Save could be clicked.
+- **Linux pick path hardened** (`core/services/image_pick.dart`, `pickImageBytes`): file_picker's
+  Linux backend is the XDG portal over D-Bus and THROWS when no portal answers (bare WM,
+  private session bus); the throw used to vanish into hollow_crash.log. Now: logged through
+  `logFromDart` (`[HOLLOW-PICK]`), a zenity / qarma / kdialog fallback, and a toast
+  "Could not open the file picker". Stock GNOME (VM) was verified to open the portal dialog
+  and cancel cleanly with the old code, so the portal itself was never the Linux failure.
+  `[HOLLOW-EMOTE]` lines now mark processing and add failures too. The sticker upload uses
+  the same helper. `debugArmedImagePick` is the probe seam (`arm_image_pick` op).
+- **Sibling sync (Rust).** `HavenMessage::PersonalEmoteSync { emotes }` carries
+  `PersonalEmoteEntry { name, hash, animated, source, added_at }` rows; a delta after an
+  add/remove (`NodeCommand::SyncPersonalEmotes`, fanned with `fan_to_own_siblings` from the
+  `add/remove_personal_emote` FFI) and the full set on `on_verified_sibling` and
+  `SiblingStateSyncRequest` are the same message. Receiver (`handle_incoming_request`):
+  `same_identity` gate, 512-row cap, per-row grammar, `merge_personal_emote_entry` LWW,
+  missing blobs pulled over the asset rail with `peer_hint = OUR OWN MASTER` (so
+  `ask_candidates` = our online siblings and the retry re-asks on reconnect), then
+  `NetworkEvent::PersonalEmotesUpdated` → Dart invalidates `personalEmotesProvider`. Local
+  stamps are `max(now, held + 1)` so a sibling clock running ahead cannot pin a name. The
+  Mine tab wraps its grid in `EmoteScope(peerHint: own master)` for the same reason.
+  `security_write_gates` has the row. Harness: `personal_emotes_converge_across_siblings`,
+  `personal_emote_sync_from_non_sibling_is_dropped`, `personal_emote_lww_keeps_the_newer_row`.
+- **Fleet:** `fleet_device_link.ps1` gates G8a-G8d (a uploads through the picker with
+  `arm_image_pick`, b lists it WITH its image, a removes and b drops it, then the reverse).
+  The script also gained the Linux launch branch, a handle-based boot poll (the path lookup
+  read a booting process as dead), a stash-first G4 on Linux (the self-relaunch lands ~4 s
+  after the stash and the replacement truncates the outbox, so the stash on disk is the
+  proof and the mailbox is handed over at once) and an Escape-first settings close. Green
+  18/18 on Windows and on the Linux VM, 2026-09-10.

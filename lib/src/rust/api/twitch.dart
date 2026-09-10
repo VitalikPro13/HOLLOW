@@ -33,18 +33,16 @@ Future<void> twitchDisconnect() =>
 
 /// Verify the connected Twitch account and wear the credential.
 ///
-/// What the Connect flow ends with, and what the purple chip draws from. The
-/// credential is kept and announced in one profile save; nothing else on the
-/// profile changes.
+/// What the Connect flow ends with and what the chip draws from. The credential is
+/// kept and announced in one profile save; nothing else on the profile changes.
 Future<TwitchVerifyOutcome> twitchVerifyOwner() =>
     RustLib.instance.api.crateApiTwitchTwitchVerifyOwner();
 
 /// Verify that we follow `broadcaster_id`, and answer the credential as JSON.
 ///
-/// This is what rides a join request to a Twitch-gated server. It never
-/// touches the profile: a follow credential names a channel somebody watches,
-/// which is theirs to hand to that channel's server and to nobody else
-/// (`support_creds::keep_verified` caps it at zero in both directions).
+/// This rides a join request to a Twitch-gated server and never touches the profile: a
+/// follow credential names a channel somebody watches, which is theirs to hand to
+/// that channel's server and to nobody else.
 Future<String> twitchVerifyFollow({required String broadcasterId}) => RustLib
     .instance
     .api
@@ -52,14 +50,13 @@ Future<String> twitchVerifyFollow({required String broadcasterId}) => RustLib
 
 /// Keep the account credential fresh, silently.
 ///
-/// A credential is minted for a 90-day window and verifies for that window
-/// and the one after it, so there is a whole window in which to renew it from
-/// the persisted refresh token without asking the user for anything. Called
-/// at start-up; the cooldown below is what keeps a long-running app from
-/// asking the shop more than once a day.
+/// A credential is minted for a 90-day window and verifies for that window and the
+/// next, so there is a whole window in which to renew it from the persisted refresh
+/// token without asking the user. Called at start-up, with a cooldown so a
+/// long-running app asks the shop at most once a day.
 ///
-/// Answers whether a fresh credential was minted. Every refusal is a `false`,
-/// never an error the user sees: this runs behind their back.
+/// Answers whether a fresh credential was minted; every refusal is `false`, never an
+/// error the user sees.
 Future<bool> twitchMaintainOwnerCredential() =>
     RustLib.instance.api.crateApiTwitchTwitchMaintainOwnerCredential();
 
@@ -105,10 +102,9 @@ class TwitchDeviceFlowResult {
 
 /// What [`twitch_verify_owner`] came back with.
 ///
-/// Not a `Result`: a refusal from the shop (a stale token, a rate limit,
-/// Twitch itself being down) is an ANSWER, and the caller shows its sentence
-/// rather than treating it as a crash. `Err` is kept for the things that stop
-/// the call happening at all, like no connected account.
+/// Not a `Result`: a refusal from the shop is an ANSWER, and the caller shows its
+/// sentence rather than treating it as a crash. `Err` is kept for the things that
+/// stop the call happening at all, like no connected account.
 class TwitchVerifyOutcome {
   /// The credential is minted, kept and announced.
   final bool verified;

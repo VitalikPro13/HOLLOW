@@ -162,6 +162,9 @@ pub enum NetworkEvent {
     /// Custom emote bytes arrived and verified, so Dart invalidates the hash-keyed
     /// providers and pending `[e:name:hash]` tokens re-render as images.
     EmoteAssetsReceived { hashes: Vec<String> },
+    /// The personal emote set changed through a sibling device, so Dart
+    /// invalidates `personalEmotesProvider`.
+    PersonalEmotesUpdated,
     ChannelAdded { server_id: String, channel_id: String, name: String, channel_type: String },
     ChannelRemoved { server_id: String, channel_id: String },
     ChannelRenamed { server_id: String, channel_id: String, new_name: String },
@@ -880,6 +883,7 @@ fn to_ffi_event(event: node::NetworkEvent) -> NetworkEvent {
         node::NetworkEvent::EmoteAssetsReceived { hashes } => {
             NetworkEvent::EmoteAssetsReceived { hashes }
         }
+        node::NetworkEvent::PersonalEmotesUpdated => NetworkEvent::PersonalEmotesUpdated,
         node::NetworkEvent::ChannelAdded { server_id, channel_id, name, channel_type } => {
             NetworkEvent::ChannelAdded { server_id, channel_id, name, channel_type }
         }

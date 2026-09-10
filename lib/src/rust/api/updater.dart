@@ -11,33 +11,31 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 String getCurrentVersion() =>
     RustLib.instance.api.crateApiUpdaterGetCurrentVersion();
 
-/// How this Linux copy of Hollow was installed: `"flatpak"` or `"tarball"`.
-/// Empty on every other platform. Dart branches its update UI on this (a
-/// flatpak has a read-only `/app`, so the "can I write to the app dir" probe
-/// is meaningless there), and every Linux path below reads the SAME detection.
+/// How this Linux copy of Hollow was installed: `"flatpak"` or `"tarball"`, empty
+/// elsewhere. Dart branches its update UI on it (a flatpak's `/app` is read-only, so
+/// the "can I write to the app dir" probe is meaningless there) and every Linux path
+/// below reads the SAME detection.
 String linuxInstallKind() =>
     RustLib.instance.api.crateApiUpdaterLinuxInstallKind();
 
-/// Fetches `manifest.json` AND its `manifest.json.sig` sidecar, and returns
-/// the manifest text only when the signature verifies against
-/// [`MANIFEST_SIGNING_PUBKEYS`]. The signature covers the manifest's exact
-/// bytes, so the text handed to Dart is byte for byte what was signed.
+/// Fetches `manifest.json` AND its `manifest.json.sig` sidecar, returning the manifest
+/// text only when the signature verifies against [`MANIFEST_SIGNING_PUBKEYS`]. The
+/// signature covers the exact bytes, so what Dart gets is byte for byte what was
+/// signed.
 Future<String> fetchVersionManifest({required String manifestUrl}) => RustLib
     .instance
     .api
     .crateApiUpdaterFetchVersionManifest(manifestUrl: manifestUrl);
 
-/// Plain fetch for the OTHER release-folder feeds (news.json, status.json):
-/// display-only text with no signature sidecar. Nothing downloaded through
-/// here is ever executed or installed; the update manifest itself must go
-/// through [`fetch_version_manifest`].
+/// Plain fetch for the OTHER release-folder feeds, display-only text with no signature
+/// sidecar. Nothing fetched here is ever executed or installed; the update manifest
+/// goes through [`fetch_version_manifest`].
 Future<String> fetchReleaseFeed({required String url}) =>
     RustLib.instance.api.crateApiUpdaterFetchReleaseFeed(url: url);
 
-/// Downloads `url` to `dest_path` and keeps the file ONLY if its SHA-256 is
-/// `expected_sha256` (the value from the signed manifest). Any failure,
-/// including a checksum mismatch or a cancelled stream, deletes the partial
-/// file and ends the stream with `DownloadProgress::error` set.
+/// Downloads `url` to `dest_path` and keeps the file ONLY if its SHA-256 matches the
+/// value from the signed manifest. Any failure, a mismatch included, deletes the
+/// partial file and ends the stream with `DownloadProgress::error` set.
 Stream<DownloadProgress> downloadUpdate({
   required String url,
   required String destPath,
