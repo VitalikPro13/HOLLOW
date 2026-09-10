@@ -2485,8 +2485,9 @@ class _ChannelLayoutEditorState extends ConsumerState<_ChannelLayoutEditor> {
               ],
             ),
             // Only meaningful for PRIVATE (MLS) channels: a public one is
-            // plaintext for everyone, and voice has no gating at all.
-            if (!isVoice && !(ch?.isPublic ?? false)) ...[
+            // plaintext for everyone. Voice is never public; its posting gate
+            // is never consulted (#71), so it shows visibility and grants only.
+            if (!(ch?.isPublic ?? false)) ...[
               const SizedBox(height: HollowSpacing.xs),
               Padding(
                 // Aligned under the "#" channel icon, not the channel name.
@@ -2506,19 +2507,22 @@ class _ChannelLayoutEditorState extends ConsumerState<_ChannelLayoutEditor> {
                       onCustomPressed: () => _editGateLabels(
                           item.channelId, forVisibility: true),
                     ),
-                    const SizedBox(width: HollowSpacing.sm),
-                    _MobileAccessChip(
-                      icon: LucideIcons.messageSquare,
-                      value: ch?.posting ?? 'everyone',
-                      gateLabels: ch?.postingLabels ?? const [],
-                      allLabels: ref
-                              .watch(serverLabelsProvider(widget.serverId))
-                              .valueOrNull ??
-                          const [],
-                      onChanged: (v) => _setChannelPosting(item.channelId, v),
-                      onCustomPressed: () => _editGateLabels(
-                          item.channelId, forVisibility: false),
-                    ),
+                    if (!isVoice) ...[
+                      const SizedBox(width: HollowSpacing.sm),
+                      _MobileAccessChip(
+                        icon: LucideIcons.messageSquare,
+                        value: ch?.posting ?? 'everyone',
+                        gateLabels: ch?.postingLabels ?? const [],
+                        allLabels: ref
+                                .watch(serverLabelsProvider(widget.serverId))
+                                .valueOrNull ??
+                            const [],
+                        onChanged: (v) =>
+                            _setChannelPosting(item.channelId, v),
+                        onCustomPressed: () => _editGateLabels(
+                            item.channelId, forVisibility: false),
+                      ),
+                    ],
                     const SizedBox(width: HollowSpacing.sm),
                     HollowPressable(
                       onTap: () => showChannelGrantsDialog(

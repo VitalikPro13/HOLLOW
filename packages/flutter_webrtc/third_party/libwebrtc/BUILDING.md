@@ -9,11 +9,12 @@ milestone, new wrapper patch, new architecture).
 
 Both binaries were built 2026-07-19 from the same pinned sources: Windows on
 the maintainer machine (`D:\libwebrtc-build`), Linux on the build VM
-(`~/libwebrtc-build`) — both trees remain warm for incremental rebuilds.
+(`~/libwebrtc-build`) — both trees remain warm for incremental rebuilds. The
+Linux binary was relinked 2026-09-10 with `hollow-pulse-reinit.patch` (below).
 
 ## What the custom build changes
 
-Two patch files in this folder, BOTH required:
+Three patch files in this folder, ALL required:
 
 **[`hollow-core-audio.patch`](hollow-core-audio.patch)** — small interface
 additions to the WebRTC core (`AudioTransport::UpdateAudioSenders` /
@@ -21,6 +22,25 @@ additions to the WebRTC core (`AudioTransport::UpdateAudioSenders` /
 lines across 13 files). The wrapper branch's `custom_audio_transport_impl.h`
 does not compile against a pristine core without it; the shipped Windows DLL
 contains these changes, so all platforms must apply them for parity.
+
+**[`hollow-pulse-reinit.patch`](hollow-pulse-reinit.patch)** (Linux core, one
+hunk in `modules/audio_device/linux/audio_device_pulse_linux.cc`). Upstream
+`AudioDeviceLinuxPulse::Terminate()` sets `quit_` and `Init()` never clears it,
+so after the module is terminated once (libwebrtc does that whenever the LAST
+PeerConnection dies) the audio threads of every later `Init()` exit on their
+first wake and `StartRecording()`/`StartPlayout()` time out at 10 s each
+("failed to activate recording"): the silent Linux calls of issue #72. The
+patch clears the flag before the threads spawn. Reproduced and proved with the
+harness in [`adm_probe/`](adm_probe/) (Init, Terminate, Init, StartRecording:
+21 ms, then 10010 ms and -1 before the fix; 3 cycles at 8 ms after). To run it,
+copy that folder to `src/hollow_adm_probe/`, add `"hollow_adm_probe:adm_probe"`
+to the root `BUILD.gn` default group, `ninja -C out/Linux-x64 adm_probe`, then
+`./out/Linux-x64/adm_probe 3` inside a PipeWire or PulseAudio session (a
+headless box needs one source: `pw-cli create-node adapter
+'{ factory.name=support.null-audio-sink node.name=fake-mic
+media.class=Audio/Source/Virtual object.linger=true }'`). Exit 0 = PASS. The
+plugin's anchor PeerConnection (`flutter_webrtc_base.cc`) stays as belt and
+braces. Upstream WebRTC main still carries the bug as of 2026-09-10.
 
 **[`hollow-screencast.patch`](hollow-screencast.patch)** — the wrapper patch:
 
@@ -134,6 +154,7 @@ After the sync, apply the patches and wire the wrapper target:
 ```bash
 cd src
 git apply --ignore-whitespace /path/to/hollow-core-audio.patch
+git apply /path/to/hollow-pulse-reinit.patch     # Linux-only code, apply on both
 # root BUILD.gn: add "libwebrtc" to the default group's deps —
 #   deps = [ ":webrtc", "libwebrtc" ]
 ```

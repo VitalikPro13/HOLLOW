@@ -2095,6 +2095,8 @@ async fn server_join_forms_mls_and_channel_message_decrypts() {
             Ok(super::types::HavenMessage::MlsChannelMessage { .. }))
     }).expect("recorded MLS ciphertext");
     let epoch = j.mls_epoch(&server_id).await;
+    // ABSENCE proof: the replays must span more than MLS_DECRYPT_FAIL_WINDOW without
+    // any eviction, and "nothing happened" has no signal to poll (counted in BUDGET_MS).
     for _ in 0..4 {
         relay.inject(&server_id, &o.device_id, &j.device_id, frame.clone());
         sleep_ms(2100).await;
@@ -19754,7 +19756,7 @@ fn harness_fixed_sleep_budget_does_not_grow() {
     // whose only signal is a running node's DB, the spawn stagger, and the auto-download
     // advert window that has no live probe. Every such sleep says so at its own call
     // site, which is where the reason for the current number lives.
-    const BUDGET_MS: u64 = 601_900;
+    const BUDGET_MS: u64 = 604_000;
 
     let src = include_str!("test_harness.rs");
     // Built from pieces so this scan does not count its own source text.

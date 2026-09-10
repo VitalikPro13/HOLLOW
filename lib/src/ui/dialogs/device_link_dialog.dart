@@ -603,8 +603,8 @@ class _DeviceLinkContentState extends ConsumerState<_DeviceLinkContent> {
         ),
         const SizedBox(height: HollowSpacing.lg),
         Text(
-          'Servers & their history were copied too. New server messages will appear '
-          'once multi-device servers ship.',
+          'Servers and their history were copied too. New messages reach both '
+          'devices from now on.',
           textAlign: TextAlign.center,
           style: HollowTypography.caption.copyWith(color: hollow.textSecondary, fontSize: 10),
         ),

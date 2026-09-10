@@ -155,14 +155,15 @@ class _ChannelActionsSheetState extends State<_ChannelActionsSheet> {
                 : _accessLabel(_visibility),
             onTap: () => setState(() => _view = _SheetView.visibility),
           ),
-          _ActionRow(
-            icon: LucideIcons.messageSquare,
-            label: 'Who Can Post',
-            trailing: _postingLabels.isNotEmpty
-                ? '${_postingLabels.length} label${_postingLabels.length == 1 ? '' : 's'}'
-                : _accessLabel(_posting),
-            onTap: () => setState(() => _view = _SheetView.posting),
-          ),
+          if (!isVoice)
+            _ActionRow(
+              icon: LucideIcons.messageSquare,
+              label: 'Who Can Post',
+              trailing: _postingLabels.isNotEmpty
+                  ? '${_postingLabels.length} label${_postingLabels.length == 1 ? '' : 's'}'
+                  : _accessLabel(_posting),
+              onTap: () => setState(() => _view = _SheetView.posting),
+            ),
           if (!widget.channel.isPublic)
             _ActionRow(
               icon: LucideIcons.userPlus,

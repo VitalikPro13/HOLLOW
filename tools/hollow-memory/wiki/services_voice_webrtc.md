@@ -881,8 +881,13 @@ which made it look like one machine was always broken. Windows and macOS modules
 creates one PeerConnection on Linux right after the factory initialises and deletes it only in its
 destructor. It has no transport until an offer exists, so it costs nothing; the module initialises
 once at plugin construction (the two `webrtc_audio_module` threads exist from boot) and stays.
-The engine-side fix belongs in `audio_device_pulse_linux.cc` and means rebuilding the vendored
-`libwebrtc.so` (`third_party/libwebrtc/BUILDING.md`).
+The engine-side fix landed 2026-09-10 as `hollow-pulse-reinit.patch` (`third_party/libwebrtc/`):
+`AudioDeviceLinuxPulse::Terminate()` sets `quit_` and `Init()` never cleared it, so the threads a
+later `Init()` spawns exit on their first wake and every stream start times out; the patch clears
+the flag before the threads spawn. Upstream WebRTC main still has the bug. The harness in
+`third_party/libwebrtc/adm_probe/` reproduces it (Init, Terminate, Init, StartRecording: 10 s and
+-1 before, 8 ms after) and BUILDING.md has the recipe; the vendored `libwebrtc.so` was relinked
+from the same tree. The anchor connection stays as a second line of defence.
 
 Two diagnostics landed with it. The plugin installs a libwebrtc log sink on stderr before
 `LibWebRTC::Initialize()` (`HOLLOW_WEBRTC_LOG=verbose|info|warning|error|none`, default warning),

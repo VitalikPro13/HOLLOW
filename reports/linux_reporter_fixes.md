@@ -46,3 +46,23 @@ The patch above was tested on Vitalik's real Ubuntu laptop (GNOME on X11) with t
 Verified on the laptop: `friend_dm` (39 s), three DM calls both ways with audio both ways, the video Play tap, `voice_channel` (1:31). Windows release build compiles with the plugin changes.
 
 Not verified here: a Linux to Windows call (the reporters' topology; the Windows side never had the failure), device linking with a fresh code, the stuck 99.6 KB transfer, screen share with audio. Hardware video decoding on Linux stays off until a fleet run proves a path. The proper fix for the audio module re-init lives in libwebrtc itself and needs a rebuild of the vendored engine.
+
+# Verification, 2026-09-10
+
+Three things were checked against the reporter's log and the fleet, with the laptop off.
+
+## The MLS failures were replays, not a crypto fault
+
+All 109 `SecretReuseError` lines in `reporter_debug.log` follow a frame from the relay's catch-up ring, and every one sits in the second after a restart. The client asks the ring for its watermark age plus a 30-minute overlap, so the relay replays half an hour of frames the client had already decrypted before it restarted, and OpenMLS refuses a consumed generation. The frames that were new decrypted normally (3 and 14 per restart). Both bursts fit inside one second, below the 3 s sustained window, so no group was ever dropped and no epoch moved. The cost before the fix was log noise, the burst warnings and one throttled sync request. The `decrypt_fresh` change in de1f179 returns before any of that, and the two tests behind it pass. The next log from the reporter should carry zero of these lines. These failures explain none of the audio symptoms. Those were the audio module re-init below.
+
+## The audio module defect is fixed in the engine
+
+`AudioDeviceLinuxPulse::Terminate()` sets `quit_` and `Init()` never clears it, so every audio thread spawned by a later init exits on its first wake and each stream start times out at 10 s. Upstream WebRTC main still has the bug. A small harness (`third_party/libwebrtc/adm_probe/`) reproduced it on the build VM: first cycle 21 ms and 16 ms, second cycle 10010 ms and 10008 ms with the reporter's exact log lines. With the one hunk in `hollow-pulse-reinit.patch` three cycles start in 7 to 8 ms. `libwebrtc.so` was relinked from the same tree and vendored; exports, linked libraries and section sizes match the previous binary. The anchor connection stays. The fleet run with the anchor disabled still needs the laptop.
+
+## Device linking works and everything syncs afterwards
+
+`scripts/fleet_device_link.ps1` walks the whole journey on two fresh Windows instances plus a friend: code shown, code entered, data sent, stash, the app's own relaunch, then the linked device holds the same master, the server with its history, the friend and the DM rows, and both devices list two devices. After the link, a DM and a channel post from the friend reach both devices, and a post or DM from the new device reaches the friend and the sibling. 14 gates green, then the two refusal gates (offline, 60 s unanswered). By hand, a Windows master linked an iOS Simulator and an iOS master linked a Windows instance, with the same result in both directions, including the new device alert on the friend's side. The reporter's stuck link is therefore not reproducible on a clean identity. Their case needs a log from the linking device.
+
+Found on the way and not yet decided: the "Device linked" view said new server messages would arrive "once multi-device servers ship", which the journey disproves (rewritten); the offline Link button is disabled at 40 percent opacity, which is the design system's convention; and the mnemonic pull path (`pullFromSibling`) has no caller, so its failure copy never renders.
+
+Issue #71 (voice channels missing visibility, who can post and temporary access in the mobile server settings) is fixed and verified by screenshot on desktop, on the mobile settings list and on the long-press sheet. Rust never consults the posting gate for a voice channel, so who can post is now text only on every surface.

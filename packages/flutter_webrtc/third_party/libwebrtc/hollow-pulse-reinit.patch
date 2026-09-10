@@ -1,0 +1,19 @@
+diff --git a/modules/audio_device/linux/audio_device_pulse_linux.cc b/modules/audio_device/linux/audio_device_pulse_linux.cc
+index 8a09011..62ee91e 100644
+--- a/modules/audio_device/linux/audio_device_pulse_linux.cc
++++ b/modules/audio_device/linux/audio_device_pulse_linux.cc
+@@ -171,6 +171,14 @@ AudioDeviceGeneric::InitStatus AudioDeviceLinuxPulse::Init() {
+   }
+ #endif
+ 
++  // Terminate() leaves quit_ set. Without clearing it the threads spawned
++  // below exit on their first wake and every StartRecording()/StartPlayout()
++  // after a re-Init() times out at 10 s (Hollow #72).
++  {
++    MutexLock lock(&mutex_);
++    quit_ = false;
++  }
++
+   // RECORDING
+   const auto attributes =
+       ThreadAttributes().SetPriority(ThreadPriority::kRealtime);

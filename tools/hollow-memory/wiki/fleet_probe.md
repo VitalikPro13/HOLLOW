@@ -517,3 +517,15 @@ This is how the #72 root cause was found (memory `project_linux_call_audio_adm_i
 both `open_channel vc-test` and wait for `semantics:Disconnect`, 15 s together, leave, delete.
 The connection gate is `wait_for provider:connection equals:connected`, not `text:Connected`,
 because an attached run may be sitting in a chat where that text is not on screen.
+
+## The device-link journey (`fleet_device_link.ps1`, 2026-09-10)
+
+A populated master (a) hands its identity, friends, DMs and servers to an empty device (b) while a friend (c) supplies traffic. Gates: G1 friends, DMs and #general traffic; G2 a shows the code (Settings > Devices > Link a device); G3 b enters it and reaches "Linking this device"; G4 "Data sent" and "Device linked"; G5 the stash (`pending_link.hollow` + `pending_link.code`) and the relaunch; G6 b's identity equals a's master, server and history present, friend and DM rows present, two device rows on both; G7 live fan-out in all four directions. `-EdgeGates` runs the two refusals instead: offline (the welcome dialog's Advanced relay field typed with `relay.invalid`, override with `-DeadRelay`) and the 60 s unanswered timeout. Green on Windows 2026-09-10 (14 of 14, then 2 of 2); evidence under `build/fleet_out/kept/device_link_evidence/`.
+
+What is not obvious:
+
+- `DeviceLinkMode.enterCode` is reachable ONLY from the welcome flow, so the empty peer is launched on an empty data dir, never from an onboarded fixture.
+- On Windows the app's own relaunch (Rust waiter) lands inside fleet tracking because env and cwd are inherited, but the probe replays `inbox.jsonl` from line 0 on boot and would re-run the journey: `Reset-PeerMailbox` empties the inbox and drops `live-ready` in the window before the new process reads them. Never call it on a running instance (its read cursor ends past EOF and the peer is wedged).
+- iOS has no self-relaunch: the app stashes and exits, the harness relaunches, the import runs before the node starts.
+- `wait_for` sees built widgets only: run the channel half with everyone in #general, then move everyone to the DM surface for the DM half, or a delivered DM reads as a failed wait.
+- The cross-platform pairs (Windows master to iOS sub-device and the reverse) were driven by hand with one `fleet_send` session per fleet, the code captured on one side and typed on the other. The script carries sim and linux branches, but no iOS to iOS run has exercised them end to end yet.

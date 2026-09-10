@@ -1127,19 +1127,21 @@ class _ChannelRow extends StatelessWidget {
                       onCustomPressed: onVisibilityLabelsPressed,
                     ),
                   ),
-                  const SizedBox(width: 4),
-                  HollowTooltip(
-                    message: 'Who can post',
-                    child: _AccessChip(
-                      icon: LucideIcons.messageSquare,
-                      value: posting,
-                      gateLabels: postingLabels,
-                      allLabels: allLabels,
-                      onChanged: onPostingChanged,
-                      onCustomPressed: onPostingLabelsPressed,
-                    ),
-                  ),
+                  // Posting is text-only: Rust consults it for messages and
+                  // files, never for a voice join (#71).
                   if (!isVoice) ...[
+                    const SizedBox(width: 4),
+                    HollowTooltip(
+                      message: 'Who can post',
+                      child: _AccessChip(
+                        icon: LucideIcons.messageSquare,
+                        value: posting,
+                        gateLabels: postingLabels,
+                        allLabels: allLabels,
+                        onChanged: onPostingChanged,
+                        onCustomPressed: onPostingLabelsPressed,
+                      ),
+                    ),
                     const SizedBox(width: 4),
                     HollowTooltip(
                       message: 'Minimum delay between each member\'s messages',

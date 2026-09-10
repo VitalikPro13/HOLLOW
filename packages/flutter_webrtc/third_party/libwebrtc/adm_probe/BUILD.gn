@@ -1,0 +1,12 @@
+import("../webrtc.gni")
+
+# Throwaway harness for the PulseAudio ADM re-init defect (Hollow #72).
+rtc_executable("adm_probe") {
+  sources = [ "adm_probe.cc" ]
+  deps = [
+    "//api/audio:audio_device",
+    "//api/audio:create_audio_device_module",
+    "//api/environment:environment_factory",
+    "//rtc_base:logging",
+  ]
+}

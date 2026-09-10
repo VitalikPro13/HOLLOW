@@ -65,7 +65,7 @@ Expanded server channel list shows tree-style connectors (├── / └──)
 **File:** `lib/src/ui/mobile/mobile_channel_actions.dart`
 Long-press on a channel row in the expanded accordion opens `showMobileChannelActions()`:
 - Channel name header with type icon (hash/volume)
-- If `canManage` (Permission.manageChannels): **Rename** (pops sheet, opens `showHollowDialog`), **Visibility** (radio: Everyone/Mod+/Admin+), **Who Can Post** (same), **Delete** (inline confirmation)
+- If `canManage` (Permission.manageChannels): **Rename** (pops sheet, opens `showHollowDialog`), **Visibility** (radio: Everyone/Mod+/Admin+), **Who Can Post** (same; text channels only since #71, a voice channel shows Visibility and Temporary Access), **Delete** (inline confirmation)
 - If not admin: read-only channel info only
 - Uses `AnimatedSize` view switching (actions → deleteConfirm → visibility → posting)
 - `onChanged` callback triggers `_loadChannels()` to refresh the accordion
