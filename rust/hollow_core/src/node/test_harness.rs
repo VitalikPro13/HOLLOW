@@ -3160,7 +3160,7 @@ async fn dm_file_transfer_completes_and_decrypts() {
     assert_eq!(meta.size_bytes, contents.len() as u64, "size matches the source file");
     assert!(meta.completed_at.is_some(), "transfer completed");
     let disk = meta.disk_path.expect("completed file has a disk path");
-    let got = std::fs::read(&disk).expect("read the received file");
+    let got = super::at_rest::read_all(std::path::Path::new(&disk)).expect("read the received file");
     assert_eq!(got, contents, "received file must decrypt to the original contents");
     assert!(!b.missing_file_ids().contains(&fid), "completed file is not missing");
 }
@@ -3270,7 +3270,7 @@ async fn dm_auto_download_off_declines_push_then_manual_request_completes() {
     let meta = b.file_meta(&fid).expect("files row after manual download");
     assert!(meta.completed_at.is_some(), "manual download completed");
     let disk = meta.disk_path.expect("completed file has a disk path");
-    let got = std::fs::read(&disk).expect("read the received file");
+    let got = super::at_rest::read_all(std::path::Path::new(&disk)).expect("read the received file");
     assert_eq!(got, contents, "manually pulled file decrypts to the original contents");
 
     super::file_handler::set_auto_download_conf(169, std::collections::HashMap::new());
@@ -3390,7 +3390,7 @@ async fn dm_receiver_pref_prenegotiation_skips_push_bytes() {
     let meta = b.file_meta(&fid).expect("files row after manual download");
     let disk = meta.disk_path.expect("completed file has a disk path");
     assert_eq!(
-        std::fs::read(&disk).expect("read the received file"),
+        super::at_rest::read_all(std::path::Path::new(&disk)).expect("read the received file"),
         contents,
         "manually pulled file decrypts to the original contents"
     );
@@ -3482,7 +3482,7 @@ async fn dm_voice_message_bypasses_auto_download_gate() {
     let meta = b.file_meta(&fid).expect("voice files row");
     let disk = meta.disk_path.expect("completed voice note has a disk path");
     assert_eq!(
-        std::fs::read(&disk).expect("read the received voice note"),
+        super::at_rest::read_all(std::path::Path::new(&disk)).expect("read the received voice note"),
         contents,
         "voice note decrypts to the original contents"
     );
@@ -3797,7 +3797,7 @@ async fn dm_file_request_waits_for_offline_holder_then_fetches_on_return() {
     let meta = b.file_meta(&fid).expect("B persisted the files row");
     let disk = meta.disk_path.expect("completed file has a disk path");
     assert_eq!(
-        std::fs::read(&disk).expect("read the received file"),
+        super::at_rest::read_all(std::path::Path::new(&disk)).expect("read the received file"),
         contents,
         "the queued fetch must decrypt to the original contents"
     );
@@ -3935,7 +3935,7 @@ async fn file_unavailable_from_unasked_device_changes_nothing() {
     let meta = b.file_meta(&fid).expect("B persisted the files row");
     let disk = meta.disk_path.expect("completed file has a disk path");
     assert_eq!(
-        std::fs::read(&disk).expect("read the received file"),
+        super::at_rest::read_all(std::path::Path::new(&disk)).expect("read the received file"),
         contents,
         "the surviving ask must land the holder's bytes byte-exact"
     );
@@ -4222,7 +4222,7 @@ async fn channel_file_request_rotates_to_next_holder_after_gone() {
     let meta = b.file_meta(&fid).expect("the asker persisted the files row");
     let disk = meta.disk_path.expect("completed file has a disk path");
     assert_eq!(
-        std::fs::read(&disk).expect("read the received file"),
+        super::at_rest::read_all(std::path::Path::new(&disk)).expect("read the received file"),
         contents,
         "the rotated fetch must decrypt to the original contents"
     );
@@ -10748,7 +10748,7 @@ async fn channel_file_request_reroutes_to_online_holder_when_sender_offline() {
     {
         let meta = b.file_meta(&fid).expect("B persisted the files row");
         let disk = meta.disk_path.expect("B's completed file has a disk path");
-        assert_eq!(std::fs::read(&disk).unwrap(), contents, "B holds the original bytes");
+        assert_eq!(super::at_rest::read_all(std::path::Path::new(&disk)).unwrap(), contents, "B holds the original bytes");
     }
 
     // The SENDER goes offline — B is now the only online holder.
@@ -10794,7 +10794,7 @@ async fn channel_file_request_reroutes_to_online_holder_when_sender_offline() {
     assert!(meta.completed_at.is_some(), "C's transfer completed");
     let disk = meta.disk_path.expect("C's completed file has a disk path");
     assert_eq!(
-        std::fs::read(&disk).unwrap(),
+        super::at_rest::read_all(std::path::Path::new(&disk)).unwrap(),
         contents,
         "C's bytes must match the original — only B could have served them"
     );
@@ -10941,7 +10941,7 @@ async fn file_request_gate_refuses_stranger_and_serves_guest_public() {
     sleep_ms(300).await;
     let meta = g.file_meta(&fid).expect("guest persisted the files row");
     let disk = meta.disk_path.expect("guest's completed file has a disk path");
-    assert_eq!(std::fs::read(&disk).unwrap(), contents, "guest holds the original bytes");
+    assert_eq!(super::at_rest::read_all(std::path::Path::new(&disk)).unwrap(), contents, "guest holds the original bytes");
 
     // 4. A file posted LIVE into the now-public channel reaches the guest as
     // a plaintext message + metadata header (no MLS involved).
@@ -20035,7 +20035,9 @@ fn harness_fixed_sleep_budget_does_not_grow() {
     // advert window that has no live probe. Every such sleep says so at its own call
     // site, which is where the reason for the current number lives. 2026-09-10: the
     // personal-emote tests added two staggers and two send-to-nobody settles (3.3 s).
-    const BUDGET_MS: u64 = 607_300;
+    // 2026-09-11: the three at-rest DM/channel tests added three spawn staggers and
+    // two auto-download advert windows (5.6 s), both of the kinds listed above.
+    const BUDGET_MS: u64 = 612_900;
 
     let src = include_str!("test_harness.rs");
     // Built from pieces so this scan does not count its own source text.
@@ -22029,4 +22031,526 @@ async fn read_markers_reach_siblings_on_verify_and_live() {
 
     drop(b);
     drop(c);
+}
+
+// At-rest file protection (issue 78). Attachments are AES-256-GCM on disk under a
+// per-file key in SQLCipher, so what these assert is the DISK: the marker the
+// sender put INSIDE the bytes must not survive anywhere under the receiver's data
+// root, and the receiver must still read its own copy back byte-exact.
+
+/// Every file under `root` whose bytes contain `needle`, relative to `root`.
+/// `hollow_debug.log` is exempt: it is a log, not content.
+fn plaintext_hits_under(root: &std::path::Path, needle: &[u8]) -> Vec<String> {
+    fn walk(dir: &std::path::Path, root: &std::path::Path, needle: &[u8], out: &mut Vec<String>) {
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, root, needle, out);
+                continue;
+            }
+            if path.file_name().map(|n| n == "hollow_debug.log").unwrap_or(false) {
+                continue;
+            }
+            let Ok(bytes) = std::fs::read(&path) else { continue };
+            if bytes.windows(needle.len()).any(|w| w == needle) {
+                out.push(
+                    path.strip_prefix(root)
+                        .unwrap_or(&path)
+                        .to_string_lossy()
+                        .to_string(),
+                );
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(root, root, needle, &mut out);
+    out
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
+async fn at_rest_dm_file_lands_encrypted_on_receiver_disk() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    super::at_rest::reset_for_test();
+    // The SOURCE the sender picks lives outside the data root, so the scan below
+    // measures only what Hollow itself wrote.
+    let outside = tempfile::tempdir().expect("source tmp");
+
+    let relay = MockRelay::new();
+
+    const A_MASTER: u8 = 131;
+    const B_MASTER: u8 = 132;
+    let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER)).peer_id();
+    let b_master = NativeKeypair::from_secret_bytes(&seed_bytes(B_MASTER)).peer_id();
+
+    let mut a = spawn_node_with_friends(&relay, A_MASTER, A_MASTER, &[&b_master]).await;
+    sleep_ms(1200).await;
+    let mut b = spawn_node_with_friends(&relay, B_MASTER, B_MASTER, &[&a_master]).await;
+    expect_dm_pair_ready(&relay, &a, &b, 15).await;
+    // The auto-download advert exchange has no live probe; see the note on
+    // dm_file_transfer_completes_and_decrypts (counted in BUDGET_MS).
+    sleep_ms(1000).await;
+    drain_events(&mut a);
+    drain_events(&mut b);
+
+    const MARKER: &[u8] = b"HOLLOW-PLAIN-atrest-dm-marker";
+    let contents: Vec<u8> = MARKER.repeat(400);
+    let src = outside.path().join("secret.bin");
+    std::fs::write(&src, &contents).expect("write src file");
+
+    a.cmd_tx
+        .send(NodeCommand::SendFile(Box::new(super::types::SendFilePayload {
+            peer_id: Some(b.master_id.clone()),
+            server_id: None,
+            channel_id: None,
+            file_path: src.to_str().unwrap().to_string(),
+            message_id: "atrest-dm-1".to_string(),
+            message_text: String::new(),
+            vthumb: None,
+            override_width: None,
+            override_height: None,
+            share_ref: None,
+            voice: false,
+            poster: None,
+        })))
+        .await
+        .unwrap();
+
+    let mut got_fid = None;
+    let header = wait_event(&mut b, std::time::Duration::from_secs(8), |ev| {
+        if let NetworkEvent::FileHeaderReceived { file_id, file_name, .. } = ev
+            && file_name.starts_with("secret")
+        {
+            got_fid = Some(file_id.clone());
+            return true;
+        }
+        false
+    })
+    .await;
+    assert!(header, "the receiver must get the FileHeader");
+    let fid = got_fid.expect("file id from header");
+    let done = wait_event(&mut b, std::time::Duration::from_secs(10), |ev| {
+        matches!(ev, NetworkEvent::FileCompleted { file_id, .. } if *file_id == fid)
+    })
+    .await;
+    assert!(done, "the receiver must complete the transfer");
+
+    let disk = b
+        .file_meta(&fid)
+        .and_then(|m| m.disk_path)
+        .expect("the completed file has a disk path");
+    let disk = std::path::PathBuf::from(disk);
+    assert!(
+        super::at_rest::is_encrypted(&disk),
+        "the receiver's copy must be at-rest encrypted, got a plaintext file at {disk:?}",
+    );
+    assert_eq!(
+        super::at_rest::read_all(&disk).expect("decrypt the receiver's copy"),
+        contents,
+        "the receiver's copy must decrypt to the sender's bytes",
+    );
+
+    let hits = plaintext_hits_under(global_tmp.path(), MARKER);
+    assert!(
+        hits.is_empty(),
+        "the attachment's own bytes must not survive in plaintext anywhere under the data root, found the marker in {hits:?}",
+    );
+
+    drop(a);
+    drop(b);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
+async fn at_rest_channel_file_served_from_encrypted_copy_after_migration() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    super::at_rest::reset_for_test();
+
+    // Written BEFORE any node boots: this is the file an older version left in
+    // plaintext, and the boot sweep is what has to convert it.
+    const MARKER: &[u8] = b"HOLLOW-PLAIN-atrest-legacy-marker";
+    const FID: &str = "atrestseedfile01";
+    let contents: Vec<u8> = MARKER.repeat(300);
+    let files_dir = super::file_transfer::files_dir();
+    let seeded = files_dir.join(format!("{FID}a.bin"));
+    std::fs::write(&seeded, &contents).expect("seed a plaintext file");
+
+    let relay = MockRelay::new();
+
+    const A_MASTER: u8 = 133; // owner and holder of the legacy file
+    const C_MASTER: u8 = 134; // the late joiner
+    let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER)).peer_id();
+    let c_master = NativeKeypair::from_secret_bytes(&seed_bytes(C_MASTER)).peer_id();
+
+    let mut a = spawn_node_with_friends(&relay, A_MASTER, A_MASTER, &[&c_master]).await;
+    sleep_ms(1200).await;
+    let mut c = spawn_node_with_friends(&relay, C_MASTER, C_MASTER, &[&a_master]).await;
+    expect_dm_pair_ready(&relay, &a, &c, 15).await;
+
+    let migrated = wait_until(20, async || super::at_rest::is_encrypted(&seeded)).await;
+    assert!(migrated, "the boot sweep must protect the legacy plaintext file");
+    assert_eq!(
+        super::at_rest::read_all(&seeded).expect("decrypt the migrated file"),
+        contents,
+        "migration must preserve the bytes",
+    );
+
+    let server_id = create_server_and_wait(&mut a, "At Rest Serving").await;
+    let general = general_channel_of(&server_id);
+    c.cmd_tx
+        .send(NodeCommand::JoinServer {
+            server_id: server_id.clone(),
+            twitch_proof_json: None,
+            nsfw_confirmed: false,
+        })
+        .await
+        .unwrap();
+    let joined = wait_event(&mut c, std::time::Duration::from_secs(10), |ev| {
+        matches!(ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id)
+    })
+    .await;
+    assert!(joined, "the late joiner must join the server");
+    expect_mls_group(&[&a, &c], &server_id, 25).await;
+    drain_events(&mut a);
+    drain_events(&mut c);
+
+    // A's row for the legacy file, posted in the channel the joiner can now see.
+    {
+        let store = a.store();
+        store
+            .insert_file_metadata(
+                FID,
+                "legacy.bin",
+                "bin",
+                "application/octet-stream",
+                contents.len() as u64,
+                1,
+                false,
+                None,
+                None,
+                Some("atrest-legacy-msg"),
+                "channel",
+                &format!("{server_id}:{general}"),
+                &a_master,
+                true,
+                1_700_000_000_000,
+                None,
+                None,
+            )
+            .expect("insert the legacy file row");
+        store
+            .mark_file_complete(FID, &seeded.to_string_lossy())
+            .expect("mark the legacy file complete");
+    }
+
+    c.cmd_tx
+        .send(NodeCommand::RequestFile {
+            file_id: FID.to_string(),
+            peer_id: a_master.clone(),
+            chunks: Vec::new(),
+        })
+        .await
+        .unwrap();
+    let served = wait_event(&mut c, std::time::Duration::from_secs(25), |ev| {
+        matches!(ev, NetworkEvent::FileCompleted { file_id, .. } if file_id == FID)
+    })
+    .await;
+    assert!(served, "the holder must serve the migrated file to the late joiner");
+
+    let c_disk = c
+        .file_meta(FID)
+        .and_then(|m| m.disk_path)
+        .expect("the joiner's copy has a disk path");
+    let c_disk = std::path::PathBuf::from(c_disk);
+    assert_ne!(c_disk, seeded, "the joiner writes its own copy, not the holder's");
+    assert!(
+        super::at_rest::is_encrypted(&c_disk),
+        "the joiner's copy must be at-rest encrypted, got plaintext at {c_disk:?}",
+    );
+    assert_eq!(
+        super::at_rest::read_all(&c_disk).expect("decrypt the joiner's copy"),
+        contents,
+        "the served bytes must equal the original file",
+    );
+    assert!(
+        plaintext_hits_under(global_tmp.path(), MARKER).is_empty(),
+        "neither copy may sit in plaintext after the serve",
+    );
+
+    drop(a);
+    drop(c);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
+async fn at_rest_delete_for_me_erases_key_row_and_bytes() {
+    let _g = test_guard();
+    let _store_g = crate::api::storage::store_test_lock();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    super::at_rest::reset_for_test();
+    let outside = tempfile::tempdir().expect("source tmp");
+
+    let relay = MockRelay::new();
+
+    const A_MASTER: u8 = 135;
+    const B_MASTER: u8 = 136;
+    let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER)).peer_id();
+    let b_master = NativeKeypair::from_secret_bytes(&seed_bytes(B_MASTER)).peer_id();
+
+    let mut a = spawn_node_with_friends(&relay, A_MASTER, A_MASTER, &[&b_master]).await;
+    sleep_ms(1200).await;
+    let mut b = spawn_node_with_friends(&relay, B_MASTER, B_MASTER, &[&a_master]).await;
+    expect_dm_pair_ready(&relay, &a, &b, 15).await;
+    // The auto-download advert exchange has no live probe (counted in BUDGET_MS).
+    sleep_ms(1000).await;
+    drain_events(&mut a);
+    drain_events(&mut b);
+
+    let contents: Vec<u8> = b"delete me and take the key with you".repeat(64);
+    let src = outside.path().join("erase.bin");
+    std::fs::write(&src, &contents).expect("write src file");
+    a.cmd_tx
+        .send(NodeCommand::SendFile(Box::new(super::types::SendFilePayload {
+            peer_id: Some(b.master_id.clone()),
+            server_id: None,
+            channel_id: None,
+            file_path: src.to_str().unwrap().to_string(),
+            message_id: "atrest-erase-1".to_string(),
+            message_text: String::new(),
+            vthumb: None,
+            override_width: None,
+            override_height: None,
+            share_ref: None,
+            voice: false,
+            poster: None,
+        })))
+        .await
+        .unwrap();
+
+    let mut got_fid = None;
+    wait_event(&mut b, std::time::Duration::from_secs(8), |ev| {
+        if let NetworkEvent::FileHeaderReceived { file_id, file_name, .. } = ev
+            && file_name.starts_with("erase")
+        {
+            got_fid = Some(file_id.clone());
+        }
+        got_fid.is_some()
+    })
+    .await;
+    let fid = got_fid.expect("file id from header");
+    let done = wait_event(&mut b, std::time::Duration::from_secs(10), |ev| {
+        matches!(ev, NetworkEvent::FileCompleted { file_id, .. } if *file_id == fid)
+    })
+    .await;
+    assert!(done, "the receiver must complete the transfer");
+
+    let disk = std::path::PathBuf::from(
+        b.file_meta(&fid).and_then(|m| m.disk_path).expect("disk path"),
+    );
+    let uid = super::at_rest::uid_of(&disk).expect("the stored copy carries an at-rest header");
+    assert!(super::at_rest::key_row_exists_for_test(&uid), "the key row exists before the delete");
+
+    crate::api::storage::set_test_store(b.store());
+    let freed = crate::api::storage::clear_file_bytes_for_context("dm".to_string(), a_master.clone())
+        .expect("clear the conversation's file bytes");
+    assert!(freed > 0, "the delete must free the bytes it removed");
+
+    assert!(!disk.exists(), "the bytes are gone from disk");
+    assert!(
+        !super::at_rest::key_row_exists_for_test(&uid),
+        "the key row must die with the file: a surviving row is a recoverable file",
+    );
+    assert!(
+        !super::at_rest::key_in_ring_for_test(&uid),
+        "the in-memory key ring must drop it too",
+    );
+
+    drop(a);
+    drop(b);
+}
+
+/// A Hollow Share download is the one path that writes a file out of order and
+/// across a restart, so the partial has to be at-rest encrypted from its FIRST
+/// chunk and keep its key when the app comes back.
+///
+/// Driven against the share handlers directly: chunk SERVING needs a live WebRTC
+/// share lane, which the mock relay does not model, so the bytes are handed to
+/// the same receive handler the transport calls.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
+async fn at_rest_share_partial_written_encrypted_and_resumes() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    super::at_rest::reset_for_test();
+
+    let master = NativeKeypair::from_secret_bytes(&seed_bytes(137));
+    let passphrase = passphrase_for(&master);
+    let db_path = global_tmp.path().join("messages.db").to_string_lossy().to_string();
+    super::at_rest::init(&db_path, &passphrase).expect("key ring");
+
+    // The source the sharer picked, outside the data root.
+    let outside = tempfile::tempdir().expect("source tmp");
+    const MARKER: &[u8] = b"HOLLOW-PLAIN-atrest-share-marker";
+    let contents: Vec<u8> = MARKER.repeat(30_000);
+    let src = outside.path().join("big.bin");
+    std::fs::write(&src, &contents).expect("write src");
+
+    let mut key = [0u8; 32];
+    getrandom::fill(&mut key).expect("share key");
+    let manifest = super::share_handler::build_manifest_from_file(
+        src.to_str().unwrap(),
+        &key,
+    )
+    .expect("manifest");
+    assert!(manifest.chunk_count >= 3, "the file must span several chunks");
+
+    let manifest_bytes = serde_json::to_vec(&manifest).expect("manifest json");
+    let root_hash = super::share_handler::manifest_root_hash(&manifest_bytes);
+    let root_hex = hex::encode(root_hash);
+    let link = super::share_handler::encode_link(&root_hash, &key);
+
+    let (ws_cmd_tx, _ws_cmd_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, mut event_rx) = mpsc::channel(256);
+    let mut registry = super::share_handler::new_registry();
+
+    // What ShareOpenLink leaves behind once the manifest has arrived.
+    let seed_state = |registry: &mut super::share_handler::ShareRegistry| {
+        let now = std::time::Instant::now();
+        registry.insert(
+            root_hex.clone(),
+            super::share_handler::ShareSwarmState {
+                root_hash,
+                key,
+                manifest: Some(manifest.clone()),
+                file_ext: "bin".to_string(),
+                save_dir: None,
+                have: super::share_handler::ChunkBitmap::empty(manifest.chunk_count),
+                data_path: None,
+                writer: None,
+                seeding: false,
+                bytes_uploaded: 0,
+                bytes_downloaded: 0,
+                peer_have: std::collections::HashMap::new(),
+                inflight: std::collections::HashMap::new(),
+                last_have_broadcast: now,
+                speed_samples: Vec::new(),
+                speed_bps: 0,
+                manifest_requested_at: None,
+                last_seeding_emit: now,
+                sequential: false,
+                hidden: false,
+                server_id: None,
+                context_type: None,
+            },
+        );
+    };
+
+    let save_dir = global_tmp.path().join("shares");
+    seed_state(&mut registry);
+    super::share_handler::handle_command_share_start(
+        &mut registry,
+        &master,
+        &ws_cmd_tx,
+        &event_tx,
+        root_hex.clone(),
+        save_dir.to_string_lossy().to_string(),
+        link.clone(),
+        false,
+    )
+    .await;
+
+    let partial = save_dir.join(format!("{root_hex}.partial"));
+    assert!(
+        super::at_rest::is_encrypted(&partial),
+        "the partial must be at-rest encrypted before a single chunk lands",
+    );
+
+    let cs = manifest.chunk_size as usize;
+    let chunk_bytes = |idx: u32| -> String {
+        let lo = idx as usize * cs;
+        let hi = (lo + cs).min(contents.len());
+        let ct = super::share_handler::encrypt_chunk(&key, idx, &contents[lo..hi]).expect("encrypt");
+        <base64::engine::general_purpose::GeneralPurpose as base64::Engine>::encode(
+            &base64::engine::general_purpose::STANDARD,
+            ct,
+        )
+    };
+
+    // Half the download, then the app dies with the partial on disk.
+    for idx in 0..manifest.chunk_count / 2 {
+        super::share_handler::handle_envelope_share_chunk_response(
+            &mut registry,
+            &master,
+            &event_tx,
+            root_hex.clone(),
+            idx,
+            chunk_bytes(idx),
+        )
+        .await;
+    }
+    assert!(
+        super::at_rest::is_encrypted(&partial),
+        "the partial stays encrypted while chunks land",
+    );
+    assert!(
+        plaintext_hits_under(global_tmp.path(), MARKER).is_empty(),
+        "no downloaded chunk may sit in plaintext on disk",
+    );
+
+    // Restart: a fresh registry with no writer, exactly what a relaunch has.
+    registry = super::share_handler::new_registry();
+    seed_state(&mut registry);
+    super::share_handler::handle_command_share_start(
+        &mut registry,
+        &master,
+        &ws_cmd_tx,
+        &event_tx,
+        root_hex.clone(),
+        save_dir.to_string_lossy().to_string(),
+        link.clone(),
+        false,
+    )
+    .await;
+
+    for idx in 0..manifest.chunk_count {
+        super::share_handler::handle_envelope_share_chunk_response(
+            &mut registry,
+            &master,
+            &event_tx,
+            root_hex.clone(),
+            idx,
+            chunk_bytes(idx),
+        )
+        .await;
+    }
+
+    let mut final_path = None;
+    while let Ok(ev) = event_rx.try_recv() {
+        if let NetworkEvent::ShareCompleted { root_hash: rh, disk_path } = ev
+            && rh == root_hex
+        {
+            final_path = Some(std::path::PathBuf::from(disk_path));
+        }
+    }
+    let final_path = final_path.expect("the resumed download must complete");
+    assert!(
+        super::at_rest::is_encrypted(&final_path),
+        "the finished file keeps the partial's at-rest header",
+    );
+    assert_eq!(
+        super::at_rest::read_all(&final_path).expect("decrypt the finished file"),
+        contents,
+        "the resumed download must reassemble the original bytes",
+    );
+    assert!(
+        plaintext_hits_under(global_tmp.path(), MARKER).is_empty(),
+        "the finished share must not leave plaintext behind",
+    );
 }

@@ -197,9 +197,9 @@ pub fn share_keep_and_seed(root_hash: String) -> Result<String, String> {
             .ok_or("Invalid file path")?;
         let new_path = files_dir.join(file_name);
 
-        std::fs::copy(&old, &new_path)
-            .map_err(|e| format!("Failed to copy file: {e}"))?;
-        let _ = std::fs::remove_file(&old);
+        // A move, not a copy: the at-rest uid lives in the header, so two copies
+        // would share one key row and deleting either would orphan the other.
+        crate::node::at_rest::rename(&old, &new_path)?;
 
         let result = new_path.to_string_lossy().to_string();
         store.update_share_disk_path(&root_hash, &result)?;

@@ -1,8 +1,12 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:crypto/crypto.dart';
+
 import 'package:hollow/src/core/hollow_data_dir.dart';
+import 'package:hollow/src/core/services/at_rest.dart';
 import 'package:path/path.dart' as p;
 
 import '../../rust/api/network.dart' as network_api;
@@ -102,8 +106,11 @@ class VideoThumbnailService {
   /// downloads. Null when [videoPath] is not a recognized video file path.
   static String? thumbCachePathFor(String videoPath) {
     try {
-      final base = p.basenameWithoutExtension(videoPath);
-      if (base.isEmpty) return null;
+      final name = p.basename(videoPath);
+      if (name.isEmpty) return null;
+      // A picked video's own name would otherwise sit in the folder next to
+      // files that are all opaque ids.
+      final base = sha256.convert(utf8.encode(name)).toString().substring(0, 32);
       final filesDir = _hollowFilesDir();
       return p.join(filesDir, '$base.thumb.webp');
     } catch (_) {
@@ -138,7 +145,7 @@ class VideoThumbnailService {
     if (result == null) return null;
 
     try {
-      await File(cachePath).writeAsBytes(result.webpBytes, flush: true);
+      await AtRest.write(cachePath, result.webpBytes);
       return cachePath;
     } catch (e) {
       _log('[VideoThumbnail] failed to cache thumbnail: $e');
@@ -166,69 +173,62 @@ class VideoThumbnailService {
       return null;
     }
 
-    Directory? tempDir;
     try {
-      tempDir = await Directory.systemTemp.createTemp('hollow_thumb_');
-      final outPath = p.join(tempDir.path, 'thumb.webp');
+      // An attachment on disk is ciphertext, so ffmpeg reads it from stdin.
+      // A file the user picked keeps its path: -ss before -i cannot seek a
+      // pipe, and a moov atom written at the end of an mp4 is unreachable
+      // through one.
+      final piped = AtRest.isManaged(videoPath);
+      final stdinBytes = piped ? await AtRest.read(videoPath) : null;
 
-      // -ss 00:00:00.5 avoids a fully-black first frame, and `-f image2` is
-      // explicit because the bundled MINIMAL ffmpeg (vendor/ffmpeg,
-      // --disable-everything) has no `webp` muxer for the extension to
-      // drive the format guess.
+      // Every flag must exist in the MINIMAL build (vendor/ffmpeg). `-pred
+      // mixed` was rejected as "Unrecognized option" and silently killed
+      // EVERY extraction, taking video dimensions and posters with it. Test a
+      // new flag against the bundled binary, never a system ffmpeg.
       //
-      // CRITICAL: every flag must exist in the MINIMAL build. `-pred mixed`
-      // was rejected as "Unrecognized option" by the n7.1 minimal build and
-      // silently killed EVERY thumbnail extraction, taking video dimensions
-      // and posters with it. Test a new flag against the bundled binary,
-      // never a system ffmpeg.
-      final result = await Process.run(
+      // -ss 00:00:00.5 avoids a fully-black first frame; on a pipe it has to
+      // follow -i, which decodes to the seek point instead of jumping.
+      final run = await runFfmpeg(
         ffmpeg,
-        [
+        <String>[
           '-y',
-          '-ss', '00:00:00.5',
-          '-i', videoPath,
+          if (!piped) ...['-ss', _thumbSeekPoint],
+          '-i', piped ? 'pipe:0' : videoPath,
+          if (piped) ...['-ss', _thumbSeekPoint],
           '-vf', 'scale=-2:$targetHeight',
           '-frames:v', '1',
           '-update', '1',
           '-c:v', 'libwebp',
           '-lossless', '1',
           '-compression_level', '6',
-          '-f', 'image2',
-          outPath,
+          '-f', 'image2pipe',
+          'pipe:1',
         ],
-        stdoutEncoding: null, // raw bytes
-        stderrEncoding: null,
-      ).timeout(const Duration(seconds: 10));
+        stdinBytes: stdinBytes,
+        timeout: const Duration(seconds: 10),
+      );
 
-      if (result.exitCode != 0) {
-        final stderrStr = _bytesToString(result.stderr);
+      if (run.exitCode != 0) {
         // Log the TAIL of stderr: ffmpeg prints its version banner and build
         // config first, so a head-truncated log hides the actual error.
-        _log('[VideoThumbnail] ffmpeg exit ${result.exitCode}: ${_tail(stderrStr, 500)}');
+        _log('[VideoThumbnail] ffmpeg exit ${run.exitCode}: '
+            '${_tail(run.stderrText, 500)}');
+        return null;
+      }
+      if (run.stdoutBytes.isEmpty) {
+        _log('[VideoThumbnail] ffmpeg produced no image');
         return null;
       }
 
-      final outFile = File(outPath);
-      if (!outFile.existsSync()) {
-        _log('[VideoThumbnail] ffmpeg succeeded but output file missing: $outPath');
-        return null;
-      }
-      final bytes = await outFile.readAsBytes();
-      if (bytes.isEmpty) {
-        _log('[VideoThumbnail] ffmpeg produced empty file');
-        return null;
-      }
+      // ffmpeg writes its probe info (Duration, Stream details) to stderr even
+      // on success, so parse it for the source dimensions and duration.
+      final parsed = _parseFfmpegStderr(run.stderrText);
 
-      // ffmpeg writes its probe info (Duration, Stream details) to stderr
-      // even on success, so parse it for the source dimensions and duration.
-      final stderrStr = _bytesToString(result.stderr);
-      final parsed = _parseFfmpegStderr(stderrStr);
-
-      _log('[VideoThumbnail] extracted ${bytes.length} bytes, '
+      _log('[VideoThumbnail] extracted ${run.stdoutBytes.length} bytes, '
           '${parsed.width}x${parsed.height}, ${parsed.durationMs}ms');
 
       return VideoThumbnailResult(
-        webpBytes: Uint8List.fromList(bytes),
+        webpBytes: run.stdoutBytes,
         durationMs: parsed.durationMs,
         sourceWidth: parsed.width,
         sourceHeight: parsed.height,
@@ -239,27 +239,60 @@ class VideoThumbnailService {
     } catch (e) {
       _log('[VideoThumbnail] extraction failed: $e');
       return null;
-    } finally {
-      if (tempDir != null) {
-        try {
-          await tempDir.delete(recursive: true);
-        } catch (_) {
-          // ignore cleanup failures
-        }
-      }
     }
   }
 
-  static String _bytesToString(dynamic bytes) {
-    if (bytes is List<int>) {
+  /// Where the poster frame is taken from, past a first frame that is often
+  /// solid black.
+  static const String _thumbSeekPoint = '00:00:00.5';
+
+  /// Runs the bundled ffmpeg, optionally feeding it [stdinBytes], and collects
+  /// both output streams.
+  ///
+  /// Shared by the thumbnail, duration-probe and audio-transcode paths: an
+  /// attachment is ciphertext on disk, so none of them can name a file and
+  /// none of them may write a plaintext one.
+  static Future<FfmpegRun> runFfmpeg(
+    String ffmpeg,
+    List<String> args, {
+    Uint8List? stdinBytes,
+    Duration timeout = const Duration(seconds: 10),
+  }) async {
+    final proc = await Process.start(ffmpeg, args);
+    final out = BytesBuilder(copy: false);
+    final err = BytesBuilder(copy: false);
+    final drained = Future.wait<void>([
+      proc.stdout.forEach(out.add),
+      proc.stderr.forEach(err.add),
+    ]);
+
+    if (stdinBytes != null) {
+      // `-frames:v 1` makes ffmpeg exit before it has read the whole input, so
+      // the write end breaks by design.
+      unawaited(proc.stdin.done.catchError((Object _) {}));
       try {
-        return String.fromCharCodes(bytes);
-      } catch (_) {
-        return '';
-      }
+        proc.stdin.add(stdinBytes);
+        await proc.stdin.flush();
+      } catch (_) {}
+      try {
+        await proc.stdin.close();
+      } catch (_) {}
     }
-    if (bytes is String) return bytes;
-    return bytes?.toString() ?? '';
+
+    int exitCode;
+    try {
+      exitCode = await proc.exitCode.timeout(timeout);
+    } on TimeoutException {
+      proc.kill(ProcessSignal.sigkill);
+      rethrow;
+    }
+    await drained;
+
+    return FfmpegRun(
+      exitCode: exitCode,
+      stdoutBytes: out.takeBytes(),
+      stderrText: String.fromCharCodes(err.takeBytes()),
+    );
   }
 
   static String _tail(String s, int max) =>
@@ -316,5 +349,18 @@ class _ParsedProbe {
     required this.durationMs,
     required this.width,
     required this.height,
+  });
+}
+
+/// One bundled-ffmpeg invocation's exit code and both output streams.
+class FfmpegRun {
+  final int exitCode;
+  final Uint8List stdoutBytes;
+  final String stderrText;
+
+  const FfmpegRun({
+    required this.exitCode,
+    required this.stdoutBytes,
+    required this.stderrText,
   });
 }

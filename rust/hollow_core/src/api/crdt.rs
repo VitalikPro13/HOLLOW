@@ -1712,8 +1712,7 @@ pub fn vault_upload_file(
     file_path: String,
     message_id: String,
 ) -> Result<String, String> {
-    let file_data =
-        std::fs::read(&file_path).map_err(|e| format!("Failed to read file: {e}"))?;
+    let file_data = crate::node::at_rest::read_all(std::path::Path::new(&file_path))?;
     let original_size = file_data.len() as u64;
 
     let path = std::path::Path::new(&file_path);

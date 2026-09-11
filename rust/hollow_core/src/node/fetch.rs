@@ -1088,7 +1088,7 @@ fn handle_file_header(
             let files_dir = crate::node::file_transfer::files_dir();
             let _ = std::fs::create_dir_all(&files_dir);
             let disk_path = crate::node::file_transfer::final_file_path(&p.fid, &p.ext);
-            if std::fs::write(&disk_path, &plaintext).is_ok() {
+            if crate::node::at_rest::write_all(&disk_path, &plaintext).is_ok() {
                 let disk_str = disk_path.to_string_lossy().to_string();
                 // The companion text DM is sent through a room lookup that fails
                 // for an OFFLINE peer, so the fetch often gets ONLY this

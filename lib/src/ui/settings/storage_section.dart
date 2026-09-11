@@ -151,6 +151,58 @@ class _SummaryHeader extends ConsumerWidget {
             for (final s in segments) _LegendChip(segment: s),
           ],
         ),
+        const SizedBox(height: HollowSpacing.sm),
+        const _AtRestStatusLine(),
+      ],
+    );
+  }
+}
+
+/// Whether the files on disk are encrypted yet, and how far the one-time sweep
+/// over an older version's plaintext has got.
+class _AtRestStatusLine extends ConsumerWidget {
+  const _AtRestStatusLine();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final hollow = HollowTheme.of(context);
+    final status = ref.watch(atRestStatusProvider).valueOrNull;
+    if (status == null) return const SizedBox.shrink();
+
+    final String label;
+    final Color color;
+    if (status.running) {
+      label = 'Protecting your files (${status.done} of ${status.total})';
+      color = hollow.textSecondary;
+    } else if (status.failed > 0) {
+      label = status.failed == 1
+          ? '1 file is not protected yet. Hollow will try again the next time '
+              'it starts.'
+          : '${status.failed} files are not protected yet. Hollow will try '
+              'again the next time it starts.';
+      color = hollow.warning;
+    } else {
+      label = 'Protected';
+      color = hollow.textSecondary;
+    }
+
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Padding(
+          padding: const EdgeInsets.only(top: 1),
+          child: Icon(
+            status.failed > 0 ? LucideIcons.shieldAlert : LucideIcons.shield,
+            size: 12,
+            color: color,
+          ),
+        ),
+        const SizedBox(width: HollowSpacing.xs),
+        Expanded(
+          child: Text(label,
+              style: HollowTypography.caption
+                  .copyWith(color: color, fontSize: 11)),
+        ),
       ],
     );
   }

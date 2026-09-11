@@ -1,5 +1,8 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/services/at_rest.dart';
 import 'package:hollow/src/core/services/gif_thumb_cache.dart';
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 
@@ -15,6 +18,41 @@ final storageBreakdownProvider =
 /// dir — not part of the Rust StorageBreakdown).
 final gifThumbCacheSizeProvider = FutureProvider.autoDispose<int>((ref) {
   return GifThumbCache.instance.sizeBytes();
+});
+
+/// Progress of the one-time sweep that encrypts files left in the clear by an
+/// older version.
+///
+/// Polls only while the sweep is running, and only while the Storage Manager is
+/// on screen; the last value is a settled state that cannot change again this
+/// launch.
+final atRestStatusProvider = StreamProvider.autoDispose<AtRestStatus>((ref) {
+  const interval = Duration(seconds: 2);
+  final controller = StreamController<AtRestStatus>();
+  Timer? timer;
+
+  Future<void> tick() async {
+    try {
+      final status = await AtRest.status();
+      if (controller.isClosed) return;
+      controller.add(status);
+      if (!status.running) {
+        timer?.cancel();
+        await controller.close();
+      }
+    } catch (_) {
+      timer?.cancel();
+      if (!controller.isClosed) await controller.close();
+    }
+  }
+
+  tick();
+  timer = Timer.periodic(interval, (_) => tick());
+  ref.onDispose(() {
+    timer?.cancel();
+    if (!controller.isClosed) controller.close();
+  });
+  return controller.stream;
 });
 
 /// Actions for the Storage Manager: clear cached file bytes, enforce the files

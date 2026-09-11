@@ -2,9 +2,7 @@
 // existing relay rooms and WebRTC data channel pipeline (HOLLOW_PLAN 7A).
 
 use std::collections::HashMap;
-use std::fs::{File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
@@ -92,7 +90,7 @@ fn chunk_nonce(chunk_index: u32) -> [u8; 12] {
 }
 
 /// Encrypt one chunk of plaintext with the share's per-link key.
-fn encrypt_chunk(key: &[u8; 32], chunk_index: u32, plaintext: &[u8]) -> Result<Vec<u8>, String> {
+pub(crate) fn encrypt_chunk(key: &[u8; 32], chunk_index: u32, plaintext: &[u8]) -> Result<Vec<u8>, String> {
     use aes_gcm::aead::Aead;
     use aes_gcm::{Aes256Gcm, Key, KeyInit, Nonce};
     let aes_key = Key::<Aes256Gcm>::from(*key);
@@ -350,8 +348,11 @@ pub struct ShareSwarmState {
     /// Where downloaded files land. None until ShareStart provides it (or auto-rejoin loads it).
     pub save_dir: Option<PathBuf>,
     pub have: ChunkBitmap,
-    /// Sparse partial file for downloads, or the final completed file when seeding.
-    pub data_file: Option<File>,
+    /// The bytes on disk: the sparse partial while downloading, the finished file
+    /// when seeding. At-rest encrypted, so it is addressed by path, not a handle.
+    pub data_path: Option<PathBuf>,
+    /// Open only while downloading; holds the partial's at-rest chunk layout.
+    pub writer: Option<crate::node::at_rest::Writer>,
     pub seeding: bool,
     pub bytes_uploaded: u64,
     pub bytes_downloaded: u64,
@@ -424,9 +425,7 @@ pub fn build_manifest_from_file(
     source_path: &str,
     key: &[u8; 32],
 ) -> Result<ShareManifest, String> {
-    let meta = std::fs::metadata(source_path)
-        .map_err(|e| format!("stat source: {e}"))?;
-    let total_size = meta.len();
+    let total_size = crate::node::at_rest::plaintext_len(Path::new(source_path))?;
     if total_size == 0 {
         return Err("Cannot share an empty file".to_string());
     }
@@ -442,10 +441,7 @@ pub fn build_manifest_from_file(
         .unwrap_or_else(|| "share".to_string());
     let mime = guess_mime_from_path(source_path);
 
-    let mut f = File::open(source_path)
-        .map_err(|e| format!("open source: {e}"))?;
     let mut hashes: Vec<[u8; 32]> = Vec::with_capacity(chunk_count as usize);
-    let mut buf = vec![0u8; CHUNK_SIZE as usize];
 
     for idx in 0..chunk_count {
         let want = if idx == chunk_count - 1 {
@@ -453,10 +449,12 @@ pub fn build_manifest_from_file(
         } else {
             CHUNK_SIZE as usize
         };
-        let slice = &mut buf[..want];
-        f.read_exact(slice)
-            .map_err(|e| format!("read chunk {idx}: {e}"))?;
-        let ct = encrypt_chunk(key, idx, slice)?;
+        let slice = crate::node::at_rest::read_range(
+            Path::new(source_path),
+            idx as u64 * CHUNK_SIZE as u64,
+            want,
+        )?;
+        let ct = encrypt_chunk(key, idx, &slice)?;
         let mut h = [0u8; 32];
         h.copy_from_slice(&Sha256::digest(&ct));
         hashes.push(h);
@@ -570,16 +568,17 @@ pub async fn handle_command_share_create(
 
     let mut have = ChunkBitmap::empty(manifest.chunk_count);
     for i in 0..manifest.chunk_count { have.set(i); }
-    let data_file = OpenOptions::new().read(true).open(&source_path).ok();
+    let data_path = Some(PathBuf::from(&source_path));
     let now_inst = Instant::now();
     let state = ShareSwarmState {
         root_hash,
         key,
         manifest: Some(manifest.clone()),
         file_ext,
-        save_dir: std::path::Path::new(&source_path).parent().map(PathBuf::from),
+        save_dir: Path::new(&source_path).parent().map(PathBuf::from),
         have,
-        data_file,
+        data_path,
+        writer: None,
         seeding: true,
         bytes_uploaded: 0,
         bytes_downloaded: 0,
@@ -664,7 +663,8 @@ pub async fn handle_command_share_open_link(
             file_ext: String::new(),
             save_dir: None,
             have: ChunkBitmap::empty(0),
-            data_file: None,
+            data_path: None,
+            writer: None,
             seeding: false,
             bytes_uploaded: 0,
             bytes_downloaded: 0,
@@ -789,13 +789,12 @@ pub async fn handle_command_share_set_seeding(
     let bytes_uploaded = if let Some(state) = registry.get_mut(&root_hash) {
         state.seeding = seeding;
         if seeding {
-            if state.data_file.is_none() {
-                let disk_path = open_message_store(bundle_keypair)
+            if state.data_path.is_none() {
+                state.data_path = open_message_store(bundle_keypair)
                     .and_then(|store| store.load_share(&root_hash).ok().flatten())
-                    .and_then(|s| s.disk_path);
-                if let Some(path) = disk_path {
-                    state.data_file = OpenOptions::new().read(true).open(&path).ok();
-                }
+                    .and_then(|s| s.disk_path)
+                    .map(PathBuf::from)
+                    .filter(|p| p.exists());
             }
             let _ = ws_cmd_tx.send(WsCommand::JoinRoom { room_code: room });
         } else {
@@ -835,11 +834,11 @@ pub async fn handle_command_share_cancel(
     let room = format!("{SHARE_ROOM_PREFIX}{root_hash}");
     let _ = ws_cmd_tx.send(WsCommand::LeaveRoom { room_code: room });
     if let Some(mut state) = registry.remove(&root_hash) {
-        state.data_file = None;
+        state.writer = None;
     }
     if let Ok(dir) = shares_dir() {
         let partial = partial_path_in(&dir, &root_hash);
-        let _ = std::fs::remove_file(&partial);
+        let _ = crate::node::at_rest::remove(&partial);
     }
     if let Some(store) = open_message_store(bundle_keypair) {
         let _ = store.delete_share(&root_hash);
@@ -863,10 +862,10 @@ pub async fn handle_command_share_remove(
     if let Some(store) = open_message_store(bundle_keypair) {
         if delete_file && let Ok(Some(s)) = store.load_share(&root_hash) {
             if let Some(p) = s.disk_path {
-                let _ = std::fs::remove_file(&p);
+                let _ = crate::node::at_rest::remove(Path::new(&p));
             }
             if let Ok(p) = partial_path(&root_hash) {
-                let _ = std::fs::remove_file(&p);
+                let _ = crate::node::at_rest::remove(&p);
             }
         }
         let _ = store.delete_share(&root_hash);
@@ -954,15 +953,16 @@ pub async fn handle_command_share_start(
         );
     }
 
-    // Prepare the partial file.
+    // Prepare the partial file. A partial an earlier run left keeps its key and its
+    // chunk layout, so resuming never re-keys what is already on disk.
     let p = partial_path_in(&resolved_dir, &root_hash);
-    let file = match (|| -> Result<File, String> {
-        let f = OpenOptions::new().read(true).write(true).create(true).truncate(false)
-            .open(&p).map_err(|e| format!("open partial: {e}"))?;
-        f.set_len(manifest.total_size).map_err(|e| format!("set_len: {e}"))?;
-        Ok(f)
-    })() {
-        Ok(f) => f,
+    let opened = if crate::node::at_rest::is_encrypted(&p) {
+        crate::node::at_rest::Writer::open_existing(&p, manifest.total_size)
+    } else {
+        crate::node::at_rest::Writer::create(&p, manifest.chunk_size, manifest.total_size)
+    };
+    let writer = match opened {
+        Ok(w) => w,
         Err(e) => {
             let _ = event_tx.send(NetworkEvent::ShareFailed { root_hash, error: e }).await;
             return;
@@ -972,7 +972,8 @@ pub async fn handle_command_share_start(
     // Update the existing registry entry to start downloading.
     let save_dir = Some(resolved_dir);
     if let Some(state) = registry.get_mut(&root_hash) {
-        state.data_file = Some(file);
+        state.writer = Some(writer);
+        state.data_path = Some(p);
         state.save_dir = save_dir;
         state.have = ChunkBitmap::empty(manifest.chunk_count);
         state.manifest_requested_at = None;
@@ -1044,15 +1045,12 @@ fn rebuild_seed_state(
         Err(_) => return None,
     };
     let Some(disk_path) = stored.disk_path.as_ref() else { return None; };
-    let data_file = match OpenOptions::new().read(true).open(disk_path) {
-        Ok(f) => f,
-        Err(_) => {
-            hollow_log!("[SHARE] auto_rejoin: file missing for {} — marking stale", stored.root_hash);
-            let _ = store.set_share_seeding(&stored.root_hash, false);
-            let _ = store.set_share_state(&stored.root_hash, "stale");
-            return None;
-        }
-    };
+    if !Path::new(disk_path).exists() {
+        hollow_log!("[SHARE] auto_rejoin: file missing for {} — marking stale", stored.root_hash);
+        let _ = store.set_share_seeding(&stored.root_hash, false);
+        let _ = store.set_share_state(&stored.root_hash, "stale");
+        return None;
+    }
     if stored.encryption_key.len() != 32 { return None; }
     let mut key = [0u8; 32];
     key.copy_from_slice(&stored.encryption_key);
@@ -1074,7 +1072,8 @@ fn rebuild_seed_state(
         file_ext: stored.file_ext,
         save_dir: stored.save_dir.map(PathBuf::from),
         have,
-        data_file: Some(data_file),
+        data_path: Some(PathBuf::from(disk_path)),
+        writer: None,
         seeding: true,
         bytes_uploaded: stored.bytes_uploaded,
         bytes_downloaded: 0,
@@ -1228,7 +1227,7 @@ async fn tick_share_maintenance(
     }
 
     // Stale file check: if seeding but source file is gone, mark stale.
-    if state.seeding && state.data_file.is_none() {
+    if state.seeding && state.data_path.is_none() {
         state.seeding = false;
         if let Some(store) = open_message_store(bundle_keypair) {
             let _ = store.set_share_seeding(rh, false);
@@ -1312,7 +1311,7 @@ async fn tick_schedule_requests(
 
         if state.have.is_complete() { return; }
         let Some(ref manifest) = state.manifest else { return; };
-        if state.data_file.is_none() { return; }
+        if state.writer.is_none() { return; }
 
         let needed = collect_needed_chunks(state, webrtc_share_peers, manifest.chunk_count);
         let assignments = assign_chunks_to_peers(needed, &state.inflight);
@@ -1617,9 +1616,9 @@ pub async fn handle_envelope_share_chunk_request(
     let total_size = state.manifest.as_ref().map(|m| m.total_size).unwrap_or(0);
     let chunk_count = state.manifest.as_ref().map(|m| m.chunk_count).unwrap_or(0);
     let key = state.key;
-    let Some(file) = state.data_file.as_mut() else { return; };
+    let Some(path) = state.data_path.clone() else { return; };
     let bytes_served = serve_chunk_requests(
-        file, &state.have, &key, seed_budget, event_tx,
+        &path, &state.have, &key, seed_budget, event_tx,
         prefer_webrtc, sender_peer_id, &root_hash, indices,
         chunk_size, total_size, chunk_count,
     ).await;
@@ -1635,7 +1634,7 @@ pub async fn handle_envelope_share_chunk_request(
 /// seed bandwidth budget. Returns the total ciphertext bytes served.
 #[allow(clippy::too_many_arguments)]
 async fn serve_chunk_requests(
-    file: &mut File,
+    path: &Path,
     have: &ChunkBitmap,
     key: &[u8; 32],
     seed_budget: &mut SeedBudget,
@@ -1667,7 +1666,7 @@ async fn serve_chunk_requests(
         }
         // Read plaintext from original file, encrypt on-the-fly.
         let offset = idx as u64 * chunk_size as u64;
-        let Some(buf) = read_encrypt_chunk(file, key, idx, want, offset) else {
+        let Some(buf) = read_encrypt_chunk(path, key, idx, want, offset) else {
             // Nothing handed to the transport — return the tokens.
             seed_budget.refund(budgeted);
             continue;
@@ -1705,15 +1704,14 @@ fn chunk_plain_len(idx: u32, chunk_count: u32, total_size: u64, chunk_size: u32)
 /// Read `want` plaintext bytes at `offset` and encrypt them as chunk `idx`.
 /// Returns None on any seek/read/encrypt failure (caller skips the chunk).
 fn read_encrypt_chunk(
-    file: &mut File,
+    path: &Path,
     key: &[u8; 32],
     idx: u32,
     want: usize,
     offset: u64,
 ) -> Option<Vec<u8>> {
-    let mut pt_buf = vec![0u8; want];
-    if file.seek(SeekFrom::Start(offset)).is_err() { return None; }
-    if file.read_exact(&mut pt_buf).is_err() { return None; }
+    let pt_buf = crate::node::at_rest::read_range(path, offset, want).ok()?;
+    if pt_buf.len() != want { return None; }
     encrypt_chunk(key, idx, &pt_buf).ok()
 }
 
@@ -1744,8 +1742,8 @@ async fn finalize_completed_download(
     };
     let partial = partial_path_in(&dir, root_hash);
     let final_p = unique_final_path(&dir, file_name);
-    if let Some(s) = registry.get_mut(root_hash) { s.data_file = None; }
-    if let Err(e) = std::fs::rename(&partial, &final_p) {
+    if let Some(s) = registry.get_mut(root_hash) { s.writer = None; }
+    if let Err(e) = crate::node::at_rest::rename(&partial, &final_p) {
         hollow_log!("[SHARE] rename .partial -> final failed: {e}");
         return;
     }
@@ -1762,7 +1760,7 @@ async fn finalize_completed_download(
     };
     persist_share_completion(bundle_keypair, root_hash, &final_p, is_hidden);
     if let Some(s) = registry.get_mut(root_hash) {
-        s.data_file = OpenOptions::new().read(true).open(&final_p).ok();
+        s.data_path = Some(final_p.clone());
         s.seeding = !is_hidden;
     }
     let _ = event_tx.send(NetworkEvent::ShareCompleted {
@@ -1866,11 +1864,12 @@ pub async fn handle_envelope_share_chunk_response(
         }
     };
 
-    // Write to the partial file at the plaintext offset.
-    let offset = index as u64 * manifest.chunk_size as u64;
-    if let Some(file) = state.data_file.as_mut() {
-        if file.seek(SeekFrom::Start(offset)).is_err() { return; }
-        if file.write_all(&pt).is_err() { return; }
+    // One transport chunk is one at-rest chunk, so an out-of-order download never
+    // needs the neighbours it has not fetched.
+    if let Some(w) = state.writer.as_mut()
+        && w.write_chunk(index, &pt).is_err()
+    {
+        return;
     }
     state.have.set(index);
     state.bytes_downloaded += pt.len() as u64;
@@ -1979,11 +1978,10 @@ pub async fn handle_webrtc_share_chunk_complete(
         }
     };
 
-    // Write to the partial file at the plaintext offset.
-    let offset = chunk_index as u64 * manifest.chunk_size as u64;
-    if let Some(file) = state.data_file.as_mut() {
-        if file.seek(SeekFrom::Start(offset)).is_err() { return; }
-        if file.write_all(&pt).is_err() { return; }
+    if let Some(w) = state.writer.as_mut()
+        && w.write_chunk(chunk_index, &pt).is_err()
+    {
+        return;
     }
     state.have.set(chunk_index);
     state.bytes_downloaded += pt.len() as u64;

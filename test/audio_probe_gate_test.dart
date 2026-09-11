@@ -14,12 +14,14 @@ library;
 
 import 'dart:async';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hollow/src/core/models/file_attachment.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
+import 'package:hollow/src/core/services/at_rest.dart';
 import 'package:hollow/src/core/services/audio_probe_service.dart';
 import 'package:hollow/src/core/services/audio_transcode_service.dart';
 import 'package:hollow/src/theme/hollow_theme_data.dart';
@@ -71,11 +73,25 @@ void main() {
       transcodeCalls.add(args);
       return ProcessResult(0, 1, '', 'stubbed, no real ffmpeg in tests');
     };
+    // The container sniff reads the file through AtRest, whose real handle
+    // would never settle inside the widget binding's fake clock.
+    AtRest.debugReadRange = (path, offset, len) async {
+      final handle = File(path).openSync();
+      try {
+        handle.setPositionSync(offset);
+        return handle.readSync(len);
+      } catch (_) {
+        return Uint8List(0);
+      } finally {
+        handle.closeSync();
+      }
+    };
   });
 
   tearDown(() {
     AudioProbeService.debugRunner = null;
     AudioTranscodeService.debugRunner = null;
+    AtRest.debugReadRange = null;
     AudioProbeService.debugResetCache();
     try {
       tmp.deleteSync(recursive: true);

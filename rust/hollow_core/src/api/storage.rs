@@ -90,10 +90,13 @@ pub fn open_message_store() -> Result<(), String> {
     let db_path = hollow_dir.join("messages.db");
 
     let passphrase = derive_db_key()?;
-    let ms = MessageStore::open(
-        db_path.to_str().ok_or("Invalid path encoding")?,
-        &passphrase,
-    )?;
+    let path = db_path.to_str().ok_or("Invalid path encoding")?;
+    let ms = MessageStore::open(path, &passphrase)?;
+    // Dart can open the store before the node starts, and it reads attachments
+    // through the key ring the moment it has one.
+    if let Err(e) = crate::node::at_rest::init(path, &passphrase) {
+        hollow_log!("[HOLLOW-ATREST] key ring unavailable: {e}");
+    }
 
     *guard = Some(ms);
     Ok(())
@@ -1129,7 +1132,7 @@ pub fn clear_file_bytes_for_context(context_type: String, context_id: String) ->
     for p in &paths {
         let path = std::path::Path::new(p);
         if let Ok(meta) = std::fs::metadata(path) {
-            if std::fs::remove_file(path).is_ok() {
+            if crate::node::at_rest::remove(path).is_ok() {
                 freed += meta.len();
             }
         }
@@ -1152,7 +1155,7 @@ pub fn clear_all_file_bytes() -> Result<u64, String> {
     for p in &paths {
         let path = std::path::Path::new(p);
         if let Ok(meta) = std::fs::metadata(path) {
-            if std::fs::remove_file(path).is_ok() {
+            if crate::node::at_rest::remove(path).is_ok() {
                 freed += meta.len();
             }
         }
@@ -1162,7 +1165,7 @@ pub fn clear_all_file_bytes() -> Result<u64, String> {
     if let Ok(entries) = std::fs::read_dir(&files_dir) {
         for entry in entries.flatten() {
             if let Ok(meta) = entry.metadata() {
-                if meta.is_file() && std::fs::remove_file(entry.path()).is_ok() {
+                if meta.is_file() && crate::node::at_rest::remove(&entry.path()).is_ok() {
                     freed += meta.len();
                 }
             }
@@ -1205,7 +1208,7 @@ pub fn clear_vault_cache() -> Result<u64, String> {
     if let Ok(entries) = std::fs::read_dir(&dir) {
         for entry in entries.flatten() {
             if let Ok(meta) = entry.metadata() {
-                if meta.is_file() && std::fs::remove_file(entry.path()).is_ok() {
+                if meta.is_file() && crate::node::at_rest::remove(&entry.path()).is_ok() {
                     freed += meta.len();
                 }
             }
@@ -1465,6 +1468,10 @@ pub(crate) fn import_snapshot_bytes(zip_bytes: &[u8]) -> Result<(), String> {
             hollow_log!("[HOLLOW-LINK] Import wrote {name} ({} bytes)", data.len());
         }
     }
+
+    // messages.db was just replaced, so the key ring must re-register against the
+    // IMPORTED database rather than the one that is gone.
+    crate::node::at_rest::forget_stores();
 
     // Log what the imported identity resolves to: the master peer_id MUST match the
     // source device's, and the next launch derives the DB passphrase from this key.

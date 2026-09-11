@@ -94,6 +94,7 @@ import 'package:url_launcher/url_launcher.dart';
 
 import 'package:hollow/src/ui/chat/chat_pane_shared.dart';
 import 'package:hollow/src/ui/dialogs/no_turn_dialog.dart';
+import 'package:hollow/src/core/services/attachment_export.dart';
 
 // The twins' shared building blocks live in chat_pane_shared.dart, re-exported
 // here for the existing consumers (mobile routes, archive viewers).
@@ -1021,7 +1022,8 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
           );
 
       if (mounted) {
-        HollowToast.show(context, 'File saved', type: HollowToastType.success);
+        HollowToast.show(context, exportedCopyMessage(savePath),
+            type: HollowToastType.success);
       }
     } catch (e) {
       if (mounted) {
@@ -1058,7 +1060,7 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
       );
       await File(savePath).writeAsBytes(converted);
     } else {
-      await File(attachment.diskPath!).copy(savePath);
+      await exportAttachmentTo(attachment.diskPath!, savePath);
     }
   }
 

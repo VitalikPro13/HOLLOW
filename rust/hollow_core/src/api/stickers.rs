@@ -549,8 +549,7 @@ pub fn preview_sticker_pack(path: String) -> Result<StickerPackPreview, String> 
 fn read_pack_manifest(path: &str) -> Result<PackManifest, String> {
     use std::io::Read;
 
-    let zip_bytes =
-        std::fs::read(path).map_err(|e| format!("Failed to read pack: {e}"))?;
+    let zip_bytes = crate::node::at_rest::read_all(std::path::Path::new(path))?;
     let mut archive = zip::ZipArchive::new(std::io::Cursor::new(&zip_bytes))
         .map_err(|e| format!("Not a valid pack file: {e}"))?;
     let mut raw = String::new();
@@ -620,8 +619,7 @@ pub fn import_sticker_pack(
         clean_label(name)?
     };
 
-    let zip_bytes =
-        std::fs::read(&path).map_err(|e| format!("Failed to read pack: {e}"))?;
+    let zip_bytes = crate::node::at_rest::read_all(std::path::Path::new(&path))?;
     let mut archive = zip::ZipArchive::new(std::io::Cursor::new(&zip_bytes))
         .map_err(|e| format!("Not a valid pack file: {e}"))?;
 

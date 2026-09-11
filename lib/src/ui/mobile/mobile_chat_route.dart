@@ -79,6 +79,7 @@ import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 import 'package:hollow/src/ui/dialogs/no_turn_dialog.dart';
+import 'package:hollow/src/core/services/at_rest.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
 
@@ -1295,7 +1296,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
             : fileName;
         fileName = '$base.png';
       } else {
-        bytes = await File(attachment.diskPath!).readAsBytes();
+        bytes = await AtRest.read(attachment.diskPath!);
       }
 
       final savePath = await FilePicker.platform.saveFile(

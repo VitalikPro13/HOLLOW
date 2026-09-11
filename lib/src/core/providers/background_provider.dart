@@ -4,6 +4,7 @@ import 'dart:typed_data';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/hollow_data_dir.dart';
+import 'package:hollow/src/core/services/at_rest.dart';
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 
 const _opacityKey = 'bg_panel_opacity';
@@ -44,7 +45,7 @@ class BackgroundNotifier extends Notifier<BackgroundState> {
       final file = File('${dir.path}/$_bgFileName');
       Uint8List? bytes;
       if (await file.exists()) {
-        bytes = await file.readAsBytes();
+        bytes = await AtRest.read(file.path);
       }
 
       state = BackgroundState(imageBytes: bytes, panelOpacity: opacity);
@@ -56,8 +57,7 @@ class BackgroundNotifier extends Notifier<BackgroundState> {
   Future<void> setImage(Uint8List bytes) async {
     try {
       final dir = _hollowDir();
-      final file = File('${dir.path}/$_bgFileName');
-      await file.writeAsBytes(bytes);
+      await AtRest.write('${dir.path}/$_bgFileName', bytes);
       state = state.copyWith(imageBytes: bytes);
     } catch (e) {
       debugPrint('[HOLLOW] Failed to save background: $e');
@@ -67,8 +67,8 @@ class BackgroundNotifier extends Notifier<BackgroundState> {
   Future<void> clearImage() async {
     try {
       final dir = _hollowDir();
-      final file = File('${dir.path}/$_bgFileName');
-      if (await file.exists()) await file.delete();
+      // Through AtRest so the file key row dies with the wallpaper.
+      await AtRest.remove('${dir.path}/$_bgFileName');
       state = state.copyWith(clearImage: true);
     } catch (e) {
       debugPrint('[HOLLOW] Failed to clear background: $e');

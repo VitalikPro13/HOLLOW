@@ -15,6 +15,7 @@ import 'package:hollow/src/core/providers/file_transfer_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/video_playback_provider.dart';
 import 'package:hollow/src/core/providers/share_tab_provider.dart';
+import 'package:hollow/src/core/services/at_rest.dart';
 import 'package:hollow/src/core/services/video_thumbnail_service.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:hollow/src/rust/api/network.dart' as network_api;
@@ -26,6 +27,7 @@ import 'package:hollow/src/ui/chat/file_card_status.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_focus_ring.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
+import 'package:hollow/src/ui/components/attachment_image.dart';
 
 /// Renders a video attachment inline in a message bubble.
 ///
@@ -293,7 +295,10 @@ class _VideoMessageBubbleState extends ConsumerState<VideoMessageBubble> {
   Future<void> _initController(String videoPath) async {
     if (mounted) setState(() => _state = _PlaybackState.preparing);
     try {
-      final controller = VideoPlayerController.file(File(videoPath));
+      // Loopback URL, not a file: an attachment on disk is ciphertext and no
+      // player can open it directly.
+      final controller = VideoPlayerController.networkUrl(
+          Uri.parse(await AtRest.mediaUrlFor(videoPath)));
       await controller.initialize();
       if (!mounted) {
         controller.dispose();
@@ -407,11 +412,11 @@ class _VideoMessageBubbleState extends ConsumerState<VideoMessageBubble> {
   /// flat black slab.
   Widget _posterLayer(String? thumbPath) {
     if (thumbPath != null) {
-      return Image.file(
-        File(thumbPath),
+      return AttachmentImage(
+        path: thumbPath,
         fit: BoxFit.cover,
         gaplessPlayback: true,
-        errorBuilder: (_, e, s) => _posterFallbackLayer(),
+        errorWidget: _posterFallbackLayer(),
       );
     }
     return _posterFallbackLayer();
@@ -954,7 +959,8 @@ class _FullscreenVideoViewState extends State<_FullscreenVideoView> {
 
   Future<void> _initController() async {
     try {
-      final c = VideoPlayerController.file(File(widget.videoPath));
+      final c = VideoPlayerController.networkUrl(
+          Uri.parse(await AtRest.mediaUrlFor(widget.videoPath)));
       await c.initialize();
       if (!mounted) {
         c.dispose();

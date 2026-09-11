@@ -494,3 +494,7 @@ For servers with gossip overlays (large servers), files are distributed via a go
 3. Gossip neighbors receive file via WebRTC data channel.
 4. On receive completion (`handle_webrtc_transfer_complete()`), each peer checks for pending relays and forwards to their own neighbors with decremented TTL.
 5. TTL capped at `MAX_BROADCAST_TTL` for security. TTL=0 messages are not relayed.
+
+## At-rest encryption (2026-09-11)
+
+Every path above that lands bytes in `files/` (`write_chunk`, `assemble_file`, the decrypted stream at `try_decrypt_file_stream`, the own-copy write in `handle_send_file`, the fetch node inline image) now goes through `node/at_rest.rs` (`write_all` or a `Writer`), every read back (FileRequest serving, re-sends, the archive exporter) through `read_all`/`read_range`, and every unlink through `at_rest::remove`, which deletes the key row. File names are unchanged; the bytes carry the `HFE1` header. Dart never opens these files with dart:io (`AtRest`, `AttachmentImage`, the loopback media server). See `security_write_gates.md` §12 and memory `project_at_rest_file_encryption_plan`.

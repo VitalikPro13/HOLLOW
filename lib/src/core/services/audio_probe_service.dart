@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 
 import '../../rust/api/network.dart' as network_api;
+import 'at_rest.dart';
 import 'video_thumbnail_service.dart';
 
 void _log(String msg) {
@@ -42,13 +43,10 @@ class AudioProbeService {
   /// This is what stands between an auto-downloaded attachment and ffmpeg: an
   /// extension is the sender's choice, the magic is not. It proves only that
   /// the container claims to be Ogg, which is enough to refuse the obvious
-  /// forgeries before anything memory-unsafe reads the bytes. Synchronous
-  /// because the answer has to be in hand on the frame the bubble builds.
+  /// forgeries before anything memory-unsafe reads the bytes.
   static Future<bool> looksLikeOgg(String path) async {
-    RandomAccessFile? handle;
     try {
-      handle = File(path).openSync();
-      final head = handle.readSync(_oggMagic.length);
+      final head = await AtRest.readRange(path, 0, _oggMagic.length);
       if (head.length < _oggMagic.length) return false;
       for (var i = 0; i < _oggMagic.length; i++) {
         if (head[i] != _oggMagic[i]) return false;
@@ -57,10 +55,6 @@ class AudioProbeService {
     } catch (_) {
       // Missing, locked, or vanished between the check and the read.
       return false;
-    } finally {
-      try {
-        handle?.closeSync();
-      } catch (_) {}
     }
   }
 
@@ -84,19 +78,24 @@ class AudioProbeService {
 
     try {
       // No output wanted, only the stderr probe info: -i triggers format
-      // detection, `-f null -` discards the decode.
-      final args = ['-i', audioPath, '-f', 'null', '-'];
-      final result = await (runner != null
-              ? runner(ffmpeg, args)
-              : Process.run(
-                  ffmpeg,
-                  args,
-                  stdoutEncoding: null,
-                  stderrEncoding: null,
-                ))
-          .timeout(const Duration(seconds: 5));
-
-      final stderrStr = _bytesToString(result.stderr);
+      // detection, `-f null -` discards the decode. An attachment on disk is
+      // ciphertext, so ffmpeg reads it from stdin.
+      final piped = runner == null && AtRest.isManaged(audioPath);
+      final args = ['-i', piped ? 'pipe:0' : audioPath, '-f', 'null', '-'];
+      const budget = Duration(seconds: 5);
+      final String stderrStr;
+      if (runner != null) {
+        final result = await runner(ffmpeg, args).timeout(budget);
+        stderrStr = _bytesToString(result.stderr);
+      } else {
+        final run = await VideoThumbnailService.runFfmpeg(
+          ffmpeg,
+          args,
+          stdinBytes: piped ? await AtRest.read(audioPath) : null,
+          timeout: budget,
+        );
+        stderrStr = run.stderrText;
+      }
       final durationMs = _parseDuration(stderrStr);
       if (durationMs != null && durationMs > 0) {
         _cache[audioPath] = durationMs;

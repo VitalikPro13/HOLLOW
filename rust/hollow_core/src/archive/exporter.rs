@@ -542,7 +542,9 @@ fn read_file_for_archive(
     file_ext: &str,
     file_bytes_map: &mut BTreeMap<String, Vec<u8>>,
 ) -> (Option<String>, bool) {
-    match std::fs::read(file_path) {
+    // The archive carries PLAINTEXT attachments and hashes them, so the at-rest
+    // layer has to come off on the way out.
+    match crate::node::at_rest::read_all(file_path) {
         Ok(bytes) => {
             let hash = Sha256::digest(&bytes);
             let hash_hex = hex::encode(hash);

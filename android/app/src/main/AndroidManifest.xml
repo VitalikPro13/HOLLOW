@@ -31,6 +31,7 @@
         android:allowBackup="false"
         android:fullBackupContent="false"
         android:dataExtractionRules="@xml/data_extraction_rules"
+        android:networkSecurityConfig="@xml/network_security_config"
         android:allowAudioPlaybackCapture="false">
         <!-- Portrait-only (incl. tablets): landscape/tablet layouts are the
              mobile shell's deferred edge cases; also locked at runtime in

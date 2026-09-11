@@ -45,6 +45,15 @@
 	<string>com.anonlisten.hollow.BroadcastExtension</string>
 	<key>RTCAppGroupIdentifier</key>
 	<string>group.com.anonlisten.hollow</string>
+	<!-- The loopback media server is the only cleartext destination: video and
+	     audio players cannot open an encrypted file, so they fetch it over plain
+	     HTTP from 127.0.0.1. NSAllowsLocalNetworking covers exactly that and
+	     nothing on the public internet. -->
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
 	<!-- hollow:// deep links (server invites, shares, recovery links). -->
 	<key>CFBundleURLTypes</key>
 	<array>

@@ -16,12 +16,12 @@ import 'package:hollow/src/ui/chat/hollow_link_utils.dart';
 import 'package:hollow/src/ui/chat/message_text_parser.dart';
 import 'package:hollow/src/ui/chat/staged_hollow_link_card.dart';
 import 'package:hollow/src/ui/chat/staged_link_preview_card.dart';
-import 'package:hollow/src/ui/components/animated_gif_image.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_scroll_behavior.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_tooltip.dart';
 import 'package:hollow/src/ui/components/ui_scale.dart';
+import 'package:hollow/src/ui/components/attachment_image.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
 
@@ -356,11 +356,13 @@ class UnreadDivider extends StatelessWidget {
 
 /// A gif-or-static thumbnail for a file on disk.
 Widget gifAwareImage(String path, {double? width, double? height}) =>
-    path.toLowerCase().endsWith('.gif')
-        ? GifFileImage(
-            diskPath: path, width: width, height: height, fit: BoxFit.cover)
-        : Image.file(File(path),
-            width: width, height: height, fit: BoxFit.cover);
+    AttachmentImage(
+      path: path,
+      animated: path.toLowerCase().endsWith('.gif'),
+      width: width,
+      height: height,
+      fit: BoxFit.cover,
+    );
 
 /// Whether a [SelectionArea] wrapped AROUND a scrolling message list would
 /// misbehave, so it must be scoped to the ROWS instead (issue #35).

@@ -1,4 +1,3 @@
-import 'dart:io';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
@@ -23,6 +22,7 @@ import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/dialogs/export_archive_dialog.dart';
 import 'package:hollow/src/ui/dialogs/message_proof_dialog.dart';
 import 'package:hollow/src/ui/mobile/mobile_archive_message_actions.dart';
+import 'package:hollow/src/core/services/at_rest.dart';
 
 /// Full-screen archive message viewer for My Data (DMs and channels).
 class MobileArchiveViewerRoute extends ConsumerStatefulWidget {
@@ -448,7 +448,7 @@ class _MobileArchiveViewerRouteState
           targetFormat: 'png',
         );
       } else {
-        bytes = await File(attachment.diskPath!).readAsBytes();
+        bytes = await AtRest.read(attachment.diskPath!);
       }
 
       final fileName = attachment.isImage && attachment.fileExt == 'webp'

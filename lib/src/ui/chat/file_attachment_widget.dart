@@ -13,7 +13,6 @@ import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
-import 'package:hollow/src/ui/components/animated_gif_image.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_focus_ring.dart';
@@ -25,6 +24,7 @@ import 'package:hollow/src/ui/chat/audio_message_bubble.dart';
 import 'package:hollow/src/ui/chat/file_card_status.dart';
 import 'package:hollow/src/ui/chat/sticker_pack_card.dart';
 import 'package:hollow/src/ui/chat/video_message_bubble.dart';
+import 'package:hollow/src/ui/components/attachment_image.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// File extensions that route to the video bubble.
@@ -370,26 +370,21 @@ class FileAttachmentWidget extends ConsumerWidget {
               ),
               child: ClipRRect(
                 borderRadius: BorderRadius.circular(hollow.radiusSm),
-                child: isGif
-                    ? GifFileImage(
-                        diskPath: diskPath,
-                        fit: BoxFit.contain,
-                        errorWidget: _buildPlaceholder(
-                            hollow, displayWidth, displayHeight, false, 1.0, 0, null, status),
-                      )
-                    : Image.file(
-                        File(diskPath),
-                        fit: BoxFit.contain,
-                        // Decode at bubble size: a 12 MP camera image decoded
-                        // on first paint is a visible beat on phones.
-                        // ResizeImage never upscales, and the fullscreen view
-                        // decodes full-res separately.
-                        cacheWidth: (maxWidth *
-                                MediaQuery.devicePixelRatioOf(context))
-                            .ceil(),
-                        errorBuilder: (_, e, st) => _buildPlaceholder(
-                            hollow, displayWidth, displayHeight, false, 1.0, 0, null, status),
-                      ),
+                child: AttachmentImage(
+                  path: diskPath,
+                  animated: isGif,
+                  fit: BoxFit.contain,
+                  // Decode at bubble size: a 12 MP camera image decoded on
+                  // first paint is a visible beat on phones. ResizeImage never
+                  // upscales, and the fullscreen view decodes full-res
+                  // separately.
+                  cacheWidth: isGif
+                      ? null
+                      : (maxWidth * MediaQuery.devicePixelRatioOf(context))
+                          .ceil(),
+                  errorWidget: _buildPlaceholder(hollow, displayWidth,
+                      displayHeight, false, 1.0, 0, null, status),
+                ),
               ),
             ),
           ),
@@ -739,15 +734,11 @@ class _FullscreenImageView extends StatelessWidget {
               padding: const EdgeInsets.all(HollowSpacing.xxl),
               child: ClipRRect(
                 borderRadius: BorderRadius.circular(hollow.radiusMd),
-                child: isGif
-                    ? GifFileImage(
-                        diskPath: diskPath,
-                        fit: BoxFit.contain,
-                      )
-                    : Image.file(
-                        File(diskPath),
-                        fit: BoxFit.contain,
-                      ),
+                child: AttachmentImage(
+                  path: diskPath,
+                  animated: isGif,
+                  fit: BoxFit.contain,
+                ),
               ),
             ),
 

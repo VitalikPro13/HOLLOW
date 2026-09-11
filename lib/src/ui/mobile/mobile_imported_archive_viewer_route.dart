@@ -1,4 +1,3 @@
-import 'dart:io';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
@@ -28,6 +27,7 @@ import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/dialogs/message_proof_dialog.dart';
 import 'package:hollow/src/ui/mobile/mobile_archive_message_actions.dart';
+import 'package:hollow/src/core/services/at_rest.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Full-screen route for viewing an imported .hollow-archive file.
@@ -472,7 +472,7 @@ class _MobileImportedArchiveViewerRouteState
           targetFormat: 'png',
         );
       } else {
-        bytes = await File(attachment.diskPath!).readAsBytes();
+        bytes = await AtRest.read(attachment.diskPath!);
       }
 
       final fileName = attachment.isImage && attachment.fileExt == 'webp'

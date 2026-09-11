@@ -7,6 +7,7 @@
 // ignore_for_file: argument_type_not_assignable
 
 import 'api/archive.dart';
+import 'api/at_rest.dart';
 import 'api/conference.dart';
 import 'api/crdt.dart';
 import 'api/emotes.dart';
@@ -86,6 +87,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   ArchiveVerifyResult dco_decode_archive_verify_result(dynamic raw);
+
+  @protected
+  AtRestStatus dco_decode_at_rest_status(dynamic raw);
 
   @protected
   bool dco_decode_bool(dynamic raw);
@@ -709,6 +713,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   ArchiveVerifyResult sse_decode_archive_verify_result(
     SseDeserializer deserializer,
   );
+
+  @protected
+  AtRestStatus sse_decode_at_rest_status(SseDeserializer deserializer);
 
   @protected
   bool sse_decode_bool(SseDeserializer deserializer);
@@ -1497,6 +1504,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
     ArchiveVerifyResult self,
     SseSerializer serializer,
   );
+
+  @protected
+  void sse_encode_at_rest_status(AtRestStatus self, SseSerializer serializer);
 
   @protected
   void sse_encode_bool(bool self, SseSerializer serializer);

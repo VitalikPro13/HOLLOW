@@ -478,6 +478,7 @@
 | 286 | Relay stats display | `relay_stats_provider.dart` | Done | Home network column | Mobile: relay card in Settings About tab (status, RAM, bandwidth, online users) |
 | 287 | Animated GIF display | `animated_gif_image.dart` | Done | Auto-play | Frame decode via instantiateImageCodec, used in mobile profile |
 | 288 | Responsive layout | `hollow_shell.dart` | Done | LayoutBuilder | <600 mobile, 600-1024 tablet, 1024+ desktop |
+| 289 | File encryption at rest | `at_rest.dart`, `attachment_image.dart`, `storage_section.dart` | Done | Always on, no toggle | Attachments on disk are HFE1 ciphertext keyed from messages.db; older plaintext is swept on first start ("Protected" in Files & Storage). Driven end to end by `scripts/fleet_at_rest.ps1` (seed on the old build, then G1 migration, G2 render, G3 fresh receive, G4 serve, G5 export) |
 
 ---
 

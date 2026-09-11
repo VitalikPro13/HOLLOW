@@ -14,6 +14,7 @@ import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/core/providers/video_playback_provider.dart';
 import 'package:hollow/src/core/services/audio_probe_service.dart';
 import 'package:hollow/src/core/services/audio_transcode_service.dart';
+import 'package:hollow/src/core/services/at_rest.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
@@ -215,6 +216,19 @@ class _AudioMessageBubbleState extends ConsumerState<AudioMessageBubble> {
     await _initPlayer(playable);
   }
 
+  /// Hands the player a loopback URL, falling back to the decrypted bytes when
+  /// a platform backend refuses one.
+  Future<void> _playFrom(AudioPlayer player, String audioPath) async {
+    try {
+      await player.play(UrlSource(await AtRest.mediaUrlFor(audioPath)));
+      debugPrint('at_rest audio source=url');
+      return;
+    } catch (e) {
+      debugPrint('at_rest audio source=bytes-fallback reason=$e');
+    }
+    await player.play(BytesSource(await AtRest.read(audioPath)));
+  }
+
   Future<void> _initPlayer(String audioPath) async {
     _disposePlayer();
 
@@ -238,7 +252,7 @@ class _AudioMessageBubbleState extends ConsumerState<AudioMessageBubble> {
     });
 
     try {
-      await player.play(DeviceFileSource(audioPath));
+      await _playFrom(player, audioPath);
       if (mounted) {
         setState(() {
           _state = _PlaybackState.playing;

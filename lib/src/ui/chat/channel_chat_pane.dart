@@ -51,7 +51,6 @@ import 'package:hollow/src/core/providers/emote_provider.dart';
 import 'package:hollow/src/ui/chat/chat_pane_shared.dart';
 import 'package:hollow/src/ui/chat/message_action_bar.dart';
 import 'package:hollow/src/ui/dialogs/message_proof_dialog.dart';
-import 'package:hollow/src/ui/components/animated_gif_image.dart';
 import 'package:hollow/src/ui/components/connection_progress.dart';
 import 'package:hollow/src/core/providers/relay_domain_provider.dart';
 import 'package:hollow/src/ui/chat/hollow_link_utils.dart';
@@ -66,6 +65,7 @@ import 'package:hollow/src/ui/components/hollow_tooltip.dart';
 import 'package:hollow/src/ui/components/status_dot.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
+import 'package:hollow/src/core/services/attachment_export.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
 
@@ -1328,7 +1328,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
         allowedExtensions: [fileExt],
       );
       if (savePath == null) return;
-      await File(cachePath).copy(savePath);
+      await exportAttachmentTo(cachePath, savePath);
 
       ref.read(downloadManagerStateProvider.notifier).recordSavedFile(
             savedPath: savePath,
@@ -1336,7 +1336,8 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
           );
 
       if (mounted) {
-        HollowToast.show(context, 'Video saved', type: HollowToastType.success);
+        HollowToast.show(context, exportedCopyMessage(savePath),
+            type: HollowToastType.success);
       }
     } catch (e) {
       if (mounted) {
@@ -1413,7 +1414,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
         );
         await File(savePath).writeAsBytes(converted);
       } else {
-        await File(sourcePath).copy(savePath);
+        await exportAttachmentTo(sourcePath, savePath);
       }
 
       ref.read(downloadManagerStateProvider.notifier).recordSavedFile(

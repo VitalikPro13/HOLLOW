@@ -322,6 +322,33 @@ one. `validate_frame_centre` and `process_avatar_frame` hand bytes to
 reach); on the remote path `blob_shape` has already checked the canvas before
 either runs, and the local path is a file the user picked.
 
+## 12. At-rest file protection and the loopback media server (issue 78)
+
+Every content file under the data root is AES-256-GCM on disk (`node/at_rest.rs`,
+format `HFE1`, one random key per file in the `file_keys` table of messages.db, so
+the keys inherit whatever identity protection the user chose). Video and audio
+players only take a URL, so `node/at_rest_server.rs` hands the decrypted bytes back
+over HTTP on `127.0.0.1`.
+
+**The server is listed here even though no frame can reach it.** It is the one
+place at-rest bytes leave the process in the clear, and a reader auditing what can
+reach our disk should find it here rather than discover it. It writes nothing, and
+it can only ever hand out a file that already sits under the data root.
+
+| Path | Site | Gate |
+|---|---|---|
+| Serving a decrypted file over HTTP | `at_rest_server::respond`, reachable only through `api::at_rest::at_rest_media_url` | FOUR gates. (1) BIND: `TcpListener::bind(("127.0.0.1", 0))`, never `0.0.0.0`, never the IPv6 wildcard, so nothing off the machine reaches it. (2) TOKEN: 32 random bytes minted once per process on first use and compared in constant time; a request whose first path segment is not the token gets a bare 404 that says nothing about whether the file exists. (3) CONFINEMENT: the rest of the path is percent-decoded, refused outright if any component is anything but a plain name (`..`, a root, a drive prefix), then joined onto the data root and CANONICALISED, and the resolved path must still start with the canonicalised data root, so a symlink planted inside the root cannot point out of it. (4) METHOD: GET and HEAD only; anything else closes the socket. Request line and headers are capped at 8 KiB, an idle socket is dropped after 30 s, and at most 64 connections are served at once, so a local program cannot hold the process open or grow it. Responses carry `Cache-Control: no-store`. One range per request (`bytes=a-b`, `bytes=a-`, `bytes=-n`); a multi-range request is 416 rather than a multipart body, and the body streams through `at_rest::read_range` a chunk at a time, so a 4 GB video never costs 4 GB of memory. Nothing about a path is logged. Unit: `at_rest_server_range_semantics` |
+| `write_at_rest` / `remove_at_rest` / `at_rest_media_url` (the Dart surface) | `api::at_rest` | The path must resolve under the data root before anything happens. The file may not exist yet, so it is the PARENT that is canonicalised and checked. Outside the root the call is refused, so Dart cannot be talked into writing, unlinking or publishing a URL for anything else. `read_at_rest*` and `export_at_rest` deliberately DO accept a source outside the root and pass it through unchanged, which gives Dart one read primitive for both a user-picked file and a stored attachment |
+| `file_keys` rows | `node::at_rest` only | No frame reaches this table. A row is written only by a local write path, at the moment we store a file, and deleted only with the file it belongs to, which is the cryptographic erase. A file carrying the `HFE1` header whose key row is gone is an ERROR, never a passthrough: serving raw ciphertext as content, or silently re-keying it, would both turn a lost key into a corrupt file nobody noticed. A file with no header is a legacy plaintext file and reads back unchanged, so the boot sweep can convert an existing install in the background while the app runs |
+
+Residual, named so a sweep does not have to re-derive it: another process running
+as the same user can read the port and, given the token, fetch a file. That process
+could already read the SQLCipher key material and the ciphertext itself, so the
+server does not widen the threat model it sits inside, which is the disk after the
+app is closed, uninstalled, stolen or browsed, never a live unlocked session.
+Archive export is the other deliberate exit: a `.hollow-archive` carries PLAINTEXT
+attachments by design, as does a Save-as copy, both to a path the user chose.
+
 ---
 
 ## Related
@@ -334,3 +361,5 @@ either runs, and the local path is a file the user picked.
   from
 - `feedback_sender_controlled_filename_sanitization` — the same "hash-verified ≠
   trusted" mistake, in the file path
+- `project_at_rest_file_encryption_plan` covers the `HFE1` format, the key ring,
+  the boot sweep and the loopback media server (issue 78)

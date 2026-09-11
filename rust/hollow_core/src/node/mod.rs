@@ -1,4 +1,6 @@
 pub(crate) mod assets;
+pub(crate) mod at_rest;
+pub(crate) mod at_rest_server;
 pub(crate) mod blocklist;
 pub(crate) mod conference;
 pub(crate) mod crdt_store;

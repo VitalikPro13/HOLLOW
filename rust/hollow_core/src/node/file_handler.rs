@@ -258,7 +258,13 @@ pub(crate) async fn handle_send_file(
 ) {
     hollow_log!("[HOLLOW-FILE] SendFile: {file_path} mid={message_id}");
 
-    let mut file_data = match tokio::fs::read(&file_path).await {
+    let read_src = file_path.clone();
+    let mut file_data = match tokio::task::spawn_blocking(move || {
+        crate::node::at_rest::read_all(std::path::Path::new(&read_src))
+    })
+    .await
+    .unwrap_or_else(|e| Err(format!("read task failed: {e}")))
+    {
         Ok(d) => d,
         Err(e) => {
             hollow_log!("[HOLLOW-FILE] Failed to read file: {e}");
@@ -733,7 +739,12 @@ pub(crate) async fn finish_send_file(
     // 6. Store file locally (skip for non-image vault files — shards handle storage).
     let final_path = file_transfer::final_file_path(&file_id, &final_ext);
     if store_full_file {
-        if let Err(e) = tokio::fs::write(&final_path, &final_data).await {
+        let dest = final_path.clone();
+        let bytes = final_data.clone();
+        let wrote = tokio::task::spawn_blocking(move || crate::node::at_rest::write_all(&dest, &bytes))
+            .await
+            .unwrap_or_else(|e| Err(format!("write task failed: {e}")));
+        if let Err(e) = wrote {
             hollow_log!("[HOLLOW-FILE] Failed to save local file: {e}");
         }
     }
@@ -2348,7 +2359,12 @@ async fn try_decrypt_file_stream(
     let plaintext = crate::vault::pipeline::aes_decrypt(&ciphertext, &key, &nonce)
         .map_err(|e| format!("decrypt failed: {e}"))?;
     let final_path = file_transfer::final_file_path(&request.id, &pfs.ext);
-    if tokio::fs::write(&final_path, &plaintext).await.is_err() {
+    let dest = final_path.clone();
+    if tokio::task::spawn_blocking(move || crate::node::at_rest::write_all(&dest, &plaintext))
+        .await
+        .unwrap_or_else(|e| Err(format!("write task failed: {e}")))
+        .is_err()
+    {
         return Err("failed to write decrypted file".to_string());
     }
     let disk_path = final_path.to_string_lossy().to_string();
@@ -2630,6 +2646,8 @@ pub(crate) async fn stream_to_peer_bytes(
 ) {
     if webrtc_peers.contains(peer_str) {
         // WebRTC: Dart reads from file path — must write temp file.
+        // Vault shard bytes are already AES ciphertext and the WS fallback streams
+        // this file raw, so it is staged as-is.
         let temp_path = file_transfer::files_dir().join(format!(".stream_shard_{id}.tmp"));
         let _ = std::fs::write(&temp_path, data);
         let total_size = data.len() as u64;

@@ -1503,6 +1503,13 @@ pub fn start_node() -> Result<String, String> {
         .ok_or("Invalid path encoding")?
         .to_string();
 
+    // The at-rest key ring has to be live before any handler writes content; the
+    // event loop re-runs this with the same database and sweeps what older versions
+    // left in plaintext.
+    if let Err(e) = node::at_rest::init(&db_path, &passphrase) {
+        hollow_log!("[HOLLOW-ATREST] key ring unavailable at startup: {e}");
+    }
+
     // One-time storage hygiene (legacy `auto_vacuum=0` to INCREMENTAL). MUST run in
     // this single-connection window: doing the VACUUM while the long-lived
     // MessageStore/CryptoStore/CrdtStore connections are open raced the SQLCipher
@@ -2711,6 +2718,11 @@ pub fn start_fetch_node(
         .ok_or("Invalid path encoding")?
         .to_string();
 
+    // The fetch isolate writes inline images to disk, so it needs the key ring too.
+    if let Err(e) = node::at_rest::init(&db_path, &passphrase) {
+        hollow_log!("[HOLLOW-ATREST] key ring unavailable in the fetch node: {e}");
+    }
+
     let mut olm = {
         let store = MessageStore::open(&db_path, &passphrase)?;
         match store.load_olm_account()? {
@@ -3704,8 +3716,7 @@ pub fn convert_image_format(
     source_path: String,
     target_format: String,
 ) -> Result<Vec<u8>, String> {
-    let data = std::fs::read(&source_path)
-        .map_err(|e| format!("Failed to read source file: {e}"))?;
+    let data = crate::node::at_rest::read_all(std::path::Path::new(&source_path))?;
     crate::node::image_convert::convert_from_webp(&data, &target_format)
 }
 

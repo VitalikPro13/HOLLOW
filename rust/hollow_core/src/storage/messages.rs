@@ -1050,7 +1050,72 @@ impl MessageStore {
                 redeemed_at  INTEGER NOT NULL DEFAULT 0
             )")?;
 
+        // Per-file at-rest keys (issue 78). Keyed by the random uid in the file
+        // header, never by path, so a rename costs nothing. Deleting a row is the
+        // cryptographic erase of that file.
+        ddl(conn, "file_keys table",
+            "CREATE TABLE IF NOT EXISTS file_keys (
+                uid        BLOB PRIMARY KEY,
+                key        BLOB NOT NULL,
+                nonce      BLOB NOT NULL,
+                version    INTEGER NOT NULL DEFAULT 1,
+                created_at INTEGER NOT NULL
+            )")?;
+
         Ok(())
+    }
+
+    /// Every at-rest file key, loaded once into the process key ring so reads
+    /// never touch the database.
+    pub fn load_file_keys(&self) -> Result<Vec<([u8; 16], [u8; 32], [u8; 8])>, String> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT uid, key, nonce FROM file_keys")
+            .map_err(|e| format!("Failed to prepare file_keys query: {e}"))?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, Vec<u8>>(0)?,
+                    r.get::<_, Vec<u8>>(1)?,
+                    r.get::<_, Vec<u8>>(2)?,
+                ))
+            })
+            .map_err(|e| format!("Failed to query file_keys: {e}"))?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (uid, key, nonce) = row.map_err(|e| format!("Failed to read file_keys row: {e}"))?;
+            let (Ok(uid), Ok(key), Ok(nonce)) = (
+                <[u8; 16]>::try_from(uid.as_slice()),
+                <[u8; 32]>::try_from(key.as_slice()),
+                <[u8; 8]>::try_from(nonce.as_slice()),
+            ) else {
+                continue;
+            };
+            out.push((uid, key, nonce));
+        }
+        Ok(out)
+    }
+
+    pub fn insert_file_key(&self, uid: &[u8; 16], key: &[u8; 32], nonce: &[u8; 8]) -> Result<(), String> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64;
+        self.conn
+            .execute(
+                "INSERT OR REPLACE INTO file_keys (uid, key, nonce, version, created_at)
+                 VALUES (?1, ?2, ?3, 1, ?4)",
+                rusqlite::params![uid.as_slice(), key.as_slice(), nonce.as_slice(), now],
+            )
+            .map(|_| ())
+            .map_err(|e| format!("Failed to store file key: {e}"))
+    }
+
+    pub fn delete_file_key(&self, uid: &[u8; 16]) -> Result<(), String> {
+        self.conn
+            .execute("DELETE FROM file_keys WHERE uid = ?1", rusqlite::params![uid.as_slice()])
+            .map(|_| ())
+            .map_err(|e| format!("Failed to delete file key: {e}"))
     }
 
     /// One-time storage hygiene, run ONCE at node startup while a SINGLE connection

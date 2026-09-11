@@ -1,4 +1,5 @@
 pub mod archive;
+pub mod at_rest;
 pub mod conference;
 pub mod crdt;
 pub mod emotes;

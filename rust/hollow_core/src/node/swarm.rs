@@ -681,6 +681,31 @@ async fn run_event_loop(
     // Key: transfer_id, Value: (peer_id, kind, id, source_path, total_size)
     let mut pending_webrtc_sends: HashMap<String, (String, super::ws_stream_transfer::StreamKind, String, std::path::PathBuf, u64)> = HashMap::new();
 
+    // At-rest file protection (issue 78): the key ring has to be live before any
+    // handler writes content, and the sweep converts what older versions left in
+    // plaintext. Both run here so the multi-node harness exercises them too.
+    {
+        if let Err(e) = crate::node::at_rest::init(&db_path, &db_passphrase) {
+            hollow_log!("[HOLLOW-ATREST] key ring unavailable: {e}");
+        }
+        crate::node::at_rest::wipe_temp_dir();
+        // Directories the app fills with content, plus the one loose content file
+        // at the data root. The root itself is NEVER swept: identity.key, the
+        // database, the logs and profiles.json live there.
+        let mut sweep_targets = vec![
+            crate::node::file_transfer::files_dir(),
+            crate::vault::pipeline::vault_cache_dir(),
+            crate::node::share_handler::shares_dir().unwrap_or_default(),
+        ];
+        if let Ok(root) = crate::identity::data_dir() {
+            sweep_targets.push(root.join("audio_cache"));
+            sweep_targets.push(root.join("custom_background.img"));
+        }
+        tokio::task::spawn_blocking(move || {
+            crate::node::at_rest::migrate_plaintext(&sweep_targets);
+        });
+    }
+
     // Startup sweep: delete orphaned sender-side stream temps left by a previous
     // run. They are always transient ciphertext of an in-flight send, so none can
     // legitimately exist on a fresh boot.
@@ -692,7 +717,7 @@ async fn run_event_loop(
                 let name = entry.file_name();
                 let name = name.to_string_lossy();
                 if name.starts_with(".stream_send_") || name.starts_with(".stream_shard_") {
-                    if std::fs::remove_file(entry.path()).is_ok() {
+                    if crate::node::at_rest::remove(&entry.path()).is_ok() {
                         swept += 1;
                     }
                 }
@@ -5360,7 +5385,7 @@ async fn run_event_loop(
                                 for (file_id, disk_path) in &files {
                                     hollow_log!("[HOLLOW-VAULT] Retention: expiring channel file {}", file_id);
                                     if let Some(path) = disk_path {
-                                        let _ = std::fs::remove_file(path);
+                                        let _ = crate::node::at_rest::remove(std::path::Path::new(path));
                                     }
                                     let _ = cs.mark_file_expired(file_id, now_ts);
                                 }
@@ -8383,7 +8408,7 @@ async fn handle_incoming_request(
                                     let files_dir = file_transfer::files_dir();
                                     let _ = std::fs::create_dir_all(&files_dir);
                                     let disk_path = file_transfer::final_file_path(&fid, &ext);
-                                    if std::fs::write(&disk_path, &plaintext).is_ok() {
+                                    if crate::node::at_rest::write_all(&disk_path, &plaintext).is_ok() {
                                         let disk_str = disk_path.to_string_lossy().to_string();
                                         if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
                                             let _ = store.mark_file_complete(&fid, &disk_str);
@@ -13560,7 +13585,8 @@ async fn handle_incoming_request(
                             Err("expired")
                         } else {
                             match file_meta.disk_path.as_ref() {
-                                Some(p) => std::fs::read(p).map_err(|_| "gone"),
+                                Some(p) => crate::node::at_rest::read_all(std::path::Path::new(p))
+                                    .map_err(|_| "gone"),
                                 None => Err("gone"),
                             }
                         };

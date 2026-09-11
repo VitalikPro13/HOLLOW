@@ -28,6 +28,7 @@ import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/dialogs/message_proof_dialog.dart';
+import 'package:hollow/src/core/services/attachment_export.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Two-panel layout for "Imported Archives" sub-tab.
@@ -808,12 +809,12 @@ class _ImportedDmMessageListState
             sourcePath: attachment.diskPath!, targetFormat: targetExt);
         await File(savePath).writeAsBytes(converted);
       } else {
-        await File(attachment.diskPath!).copy(savePath);
+        await exportAttachmentTo(attachment.diskPath!, savePath);
       }
       ref.read(downloadManagerStateProvider.notifier).recordSavedFile(
           savedPath: savePath, isImage: isImage, isVideo: false);
       if (mounted) {
-        HollowToast.show(context, 'File saved',
+        HollowToast.show(context, exportedCopyMessage(savePath),
             type: HollowToastType.success);
       }
     } catch (e) {
@@ -958,12 +959,12 @@ class _ImportedChannelMessageListState
             sourcePath: attachment.diskPath!, targetFormat: targetExt);
         await File(savePath).writeAsBytes(converted);
       } else {
-        await File(attachment.diskPath!).copy(savePath);
+        await exportAttachmentTo(attachment.diskPath!, savePath);
       }
       ref.read(downloadManagerStateProvider.notifier).recordSavedFile(
           savedPath: savePath, isImage: isImage, isVideo: false);
       if (mounted) {
-        HollowToast.show(context, 'File saved',
+        HollowToast.show(context, exportedCopyMessage(savePath),
             type: HollowToastType.success);
       }
     } catch (e) {

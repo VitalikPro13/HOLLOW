@@ -295,7 +295,7 @@ pub fn check_cache(content_id: &str, ext: &str) -> Option<PathBuf> {
 /// Write decrypted file data to the vault cache. Returns the disk path.
 pub fn write_to_cache(content_id: &str, ext: &str, data: &[u8]) -> Result<PathBuf, String> {
     let path = cache_path(content_id, ext);
-    std::fs::write(&path, data).map_err(|e| format!("Failed to write cache file: {e}"))?;
+    crate::node::at_rest::write_all(&path, data)?;
     Ok(path)
 }
 
@@ -343,7 +343,7 @@ pub fn evict_dir_if_needed(
         if exempt_paths.contains(path) {
             continue;
         }
-        if std::fs::remove_file(path).is_ok() {
+        if crate::node::at_rest::remove(path).is_ok() {
             freed += size;
             deleted.push(path.to_string_lossy().to_string());
         }

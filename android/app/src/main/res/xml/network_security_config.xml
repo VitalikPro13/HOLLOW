@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The loopback media server is the only cleartext destination: video and
+     audio players cannot open an encrypted file, so they fetch it over plain
+     HTTP from 127.0.0.1. Everything else stays TLS-only. -->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false" />
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">127.0.0.1</domain>
+    </domain-config>
+</network-security-config>

@@ -13,6 +13,7 @@ import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
+import 'package:hollow/src/ui/components/attachment_image.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Data needed to display and export a message's cryptographic proof.
@@ -623,10 +624,10 @@ class _MessagePreview extends StatelessWidget {
                     child: SizedBox(
                       width: 48,
                       height: 48,
-                      child: Image.file(
-                        File(file.diskPath!),
+                      child: AttachmentImage(
+                        path: file.diskPath!,
                         fit: BoxFit.cover,
-                        errorBuilder: (_, __, ___) => Container(
+                        errorWidget: Container(
                           color: hollow.surface,
                           child: Icon(
                             isVideo ? LucideIcons.film : LucideIcons.image,

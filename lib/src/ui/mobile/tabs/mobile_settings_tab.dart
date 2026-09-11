@@ -77,6 +77,7 @@ import 'package:hollow/src/ui/shop/shop_dashboard.dart';
 import 'package:hollow/src/ui/chat/hollow_link_utils.dart';
 import 'package:hollow/src/core/providers/relay_status_provider.dart';
 import 'package:hollow/src/ui/components/relay_no_turn_chip.dart';
+import 'package:hollow/src/core/services/at_rest.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 class MobileSettingsTab extends ConsumerWidget {
@@ -3908,14 +3909,17 @@ class _BackupExportButtonState extends ConsumerState<_BackupExportButton> {
         includeFiles: _includeFiles,
         passphrase: passphrase,
       );
-      final bytes = await File(tmpPath).readAsBytes();
+      // Staged inside the data root, so it comes back through AtRest whether
+      // or not the backup writer encrypted it.
+      final bytes = await AtRest.read(tmpPath);
       final savePath = await FilePicker.platform.saveFile(
         dialogTitle: 'Save backup',
         fileName: 'hollow-backup.hollow',
         bytes: bytes,
       );
       try {
-        await File(tmpPath).delete();
+        // Through AtRest so the file key row dies with the staged copy.
+        await AtRest.remove(tmpPath);
       } catch (_) {}
       if (!mounted) return;
       if (savePath == null) return; // user cancelled the save sheet
@@ -3924,7 +3928,8 @@ class _BackupExportButtonState extends ConsumerState<_BackupExportButton> {
           type: HollowToastType.success);
     } catch (e) {
       try {
-        await File(tmpPath).delete();
+        // Through AtRest so the file key row dies with the staged copy.
+        await AtRest.remove(tmpPath);
       } catch (_) {}
       if (mounted) {
         HollowToast.show(context, 'Export failed: $e',

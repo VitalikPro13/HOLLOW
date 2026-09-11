@@ -24,7 +24,7 @@ pub fn files_dir() -> PathBuf {
 /// Write a single chunk to disk as a temporary file.
 pub fn write_chunk(file_id: &str, chunk_index: u32, data: &[u8]) -> Result<(), String> {
     let path = chunk_path(file_id, chunk_index);
-    std::fs::write(&path, data)
+    crate::node::at_rest::write_all(&path, data)
         .map_err(|e| format!("Failed to write chunk {chunk_index} for {file_id}: {e}"))
 }
 
@@ -35,25 +35,21 @@ pub fn assemble_file(
     total_chunks: u32,
     final_path: &std::path::Path,
 ) -> Result<(), String> {
-    use std::io::Write;
-
-    let mut output = std::fs::File::create(final_path)
-        .map_err(|e| format!("Failed to create output file: {e}"))?;
-
+    // Assembled in memory rather than appended chunk by chunk: the at-rest layout
+    // is sealed per chunk against the FINAL file's length, which an append-as-you-go
+    // writer does not know. Bounded by the 34 MB transfer cap.
+    let mut whole = Vec::new();
     for idx in 0..total_chunks {
         let cp = chunk_path(file_id, idx);
-        let data = std::fs::read(&cp)
+        let data = crate::node::at_rest::read_all(&cp)
             .map_err(|e| format!("Failed to read chunk {idx}: {e}"))?;
-        output.write_all(&data)
-            .map_err(|e| format!("Failed to write chunk {idx} to output: {e}"))?;
+        whole.extend_from_slice(&data);
     }
+    crate::node::at_rest::write_all(final_path, &whole)
+        .map_err(|e| format!("Failed to write the assembled file: {e}"))?;
 
-    output.flush()
-        .map_err(|e| format!("Failed to flush output file: {e}"))?;
-
-    // Clean up chunk files.
     for idx in 0..total_chunks {
-        let _ = std::fs::remove_file(chunk_path(file_id, idx));
+        let _ = crate::node::at_rest::remove(&chunk_path(file_id, idx));
     }
 
     Ok(())

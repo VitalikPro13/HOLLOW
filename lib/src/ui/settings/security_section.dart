@@ -503,6 +503,26 @@ class _SecurityTabState extends State<SecurityTab> {
           ),
         ],
       ),
+      const SizedBox(height: HollowSpacing.xs),
+      Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.only(top: 2),
+            child:
+                Icon(LucideIcons.shield, size: 14, color: hollow.textSecondary),
+          ),
+          const SizedBox(width: HollowSpacing.xs),
+          Expanded(
+            child: Text(
+              'Your files on disk are protected with the same key as your messages.',
+              style: HollowTypography.caption.copyWith(
+                color: hollow.textSecondary, fontSize: 11,
+              ),
+            ),
+          ),
+        ],
+      ),
     ];
   }
 

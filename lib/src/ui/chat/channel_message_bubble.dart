@@ -1,4 +1,3 @@
-import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -17,13 +16,13 @@ import 'package:hollow/src/ui/chat/bubble_perf.dart';
 import 'package:hollow/src/ui/chat/chat_pane_shared.dart';
 import 'package:hollow/src/ui/chat/hollow_link_utils.dart';
 import 'package:hollow/src/ui/chat/link_preview_card.dart';
-import 'package:hollow/src/ui/components/animated_gif_image.dart';
 import 'package:hollow/src/ui/chat/message_text_parser.dart';
 import 'package:hollow/src/ui/chat/profile_tap.dart';
 import 'package:hollow/src/ui/chat/reaction_bar.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_focus_ring.dart';
 import 'package:hollow/src/ui/components/support_glyph.dart';
+import 'package:hollow/src/ui/components/attachment_image.dart';
 
 /// Flat message row for channel messages. [showHeader] is false for a grouped
 /// continuation, which drops the avatar, name and timestamp.
@@ -132,19 +131,13 @@ class ChannelMessageBubble extends ConsumerWidget {
               padding: const EdgeInsets.only(left: HollowSpacing.sm),
               child: ClipRRect(
                 borderRadius: BorderRadius.circular(4),
-                child: replyToImagePath!.toLowerCase().endsWith('.gif')
-                    ? GifFileImage(
-                        diskPath: replyToImagePath!,
-                        width: 32,
-                        height: 32,
-                        fit: BoxFit.cover,
-                      )
-                    : Image.file(
-                        File(replyToImagePath!),
-                        width: 32,
-                        height: 32,
-                        fit: BoxFit.cover,
-                      ),
+                child: AttachmentImage(
+                  path: replyToImagePath!,
+                  animated: replyToImagePath!.toLowerCase().endsWith('.gif'),
+                  width: 32,
+                  height: 32,
+                  fit: BoxFit.cover,
+                ),
               ),
             ),
         ],

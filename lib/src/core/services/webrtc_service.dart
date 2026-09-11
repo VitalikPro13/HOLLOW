@@ -5,6 +5,7 @@ import 'dart:typed_data';
 import 'dart:math';
 
 import 'package:hollow/src/core/hollow_data_dir.dart';
+import 'package:hollow/src/core/services/at_rest.dart';
 
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 
@@ -520,8 +521,10 @@ class WebRtcService {
     _armIdleTimer(conn, lane);
 
     try {
-      // Read entire file into memory (like WS path) to avoid per-chunk async I/O.
-      final fileData = await File(filePath).readAsBytes();
+      // Read entire file into memory (like WS path) to avoid per-chunk async
+      // I/O. AtRest, not dart:io: a source under the data root is ciphertext,
+      // and a user-picked one passes straight through.
+      final fileData = await AtRest.read(filePath);
       final dc = conn.dataChannel!;
 
       final typeFlag = switch (kind) {

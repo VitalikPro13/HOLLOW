@@ -13,11 +13,20 @@ import 'package:hollow/src/core/providers/channel_provider.dart'
     show selectedChannelProvider;
 import 'package:hollow/src/core/providers/server_provider.dart'
     show selectedServerProvider;
+import 'package:hollow/src/core/services/attachment_export.dart'
+    show exportAttachmentTo;
 import 'package:hollow/src/core/services/image_pick.dart';
 import 'package:hollow/src/rust/api/storage.dart' as storage;
 import 'package:hollow/src/ui/app.dart' show hollowNavigatorKey;
+import 'package:hollow/src/ui/chat/audio_message_bubble.dart'
+    show AudioMessageBubble;
 import 'package:hollow/src/ui/chat/chat_drop_zone.dart';
+import 'package:hollow/src/ui/chat/file_attachment_widget.dart'
+    show FileAttachmentWidget;
+import 'package:hollow/src/ui/chat/video_message_bubble.dart'
+    show InlineVideoPlayer, VideoMessageBubble;
 import 'package:hollow/src/ui/shop/hollowpack_import.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import 'probe_dump.dart';
 import 'probe_env.dart';
@@ -301,6 +310,9 @@ class ProbeRunner {
         'shot',
         'capture',
         'look',
+        'video_state',
+        'audio_state',
+        'export_attachment',
         'expect_text',
         'expect_no_text',
         'expect_count',
@@ -457,6 +469,15 @@ class ProbeRunner {
 
       case 'channel_rows':
         return _channelRows(step);
+
+      case 'video_state':
+        return _videoState(step);
+
+      case 'audio_state':
+        return _audioState(step);
+
+      case 'export_attachment':
+        return _exportAttachment(step);
 
       case 'log':
         return '${step['message'] ?? ''}';
@@ -615,6 +636,177 @@ class ProbeRunner {
       }
     });
     return lines.join('\n');
+  }
+
+  /// What the first visible video bubble's player actually holds: whether the
+  /// controller initialised, how long the clip is and where playback is.
+  ///
+  /// A screenshot cannot answer any of that - platform views do not paint into
+  /// one - so a video that plays and a video that failed to open look the same
+  /// in a picture. `timeout_ms` polls until a player is mounted AND initialised,
+  /// which is what a gate wants after tapping play.
+  Future<String> _videoState(Map<String, dynamic> step) async {
+    final index = step['index'] as int? ?? 0;
+    final ms = step['timeout_ms'] as int? ?? 0;
+    final deadline = DateTime.now().add(Duration(milliseconds: ms));
+
+    String? describe({required bool requireInitialised}) {
+      final players = find.byType(InlineVideoPlayer).evaluate().toList();
+      if (index >= players.length) return null;
+      final controller =
+          (players[index].widget as InlineVideoPlayer).controller;
+      final value = controller.value;
+      if (requireInitialised && !value.isInitialized) return null;
+      return 'video initialized=${value.isInitialized} '
+          'durationMs=${value.duration.inMilliseconds} '
+          'positionMs=${value.position.inMilliseconds} '
+          'size=${value.size.width.round()}x${value.size.height.round()} '
+          'playing=${value.isPlaying} buffering=${value.isBuffering} '
+          'error=${value.errorDescription ?? "-"}';
+    }
+
+    var answer = describe(requireInitialised: ms > 0);
+    while (answer == null && DateTime.now().isBefore(deadline)) {
+      await settle(frames: 6, step: const Duration(milliseconds: 100));
+      answer = describe(requireInitialised: true);
+    }
+    if (answer != null) return answer;
+
+    final bubbles = find.byType(VideoMessageBubble).evaluate().length;
+    final players = find.byType(InlineVideoPlayer).evaluate().length;
+    throw _ProbeFailure('no initialised video player at index $index '
+        '($players mounted, $bubbles video bubble(s) on screen). '
+        'The player only exists while the bubble is playing, so tap the play '
+        'control first.');
+  }
+
+  /// Whether a voice note is actually moving, read off the playing row itself:
+  /// its scrubber carries the position and the duration in milliseconds, and
+  /// the pause icon is the bubble's own answer to "am I playing".
+  ///
+  /// With `timeout_ms` the op only succeeds once the position has ADVANCED past
+  /// its first reading, which is the difference between a player that started
+  /// and a player that opened a source and sat there. A clip that runs out
+  /// while polling counts: the row returns to its idle shape, and having seen
+  /// it move is the proof.
+  Future<String> _audioState(Map<String, dynamic> step) async {
+    final index = step['index'] as int? ?? 0;
+    final ms = step['timeout_ms'] as int? ?? 0;
+    final deadline = DateTime.now().add(Duration(milliseconds: ms));
+
+    List<int>? reading;
+    String file = '';
+    List<int>? read() {
+      final bubbles = find.byType(AudioMessageBubble).evaluate().toList();
+      if (index >= bubbles.length) return null;
+      file = (bubbles[index].widget as AudioMessageBubble).attachment.fileName;
+      Slider? scrubber;
+      var playing = 0;
+      void visit(Element element) {
+        final widget = element.widget;
+        if (widget is Slider) scrubber ??= widget;
+        if (widget is Icon && widget.icon == LucideIcons.pause) playing = 1;
+        element.visitChildren(visit);
+      }
+
+      bubbles[index].visitChildren(visit);
+      final found = scrubber;
+      if (found == null) return null;
+      return [playing, found.value.round(), found.max.round()];
+    }
+
+    String describe(List<int> value, String note) =>
+        'audio playing=${value[0] == 1} positionMs=${value[1]} '
+        'durationMs=${value[2]} file=$file $note';
+
+    reading = read();
+    if (ms <= 0) {
+      if (reading == null) {
+        final bubbles = find.byType(AudioMessageBubble).evaluate().length;
+        throw _ProbeFailure('no audio is playing ($bubbles audio bubble(s) on '
+            'screen). The scrubber only exists while the bubble plays, so tap '
+            'the play control first.');
+      }
+      return describe(reading, '');
+    }
+
+    var best = reading;
+    while (DateTime.now().isBefore(deadline)) {
+      await settle(frames: 4, step: const Duration(milliseconds: 100));
+      final now = read();
+      if (now == null) {
+        if (best != null && best[1] > 0) {
+          return describe(best, '(the clip finished while polling)');
+        }
+        continue;
+      }
+      if (best == null) {
+        best = now;
+        continue;
+      }
+      if (now[1] > best[1]) return describe(now, '(advanced from ${best[1]}ms)');
+    }
+    if (best == null) {
+      final bubbles = find.byType(AudioMessageBubble).evaluate().length;
+      throw _ProbeFailure('no audio ever started playing ($bubbles audio '
+          'bubble(s) on screen)');
+    }
+    throw _ProbeFailure('${describe(best, "")} - the position never advanced');
+  }
+
+  /// Saves an attachment out through the app's OWN export path
+  /// ([exportAttachmentTo]), which is the only thing that turns a protected
+  /// file back into a plaintext copy.
+  ///
+  /// The attachment is named the way a user sees it (`file`), and its disk path
+  /// comes from the card on screen, falling back to the file row. An explicit
+  /// `path` skips the lookup.
+  Future<String> _exportAttachment(Map<String, dynamic> step) async {
+    final dest = '${step['dest'] ?? ''}';
+    if (dest.isEmpty) throw _ProbeFailure('export_attachment needs a "dest"');
+
+    var diskPath = '${step['path'] ?? ''}';
+    var label = diskPath;
+    if (diskPath.isEmpty) {
+      final wanted = '${step['file'] ?? ''}';
+      if (wanted.isEmpty) {
+        throw _ProbeFailure('export_attachment needs a "file" or a "path"');
+      }
+      final cards = find
+          .byType(FileAttachmentWidget)
+          .evaluate()
+          .map((element) => (element.widget as FileAttachmentWidget).attachment)
+          .toList();
+      final matches = cards
+          .where((a) => a.fileName == wanted || a.fileName.contains(wanted))
+          .toList();
+      if (matches.isEmpty) {
+        final names = cards.map((a) => a.fileName).join(', ');
+        throw _ProbeFailure('no attachment named "$wanted" on screen. '
+            'Visible: ${names.isEmpty ? "(none)" : names}');
+      }
+      final attachment = matches[step['index'] as int? ?? 0];
+      label = attachment.fileName;
+      diskPath = attachment.diskPath ?? '';
+      if (diskPath.isEmpty) {
+        final row = await tester.runAsync(
+            () => storage.getFileMetadata(fileId: attachment.fileId));
+        diskPath = row?.diskPath ?? '';
+      }
+      if (diskPath.isEmpty) {
+        throw _ProbeFailure('"$label" has no bytes on disk to export');
+      }
+    }
+
+    // Real I/O over FFI, so it runs outside the test's fake async.
+    await tester.runAsync(() => exportAttachmentTo(diskPath, dest));
+    final written = File(dest);
+    if (!written.existsSync()) {
+      throw _ProbeFailure('the export reported success but wrote nothing to '
+          '$dest');
+    }
+    return 'exported $label from $diskPath to $dest '
+        '(${written.lengthSync()} bytes)';
   }
 
   /// A mounted `ConsumerWidget`/`ConsumerStatefulWidget` element, which is

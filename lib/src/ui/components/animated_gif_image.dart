@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:io';
 import 'dart:typed_data';
 import 'dart:ui' as ui;
 
@@ -294,69 +293,4 @@ class _GifFrame {
   final ui.Image image;
   final Duration duration;
   const _GifFrame({required this.image, required this.duration});
-}
-
-/// Loads an image from disk and renders it through [AnimatedGifImage], falling
-/// back to [Image.file] for a still.
-class GifFileImage extends StatefulWidget {
-  final String diskPath;
-  final double? width;
-  final double? height;
-  final BoxFit fit;
-  final Widget? errorWidget;
-
-  const GifFileImage({
-    super.key,
-    required this.diskPath,
-    this.width,
-    this.height,
-    this.fit = BoxFit.cover,
-    this.errorWidget,
-  });
-
-  @override
-  State<GifFileImage> createState() => _GifFileImageState();
-}
-
-class _GifFileImageState extends State<GifFileImage> {
-  Uint8List? _bytes;
-  bool _failed = false;
-
-  @override
-  void initState() {
-    super.initState();
-    _loadBytes();
-  }
-
-  @override
-  void didUpdateWidget(GifFileImage old) {
-    super.didUpdateWidget(old);
-    if (old.diskPath != widget.diskPath) {
-      _bytes = null;
-      _failed = false;
-      _loadBytes();
-    }
-  }
-
-  Future<void> _loadBytes() async {
-    try {
-      final bytes = await File(widget.diskPath).readAsBytes();
-      if (mounted) setState(() => _bytes = bytes);
-    } catch (_) {
-      if (mounted) setState(() => _failed = true);
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    if (_failed) return widget.errorWidget ?? const SizedBox.shrink();
-    if (_bytes == null) return SizedBox(width: widget.width, height: widget.height);
-    return AnimatedGifImage(
-      bytes: _bytes!,
-      width: widget.width,
-      height: widget.height,
-      fit: widget.fit,
-      errorWidget: widget.errorWidget,
-    );
-  }
 }

@@ -23,6 +23,7 @@ import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/dialogs/export_archive_dialog.dart';
 import 'package:hollow/src/ui/dialogs/message_proof_dialog.dart';
+import 'package:hollow/src/core/services/attachment_export.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Right panel of "My Data" — shows empty state or a read-only message viewer.
@@ -310,7 +311,7 @@ class _DmMessageListState extends ConsumerState<_DmMessageList> {
         );
         await File(savePath).writeAsBytes(converted);
       } else {
-        await File(attachment.diskPath!).copy(savePath);
+        await exportAttachmentTo(attachment.diskPath!, savePath);
       }
 
       ref.read(downloadManagerStateProvider.notifier).recordSavedFile(
@@ -320,7 +321,7 @@ class _DmMessageListState extends ConsumerState<_DmMessageList> {
           );
 
       if (mounted) {
-        HollowToast.show(context, 'File saved',
+        HollowToast.show(context, exportedCopyMessage(savePath),
             type: HollowToastType.success);
       }
     } catch (e) {
@@ -608,7 +609,7 @@ class _ChannelMessageListState extends ConsumerState<_ChannelMessageList> {
         );
         await File(savePath).writeAsBytes(converted);
       } else {
-        await File(attachment.diskPath!).copy(savePath);
+        await exportAttachmentTo(attachment.diskPath!, savePath);
       }
 
       ref.read(downloadManagerStateProvider.notifier).recordSavedFile(
@@ -618,7 +619,7 @@ class _ChannelMessageListState extends ConsumerState<_ChannelMessageList> {
           );
 
       if (mounted) {
-        HollowToast.show(context, 'File saved',
+        HollowToast.show(context, exportedCopyMessage(savePath),
             type: HollowToastType.success);
       }
     } catch (e) {

@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import 'package:hollow/src/core/providers/app_shortcuts_provider.dart';
 import 'package:hollow/src/core/services/hotkeys/hotkey_binding.dart';
 import 'package:super_clipboard/super_clipboard.dart';
+import 'package:hollow/src/core/services/at_rest.dart';
 
 /// Handles keyboard shortcuts for the chat input field.
 ///
@@ -161,10 +162,9 @@ Future<bool> copyImageToClipboard(String filePath) async {
   final clipboard = SystemClipboard.instance;
   if (clipboard == null) return false;
 
-  final file = File(filePath);
-  if (!file.existsSync()) return false;
+  if (!File(filePath).existsSync()) return false;
 
-  final bytes = await file.readAsBytes();
+  final bytes = await AtRest.read(filePath);
   final ext = filePath.split('.').last.toLowerCase();
 
   final SimpleFileFormat format;
