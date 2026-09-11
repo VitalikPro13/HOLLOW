@@ -368,6 +368,7 @@ class ProbeDump {
     final unread = read(unreadProvider);
     if (unread != null) {
       out['dmUnreadCounts'] = unread.dmUnreadCounts;
+      out['channelUnreadCounts'] = unread.channelUnreadCounts;
     }
 
     // Everything below is what a FLEET run needs: which instance am I, who do
@@ -557,6 +558,10 @@ class ProbeDump {
     final dmUnread = providers['dmUnreadCounts'] as Map?;
     if (dmUnread != null && dmUnread.isNotEmpty) {
       buffer.writeln('- DM unread: $dmUnread');
+    }
+    final channelUnread = providers['channelUnreadCounts'] as Map?;
+    if (channelUnread != null && channelUnread.isNotEmpty) {
+      buffer.writeln('- Channel unread: $channelUnread');
     }
     final strip = providers['stripOutline'] as List?;
     if (strip != null) {

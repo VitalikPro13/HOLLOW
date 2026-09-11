@@ -2,6 +2,14 @@ import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart' show rootBundle;
+import 'package:flutter_local_notifications/flutter_local_notifications.dart'
+    show
+        DarwinInitializationSettings,
+        DarwinNotificationAction,
+        DarwinNotificationAttachment,
+        DarwinNotificationCategory,
+        DarwinNotificationDetails,
+        MacOSFlutterLocalNotificationsPlugin;
 import 'package:flutter_local_notifications_platform_interface/flutter_local_notifications_platform_interface.dart'
     show NotificationResponse;
 import 'package:flutter_local_notifications_windows/flutter_local_notifications_windows.dart';
@@ -26,9 +34,12 @@ void notifLog(String msg) {
 /// Windows talks to `FlutterLocalNotificationsWindows()` directly, because the
 /// unified facade does not route Windows in v18. That is the RICH path (avatar,
 /// text, an inline Reply, rendered as an Action Center toast) and it needs the
-/// registered Start-menu shortcut the Inno Setup installer creates. macOS and
-/// Linux use `local_notifier`, since rich actions and images are unreliable
-/// across desktop environments.
+/// registered Start-menu shortcut the Inno Setup installer creates. macOS goes
+/// through `UNUserNotificationCenter` (avatar, inline Reply, per-conversation
+/// thread): the `NSUserNotificationCenter` that `local_notifier` uses is
+/// deprecated and delivers nothing on current macOS, so a posted toast never
+/// reached Notification Center. Linux keeps `local_notifier`, since rich
+/// actions and images are unreliable across desktop environments.
 ///
 /// [SystemNotificationNotifier] decides WHEN to call this; this decides HOW.
 /// Windows carries the toast's launch arguments in `payload`, so a Reply
@@ -45,6 +56,13 @@ class DesktopNotificationService {
   FlutterLocalNotificationsWindows? _winPlugin;
   FlutterLocalNotificationsWindows get _win =>
       _winPlugin ??= FlutterLocalNotificationsWindows();
+
+  MacOSFlutterLocalNotificationsPlugin? _macPlugin;
+  MacOSFlutterLocalNotificationsPlugin get _mac =>
+      _macPlugin ??= MacOSFlutterLocalNotificationsPlugin();
+
+  /// The DM category carries the inline Reply action; channel toasts have none.
+  static const String _macDmCategory = 'hollow_dm';
 
   bool _initialized = false;
 
@@ -103,6 +121,27 @@ class DesktopNotificationService {
           ),
           onNotificationReceived: _onWindowsResponse,
         );
+      } else if (Platform.isMacOS) {
+        // The permission prompt shows once, on the first message that needs a
+        // toast; the answer lands in System Settings > Notifications > Hollow.
+        final granted = await _mac.initialize(
+          DarwinInitializationSettings(
+            requestBadgePermission: false,
+            defaultPresentBadge: false,
+            notificationCategories: [
+              DarwinNotificationCategory(_macDmCategory, actions: [
+                DarwinNotificationAction.text(
+                  _replyActionId,
+                  'Reply',
+                  buttonTitle: 'Send',
+                  placeholder: 'Reply…',
+                ),
+              ]),
+            ],
+          ),
+          onDidReceiveNotificationResponse: _onDarwinResponse,
+        );
+        notifLog('macOS notification permission granted=$granted');
       } else {
         // local_notifier needs a one-time setup with a shortcut.
         await localNotifier.setup(
@@ -156,6 +195,22 @@ class DesktopNotificationService {
     }
   }
 
+  /// macOS response router: the Reply action carries its text in `input`, a
+  /// body tap only the payload.
+  void _onDarwinResponse(NotificationResponse response) {
+    final payload = response.payload ?? '';
+    if (response.actionId == _replyActionId) {
+      final text = (response.input ?? '').trim();
+      if (payload.isNotEmpty && text.isNotEmpty) {
+        _replyHandler?.call(payload, text);
+      }
+      return;
+    }
+    if (payload.isNotEmpty) {
+      _openHandler?.call(payload);
+    }
+  }
+
   static const String _replyActionId = 'reply';
   static const String _replyTextId = 'replyText';
 
@@ -183,6 +238,15 @@ class DesktopNotificationService {
         avatarBytes: avatarBytes,
         payload: sourceKey,
         replyTarget: sourceKey,
+      );
+    } else if (Platform.isMacOS) {
+      await _showMac(
+        threadKey: 'dm:$sourceKey',
+        title: title,
+        body: body,
+        avatarBytes: avatarBytes,
+        payload: sourceKey,
+        reply: true,
       );
     } else {
       await _showNative(sourceKey: 'dm:$sourceKey', title: title, body: body);
@@ -214,8 +278,70 @@ class DesktopNotificationService {
         payload: 'channel:$serverId:$channelId',
         replyTarget: null,
       );
+    } else if (Platform.isMacOS) {
+      await _showMac(
+        threadKey: 'ch:$key',
+        title: title,
+        body: body,
+        avatarBytes: avatarBytes,
+        payload: 'channel:$serverId:$channelId',
+        reply: false,
+      );
     } else {
       await _showNative(sourceKey: 'ch:$key', title: title, body: body);
+    }
+  }
+
+  /// Notification Center accepts PNG, JPEG and GIF attachments and rejects the
+  /// whole post for anything else, so an avatar in another format is skipped.
+  static String? _attachmentExt(Uint8List b) {
+    if (b.length < 4) return null;
+    if (b[0] == 0x89 && b[1] == 0x50 && b[2] == 0x4E && b[3] == 0x47) {
+      return 'png';
+    }
+    if (b[0] == 0xFF && b[1] == 0xD8 && b[2] == 0xFF) return 'jpg';
+    if (b[0] == 0x47 && b[1] == 0x49 && b[2] == 0x46) return 'gif';
+    return null;
+  }
+
+  Future<void> _showMac({
+    required String threadKey,
+    required String title,
+    required String body,
+    required String payload,
+    required bool reply,
+    Uint8List? avatarBytes,
+  }) async {
+    // Fresh id per message so it stacks, and a fresh file per attachment: the
+    // system MOVES an attached file into its own store.
+    final id = (_toastCounter++) & 0x7fffffff;
+    String? avatarPath;
+    final ext = avatarBytes == null ? null : _attachmentExt(avatarBytes);
+    if (avatarBytes != null && ext != null) {
+      try {
+        final f = File('${Directory.systemTemp.path}/hollow_notif_$id.$ext');
+        await f.writeAsBytes(avatarBytes, flush: true);
+        avatarPath = f.path;
+      } catch (_) {}
+    }
+    try {
+      await _mac.show(
+        id,
+        title,
+        body,
+        payload: payload,
+        notificationDetails: DarwinNotificationDetails(
+          threadIdentifier: threadKey,
+          categoryIdentifier: reply ? _macDmCategory : null,
+          attachments: avatarPath == null
+              ? null
+              : [DarwinNotificationAttachment(avatarPath, identifier: 'avatar')],
+        ),
+      );
+      notifLog('macOS notification posted id=$id avatar=${avatarPath != null}');
+    } catch (e) {
+      debugPrint('[HOLLOW] macOS notification failed: $e');
+      notifLog('macOS notification FAILED id=$id: $e');
     }
   }
 

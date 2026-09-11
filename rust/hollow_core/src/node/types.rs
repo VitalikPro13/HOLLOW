@@ -153,6 +153,20 @@ pub(crate) struct CarriedProfile {
     pub profile_pk: Option<String>,
 }
 
+/// One conversation's read pointer as siblings exchange it. `key` is the
+/// `seen:` suffix (`dm:<master>` or `ch:<server>:<channel>`), `ts` the seen
+/// message's millisecond timestamp so a device that lacks that exact row can
+/// still place the pointer.
+#[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct ReadMarker {
+    #[serde(default)]
+    pub key: String,
+    #[serde(default)]
+    pub message_id: String,
+    #[serde(default)]
+    pub ts: i64,
+}
+
 /// One friend entry shared between an identity's own devices: relationship
 /// metadata only, never message history. See `HavenMessage::FriendListSync`.
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
@@ -202,7 +216,10 @@ pub(crate) enum NetworkEvent {
         /// mentions-only notification gate reads this.
         reply_to_own: bool,
         /// Same contract as [`NetworkEvent::MessageReceived::duplicate`].
-        duplicate: bool },
+        duplicate: bool,
+        /// Authored by ANY of our own devices (a sibling echo or catch-up of our
+        /// own post). Dart marks the channel read instead of counting it unread.
+        is_own: bool },
     MessageSent { to_peer: String, message_id: String, timestamp: i64, signature: Option<String>, public_key: Option<String> },
     ChannelMessageSent { server_id: String, channel_id: String, message_id: String, timestamp: i64, signature: Option<String>, public_key: Option<String> },
     MessageSendFailed { to_peer: String, error: String },
@@ -241,6 +258,9 @@ pub(crate) enum NetworkEvent {
     /// A device list was ingested for `master_peer_id`; Dart invalidates its
     /// device-to-identity map so attribution updates.
     DeviceListUpdated { master_peer_id: String },
+    /// A sibling device reported where its reading stands (issue #80). Dart
+    /// advances its own seen pointers, never regressing them, via the store.
+    ReadMarkersReceived { markers: Vec<ReadMarker> },
     /// A contact's identity changed: a new device joined it, or one of their
     /// devices re-keyed. `peer_id` is the MASTER, `kind` a
     /// `security_alerts::KIND_*` constant. Emitted once per distinct fact, so a
@@ -897,6 +917,8 @@ pub(crate) enum NodeCommand {
     SetOfflineInbox { enabled: bool, retention_secs: i64 },
     // -- Typing indicators --
     SendTypingIndicator { server_id: String, channel_id: String },
+    /// Tell our own online siblings where our reading stands (issue #80).
+    SyncReadMarkers { markers: Vec<ReadMarker> },
     // -- Presence --
     SetInvisible { invisible: bool },
     // -- Channel subscriptions --
@@ -1182,6 +1204,7 @@ impl NodeCommand {
             Self::SetPushPrefs { .. } => "SetPushPrefs",
             Self::SetOfflineInbox { .. } => "SetOfflineInbox",
             Self::SendTypingIndicator { .. } => "SendTypingIndicator",
+            Self::SyncReadMarkers { .. } => "SyncReadMarkers",
             Self::SetInvisible { .. } => "SetInvisible",
             Self::SubscribeChannels { .. } => "SubscribeChannels",
             Self::UpdateChannelLayout { .. } => "UpdateChannelLayout",
@@ -1815,6 +1838,16 @@ pub(crate) enum HavenMessage {
     /// for when automatic sibling sync did not converge. Verified-self only.
     #[serde(rename = "sibling_state_sync_request")]
     SiblingStateSyncRequest,
+
+    /// Multi-device read state (issue #80): where THIS device's reading stands,
+    /// one entry per conversation. Sent live on every pointer move and as a full
+    /// snapshot when a sibling is verified. Verified-self only; the receiver
+    /// advances by timestamp and never regresses.
+    #[serde(rename = "read_markers")]
+    ReadMarkers {
+        #[serde(default)]
+        markers: Vec<ReadMarker>,
+    },
 
     /// Multi-device: one device shares personal ("Mine") emote rows with a SIBLING
     /// of the same master. A delta after an add or remove and the full set on

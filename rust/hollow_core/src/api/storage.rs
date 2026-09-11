@@ -455,6 +455,35 @@ pub fn load_settings_with_prefix(prefix: String) -> Result<Vec<SettingEntry>, St
         .collect())
 }
 
+/// One read pointer a sibling reported, as Dart hands it back to the store.
+pub struct RemoteReadMarker {
+    pub key: String,
+    pub ts: i64,
+}
+
+/// A read pointer that moved: Dart adopts `message_id` as the seen pointer for
+/// `key` and recounts that conversation.
+pub struct AppliedReadMarker {
+    pub key: String,
+    pub message_id: String,
+}
+
+/// Adopt sibling read pointers (#80). Each advances by time and never regresses;
+/// only the ones that moved come back. Malformed keys are skipped, not fatal.
+#[frb]
+pub fn apply_remote_read_markers(markers: Vec<RemoteReadMarker>) -> Result<Vec<AppliedReadMarker>, String> {
+    let store = get_store();
+    let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let ms = guard.as_ref().ok_or("Message store is not open")?;
+    Ok(markers
+        .into_iter()
+        .filter_map(|m| {
+            let mid = ms.apply_remote_read_marker(&m.key, m.ts).ok().flatten()?;
+            Some(AppliedReadMarker { key: m.key, message_id: mid })
+        })
+        .collect())
+}
+
 // Verified peers live in `api::verification` so every entry point resolves device to
 // master in one auditable place: a verified flag stored under a device id stops
 // applying the moment that contact links a device.

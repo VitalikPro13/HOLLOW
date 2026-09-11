@@ -1984,16 +1984,24 @@ impl MessageStore {
     /// sent something. Same-millisecond messages render together, so treating the whole
     /// millisecond as seen matches what the user saw. A missing seen row returns 0,
     /// never a count-everything degradation.
+    ///
+    /// The floor is the LATEST of three marks (#80): the seen row, the
+    /// `seen_ts:` a sibling reported (it may name a row not backfilled here
+    /// yet), and our own newest message, because being last to speak means the
+    /// conversation was read. A pointer to nothing and no other mark stays 0.
     pub fn count_unread_dm(&self, peer_id: &str, last_seen_message_id: &str) -> u32 {
         self.conn
             .query_row(
                 "SELECT COUNT(*) FROM messages m
                  WHERE m.peer_id = ?1
                    AND m.hidden_at IS NULL AND m.is_mine = 0
-                   AND m.timestamp >
-                       (SELECT s.timestamp FROM messages s
-                         WHERE s.peer_id = ?1 AND s.message_id = ?2)",
-                params![peer_id, last_seen_message_id],
+                   AND m.timestamp > (SELECT MAX(v) FROM (
+                       SELECT s.timestamp AS v FROM messages s
+                         WHERE s.peer_id = ?1 AND s.message_id = ?2
+                       UNION ALL SELECT CAST(value AS INTEGER) FROM app_settings WHERE key = ?3
+                       UNION ALL SELECT MAX(o.timestamp) FROM messages o
+                         WHERE o.peer_id = ?1 AND o.is_mine = 1))",
+                params![peer_id, last_seen_message_id, format!("seen_ts:dm:{peer_id}")],
                 |row| row.get::<_, i64>(0),
             )
             .unwrap_or(0) as u32
@@ -2012,10 +2020,14 @@ impl MessageStore {
                 "SELECT COUNT(*) FROM channel_messages m
                  WHERE m.server_id = ?1 AND m.channel_id = ?2
                    AND m.hidden_at IS NULL AND m.is_mine = 0
-                   AND m.timestamp >
-                       (SELECT s.timestamp FROM channel_messages s
-                         WHERE s.server_id = ?1 AND s.channel_id = ?2 AND s.message_id = ?3)",
-                params![server_id, channel_id, last_seen_message_id],
+                   AND m.timestamp > (SELECT MAX(v) FROM (
+                       SELECT s.timestamp AS v FROM channel_messages s
+                         WHERE s.server_id = ?1 AND s.channel_id = ?2 AND s.message_id = ?3
+                       UNION ALL SELECT CAST(value AS INTEGER) FROM app_settings WHERE key = ?4
+                       UNION ALL SELECT MAX(o.timestamp) FROM channel_messages o
+                         WHERE o.server_id = ?1 AND o.channel_id = ?2 AND o.is_mine = 1))",
+                params![server_id, channel_id, last_seen_message_id,
+                        format!("seen_ts:ch:{server_id}:{channel_id}")],
                 |row| row.get::<_, i64>(0),
             )
             .unwrap_or(0) as u32
@@ -2025,9 +2037,13 @@ impl MessageStore {
     pub fn count_all_unread_dm(&self, peer_id: &str) -> u32 {
         self.conn
             .query_row(
-                "SELECT COUNT(*) FROM messages
-                 WHERE peer_id = ?1 AND hidden_at IS NULL AND is_mine = 0",
-                params![peer_id],
+                "SELECT COUNT(*) FROM messages m
+                 WHERE m.peer_id = ?1 AND m.hidden_at IS NULL AND m.is_mine = 0
+                   AND m.timestamp > COALESCE((SELECT MAX(v) FROM (
+                       SELECT CAST(value AS INTEGER) AS v FROM app_settings WHERE key = ?2
+                       UNION ALL SELECT MAX(o.timestamp) FROM messages o
+                         WHERE o.peer_id = ?1 AND o.is_mine = 1)), -1)",
+                params![peer_id, format!("seen_ts:dm:{peer_id}")],
                 |row| row.get::<_, i64>(0),
             )
             .unwrap_or(0) as u32
@@ -2037,10 +2053,14 @@ impl MessageStore {
     pub fn count_all_unread_channel(&self, server_id: &str, channel_id: &str) -> u32 {
         self.conn
             .query_row(
-                "SELECT COUNT(*) FROM channel_messages
-                 WHERE server_id = ?1 AND channel_id = ?2
-                   AND hidden_at IS NULL AND is_mine = 0",
-                params![server_id, channel_id],
+                "SELECT COUNT(*) FROM channel_messages m
+                 WHERE m.server_id = ?1 AND m.channel_id = ?2
+                   AND m.hidden_at IS NULL AND m.is_mine = 0
+                   AND m.timestamp > COALESCE((SELECT MAX(v) FROM (
+                       SELECT CAST(value AS INTEGER) AS v FROM app_settings WHERE key = ?3
+                       UNION ALL SELECT MAX(o.timestamp) FROM channel_messages o
+                         WHERE o.server_id = ?1 AND o.channel_id = ?2 AND o.is_mine = 1)), -1)",
+                params![server_id, channel_id, format!("seen_ts:ch:{server_id}:{channel_id}")],
                 |row| row.get::<_, i64>(0),
             )
             .unwrap_or(0) as u32
@@ -2060,20 +2080,28 @@ impl MessageStore {
         param_values.push(Box::new(server_id.to_string()));
         param_values.push(Box::new(channel_id.to_string()));
 
-        let mut param_idx = 3;
-        // Strictly newer in milliseconds than the seen row; a missing seen row makes the
-        // comparison NULL and counts 0.
+        param_values.push(Box::new(format!("seen_ts:ch:{server_id}:{channel_id}")));
+        let mut param_idx = 4;
+        // The same three-mark floor as `count_unread_channel`; with no pointer the
+        // sibling mark and our own newest post still floor, else everything counts.
         let seen_filter = if let Some(mid) = last_seen_message_id {
             param_values.push(Box::new(mid.to_string()));
             let f = format!(
-                "AND timestamp >
-                     (SELECT s.timestamp FROM channel_messages s
-                       WHERE s.server_id = ?1 AND s.channel_id = ?2 AND s.message_id = ?{param_idx})"
+                "AND timestamp > (SELECT MAX(v) FROM (
+                     SELECT s.timestamp AS v FROM channel_messages s
+                       WHERE s.server_id = ?1 AND s.channel_id = ?2 AND s.message_id = ?{param_idx}
+                     UNION ALL SELECT CAST(value AS INTEGER) FROM app_settings WHERE key = ?3
+                     UNION ALL SELECT MAX(o.timestamp) FROM channel_messages o
+                       WHERE o.server_id = ?1 AND o.channel_id = ?2 AND o.is_mine = 1))"
             );
             param_idx += 1;
             f
         } else {
-            String::new()
+            "AND timestamp > COALESCE((SELECT MAX(v) FROM (
+                 SELECT CAST(value AS INTEGER) AS v FROM app_settings WHERE key = ?3
+                 UNION ALL SELECT MAX(o.timestamp) FROM channel_messages o
+                   WHERE o.server_id = ?1 AND o.channel_id = ?2 AND o.is_mine = 1)), -1)"
+                .to_string()
         };
 
         for pattern in mention_patterns {
@@ -4384,6 +4412,131 @@ impl MessageStore {
         Ok(rows.filter_map(|r| r.ok()).collect())
     }
 
+    // ── Read markers (issue #80) ──────────────────────────────────
+    //
+    // A read pointer is the `seen:<key>` setting holding a message id. Siblings
+    // exchange it with the row's timestamp, because the other device may hold a
+    // different row set and has to place the pointer by time. A sibling's
+    // timestamp is kept as `seen_ts:<key>` too: it can arrive BEFORE the rows it
+    // covers are backfilled, and the counts floor on it either way.
+
+    /// Millisecond timestamp of the row a read pointer names; `None` when the
+    /// key is malformed or the row is absent locally.
+    pub fn read_marker_timestamp(&self, key: &str, message_id: &str) -> Option<i64> {
+        if let Some(peer) = key.strip_prefix("dm:") {
+            self.conn
+                .query_row(
+                    "SELECT timestamp FROM messages WHERE peer_id = ?1 AND message_id = ?2",
+                    params![peer, message_id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .ok()
+        } else if key.starts_with("ch:") {
+            self.conn
+                .query_row(
+                    "SELECT timestamp FROM channel_messages WHERE message_id = ?1",
+                    params![message_id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .ok()
+        } else {
+            None
+        }
+    }
+
+    /// Where reading stands for `key`: the later of the seen row's timestamp and
+    /// the sibling-reported `seen_ts:`. `None` when neither exists.
+    pub fn read_marker_floor(&self, key: &str) -> Option<i64> {
+        let row = self
+            .load_setting(&format!("seen:{key}"))
+            .ok()
+            .flatten()
+            .and_then(|mid| self.read_marker_timestamp(key, &mid));
+        let reported = self
+            .load_setting(&format!("seen_ts:{key}"))
+            .ok()
+            .flatten()
+            .and_then(|v| v.parse::<i64>().ok());
+        match (row, reported) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (a, None) => a,
+            (None, b) => b,
+        }
+    }
+
+    /// Every read pointer with a resolvable timestamp, as `(key, message_id, ts)`;
+    /// `message_id` is empty for a conversation known only through a sibling mark.
+    pub fn read_markers_snapshot(&self) -> Vec<(String, String, i64)> {
+        let mut keys: Vec<(String, String)> = Vec::new();
+        for (k, mid) in self.load_settings_with_prefix("seen:").unwrap_or_default() {
+            if let Some(key) = k.strip_prefix("seen:") {
+                keys.push((key.to_string(), mid));
+            }
+        }
+        for (k, _) in self.load_settings_with_prefix("seen_ts:").unwrap_or_default() {
+            if let Some(key) = k.strip_prefix("seen_ts:") {
+                if !keys.iter().any(|(existing, _)| existing == key) {
+                    keys.push((key.to_string(), String::new()));
+                }
+            }
+        }
+        keys.into_iter()
+            .filter_map(|(key, mid)| {
+                let ts = self.read_marker_floor(&key)?;
+                Some((key, mid, ts))
+            })
+            .collect()
+    }
+
+    /// Adopt a sibling's read pointer for `key` when `ts` is later than where our
+    /// reading stands: `seen_ts:` records it, and the newest local row at or before
+    /// it becomes the seen message. Returns the pointer that now applies, empty
+    /// when only the timestamp moved (no local row that old yet), `None` when
+    /// nothing changed.
+    pub fn apply_remote_read_marker(&self, key: &str, ts: i64) -> Result<Option<String>, String> {
+        if !key.starts_with("dm:") && !key.starts_with("ch:") {
+            return Err(format!("unknown read marker key: {key}"));
+        }
+        let current_ts = self.read_marker_floor(key).unwrap_or(-1);
+        if ts <= current_ts {
+            return Ok(None);
+        }
+        self.save_setting(&format!("seen_ts:{key}"), &ts.to_string())?;
+        let setting = format!("seen:{key}");
+        let candidate: Option<String> = if let Some(peer) = key.strip_prefix("dm:") {
+            self.conn
+                .query_row(
+                    "SELECT message_id FROM messages
+                     WHERE peer_id = ?1 AND timestamp <= ?2 AND message_id IS NOT NULL
+                     ORDER BY timestamp DESC, id DESC LIMIT 1",
+                    params![peer, ts],
+                    |row| row.get(0),
+                )
+                .ok()
+        } else if let Some(rest) = key.strip_prefix("ch:") {
+            let (sid, cid) = rest.split_once(':').ok_or("malformed channel read marker")?;
+            self.conn
+                .query_row(
+                    "SELECT message_id FROM channel_messages
+                     WHERE server_id = ?1 AND channel_id = ?2 AND timestamp <= ?3
+                       AND message_id IS NOT NULL
+                     ORDER BY timestamp DESC, id DESC LIMIT 1",
+                    params![sid, cid, ts],
+                    |row| row.get(0),
+                )
+                .ok()
+        } else {
+            None
+        };
+        let Some(mid) = candidate else { return Ok(Some(String::new())) };
+        // Same millisecond as the pointer we hold: only the timestamp moved.
+        if self.read_marker_timestamp(key, &mid) == Some(current_ts) {
+            return Ok(Some(String::new()));
+        }
+        self.save_setting(&setting, &mid)?;
+        Ok(Some(mid))
+    }
+
     /// Load a setting by key. Returns None if not set.
     pub fn load_setting(&self, key: &str) -> Result<Option<String>, String> {
         let mut stmt = self
@@ -5752,6 +5905,93 @@ mod tests {
         assert_eq!(store.count_unread_channel(sid, cid, "gone"), 0);
         let (total, _) = store.count_unread_channel_with_mentions(sid, cid, Some("ch-seen"), &[]);
         assert_eq!(total, 1);
+    }
+
+    /// Being last to speak reads the conversation on every device: own rows floor
+    /// the count even when the seen pointer never crossed them (#80).
+    #[test]
+    fn own_message_floors_unread_counts() {
+        let store = mem_store();
+        let peer = "friend_master";
+        store.insert(peer, "theirs-old", false, 1000, None, None, Some("t1"), None, None, None).unwrap();
+        store.insert(peer, "theirs-2", false, 1500, None, None, Some("t2"), None, None, None).unwrap();
+        store.insert(peer, "mine", true, 2000, None, None, Some("m1"), None, None, None).unwrap();
+        store.insert(peer, "theirs-new", false, 3000, None, None, Some("t3"), None, None, None).unwrap();
+        // Pointer at the oldest row, yet only the message after our reply counts.
+        assert_eq!(store.count_unread_dm(peer, "t1"), 1);
+        // Never opened on this device: same floor.
+        assert_eq!(store.count_all_unread_dm(peer), 1);
+
+        let (sid, cid) = ("s-floor", "c-floor");
+        store.insert_channel_message(sid, cid, "al", "theirs", false, 1000,
+            None, None, Some("c1"), None, None, None).unwrap();
+        store.insert_channel_message(sid, cid, "me", "mine", true, 2000,
+            None, None, Some("c2"), None, None, None).unwrap();
+        store.insert_channel_message(sid, cid, "al", "@everyone later", false, 3000,
+            None, None, Some("c3"), None, None, None).unwrap();
+        assert_eq!(store.count_unread_channel(sid, cid, "c1"), 1);
+        assert_eq!(store.count_all_unread_channel(sid, cid), 1);
+        let (total, mentions) = store.count_unread_channel_with_mentions(
+            sid, cid, Some("c1"), &["@everyone".to_string()]);
+        assert_eq!((total, mentions), (1, 1));
+        let (total, _) = store.count_unread_channel_with_mentions(sid, cid, None, &[]);
+        assert_eq!(total, 1);
+    }
+
+    /// A sibling's pointer is adopted by TIME against the rows this device holds,
+    /// advances only forward, and the snapshot round-trips it (#80).
+    #[test]
+    fn remote_read_marker_advances_by_time_and_never_regresses() {
+        let store = mem_store();
+        let peer = "friend_master";
+        store.insert(peer, "a", false, 1000, None, None, Some("d1"), None, None, None).unwrap();
+        store.insert(peer, "b", false, 2000, None, None, Some("d2"), None, None, None).unwrap();
+        store.insert(peer, "c", false, 3000, None, None, Some("d3"), None, None, None).unwrap();
+        let key = format!("dm:{peer}");
+
+        // The sibling read a row we do not hold (ts 2500): the newest row at or
+        // before it becomes our pointer.
+        assert_eq!(store.apply_remote_read_marker(&key, 2500).unwrap(), Some("d2".into()));
+        assert_eq!(store.load_setting("seen:dm:friend_master").unwrap().as_deref(), Some("d2"));
+        assert_eq!(store.count_unread_dm(peer, "d2"), 1);
+        // Older than what we hold: ignored.
+        assert_eq!(store.apply_remote_read_marker(&key, 1000).unwrap(), None);
+        // Same millisecond: nothing to move.
+        assert_eq!(store.apply_remote_read_marker(&key, 2000).unwrap(), None);
+        // Forward again: the pointer lands on the newest row, the mark keeps 9000
+        // so a row backfilled later at 4000 stays read.
+        assert_eq!(store.apply_remote_read_marker(&key, 9000).unwrap(), Some("d3".into()));
+        store.insert(peer, "late", false, 4000, None, None, Some("d4"), None, None, None).unwrap();
+        assert_eq!(store.count_unread_dm(peer, "d3"), 0);
+        assert_eq!(store.read_marker_floor(&key), Some(9000));
+        store.insert(peer, "after", false, 9500, None, None, Some("d5"), None, None, None).unwrap();
+        assert_eq!(store.count_unread_dm(peer, "d3"), 1);
+        // Earlier than every local row and no pointer yet: the mark alone is
+        // kept, and the count without a pointer floors on it.
+        assert_eq!(store.apply_remote_read_marker("dm:nobody", 5).unwrap(), Some(String::new()));
+        store.insert("nobody", "x", false, 3, None, None, Some("n1"), None, None, None).unwrap();
+        store.insert("nobody", "y", false, 8, None, None, Some("n2"), None, None, None).unwrap();
+        assert_eq!(store.count_all_unread_dm("nobody"), 1);
+
+        let (sid, cid) = ("s-rm", "c-rm");
+        store.insert_channel_message(sid, cid, "al", "x", false, 100,
+            None, None, Some("k1"), None, None, None).unwrap();
+        store.insert_channel_message(sid, cid, "al", "y", false, 200,
+            None, None, Some("k2"), None, None, None).unwrap();
+        let ch_key = format!("ch:{sid}:{cid}");
+        assert_eq!(store.apply_remote_read_marker(&ch_key, 150).unwrap(), Some("k1".into()));
+        assert!(store.apply_remote_read_marker("bogus:key", 1).is_err());
+
+        let mut snap = store.read_markers_snapshot();
+        snap.sort();
+        assert_eq!(snap, vec![
+            (ch_key.clone(), "k1".to_string(), 150),
+            (key.clone(), "d3".to_string(), 9000),
+            ("dm:nobody".to_string(), String::new(), 5),
+        ]);
+        assert_eq!(store.read_marker_timestamp(&key, "d1"), Some(1000));
+        assert_eq!(store.read_marker_timestamp(&ch_key, "k2"), Some(200));
+        assert_eq!(store.read_marker_timestamp(&key, "missing"), None);
     }
 
     // ── Storage Manager ────────────────────────────────────────────────────

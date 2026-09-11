@@ -1,5 +1,8 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 import 'package:hollow/src/core/providers/notification_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
@@ -13,8 +16,82 @@ import 'package:hollow/src/core/providers/unread_marker_provider.dart';
 /// app_settings under `seen:ch:{serverId}:{channelId}` / `seen:dm:{peerId}`.
 /// The count compares that pointer with the latest in-memory message id.
 class UnreadNotifier extends Notifier<UnreadState> {
+  /// Per-conversation debounce for the sibling read-marker push (#80): reading
+  /// at the bottom of a busy channel moves the pointer once per message.
+  final Map<String, Timer> _markerPush = {};
+
   @override
   UnreadState build() => const UnreadState();
+
+  void _pushReadMarker(String key, String messageId) {
+    _markerPush.remove(key)?.cancel();
+    _markerPush[key] = Timer(const Duration(milliseconds: 400), () {
+      _markerPush.remove(key);
+      network_api
+          .syncReadMarker(key: key, messageId: messageId)
+          .catchError((_) {});
+    });
+  }
+
+  /// Adopts sibling read pointers (#80) and returns the ones that moved, so the
+  /// caller can retire their notification surfaces. Never pushed back: the
+  /// sender already holds them.
+  Future<List<storage_api.AppliedReadMarker>> applyRemoteReadMarkers(
+      List<network_api.ReadMarkerEntry> markers) async {
+    final List<storage_api.AppliedReadMarker> applied;
+    try {
+      applied = await storage_api.applyRemoteReadMarkers(markers: [
+        for (final m in markers)
+          storage_api.RemoteReadMarker(key: m.key, ts: m.ts),
+      ]);
+    } catch (_) {
+      return const [];
+    }
+    if (applied.isEmpty) return applied;
+    final dmSeen = Map<String, String>.from(state.dmLastSeen);
+    final dmCounts = Map<String, int>.from(state.dmUnreadCounts);
+    final chSeen = Map<String, String>.from(state.channelLastSeen);
+    final chCounts = Map<String, int>.from(state.channelUnreadCounts);
+    final chMentions = Map<String, int>.from(state.channelMentionCounts);
+    final dmPeers = <String>[];
+    final channels = <String, List<String>>{};
+    for (final m in applied) {
+      // An empty id means only the sibling's timestamp moved (its row is not
+      // here yet): the pointer stays, the recount below floors on the mark.
+      if (m.key.startsWith('dm:')) {
+        final peer = m.key.substring(3);
+        if (m.messageId.isNotEmpty) dmSeen[peer] = m.messageId;
+        dmCounts.remove(peer);
+        dmPeers.add(peer);
+      } else if (m.key.startsWith('ch:')) {
+        final rest = m.key.substring(3);
+        final i = rest.indexOf(':');
+        if (i <= 0) continue;
+        if (m.messageId.isNotEmpty) chSeen[rest] = m.messageId;
+        chCounts.remove(rest);
+        chMentions.remove(rest);
+        channels
+            .putIfAbsent(rest.substring(0, i), () => [])
+            .add(rest.substring(i + 1));
+      }
+    }
+    state = state.copyWith(
+      dmLastSeen: dmSeen,
+      dmUnreadCounts: dmCounts,
+      channelLastSeen: chSeen,
+      channelUnreadCounts: chCounts,
+      channelMentionCounts: chMentions,
+    );
+    // The sibling may have read less than this device holds: recount from the
+    // DB, whose count carries the new pointer.
+    for (final peer in dmPeers) {
+      await recomputeDmUnread(peer);
+    }
+    for (final e in channels.entries) {
+      await recomputeServerUnread(e.key, e.value);
+    }
+    return applied;
+  }
 
   /// Load last-seen state from DB on startup and compute actual unread counts,
   /// respecting notification settings (All/Mentions/Nothing).
@@ -229,6 +306,7 @@ class UnreadNotifier extends Notifier<UnreadState> {
       key: 'seen:ch:$serverId:$channelId',
       value: latestMessageId,
     );
+    _pushReadMarker('ch:$serverId:$channelId', latestMessageId);
   }
 
   /// Mark a DM as seen.
@@ -259,6 +337,7 @@ class UnreadNotifier extends Notifier<UnreadState> {
       key: 'seen:dm:$peerId',
       value: latestMessageId,
     );
+    _pushReadMarker('dm:$peerId', latestMessageId);
   }
 
   /// Marks the DM with [peerId] read up to its newest message.

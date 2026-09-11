@@ -65,6 +65,32 @@ pub(crate) fn request_sibling_dm_backfill(
     );
 }
 
+/// Send a sibling every read pointer we hold (#80). Sibling detection has TWO
+/// paths (the inbox join-proof and the device-list ingest), so this fires from
+/// both, like the DM backfill request. One transient store open on a one-shot
+/// handshake path. Returns the marker count.
+pub(crate) fn send_read_markers_to_sibling(
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    sibling_peer_id: &str,
+    db_path: &str,
+    db_passphrase: &str,
+) -> usize {
+    let markers: Vec<ReadMarker> = crate::storage::MessageStore::open(db_path, db_passphrase)
+        .map(|s| s.read_markers_snapshot())
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(key, message_id, ts)| ReadMarker { key, message_id, ts })
+        .collect();
+    if markers.is_empty() { return 0; }
+    let n = markers.len();
+    hollow_log!("[HOLLOW-UNREAD] Sending {n} read marker(s) to sibling {sibling_peer_id}");
+    send_message_to_peer(
+        ws_cmd_tx, ws_room_peers, sibling_peer_id, HavenMessage::ReadMarkers { markers },
+    );
+    n
+}
+
 // -- Per-message Ed25519 signing helpers (v2 only since 0.8.5) --
 //
 // The retired v1 payload covered the TEXT only, so reply_to, file_id,
@@ -1450,6 +1476,9 @@ async fn ingest_sibling_device_list(
         // device-list ingest, so the DM backfill request must fire from both or it
         // silently never runs. `request_sibling_dm_backfill` throttles the pair.
         request_sibling_dm_backfill(
+            ws_cmd_tx, ws_room_peers, sender_peer_id, db_path, db_passphrase,
+        );
+        send_read_markers_to_sibling(
             ws_cmd_tx, ws_room_peers, sender_peer_id, db_path, db_passphrase,
         );
     }

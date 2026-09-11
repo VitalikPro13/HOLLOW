@@ -2450,6 +2450,7 @@ pub(crate) async fn handle_envelope_channel_message(
         public_key: pk,
         reply_to_own,
         duplicate: !is_new,
+        is_own: is_mine,
     }).await;
 }
 

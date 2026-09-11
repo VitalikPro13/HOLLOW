@@ -37,6 +37,9 @@
 #   G8  personal emotes converge (issue #76): a uploads one through the
 #       picker, b lists it with its image, a removes it and b drops it, then
 #       the reverse direction.
+#   G9  read state converges (issue #80): what b posts is never unread on a,
+#       a reading a DM or a channel clears b's badge, and a sibling that was
+#       OFFLINE while a read comes back with nothing to clear.
 #
 # ## -EdgeGates: the two refusals
 #
@@ -132,6 +135,10 @@ if ($EdgeGates) {
     $script:Gates['G8b b lists the emote and its image arrived']                    = 'SKIP'
     $script:Gates['G8c a removes it and b stops listing it']                        = 'SKIP'
     $script:Gates['G8d b uploads one and a lists it with its image']                = 'SKIP'
+    $script:Gates['G9a what b posts is never unread on a']                          = 'SKIP'
+    $script:Gates['G9b a reading the DM clears the badge on b']                     = 'SKIP'
+    $script:Gates['G9c a reading #general clears the badge on b']                   = 'SKIP'
+    $script:Gates['G9d b, offline while a read, comes back with nothing unread']    = 'SKIP'
     $script:CleanupGate = 'C  cleanup: a deleted the server it created'
 }
 $script:Gates[$script:CleanupGate] = 'SKIP'
@@ -432,6 +439,30 @@ function Get-DumpBodies($peer, $name, $key) {
         }
     }
     return $bodies
+}
+
+# One badge, straight from the unread provider the strip and the friend chips
+# render from. A missing entry is 0.
+function Get-UnreadCount($peer, $name, $kind, $key) {
+    $mapKey = if ($kind -eq 'dm') { 'dmUnreadCounts' } else { 'channelUnreadCounts' }
+    $map = (Get-DumpJson $peer $name).providers.$mapKey
+    if (-not $map) { return 0 }
+    $entry = $map.PSObject.Properties[$key]
+    if ($entry) { return [int]$entry.Value } else { return 0 }
+}
+
+# Poll a peer's badge until $test (a scriptblock over the count) holds. Returns
+# the last count seen, so a caller reports the number and not just a verdict.
+function Wait-UnreadCount($peer, $kind, $key, $test, $timeoutSeconds) {
+    $deadline = (Get-Date).AddSeconds($timeoutSeconds)
+    $count = 0
+    while ($true) {
+        Step $peer @{ op = 'dump'; name = "g9_$peer" }
+        $count = Get-UnreadCount $peer "g9_$peer" $kind $key
+        if (& $test $count) { return $count }
+        if ((Get-Date) -ge $deadline) { return $count }
+        Start-Sleep -Seconds 2
+    }
 }
 
 function Get-DumpCount($peer, $name, $key) {
@@ -1151,6 +1182,99 @@ try {
         foreach ($peer in @('a', 'b')) { Step $peer @{ op = 'shot'; name = "link-$runTag-$peer-g8" } }
         Close-Picker a
         Close-Picker b
+
+        # ---- G9: read state converges between the two devices (#80) -------
+        # Every peer looks at a surface the message will NOT land on, so an
+        # arrival has to show as a badge instead of being marked seen on the
+        # spot. Badges are read from the provider, never from pixels.
+        Say '9/9 read state: own posts never unread, reading on one device clears the other'
+        foreach ($peer in @('a', 'b')) {
+            Step $peer @{ op = 'open_server'; name = $server }
+            Step $peer @{ op = 'open_channel'; name = 'general' }
+        }
+        Step a @{ op = 'dump'; name = 'g9_ids' }
+        $serverRow = @((Get-DumpJson a 'g9_ids').providers.servers | Where-Object { $_.name -eq $server }) | Select-Object -First 1
+        $generalRow = @((Get-DumpJson a 'g9_ids').providers.channels | Where-Object { $_.name -eq 'general' }) | Select-Object -First 1
+        if (-not $serverRow -or -not $generalRow) { throw "could not resolve the ids of $server / #general from a's dump" }
+        $chanKey = "$($serverRow.id):$($generalRow.id)"
+        $isZero = { param($n) $n -eq 0 }
+        $isSome = { param($n) $n -ge 1 }
+
+        # G9a: b posts a DM while a sits in #general, then a channel message
+        # while a sits in the DM. Neither may badge a: they are a's own posts.
+        Open-Dm b 'probe-c'
+        Send-Dm b 'dm b own ${RUN}'
+        Step a @{ op = 'wait'; ms = 6000 }
+        $ownDm = Wait-UnreadCount a 'dm' $masterC $isZero 1
+        Step b @{ op = 'open_server'; name = $server }
+        Step b @{ op = 'open_channel'; name = 'general' }
+        Open-Dm a 'probe-c'
+        Send-Channel b 'general' 'ch b own ${RUN}'
+        Step a @{ op = 'wait'; ms = 6000 }
+        $ownCh = Wait-UnreadCount a 'ch' $chanKey $isZero 1
+        if ($ownDm -ne 0) { Add-Note "a badged its own DM (sent from b) with $ownDm unread" }
+        if ($ownCh -ne 0) { Add-Note "a badged its own #general post (sent from b) with $ownCh unread" }
+        Set-Gate 'G9a what b posts is never unread on a' $(if ($ownDm -eq 0 -and $ownCh -eq 0) { 'PASS' } else { 'FAIL' })
+
+        # G9b: c DMs while both a and b sit in #general; both badge; a opens
+        # the DM; b's badge has to clear without b touching anything.
+        foreach ($peer in @('a', 'b')) {
+            Step $peer @{ op = 'open_server'; name = $server }
+            Step $peer @{ op = 'open_channel'; name = 'general' }
+        }
+        Open-Dm c 'probe-a'
+        Send-Dm c 'dm c unread ${RUN}'
+        $badgeA = Wait-UnreadCount a 'dm' $masterC $isSome 30
+        $badgeB = Wait-UnreadCount b 'dm' $masterC $isSome 30
+        if ($badgeA -lt 1) { Add-Note "a never badged c's DM (count $badgeA)" }
+        if ($badgeB -lt 1) { Add-Note "b never badged c's DM (count $badgeB)" }
+        Open-Dm a 'probe-c'
+        Step a @{ op = 'wait_for'; target = 'text:dm c unread ${RUN}'; timeout_ms = 30000 }
+        $clearedB = Wait-UnreadCount b 'dm' $masterC $isZero 45
+        if ($clearedB -ne 0) { Add-Note "b still shows $clearedB unread for c after a read the DM" }
+        Set-Gate 'G9b a reading the DM clears the badge on b' $(if ($badgeA -ge 1 -and $badgeB -ge 1 -and $clearedB -eq 0) { 'PASS' } else { 'FAIL' })
+
+        # G9c: the channel twin. Both in the DM, c posts in #general, a opens it.
+        Open-Dm a 'probe-c'
+        Open-Dm b 'probe-c'
+        Step c @{ op = 'open_server'; name = $server }
+        Step c @{ op = 'open_channel'; name = 'general' }
+        Send-Channel c 'general' 'ch c unread ${RUN}'
+        $chBadgeA = Wait-UnreadCount a 'ch' $chanKey $isSome 30
+        $chBadgeB = Wait-UnreadCount b 'ch' $chanKey $isSome 30
+        if ($chBadgeA -lt 1) { Add-Note "a never badged c's #general post (count $chBadgeA)" }
+        if ($chBadgeB -lt 1) { Add-Note "b never badged c's #general post (count $chBadgeB)" }
+        Step a @{ op = 'open_server'; name = $server }
+        Step a @{ op = 'open_channel'; name = 'general' }
+        Step a @{ op = 'wait_for'; target = 'text:ch c unread ${RUN}'; timeout_ms = 30000 }
+        $chClearedB = Wait-UnreadCount b 'ch' $chanKey $isZero 45
+        if ($chClearedB -ne 0) { Add-Note "b still shows $chClearedB unread for #general after a read it" }
+        Set-Gate 'G9c a reading #general clears the badge on b' $(if ($chBadgeA -ge 1 -and $chBadgeB -ge 1 -and $chClearedB -eq 0) { 'PASS' } else { 'FAIL' })
+        foreach ($peer in @('a', 'b')) { Step $peer @{ op = 'shot'; name = "link-$runTag-$peer-g9-live" } }
+
+        # G9d: b goes OFFLINE. c DMs, a reads it. b comes back: the message has
+        # to be there (backfill) and already read (the marker snapshot), in
+        # whichever order those two arrive.
+        Backup-PeerArtifacts b 'g9-before-offline'
+        Stop-Peer b
+        Step a @{ op = 'open_server'; name = $server }
+        Step a @{ op = 'open_channel'; name = 'general' }
+        Open-Dm c 'probe-a'
+        Send-Dm c 'dm c offline ${RUN}'
+        $offBadgeA = Wait-UnreadCount a 'dm' $masterC $isSome 30
+        if ($offBadgeA -lt 1) { Add-Note "a never badged c's DM while b was offline (count $offBadgeA)" }
+        Open-Dm a 'probe-c'
+        Step a @{ op = 'wait_for'; target = 'text:dm c offline ${RUN}'; timeout_ms = 30000 }
+        Step a @{ op = 'wait'; ms = 2000 }
+        Restart-Peer b
+        Wait-ForConnected b
+        $backBadgeB = Wait-UnreadCount b 'dm' $masterC $isZero 90
+        Open-Dm b 'probe-c'
+        $backfilled = Invoke-SoftStep b @{ op = 'wait_for'; target = 'text:dm c offline ${RUN}'; timeout_ms = 90000 }
+        if (-not $backfilled.ok) { Add-Note "b never received c's offline-window DM after coming back" }
+        if ($backBadgeB -ne 0) { Add-Note "b came back with $backBadgeB unread for c although a had read it" }
+        Set-Gate 'G9d b, offline while a read, comes back with nothing unread' $(if ($offBadgeA -ge 1 -and $backfilled.ok -and $backBadgeB -eq 0) { 'PASS' } else { 'FAIL' })
+        Step b @{ op = 'shot'; name = "link-$runTag-b-g9-back" }
     }
     Say 'the journey ran to the end' 'Green'
 } catch {

@@ -560,6 +560,15 @@ Future<void> sendTypingIndicator({
   channelId: channelId,
 );
 
+/// Tell our own online siblings that `key` is read up to `message_id` (#80).
+/// Silently a no-op when the row is unknown here: a pointer without a timestamp
+/// cannot be placed on another device.
+Future<void> syncReadMarker({required String key, required String messageId}) =>
+    RustLib.instance.api.crateApiNetworkSyncReadMarker(
+      key: key,
+      messageId: messageId,
+    );
+
 /// Toggle invisible mode. Broadcasts StatusUpdate to all connected peers.
 Future<void> setInvisible({required bool invisible}) =>
     RustLib.instance.api.crateApiNetworkSetInvisible(invisible: invisible);
@@ -1631,6 +1640,7 @@ sealed class NetworkEvent with _$NetworkEvent {
     String? publicKey,
     required bool replyToOwn,
     required bool duplicate,
+    required bool isOwn,
   }) = NetworkEvent_ChannelMessageReceived;
   const factory NetworkEvent.messageSent({
     required String toPeer,
@@ -1756,6 +1766,12 @@ sealed class NetworkEvent with _$NetworkEvent {
   /// A device list was ingested for `master_peer_id` (multi-device, Phase 6).
   const factory NetworkEvent.deviceListUpdated({required String masterPeerId}) =
       NetworkEvent_DeviceListUpdated;
+
+  /// A sibling reported its read pointers (#80); Dart applies them through
+  /// `storage::apply_remote_read_markers`.
+  const factory NetworkEvent.readMarkersReceived({
+    required List<ReadMarkerEntry> markers,
+  }) = NetworkEvent_ReadMarkersReceived;
 
   /// A contact's identity changed in a way worth showing: a new device joined their
   /// identity, or one re-keyed. `peer_id` is the MASTER, `kind` is `new_device` or
@@ -2538,6 +2554,34 @@ class PushProfile {
           runtimeType == other.runtimeType &&
           displayName == other.displayName &&
           avatarBytes == other.avatarBytes;
+}
+
+/// FFI mirror of `node::types::ReadMarker`: one conversation's read pointer.
+class ReadMarkerEntry {
+  /// `dm:<master>` or `ch:<server>:<channel>`, the `seen:` suffix.
+  final String key;
+  final String messageId;
+
+  /// Millisecond timestamp of that message on the reporting device.
+  final PlatformInt64 ts;
+
+  const ReadMarkerEntry({
+    required this.key,
+    required this.messageId,
+    required this.ts,
+  });
+
+  @override
+  int get hashCode => key.hashCode ^ messageId.hashCode ^ ts.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ReadMarkerEntry &&
+          runtimeType == other.runtimeType &&
+          key == other.key &&
+          messageId == other.messageId &&
+          ts == other.ts;
 }
 
 /// Lightweight FFI mirror of node::types::ShareEntryRef.

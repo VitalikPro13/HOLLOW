@@ -622,6 +622,15 @@ All default to empty `const {}`. The `copyWith` method supports all seven fields
 
 `onChannelMessage()` accepts `{bool isMention = false}` to track mentions separately. `markChannelSeen()` clears both unread and mention counts.
 
+### Read state across devices (issue #80, 2026-09-11)
+
+The Rust count is floored by THREE marks, `MAX(seen row ts, app_settings['seen_ts:<key>'], newest own is_mine=1 ts)`, so being last to speak reads the conversation on every device even without sync, and a sibling's mark applies before the rows it covers are backfilled.
+
+- `markDmSeen`/`markChannelSeen` → `_pushReadMarker` (400 ms per-key debounce) → `network_api.syncReadMarker(key, messageId)` → Rust fans one `ReadMarkers` frame to our own ONLINE siblings. Offline siblings get the full snapshot from `on_verified_sibling` (both directions) and from the manual "Sync from this device" responder.
+- `NetworkEvent_ReadMarkersReceived` → `event_provider._applyRemoteReadMarkers` → `applyRemoteReadMarkers(markers)`: FFI `storage_api.applyRemoteReadMarkers` applies each through `MessageStore::apply_remote_read_marker` (monotonic by timestamp), then the notifier rewrites `dmLastSeen`/`channelLastSeen` for the ones that moved (an EMPTY `messageId` means only the timestamp mark moved; the pointer stays), drops their in-memory counts and RECOUNTS from the DB (`recomputeDmUnread`, `recomputeServerUnread`). event_provider then retires the in-app card and the mobile OS notification for those conversations.
+- Never route a remote marker through `markDmSeen`/`markChannelSeen`: that pushes it back to the sibling that sent it.
+- `ChannelMessageReceived` now carries `isOwn`; an own post marks the channel seen and never counts, notifies, or feeds the hint dedup. The hint path compares the sender through `deviceLinkProvider.sameIdentity` (Rust drops own-identity hints too).
+
 Helper methods: `channelMentionCount()`, `serverMentionCount()`, `isChannelMentioned()`.
 
 ### Persistence Format

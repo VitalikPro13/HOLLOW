@@ -53,6 +53,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   String dco_decode_String(dynamic raw);
 
   @protected
+  AppliedReadMarker dco_decode_applied_read_marker(dynamic raw);
+
+  @protected
   ArchiveChannelInfoFfi dco_decode_archive_channel_info_ffi(dynamic raw);
 
   @protected
@@ -219,6 +222,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<String> dco_decode_list_String(dynamic raw);
 
   @protected
+  List<AppliedReadMarker> dco_decode_list_applied_read_marker(dynamic raw);
+
+  @protected
   List<ArchiveChannelInfoFfi> dco_decode_list_archive_channel_info_ffi(
     dynamic raw,
   );
@@ -336,7 +342,13 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  List<ReadMarkerEntry> dco_decode_list_read_marker_entry(dynamic raw);
+
+  @protected
   List<(String, PlatformInt64)> dco_decode_list_record_string_i_64(dynamic raw);
+
+  @protected
+  List<RemoteReadMarker> dco_decode_list_remote_read_marker(dynamic raw);
 
   @protected
   List<SecurityAlertFfi> dco_decode_list_security_alert_ffi(dynamic raw);
@@ -504,6 +516,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   PushProfile dco_decode_push_profile(dynamic raw);
 
   @protected
+  ReadMarkerEntry dco_decode_read_marker_entry(dynamic raw);
+
+  @protected
   (String, PlatformInt64) dco_decode_record_string_i_64(dynamic raw);
 
   @protected
@@ -511,6 +526,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   RedeemOutcome dco_decode_redeem_outcome(dynamic raw);
+
+  @protected
+  RemoteReadMarker dco_decode_remote_read_marker(dynamic raw);
 
   @protected
   SecurityAlertFfi dco_decode_security_alert_ffi(dynamic raw);
@@ -644,6 +662,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   String sse_decode_String(SseDeserializer deserializer);
+
+  @protected
+  AppliedReadMarker sse_decode_applied_read_marker(
+    SseDeserializer deserializer,
+  );
 
   @protected
   ArchiveChannelInfoFfi sse_decode_archive_channel_info_ffi(
@@ -844,6 +867,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<String> sse_decode_list_String(SseDeserializer deserializer);
 
   @protected
+  List<AppliedReadMarker> sse_decode_list_applied_read_marker(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   List<ArchiveChannelInfoFfi> sse_decode_list_archive_channel_info_ffi(
     SseDeserializer deserializer,
   );
@@ -1001,7 +1029,17 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  List<ReadMarkerEntry> sse_decode_list_read_marker_entry(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   List<(String, PlatformInt64)> sse_decode_list_record_string_i_64(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  List<RemoteReadMarker> sse_decode_list_remote_read_marker(
     SseDeserializer deserializer,
   );
 
@@ -1219,6 +1257,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   PushProfile sse_decode_push_profile(SseDeserializer deserializer);
 
   @protected
+  ReadMarkerEntry sse_decode_read_marker_entry(SseDeserializer deserializer);
+
+  @protected
   (String, PlatformInt64) sse_decode_record_string_i_64(
     SseDeserializer deserializer,
   );
@@ -1228,6 +1269,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   RedeemOutcome sse_decode_redeem_outcome(SseDeserializer deserializer);
+
+  @protected
+  RemoteReadMarker sse_decode_remote_read_marker(SseDeserializer deserializer);
 
   @protected
   SecurityAlertFfi sse_decode_security_alert_ffi(SseDeserializer deserializer);
@@ -1390,6 +1434,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_String(String self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_applied_read_marker(
+    AppliedReadMarker self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_archive_channel_info_ffi(
@@ -1665,6 +1715,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_list_String(List<String> self, SseSerializer serializer);
 
   @protected
+  void sse_encode_list_applied_read_marker(
+    List<AppliedReadMarker> self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_list_archive_channel_info_ffi(
     List<ArchiveChannelInfoFfi> self,
     SseSerializer serializer,
@@ -1869,8 +1925,20 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_list_read_marker_entry(
+    List<ReadMarkerEntry> self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_list_record_string_i_64(
     List<(String, PlatformInt64)> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_remote_read_marker(
+    List<RemoteReadMarker> self,
     SseSerializer serializer,
   );
 
@@ -2166,6 +2234,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_push_profile(PushProfile self, SseSerializer serializer);
 
   @protected
+  void sse_encode_read_marker_entry(
+    ReadMarkerEntry self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_record_string_i_64(
     (String, PlatformInt64) self,
     SseSerializer serializer,
@@ -2176,6 +2250,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_redeem_outcome(RedeemOutcome self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_remote_read_marker(
+    RemoteReadMarker self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_security_alert_ffi(

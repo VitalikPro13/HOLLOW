@@ -100,6 +100,14 @@ Future<String?> loadSetting({required String key}) =>
 Future<List<SettingEntry>> loadSettingsWithPrefix({required String prefix}) =>
     RustLib.instance.api.crateApiStorageLoadSettingsWithPrefix(prefix: prefix);
 
+/// Adopt sibling read pointers (#80). Each advances by time and never regresses;
+/// only the ones that moved come back. Malformed keys are skipped, not fatal.
+Future<List<AppliedReadMarker>> applyRemoteReadMarkers({
+  required List<RemoteReadMarker> markers,
+}) => RustLib.instance.api.crateApiStorageApplyRemoteReadMarkers(
+  markers: markers,
+);
+
 /// Count unread, non-hidden DM messages newer than the last-seen message ID.
 Future<int> countUnreadDm({
   required String peerId,
@@ -388,6 +396,26 @@ Future<bool> hasPendingWipe() =>
 Future<void> performPendingWipe() =>
     RustLib.instance.api.crateApiStoragePerformPendingWipe();
 
+/// A read pointer that moved: Dart adopts `message_id` as the seen pointer for
+/// `key` and recounts that conversation.
+class AppliedReadMarker {
+  final String key;
+  final String messageId;
+
+  const AppliedReadMarker({required this.key, required this.messageId});
+
+  @override
+  int get hashCode => key.hashCode ^ messageId.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is AppliedReadMarker &&
+          runtimeType == other.runtimeType &&
+          key == other.key &&
+          messageId == other.messageId;
+}
+
 /// A friend entry returned to Dart.
 class FriendFfi {
   final String peerId;
@@ -422,6 +450,25 @@ class FriendFfi {
           direction == other.direction &&
           requestedAt == other.requestedAt &&
           updatedAt == other.updatedAt;
+}
+
+/// One read pointer a sibling reported, as Dart hands it back to the store.
+class RemoteReadMarker {
+  final String key;
+  final PlatformInt64 ts;
+
+  const RemoteReadMarker({required this.key, required this.ts});
+
+  @override
+  int get hashCode => key.hashCode ^ ts.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is RemoteReadMarker &&
+          runtimeType == other.runtimeType &&
+          key == other.key &&
+          ts == other.ts;
 }
 
 /// A single settings row for the batched prefix load.

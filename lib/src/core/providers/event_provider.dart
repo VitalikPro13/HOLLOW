@@ -48,6 +48,8 @@ import 'package:hollow/src/core/providers/vault_status_provider.dart';
 import 'package:hollow/src/core/providers/download_manager_provider.dart';
 import 'package:hollow/src/core/providers/notification_provider.dart';
 import 'package:hollow/src/core/providers/system_notification_provider.dart';
+import 'package:hollow/src/core/services/push_notification_service.dart'
+    as push;
 import 'package:hollow/src/core/providers/webrtc_provider.dart';
 import 'package:hollow/src/core/providers/call_provider.dart';
 import 'package:hollow/src/core/providers/voice_channel_provider.dart';
@@ -385,7 +387,7 @@ class EventStreamNotifier extends Notifier<bool> {
         }
 
       case NetworkEvent_ChannelMessageReceived(
-            :final serverId, :final channelId, :final fromPeer, :final text, :final timestamp, :final messageId, :final replyToMid, :final linkPreview, :final signature, :final publicKey, :final replyToOwn, :final duplicate):
+            :final serverId, :final channelId, :final fromPeer, :final text, :final timestamp, :final messageId, :final replyToMid, :final linkPreview, :final signature, :final publicKey, :final replyToOwn, :final duplicate, :final isOwn):
         ref.read(channelChatProvider.notifier).receiveMessage(
               serverId, channelId, fromPeer, text, timestamp, messageId, replyToMid,
               linkPreview: linkPreview,
@@ -393,6 +395,14 @@ class EventStreamNotifier extends Notifier<bool> {
               publicKey: publicKey,
             );
         ref.read(typingProvider.notifier).clearTyping('$serverId:$channelId', fromPeer);
+        // Our own post from another device (#80): being last to speak reads the
+        // channel, so it must never count unread, notify, or feed the hint path.
+        if (isOwn) {
+          if (messageId.isNotEmpty) _processedChannelMessageIds.add(messageId);
+          ref.read(unreadProvider.notifier).markChannelSeen(
+              serverId, channelId, messageId.isNotEmpty ? messageId : null);
+          break;
+        }
         // Duplicate delivery (row already in DB via a sync batch): the append keeps
         // an open pane current, but unread and notifications must not re-fire.
         if (duplicate) break;
@@ -776,6 +786,9 @@ class EventStreamNotifier extends Notifier<bool> {
         ref.read(profileAnimProvider.notifier).onProfileUpdated(peerId);
         _refreshPushHints();
 
+      case NetworkEvent_ReadMarkersReceived(:final markers):
+        _applyRemoteReadMarkers(markers);
+
       case NetworkEvent_DeviceListUpdated(:final masterPeerId):
         // Refresh the Dart device->identity map so attribution picks the list up.
         debugPrint('[HOLLOW] Device list updated: $masterPeerId');
@@ -988,7 +1001,11 @@ class EventStreamNotifier extends Notifier<bool> {
             :final messageId,
             :final hasEveryone, :final mentionedNames, :final isReplyToOwn):
         final localPeerId = ref.read(identityProvider).peerId ?? '';
-        if (fromPeer == localPeerId) break;
+        // The hint carries the sender DEVICE id; one from any of our own devices
+        // is our own post (#80).
+        if (ref.read(deviceLinkProvider).sameIdentity(fromPeer, localPeerId)) {
+          break;
+        }
         // Blocked sender — no unread badges from blocked users (master-keyed).
         if (ref
             .read(blockedUsersProvider)
@@ -1996,6 +2013,32 @@ class EventStreamNotifier extends Notifier<bool> {
 
   /// Resolve channel name and show notification. `isMention` is the ONE
   /// authoritative mention decision, computed at the event gate (#42).
+  /// A sibling read further than this device (#80): move the pointers, then
+  /// retire whatever notification surface those conversations still hold.
+  Future<void> _applyRemoteReadMarkers(List<ReadMarkerEntry> markers) async {
+    final applied = await ref
+        .read(unreadProvider.notifier)
+        .applyRemoteReadMarkers(markers);
+    final mobile = Platform.isAndroid || Platform.isIOS;
+    for (final m in applied) {
+      if (m.key.startsWith('dm:')) {
+        final peer = m.key.substring(3);
+        ref.read(systemNotificationProvider.notifier).dismissDm(peer);
+        if (mobile) push.dismissPeerNotification(peer).catchError((_) {});
+      } else if (m.key.startsWith('ch:')) {
+        final rest = m.key.substring(3);
+        final i = rest.indexOf(':');
+        if (i <= 0) continue;
+        final sid = rest.substring(0, i);
+        final cid = rest.substring(i + 1);
+        ref.read(systemNotificationProvider.notifier).dismissChannel(sid, cid);
+        if (mobile) {
+          push.dismissChannelNotification(sid, cid).catchError((_) {});
+        }
+      }
+    }
+  }
+
   Future<void> _notifyChannelWithName(String serverId, String channelId,
       String fromPeer, String text, bool isMention, String messageId) async {
     String? chName = ref.read(channelListProvider)[channelId]?.name;

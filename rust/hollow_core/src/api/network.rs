@@ -150,7 +150,7 @@ pub enum NetworkEvent {
     RoomCleared,
     Listening { address: String },
     MessageReceived { from_peer: String, text: String, timestamp: i64, message_id: String, reply_to_mid: String, link_preview: Option<LinkPreviewRef>, signature: Option<String>, public_key: Option<String>, is_own: bool, duplicate: bool },
-    ChannelMessageReceived { server_id: String, channel_id: String, from_peer: String, text: String, timestamp: i64, message_id: String, reply_to_mid: String, link_preview: Option<LinkPreviewRef>, signature: Option<String>, public_key: Option<String>, reply_to_own: bool, duplicate: bool },
+    ChannelMessageReceived { server_id: String, channel_id: String, from_peer: String, text: String, timestamp: i64, message_id: String, reply_to_mid: String, link_preview: Option<LinkPreviewRef>, signature: Option<String>, public_key: Option<String>, reply_to_own: bool, duplicate: bool, is_own: bool },
     MessageSent { to_peer: String, message_id: String, timestamp: i64, signature: Option<String>, public_key: Option<String> },
     ChannelMessageSent { server_id: String, channel_id: String, message_id: String, timestamp: i64, signature: Option<String>, public_key: Option<String> },
     MessageSendFailed { to_peer: String, error: String },
@@ -191,6 +191,9 @@ pub enum NetworkEvent {
     ProfileUpdated { peer_id: String },
     /// A device list was ingested for `master_peer_id` (multi-device, Phase 6).
     DeviceListUpdated { master_peer_id: String },
+    /// A sibling reported its read pointers (#80); Dart applies them through
+    /// `storage::apply_remote_read_markers`.
+    ReadMarkersReceived { markers: Vec<ReadMarkerEntry> },
     /// A contact's identity changed in a way worth showing: a new device joined their
     /// identity, or one re-keyed. `peer_id` is the MASTER, `kind` is `new_device` or
     /// `identity_key_changed`.
@@ -447,6 +450,15 @@ pub enum NetworkEvent {
     PublicChannelListReceived { server_id: String, server_name: String, channels: Vec<PublicChannelEntryFfi>, server_avatar: Option<Vec<u8>>, server_banner_thumb: Option<Vec<u8>> },
     PublicChannelSyncReceived { server_id: String, channel_id: String, messages: Vec<GuestSyncMessageFfi>, has_more: bool, sender_profiles: Vec<SyncSenderProfileFfi> },
     PublicChannelConfigChanged { server_id: String, channel_id: String, is_public: bool, channel_name: String, category: Option<String> },
+}
+
+/// FFI mirror of `node::types::ReadMarker`: one conversation's read pointer.
+pub struct ReadMarkerEntry {
+    /// `dm:<master>` or `ch:<server>:<channel>`, the `seen:` suffix.
+    pub key: String,
+    pub message_id: String,
+    /// Millisecond timestamp of that message on the reporting device.
+    pub ts: i64,
 }
 
 /// Lightweight FFI mirror of node::types::ShareEntryRef.
@@ -858,8 +870,8 @@ fn to_ffi_event(event: node::NetworkEvent) -> NetworkEvent {
         node::NetworkEvent::MessageReceived { from_peer, text, timestamp, message_id, reply_to_mid, link_preview, signature, public_key, is_own, duplicate } => {
             NetworkEvent::MessageReceived { from_peer, text, timestamp, message_id, reply_to_mid, link_preview: link_preview.map(Into::into), signature, public_key, is_own, duplicate }
         }
-        node::NetworkEvent::ChannelMessageReceived { server_id, channel_id, from_peer, text, timestamp, message_id, reply_to_mid, link_preview, signature, public_key, reply_to_own, duplicate } => {
-            NetworkEvent::ChannelMessageReceived { server_id, channel_id, from_peer, text, timestamp, message_id, reply_to_mid, link_preview: link_preview.map(Into::into), signature, public_key, reply_to_own, duplicate }
+        node::NetworkEvent::ChannelMessageReceived { server_id, channel_id, from_peer, text, timestamp, message_id, reply_to_mid, link_preview, signature, public_key, reply_to_own, duplicate, is_own } => {
+            NetworkEvent::ChannelMessageReceived { server_id, channel_id, from_peer, text, timestamp, message_id, reply_to_mid, link_preview: link_preview.map(Into::into), signature, public_key, reply_to_own, duplicate, is_own }
         }
         node::NetworkEvent::MessageSent { to_peer, message_id, timestamp, signature, public_key } => {
             NetworkEvent::MessageSent { to_peer, message_id, timestamp, signature, public_key }
@@ -941,6 +953,14 @@ fn to_ffi_event(event: node::NetworkEvent) -> NetworkEvent {
         node::NetworkEvent::SelfRevoked => NetworkEvent::SelfRevoked,
         node::NetworkEvent::DeviceListUpdated { master_peer_id } => {
             NetworkEvent::DeviceListUpdated { master_peer_id }
+        }
+        node::NetworkEvent::ReadMarkersReceived { markers } => {
+            NetworkEvent::ReadMarkersReceived {
+                markers: markers
+                    .into_iter()
+                    .map(|m| ReadMarkerEntry { key: m.key, message_id: m.message_id, ts: m.ts })
+                    .collect(),
+            }
         }
         node::NetworkEvent::SecurityAlert { peer_id, kind, detail, created_at } => {
             NetworkEvent::SecurityAlert { peer_id, kind, detail, created_at }
@@ -2958,6 +2978,32 @@ pub fn send_typing_indicator(server_id: String, channel_id: String) -> Result<()
     )
     .map_err(|e| format!("Failed to send command: {e}"))?;
 
+    Ok(())
+}
+
+/// Tell our own online siblings that `key` is read up to `message_id` (#80).
+/// Silently a no-op when the row is unknown here: a pointer without a timestamp
+/// cannot be placed on another device.
+#[frb]
+pub fn sync_read_marker(key: String, message_id: String) -> Result<(), String> {
+    let ts = {
+        let store = crate::api::storage::get_store();
+        let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+        let ms = guard.as_ref().ok_or("Message store is not open")?;
+        ms.read_marker_timestamp(&key, &message_id)
+    };
+    let Some(ts) = ts else { return Ok(()) };
+
+    let node = get_node();
+    let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
+    drop(guard);
+
+    let rt = get_runtime();
+    rt.block_on(cmd_tx.send(node::NodeCommand::SyncReadMarkers {
+        markers: vec![node::types::ReadMarker { key, message_id, ts }],
+    }))
+    .map_err(|e| format!("Failed to send command: {e}"))?;
     Ok(())
 }
 

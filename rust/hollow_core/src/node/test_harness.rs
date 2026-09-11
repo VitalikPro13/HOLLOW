@@ -15,7 +15,7 @@ use crate::crdt::server_state::ServerState;
 use crate::crypto::{CryptoStore, OlmManager};
 use crate::identity::native_identity::NativeKeypair;
 use super::crdt_store::CrdtStore;
-use super::types::{NetworkEvent, NodeCommand};
+use super::types::{NetworkEvent, NodeCommand, ReadMarker};
 use super::ws_client::{WsCommand, WsEvent};
 
 /// Process-wide guard: the resolver and the other global statics the nodes touch
@@ -21971,4 +21971,62 @@ async fn asset_pull_rotates_after_invalid_bytes() {
     drop(o);
     drop(g);
     drop(b);
+}
+
+// Read pointers travel between an identity's own devices (#80): the full set
+// when a sibling is verified, and one marker live on every pointer move. A
+// friend never receives them (`fan_to_own_siblings` targets siblings only).
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests vs the global resolver
+async fn read_markers_reach_siblings_on_verify_and_live() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+    const M_MASTER: u8 = 5;
+    const B_DEV: u8 = 6;
+    const C_DEV: u8 = 7;
+
+    let mut b = spawn_node_with_friends(&relay, M_MASTER, B_DEV, &[]).await;
+    // B has read a DM up to ts 4000 before C ever exists.
+    {
+        let store = b.store();
+        store.insert("friend_master", "one", false, 3000, None, None, Some("f1"), None, None, None).unwrap();
+        store.insert("friend_master", "two", false, 4000, None, None, Some("f2"), None, None, None).unwrap();
+        store.save_setting("seen:dm:friend_master", "f2").unwrap();
+    }
+
+    let mut c = spawn_node_with_friends(&relay, M_MASTER, C_DEV, &[]).await;
+    // The verified-sibling snapshot: C learns B's pointer with its timestamp.
+    let got = wait_event(&mut c, std::time::Duration::from_secs(8), |ev| {
+        matches!(ev, NetworkEvent::ReadMarkersReceived { markers }
+            if markers.iter().any(|m| m.key == "dm:friend_master" && m.message_id == "f2" && m.ts == 4000))
+    })
+    .await;
+    assert!(got, "C must receive B's read-marker snapshot on sibling verification");
+    drain_events(&mut b);
+    drain_events(&mut c);
+
+    // Live: C's pointer move reaches B and only B.
+    c.cmd_tx
+        .send(NodeCommand::SyncReadMarkers {
+            markers: vec![ReadMarker {
+                key: "ch:srv:chan".into(),
+                message_id: "k1".into(),
+                ts: 777,
+            }],
+        })
+        .await
+        .unwrap();
+    let got = wait_event(&mut b, std::time::Duration::from_secs(8), |ev| {
+        matches!(ev, NetworkEvent::ReadMarkersReceived { markers }
+            if markers == &[ReadMarker { key: "ch:srv:chan".into(), message_id: "k1".into(), ts: 777 }])
+    })
+    .await;
+    assert!(got, "B must receive C's live read marker");
+
+    drop(b);
+    drop(c);
 }

@@ -280,6 +280,11 @@ fn on_verified_sibling(
     send_personal_emotes_to_sibling(
         ws_cmd_tx, ws_room_peers, peer_id, db_path, db_passphrase,
     );
+    // Both sides send on verification, so whichever device read more while the
+    // other was away wins per conversation (#80).
+    super::crypto_handler::send_read_markers_to_sibling(
+        ws_cmd_tx, ws_room_peers, peer_id, db_path, db_passphrase,
+    );
     // Pull theirs too (in case WE are the empty device).
     hollow_log!(
         "[HOLLOW-MULTIDEV] Sibling {peer_id} verified — requesting their friend list"
@@ -2185,6 +2190,14 @@ async fn run_event_loop(
                                 &ws_cmd_tx, &ws_room_peers, &mut mls,
                                 &server_states, &bundle_keypair, &crypto_store,
                                 &local_peer_str, server_id, channel_id,
+                            );
+                        }
+                    }
+
+                    NodeCommand::SyncReadMarkers { markers } => {
+                        if let Ok(data) = serde_json::to_vec(&HavenMessage::ReadMarkers { markers }) {
+                            sync_handler::fan_to_own_siblings(
+                                &ws_cmd_tx, &ws_room_peers, &local_peer_str, &device_peer_id, data,
                             );
                         }
                     }
@@ -6967,6 +6980,7 @@ async fn handle_incoming_request(
                             public_key: pk,
                             reply_to_own,
                             duplicate: !is_new,
+                            is_own: is_mine,
                         })
                         .await;
                 }
@@ -7011,7 +7025,9 @@ async fn handle_incoming_request(
                             }
                             let sig_verified = sig_check == BackfillSig::Valid;
 
-                            let is_mine = msg.s == local_peer;
+                            // Through the resolver: a row authored by any of our own
+                            // devices is ours, or our own backfilled posts count unread.
+                            let is_mine = super::resolver::same_identity(&msg.s, &local_peer);
                             let already_exists = msg.mid.as_ref()
                                 .map(|mid| store.channel_message_exists(mid))
                                 .unwrap_or(false);
@@ -12704,6 +12720,19 @@ async fn handle_incoming_request(
             }
         }
 
+        HavenMessage::ReadMarkers { markers } => {
+            // SECURITY: read state is per identity; a friend must not move our
+            // pointers. The store apply and the never-regress rule live behind the
+            // FFI (Dart owns the unread state), so this only gates and forwards.
+            if !super::resolver::same_identity(peer_str, local_peer_str) {
+                hollow_log!("[HOLLOW-UNREAD] Dropped ReadMarkers from non-self peer {peer_str}");
+                return;
+            }
+            if markers.is_empty() { return; }
+            hollow_log!("[HOLLOW-UNREAD] Received {} read marker(s) from sibling {peer_str}", markers.len());
+            let _ = event_tx.send(NetworkEvent::ReadMarkersReceived { markers }).await;
+        }
+
         HavenMessage::SiblingStateSyncRequest => {
             // Multi-device MANUAL state sync: our OWN other device (the user tapped
             // "Sync from this device" on it, choosing US as the source) wants our
@@ -12752,8 +12781,12 @@ async fn handle_incoming_request(
             let emotes_sent = send_personal_emotes_to_sibling(
                 ws_cmd_tx, ws_room_peers, peer_str, db_path, db_passphrase,
             );
+            // 4) Where our reading stands, so the requester drops badges we cleared.
+            let markers_sent = super::crypto_handler::send_read_markers_to_sibling(
+                ws_cmd_tx, ws_room_peers, peer_str, db_path, db_passphrase,
+            );
             hollow_log!(
-                "[HOLLOW-SYNC] Manual state-sync from {peer_str}: announced {announced} server(s) + {friends_sent} friend(s) + {emotes_sent} personal emote row(s)"
+                "[HOLLOW-SYNC] Manual state-sync from {peer_str}: announced {announced} server(s) + {friends_sent} friend(s) + {emotes_sent} personal emote row(s) + {markers_sent} read marker(s)"
             );
         }
 
@@ -13216,6 +13249,11 @@ async fn handle_incoming_request(
         }
 
         HavenMessage::ChannelNotificationHint { server_id, channel_id, message_id, has_everyone, mentioned_names, is_reply: _, reply_to_sender } => {
+            // The room broadcast reaches our own siblings too, and a hint for our
+            // own post counted it unread on every other device (#80).
+            if super::resolver::same_identity(peer_str, local_peer_str) {
+                return;
+            }
             // Reply-to-ME only — the wire's bare `is_reply` fired the
             // mentions-only level on every reply to anyone (#42). Hints from
             // pre-0.9.1 senders carry no author → false (never over-notify).
