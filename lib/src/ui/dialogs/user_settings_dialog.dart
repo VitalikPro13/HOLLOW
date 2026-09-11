@@ -27,6 +27,7 @@ import 'package:hollow/src/ui/settings/audio_section.dart';
 import 'package:hollow/src/ui/settings/backup_section.dart';
 import 'package:hollow/src/ui/settings/devices_section.dart';
 import 'package:hollow/src/ui/settings/network_section.dart';
+import 'package:hollow/src/ui/settings/notification_settings_section.dart';
 import 'package:hollow/src/ui/settings/profile_section.dart';
 import 'package:hollow/src/ui/settings/security_section.dart';
 import 'package:hollow/src/ui/settings/shortcuts_section.dart';
@@ -97,6 +98,7 @@ enum _SettingsCategory {
   profile,
   appearance,
   accessibility,
+  notifications,
   network,
   storage,
   audio,
@@ -113,6 +115,7 @@ extension _SettingsCategoryMeta on _SettingsCategory {
         _SettingsCategory.profile => LucideIcons.user,
         _SettingsCategory.appearance => LucideIcons.palette,
         _SettingsCategory.accessibility => LucideIcons.accessibility,
+        _SettingsCategory.notifications => LucideIcons.bell,
         _SettingsCategory.network => LucideIcons.globe,
         _SettingsCategory.storage => LucideIcons.hardDrive,
         _SettingsCategory.audio => LucideIcons.mic,
@@ -128,6 +131,7 @@ extension _SettingsCategoryMeta on _SettingsCategory {
         _SettingsCategory.profile => 'Profile',
         _SettingsCategory.appearance => 'Appearance',
         _SettingsCategory.accessibility => 'Accessibility',
+        _SettingsCategory.notifications => 'Notifications',
         _SettingsCategory.network => 'Network',
         _SettingsCategory.storage => 'Files & Storage',
         _SettingsCategory.audio => 'Audio & Video',
@@ -150,6 +154,9 @@ extension _SettingsCategoryMeta on _SettingsCategory {
         _SettingsCategory.accessibility =>
           'accessibility contrast motion reduce animations transitions '
               'transparency blur text size voice screen reader voiceover',
+        _SettingsCategory.notifications =>
+          'notifications toast permission mute mentions servers channels test '
+              'sound',
         _SettingsCategory.network =>
           'network relay server domain connection offline delivery inbox '
               'buffer retention',
@@ -812,6 +819,7 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
       _SettingsCategory.profile => _buildProfileSection(),
       _SettingsCategory.appearance => const AppearanceSettingsView(),
       _SettingsCategory.accessibility => const AccessibilitySettingsView(),
+      _SettingsCategory.notifications => const NotificationSettingsView(),
       _SettingsCategory.network => _buildNetworkSection(),
       _SettingsCategory.storage => const StorageSettingsView(),
       _SettingsCategory.audio => const AudioVideoSettingsView(),

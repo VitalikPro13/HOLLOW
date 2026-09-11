@@ -186,6 +186,82 @@ Future<void> showLocalChannelNotification({
   );
 }
 
+/// Posts one test banner so the user can confirm notifications arrive. Throws
+/// so the caller can report the failure.
+Future<void> showTestNotification() async {
+  if (!Platform.isAndroid && !Platform.isIOS) {
+    throw StateError('This platform cannot post a test notification.');
+  }
+  final plugin = FlutterLocalNotificationsPlugin();
+  await _initNotificationPlugin(plugin);
+  // No payload and no group: a tap opens nothing, and the banner never counts
+  // as a child that keeps a DM or channel group summary alive.
+  await plugin.show(
+    _testNotifId,
+    'Hollow',
+    'Notifications are working on this device.',
+    const NotificationDetails(
+      android: AndroidNotificationDetails(
+        'hollow_messages',
+        'Messages',
+        channelDescription: 'Hollow message notifications',
+        importance: Importance.high,
+        priority: Priority.high,
+        icon: '@drawable/ic_stat_hollow',
+      ),
+      iOS: DarwinNotificationDetails(
+        presentAlert: true,
+        presentBanner: true,
+        presentSound: true,
+        interruptionLevel: InterruptionLevel.active,
+      ),
+    ),
+  );
+}
+
+/// Whether the OS currently lets Hollow post notifications, as Android or iOS
+/// reports it. Null when the platform cannot answer.
+Future<bool?> mobileNotificationsEnabled() async {
+  final plugin = FlutterLocalNotificationsPlugin();
+  try {
+    if (Platform.isAndroid) {
+      return await plugin
+          .resolvePlatformSpecificImplementation<
+              AndroidFlutterLocalNotificationsPlugin>()
+          ?.areNotificationsEnabled();
+    }
+    if (Platform.isIOS) {
+      final opts = await plugin
+          .resolvePlatformSpecificImplementation<
+              IOSFlutterLocalNotificationsPlugin>()
+          ?.checkPermissions();
+      return opts?.isEnabled;
+    }
+  } catch (_) {}
+  return null;
+}
+
+/// Shows the OS permission prompt where one is still available, and returns
+/// the OS answer. Null when it cannot be asked at all.
+Future<bool?> requestMobileNotificationPermission() async {
+  final plugin = FlutterLocalNotificationsPlugin();
+  try {
+    if (Platform.isAndroid) {
+      return await plugin
+          .resolvePlatformSpecificImplementation<
+              AndroidFlutterLocalNotificationsPlugin>()
+          ?.requestNotificationsPermission();
+    }
+    if (Platform.isIOS) {
+      return await plugin
+          .resolvePlatformSpecificImplementation<
+              IOSFlutterLocalNotificationsPlugin>()
+          ?.requestPermissions(alert: true, sound: true, badge: true);
+    }
+  } catch (_) {}
+  return null;
+}
+
 Future<void> _pushLog(String msg) async {
   try {
     final dir = await getApplicationDocumentsDirectory();
@@ -253,6 +329,12 @@ Future<void> _firebaseBackgroundHandler(RemoteMessage message) async {
 
   if (rustReady) {
     (displayName, avatarBytes, personKey) = await _resolveDmPushProfile(sender);
+    // The relay filter keys on device ids it knew at the last pref sync; a
+    // device linked since still wakes us, so the mute is re-checked here.
+    if (await _dmPushMuted(personKey)) {
+      await _pushLog('DM muted for $personKey, no banner');
+      return;
+    }
   }
 
   // Fetch and decrypt the content BEFORE showing the banner, so the user sees
@@ -277,6 +359,17 @@ Future<void> _firebaseBackgroundHandler(RemoteMessage message) async {
       contentShown, personKey, displayName, avatarBytes);
 
   await _pushLog('Handler complete');
+}
+
+/// The same `notif:dm:` setting the live path consults, read straight from
+/// the store because the background isolate has no providers.
+Future<bool> _dmPushMuted(String personKey) async {
+  try {
+    return await storage_api.loadSetting(key: 'notif:dm:$personKey') ==
+        'false';
+  } catch (_) {
+    return false;
+  }
 }
 
 /// Resolves the cached display name, avatar and per-PERSON notification key
@@ -892,6 +985,9 @@ const int _groupSummaryId = 0x40000001;
 // bundle; per-channel ids are a positive 31-bit FNV and never collide.
 const String _channelGroupKey = 'hollow_channel_group';
 const int _channelGroupSummaryId = 0x40000002;
+// Outside the per-peer and per-channel hash space, so the test banner can
+// never replace a real message card.
+const int _testNotifId = 0x40000003;
 
 Future<void> _showGenericNotification() async {
   final plugin = FlutterLocalNotificationsPlugin();

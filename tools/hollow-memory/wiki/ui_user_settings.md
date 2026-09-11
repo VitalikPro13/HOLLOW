@@ -20,7 +20,7 @@ Helper: `_bannerColorFromId(String id)` generates a deterministic HSL color from
 
 ## Category Navigation System
 
-`enum _SettingsCategory { profile, appearance, accessibility, network, storage, audio, shortcuts, security, devices, backup, updates, about }` with a `_SettingsCategoryMeta` extension providing each category's `icon`, `label`, and `searchTerms` (keywords so the rail search matches settings *inside* a category, e.g. "theme"→Appearance, "relay"→Network, "recovery"→Security).
+`enum _SettingsCategory { profile, appearance, accessibility, notifications, network, storage, audio, shortcuts, security, devices, backup, updates, about }` with a `_SettingsCategoryMeta` extension providing each category's `icon`, `label`, and `searchTerms` (keywords so the rail search matches settings *inside* a category, e.g. "theme"→Appearance, "relay"→Network, "recovery"→Security).
 
 The old monolithic "System" tab (8 sections) split into **Appearance / Network / Files & Storage / Audio & Video / Shortcuts**; the old "Security" tab (7 sections) split into **Security / Devices / Backup**.
 
@@ -717,3 +717,11 @@ Providers read/watched by this dialog:
 - `ringtoneDurationProvider` — async, cached total duration
 - `updaterProvider` — update state machine (status, manifest, progress, versions)
 - `serverListProvider` — for Twitch badge propagation
+
+## Notifications category (2026-09-11)
+
+`NotificationSettingsView` (`lib/src/ui/settings/notification_settings_section.dart`), the SAME widget the mobile settings tile pushes inside `_SettingsSubPage`. Three cards:
+
+- **System Notifications:** `StatusDot` (filled only when granted) + Allowed/Blocked/Unknown, the platform `detail` sentence, then ghost "Request permission" (only when `canRequest` and not granted), ghost "Open system settings" (only when `canOpenSettings`), filled "Send a test notification". Status comes from `checkNotificationPermission()` in `lib/src/core/services/notification_permission.dart`, loaded on init, re-checked when the window regains focus and after each action. Every button shows a spinner while busy and toasts on failure.
+- **Servers:** one row per `serverListProvider` entry (`ValueKey(serverId)`), level via the public `NotificationLevelSelector` (from `notifications_tab.dart`) on wide rows or `TriStateSegment<NotificationLevel>` under 380 logical px × text scale; a labelled chevron expands the row to `serverChannelsProvider(serverId)` (filtered `meCanSee`) with `ChannelOverrideDropdown` per channel. Channels load only while expanded. Collapsed rows show "N overrides" from a prefix scan of `channelOverrides`.
+- **Muted Direct Messages:** every `dmEnabled == false` key collapsed through `deviceLinkProvider.identityOf`, `HollowAvatar` + display name + ghost "Unmute" that writes every raw key behind the row plus the master.

@@ -57,7 +57,7 @@ class NotificationsTab extends ConsumerWidget {
           ),
           const SizedBox(height: HollowSpacing.md),
 
-          _NotificationLevelSelector(
+          NotificationLevelSelector(
             value: serverLevel,
             onChanged: (level) =>
                 notifNotifier.setServerLevel(serverId, level),
@@ -124,7 +124,7 @@ class NotificationsTab extends ConsumerWidget {
                       ),
                     ),
                     const SizedBox(width: HollowSpacing.md),
-                    _ChannelOverrideDropdown(
+                    ChannelOverrideDropdown(
                       value: override,
                       onChanged: (level) =>
                           notifNotifier.setChannelOverride(
@@ -140,12 +140,14 @@ class NotificationsTab extends ConsumerWidget {
   }
 }
 
-/// Server-level notification picker.
-class _NotificationLevelSelector extends StatelessWidget {
+/// Server-level notification picker. Shared with the Notifications category of
+/// user settings, which lists every server.
+class NotificationLevelSelector extends StatelessWidget {
   final NotificationLevel value;
   final ValueChanged<NotificationLevel> onChanged;
 
-  const _NotificationLevelSelector({
+  const NotificationLevelSelector({
+    super.key,
     required this.value,
     required this.onChanged,
   });
@@ -255,12 +257,14 @@ class _LevelChip extends StatelessWidget {
   }
 }
 
-/// Per-channel override selector.
-class _ChannelOverrideDropdown extends StatelessWidget {
+/// Per-channel override selector. Shared with the Notifications category of
+/// user settings.
+class ChannelOverrideDropdown extends StatelessWidget {
   final ChannelNotificationLevel value;
   final ValueChanged<ChannelNotificationLevel> onChanged;
 
-  const _ChannelOverrideDropdown({
+  const ChannelOverrideDropdown({
+    super.key,
     required this.value,
     required this.onChanged,
   });

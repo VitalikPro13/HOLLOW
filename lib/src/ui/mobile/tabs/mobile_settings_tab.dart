@@ -43,6 +43,7 @@ import 'package:hollow/src/rust/api/identity.dart' as identity_api;
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/ui/settings/network_section.dart'
     show GifProxySettingsCard, LinkPreviewSettingsCard;
+import 'package:hollow/src/ui/settings/notification_settings_section.dart';
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 import 'package:hollow/src/rust/api/twitch.dart' as twitch_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
@@ -210,6 +211,20 @@ class MobileSettingsTab extends ConsumerWidget {
           subtitle: 'Quality, mic gain & ringtone',
           onTap: () => _push(context, 'Audio & Video',
               const _AudioTab(key: ValueKey('audio'))),
+        ),
+        const SizedBox(height: HollowSpacing.sm),
+        _SettingsNavTile(
+          icon: LucideIcons.bell,
+          title: 'Notifications',
+          subtitle: 'Permission, servers, muted chats & test',
+          onTap: () => _push(
+              context,
+              'Notifications',
+              const Padding(
+                key: ValueKey('notifications'),
+                padding: EdgeInsets.all(HollowSpacing.lg),
+                child: NotificationSettingsView(),
+              )),
         ),
         const SizedBox(height: HollowSpacing.sm),
         _SettingsNavTile(

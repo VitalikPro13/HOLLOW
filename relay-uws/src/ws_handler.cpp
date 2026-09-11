@@ -1098,12 +1098,28 @@ void sweep_offline_buffer(RelayState& state) {
     }
 }
 
+// Muted DM senders ride the reserved `~dm` server-pref entry (sender device
+// id -> "nothing"), so the snapshot codec and set_push_prefs stay unchanged.
+static const char* DM_MUTE_PREF_KEY = "~dm";
+
+static bool dm_push_muted(const std::string& target_peer_id,
+                          const std::string& sender_peer_id, const RelayState& state) {
+    auto pit = state.push_prefs.find(target_peer_id);
+    if (pit == state.push_prefs.end()) return false;
+    auto dit = pit->second.find(DM_MUTE_PREF_KEY);
+    if (dit == pit->second.end()) return false;
+    auto sit = dit->second.channels.find(sender_peer_id);
+    return sit != dit->second.channels.end() && sit->second == "nothing";
+}
+
 static void try_push_notify(const std::string& target_peer_id,
                             const std::string& sender_peer_id, RelayState& state) {
     auto tok_it = state.push_tokens.find(target_peer_id);
     if (tok_it == state.push_tokens.end()) {
         return;
     }
+    // Only the wake-up is skipped; the deposit is already buffered.
+    if (dm_push_muted(target_peer_id, sender_peer_id, state)) return;
 
     auto now = std::chrono::steady_clock::now();
     auto& last = state.last_push_sent[target_peer_id];

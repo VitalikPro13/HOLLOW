@@ -9,7 +9,8 @@ import 'package:flutter_local_notifications/flutter_local_notifications.dart'
         DarwinNotificationAttachment,
         DarwinNotificationCategory,
         DarwinNotificationDetails,
-        MacOSFlutterLocalNotificationsPlugin;
+        MacOSFlutterLocalNotificationsPlugin,
+        NotificationsEnabledOptions;
 import 'package:flutter_local_notifications_platform_interface/flutter_local_notifications_platform_interface.dart'
     show NotificationResponse;
 import 'package:flutter_local_notifications_windows/flutter_local_notifications_windows.dart';
@@ -102,6 +103,11 @@ class DesktopNotificationService {
   static bool get isSupported =>
       Platform.isWindows || Platform.isMacOS || Platform.isLinux;
 
+  /// True once the OS notification backend accepted [init]. False means no
+  /// toast can fire this session, which is the only "permission" signal
+  /// Windows and Linux expose.
+  bool get isReady => _initialized;
+
   Future<void> init() => _initFuture ??= _init();
 
   Future<void> _init() async {
@@ -122,10 +128,15 @@ class DesktopNotificationService {
           onNotificationReceived: _onWindowsResponse,
         );
       } else if (Platform.isMacOS) {
-        // The permission prompt shows once, on the first message that needs a
-        // toast; the answer lands in System Settings > Notifications > Hollow.
+        // `initialize` IS the permission request, so the prompt shows at
+        // startup (the shell bootstrap awaits this), not at the first message.
+        // The alert and sound requests are spelled out rather than left to the
+        // plugin defaults, because that timing is a decision. The answer lands
+        // in System Settings > Notifications > Hollow.
         final granted = await _mac.initialize(
           DarwinInitializationSettings(
+            requestAlertPermission: true,
+            requestSoundPermission: true,
             requestBadgePermission: false,
             defaultPresentBadge: false,
             notificationCategories: [
@@ -161,6 +172,58 @@ class DesktopNotificationService {
       // Let a later message retry rather than caching the failure forever.
       _initFuture = null;
     }
+  }
+
+  /// What macOS reports about Hollow's notification authorization right now.
+  /// Null off macOS or when the OS does not answer. Goes through the SAME
+  /// plugin instance [init] configured: a second `initialize` would re-register
+  /// the reply category and re-raise the prompt.
+  Future<NotificationsEnabledOptions?> checkPermission() async {
+    if (!Platform.isMacOS) return null;
+    try {
+      return await _mac.checkPermissions();
+    } catch (e) {
+      notifLog('macOS checkPermissions failed: $e');
+      return null;
+    }
+  }
+
+  /// Asks macOS for alert and sound permission. Answers false without showing
+  /// anything once the user has denied it, so the caller offers system settings.
+  Future<bool> requestPermission() async {
+    if (!Platform.isMacOS) return false;
+    try {
+      final granted = await _mac.requestPermissions(alert: true, sound: true);
+      notifLog('macOS permission re-request granted=$granted');
+      return granted ?? false;
+    } catch (e) {
+      notifLog('macOS requestPermissions failed: $e');
+      return false;
+    }
+  }
+
+  /// Posts the "are notifications working" toast. No Reply action and an EMPTY
+  /// payload, so the open and reply handlers ignore a tap. Throws when the
+  /// backend is not up, since the caller shows the failure to the user.
+  Future<void> showTest() async {
+    await init();
+    if (!_initialized) {
+      throw StateError(
+          'Hollow could not reach the notification service on this device.');
+    }
+    const title = 'Hollow';
+    const body = 'Notifications are working on this device.';
+    final id = (_toastCounter++) & 0x7fffffff;
+    if (Platform.isWindows) {
+      await _win.show(id, title, body,
+          payload: '', details: const WindowsNotificationDetails());
+    } else if (Platform.isMacOS) {
+      await _mac.show(id, title, body,
+          payload: '', notificationDetails: const DarwinNotificationDetails());
+    } else {
+      await LocalNotification(title: title, body: body).show();
+    }
+    notifLog('test toast posted id=$id');
   }
 
   /// Writes the bundled icon to a temp file and returns its path, since the

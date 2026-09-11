@@ -93,9 +93,11 @@ Root: HKCU; Subkey: "Software\Classes\hollow\DefaultIcon"; ValueType: string; Va
 Root: HKCU; Subkey: "Software\Classes\hollow\shell\open\command"; ValueType: string; ValueData: """{app}\{#AppExeName}"" ""%1"""
 
 [Icons]
-Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExeName}"
+; AppUserModelID must match desktop_notification_service.dart, or Windows
+; toasts lose the app name and grouping.
+Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExeName}"; AppUserModelID: "com.anonlisten.hollow"
 Name: "{group}\{cm:UninstallProgram,{#AppName}}"; Filename: "{uninstallexe}"
-Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExeName}"; Tasks: desktopicon
+Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExeName}"; AppUserModelID: "com.anonlisten.hollow"; Tasks: desktopicon
 
 [Run]
 ; "Launch Hollow now" checkbox at the end of the installer

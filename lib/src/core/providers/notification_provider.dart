@@ -3,6 +3,7 @@ import 'dart:io' show Platform;
 
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 
@@ -41,8 +42,35 @@ enum ChannelNotificationLevel {
 /// - `notif:dm:{peerId}` → "true" / "false"
 class NotificationSettingsNotifier
     extends Notifier<NotificationSettingsState> {
+  /// Reserved relay pref key for muted DM senders; the relay reads the same
+  /// key (`DM_MUTE_PREF_KEY` in ws_handler.cpp).
+  static const String dmMutePrefKey = '~dm';
+
   @override
-  NotificationSettingsState build() => const NotificationSettingsState();
+  NotificationSettingsState build() {
+    // A muted friend's newly linked device must join the relay filter.
+    ref.listen(deviceLinkProvider, (_, _) {
+      if (state.dmEnabled.containsValue(false)) _syncPushPrefsToRelay();
+    });
+    return const NotificationSettingsState();
+  }
+
+  /// Every device id a muted DM key can wake us from: the stored key, its
+  /// master, and every device linked to that master.
+  Set<String> _mutedDmDeviceIds() {
+    final links = ref.read(deviceLinkProvider);
+    final out = <String>{};
+    for (final entry in state.dmEnabled.entries) {
+      if (entry.value) continue;
+      final master = links.identityOf(entry.key);
+      out.add(entry.key);
+      out.add(master);
+      for (final l in links.links.entries) {
+        if (l.value == master) out.add(l.key);
+      }
+    }
+    return out;
+  }
 
   /// Load all notification settings from DB.
   ///
@@ -113,6 +141,16 @@ class NotificationSettingsNotifier
       final server = prefs.putIfAbsent(
           sid, () => {'level': 'all', 'channels': <String, String>{}});
       (server['channels'] as Map<String, String>)[cid] = entry.value.name;
+    }
+    // Muted DMs ride the reserved `~dm` entry in the same server-pref shape,
+    // keyed by the sender's DEVICE ids because the relay never learns
+    // device→master; a wake carries the socket's device id.
+    final muted = _mutedDmDeviceIds();
+    if (muted.isNotEmpty) {
+      prefs[dmMutePrefKey] = {
+        'level': 'all',
+        'channels': <String, String>{for (final id in muted) id: 'nothing'},
+      };
     }
     try {
       network_api.setPushPrefs(prefsJson: jsonEncode(prefs));
@@ -193,6 +231,7 @@ class NotificationSettingsNotifier
     final updated = Map<String, bool>.from(state.dmEnabled);
     updated[peerId] = enabled;
     state = state.copyWith(dmEnabled: updated);
+    _syncPushPrefsToRelay();
   }
 
   /// Check if a given channel is effectively muted.

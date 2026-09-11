@@ -56,6 +56,24 @@ class MainActivity : FlutterFragmentActivity() {
                         }
                         result.success(null)
                     }
+                    // Per-app notification settings exist from O; older
+                    // releases only have the app details page.
+                    "openNotificationSettings" -> {
+                        val intent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                            Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                                .putExtra(Settings.EXTRA_APP_PACKAGE, packageName)
+                        } else {
+                            Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
+                                .setData(Uri.parse("package:$packageName"))
+                        }
+                        val opened = try {
+                            startActivity(intent)
+                            true
+                        } catch (e: Exception) {
+                            false
+                        }
+                        result.success(opened)
+                    }
                     "acquireWifiLock" -> {
                         if (wifiLock == null) {
                             val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
