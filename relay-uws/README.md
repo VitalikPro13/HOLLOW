@@ -71,6 +71,7 @@ Under Docker there is no fd store, so the buffers end with the container; certif
 ```bash
 cd test && g++ -std=c++17 -I../src test_snapshot_codec.cpp -o test_snapshot_codec && ./test_snapshot_codec
 cd test && g++ -std=c++17 -I../src test_turn_uris.cpp -o test_turn_uris && ./test_turn_uris
+cd test && g++ -std=c++17 -I../src test_kill_list.cpp -o test_kill_list && ./test_kill_list
 ```
 
 A side effect worth knowing: the relay now exits cleanly. It used to close only its listen socket on SIGTERM, and the periodic timers plus every open connection kept the event loop alive until systemd's 90-second stop timeout killed it, so a restart was a 90-second brownout for new connections. It is now well under a second.

@@ -13,6 +13,10 @@ void sweep_offline_buffer(RelayState& state);
 // runs it; a restored snapshot runs it once in case the budget shrank.
 void enforce_buffer_budget(RelayState& state);
 
+// Drop parked destroy signals nobody ever came back for. Called from main's
+// timer loop.
+void sweep_kill_list(RelayState& state);
+
 // Release multi-device link codes whose 5-minute TTL has elapsed (server-side
 // backstop; the live countdown is client-side). Called from main's timer loop.
 void sweep_link_codes(RelayState& state);

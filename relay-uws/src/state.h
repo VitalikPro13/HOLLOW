@@ -8,6 +8,7 @@
 #include <cstdint>
 
 #include <App.h>
+#include "kill_list.h"
 #include "license.h"
 #include "offline_index.h"
 #include "reports.h"
@@ -362,6 +363,11 @@ struct RelayState {
     std::unordered_map<std::string, LinkGuessState> link_guesses;
     // Insertion order, for O(1) eviction at MAX_LINK_GUESS_KEYS.
     std::deque<std::string> link_guess_fifo;
+
+    // Destroy signals waiting for devices that are not connected. The relay
+    // holds an opaque blob per target device id and hands it over on that
+    // device's next auth; only that device's ack removes it.
+    KillList kill_list;
 
     // Highest device-list version this relay has seen verify for each master
     // (RELAY-6). A revoked device keeps its last master-signed list forever and

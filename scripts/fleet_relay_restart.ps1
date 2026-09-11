@@ -29,10 +29,36 @@
 #   G4 b returns ALONE (the sender is still closed, so peer sync cannot be the
 #      source) and sees both messages: the DM in the conversation, the channel
 #      message in #general.
+#   G5 the destroy signal a parked for the CLOSED throwaway peer d came through
+#      the same restart and reaches d the moment it authenticates.
+#   G6 a guest socket cannot park one.
 #
 # a stays closed while b returns on purpose: with a online, b would receive
 # both messages from a's own database through peer sync and the relay would be
 # proven nothing.
+#
+# ## The kill-list gate (G5, G6)
+#
+# The relay parks a destroy signal for a device that is not connected and hands
+# it over on that device's next auth, and that registry rides the same restart
+# handoff as the buffers. d is a THROWAWAY identity minted for this gate alone,
+# never a or b, and the blob it is sent is a dummy string: a client verifies the
+# signature against its own master and drops this one, so nothing is ever wiped.
+#
+# Two pieces do not exist yet, and until they do the gate reports WARN instead
+# of a verdict:
+#   - a probe op `kill_deposit` with `target` (a device id) and `value` (the
+#     blob), which sends the relay {"type":"kill_deposit","targets":[target],
+#     "blob":value,"issued_at_ms":now};
+#   - a `devicePeerId` provider key in the probe dump, because the kill list is
+#     keyed by the DEVICE id a socket authenticates as and `peerId` is the
+#     MASTER id.
+# G6 additionally needs a socket that authenticates as a GUEST, which no fleet
+# instance does (that is the web viewer), so it reports WARN as written.
+#
+# The entry this gate deposits is removed only by its target's ack, which the
+# client cannot send yet, so each run leaves one dummy entry parked on the relay
+# until its 365-day sweep. One entry per run, bounded by the relay's own caps.
 #
 # The relay host is read from BUILD_GUIDE.md's deploy section: ssh as
 # ubuntu@141.227.186.209 with the passwordless key this machine already uses
@@ -66,6 +92,9 @@ $script:FleetVars = @{ RUN = (Get-Date -Format 'HHmmss') }
 $runRoot = Join-Path $env:TEMP 'hollow_fleet\run'
 $server = "rrs-$($script:FleetVars.RUN)"
 $journeyPeers = @('a', 'b')
+# d only ever exists to be the target of a parked destroy signal.
+$killPeer = 'd'
+$fleetPeers = @('a', 'b', $killPeer)
 
 function Say($message, $colour = 'Cyan') { Write-Host "[relay-restart] $message" -ForegroundColor $colour }
 
@@ -77,6 +106,8 @@ $script:Gates = [ordered]@{
     'G2 b closed: a sends a DM and a channel message, then closes'   = 'SKIP'
     'G3 relay restarted with nobody connected; journal shows handoff' = 'SKIP'
     'G4 b returns ALONE and sees both messages'                       = 'SKIP'
+    'G5 the parked kill signal survives the restart and reaches d'    = 'SKIP'
+    'G6 a guest socket cannot park a kill signal'                     = 'SKIP'
     'C  cleanup: no fleet server left on the relay'                   = 'SKIP'
 }
 $script:Notes = New-Object System.Collections.ArrayList
@@ -227,6 +258,22 @@ function Get-RelaySnapshotLines {
     return Invoke-Relay 'sudo -n journalctl -u hollow-relay --no-pager -o cat --since "-3min" | grep -F "[snapshot]" | tail -2'
 }
 
+function Get-RelayClock {
+    $out = Invoke-Relay 'date +%s'
+    return ((@($out) | Select-Object -Last 1)).Trim()
+}
+
+# Counts only, and the relay prints no peer id on this line: it says a parked
+# signal went out, never to whom.
+function Get-RelayKillDeliveriesSince($epoch) {
+    $remote = 'sudo -n journalctl -u hollow-relay --no-pager -o cat --since "@' + $epoch +
+              '" | grep -F "[kill] kill_signal delivered" | wc -l'
+    $text = ((@(Invoke-Relay $remote) | Select-Object -Last 1)).Trim()
+    $n = 0
+    if ([int]::TryParse($text, [ref]$n)) { return $n }
+    return 0
+}
+
 function Get-PeerLogLines($peer, $pattern) {
     $path = Join-Path $script:FleetStageRoot "$peer\hollow_debug.log"
     if (-not (Test-Path $path)) { return @() }
@@ -268,31 +315,35 @@ function Write-Evidence($label) {
 # --------------------------------------------------------------------------
 
 if (-not $SkipBuild) {
-    Say 'building and staging a,b (pass -SkipBuild when you have just built)'
-    Invoke-FleetScript @('-Build', '-Peers', 'a,b')
+    Say 'building and staging a,b,d (pass -SkipBuild when you have just built)'
+    Invoke-FleetScript @('-Build', '-Peers', ($fleetPeers -join ','))
 }
 
 if ($KeepIdentities) {
     Say 'keeping the identities that are already live (their relay mailboxes are not empty)' 'Yellow'
     if ((Get-LivePeers).Count -eq 0) {
         Say 'nothing is live (a build stops the fleet) - booting the existing fixtures'
-        Invoke-FleetScript @('-Live', '-Peers', 'a,b')
-        foreach ($peer in $journeyPeers) { $script:FleetConsumed[$peer] = 0 }
+        Invoke-FleetScript @('-Live', '-Peers', ($fleetPeers -join ','))
+        foreach ($peer in $fleetPeers) { $script:FleetConsumed[$peer] = 0 }
     }
 } else {
-    Start-FreshFleet $journeyPeers
+    Start-FreshFleet $fleetPeers
 }
 
 $live = Get-LivePeers
-foreach ($peer in $journeyPeers) {
+foreach ($peer in $fleetPeers) {
     if ($live -notcontains $peer) {
-        throw "peer '$peer' is not running. Start the fleet with: powershell -File scripts\fleet.ps1 -Live -Peers a,b (live: $($live -join ', '))"
+        throw "peer '$peer' is not running. Start the fleet with: powershell -File scripts\fleet.ps1 -Live -Peers a,b,d (live: $($live -join ', '))"
     }
 }
 Say "run tag $($script:FleetVars.RUN), server $server"
 
 $failure = $null
 $serverCreated = $false
+$killTarget = $null
+$killDeposited = $false
+$killHanded = 0
+$killRestored = 0
 
 try {
     Wait-ForConnected a | Out-Null
@@ -300,8 +351,23 @@ try {
     Step a @{ op = 'capture'; from = 'provider'; key = 'peerId'; as = 'PEER_A' }
     Step b @{ op = 'capture'; from = 'provider'; key = 'peerId'; as = 'PEER_B' }
 
+    # d is the kill-list fixture. The relay keys the list by the DEVICE id its
+    # socket authenticates as, not the master id the rest of the app shows.
+    Step $killPeer @{ op = 'capture'; from = 'provider'; key = 'peerId'; as = 'PEER_D' }
+    $deviceAnswer = Invoke-SoftStep $killPeer @{
+        op = 'capture'; from = 'provider'; key = 'devicePeerId'; as = 'DEVICE_D'
+    }
+    if ($deviceAnswer.ok) {
+        $killTarget = $script:FleetVars['DEVICE_D']
+    } else {
+        Add-Note "the probe has no devicePeerId provider key yet, so G5 cannot name a target ($($deviceAnswer.message))"
+    }
+    # Closed for the whole journey: a parked signal is only parked while its
+    # target is away.
+    Stop-Peer $killPeer
+
     # --- G1: friends, a server, both directions. ---------------------------
-    Say '1/4 friends + server baseline'
+    Say '1/6 friends + server baseline'
     Step b @{ op = 'tap'; target = 'semantics:Add friend'; index = 0 }
     Step b @{ op = 'tap'; target = 'text:Add Friend'; index = 0 }
     Step b @{ op = 'enter_text'; target = 'hint:Peer ID or nickname...'; value = '${PEER_A}' }
@@ -356,7 +422,7 @@ try {
     Set-Gate 'G1 a and b are friends, share rrs-RUN #general, talk both ways' 'PASS'
 
     # --- G2: b away; a sends into the void; a leaves too. -------------------
-    Say '2/4 b closes; a sends a DM and a channel message, then closes'
+    Say '2/6 b closes; a sends a DM and a channel message, then closes'
     # Let b's leave settle at the relay so the DM is buffered, not delivered
     # to a ghost socket, and the channel message reaches the ring.
     Stop-Peer b
@@ -370,6 +436,21 @@ try {
     Step a @{ op = 'enter_text'; target = 'field'; value = 'dm while away ${RUN}' }
     Step a @{ op = 'key'; value = 'enter' }
     Step a @{ op = 'wait_for'; target = 'text:dm while away ${RUN}'; timeout_ms = 30000 }
+
+    # Park a destroy signal for the closed throwaway. The blob is a dummy, so a
+    # client that verifies it against its own master drops it.
+    if ($killTarget) {
+        $deposit = Invoke-SoftStep a @{
+            op = 'kill_deposit'; target = $killTarget; value = "fleet-dummy-$($script:FleetVars.RUN)"
+        }
+        if ($deposit.ok) {
+            $killDeposited = $true
+            Add-Note 'a parked a dummy destroy signal for d'
+        } else {
+            Add-Note "kill_deposit is not a probe op yet ($($deposit.message))"
+        }
+    }
+
     # Let a's WS layer FLUSH both frames to the relay before it is killed; a
     # deposit has no client-visible ack, so this is a wait or a coin flip.
     Step a @{ op = 'wait'; ms = 6000 }
@@ -379,7 +460,7 @@ try {
     Set-Gate 'G2 b closed: a sends a DM and a channel message, then closes' 'PASS'
 
     # --- G3: the relay restarts with nobody from this fleet connected. ------
-    Say '3/4 relay restart with both instances closed'
+    Say '3/6 relay restart with both instances closed'
     $seconds = Restart-Relay
     Start-Sleep -Seconds 3
     $lines = @(Get-RelaySnapshotLines)
@@ -392,7 +473,10 @@ try {
         $dmFrames = [int]$Matches[1]
         $topicFrames = [int]$Matches[2]
     }
-    Add-Note ("relay restart took {0:n1}s; handoff carried {1} DM frame(s) and {2} topic frame(s)" -f $seconds, $dmFrames, $topicFrames)
+    # The handoff line counts kill entries too; G5 is where they are judged.
+    if ($handed -and $handed -match '(\d+) kill entries') { $killHanded = [int]$Matches[1] }
+    if ($restored -and $restored -match '(\d+) kill entries;') { $killRestored = [int]$Matches[1] }
+    Add-Note ("relay restart took {0:n1}s; handoff carried {1} DM frame(s), {2} topic frame(s) and {3} kill entr(ies)" -f $seconds, $dmFrames, $topicFrames, $killHanded)
     if ($handed -and $restored -and $dmFrames -ge 1 -and $topicFrames -ge 1 -and $seconds -lt 20) {
         Set-Gate 'G3 relay restarted with nobody connected; journal shows handoff' 'PASS'
     } else {
@@ -402,7 +486,7 @@ try {
     }
 
     # --- G4: b returns alone. -----------------------------------------------
-    Say '4/4 b returns ALONE (a still closed)'
+    Say '4/6 b returns ALONE (a still closed)'
     Restart-Peer b
     Wait-ForConnected b | Out-Null
     Step b @{ op = 'tap'; target = 'tooltip:probe-a' }
@@ -421,6 +505,46 @@ try {
         Write-Evidence 'G4'
         throw 'G4 failed: see the evidence above'
     }
+
+    # --- G5: d returns and is handed the parked signal. ---------------------
+    Say '5/6 d returns and is handed the parked destroy signal'
+    $since = Get-RelayClock
+    Restart-Peer $killPeer
+    $ready = Send-FleetStep $killPeer ([pscustomobject]@{
+        op = 'wait_for'; provider = 'connection'; equals = 'connected'; timeout_ms = 120000
+    }) 180
+    if (-not $ready.ok) { throw "d never reached Connected after the restart: $($ready.message)" }
+    # The signal rides out with auth_ok, so it is already sent by the time the
+    # connection settles; the pause is for journald, not for the relay.
+    Start-Sleep -Seconds 3
+    $delivered = Get-RelayKillDeliveriesSince $since
+
+    # A dummy blob must never cost anyone their data: d is still d.
+    Step $killPeer @{ op = 'capture'; from = 'provider'; key = 'peerId'; as = 'PEER_D_AFTER' }
+    $identityHeld = ($script:FleetVars['PEER_D_AFTER'] -eq $script:FleetVars['PEER_D'])
+    if (-not $identityHeld) {
+        Set-Gate 'G5 the parked kill signal survives the restart and reaches d' 'FAIL'
+        throw 'G5 failed: d lost its identity to a dummy blob, which no signature can have authorised'
+    }
+    if (-not $killDeposited) {
+        Set-Gate 'G5 the parked kill signal survives the restart and reaches d' 'WARN'
+        Add-Note 'G5 is coded but cannot run: the deposit needs the kill_deposit probe op and the devicePeerId provider key'
+    } elseif ($killHanded -ge 1 -and $killRestored -ge 1 -and $delivered -ge 1) {
+        Set-Gate 'G5 the parked kill signal survives the restart and reaches d' 'PASS'
+        Add-Note ("kill list: {0} handed over, {1} restored, {2} delivered on d's auth" -f $killHanded, $killRestored, $delivered)
+    } else {
+        Set-Gate 'G5 the parked kill signal survives the restart and reaches d' 'FAIL'
+        Add-Note "G5: handed=$killHanded restored=$killRestored delivered=$delivered"
+        throw 'G5 failed: the parked signal did not survive the restart or did not reach d'
+    }
+
+    # --- G6: a guest cannot park one. ---------------------------------------
+    Say '6/6 a guest socket cannot park a destroy signal'
+    # handle_kill_deposit refuses a guest before it reads a field and answers
+    # nothing at all, so the check is "no kill_deposited reply". Nothing in the
+    # fleet authenticates as a guest, so this waits on a guest client.
+    Set-Gate 'G6 a guest socket cannot park a kill signal' 'WARN'
+    Add-Note 'G6 is coded but cannot run: no fleet instance authenticates as a guest (that is the web viewer)'
 } catch {
     $failure = $_
     Say "FAILED: $($_.Exception.Message)" 'Red'
@@ -476,6 +600,7 @@ if ($script:Notes.Count -gt 0) {
 Write-Host ''
 Say "a = $($script:FleetVars.PEER_A)" 'DarkCyan'
 Say "b = $($script:FleetVars.PEER_B)" 'DarkCyan'
+Say "d = $($script:FleetVars.PEER_D) (throwaway, kill-list target only)" 'DarkCyan'
 
 if ($failure) { throw $failure }
 if (-not $KeepUp) {

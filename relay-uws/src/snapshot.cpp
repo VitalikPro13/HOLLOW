@@ -54,6 +54,9 @@ static snapshot::Data capture(const RelayState& st, Clock::time_point now) {
         d.topics.push_back(std::move(t));
     }
     for (const auto& [peer, tok] : st.push_tokens) d.push_tokens.push_back({peer, tok.token, tok.platform});
+    for (const auto& [target, e] : st.kill_list.entries) {
+        d.kills.push_back({target, e.issuer, e.blob, e.issued_at_ms, age_secs(e.stored_at, now)});
+    }
     for (const auto& [peer, servers] : st.push_prefs) {
         snapshot::PushPref p;
         p.peer = peer;
@@ -81,6 +84,14 @@ static void apply(RelayState& st, snapshot::Data&& d, Clock::time_point now) {
             for (auto& c : s.channels) pref.channels[c.channel] = std::move(c.level);
             servers[s.server] = std::move(pref);
         }
+    }
+
+    // Deposit order decides which entry a full kill list evicts first, so the
+    // oldest goes back in first.
+    std::sort(d.kills.begin(), d.kills.end(),
+              [](const snapshot::Kill& a, const snapshot::Kill& b) { return a.age_secs > b.age_secs; });
+    for (auto& k : d.kills) {
+        st.kill_list.restore(k.target, k.issuer, k.blob, k.issued_at_ms, at_from_age(k.age_secs, now));
     }
 
     // The eviction index must see every frame in the order the old process
@@ -164,10 +175,11 @@ void snapshot_to_fdstore(RelayState& st) {
     // Counts only: no key, room or peer id is ever printed.
     fprintf(stderr,
             "[snapshot] %s: %zu DM frames in %zu queues, %zu topic frames in %zu rings, "
-            "%zu opt-ins, %zu push tokens, %zu push prefs, %zu bytes\n",
+            "%zu opt-ins, %zu push tokens, %zu push prefs, %zu kill entries, %zu bytes\n",
             ok ? "handed to the fd store" : "fd store REFUSED (buffers end with this process)",
             d.dm_frames(), d.dm.size(), d.topic_frames(), d.topics.size(),
-            d.optin.size(), d.push_tokens.size(), d.push_prefs.size(), bytes.size());
+            d.optin.size(), d.push_tokens.size(), d.push_prefs.size(), d.kills.size(),
+            bytes.size());
 }
 
 void restore_from_fdstore(RelayState& st) {
@@ -209,14 +221,17 @@ void restore_from_fdstore(RelayState& st) {
     size_t dm_frames = d.dm_frames(), dm_queues = d.dm.size();
     size_t topic_frames = d.topic_frames(), rings = d.topics.size();
     size_t optins = d.optin.size(), tokens = d.push_tokens.size(), prefs = d.push_prefs.size();
+    size_t kills = d.kills.size();
     apply(st, std::move(d), Clock::now());
     // Whatever aged out while the service was down, and whatever a smaller
     // budget in this build no longer admits.
     sweep_offline_buffer(st);
     enforce_buffer_budget(st);
+    st.kill_list.sweep(Clock::now());
     fprintf(stderr,
             "[snapshot] restored %zu DM frames in %zu queues, %zu topic frames in %zu rings, "
-            "%zu opt-ins, %zu push tokens, %zu push prefs; %zu frames live after expiry\n",
-            dm_frames, dm_queues, topic_frames, rings, optins, tokens, prefs,
-            st.buffer_index.live);
+            "%zu opt-ins, %zu push tokens, %zu push prefs, %zu kill entries; "
+            "%zu frames live after expiry, %zu kill entries live\n",
+            dm_frames, dm_queues, topic_frames, rings, optins, tokens, prefs, kills,
+            st.buffer_index.live, st.kill_list.size());
 }

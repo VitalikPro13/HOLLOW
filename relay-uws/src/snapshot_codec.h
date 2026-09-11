@@ -6,15 +6,20 @@
 #include <vector>
 
 // Wire form of the relay state that outlives a service restart: the offline
-// delivery buffers, the registrations an offline peer cannot re-send, and push
-// tokens. Header-only and independent of RelayState so the round trip is unit
-// tested without a relay (test/test_snapshot_codec.cpp).
+// delivery buffers, the registrations an offline peer cannot re-send, push
+// tokens, and the destroy signals parked for devices that are not connected.
+// Header-only and independent of RelayState so the round trip is unit tested
+// without a relay (test/test_snapshot_codec.cpp).
 //
 // Timestamps travel as AGES. steady_clock values belong to the process that
 // took them; the reader rebuilds "at = now - age" on its own clock.
 namespace snapshot {
 
-static constexpr uint32_t VERSION = 1;
+// 2 added the parked destroy signals (`kills`). A version 1 snapshot still
+// decodes, with no kills, so a relay coming up on this build keeps the buffers
+// the previous one handed over.
+static constexpr uint32_t VERSION = 2;
+static constexpr uint32_t MIN_VERSION = 1;
 // One frame can never exceed the relay's maxPayloadLength, so a longer string
 // is corruption, not data.
 static constexpr uint32_t MAX_STRING_BYTES = 64u * 1024 * 1024;
@@ -67,6 +72,13 @@ struct PushPref {
     std::string peer;
     std::vector<ServerPref> servers;
 };
+struct Kill {
+    std::string target;
+    std::string issuer;
+    std::string blob;
+    int64_t issued_at_ms = 0;
+    uint32_t age_secs = 0;
+};
 
 struct Data {
     std::vector<DmQueue> dm;
@@ -74,6 +86,7 @@ struct Data {
     std::vector<Topic> topics;
     std::vector<PushToken> push_tokens;
     std::vector<PushPref> push_prefs;
+    std::vector<Kill> kills;
 
     size_t dm_frames() const {
         size_t n = 0;
@@ -234,17 +247,26 @@ inline std::string encode(const Data& d) {
         }
     }
 
+    w.count(d.kills.size());
+    for (const auto& k : d.kills) {
+        w.str(k.target);
+        w.str(k.issuer);
+        w.str(k.blob);
+        w.i64(k.issued_at_ms);
+        w.u32(k.age_secs);
+    }
+
     w.out.append("HRSE", 4);
     return w.out;
 }
 
-// False for anything that is not exactly one snapshot of this VERSION; `out`
-// is untouched in that case.
+// False for anything that is not exactly one snapshot of a version this build
+// reads; `out` is untouched in that case.
 inline bool decode(std::string_view bytes, Data& out) {
     detail::Reader r{bytes};
     Data d;
     uint32_t version = 0;
-    if (!r.tag("HRSN") || !r.u32(version) || version != VERSION) return false;
+    if (!r.tag("HRSN") || !r.u32(version) || version < MIN_VERSION || version > VERSION) return false;
 
     uint32_t n = 0;
     if (!r.count(n)) return false;
@@ -307,6 +329,16 @@ inline bool decode(std::string_view bytes, Data& out) {
             p.servers.push_back(std::move(s));
         }
         d.push_prefs.push_back(std::move(p));
+    }
+
+    if (version >= 2) {
+        if (!r.count(n)) return false;
+        for (uint32_t i = 0; i < n; i++) {
+            Kill k;
+            if (!r.str(k.target) || !r.str(k.issuer) || !r.str(k.blob) ||
+                !r.i64(k.issued_at_ms) || !r.u32(k.age_secs)) return false;
+            d.kills.push_back(std::move(k));
+        }
     }
 
     if (!r.tag("HRSE") || r.left() != 0) return false;

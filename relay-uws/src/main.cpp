@@ -182,6 +182,7 @@ int main(int argc, char** argv) {
             us_timer_set(buffer_timer, [](struct us_timer_t* t) {
                 auto* s = *reinterpret_cast<RelayState**>(us_timer_ext(t));
                 sweep_offline_buffer(*s);
+                sweep_kill_list(*s);
                 sweep_link_codes(*s);
                 sweep_link_guesses(*s);
                 s->reports.save_if_dirty();

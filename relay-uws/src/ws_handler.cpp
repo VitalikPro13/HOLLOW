@@ -322,6 +322,17 @@ static void handle_auth(SSLWebSocket* ws, PerSocketData* data,
     }
 
     send_json(ws, {{"type", "auth_ok"}});
+
+    // Out with the auth, before any join: a device whose identity is gone may
+    // never join a room again, and a phone that only wakes for push (a fetch
+    // socket) has to act on it too.
+    if (const auto* kill = state.kill_list.find(peer_id)) {
+        send_json(ws, {{"type", "kill_signal"},
+                       {"blob", kill->blob},
+                       {"issued_at_ms", kill->issued_at_ms}});
+        // Operational only: no peer id, no issuer, no blob.
+        fprintf(stderr, "[kill] kill_signal delivered\n");
+    }
     // privacy: no connection logging
 }
 
@@ -1098,6 +1109,10 @@ void sweep_offline_buffer(RelayState& state) {
     }
 }
 
+void sweep_kill_list(RelayState& state) {
+    state.kill_list.sweep(std::chrono::steady_clock::now());
+}
+
 // Muted DM senders ride the reserved `~dm` server-pref entry (sender device
 // id -> "nothing"), so the snapshot codec and set_push_prefs stay unchanged.
 static const char* DM_MUTE_PREF_KEY = "~dm";
@@ -1159,6 +1174,58 @@ static void handle_register_push_token(SSLWebSocket* ws, PerSocketData* data,
     state.push_tokens[data->peer_id] = { token, platform };
     send_json(ws, {{"type", "push_token_registered"}});
     // No logging — associating a peer_id with a push token is sensitive.
+}
+
+// Drop a peer's push token (wipe step 5). No reply: the caller is on its way
+// out and must not wait on the relay.
+static void handle_unregister_push_token(PerSocketData* data, RelayState& state) {
+    if (data->is_guest) return;
+    state.push_tokens.erase(data->peer_id);
+    // No logging - associating a peer_id with a push token is sensitive.
+}
+
+// Park a destroy signal for devices that are not connected. The blob is opaque:
+// the target verifies the signature itself, so a forged deposit dies there and
+// the relay learns nothing from one but which device ids to hand it to.
+//
+// Fields are type-checked rather than read through value(), which throws on a
+// type it did not expect.
+static void handle_kill_deposit(SSLWebSocket* ws, PerSocketData* data, const json& j,
+                                RelayState& state) {
+    if (data->is_guest) return;
+    // A fetch socket is a push isolate: it receives signals, it never issues.
+    if (data->is_fetch) return;
+
+    auto blob_it = j.find("blob");
+    if (blob_it == j.end() || !blob_it->is_string()) return;
+    const std::string& blob = blob_it->get_ref<const std::string&>();
+    if (blob.empty() || blob.size() > KillList::MAX_BLOB_BYTES) return;
+
+    auto issued_it = j.find("issued_at_ms");
+    if (issued_it == j.end() || !issued_it->is_number_integer()) return;
+    int64_t issued_at_ms = issued_it->get<int64_t>();
+    if (issued_at_ms <= 0) return;
+
+    auto targets_it = j.find("targets");
+    if (targets_it == j.end() || !targets_it->is_array()) return;
+
+    auto now = std::chrono::steady_clock::now();
+    size_t stored = 0, seen = 0;
+    for (const auto& t : *targets_it) {
+        if (++seen > KillList::MAX_TARGETS_PER_DEPOSIT) break;
+        if (!t.is_string()) continue;
+        const std::string& target = t.get_ref<const std::string&>();
+        // The target is a map KEY, so it must be a peer id and not free text.
+        if (!is_peer_id_shape(target)) continue;
+        if (state.kill_list.deposit(target, data->peer_id, blob, issued_at_ms, now)) stored++;
+    }
+    send_json(ws, {{"type", "kill_deposited"}, {"stored", stored}});
+    // No logging - the targets of a destroy are the social graph of an identity.
+}
+
+// The only removal a client can ask for, and always its own: no field is read.
+static void handle_kill_ack(PerSocketData* data, RelayState& state) {
+    state.kill_list.ack(data->peer_id);
 }
 
 // Store a peer's channel push prefs (RAM only, replaced wholesale). The app
@@ -2226,6 +2293,12 @@ static void handle_text_message(SSLWebSocket* ws, PerSocketData* data,
     } else if (type == "register_push_token") {
         handle_register_push_token(ws, data, j.value("token", ""),
                                    j.value("platform", ""), state);
+    } else if (type == "unregister_push_token") {
+        handle_unregister_push_token(data, state);
+    } else if (type == "kill_deposit") {
+        handle_kill_deposit(ws, data, j, state);
+    } else if (type == "kill_ack") {
+        handle_kill_ack(data, state);
     } else if (type == "set_push_prefs") {
         handle_set_push_prefs(data, j, state);
     } else if (type == "set_offline_buffer") {
@@ -2413,7 +2486,14 @@ void setup_ws_handler(uWS::SSLApp& app, RelayState& state, const Config& config)
 
             if (opCode == uWS::OpCode::TEXT) {
                 if (message.size() > 1024 * 1024) return;
-                handle_text_message(ws, data, message, state, config);
+                // A field of the wrong JSON type makes value() throw, and an
+                // exception unwinding into uSockets' C frames would end the
+                // process on one malformed frame from any client.
+                try {
+                    handle_text_message(ws, data, message, state, config);
+                } catch (const std::exception&) {
+                    return;
+                }
             } else if (opCode == uWS::OpCode::BINARY) {
                 // 1-byte 0x00 = guest keepalive, don't process or count
                 if (message.size() == 1 && static_cast<uint8_t>(message[0]) == 0x00) {
