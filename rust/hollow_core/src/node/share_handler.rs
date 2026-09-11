@@ -921,7 +921,7 @@ pub async fn handle_command_share_start(
             }
         }
     };
-    if let Err(e) = std::fs::create_dir_all(&resolved_dir) {
+    if let Err(e) = tokio::fs::create_dir_all(&resolved_dir).await {
         let _ = event_tx.send(NetworkEvent::ShareFailed {
             root_hash, error: format!("create save_dir: {e}"),
         }).await;
@@ -1939,20 +1939,20 @@ pub async fn handle_webrtc_share_chunk_complete(
         Some(rh) => rh,
         None => {
             hollow_log!("[SHARE-WEBRTC] no active share matches short_root {short_root}");
-            let _ = std::fs::remove_file(&temp_path);
+            let _ = tokio::fs::remove_file(&temp_path).await;
             return;
         }
     };
 
     // Read + delete the staged ciphertext.
-    let ct = match std::fs::read(&temp_path) {
+    let ct = match tokio::fs::read(&temp_path).await {
         Ok(b) => b,
         Err(e) => {
             hollow_log!("[SHARE-WEBRTC] read temp failed: {e}");
             return;
         }
     };
-    let _ = std::fs::remove_file(&temp_path);
+    let _ = tokio::fs::remove_file(&temp_path).await;
 
     let Some(state) = registry.get_mut(&root_hash) else { return; };
     let Some(ref manifest) = state.manifest else { return; };

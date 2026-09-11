@@ -2062,7 +2062,7 @@ pub(crate) async fn handle_webrtc_transfer_complete(
         ws_stream_transfer::StreamKind::File
     };
     let temp_path_buf = PathBuf::from(&temp_path);
-    let file_size = std::fs::metadata(&temp_path).map(|m| m.len()).unwrap_or(0);
+    let file_size = tokio::fs::metadata(&temp_path).await.map(|m| m.len()).unwrap_or(0);
     let request = ws_stream_transfer::StreamRequest {
         kind: stream_kind,
         id: transfer_id.clone(),
@@ -2251,7 +2251,7 @@ async fn handle_link_snapshot_stream(
     let Some(state) = pending_link_snapshots.remove(&link_id) else {
         // No decryption material registered for this link session — drop it.
         hollow_log!("[HOLLOW-LINK] No pending link state for {link_id} — dropping snapshot");
-        let _ = std::fs::remove_file(&request.temp_path);
+        let _ = tokio::fs::remove_file(&request.temp_path).await;
         let _ = event_tx.send(NetworkEvent::LinkFailed {
             link_id: bare_id,
             error: "no pending link session".to_string(),
@@ -2262,14 +2262,13 @@ async fn handle_link_snapshot_stream(
     // The inbound bytes are a full `.hollow` backup blob encrypted with the link
     // CODE. Rather than import in place, STASH the blob and code and signal a
     // restart, so the bootstrap imports it pre-node-start like a manual restore.
-    let outcome: Result<(), String> = (|| {
-        let blob = std::fs::read(&request.temp_path)
-            .map_err(|e| format!("read link blob: {e}"))?;
-        crate::api::storage::stash_pending_link(&blob, &state.code)
-            .map_err(|e| format!("stash failed: {e}"))
-    })();
+    let outcome: Result<(), String> = match tokio::fs::read(&request.temp_path).await {
+        Ok(blob) => crate::api::storage::stash_pending_link(&blob, &state.code)
+            .map_err(|e| format!("stash failed: {e}")),
+        Err(e) => Err(format!("read link blob: {e}")),
+    };
 
-    let _ = std::fs::remove_file(&request.temp_path);
+    let _ = tokio::fs::remove_file(&request.temp_path).await;
 
     match outcome {
         Ok(()) => {
@@ -2324,7 +2323,7 @@ async fn handle_file_stream_complete(
     match try_decrypt_file_stream(request, &pfs, db_path, db_passphrase).await {
         Ok(disk_path) => {
             // Success — consume the assembled stream.
-            let _ = std::fs::remove_file(&request.temp_path);
+            let _ = tokio::fs::remove_file(&request.temp_path).await;
             let _ = event_tx.send(NetworkEvent::FileCompleted { file_id, disk_path }).await;
         }
         Err(fail_reason) => {
@@ -2445,7 +2444,7 @@ async fn handle_shard_stream_complete(
 
     let Some(pss) = pending_shard_streams.remove(&key) else {
         hollow_log!("[HOLLOW-STREAM] No pending ShardStore for stream {key} — ignoring");
-        let _ = std::fs::remove_file(&request.temp_path);
+        let _ = tokio::fs::remove_file(&request.temp_path).await;
         return;
     };
     if let Ok(shard_bytes) = tokio::fs::read(&request.temp_path).await {
@@ -2464,7 +2463,7 @@ async fn handle_shard_stream_complete(
             };
             if !ok {
                 hollow_log!("[HOLLOW-SECURITY] DROPPED vault shard {shard_index} for {content_id} from {sender_peer}: missing or wrong per-shard hash");
-                let _ = std::fs::remove_file(&request.temp_path);
+                let _ = tokio::fs::remove_file(&request.temp_path).await;
                 return;
             }
         }
@@ -2493,7 +2492,7 @@ async fn handle_shard_stream_complete(
             }
         }
     }
-    let _ = std::fs::remove_file(&request.temp_path);
+    let _ = tokio::fs::remove_file(&request.temp_path).await;
 }
 
 /// Try to reconstruct a pending vault download after a new shard landed: gather
@@ -2649,7 +2648,7 @@ pub(crate) async fn stream_to_peer_bytes(
         // Vault shard bytes are already AES ciphertext and the WS fallback streams
         // this file raw, so it is staged as-is.
         let temp_path = file_transfer::files_dir().join(format!(".stream_shard_{id}.tmp"));
-        let _ = std::fs::write(&temp_path, data);
+        let _ = tokio::fs::write(&temp_path, data).await;
         let total_size = data.len() as u64;
         let kind_str = match kind {
             ws_stream_transfer::StreamKind::Shard { .. } => "shard",
@@ -2832,7 +2831,7 @@ pub(crate) async fn handle_envelope_file_header(
     if !auto_ok && share_ref.is_none() && aes_key.is_some() {
         declined_file_ids.insert(fid.clone());
         if let Some((temp_path, _, _)) = early_file_streams.remove(&fid) {
-            let _ = std::fs::remove_file(&temp_path);
+            let _ = tokio::fs::remove_file(&temp_path).await;
         }
         hollow_log!("[HOLLOW-FILE] Auto-download gate declined pushed MLS file {fid} ({size} bytes, server:{server_id}) — metadata kept, manual download available");
         // Header-time decline signal — see the DM/Olm arm twin.

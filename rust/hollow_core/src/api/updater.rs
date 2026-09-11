@@ -1,5 +1,4 @@
 use std::fs;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use base64::Engine as _;
@@ -170,7 +169,7 @@ pub fn download_update(
     let rt = get_runtime();
     rt.spawn(async move {
         if let Err(e) = download_inner(&url, &dest_path, &expected_sha256, &sink).await {
-            let _ = fs::remove_file(&dest_path);
+            let _ = tokio::fs::remove_file(&dest_path).await;
             let _ = sink.add(DownloadProgress {
                 bytes_downloaded: 0,
                 total_bytes: 0,
@@ -188,6 +187,8 @@ async fn download_inner(
     expected_sha256: &str,
     sink: &StreamSink<DownloadProgress>,
 ) -> Result<(), String> {
+    use tokio::io::AsyncWriteExt;
+
     let expected = normalise_expected_sha256(expected_sha256)?;
     if !url.starts_with("https://") {
         return Err("Update downloads must use https".to_string());
@@ -204,11 +205,13 @@ async fn download_inner(
 
     let dest = PathBuf::from(dest_path);
     if let Some(parent) = dest.parent() {
-        fs::create_dir_all(parent)
+        tokio::fs::create_dir_all(parent)
+            .await
             .map_err(|e| format!("Failed to create download directory: {e}"))?;
     }
 
-    let mut file = fs::File::create(&dest)
+    let mut file = tokio::fs::File::create(&dest)
+        .await
         .map_err(|e| format!("Failed to create file: {e}"))?;
 
     let mut bytes_downloaded: u64 = 0;
@@ -217,6 +220,7 @@ async fn download_inner(
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|e| format!("Stream error: {e}"))?;
         file.write_all(&chunk)
+            .await
             .map_err(|e| format!("Write error: {e}"))?;
         hasher.update(&chunk);
         bytes_downloaded += chunk.len() as u64;
@@ -233,7 +237,7 @@ async fn download_inner(
             return Err("Download cancelled".to_string());
         }
     }
-    file.flush().map_err(|e| format!("Write error: {e}"))?;
+    file.flush().await.map_err(|e| format!("Write error: {e}"))?;
     drop(file);
 
     let actual = hex::encode(hasher.finalize());

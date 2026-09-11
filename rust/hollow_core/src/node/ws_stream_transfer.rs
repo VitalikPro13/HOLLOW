@@ -99,10 +99,10 @@ pub async fn ws_stream_send(
     total_size: u64,
     start_offset: u64,
 ) {
-    use std::io::{Read, Seek};
+    use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
-    let mut file = match std::fs::File::open(source_path) {
-        Ok(f) => std::io::BufReader::new(f),
+    let mut file = match tokio::fs::File::open(source_path).await {
+        Ok(f) => tokio::io::BufReader::new(f),
         Err(e) => {
             hollow_log!("[HOLLOW-WS-STREAM] Failed to open source {}: {e}", source_path.display());
             return;
@@ -110,7 +110,7 @@ pub async fn ws_stream_send(
     };
 
     if start_offset > 0 {
-        if let Err(e) = file.seek(std::io::SeekFrom::Start(start_offset)) {
+        if let Err(e) = file.seek(std::io::SeekFrom::Start(start_offset)).await {
             hollow_log!("[HOLLOW-WS-STREAM] Failed to seek to offset {start_offset}: {e}");
             return;
         }
@@ -151,7 +151,7 @@ pub async fn ws_stream_send(
     }
 
     let mut read_buf = vec![0u8; first_data_cap];
-    let first_read = match file.read(&mut read_buf) {
+    let first_read = match file.read(&mut read_buf).await {
         Ok(n) => n,
         Err(e) => {
             hollow_log!("[HOLLOW-WS-STREAM] Failed to read first chunk: {e}");
@@ -174,7 +174,7 @@ pub async fn ws_stream_send(
     while bytes_sent < total_size {
         tokio::task::yield_now().await;
 
-        let n = match file.read(&mut cont_buf) {
+        let n = match file.read(&mut cont_buf).await {
             Ok(0) => break,
             Ok(n) => n,
             Err(e) => {

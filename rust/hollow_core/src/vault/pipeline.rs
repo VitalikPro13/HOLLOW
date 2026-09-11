@@ -657,8 +657,15 @@ mod tests {
 
     #[test]
     fn cache_write_and_check() {
+        // The cache writes through the at-rest layer, whose process-global key
+        // ring needs a store; a temp ring keeps this off the real identity.
+        let _g = crate::node::resolver::test_lock();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = dir.path().join("messages.db").to_string_lossy().to_string();
+        crate::node::at_rest::reset_for_test();
+        crate::node::at_rest::init(&db, &"6b".repeat(32)).expect("init ring");
+
         let data = b"cached file data";
-        // Use a unique content_id to avoid test interference
         let cid = content_id(data);
         let path = write_to_cache(&cid, "txt", data).unwrap();
         assert!(path.exists());
@@ -667,8 +674,7 @@ mod tests {
         assert!(found.is_some());
         assert_eq!(found.unwrap(), path);
 
-        // Cleanup
-        let _ = std::fs::remove_file(&path);
+        let _ = crate::node::at_rest::remove(&path);
     }
 
     #[test]

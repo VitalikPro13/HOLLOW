@@ -712,7 +712,8 @@ async fn run_event_loop(
     // legitimately exist on a fresh boot.
     {
         let files_dir = crate::node::file_transfer::files_dir();
-        if let Ok(entries) = std::fs::read_dir(&files_dir) {
+        let swept = tokio::task::spawn_blocking(move || {
+            let Ok(entries) = std::fs::read_dir(&files_dir) else { return 0u32 };
             let mut swept = 0u32;
             for entry in entries.flatten() {
                 let name = entry.file_name();
@@ -723,9 +724,12 @@ async fn run_event_loop(
                     }
                 }
             }
-            if swept > 0 {
-                hollow_log!("[HOLLOW-FILE] Startup swept {swept} orphaned stream temp(s) from files/");
-            }
+            swept
+        })
+        .await
+        .unwrap_or(0);
+        if swept > 0 {
+            hollow_log!("[HOLLOW-FILE] Startup swept {swept} orphaned stream temp(s) from files/");
         }
     }
 
@@ -2590,7 +2594,7 @@ async fn run_event_loop(
                             // Auto-download gate (issue #41): discard pushed bytes
                             // for a declined file (see the BinaryDirect twin).
                             hollow_log!("[HOLLOW-FILE] Discarding declined pushed WebRTC transfer {transfer_id}");
-                            let _ = std::fs::remove_file(&temp_path);
+                            let _ = tokio::fs::remove_file(&temp_path).await;
                             let _ = event_tx.send(NetworkEvent::FileFailed {
                                 file_id: transfer_id.clone(),
                                 error: "auto_download_off".to_string(),
@@ -3268,7 +3272,7 @@ async fn run_event_loop(
                         if !pending_ws_transfers.is_empty() {
                             hollow_log!("[HOLLOW-WS] Cleaning up {} in-progress WS transfers", pending_ws_transfers.len());
                             for (id, state) in pending_ws_transfers.drain() {
-                                let _ = std::fs::remove_file(&state.temp_path);
+                                let _ = tokio::fs::remove_file(&state.temp_path).await;
                                 hollow_log!("[HOLLOW-WS-STREAM] Abandoned transfer {id} due to disconnect");
                             }
                         }
@@ -4403,7 +4407,7 @@ async fn run_event_loop(
                             // instead of being parked forever in early_file_streams.
                             if declined_file_ids.contains(&completed.id) {
                                 hollow_log!("[HOLLOW-FILE] Discarding declined pushed stream {} ({} bytes)", completed.id, completed.size);
-                                let _ = std::fs::remove_file(&completed.temp_path);
+                                let _ = tokio::fs::remove_file(&completed.temp_path).await;
                                 // Clear any transfer state the UI picked up from a
                                 // progress tick that raced the decline — without
                                 // this the bubble shows a spinner at 100% forever.
@@ -4806,11 +4810,11 @@ async fn run_event_loop(
                                                                     let sk = crate::vault::content_store::shard_key(&assignment.content_id, assignment.shard_index);
                                                                     if let Ok(shard_bytes) = cs.read_shard_unchecked(&pool.server_id, &sk) {
                                                                         let temp_dir = std::env::temp_dir().join("hollow_recovery");
-                                                                        let _ = std::fs::create_dir_all(&temp_dir);
+                                                                        let _ = tokio::fs::create_dir_all(&temp_dir).await;
                                                                         let temp_path = temp_dir.join(format!("{}_{}.shard",
                                                                             &assignment.content_id[..8.min(assignment.content_id.len())],
                                                                             assignment.shard_index));
-                                                                        if std::fs::write(&temp_path, &shard_bytes).is_ok() {
+                                                                        if tokio::fs::write(&temp_path, &shard_bytes).await.is_ok() {
                                                                             let total_size = shard_bytes.len() as u64;
                                                                             hollow_log!("[RECOVERY-POOL] Sending shard {}:{} ({} bytes) to {}",
                                                                                 assignment.content_id, assignment.shard_index, total_size, assignment.dest_peer);
@@ -4824,7 +4828,7 @@ async fn run_event_loop(
                                                                                 total_size,
                                                                                 0,
                                                                             ).await;
-                                                                            let _ = std::fs::remove_file(&temp_path);
+                                                                            let _ = tokio::fs::remove_file(&temp_path).await;
 
                                                                             let received_msg = HavenMessage::RecoveryShardReceived {
                                                                                 content_id: assignment.content_id.clone(),
@@ -5268,18 +5272,19 @@ async fn run_event_loop(
                     channel_sync_sent.retain(|_, instant| instant.elapsed() < Duration::from_secs(30));
                     pending_shard_assembly.retain(|_, asm| asm.received_at.elapsed() < Duration::from_secs(600));
                     // Clean up orphaned early-arrival file streams (5 min TTL).
-                    let stale_early: Vec<String> = early_file_streams.iter()
-                        .filter(|(_, (tp, _, _))| {
-                            std::fs::metadata(tp)
-                                .and_then(|m| m.modified())
-                                .map(|t| t.elapsed().unwrap_or_default() >= Duration::from_secs(300))
-                                .unwrap_or(true)
-                        })
-                        .map(|(k, _)| k.clone())
-                        .collect();
+                    let mut stale_early: Vec<String> = Vec::new();
+                    for (id, (tp, _, _)) in early_file_streams.iter() {
+                        let stale = match tokio::fs::metadata(tp).await.and_then(|m| m.modified()) {
+                            Ok(t) => t.elapsed().unwrap_or_default() >= Duration::from_secs(300),
+                            Err(_) => true,
+                        };
+                        if stale {
+                            stale_early.push(id.clone());
+                        }
+                    }
                     for id in &stale_early {
                         if let Some((tp, _, _)) = early_file_streams.remove(id) {
-                            let _ = std::fs::remove_file(&tp);
+                            let _ = tokio::fs::remove_file(&tp).await;
                         }
                     }
                     if !stale_early.is_empty() {
@@ -8354,7 +8359,7 @@ async fn handle_incoming_request(
                         // below so the sender-side UI/late-joiner stays consistent.
                         pending_file_streams.remove(&fid);
                         if let Some((temp_path, _, _)) = early_file_streams.remove(&fid) {
-                            let _ = std::fs::remove_file(&temp_path);
+                            let _ = tokio::fs::remove_file(&temp_path).await;
                         }
                         hollow_log!("[HOLLOW-FILE] FileHeader for {fid} ignored — already complete on disk");
                     }
@@ -8456,7 +8461,7 @@ async fn handle_incoming_request(
                                     hollow_log!("[HOLLOW-SECURITY] REJECTED inline FileHeader from {peer_str}: bad file id or extension");
                                 } else {
                                     let files_dir = file_transfer::files_dir();
-                                    let _ = std::fs::create_dir_all(&files_dir);
+                                    let _ = tokio::fs::create_dir_all(&files_dir).await;
                                     let disk_path = file_transfer::final_file_path(&fid, &ext);
                                     if crate::node::at_rest::write_all(&disk_path, &plaintext).is_ok() {
                                         let disk_str = disk_path.to_string_lossy().to_string();
@@ -8484,7 +8489,7 @@ async fn handle_incoming_request(
                     {
                         declined_file_ids.insert(fid.clone());
                         if let Some((temp_path, _, _)) = early_file_streams.remove(&fid) {
-                            let _ = std::fs::remove_file(&temp_path);
+                            let _ = tokio::fs::remove_file(&temp_path).await;
                         }
                         hollow_log!("[HOLLOW-FILE] Auto-download gate declined pushed file {fid} ({size} bytes, {auto_dl_key}) — metadata kept, manual download available");
                         // Tell Dart NOW, at header time: the transfer provider flags
@@ -8861,7 +8866,7 @@ async fn handle_incoming_request(
                                         let shard_safe_prefix = &cid[..16.min(cid.len())];
                                         let shard_temp_name = format!(".stream_shard_{}_{}.tmp", shard_safe_prefix, si);
                                         let shard_temp_path = shard_temp_dir.join(&shard_temp_name);
-                                        if let Ok(()) = std::fs::write(&shard_temp_path, &shard_data) {
+                                        if let Ok(()) = tokio::fs::write(&shard_temp_path, &shard_data).await {
                                             let shard_kind = super::ws_stream_transfer::StreamKind::Shard { shard_index: si };
                                             file_handler::stream_to_peer(
                                                 ws_cmd_tx, ws_room_peers,
@@ -13683,7 +13688,7 @@ async fn handle_incoming_request(
                             // so A streamed B's ciphertext under A's header key.
                             let nonce_hex = hex::encode(enc.nonce);
                             let temp_path = file_transfer::files_dir().join(format!(".stream_send_{file_id}_{nonce_hex}.tmp"));
-                            if let Ok(()) = std::fs::write(&temp_path, &enc.ciphertext) {
+                            if let Ok(()) = tokio::fs::write(&temp_path, &enc.ciphertext).await {
                                 let (resp_sid, resp_cid) = if file_meta.context_type == "channel" {
                                     let parts: Vec<&str> = file_meta.context_id.splitn(2, ':').collect();
                                     if parts.len() == 2 {
@@ -13787,7 +13792,7 @@ async fn handle_incoming_request(
                                     // temp, so only delete when none is pending, or every file
                                     // re-request leaks a duplicate encrypted copy.
                                     if !pending_webrtc_sends.contains_key(&file_id) {
-                                        let _ = std::fs::remove_file(&temp_path);
+                                        let _ = tokio::fs::remove_file(&temp_path).await;
                                     }
                             }
                         }
