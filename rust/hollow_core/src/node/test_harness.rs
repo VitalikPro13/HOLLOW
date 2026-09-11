@@ -22712,7 +22712,14 @@ async fn shutdown_and_wipe(relay: &MockRelay, node: TestNode) -> Vec<String> {
     // helper pays the same 300ms (counted in BUDGET_MS).
     sleep_ms(300).await;
     crate::api::wipe::destroy_data_root(&root).expect("wipe");
-    let left: Vec<String> = std::fs::read_dir(&root)
+    let left = wipe_survivors(&root);
+    drop(tmp);
+    left
+}
+
+/// Names left under `root` after a wipe, minus what the wipe leaves on purpose.
+fn wipe_survivors(root: &std::path::Path) -> Vec<String> {
+    std::fs::read_dir(root)
         .map(|rd| {
             rd.flatten()
                 .map(|e| e.file_name().to_string_lossy().to_string())
@@ -22721,9 +22728,7 @@ async fn shutdown_and_wipe(relay: &MockRelay, node: TestNode) -> Vec<String> {
                 })
                 .collect()
         })
-        .unwrap_or_default();
-    drop(tmp);
-    left
+        .unwrap_or_default()
 }
 
 /// Scope (b): the device publishes a master-signed list that tombstones ITSELF, so
