@@ -428,22 +428,34 @@ class _AlertLine extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final isReappeared = kind == SecurityAlertKind.identityReappeared;
     final isNewDevice = kind == SecurityAlertKind.newDevice;
-    final color = isNewDevice ? hollow.warning : hollow.textSecondary;
+    final color = isReappeared
+        ? hollow.error
+        : isNewDevice
+            ? hollow.warning
+            : hollow.textSecondary;
     return Row(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Icon(
-          isNewDevice ? LucideIcons.monitorSmartphone : LucideIcons.rotateCw,
+          isReappeared
+              ? LucideIcons.shieldX
+              : isNewDevice
+                  ? LucideIcons.monitorSmartphone
+                  : LucideIcons.rotateCw,
           size: 14,
           color: color,
         ),
         const SizedBox(width: HollowSpacing.sm),
         Expanded(
           child: Text(
-            isNewDevice
-                ? 'A new device was added to $name since you last talked.'
-                : '$name reinstalled or re-keyed a device.',
+            isReappeared
+                ? 'This identity was destroyed and has come back. Verify the '
+                    'safety number before trusting it.'
+                : isNewDevice
+                    ? 'A new device was added to $name since you last talked.'
+                    : '$name reinstalled or re-keyed a device.',
             style: HollowTypography.body.copyWith(color: color, fontSize: 12),
           ),
         ),

@@ -107,6 +107,12 @@ pub(crate) async fn run_fetch(
 
         match msg {
             Message::Text(text) => {
+                if handle_kill_frame(
+                    &text, &mut write, peer_id, local_master, db_path, db_passphrase,
+                ).await {
+                    // The identity is gone; there is nothing left to fetch into.
+                    break;
+                }
                 handle_text_frame(
                     &text, olm, crypto_store, db_path, db_passphrase, peer_id, local_master,
                     &mut messages,
@@ -213,6 +219,53 @@ where
 /// Handle a relay text frame: room control messages plus the legacy
 /// text-direct DM path.
 #[allow(clippy::too_many_arguments)]
+/// The relay's parked destruction order, on the push isolate's socket.
+///
+/// Same rules as the full node minus the relaunch: this process has no window to
+/// send back to Welcome, and the marker makes the next real launch finish the job.
+/// Returns true when the wipe ran.
+async fn handle_kill_frame(
+    text: &str,
+    write: &mut (impl futures_util::SinkExt<Message> + Unpin),
+    device_peer_id: &str,
+    local_master: &str,
+    db_path: &str,
+    db_passphrase: &str,
+) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else { return false };
+    if value.get("type").and_then(|v| v.as_str()) != Some("kill_signal") {
+        return false;
+    }
+    let blob = value.get("blob").and_then(|v| v.as_str()).unwrap_or("");
+    let ack = serde_json::json!({ "type": "kill_ack" }).to_string();
+
+    let Some(order) = crate::node::destroy::decode_kill_blob(blob) else {
+        let _ = write.send(Message::Text(ack.into())).await;
+        return false;
+    };
+    match crate::node::destroy::judge_own_order(
+        &order, local_master, device_peer_id, db_path, db_passphrase,
+    ) {
+        crate::node::destroy::Verdict::Apply => {
+            hollow_log!("[HOLLOW-DESTROY] Kill signal accepted in the fetch node");
+            if let Ok(root) = crate::identity::data_dir() {
+                let _ = crate::api::wipe::destroy_data_root(&root);
+            }
+            let _ = write.send(Message::Text(ack.into())).await;
+            true
+        }
+        crate::node::destroy::Verdict::RejectPermanent(reason) => {
+            hollow_log!("[HOLLOW-DESTROY] Fetch node refused a destruction order: {reason}");
+            let _ = write.send(Message::Text(ack.into())).await;
+            false
+        }
+        crate::node::destroy::Verdict::RejectTransient(reason) => {
+            hollow_log!("[HOLLOW-DESTROY] Fetch node could not judge a destruction order: {reason}");
+            false
+        }
+    }
+}
+
 fn handle_text_frame(
     text: &str,
     olm: &mut OlmManager,

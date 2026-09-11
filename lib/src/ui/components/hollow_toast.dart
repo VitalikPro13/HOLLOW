@@ -14,6 +14,11 @@ class HollowToast {
 
   static OverlayEntry? _currentEntry;
 
+  /// Set while the desktop app lock cover is up. Toasts render in the root
+  /// overlay, which paints ABOVE every route, so without this they would land
+  /// on the lock screen.
+  static bool lockedOut = false;
+
   /// Shows a toast at the bottom of the screen.
   ///
   /// [overlayState] is REQUIRED from non-widget code, where the only handle is
@@ -26,7 +31,9 @@ class HollowToast {
     HollowToastType type = HollowToastType.info,
     Duration duration = const Duration(seconds: 3),
     OverlayState? overlayState,
+    bool allowWhileLocked = false,
   }) {
+    if (lockedOut && !allowWhileLocked) return;
     _dismiss();
 
     final overlay = overlayState ?? Overlay.of(context);
@@ -56,6 +63,10 @@ class HollowToast {
     _currentEntry = entry;
     overlay.insert(entry);
   }
+
+  /// Clears whatever is showing. The app lock calls this: a toast raised the
+  /// instant before the cover went up would otherwise sit on top of it.
+  static void dismissCurrent() => _dismiss();
 
   static void _dismiss() {
     if (_currentEntry != null && _currentEntry!.mounted) {

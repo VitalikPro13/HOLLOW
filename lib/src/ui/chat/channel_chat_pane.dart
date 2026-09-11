@@ -50,6 +50,7 @@ import 'package:hollow/src/ui/chat/emote_image.dart';
 import 'package:hollow/src/core/providers/emote_provider.dart';
 import 'package:hollow/src/ui/chat/chat_pane_shared.dart';
 import 'package:hollow/src/ui/chat/message_action_bar.dart';
+import 'package:hollow/src/ui/components/overlay_hosts.dart';
 import 'package:hollow/src/ui/dialogs/message_proof_dialog.dart';
 import 'package:hollow/src/ui/components/connection_progress.dart';
 import 'package:hollow/src/core/providers/relay_domain_provider.dart';
@@ -684,9 +685,11 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
     _mentionOverlay?.remove();
     _mentionOverlay = OverlayEntry(builder: (_) => _buildMentionOverlay());
     Overlay.of(context).insert(_mentionOverlay!);
+    OverlayHosts.register(this, _dismissMentionOverlay);
   }
 
   void _dismissMentionOverlay() {
+    OverlayHosts.unregister(this);
     _mentionOverlay?.remove();
     _mentionOverlay = null;
     _mentionCandidates = [];

@@ -6,8 +6,9 @@ import 'package:hollow/src/core/app_relaunch.dart';
 import 'package:hollow/src/core/hollow_data_dir.dart';
 import 'package:hollow/src/core/profile_registry.dart';
 import 'package:hollow/src/core/single_instance_lock.dart';
+import 'package:hollow/src/core/services/destroy_flow.dart';
 import 'package:hollow/src/rust/api/identity.dart' as identity_api;
-import 'package:hollow/src/rust/api/storage.dart' as storage_api;
+import 'package:hollow/src/rust/api/wipe.dart' as wipe_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
@@ -292,12 +293,14 @@ class _ProfileLocationsCardState extends State<ProfileLocationsCard> {
     if (proceed != true || !mounted) return;
 
     if (isRunning) {
+      // The same routine the Security tab's Danger zone runs, so erasing the
+      // running profile and destroying this device's data are one code path.
       // The live node holds open SQLCipher handles and in-process deletes fail
-      // on Windows, so a pending-wipe marker plus a relaunch does it
-      // pre-node-start.
+      // on Windows, so it leaves a marker the next launch finishes.
       setState(() => _busy = true);
       try {
-        await storage_api.stashPendingWipe();
+        await wipe_api.destroyLocal();
+        await clearLocalSecretsAfterDestroy();
         await relaunchApp();
       } catch (e) {
         if (mounted) {

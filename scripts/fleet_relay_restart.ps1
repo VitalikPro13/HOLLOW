@@ -45,20 +45,20 @@
 # never a or b, and the blob it is sent is a dummy string: a client verifies the
 # signature against its own master and drops this one, so nothing is ever wiped.
 #
-# Two pieces do not exist yet, and until they do the gate reports WARN instead
-# of a verdict:
-#   - a probe op `kill_deposit` with `target` (a device id) and `value` (the
-#     blob), which sends the relay {"type":"kill_deposit","targets":[target],
-#     "blob":value,"issued_at_ms":now};
-#   - a `devicePeerId` provider key in the probe dump, because the kill list is
-#     keyed by the DEVICE id a socket authenticates as and `peerId` is the
-#     MASTER id.
-# G6 additionally needs a socket that authenticates as a GUEST, which no fleet
-# instance does (that is the web viewer), so it reports WARN as written.
+# G5 asks for three things that can each fail on their own:
+#   - the relay journal counts the entry handed to the fd store, restored, and
+#     delivered once d authenticates;
+#   - d's own log names the exact issued_at this run deposited, then the
+#     permanent rejection that goes with a blob no signature can vouch for;
+#   - d is still d. A blob that wiped anyone would be the whole feature broken.
+# d is then relaunched a SECOND time and the parked-order line must still appear
+# exactly once: an entry the client never acked is re-sent on every auth for a
+# year, which is the reason the ack rule exists.
 #
-# The entry this gate deposits is removed only by its target's ack, which the
-# client cannot send yet, so each run leaves one dummy entry parked on the relay
-# until its 365-day sweep. One entry per run, bounded by the relay's own caps.
+# G6 needs a socket that authenticates as a GUEST, which no fleet instance does
+# (that is the web viewer), so the journey opens one itself with node: an
+# ed25519 key, the peer id libp2p derives from it, and a deposit that must draw
+# no `kill_deposited` answer. Without node on the machine it reports WARN.
 #
 # The relay host is read from BUILD_GUIDE.md's deploy section: ssh as
 # ubuntu@141.227.186.209 with the passwordless key this machine already uses
@@ -70,11 +70,13 @@ param(
     [switch]$SkipBuild,
     [switch]$KeepServer,
     [string]$RelayHost = 'ubuntu@141.227.186.209',
+    # The ssh target above is a machine; this is the name its clients dial.
+    [string]$RelayDomain = 'relay.anonlisten.com',
     [int]$BootTimeoutSeconds = 240
 )
 
 if ($args.Count -gt 0) {
-    throw "unrecognised argument(s): $($args -join ' '). This script takes -KeepIdentities, -KeepUp, -SkipBuild, -KeepServer, -RelayHost and -BootTimeoutSeconds."
+    throw "unrecognised argument(s): $($args -join ' '). This script takes -KeepIdentities, -KeepUp, -SkipBuild, -KeepServer, -RelayHost, -RelayDomain and -BootTimeoutSeconds."
 }
 
 $ErrorActionPreference = 'Stop'
@@ -265,13 +267,117 @@ function Get-RelayClock {
 
 # Counts only, and the relay prints no peer id on this line: it says a parked
 # signal went out, never to whom.
+#
+# The pattern is ONE word because a quoted multi-word one loses its quotes on
+# the way through ssh and the remote shell reads the rest of it as filenames.
 function Get-RelayKillDeliveriesSince($epoch) {
     $remote = 'sudo -n journalctl -u hollow-relay --no-pager -o cat --since "@' + $epoch +
-              '" | grep -F "[kill] kill_signal delivered" | wc -l'
+              '" | grep -F kill_signal | wc -l'
     $text = ((@(Invoke-Relay $remote) | Select-Object -Last 1)).Trim()
     $n = 0
     if ([int]::TryParse($text, [ref]$n)) { return $n }
     return 0
+}
+
+# A GUEST socket, which no fleet instance can be: the web viewer is the only
+# guest client there is. node has ed25519 and a WebSocket client, so the journey
+# writes the client it needs and throws it away again.
+#
+# `control` is the same socket WITHOUT the guest flag, depositing for a target
+# that is not a peer id: the relay answers stored=0 and keeps nothing, which is
+# what tells "the guest was refused" apart from "nobody was listening".
+function Invoke-GuestKillDeposit($mode) {
+    $node = Get-Command node -ErrorAction SilentlyContinue
+    if (-not $node) { return $null }
+    $path = Join-Path $env:TEMP "fleet_guest_deposit_$($script:FleetVars.RUN).js"
+    $js = @'
+const crypto = require('crypto');
+const host = process.argv[2];
+const control = process.argv[3] === 'control';
+const B58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+
+function base58(buf) {
+  let zeros = 0;
+  while (zeros < buf.length && buf[zeros] === 0) zeros++;
+  const size = ((buf.length - zeros) * 138) / 100 + 1 | 0;
+  const b58 = new Uint8Array(size);
+  for (let i = zeros; i < buf.length; i++) {
+    let carry = buf[i];
+    for (let j = size; j-- > 0;) {
+      carry += 256 * b58[j];
+      b58[j] = carry % 58;
+      carry = (carry / 58) | 0;
+    }
+  }
+  let it = 0;
+  while (it < size && b58[it] === 0) it++;
+  let out = '1'.repeat(zeros);
+  for (; it < size; it++) out += B58[b58[it]];
+  return out;
+}
+
+function say(line) { process.stdout.write(line + '\n'); }
+
+const { publicKey, privateKey } = crypto.generateKeyPairSync('ed25519');
+const spki = publicKey.export({ type: 'spki', format: 'der' });
+const raw = spki.subarray(spki.length - 32);
+const proto = Buffer.concat([Buffer.from([0x08, 0x01, 0x12, 0x20]), raw]);
+const peerId = base58(Buffer.concat([Buffer.from([0x00, 0x24]), proto]));
+const timestamp = Math.floor(Date.now() / 1000);
+const signature = crypto
+  .sign(null, Buffer.from(`hollow-ws-auth:${peerId}:${timestamp}`), privateKey)
+  .toString('base64');
+
+let verdict = null;
+const finish = (line) => {
+  if (verdict) return;
+  verdict = line;
+  say(line);
+  try { ws.close(); } catch (_) {}
+  process.exit(0);
+};
+
+const ws = new WebSocket(`wss://${host}/ws`);
+const overall = setTimeout(() => finish('ERROR no answer within 20s'), 20000);
+if (overall.unref) overall.unref();
+
+ws.addEventListener('error', (e) => finish(`ERROR socket ${e.message || 'failed'}`));
+ws.addEventListener('close', () => { if (!verdict) finish('ERROR socket closed before a verdict'); });
+
+ws.addEventListener('open', () => {
+  ws.send(JSON.stringify({
+    type: 'auth', peer_id: peerId, public_key: proto.toString('base64'),
+    timestamp, signature, guest: !control,
+  }));
+});
+
+ws.addEventListener('message', (ev) => {
+  let msg;
+  try { msg = JSON.parse(typeof ev.data === 'string' ? ev.data : ''); } catch (_) { return; }
+  if (msg.type === 'auth_failed') return finish(`ERROR auth_failed ${msg.error || ''}`);
+  if (msg.type === 'auth_ok') {
+    say(`${control ? 'control' : 'guest'} ${peerId}`);
+    ws.send(JSON.stringify({
+      type: 'kill_deposit', targets: [control ? 'not-a-peer-id' : peerId],
+      issued_at_ms: Date.now(), blob: 'fleet-guest-refusal-probe',
+    }));
+    setTimeout(() => finish(control ? 'ERROR the control drew no answer' : 'REFUSED'), 4000);
+    return;
+  }
+  if (msg.type === 'kill_deposited') return finish(`ACCEPTED stored=${msg.stored}`);
+});
+'@
+    try {
+        Set-Content -Path $path -Value $js -Encoding UTF8
+        $lines = @(& $node.Source $path $RelayDomain $mode)
+        foreach ($line in $lines) { Write-Host "     [$mode] $line" -ForegroundColor Gray }
+        return (@($lines | Where-Object { $_ }) | Select-Object -Last 1)
+    } catch {
+        Add-Note "the guest socket could not run ($($_.Exception.Message))"
+        return $null
+    } finally {
+        Remove-Item $path -Force -ErrorAction SilentlyContinue
+    }
 }
 
 function Get-PeerLogLines($peer, $pattern) {
@@ -282,6 +388,61 @@ function Get-PeerLogLines($peer, $pattern) {
     } catch {
         Add-Note "could not read $peer's hollow_debug.log ($($_.Exception.Message))"
         return @()
+    }
+}
+
+# `-like "*[HOLLOW-X]*"` reads the brackets as a character class and matches
+# every line, so anything a GATE depends on is matched with .Contains instead.
+function Get-PeerLogContains($peer, $needle) {
+    $path = Join-Path $script:FleetStageRoot "$peer\hollow_debug.log"
+    if (-not (Test-Path $path)) { return @() }
+    try {
+        return @(Get-Content $path -Encoding UTF8 -ErrorAction Stop |
+            Where-Object { $_.Contains($needle) })
+    } catch {
+        Add-Note "could not read $peer's hollow_debug.log ($($_.Exception.Message))"
+        return @()
+    }
+}
+
+# A log line can trail its cause by a moment, and a fixed sleep long enough to
+# cover that is long enough to hide a regression.
+function Wait-ForPeerLog($peer, $needle, $timeoutSeconds = 30) {
+    $deadline = (Get-Date).AddSeconds($timeoutSeconds)
+    while ($true) {
+        $hits = @(Get-PeerLogContains $peer $needle)
+        if ($hits.Count -gt 0) { return $hits }
+        if ((Get-Date) -ge $deadline) { return @() }
+        Start-Sleep -Milliseconds 500
+    }
+}
+
+# The log outlives the run, so a line an EARLIER run wrote would satisfy a bare
+# search: the same trap ${RUN} closes for messages. Everything that follows this
+# run's own anchor line is this run's.
+function Wait-ForPeerLogAfter($peer, $anchor, $needles, $timeoutSeconds = 30) {
+    $path = Join-Path $script:FleetStageRoot "$peer\hollow_debug.log"
+    $deadline = (Get-Date).AddSeconds($timeoutSeconds)
+    while ($true) {
+        $lines = @()
+        if (Test-Path $path) {
+            try { $lines = @(Get-Content $path -Encoding UTF8 -ErrorAction Stop) } catch { }
+        }
+        $at = -1
+        for ($i = 0; $i -lt $lines.Count; $i++) {
+            if ($lines[$i].Contains($anchor)) { $at = $i }
+        }
+        $hits = @()
+        if ($at -ge 0) {
+            for ($i = $at + 1; $i -lt $lines.Count; $i++) {
+                foreach ($needle in $needles) {
+                    if ($lines[$i].Contains($needle)) { $hits += $lines[$i]; break }
+                }
+            }
+        }
+        if ($hits.Count -gt 0) { return $hits }
+        if ((Get-Date) -ge $deadline) { return @() }
+        Start-Sleep -Milliseconds 500
     }
 }
 
@@ -342,6 +503,7 @@ $failure = $null
 $serverCreated = $false
 $killTarget = $null
 $killDeposited = $false
+$killIssuedAtMs = 0
 $killHanded = 0
 $killRestored = 0
 
@@ -440,8 +602,13 @@ try {
     # Park a destroy signal for the closed throwaway. The blob is a dummy, so a
     # client that verifies it against its own master drops it.
     if ($killTarget) {
+        # Stamped here rather than by the probe: the exact value comes back in
+        # d's own log line, so no earlier delivery can be read as this one.
+        $killIssuedAtMs = [int64][System.DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
         $deposit = Invoke-SoftStep a @{
-            op = 'kill_deposit'; target = $killTarget; value = "fleet-dummy-$($script:FleetVars.RUN)"
+            op = 'kill_deposit'; target = $killTarget
+            value = "fleet-dummy-$($script:FleetVars.RUN)"
+            issued_at_ms = $killIssuedAtMs
         }
         if ($deposit.ok) {
             $killDeposited = $true
@@ -517,7 +684,12 @@ try {
     # The signal rides out with auth_ok, so it is already sent by the time the
     # connection settles; the pause is for journald, not for the relay.
     Start-Sleep -Seconds 3
-    $delivered = Get-RelayKillDeliveriesSince $since
+    $delivered = 0
+    try {
+        $delivered = Get-RelayKillDeliveriesSince $since
+    } catch {
+        Add-Note "the relay journal could not be read ($($_.Exception.Message))"
+    }
 
     # A dummy blob must never cost anyone their data: d is still d.
     Step $killPeer @{ op = 'capture'; from = 'provider'; key = 'peerId'; as = 'PEER_D_AFTER' }
@@ -526,25 +698,95 @@ try {
         Set-Gate 'G5 the parked kill signal survives the restart and reaches d' 'FAIL'
         throw 'G5 failed: d lost its identity to a dummy blob, which no signature can have authorised'
     }
+
+    # Only d can say the order arrived, was judged and was refused, and the
+    # issued_at in its log is this run's own.
+    $parked = "Relay parked order issued_at=$killIssuedAtMs"
+    $parkedHits = @()
+    $refusedHits = @()
+    if ($killDeposited) {
+        $parkedHits = @(Wait-ForPeerLog $killPeer $parked 45)
+        # Either wording is a PERMANENT rejection, and which one depends only on
+        # how far into the blob the client got.
+        if ($parkedHits.Count -gt 0) {
+            $refusedHits = @(Wait-ForPeerLogAfter $killPeer $parked @(
+                'Kill signal blob is not a destruction order, acked and dropped',
+                'Refused a destruction order:') 20)
+        }
+        foreach ($line in @($parkedHits + $refusedHits)) {
+            Write-Host "     [d] $line" -ForegroundColor Gray
+        }
+    }
+
     if (-not $killDeposited) {
         Set-Gate 'G5 the parked kill signal survives the restart and reaches d' 'WARN'
         Add-Note 'G5 is coded but cannot run: the deposit needs the kill_deposit probe op and the devicePeerId provider key'
-    } elseif ($killHanded -ge 1 -and $killRestored -ge 1 -and $delivered -ge 1) {
+    } elseif ($killHanded -ge 1 -and $killRestored -ge 1 -and
+              $parkedHits.Count -ge 1 -and $refusedHits.Count -ge 1) {
         Set-Gate 'G5 the parked kill signal survives the restart and reaches d' 'PASS'
-        Add-Note ("kill list: {0} handed over, {1} restored, {2} delivered on d's auth" -f $killHanded, $killRestored, $delivered)
+        Add-Note ("kill list: {0} handed over, {1} restored; d logged this run's order and refused it" -f $killHanded, $killRestored)
+        # The relay's counter only corroborates what d already proved, and the
+        # box keeps barely a couple of minutes of journal.
+        if ($delivered -ge 1) {
+            Add-Note "the relay journal counted $delivered kill_signal delivery since d's return"
+        } else {
+            Add-Note "the relay journal showed no delivery line, which is its retention, not the delivery: d's own log carries this run's issued_at"
+        }
     } else {
         Set-Gate 'G5 the parked kill signal survives the restart and reaches d' 'FAIL'
-        Add-Note "G5: handed=$killHanded restored=$killRestored delivered=$delivered"
+        Add-Note "G5: handed=$killHanded restored=$killRestored delivered=$delivered parked=$($parkedHits.Count) refused=$($refusedHits.Count)"
+        @(Get-PeerLogContains $killPeer '[HOLLOW-DESTROY]') |
+            Select-Object -Last 20 |
+            ForEach-Object { Write-Host "     [d] $_" -ForegroundColor Gray }
+        Write-Evidence 'G5'
         throw 'G5 failed: the parked signal did not survive the restart or did not reach d'
+    }
+
+    # The ack rule: a refused entry is gone, so a second auth draws nothing.
+    # Without it any junk deposit rides along for a year.
+    if ($killDeposited) {
+        Stop-Peer $killPeer
+        Restart-Peer $killPeer
+        $again = Send-FleetStep $killPeer ([pscustomobject]@{
+            op = 'wait_for'; provider = 'connection'; equals = 'connected'; timeout_ms = 120000
+        }) 180
+        if (-not $again.ok) { throw "d never reached Connected on its second return: $($again.message)" }
+        Start-Sleep -Seconds 5
+        $parkedTwice = @(Get-PeerLogContains $killPeer $parked)
+        Step $killPeer @{ op = 'capture'; from = 'provider'; key = 'peerId'; as = 'PEER_D_FINAL' }
+        if ($script:FleetVars['PEER_D_FINAL'] -ne $script:FleetVars['PEER_D']) {
+            Set-Gate 'G5 the parked kill signal survives the restart and reaches d' 'FAIL'
+            throw 'G5 failed: d lost its identity on the second return'
+        }
+        if ($parkedTwice.Count -eq 1) {
+            Add-Note "ack rule: d's ack removed the entry, so its second auth was handed nothing"
+        } else {
+            Set-Gate 'G5 the parked kill signal survives the restart and reaches d' 'FAIL'
+            Add-Note "G5 ack rule: the order was handed to d $($parkedTwice.Count) times, so the ack never reached the relay"
+            throw 'G5 failed: the refused entry was re-sent on the next auth'
+        }
     }
 
     # --- G6: a guest cannot park one. ---------------------------------------
     Say '6/6 a guest socket cannot park a destroy signal'
     # handle_kill_deposit refuses a guest before it reads a field and answers
-    # nothing at all, so the check is "no kill_deposited reply". Nothing in the
-    # fleet authenticates as a guest, so this waits on a guest client.
-    Set-Gate 'G6 a guest socket cannot park a kill signal' 'WARN'
-    Add-Note 'G6 is coded but cannot run: no fleet instance authenticates as a guest (that is the web viewer)'
+    # nothing at all, so the check is "no kill_deposited reply".
+    $guestVerdict = Invoke-GuestKillDeposit 'guest'
+    $controlVerdict = Invoke-GuestKillDeposit 'control'
+    if (-not $guestVerdict -or -not $controlVerdict) {
+        Set-Gate 'G6 a guest socket cannot park a kill signal' 'WARN'
+        Add-Note 'G6 needs node on PATH for a guest socket; nothing in the fleet can authenticate as one'
+    } elseif ($guestVerdict -eq 'REFUSED' -and $controlVerdict -like 'ACCEPTED*') {
+        Set-Gate 'G6 a guest socket cannot park a kill signal' 'PASS'
+        Add-Note "guest deposit refused in silence; the same socket without the guest flag was answered ($controlVerdict), so the handler was listening"
+    } elseif ($guestVerdict -like 'ACCEPTED*') {
+        Set-Gate 'G6 a guest socket cannot park a kill signal' 'FAIL'
+        Add-Note "G6: a GUEST parked a kill signal ($guestVerdict)"
+        throw 'G6 failed: the relay accepted a deposit from a guest socket'
+    } else {
+        Set-Gate 'G6 a guest socket cannot park a kill signal' 'WARN'
+        Add-Note "G6 could not reach a verdict (guest: $guestVerdict, control: $controlVerdict)"
+    }
 } catch {
     $failure = $_
     Say "FAILED: $($_.Exception.Message)" 'Red'

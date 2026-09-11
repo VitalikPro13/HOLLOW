@@ -775,6 +775,41 @@ pub(crate) fn device_list_binds_sender(list: &SignedDeviceList, sender_peer_id: 
         || list.devices.iter().any(|d| d == sender_peer_id)
 }
 
+/// `true` = this list is EXACTLY "the deliverer revoked itself and changed nothing
+/// else", the one shape [`device_list_binds_sender`] must let through.
+///
+/// Destruction scope (b) is the sole producer: a device revoking ITSELF is the only
+/// one that can announce its own revocation. The exception is a MINIMAL DIFF against
+/// what we already store, never "the deliverer is tombstoned somewhere in here":
+/// every device holds the master key, so a revoked device running a modified client
+/// could otherwise sign a newer list that tombstones itself AND drops its
+/// legitimate siblings, and CRYPTO-1's sender rule is the only thing that makes a
+/// revocation final against exactly that attacker.
+///
+/// With NO stored list there is no diff to be minimal against, so the baseline rules
+/// decide and this says no.
+pub(crate) fn is_minimal_self_revocation(
+    list: &SignedDeviceList,
+    sender_peer_id: &str,
+    stored: Option<&SignedDeviceList>,
+) -> bool {
+    let Some(stored) = stored else { return false };
+    if !list.revoked.iter().any(|r| r == sender_peer_id) {
+        return false;
+    }
+    if list.version <= stored.version {
+        return false;
+    }
+    let set = |v: &[String]| -> std::collections::BTreeSet<String> {
+        v.iter().cloned().collect()
+    };
+    let mut want_devices = set(&stored.devices);
+    want_devices.remove(sender_peer_id);
+    let mut want_revoked = set(&stored.revoked);
+    want_revoked.insert(sender_peer_id.to_string());
+    set(&list.devices) == want_devices && set(&list.revoked) == want_revoked
+}
+
 // --- Sibling proof handshake (anti-mis-link) -------------------------------------
 //
 // A peer in our own `inbox:{master}` room used to be trusted directly as our
@@ -1039,6 +1074,104 @@ pub(crate) fn revoke_all_other_devices(
     Some((signed, to_revoke))
 }
 
+/// Revoke the device we are RUNNING ON: destruction scope (b).
+///
+/// [`revoke_own_device`] refuses this by design and must keep refusing, because
+/// every other caller of it would otherwise be one typo away from cutting off the
+/// machine in front of the user. Here it IS the point: the tombstone is what makes
+/// siblings and friends stop routing to a device whose data is about to be gone.
+/// Nothing is persisted, because the database is being destroyed moments later.
+pub(crate) fn revoke_self_device(
+    master: &crate::identity::native_identity::NativeKeypair,
+    local_device_peer_id: &str,
+    db_path: &str,
+    db_passphrase: &str,
+) -> SignedDeviceList {
+    let master_peer_id = master.peer_id();
+    let (mut devices, mut revoked, version): (Vec<String>, Vec<String>, u64) =
+        match crate::storage::MessageStore::open(db_path, db_passphrase)
+            .ok()
+            .and_then(|st| st.load_device_list(&master_peer_id).ok().flatten())
+        {
+            Some(list) => (list.devices.clone(), list.revoked.clone(), list.version),
+            None => (vec![local_device_peer_id.to_string()], Vec::new(), 0),
+        };
+    devices.retain(|d| d != local_device_peer_id);
+    if !revoked.iter().any(|r| r == local_device_peer_id) {
+        revoked.push(local_device_peer_id.to_string());
+    }
+    build_signed_device_list(master, version.saturating_add(1).max(1), devices, revoked)
+}
+
+// -- Destruction orders (Part 2, scope (c)) --
+
+/// Canonical payload for signing a [`DestroyIdentity`].
+/// "hollow-destroy:{master}:{issued_at_ms}:{sorted csv targets}:{notify_friends}".
+/// `targets` MUST be sorted before calling so the payload is deterministic.
+pub(crate) fn destroy_identity_signing_payload(
+    master_peer_id: &str,
+    issued_at_ms: i64,
+    targets: &[String],
+    notify_friends: bool,
+) -> String {
+    format!(
+        "hollow-destroy:{master_peer_id}:{issued_at_ms}:{}:{notify_friends}",
+        targets.join(",")
+    )
+}
+
+/// Build a master-signed destruction order. `targets` is sorted and deduped here
+/// so the signed payload is canonical; empty = every device of this identity.
+pub(crate) fn build_destroy_identity(
+    master: &crate::identity::native_identity::NativeKeypair,
+    issued_at_ms: i64,
+    mut targets: Vec<String>,
+    notify_friends: bool,
+) -> DestroyIdentity {
+    use base64::engine::general_purpose::STANDARD as B64;
+    targets.sort();
+    targets.dedup();
+    let master_peer_id = master.peer_id();
+    let payload =
+        destroy_identity_signing_payload(&master_peer_id, issued_at_ms, &targets, notify_friends);
+    let sig = master.sign(payload.as_bytes());
+    DestroyIdentity {
+        master_pubkey_b64: B64.encode(master.public_key_protobuf()),
+        master_peer_id,
+        issued_at_ms,
+        targets,
+        notify_friends,
+        sig_b64: B64.encode(sig),
+    }
+}
+
+/// Verify a received destruction order: the pubkey must derive to the claimed
+/// `master_peer_id` and the signature must validate over the canonical payload.
+/// Freshness and targeting are the receiver's rules, not this function's.
+pub(crate) fn verify_destroy_identity(order: &DestroyIdentity) -> bool {
+    use base64::engine::general_purpose::STANDARD as B64;
+    use crate::identity::native_identity::NativeKeypair;
+
+    let Ok(pk_bytes) = B64.decode(&order.master_pubkey_b64) else {
+        return false;
+    };
+    match NativeKeypair::peer_id_from_pubkey_protobuf(&pk_bytes) {
+        Some(derived) if derived == order.master_peer_id => {}
+        _ => return false,
+    }
+    let Ok(sig_bytes) = B64.decode(&order.sig_b64) else {
+        return false;
+    };
+    // Sorted copy, so an attacker cannot reorder the targets after signing.
+    let mut targets = order.targets.clone();
+    targets.sort();
+    let payload = destroy_identity_signing_payload(
+        &order.master_peer_id, order.issued_at_ms, &targets, order.notify_friends,
+    );
+    NativeKeypair::verify_peer_signature(&pk_bytes, &sig_bytes, payload.as_bytes())
+        .unwrap_or(false)
+}
+
 /// Union a single sibling device id into OUR OWN master-signed device list.
 ///
 /// The inbox-proof path needs this: a freshly imported sibling has no profile
@@ -1144,23 +1277,33 @@ pub(crate) async fn ingest_device_list(
         );
         return IngestOutcome::default();
     }
+    let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) else {
+        return IngestOutcome::default();
+    };
+    let stored_list = store.load_device_list(&list.master_peer_id).ok().flatten();
     // SECURITY (CRYPTO-1): the signature says who WROTE the list, never who
     // delivered it. A replay from an unlisted socket used to bind that socket to
     // the victim's master, handing over its DM fan-out and Olm authorisation.
-    if !device_list_binds_sender(&list, sender_peer_id) {
+    if !device_list_binds_sender(&list, sender_peer_id)
+        && !is_minimal_self_revocation(&list, sender_peer_id, stored_list.as_ref())
+    {
         hollow_log!(
             "[HOLLOW-SECURITY] REJECTED device list for {}: delivering device {sender_peer_id} is not in the signed list",
             list.master_peer_id
         );
         return IngestOutcome::default();
     }
-    let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) else {
-        return IngestOutcome::default();
-    };
+    // ANY later list from an identity we were told was destroyed is the mnemonic
+    // bringing it back, an UNCHANGED one included: the same safety number returns on
+    // keys the person may no longer control, so the banner clears and a warning goes
+    // up. Ahead of the no-change early return below, which is the common shape.
+    super::destroy::note_identity_reappeared(
+        event_tx, db_path, db_passphrase, &list.master_peer_id,
+    ).await;
     let (prev_devices, prev_revoked, prev_version): (Vec<String>, Vec<String>, u64) =
-        match store.load_device_list(&list.master_peer_id) {
-            Ok(Some(cur)) => (cur.devices.clone(), cur.revoked.clone(), cur.version),
-            _ => (Vec::new(), Vec::new(), 0),
+        match stored_list.as_ref() {
+            Some(cur) => (cur.devices.clone(), cur.revoked.clone(), cur.version),
+            None => (Vec::new(), Vec::new(), 0),
         };
     // TOMBSTONES, max-version-wins: a higher-version list is the latest master
     // word; a replay (version <= prev) keeps our set, so it can never un-revoke.
@@ -1339,21 +1482,24 @@ async fn ingest_sibling_device_list(
     // SECURITY (CRYPTO-1): the same binding rule, and it bites hardest here. OUR
     // OWN list is the one a stranger is most likely to hold, and replaying it back
     // lands here, which hands the sender our friend list and our DM backfill.
-    if !device_list_binds_sender(&list, sender_peer_id) {
+    let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) else {
+        return (false, Vec::new());
+    };
+    let stored_list = store.load_device_list(local_master_peer_id).ok().flatten();
+    if !device_list_binds_sender(&list, sender_peer_id)
+        && !is_minimal_self_revocation(&list, sender_peer_id, stored_list.as_ref())
+    {
         hollow_log!(
             "[HOLLOW-SECURITY] REJECTED device list for {}: delivering device {sender_peer_id} is not in the signed list",
             list.master_peer_id
         );
         return (false, Vec::new());
     }
-    let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) else {
-        return (false, Vec::new());
-    };
 
     let (mut devices, our_revoked, our_version): (Vec<String>, Vec<String>, u64) =
-        match store.load_device_list(local_master_peer_id) {
-            Ok(Some(cur)) => (cur.devices.clone(), cur.revoked.clone(), cur.version),
-            _ => (vec![local_device_peer_id.to_string()], Vec::new(), 0),
+        match stored_list.as_ref() {
+            Some(cur) => (cur.devices.clone(), cur.revoked.clone(), cur.version),
+            None => (vec![local_device_peer_id.to_string()], Vec::new(), 0),
         };
     if !devices.iter().any(|d| d == local_device_peer_id) {
         devices.push(local_device_peer_id.to_string());
@@ -4629,16 +4775,158 @@ mod tests {
             "and it must never bind the delivering device to the victim's master",
         );
 
-        // A device that IS in the list but has been tombstoned is the same answer:
-        // a revoked device cannot re-admit itself by delivering a list.
+        // A device that IS in the list but has been tombstoned is the same answer on
+        // FIRST CONTACT: with nothing stored there is no diff for the self-revocation
+        // exception to be minimal against, so the baseline rule decides.
         let revoking = build_signed_device_list(
             &victim_master, 4, vec![victim_device.clone()], vec![attacker_device.clone()],
         );
         let stored = ingest_list_from(&revoking, &attacker_device).await;
         assert!(
             stored.is_empty(),
-            "a revoked delivering device is refused too, got {stored:?}",
+            "a revoked delivering device is refused with no stored list, got {stored:?}",
         );
+
+        super::super::resolver::clear_all();
+    }
+
+    /// Ingest `incoming` from `sender` against a DB already holding `stored` for the
+    /// same master, and hand back what is persisted afterwards. `own_master` runs the
+    /// sibling path (the list is for the identity we are running as).
+    async fn ingest_over_stored(
+        master: &crate::identity::native_identity::NativeKeypair,
+        stored: &SignedDeviceList,
+        incoming: &SignedDeviceList,
+        sender_peer_id: &str,
+        local_device: &str,
+        own_master: bool,
+    ) -> (Vec<String>, Vec<String>, u64) {
+        let other = kp(0x01);
+        let (local_master_kp, local_master_id) = if own_master {
+            (master.clone(), master.peer_id())
+        } else {
+            (other.clone(), other.peer_id())
+        };
+
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("ingest.db").to_str().unwrap().to_string();
+        let pass = "ef".repeat(32);
+        crate::storage::MessageStore::migrate_auto_vacuum_once(&db, &pass).unwrap();
+        {
+            let st = crate::storage::MessageStore::open(&db, &pass).unwrap();
+            let json = serde_json::to_string(stored).unwrap();
+            st.save_device_list(
+                &stored.master_peer_id, &json, stored.version, &stored.devices, 0,
+            )
+            .unwrap();
+        }
+
+        let (event_tx, _event_rx) = mpsc::channel::<NetworkEvent>(64);
+        let (ws_cmd_tx, _ws_cmd_rx) =
+            tokio::sync::mpsc::unbounded_channel::<super::super::ws_client::WsCommand>();
+        let rooms: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
+
+        ingest_device_list(
+            &event_tx, &local_master_id, local_device, &local_master_kp,
+            sender_peer_id, &ws_cmd_tx, &rooms, Some(incoming.clone()), &db, &pass,
+        )
+        .await;
+
+        let st = crate::storage::MessageStore::open(&db, &pass).unwrap();
+        match st.load_device_list(&stored.master_peer_id).ok().flatten() {
+            Some(l) => {
+                let mut d = l.devices.clone();
+                d.sort();
+                let mut r = l.revoked.clone();
+                r.sort();
+                (d, r, l.version)
+            }
+            None => (Vec::new(), Vec::new(), 0),
+        }
+    }
+
+    /// `revoke_self_device` reads the DB; this builds the same list from a stored one,
+    /// so the test asserts against the SHAPE the production path emits.
+    fn minimal_self_revocation_of(
+        master: &crate::identity::native_identity::NativeKeypair,
+        self_device: &str,
+        stored: &SignedDeviceList,
+    ) -> SignedDeviceList {
+        let mut devices = stored.devices.clone();
+        devices.retain(|d| d != self_device);
+        let mut revoked = stored.revoked.clone();
+        revoked.push(self_device.to_string());
+        build_signed_device_list(master, stored.version + 1, devices, revoked)
+    }
+
+    /// Destruction scope (b) needs a device to publish its OWN tombstone, the one
+    /// shape CRYPTO-1's sender rule refuses. The exception is a MINIMAL DIFF and
+    /// nothing else: every device holds the master key, so a revoked one running a
+    /// modified client could otherwise sign a newer list that tombstones itself AND
+    /// drops its legitimate siblings, and that sender rule is the only thing standing
+    /// between it and a device that can never be revoked.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // the resolver guard is process-global
+    async fn self_revocation_carve_out_admits_only_the_minimal_diff() {
+        let _lock = super::super::resolver::test_lock();
+        super::super::resolver::clear_all();
+
+        let master = kp(0x50);
+        let rogue = kp(0x51).peer_id();   // the device revoking itself
+        let sibling = kp(0x52).peer_id(); // a legitimate device it must not touch
+        let fresh = kp(0x53).peer_id();   // a device nobody has seen
+
+        let mut seeded = vec![rogue.clone(), sibling.clone()];
+        seeded.sort();
+        let stored = build_signed_device_list(&master, 4, seeded.clone(), Vec::new());
+        let none: [String; 0] = [];
+
+        for own_master in [false, true] {
+            let lane = if own_master { "sibling" } else { "friend" };
+            let local_device = if own_master { sibling.as_str() } else { "12D3KooWLocalDev" };
+
+            // The attacker holds the master key, so every one of these verifies.
+            let sweeping = build_signed_device_list(
+                &master, 5, Vec::new(), vec![rogue.clone(), sibling.clone()],
+            );
+            let got = ingest_over_stored(
+                &master, &stored, &sweeping, &rogue, local_device, own_master,
+            ).await;
+            assert_eq!(
+                got, (seeded.clone(), none.to_vec(), 4),
+                "{lane}: a revoked deliverer must not drop a legitimate sibling",
+            );
+
+            let grabby = build_signed_device_list(
+                &master, 5, vec![sibling.clone(), fresh.clone()], vec![rogue.clone()],
+            );
+            let got = ingest_over_stored(
+                &master, &stored, &grabby, &rogue, local_device, own_master,
+            ).await;
+            assert_eq!(
+                got, (seeded.clone(), none.to_vec(), 4),
+                "{lane}: a revoked deliverer must not smuggle in a new device",
+            );
+
+            let stale = build_signed_device_list(
+                &master, 4, vec![sibling.clone()], vec![rogue.clone()],
+            );
+            let got = ingest_over_stored(
+                &master, &stored, &stale, &rogue, local_device, own_master,
+            ).await;
+            assert_eq!(
+                got, (seeded.clone(), none.to_vec(), 4),
+                "{lane}: the diff must also be NEWER than what we hold",
+            );
+
+            // The exact minimal diff, which is what `revoke_self_device` emits.
+            let minimal = minimal_self_revocation_of(&master, &rogue, &stored);
+            let (devices, revoked, _) = ingest_over_stored(
+                &master, &stored, &minimal, &rogue, local_device, own_master,
+            ).await;
+            assert_eq!(devices, vec![sibling.clone()], "{lane}: the surviving device stays");
+            assert_eq!(revoked, vec![rogue.clone()], "{lane}: and the deliverer is tombstoned");
+        }
 
         super::super::resolver::clear_all();
     }

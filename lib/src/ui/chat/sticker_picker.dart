@@ -28,6 +28,7 @@ import '../components/popup_animator.dart';
 import 'emote_image.dart';
 import 'gif_picker.dart' show GifMenuItem, showGifMenu;
 import 'sticker_pack_card.dart' show kStickerPackExtension;
+import 'package:hollow/src/ui/components/overlay_hosts.dart';
 
 /// Picks an image file and processes it at STICKER bounds (≤512px, ≤512 KB,
 /// alpha and animation preserved). Null on cancel, a toast on failure.
@@ -100,6 +101,7 @@ void showStickerPicker({
   void teardown() {
     if (removed) return;
     removed = true;
+    OverlayHosts.unregister(entry);
     // Play the exit, THEN drop the entry.
     anim.dismiss(() {
       entry.remove();
@@ -128,6 +130,7 @@ void showStickerPicker({
   );
 
   overlay.insert(entry);
+  OverlayHosts.register(entry, teardown);
 }
 
 class _StickerPickerOverlay extends StatelessWidget {

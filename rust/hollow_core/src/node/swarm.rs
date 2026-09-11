@@ -405,6 +405,7 @@ use super::crypto_handler::{
     send_mls_broadcast, send_encrypted_message,
     send_message_to_peer, send_message_to_peer_in_room, send_raw_to_peer, send_raw_to_identity,
 };
+use super::destroy;
 use super::file_asks;
 use super::file_handler;
 use super::forwarder_client;
@@ -1016,6 +1017,10 @@ async fn run_event_loop(
     // a peer holding our shared master key can sign the nonce, which is what gates
     // the merge and the snapshot. 60s TTL, bounded, one live challenge per peer.
     let mut pending_sibling_challenges: HashMap<String, (String, std::time::Instant)> = HashMap::new();
+    // Destruction freshness: the first start of a device stamps when it joined the
+    // identity, so an order issued before it existed can never wipe it.
+    super::destroy::stamp_device_link(&db_path, &db_passphrase, &device_peer_id);
+
     // Pending friend removals: peer_ids whose FriendRemove wasn't delivered (peer offline).
     let mut pending_friend_removals: std::collections::HashSet<String> = std::collections::HashSet::new();
     {
@@ -1407,6 +1412,38 @@ async fn run_event_loop(
                                 &local_peer_str, &ws_room_peers, &mut pending_mls_removals,
                             );
                         }
+                    }
+
+                    NodeCommand::PublishSelfRevocation { reply } => {
+                        let ok = destroy::handle_publish_self_revocation(
+                            &ws_cmd_tx, &ws_room_peers, &master_keypair,
+                            &master_peer_str, &device_peer_id, is_invisible,
+                            &db_path, &db_passphrase,
+                        );
+                        let _ = reply.send(ok);
+                    }
+
+                    NodeCommand::PublishDestroyIdentity { targets, notify_friends, reply } => {
+                        let reached = destroy::handle_publish_destroy_identity(
+                            &mut olm, &crypto_store, &event_tx, &ws_cmd_tx, &ws_room_peers,
+                            &master_keypair, &master_peer_str, &device_peer_id,
+                            targets, notify_friends, &db_path, &db_passphrase,
+                        ).await;
+                        let _ = reply.send(reached);
+                    }
+
+                    NodeCommand::UnregisterPushToken => {
+                        let _ = ws_cmd_tx.send(super::ws_client::WsCommand::UnregisterPushToken);
+                    }
+
+                    NodeCommand::KillAck => {
+                        let _ = ws_cmd_tx.send(super::ws_client::WsCommand::KillAck);
+                    }
+
+                    NodeCommand::DepositKillSignal { targets, issued_at_ms, blob } => {
+                        let _ = ws_cmd_tx.send(super::ws_client::WsCommand::KillDeposit {
+                            targets, issued_at_ms, blob,
+                        });
                     }
 
                     NodeCommand::ResetDeviceLists => {
@@ -3028,6 +3065,12 @@ async fn run_event_loop(
                             };
                             snap.olm_sessions.insert(peer, status.to_string());
                         }
+                        let mut peers: std::collections::HashSet<String> =
+                            std::collections::HashSet::new();
+                        for set in ws_room_peers.values() {
+                            peers.extend(set.iter().cloned());
+                        }
+                        snap.room_peers = peers.into_iter().collect();
                         let _ = reply.send(snap);
                     }
                 }
@@ -4384,6 +4427,13 @@ async fn run_event_loop(
                                 ).await;
                             }
                         }
+                    }
+                    WsEvent::KillSignal { blob, issued_at_ms } => {
+                        hollow_log!("[HOLLOW-DESTROY] Relay parked order issued_at={issued_at_ms}");
+                        destroy::handle_kill_signal(
+                            &event_tx, &ws_cmd_tx, &blob,
+                            &master_peer_str, &device_peer_id, &db_path, &db_passphrase,
+                        ).await;
                     }
                     WsEvent::LicenseError { reason } => {
                         hollow_log!("[HOLLOW-WS] License error: {reason}");
@@ -8962,6 +9012,11 @@ async fn handle_incoming_request(
                     }
                 }
 
+                Ok(MessageEnvelope::DestroyIdentityOrder { destroy: order }) => {
+                    destroy::handle_envelope_destroy_identity(
+                        event_tx, &order, local_peer_str, device_peer_id, db_path, db_passphrase,
+                    ).await;
+                }
                 Ok(MessageEnvelope::SessionAck) => {
                     // Lightweight encrypted ping the peer sends after creating an inbound
                     // session. Decrypting it upgrades our outbound ratchet, and it is the
@@ -11460,6 +11515,13 @@ async fn handle_incoming_request(
                                 hollow_log!("[HOLLOW-MLS] Unexpected DM envelope via MLS from {sender_peer_id} — ignoring");
                             }
 
+                            // A destruction order is a SIBLING lane message. Over MLS
+                            // it would reach every member of a server instead, and no
+                            // member of one can produce a valid order for our master.
+                            MessageEnvelope::DestroyIdentityOrder { .. } => {
+                                hollow_log!("[HOLLOW-SECURITY] REJECTED destruction order envelope via MLS from {sender_peer_id}");
+                            }
+
                             // A 1:1 call signal is Olm-direct by contract. Over MLS
                             // it would be readable by, and forgeable by, every other
                             // member of the group, SFrame key and all.
@@ -12526,6 +12588,14 @@ async fn handle_incoming_request(
             let _ = event_tx.send(NetworkEvent::FriendRemoved {
                 peer_id: master,
             }).await;
+        }
+
+        HavenMessage::IdentityDestroyed { destroy: order } => {
+            // Self-authenticating, so the sender's identity buys it nothing: the
+            // handler branches on whose MASTER signed it, not on who delivered it.
+            destroy::handle_identity_destroyed(
+                event_tx, &order, local_peer_str, device_peer_id, db_path, db_passphrase,
+            ).await;
         }
 
         HavenMessage::FriendListSync { friends } => {

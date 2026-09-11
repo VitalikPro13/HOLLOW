@@ -5,6 +5,7 @@ import 'package:hollow/src/core/providers/layout_prefs_provider.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
+import 'package:hollow/src/ui/components/overlay_hosts.dart';
 import 'package:hollow/src/ui/components/profile_card_body.dart';
 import 'package:hollow/src/ui/dialogs/profile_dialog.dart';
 
@@ -45,6 +46,14 @@ void showProfileCardPopup({
 
   final overlay = Overlay.of(context);
   late final OverlayEntry entry;
+  var removed = false;
+  void close() {
+    if (removed) return;
+    removed = true;
+    OverlayHosts.unregister(entry);
+    entry.remove();
+    entry.dispose();
+  }
 
   entry = OverlayEntry(
     builder: (context) => _ProfileCardOverlay(
@@ -55,11 +64,12 @@ void showProfileCardPopup({
       serverId: serverId,
       anchorOf: anchorOf,
       anchorBottom: anchorBottom,
-      onDismiss: () { entry.remove(); entry.dispose(); },
+      onDismiss: close,
     ),
   );
 
   overlay.insert(entry);
+  OverlayHosts.register(entry, close);
 }
 
 /// Width of the compact anchored card; call-site anchor offsets derive from it.

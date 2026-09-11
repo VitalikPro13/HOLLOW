@@ -6,6 +6,7 @@ import '../../theme/hollow_typography.dart';
 import '../components/hollow_pressable.dart';
 import 'emoji_data.dart';
 import 'emote_image.dart';
+import 'package:hollow/src/ui/components/overlay_hosts.dart';
 
 /// Composer support for custom emotes and assets.
 ///
@@ -320,6 +321,7 @@ class EmoteAutocomplete {
   }
 
   void dismiss() {
+    OverlayHosts.unregister(this);
     _entry?.remove();
     _entry?.dispose();
     _entry = null;
@@ -342,6 +344,7 @@ class EmoteAutocomplete {
     final overlay = Overlay.of(context);
     _entry = OverlayEntry(builder: (ctx) => _build(ctx));
     overlay.insert(_entry!);
+    OverlayHosts.register(this, dismiss);
   }
 
   Widget _build(BuildContext context) {

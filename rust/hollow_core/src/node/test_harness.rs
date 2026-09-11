@@ -75,6 +75,10 @@ struct RelayInner {
     /// later (a captured older announce is a replay, not a forgery).
     recording: HashSet<String>,
     recorded: Vec<(String, Vec<u8>)>,
+    /// target device id -> a parked destruction order, mirroring the relay's kill
+    /// list: one entry per target, overwritten only by a NEWER deposit, handed over
+    /// on that device's next auth and deleted only by its own ack.
+    kill_list: HashMap<String, KillEntry>,
     /// Optional load meter (scaling benchmark). When `Some`, every command the
     /// relay handles and every frame the relay DELIVERS to a socket is tallied
     /// here — the ground truth for "what does one server operation cost the
@@ -105,6 +109,13 @@ pub(crate) struct RelayMeter {
     pub broadcast_deliveries: u64,
     /// Deliveries attributable to targeted SendDirect fan-out (commit/welcome).
     pub direct_deliveries: u64,
+}
+
+#[derive(Clone)]
+struct KillEntry {
+    blob: String,
+    issued_at_ms: i64,
+    issuer: String,
 }
 
 struct BufferedMsg {
@@ -150,6 +161,31 @@ impl MockRelay {
         });
         // Tell the node it's connected (mirrors WsEvent::Connected on real auth).
         let _ = event_tx.send(WsEvent::Connected);
+        self.deliver_kill_signal(&peer_id);
+    }
+
+    /// The relay hands a parked order over immediately after `auth_ok`, before any
+    /// join: a device whose identity is gone may never join a room again.
+    fn deliver_kill_signal(&self, peer_id: &str) {
+        let inner = self.inner.lock().unwrap();
+        let Some(entry) = inner.kill_list.get(peer_id).cloned() else { return };
+        if let Some(conn) = inner.conns.get(peer_id).filter(|c| c.online) {
+            let _ = conn.event_tx.send(WsEvent::KillSignal {
+                blob: entry.blob,
+                issued_at_ms: entry.issued_at_ms,
+            });
+        }
+    }
+
+    /// The order parked for `target`, as `(blob, issued_at_ms, issuer)`. `None`
+    /// once the target has acked it.
+    #[allow(dead_code)]
+    pub(crate) fn kill_entry(&self, target: &str) -> Option<(String, i64, String)> {
+        let inner = self.inner.lock().unwrap();
+        inner
+            .kill_list
+            .get(target)
+            .map(|e| (e.blob.clone(), e.issued_at_ms, e.issuer.clone()))
     }
 
     /// Enable the load meter (scaling benchmark). Resets counts to zero. After
@@ -284,6 +320,14 @@ impl MockRelay {
             // join flow (inbox + friend DM rooms) from scratch.
             if let Some(conn) = inner.conns.get(peer_id) {
                 let _ = conn.event_tx.send(WsEvent::Connected);
+            }
+            if let Some(entry) = inner.kill_list.get(peer_id).cloned() {
+                if let Some(conn) = inner.conns.get(peer_id) {
+                    let _ = conn.event_tx.send(WsEvent::KillSignal {
+                        blob: entry.blob,
+                        issued_at_ms: entry.issued_at_ms,
+                    });
+                }
             }
         }
     }
@@ -654,6 +698,39 @@ impl MockRelay {
                     let _ = conn.event_tx.send(ev);
                 }
             }
+            WsCommand::KillDeposit { targets, issued_at_ms, blob } => {
+                // Relay semantics: at most 16 targets, only a strictly NEWER deposit
+                // replaces a waiting one, and a connected target is handed it at once
+                // (its socket has already authed, so it gets no second auth_ok).
+                for target in targets.into_iter().take(16) {
+                    let newer = inner
+                        .kill_list
+                        .get(&target)
+                        .map(|e| issued_at_ms > e.issued_at_ms)
+                        .unwrap_or(true);
+                    if !newer {
+                        continue;
+                    }
+                    inner.kill_list.insert(
+                        target.clone(),
+                        KillEntry {
+                            blob: blob.clone(),
+                            issued_at_ms,
+                            issuer: from.to_string(),
+                        },
+                    );
+                    if let Some(conn) = inner.conns.get(&target).filter(|c| c.online) {
+                        let _ = conn.event_tx.send(WsEvent::KillSignal {
+                            blob: blob.clone(),
+                            issued_at_ms,
+                        });
+                    }
+                }
+            }
+            WsCommand::KillAck => {
+                // The only removal a client can ask for, and always its own.
+                inner.kill_list.remove(from);
+            }
             // Channel-direct offline push, linkcode/push registries: not
             // needed for the current tests — no-op (add when a test does).
             _ => {}
@@ -824,6 +901,10 @@ pub(crate) struct TestNode {
     pub event_rx: mpsc::Receiver<NetworkEvent>,
     pub db_path: String,
     pub passphrase: String,
+    /// This node's private data root. Production reads it from the global
+    /// `data_dir()`, which several nodes in one process cannot share, so the wipe
+    /// routine takes it explicitly.
+    pub data_root: std::path::PathBuf,
     /// This node's MASTER keypair — the key its own event loop signs CRDT ops
     /// with. A test that has to forge (or legitimately author) an op on a
     /// node's behalf needs it, because a CrdtOp is bound to its author by
@@ -1208,6 +1289,16 @@ impl TestNode {
             .ok()
     }
 
+    /// Whether the LOOP still believes `device` shares a room with us. The relay
+    /// drops a peer before the node hears about it, so this is what a test waits on
+    /// before asserting how a send was routed.
+    pub(crate) async fn sees_peer(&self, device: &str) -> bool {
+        self.debug_snapshot()
+            .await
+            .map(|s| s.room_peers.iter().any(|p| p == device))
+            .unwrap_or(true)
+    }
+
     /// The MLS group's leaf DEVICE ids for `group_id`, telling "the loop did not
     /// reply" (None) apart from "the group holds no such leaf" (empty). An EVICTION
     /// wait MUST use this: a timed-out snapshot yields an empty list, which reads
@@ -1272,6 +1363,33 @@ impl TestNode {
     /// authority, so this is the assertion surface for "warned exactly once".
     pub(crate) fn security_alerts(&self) -> Vec<crate::storage::messages::SecurityAlertRow> {
         self.store().get_security_alerts().unwrap_or_default()
+    }
+
+    /// Whether this node still trusts `master`'s safety number. A destruction
+    /// announce clears it, which is the assertion that matters.
+    pub(crate) fn is_verified(&self, master: &str) -> bool {
+        self.store().is_peer_verified(master).unwrap_or(false)
+    }
+
+    /// The stamp behind the "this identity was destroyed" banner, as the FFI reads
+    /// it. `None` = no banner.
+    pub(crate) fn identity_destroyed_at(&self, master: &str) -> Option<i64> {
+        super::destroy::identity_destroyed_at(&self.store(), master).filter(|v| *v > 0)
+    }
+
+    /// What survives under this node's data root, as the next launch would see it.
+    /// The wipe keeps the marker, any instance lock and the profile registry.
+    pub(crate) fn data_root_leftovers(&self) -> Vec<String> {
+        std::fs::read_dir(&self.data_root)
+            .map(|rd| {
+                rd.flatten()
+                    .map(|e| e.file_name().to_string_lossy().to_string())
+                    .filter(|n| {
+                        n != "pending_wipe.marker" && n != "profiles.json" && !n.ends_with(".lock")
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// Friend-table status for a person (master-keyed): "accepted", "pending",
@@ -1443,6 +1561,7 @@ async fn spawn_node_full(
         device_id,
         cmd_tx,
         event_rx,
+        data_root: tmp.path().to_path_buf(),
         db_path,
         passphrase,
         master_kp: master.clone(),
@@ -1517,6 +1636,7 @@ async fn spawn_node_on_db(
         device_id,
         cmd_tx,
         event_rx,
+        data_root: tmp.path().to_path_buf(),
         db_path,
         passphrase,
         master_kp: master.clone(),
@@ -20037,7 +20157,10 @@ fn harness_fixed_sleep_budget_does_not_grow() {
     // personal-emote tests added two staggers and two send-to-nobody settles (3.3 s).
     // 2026-09-11: the three at-rest DM/channel tests added three spawn staggers and
     // two auto-download advert windows (5.6 s), both of the kinds listed above.
-    const BUDGET_MS: u64 = 612_900;
+    // 2026-09-11: the destruction tests added ONE 300 ms settle, in
+    // `shutdown_and_wipe` - there is no signal for "an aborted task has finished
+    // dropping its SQLCipher handles", which is the same reason `restart_node` pays it.
+    const BUDGET_MS: u64 = 613_200;
 
     let src = include_str!("test_harness.rs");
     // Built from pieces so this scan does not count its own source text.
@@ -22553,4 +22676,436 @@ async fn at_rest_share_partial_written_encrypted_and_resumes() {
         plaintext_hits_under(global_tmp.path(), MARKER).is_empty(),
         "the finished share must not leave plaintext behind",
     );
+}
+
+// ---------------------------------------------------------------------------
+// Destruction: scopes (b) and (c), the relay kill list, and what a friend sees.
+// ---------------------------------------------------------------------------
+//
+// The wipe itself is `api::wipe::destroy_data_root`, which every scope ends with
+// and which Dart calls on `DestroyReceived`. It takes the root explicitly because
+// `data_dir()` is process-global and these nodes share a process.
+
+/// Give a node's data root the shape a real install has, so "the wipe left
+/// nothing" is a claim about something.
+fn seed_install_files(root: &std::path::Path) {
+    for name in ["identity.key", "identity.device", "identity.duress"] {
+        std::fs::write(root.join(name), b"key material").unwrap();
+    }
+    std::fs::write(root.join("profiles.json"), b"{}").unwrap();
+    std::fs::create_dir_all(root.join("files")).unwrap();
+    std::fs::write(root.join("files").join("held.bin"), b"HFE1 ciphertext").unwrap();
+}
+
+/// Stop a node the way a relaunch does, then run the wipe against its root and
+/// hand back whatever survived.
+///
+/// The event loop has to be gone first: its SQLCipher handles keep `messages.db`
+/// open, and Windows refuses to unlink an open file, which is exactly why the wipe
+/// leaves a marker for the next launch.
+async fn shutdown_and_wipe(relay: &MockRelay, node: TestNode) -> Vec<String> {
+    let device_id = node.device_id.clone();
+    let root = node.data_root.clone();
+    relay.set_online(&device_id, false);
+    let (_db_path, tmp) = node.into_storage();
+    // No signal for "an aborted task finished dropping its locals"; the restart
+    // helper pays the same 300ms (counted in BUDGET_MS).
+    sleep_ms(300).await;
+    crate::api::wipe::destroy_data_root(&root).expect("wipe");
+    let left: Vec<String> = std::fs::read_dir(&root)
+        .map(|rd| {
+            rd.flatten()
+                .map(|e| e.file_name().to_string_lossy().to_string())
+                .filter(|n| {
+                    n != "pending_wipe.marker" && n != "profiles.json" && !n.ends_with(".lock")
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    drop(tmp);
+    left
+}
+
+/// Scope (b): the device publishes a master-signed list that tombstones ITSELF, so
+/// the sibling stops routing to it, and only then erases its own disk.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn destroy_scope_b_sibling_drops_the_device() {
+    let _guard = test_guard();
+    let relay = MockRelay::new();
+
+    const M_MASTER: u8 = 250;
+    const B1_DEV: u8 = 251;
+    const B2_DEV: u8 = 252;
+    let m_master = NativeKeypair::from_secret_bytes(&seed_bytes(M_MASTER)).peer_id();
+    let b1_dev = NativeKeypair::from_secret_bytes(&seed_bytes(B1_DEV)).peer_id();
+    let b2_dev = NativeKeypair::from_secret_bytes(&seed_bytes(B2_DEV)).peer_id();
+    super::resolver::seed_self(&m_master, &[b1_dev.clone(), b2_dev.clone()]);
+
+    let b1 = spawn_node_on(&relay, M_MASTER, B1_DEV).await;
+    let mut b2 = spawn_node_on(&relay, M_MASTER, B2_DEV).await;
+    seed_device_list_into_db(&b1.db_path, &b1.passphrase, M_MASTER, &[b1_dev.clone(), b2_dev.clone()]);
+    seed_device_list_into_db(&b2.db_path, &b2.passphrase, M_MASTER, &[b1_dev.clone(), b2_dev.clone()]);
+    expect_siblings_ready(&relay, &b1, &b2, 30).await;
+    seed_install_files(&b1.data_root);
+    drain_events(&mut b2);
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    b1.cmd_tx
+        .send(NodeCommand::PublishSelfRevocation { reply: tx })
+        .await
+        .unwrap();
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_secs(10), rx)
+            .await
+            .expect("the node must answer inside the caller's bound")
+            .expect("reply channel"),
+        "the revocation must reach at least one peer",
+    );
+
+    assert!(
+        wait_until(30, async || b2.revoked_devices(&m_master).contains(&b1_dev)).await,
+        "the sibling must tombstone the destroyed device, got revoked={:?} devices={:?}",
+        b2.revoked_devices(&m_master),
+        b2.known_devices(&m_master),
+    );
+    assert!(
+        !b2.known_devices(&m_master).contains(&b1_dev),
+        "a tombstoned device may never stay in the active set",
+    );
+
+    let left = shutdown_and_wipe(&relay, b1).await;
+    assert!(
+        left.is_empty(),
+        "the destroyed device's data root must hold nothing but the marker, the lock          and the profile registry, got {left:?}",
+    );
+    drop(b2);
+}
+
+/// Scope (c) with the sibling present: the order rides the Olm lane and its
+/// plaintext twin, the sibling accepts it, and its disk goes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn destroy_scope_c_online_sibling_wipes() {
+    let _guard = test_guard();
+    let relay = MockRelay::new();
+
+    const M_MASTER: u8 = 253;
+    const B1_DEV: u8 = 254;
+    const B2_DEV: u8 = 255;
+    let m_master = NativeKeypair::from_secret_bytes(&seed_bytes(M_MASTER)).peer_id();
+    let b1_dev = NativeKeypair::from_secret_bytes(&seed_bytes(B1_DEV)).peer_id();
+    let b2_dev = NativeKeypair::from_secret_bytes(&seed_bytes(B2_DEV)).peer_id();
+    super::resolver::seed_self(&m_master, &[b1_dev.clone(), b2_dev.clone()]);
+
+    let b1 = spawn_node_on(&relay, M_MASTER, B1_DEV).await;
+    let mut b2 = spawn_node_on(&relay, M_MASTER, B2_DEV).await;
+    seed_device_list_into_db(&b1.db_path, &b1.passphrase, M_MASTER, &[b1_dev.clone(), b2_dev.clone()]);
+    seed_device_list_into_db(&b2.db_path, &b2.passphrase, M_MASTER, &[b1_dev.clone(), b2_dev.clone()]);
+    expect_siblings_ready(&relay, &b1, &b2, 30).await;
+    seed_install_files(&b2.data_root);
+    drain_events(&mut b2);
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    b1.cmd_tx
+        .send(NodeCommand::PublishDestroyIdentity {
+            targets: Vec::new(),
+            notify_friends: false,
+            reply: tx,
+        })
+        .await
+        .unwrap();
+    let reached = tokio::time::timeout(std::time::Duration::from_secs(10), rx)
+        .await
+        .expect("the node must answer inside the caller's bound")
+        .expect("reply channel");
+    assert!(reached >= 1, "the online sibling must be reached over the Olm lane");
+
+    assert!(
+        wait_event(&mut b2, std::time::Duration::from_secs(30), |ev| {
+            matches!(ev, NetworkEvent::DestroyReceived { scope } if scope == "identity")
+        })
+        .await,
+        "the sibling must accept the order and hand Dart the scope",
+    );
+
+    let left = shutdown_and_wipe(&relay, b2).await;
+    assert!(left.is_empty(), "the sibling's data root must be empty, got {left:?}");
+    drop(b1);
+}
+
+/// Scope (c) with the sibling AWAY: the order is parked on the relay, handed over
+/// on that device's next auth, and deleted only by its own ack.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn destroy_scope_c_offline_sibling_wipes_on_next_auth_via_kill_list() {
+    let _guard = test_guard();
+    let relay = MockRelay::new();
+
+    const M_MASTER: u8 = 240;
+    const B1_DEV: u8 = 239;
+    const B2_DEV: u8 = 238;
+    let m_master = NativeKeypair::from_secret_bytes(&seed_bytes(M_MASTER)).peer_id();
+    let b1_dev = NativeKeypair::from_secret_bytes(&seed_bytes(B1_DEV)).peer_id();
+    let b2_dev = NativeKeypair::from_secret_bytes(&seed_bytes(B2_DEV)).peer_id();
+    super::resolver::seed_self(&m_master, &[b1_dev.clone(), b2_dev.clone()]);
+
+    let b1 = spawn_node_on(&relay, M_MASTER, B1_DEV).await;
+    let mut b2 = spawn_node_on(&relay, M_MASTER, B2_DEV).await;
+    seed_device_list_into_db(&b1.db_path, &b1.passphrase, M_MASTER, &[b1_dev.clone(), b2_dev.clone()]);
+    seed_device_list_into_db(&b2.db_path, &b2.passphrase, M_MASTER, &[b1_dev.clone(), b2_dev.clone()]);
+    expect_siblings_ready(&relay, &b1, &b2, 30).await;
+    seed_install_files(&b2.data_root);
+    drain_events(&mut b2);
+
+    // The sibling goes away BEFORE the order is issued: nothing can be handed to
+    // it live, so the relay is the only route left.
+    relay.set_online(&b2_dev, false);
+    assert!(
+        wait_until(20, async || !relay.online_devices().contains(&b2_dev)
+            && !b1.sees_peer(&b2_dev).await).await,
+        "the issuer must have NOTICED the sibling leave, or it would still route live",
+    );
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    b1.cmd_tx
+        .send(NodeCommand::PublishDestroyIdentity {
+            targets: Vec::new(),
+            notify_friends: false,
+            reply: tx,
+        })
+        .await
+        .unwrap();
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(10), rx).await;
+
+    assert!(
+        wait_until(15, async || relay.kill_entry(&b2_dev).is_some()).await,
+        "an absent sibling's order must be parked on the relay",
+    );
+    let (_blob, _issued, issuer) = relay.kill_entry(&b2_dev).expect("parked");
+    assert_eq!(issuer, b1_dev, "the relay records who deposited, never what it says");
+
+    // Back online: the relay hands it over immediately after auth, before any join.
+    relay.set_online(&b2_dev, true);
+    assert!(
+        wait_event(&mut b2, std::time::Duration::from_secs(30), |ev| {
+            matches!(ev, NetworkEvent::DestroyReceived { .. })
+        })
+        .await,
+        "the returning sibling must accept the parked order",
+    );
+
+    // The ack is what `api::wipe::destroy_local` sends once the disk is gone.
+    b2.cmd_tx.send(NodeCommand::KillAck).await.unwrap();
+    assert!(
+        wait_until(15, async || relay.kill_entry(&b2_dev).is_none()).await,
+        "the target's own ack is the only thing that clears its entry",
+    );
+
+    let left = shutdown_and_wipe(&relay, b2).await;
+    assert!(left.is_empty(), "the sibling's data root must be empty, got {left:?}");
+    drop(b1);
+}
+
+/// A device linked AFTER an order was issued keeps its data: the order was written
+/// against a machine that no longer exists, and a captured copy must not follow the
+/// user onto the next one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn destroy_refuses_signal_older_than_link_time() {
+    let _guard = test_guard();
+    let relay = MockRelay::new();
+
+    const M_MASTER: u8 = 237;
+    const B_DEV: u8 = 236;
+    const ISSUER_DEV: u8 = 235;
+    let b_dev = NativeKeypair::from_secret_bytes(&seed_bytes(B_DEV)).peer_id();
+    let issuer_dev = NativeKeypair::from_secret_bytes(&seed_bytes(ISSUER_DEV)).peer_id();
+
+    // The node stamps its link time at start, so anything issued before now is
+    // older than this device.
+    let mut b = spawn_node_on(&relay, M_MASTER, B_DEV).await;
+    assert!(
+        wait_until(15, async || relay.online_devices().contains(&b.device_id)).await,
+        "the target must be on the relay",
+    );
+    seed_install_files(&b.data_root);
+    drain_events(&mut b);
+
+    let stale = super::crypto_handler::build_destroy_identity(
+        &b.master_kp,
+        super::destroy::now_ms() - 600_000,
+        Vec::new(),
+        false,
+    );
+    let blob = super::destroy::encode_kill_blob(&stale).expect("encode");
+    let issuer = raw_socket(&relay, &issuer_dev);
+    issuer
+        .cmd_tx
+        .send(WsCommand::KillDeposit {
+            targets: vec![b_dev.clone()],
+            issued_at_ms: stale.issued_at_ms,
+            blob,
+        })
+        .unwrap();
+
+    // ABSENCE: there is no state to poll for "nothing happened", so this waits out
+    // a real window (counted in BUDGET_MS).
+    let acted = wait_event(&mut b, std::time::Duration::from_secs(6), |ev| {
+        matches!(ev, NetworkEvent::DestroyReceived { .. })
+    })
+    .await;
+    assert!(!acted, "an order older than this device's link time must be refused");
+
+    // Refused PERMANENTLY, so it is acked: otherwise the relay re-sends a blob we
+    // will never act on, on every auth, for a year.
+    assert!(
+        wait_until(15, async || relay.kill_entry(&b_dev).is_none()).await,
+        "a permanent rejection must still ack, or the entry lives for a year",
+    );
+    assert!(
+        std::fs::read_dir(&b.data_root)
+            .unwrap()
+            .flatten()
+            .any(|e| e.file_name() == "identity.key"),
+        "the refused device keeps its data",
+    );
+    drop(b);
+}
+
+/// A blob signed by SOMEBODY ELSE'S master is not ours to act on, however it got
+/// into the relay's kill list.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn kill_signal_with_foreign_blob_is_dropped() {
+    let _guard = test_guard();
+    let relay = MockRelay::new();
+
+    const M_MASTER: u8 = 234;
+    const B_DEV: u8 = 233;
+    const HOSTILE: u8 = 232;
+    let b_dev = NativeKeypair::from_secret_bytes(&seed_bytes(B_DEV)).peer_id();
+    let hostile_kp = NativeKeypair::from_secret_bytes(&seed_bytes(HOSTILE));
+
+    let mut b = spawn_node_on(&relay, M_MASTER, B_DEV).await;
+    assert!(
+        wait_until(15, async || relay.online_devices().contains(&b.device_id)).await,
+        "the target must be on the relay",
+    );
+    seed_install_files(&b.data_root);
+    drain_events(&mut b);
+
+    // Correctly signed, just not by us: the hostile peer owns its own identity and
+    // can say anything it likes about it.
+    let foreign = super::crypto_handler::build_destroy_identity(
+        &hostile_kp,
+        super::destroy::now_ms() + 60_000,
+        Vec::new(),
+        false,
+    );
+    let issuer = raw_socket(&relay, &hostile_kp.peer_id());
+    issuer
+        .cmd_tx
+        .send(WsCommand::KillDeposit {
+            targets: vec![b_dev.clone()],
+            issued_at_ms: foreign.issued_at_ms,
+            blob: super::destroy::encode_kill_blob(&foreign).expect("encode"),
+        })
+        .unwrap();
+
+    // ABSENCE again (counted in BUDGET_MS).
+    let acted = wait_event(&mut b, std::time::Duration::from_secs(6), |ev| {
+        matches!(ev, NetworkEvent::DestroyReceived { .. })
+    })
+    .await;
+    assert!(!acted, "a foreign master's order must never wipe us");
+    assert!(
+        wait_until(15, async || relay.kill_entry(&b_dev).is_none()).await,
+        "a foreign blob is a permanent rejection, so it is acked and stops repeating",
+    );
+    assert!(
+        std::fs::read_dir(&b.data_root)
+            .unwrap()
+            .flatten()
+            .any(|e| e.file_name() == "identity.key"),
+        "nothing of ours may be touched by somebody else's order",
+    );
+    drop(b);
+}
+
+/// The friend half: a destroyed identity drops its verified flag and raises the
+/// banner, and coming back from the mnemonic is a warning rather than a silent
+/// return to a trusted safety number.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn destroy_friend_announce_flips_verified_and_banner() {
+    let _guard = test_guard();
+    let relay = MockRelay::new();
+
+    const A_MASTER: u8 = 231;
+    const B_MASTER: u8 = 230;
+    let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER)).peer_id();
+    let b_master = NativeKeypair::from_secret_bytes(&seed_bytes(B_MASTER)).peer_id();
+
+    let mut a = spawn_node_with_friends(&relay, A_MASTER, A_MASTER, &[&b_master]).await;
+    let b = spawn_node_with_friends(&relay, B_MASTER, B_MASTER, &[&a_master]).await;
+    expect_dm_pair_ready(&relay, &a, &b, 30).await;
+
+    // A has compared safety numbers with B in person.
+    a.store().set_peer_verified(&b_master).expect("verify");
+    assert!(a.is_verified(&b_master), "the precondition is a verified contact");
+    drain_events(&mut a);
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    b.cmd_tx
+        .send(NodeCommand::PublishDestroyIdentity {
+            targets: Vec::new(),
+            notify_friends: true,
+            reply: tx,
+        })
+        .await
+        .unwrap();
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(10), rx).await;
+
+    assert!(
+        wait_event(&mut a, std::time::Duration::from_secs(30), |ev| {
+            matches!(ev, NetworkEvent::IdentityDestroyedByFriend { master_peer_id, .. }
+                if *master_peer_id == b_master)
+        })
+        .await,
+        "the friend must be told",
+    );
+    assert!(
+        !a.is_verified(&b_master),
+        "a destroyed identity cannot stay verified: the safety number outlives the keys",
+    );
+    assert!(
+        a.identity_destroyed_at(&b_master).is_some(),
+        "the banner reads a stamp, not a message row",
+    );
+
+    // The mnemonic can rebuild the identity, and it comes back with the SAME safety
+    // number. A re-announce carries B's device list, which is where the warning is.
+    relay.set_online(&b.device_id, false);
+    assert!(
+        wait_until(15, async || !relay.online_devices().contains(&b.device_id)).await,
+        "B must drop off before it reappears",
+    );
+    relay.set_online(&b.device_id, true);
+    assert!(
+        wait_until(30, async || a
+            .security_alerts()
+            .iter()
+            .any(|al| al.kind == super::security_alerts::KIND_IDENTITY_REAPPEARED
+                && al.peer_id == b_master))
+            .await,
+        "an identity that comes back after being destroyed must raise a warning, got {:?}",
+        a.security_alerts().iter().map(|al| al.kind.clone()).collect::<Vec<_>>(),
+    );
+    assert!(
+        a.identity_destroyed_at(&b_master).is_none(),
+        "the banner clears once the identity is back, the alert carries the story",
+    );
+    drop(a);
+    drop(b);
 }

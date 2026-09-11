@@ -151,6 +151,12 @@ pub(crate) fn load_or_create_identity() -> Result<IdentityData, String> {
             mnemonic: None,
         })
     } else {
+        // A destruction order can land mid-boot, after the wipe unlinked the key
+        // file: minting a fresh identity then leaves a live, unused key in a
+        // root the next launch is about to clear.
+        if crate::api::storage::has_pending_wipe().unwrap_or(false) {
+            return Err("A data wipe is pending. Restart Hollow to finish it.".into());
+        }
         generate_new_identity()
     }
 }

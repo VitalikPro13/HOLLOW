@@ -26,6 +26,7 @@ import '../components/hollow_toast.dart';
 import '../components/hollow_tooltip.dart';
 import 'emoji_data.dart';
 import 'emote_image.dart';
+import 'package:hollow/src/ui/components/overlay_hosts.dart';
 
 /// Quick-reaction defaults (mobile long-press row, hover bar shortcuts).
 const kQuickReactionEmojis = [
@@ -75,6 +76,7 @@ void showEmojiPicker({
   void teardown() {
     if (removed) return;
     removed = true;
+    OverlayHosts.unregister(entry);
     // Play the exit, THEN drop the entry.
     anim.dismiss(() {
       entry.remove();
@@ -101,6 +103,7 @@ void showEmojiPicker({
   );
 
   overlay.insert(entry);
+  OverlayHosts.register(entry, teardown);
 }
 
 // Recently used, persisted in app_settings as a JSON list, newest first.
@@ -174,6 +177,7 @@ void _showEmoteContextMenu(
   void dismiss() {
     if (removed) return;
     removed = true;
+    OverlayHosts.unregister(entry);
     entry.remove();
     entry.dispose();
   }
@@ -254,6 +258,7 @@ void _showEmoteContextMenu(
     ),
   );
   overlay.insert(entry);
+  OverlayHosts.register(entry, dismiss);
 }
 
 enum _PickerTab { emoji, server, mine, ffz }

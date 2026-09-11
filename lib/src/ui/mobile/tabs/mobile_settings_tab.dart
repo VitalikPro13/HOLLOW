@@ -31,6 +31,8 @@ import 'package:hollow/src/core/providers/verified_peers_provider.dart';
 import 'package:hollow/src/ui/settings/blocked_users_shared.dart';
 import 'package:hollow/src/ui/settings/verified_contacts_shared.dart';
 import 'package:hollow/src/ui/settings/device_management_shared.dart';
+import 'package:hollow/src/core/providers/duress_provider.dart';
+import 'package:hollow/src/ui/settings/duress_section.dart';
 import 'package:hollow/src/ui/settings/settings_shared.dart';
 import 'package:hollow/src/ui/settings/storage_section.dart';
 import 'package:hollow/src/ui/settings/verify_proof_section.dart';
@@ -3316,6 +3318,9 @@ class _SecurityTabState extends ConsumerState<_SecurityTab> {
   }
 
   Future<void> _loadStatus() async {
+    // The one funnel every protection change already runs through, so the
+    // duress card's availability can never lag behind this tab's own state.
+    ref.invalidate(identityProtectionProvider);
     try {
       final status = await identity_api.getIdentityProtectionStatus();
       final appLock = AppLockService();
@@ -3501,6 +3506,22 @@ class _SecurityTabState extends ConsumerState<_SecurityTab> {
 
         const SizedBox(height: HollowSpacing.xl),
 
+        const _SectionLabel(label: 'Duress Code'),
+        const SizedBox(height: HollowSpacing.sm),
+        Container(
+          padding: const EdgeInsets.all(HollowSpacing.md),
+          decoration: BoxDecoration(
+            color: hollow.surface,
+            borderRadius: BorderRadius.circular(hollow.radiusMd),
+            border: Border.all(color: hollow.border),
+          ),
+          // Both platforms re-unlock a RUNNING app now: a phone's App Lock
+          // and, on a narrow desktop window, the desktop one.
+          child: const DuressCodeCard(wideScopes: true),
+        ),
+
+        const SizedBox(height: HollowSpacing.xl),
+
         const _SectionLabel(label: 'Recovery'),
         const SizedBox(height: HollowSpacing.sm),
         _RecoveryPhraseButton(),
@@ -3509,6 +3530,19 @@ class _SecurityTabState extends ConsumerState<_SecurityTab> {
         const _SectionLabel(label: 'Verify a Proof'),
         const SizedBox(height: HollowSpacing.sm),
         const VerifyProofSection(),
+        const SizedBox(height: HollowSpacing.xl),
+
+        const _SectionLabel(label: 'Danger Zone'),
+        const SizedBox(height: HollowSpacing.sm),
+        Container(
+          padding: const EdgeInsets.all(HollowSpacing.md),
+          decoration: BoxDecoration(
+            color: hollow.surface,
+            borderRadius: BorderRadius.circular(hollow.radiusMd),
+            border: Border.all(color: hollow.error.withValues(alpha: 0.35)),
+          ),
+          child: const AccountDangerZoneCard(),
+        ),
         const SizedBox(height: HollowSpacing.xl),
       ],
     );
@@ -3531,6 +3565,9 @@ class _SecurityTabState extends ConsumerState<_SecurityTab> {
       await appLock.setLockType(type);
       await appLock.disableBiometric(); // any old stored secret is stale now
       appLock.sessionSecret = secret;
+      // Hollow starts on its own and App Lock is the prompt, so a duress code
+      // typed there reaches the other devices even after a full close.
+      await appLock.storeLaunchSecret(secret);
       await _loadStatus();
       if (mounted) {
         HollowToast.show(context, isPin ? 'PIN set' : 'Password set',

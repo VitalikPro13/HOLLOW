@@ -6,7 +6,7 @@
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `keychain_key_that_decrypts_opts`, `keychain_key_that_decrypts`, `protection_status_of`
+// These functions are ignored because they are not marked as `pub`: `code_is_the_password`, `duress_available`, `keychain_key_that_decrypts_opts`, `keychain_key_that_decrypts`, `owner_gate`, `protection_status_of`, `save_duress_settings`
 
 /// Set the data directory path (Android/iOS: pass app documents dir).
 /// Must be called before load_or_create_identity() or start_node().
@@ -70,6 +70,28 @@ Future<void> removePasswordProtection({required String password}) => RustLib
     .api
     .crateApiIdentityRemovePasswordProtection(password: password);
 
+/// Set (or replace) the duress code. `scope` is `device`, `device_revoke` or
+/// `identity`.
+Future<void> setDuressCode({
+  required String password,
+  required String duressCode,
+  required String scope,
+  required bool notifyFriends,
+}) => RustLib.instance.api.crateApiIdentitySetDuressCode(
+  password: password,
+  duressCode: duressCode,
+  scope: scope,
+  notifyFriends: notifyFriends,
+);
+
+/// Remove the duress code. The slot stays, holding random bytes under a random
+/// key, so the disk looks the same either way.
+Future<void> clearDuressCode({required String password}) =>
+    RustLib.instance.api.crateApiIdentityClearDuressCode(password: password);
+
+Future<DuressStatus> duressStatus() =>
+    RustLib.instance.api.crateApiIdentityDuressStatus();
+
 /// Toggle whether the password is required on each launch: on means a prompt every
 /// time, off caches the password-derived key in the OS keychain for a silent unlock.
 /// The identity must already be password-protected and unlocked.
@@ -122,6 +144,44 @@ Future<bool> verifyIdentityPasswordAt({
 /// Check if the identity is currently unlocked (session wrapping key is set).
 Future<bool> isIdentityUnlocked() =>
     RustLib.instance.api.crateApiIdentityIsIdentityUnlocked();
+
+/// What Settings shows about the duress code. `scope` and `notify_friends` come
+/// from the database, which is where the UI can read them; the slot itself carries
+/// its own copy, because a cold launch judges the typed code before any database
+/// is open.
+class DuressStatus {
+  final bool enabled;
+  final String scope;
+  final bool notifyFriends;
+
+  /// A duress code needs a password PROMPT. Keychain-only and silent-unlock
+  /// installs never ask for a secret, so there is nothing to type it into.
+  final bool available;
+
+  const DuressStatus({
+    required this.enabled,
+    required this.scope,
+    required this.notifyFriends,
+    required this.available,
+  });
+
+  @override
+  int get hashCode =>
+      enabled.hashCode ^
+      scope.hashCode ^
+      notifyFriends.hashCode ^
+      available.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is DuressStatus &&
+          runtimeType == other.runtimeType &&
+          enabled == other.enabled &&
+          scope == other.scope &&
+          notifyFriends == other.notifyFriends &&
+          available == other.available;
+}
 
 /// Result of creating or loading an identity.
 class IdentityInfo {

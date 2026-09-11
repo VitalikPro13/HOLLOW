@@ -23,6 +23,7 @@ import '../components/hollow_toast.dart';
 import '../components/edge_scroll_row.dart';
 import '../components/overlay_anchor.dart';
 import '../components/popup_animator.dart';
+import 'package:hollow/src/ui/components/overlay_hosts.dart';
 
 /// The GIF picker (issue #26): Popular, Favourites and Recent plus search
 /// through the Hollow website's no-log Klipy proxy.
@@ -45,6 +46,7 @@ void showGifPicker({
   void teardown() {
     if (removed) return;
     removed = true;
+    OverlayHosts.unregister(entry);
     // Play the exit, THEN drop the entry.
     anim.dismiss(() {
       entry.remove();
@@ -67,6 +69,7 @@ void showGifPicker({
   );
 
   overlay.insert(entry);
+  OverlayHosts.register(entry, teardown);
 }
 
 class _GifPickerOverlay extends StatelessWidget {
@@ -921,6 +924,7 @@ void showGifMenu(
   void dismiss() {
     if (removed) return;
     removed = true;
+    OverlayHosts.unregister(entry);
     entry.remove();
     entry.dispose();
   }
@@ -1021,6 +1025,7 @@ void showGifMenu(
   );
 
   overlay.insert(entry);
+  OverlayHosts.register(entry, dismiss);
 }
 
 // Grid cell: a still thumbnail that swaps to the animated variant on hover or

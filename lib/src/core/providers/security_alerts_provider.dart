@@ -15,6 +15,11 @@ abstract final class SecurityAlertKind {
   /// One of this contact's devices presented a new Olm identity key. Informational:
   /// key exchange is authenticated, so a changed key is not evidence of an attack.
   static const identityKeyChanged = 'identity_key_changed';
+
+  /// This contact announced their identity destroyed and it is signing again.
+  /// The recovery phrase can rebuild the same keys, so this is not proof of an
+  /// impostor, and it is the strongest reason to check a safety number.
+  static const identityReappeared = 'identity_reappeared';
 }
 
 /// Security alerts recorded for contacts (Issue 1-C).

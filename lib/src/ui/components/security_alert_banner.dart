@@ -38,11 +38,17 @@ class SecurityAlertBanner extends ConsumerWidget {
       master,
     );
 
-    // A new device carries the attack shape and a re-key is informational, so
-    // with both outstanding the stronger one leads.
+    // A reappearance outranks a new device, which outranks an informational
+    // re-key, so with several outstanding the strongest one leads.
+    final hasReappeared =
+        alerts.any((a) => a.kind == SecurityAlertKind.identityReappeared);
     final hasNewDevice =
         alerts.any((a) => a.kind == SecurityAlertKind.newDevice);
-    final color = hasNewDevice ? hollow.warning : hollow.textSecondary;
+    final color = hasReappeared
+        ? hollow.error
+        : hasNewDevice
+            ? hollow.warning
+            : hollow.textSecondary;
 
     return Container(
       width: double.infinity,
@@ -57,16 +63,18 @@ class SecurityAlertBanner extends ConsumerWidget {
       child: Row(
         children: [
           Icon(
-            hasNewDevice
-                ? LucideIcons.monitorSmartphone
-                : LucideIcons.rotateCw,
+            hasReappeared
+                ? LucideIcons.shieldX
+                : hasNewDevice
+                    ? LucideIcons.monitorSmartphone
+                    : LucideIcons.rotateCw,
             size: 16,
             color: color,
           ),
           const SizedBox(width: HollowSpacing.sm),
           Expanded(
             child: Text(
-              _message(hasNewDevice, name, alerts.length),
+              _message(hasReappeared, hasNewDevice, name, alerts.length),
               style: HollowTypography.body.copyWith(
                 color: hollow.textPrimary,
                 fontSize: 12,
@@ -94,7 +102,12 @@ class SecurityAlertBanner extends ConsumerWidget {
     );
   }
 
-  String _message(bool hasNewDevice, String name, int count) {
+  String _message(
+      bool hasReappeared, bool hasNewDevice, String name, int count) {
+    if (hasReappeared) {
+      return 'This identity was destroyed and has come back. Verify the '
+          'safety number before trusting it.';
+    }
     if (!hasNewDevice) {
       return '$name reinstalled or re-keyed a device. Their messages are still '
           'end-to-end encrypted.';

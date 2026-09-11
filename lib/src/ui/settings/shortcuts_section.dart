@@ -120,6 +120,7 @@ class _ShortcutsSettingsViewState extends ConsumerState<ShortcutsSettingsView> {
             AppShortcut.openSettings,
             AppShortcut.toggleMemberPanel,
             AppShortcut.quickSearch,
+            AppShortcut.lockNow,
             AppShortcut.toggleSplitView,
             AppShortcut.focusLeftPane,
             AppShortcut.focusRightPane,

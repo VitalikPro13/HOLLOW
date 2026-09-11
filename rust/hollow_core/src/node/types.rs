@@ -80,6 +80,33 @@ pub(crate) struct SignedDeviceList {
     pub sig_b64: String,
 }
 
+/// A master-signed order to destroy an identity's local data.
+///
+/// Self-authenticating on purpose: it travels the sibling lane, a friend's DM lane
+/// and the relay's kill list, and none of those is trusted. The signature is the
+/// MASTER's over `destroy_identity_signing_payload`, and the pubkey must derive to
+/// `master_peer_id`, exactly like [`SignedDeviceList`]. `targets` empty = every
+/// device of the identity.
+///
+/// `issued_at_ms` is the signer's clock and is NEVER trusted as time: receivers
+/// only compare it against their own link stamp and the last destroy they applied,
+/// so a backdated replay can only ever be refused.
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub(crate) struct DestroyIdentity {
+    #[serde(default)]
+    pub master_pubkey_b64: String,
+    #[serde(default)]
+    pub master_peer_id: String,
+    #[serde(default)]
+    pub issued_at_ms: i64,
+    #[serde(default)]
+    pub targets: Vec<String>,
+    #[serde(default)]
+    pub notify_friends: bool,
+    #[serde(default)]
+    pub sig_b64: String,
+}
+
 /// An Olm prekey bundle carried inside a friend request, so the handshake needs
 /// no co-presence at all.
 ///
@@ -270,6 +297,13 @@ pub(crate) enum NetworkEvent {
     /// (`stash_pending_wipe()` + relaunch); the cryptographic cutoff already
     /// happened everywhere else.
     SelfRevoked,
+    /// A verified `DestroyIdentity` for OUR OWN master arrived (sibling lane, DM
+    /// lane or the relay's kill list). Dart runs the wipe and relaunches; `scope`
+    /// is `device` | `device_revoke` | `identity`.
+    DestroyReceived { scope: String },
+    /// A FRIEND told us their identity was destroyed. Their verified flag is
+    /// already cleared; Dart shows the conversation banner.
+    IdentityDestroyedByFriend { master_peer_id: String, issued_at_ms: i64 },
     // -- Message editing events --
     ChannelMessageEdited { server_id: String, channel_id: String, message_id: String, new_text: String, edited_at: i64, signature: Option<String>, public_key: Option<String> },
     DmMessageEdited { peer_id: String, message_id: String, new_text: String, edited_at: i64, signature: Option<String>, public_key: Option<String> },
@@ -901,6 +935,27 @@ pub(crate) enum NodeCommand {
     /// single version bump, propagate to friends, and nuke each revoked sibling. A
     /// local wipe alone regrows, because the device-list merge is grow-only.
     ResetDeviceLists,
+    /// Destruction scope (b): publish a master-signed list with THIS device
+    /// tombstoned, so siblings and friends drop it. `reply` fires once the list has
+    /// been handed to the socket; the caller wipes regardless when it times out.
+    PublishSelfRevocation { reply: tokio::sync::oneshot::Sender<bool> },
+    /// Destruction scope (c): sign a [`DestroyIdentity`] with the node's in-memory
+    /// master key and push it to online siblings, the relay's kill list (for the
+    /// offline ones) and, when asked, our friends. `reply` carries the number of
+    /// sibling devices it reached.
+    PublishDestroyIdentity {
+        targets: Vec<String>,
+        notify_friends: bool,
+        reply: tokio::sync::oneshot::Sender<u32>,
+    },
+    /// Drop this device's push token from the relay (wipe step 5).
+    UnregisterPushToken,
+    /// Delete our parked kill-list entry. Sent by `api::wipe` once the local wipe
+    /// has actually run, so an unacked order is re-delivered if the wipe did not.
+    KillAck,
+    /// Park a destruction order on the relay for absent devices. The UI probe's
+    /// only way in; the node itself deposits directly from `destroy`.
+    DepositKillSignal { targets: Vec<String>, issued_at_ms: i64, blob: String },
     /// Ask the chosen SOURCE sibling to re-announce all its servers and re-share
     /// its friends to us. `source_device_id` is that device's peer_id.
     RequestStateSync { source_device_id: String },
@@ -1198,6 +1253,11 @@ impl NodeCommand {
             Self::DeclineLinkPush { .. } => "DeclineLinkPush",
             Self::RevokeDevice { .. } => "RevokeDevice",
             Self::ResetDeviceLists => "ResetDeviceLists",
+            Self::PublishSelfRevocation { .. } => "PublishSelfRevocation",
+            Self::PublishDestroyIdentity { .. } => "PublishDestroyIdentity",
+            Self::UnregisterPushToken => "UnregisterPushToken",
+            Self::KillAck => "KillAck",
+            Self::DepositKillSignal { .. } => "DepositKillSignal",
             Self::RequestStateSync { .. } => "RequestStateSync",
             Self::SyncPersonalEmotes { .. } => "SyncPersonalEmotes",
             Self::RegisterPushToken { .. } => "RegisterPushToken",
@@ -1288,6 +1348,10 @@ pub(crate) struct DebugSnapshotReply {
     pub mls_epoch: std::collections::HashMap<String, u64>,
     /// peer DEVICE id -> Olm session status: "none" | "unconfirmed" | "confirmed".
     pub olm_sessions: std::collections::HashMap<String, String>,
+    /// Every DEVICE id the loop currently believes is in a room with us. The relay's
+    /// own view leads this one, so "the node has noticed a peer leave" has a signal
+    /// to poll instead of a sleep.
+    pub room_peers: Vec<String>,
 }
 
 // -- Wire protocol types (v2: encrypted) --
@@ -1811,6 +1875,17 @@ pub(crate) enum HavenMessage {
 
     #[serde(rename = "friend_remove")]
     FriendRemove,
+
+    /// A master-signed destruction order, carried in the clear because it proves
+    /// itself. Two lanes ride this one variant: a SIBLING device of our own master
+    /// (the complement to the Olm [`MessageEnvelope::DestroyIdentity`], so a
+    /// sibling with no live Olm session still hears it) and a FRIEND being told
+    /// their contact is gone. The receiver branches on whose master signed it.
+    #[serde(rename = "identity_destroyed")]
+    IdentityDestroyed {
+        #[serde(default)]
+        destroy: Box<DestroyIdentity>,
+    },
 
     /// Multi-device: one device shares its accepted-friend list with a SIBLING of
     /// the same master, so a freshly-linked device learns its identity's friends
@@ -3236,6 +3311,15 @@ pub(crate) enum MessageEnvelope {
     /// Lightweight encrypted ping sent after creating an inbound session.
     /// Causes the remote peer's outbound session to ratchet (upgrade from
     /// PreKey type 0 to Normal type 1) when they decrypt this message.
+    /// The Olm lane for a master-signed destruction order to our OWN siblings.
+    /// Verified exactly like the plaintext twin; the two are idempotent against
+    /// each other through the `destroy_applied_at_ms` stamp.
+    #[serde(rename = "destroy_identity")]
+    DestroyIdentityOrder {
+        #[serde(default)]
+        destroy: Box<DestroyIdentity>,
+    },
+
     #[serde(rename = "session_ack")]
     SessionAck,
 

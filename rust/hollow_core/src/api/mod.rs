@@ -16,3 +16,4 @@ pub mod storage;
 pub mod twitch;
 pub mod updater;
 pub mod verification;
+pub mod wipe;

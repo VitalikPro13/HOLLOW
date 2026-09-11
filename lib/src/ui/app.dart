@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/accent_color_provider.dart';
+import 'package:hollow/src/core/providers/app_lock_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/core/providers/annotation_mode_provider.dart';
 import 'package:hollow/src/core/providers/background_provider.dart';
@@ -86,7 +87,7 @@ class HollowApp extends ConsumerWidget {
                     if (!annotation) const WindowTitleBar(),
                     Expanded(
                       child: ClipRect(
-                        child: UiScale(child: body),
+                        child: UiScale(child: _IdleActivity(child: body)),
                       ),
                     ),
                   ],
@@ -114,6 +115,26 @@ class HollowApp extends ConsumerWidget {
           ),
         );
       },
+    );
+  }
+}
+
+/// Stamps the desktop idle clock on any pointer activity, above the Navigator
+/// so a dialog's own pointers count too. A plain field write, never provider
+/// state: a mouse move must not rebuild anything.
+class _IdleActivity extends StatelessWidget {
+  final Widget child;
+  const _IdleActivity({required this.child});
+
+  @override
+  Widget build(BuildContext context) {
+    return Listener(
+      behavior: HitTestBehavior.translucent,
+      onPointerDown: (_) => IdleClock.stamp(),
+      onPointerMove: (_) => IdleClock.stamp(),
+      onPointerHover: (_) => IdleClock.stamp(),
+      onPointerSignal: (_) => IdleClock.stamp(),
+      child: child,
     );
   }
 }

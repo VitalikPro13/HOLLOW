@@ -200,6 +200,12 @@ pub enum NetworkEvent {
     SecurityAlert { peer_id: String, kind: String, detail: String, created_at: i64 },
     /// THIS device was revoked (Step 7) — Dart self-nukes (wipe + relaunch).
     SelfRevoked,
+    /// A verified destruction order for THIS identity arrived. Dart runs the wipe
+    /// and relaunches; `scope` is `device` | `device_revoke` | `identity`.
+    DestroyReceived { scope: String },
+    /// A contact told us their identity was destroyed. The verified flag is
+    /// already cleared; Dart shows the conversation banner.
+    IdentityDestroyedByFriend { master_peer_id: String, issued_at_ms: i64 },
     // -- Message editing events (Phase 3.5) --
     ChannelMessageEdited { server_id: String, channel_id: String, message_id: String, new_text: String, edited_at: i64, signature: Option<String>, public_key: Option<String> },
     DmMessageEdited { peer_id: String, message_id: String, new_text: String, edited_at: i64, signature: Option<String>, public_key: Option<String> },
@@ -951,6 +957,12 @@ fn to_ffi_event(event: node::NetworkEvent) -> NetworkEvent {
             NetworkEvent::ProfileUpdated { peer_id }
         }
         node::NetworkEvent::SelfRevoked => NetworkEvent::SelfRevoked,
+        node::NetworkEvent::DestroyReceived { scope } => {
+            NetworkEvent::DestroyReceived { scope }
+        }
+        node::NetworkEvent::IdentityDestroyedByFriend { master_peer_id, issued_at_ms } => {
+            NetworkEvent::IdentityDestroyedByFriend { master_peer_id, issued_at_ms }
+        }
         node::NetworkEvent::DeviceListUpdated { master_peer_id } => {
             NetworkEvent::DeviceListUpdated { master_peer_id }
         }
@@ -2855,6 +2867,36 @@ pub fn register_push_token(token: String, platform: String) -> Result<(), String
     rt.block_on(cmd_tx.send(node::NodeCommand::RegisterPushToken { token, platform }))
         .map_err(|e| format!("Failed to send command: {e}"))?;
     Ok(())
+}
+
+/// Park a destruction order on the relay for devices that are not connected.
+///
+/// Exists for the UI probe's `kill_deposit` op, which the relay-restart journey
+/// needs to park a throwaway blob for a peer it closed. It adds no capability: the
+/// relay accepts a deposit from any authed non-guest socket already, and the blob is
+/// opaque to it and to us.
+#[frb]
+pub fn deposit_kill_signal(
+    targets: Vec<String>,
+    issued_at_ms: i64,
+    blob: String,
+) -> Result<(), String> {
+    if targets.is_empty() {
+        return Err("Name at least one target device".into());
+    }
+    if blob.len() > 2048 {
+        return Err("Destruction blob is too large".into());
+    }
+    send_node_command(node::NodeCommand::DepositKillSignal { targets, issued_at_ms, blob })
+}
+
+/// Drop this device's push token from the relay (wipe step 5).
+///
+/// Fire and forget: the caller is on its way out, and a relay that never hears it
+/// simply fires a push nobody will collect.
+#[frb]
+pub fn unregister_push_token() -> Result<(), String> {
+    send_node_command(node::NodeCommand::UnregisterPushToken)
 }
 
 /// Register per-server/channel push prefs with the relay: `{"<server_id>":

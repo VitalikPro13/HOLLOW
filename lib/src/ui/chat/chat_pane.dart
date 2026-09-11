@@ -77,6 +77,7 @@ import 'package:hollow/src/ui/components/hollow_tooltip.dart';
 import 'package:hollow/src/ui/components/link_health_chip.dart';
 import 'package:hollow/src/ui/components/ptt_mic_visual.dart';
 import 'package:hollow/src/core/providers/verified_peers_provider.dart';
+import 'package:hollow/src/ui/components/identity_destroyed_banner.dart';
 import 'package:hollow/src/ui/components/security_alert_banner.dart';
 import 'package:hollow/src/ui/components/status_dot.dart';
 import 'package:hollow/src/ui/dialogs/verify_contact_dialog.dart';
@@ -1151,6 +1152,9 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
         // Pinned above the message list rather than a toast, because the
         // warning has to survive scrollback and restarts.
         if (!isSavedMessages) SecurityAlertBanner(peerId: widget.peerId),
+
+        if (!isSavedMessages)
+          IdentityDestroyedBanner(peerId: widget.peerId),
 
         if (isScreenShareActive)
           _buildScreenShareLayout(

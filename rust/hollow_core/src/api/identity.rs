@@ -13,6 +13,19 @@ pub struct IdentityInfo {
     pub mnemonic: Option<String>,
 }
 
+/// What Settings shows about the duress code. `scope` and `notify_friends` come
+/// from the database, which is where the UI can read them; the slot itself carries
+/// its own copy, because a cold launch judges the typed code before any database
+/// is open.
+pub struct DuressStatus {
+    pub enabled: bool,
+    pub scope: String,
+    pub notify_friends: bool,
+    /// A duress code needs a password to type it instead of. A keychain-only
+    /// install has none; a silent-unlock one still prompts at a re-lock.
+    pub available: bool,
+}
+
 /// Current protection status of the identity file.
 pub struct ProtectionStatus {
     pub is_encrypted: bool,
@@ -121,24 +134,40 @@ pub fn unlock_identity(password: Option<String>) -> Result<IdentityInfo, String>
         encryption::IdentityFormat::Plaintext => {
         }
         encryption::IdentityFormat::Encrypted { flags, salt, .. } => {
-            let wrapping_key = if encryption::flags_has_password(flags)
+            let wrapping_key = if encryption::flags_has_password(flags) && password.is_some() {
+                // A TYPED secret always runs BOTH slots: two derivations, two opens,
+                // and only then a decision. Branching on the identity slot alone
+                // would let a stopwatch tell a wrong password from a duress code.
+                let pw = password.as_deref().unwrap_or_default();
+                let identity_key = encryption::derive_wrapping_key_from_password(pw, &salt)?;
+                let identity_opens = encryption::decrypt_identity(&bytes, &identity_key).is_ok();
+                let duress = crate::identity::duress::probe(pw);
+                match (identity_opens, duress) {
+                    (true, _) => identity_key,
+                    (false, Some(cfg)) => {
+                        // Returns only AFTER the data is gone. The caller shows
+                        // nothing and waits for the relaunch.
+                        crate::api::wipe::run_duress(&cfg);
+                        return Err("duress".into());
+                    }
+                    (false, None) => {
+                        return Err("Wrong password or corrupted identity file".into());
+                    }
+                }
+            } else if encryption::flags_has_password(flags)
                 && encryption::flags_has_os_keychain(flags)
             {
-                // Password + keychain: silent keychain first, password prompt when no stored
-                // key decrypts.
+                // Password + keychain with nothing typed: the silent unlock.
                 match keychain_key_that_decrypts(&bytes) {
                     Some(key) => key,
                     None => {
-                        let pw = password.as_deref()
-                            .ok_or("Identity is password-protected. Provide a password.")?;
-                        encryption::derive_wrapping_key_from_password(pw, &salt)?
+                        return Err(
+                            "Identity is password-protected. Provide a password.".into(),
+                        );
                     }
                 }
             } else if encryption::flags_has_password(flags) {
-                // Password-only (flags=0x01): always prompt.
-                let pw = password.as_deref()
-                    .ok_or("Identity is password-protected. Provide a password.")?;
-                encryption::derive_wrapping_key_from_password(pw, &salt)?
+                return Err("Identity is password-protected. Provide a password.".into());
             } else if encryption::flags_has_os_keychain(flags) {
                 // Keychain-only (flags=0x02): silent unlock on same machine.
                 match keychain_key_that_decrypts(&bytes) {
@@ -220,6 +249,10 @@ pub fn enable_password_protection(
 
     encryption::set_session_key(wrapping_key);
 
+    // A duress slot exists for the life of password protection, so its presence
+    // never reveals whether a duress code is set.
+    let _ = crate::identity::duress::set_dummy();
+
     // Mirror the new protection onto the per-device key file (hazard R2).
     identity::device_key::rewrite_device_key_protection(
         &data.device_keypair,
@@ -254,6 +287,13 @@ pub fn change_password(old_password: String, new_password: String) -> Result<(),
 
     let old_key = encryption::derive_wrapping_key_from_password(&old_password, &old_salt)?;
     let plaintext = encryption::decrypt_identity(&bytes, &old_key)?;
+
+    // A new password that also opens the duress slot would DISARM the duress code
+    // silently: the identity slot is tried first and wins, so the code would never
+    // fire again.
+    if crate::identity::duress::probe(&new_password).is_some() {
+        return Err("That is your duress code. Choose a different password.".into());
+    }
 
     // Re-encrypt with new password, preserving keychain flag.
     let mut new_salt = [0u8; 16];
@@ -317,10 +357,135 @@ pub fn remove_password_protection(password: String) -> Result<(), String> {
     let device = identity::device_key::load_device_keypair_with_key(&key)?;
     identity::device_key::rewrite_device_key_protection(&device, None, false, false)?;
 
+    // No prompt left to type a duress code into.
+    let _ = crate::identity::duress::remove();
     let _ = platform_keystore::delete_key();
     encryption::clear_session_key();
 
     Ok(())
+}
+
+// -- Duress code --
+
+/// Password protection is the whole requirement: silent-unlock installs still
+/// prompt at an app lock, which is a real place to type a duress code.
+fn duress_available() -> bool {
+    use crate::identity::encryption;
+    let Ok(dir) = crate::identity::data_dir() else { return false };
+    let Ok(bytes) = std::fs::read(dir.join("identity.key")) else { return false };
+    match encryption::detect_format(&bytes) {
+        Ok(encryption::IdentityFormat::Encrypted { flags, .. }) => {
+            encryption::flags_has_password(flags)
+        }
+        _ => false,
+    }
+}
+
+/// `password` must open the identity file. A GATE, never an unlock: it proves the
+/// person changing the duress code is the owner and not whoever walked past an
+/// open Settings window.
+fn owner_gate(password: &str) -> Result<(), String> {
+    use crate::identity::encryption;
+    let dir = crate::identity::data_dir()?;
+    let bytes = std::fs::read(dir.join("identity.key"))
+        .map_err(|e| format!("Failed to read identity file: {e}"))?;
+    let salt = match encryption::detect_format(&bytes)? {
+        encryption::IdentityFormat::Encrypted { salt, flags, .. }
+            if encryption::flags_has_password(flags) =>
+        {
+            salt
+        }
+        _ => return Err("Identity is not password-protected".into()),
+    };
+    let key = encryption::derive_wrapping_key_from_password(password, &salt)?;
+    encryption::decrypt_identity(&bytes, &key).map(|_| ())
+}
+
+/// True when `code` also unwraps the identity: it would unlock instead of
+/// destroying, which is the one thing a duress code must never do.
+fn code_is_the_password(code: &str) -> bool {
+    use crate::identity::encryption;
+    let Ok(dir) = crate::identity::data_dir() else { return false };
+    let Ok(bytes) = std::fs::read(dir.join("identity.key")) else { return false };
+    let salt = match encryption::detect_format(&bytes) {
+        Ok(encryption::IdentityFormat::Encrypted { salt, .. }) => salt,
+        _ => return false,
+    };
+    encryption::derive_wrapping_key_from_password(code, &salt)
+        .map(|k| encryption::decrypt_identity(&bytes, &k).is_ok())
+        .unwrap_or(false)
+}
+
+fn save_duress_settings(scope: &str, notify_friends: bool) {
+    let store = crate::api::storage::get_store();
+    let Ok(guard) = store.lock() else { return };
+    let Some(ms) = guard.as_ref() else { return };
+    let _ = ms.save_setting("duress_scope", scope);
+    let _ = ms.save_setting("duress_notify_friends", if notify_friends { "1" } else { "0" });
+}
+
+/// Set (or replace) the duress code. `scope` is `device`, `device_revoke` or
+/// `identity`.
+#[frb]
+pub fn set_duress_code(
+    password: String,
+    duress_code: String,
+    scope: String,
+    notify_friends: bool,
+) -> Result<(), String> {
+    if duress_code.trim().is_empty() {
+        return Err("Enter a duress code.".into());
+    }
+    if !duress_available() {
+        return Err(
+            "A duress code needs password protection. Turn it on to use one."
+                .into(),
+        );
+    }
+    owner_gate(&password)?;
+    if duress_code == password || code_is_the_password(&duress_code) {
+        return Err("The duress code has to be different from your password.".into());
+    }
+    crate::identity::duress::set_code(&duress_code, &scope, notify_friends)?;
+    save_duress_settings(&scope, notify_friends);
+    Ok(())
+}
+
+/// Remove the duress code. The slot stays, holding random bytes under a random
+/// key, so the disk looks the same either way.
+#[frb]
+pub fn clear_duress_code(password: String) -> Result<(), String> {
+    owner_gate(&password)?;
+    crate::identity::duress::set_dummy()?;
+    let store = crate::api::storage::get_store();
+    if let Ok(guard) = store.lock() {
+        if let Some(ms) = guard.as_ref() {
+            let _ = ms.save_setting("duress_scope", "");
+            let _ = ms.save_setting("duress_notify_friends", "0");
+        }
+    }
+    Ok(())
+}
+
+#[frb]
+pub fn duress_status() -> DuressStatus {
+    let store = crate::api::storage::get_store();
+    let (scope, notify_friends) = match store.lock() {
+        Ok(guard) => match guard.as_ref() {
+            Some(ms) => (
+                ms.load_setting("duress_scope").ok().flatten().unwrap_or_default(),
+                ms.load_setting("duress_notify_friends").ok().flatten().as_deref() == Some("1"),
+            ),
+            None => (String::new(), false),
+        },
+        Err(_) => (String::new(), false),
+    };
+    DuressStatus {
+        enabled: !scope.is_empty(),
+        scope,
+        notify_friends,
+        available: duress_available(),
+    }
 }
 
 /// Toggle whether the password is required on each launch: on means a prompt every
@@ -643,5 +808,145 @@ mod profile_erase_gate_tests {
         let _ = verify_identity_password_at(dir.clone(), Some("correct horse".into()));
         let _ = verify_identity_password_at(dir, Some("wrong horse".into()));
         assert_eq!(before, encryption::get_session_key());
+    }
+}
+
+#[cfg(test)]
+mod duress_tests {
+    use super::*;
+    use crate::identity::{duress, encryption};
+    use crate::identity::native_identity::NativeKeypair;
+
+    const PASSWORD: &str = "correct horse battery staple";
+    const CODE: &str = "9 1 1 1";
+
+    /// `HOLLOW_DATA_DIR`, the session key and the derive counter are all
+    /// process-global, so these share the crate-wide test lock.
+    fn temp_identity() -> (std::sync::MutexGuard<'static, ()>, tempfile::TempDir) {
+        let g = crate::node::resolver::test_lock();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        // SAFETY: serialized by the lock above.
+        unsafe { std::env::set_var("HOLLOW_DATA_DIR", tmp.path()) };
+        encryption::clear_session_key();
+
+        let salt = [0x21u8; 16];
+        let key = encryption::derive_wrapping_key_from_password(PASSWORD, &salt).expect("derive");
+        // The master AND the per-device file, both under the same wrapping key: the
+        // protection-change flows rewrite the device file too, so a fixture without
+        // one exercises a different failure.
+        for (name, seed) in [("identity.key", 0x5au8), ("identity.device", 0x5bu8)] {
+            let plaintext = NativeKeypair::from_secret_bytes(&[seed; 32])
+                .to_protobuf_encoding()
+                .expect("encode");
+            let blob = encryption::encrypt_identity(&plaintext, &key, &salt, true, false)
+                .expect("encrypt");
+            std::fs::write(tmp.path().join(name), blob).expect("write key file");
+        }
+        duress::set_dummy().expect("dummy slot");
+        (g, tmp)
+    }
+
+    /// The whole design stands on this: a wrong password and a duress code must
+    /// cost the same, so the work is a CONSTANT two derivations whatever happens.
+    #[test]
+    fn duress_both_slots_always_derived() {
+        let (_g, _tmp) = temp_identity();
+
+        for (label, secret) in [("right", PASSWORD), ("wrong", "not the password")] {
+            let _ = encryption::take_derive_count();
+            let _ = unlock_identity(Some(secret.to_string()));
+            assert_eq!(
+                encryption::take_derive_count(), 2,
+                "{label} password with no duress code set must derive twice",
+            );
+        }
+
+        duress::set_code(CODE, duress::SCOPE_DEVICE, false).expect("set code");
+        for (label, secret) in [("right", PASSWORD), ("wrong", "not the password")] {
+            let _ = encryption::take_derive_count();
+            let _ = unlock_identity(Some(secret.to_string()));
+            assert_eq!(
+                encryption::take_derive_count(), 2,
+                "{label} password with a duress code set must derive twice",
+            );
+        }
+
+        // An install that predates the slot has no file at all, and must still cost
+        // the same: the probe derives against a throwaway salt either way.
+        duress::remove().expect("remove slot");
+        let _ = encryption::take_derive_count();
+        let _ = unlock_identity(Some(PASSWORD.to_string()));
+        assert_eq!(
+            encryption::take_derive_count(), 2,
+            "an identity with no duress slot must derive twice as well",
+        );
+        encryption::clear_session_key();
+    }
+
+    /// A silent-unlock install has a password and an app lock that asks for it,
+    /// so the duress code is on offer there too.
+    #[test]
+    fn duress_available_with_a_silent_keychain_password() {
+        let (_g, tmp) = temp_identity();
+        assert!(duress_available(), "a launch prompt offers a duress code");
+
+        let salt = [0x21u8; 16];
+        let key = encryption::derive_wrapping_key_from_password(PASSWORD, &salt).expect("derive");
+        let plaintext = NativeKeypair::from_secret_bytes(&[0x5au8; 32])
+            .to_protobuf_encoding()
+            .expect("encode");
+        let blob = encryption::encrypt_identity(&plaintext, &key, &salt, true, true)
+            .expect("encrypt");
+        std::fs::write(tmp.path().join("identity.key"), blob).expect("write key file");
+        assert!(
+            duress_available(),
+            "a silent unlock still re-prompts at an app lock"
+        );
+    }
+
+    /// A new password that opens the duress slot would DISARM the duress code in
+    /// silence: the identity slot is tried first and wins, so the code never fires
+    /// again and the person believes they still have one.
+    #[test]
+    fn change_password_refuses_the_duress_code() {
+        let (_g, _tmp) = temp_identity();
+        duress::set_code(CODE, duress::SCOPE_DEVICE, false).expect("set code");
+
+        let err = change_password(PASSWORD.into(), CODE.into())
+            .expect_err("the duress code must not become the password");
+        assert!(err.contains("duress code"), "unexpected message: {err}");
+
+        // Refused means UNCHANGED: the old password still opens the identity and the
+        // duress code still opens its slot.
+        assert!(duress::probe(CODE).is_some());
+        change_password(PASSWORD.into(), "a different password".into())
+            .expect("an unrelated new password is accepted");
+        encryption::clear_session_key();
+    }
+
+    /// A code that also unwraps the identity would unlock instead of destroying,
+    /// which is the one thing it must never do.
+    #[test]
+    fn duress_code_must_differ_from_password() {
+        let (_g, _tmp) = temp_identity();
+
+        let err = set_duress_code(
+            PASSWORD.into(), PASSWORD.into(), duress::SCOPE_DEVICE.into(), false,
+        )
+        .expect_err("the password itself must be refused as a duress code");
+        assert!(err.contains("different"), "unexpected message: {err}");
+
+        set_duress_code(PASSWORD.into(), CODE.into(), duress::SCOPE_IDENTITY.into(), true)
+            .expect("a distinct code is accepted");
+        let cfg = duress::probe(CODE).expect("the code opens its slot");
+        assert_eq!(cfg.scope, duress::SCOPE_IDENTITY);
+        assert!(cfg.notify_friends);
+
+        // The wrong owner password is a gate failure, not a silent no-op.
+        assert!(set_duress_code(
+            "wrong".into(), "another code".into(), duress::SCOPE_DEVICE.into(), false,
+        ).is_err());
+        assert_eq!(duress::probe(CODE).map(|c| c.scope), Some(duress::SCOPE_IDENTITY.into()));
+        encryption::clear_session_key();
     }
 }

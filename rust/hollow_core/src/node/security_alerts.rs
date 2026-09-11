@@ -23,6 +23,9 @@ use super::types::NetworkEvent;
 /// A device was added to a contact's master-signed device list.
 pub(crate) const KIND_NEW_DEVICE: &str = "new_device";
 
+/// An identity we were told was DESTROYED has published a device list again.
+pub(crate) const KIND_IDENTITY_REAPPEARED: &str = "identity_reappeared";
+
 /// A contact's per-device Olm identity key changed — they reinstalled or re-keyed.
 pub(crate) const KIND_KEY_CHANGED: &str = "identity_key_changed";
 
@@ -104,6 +107,24 @@ pub(crate) async fn note_new_devices(
         )
         .await;
     }
+}
+
+/// An identity came back after we recorded its destruction.
+///
+/// Louder than a new device: the mnemonic can recreate an identity, so the same
+/// safety number returns on keys the person may no longer control. Deduped by the
+/// same deterministic id as every other alert.
+pub(crate) async fn note_identity_reappeared(
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    db_path: &str,
+    db_passphrase: &str,
+    master_peer_id: &str,
+) {
+    record(
+        event_tx, db_path, db_passphrase, master_peer_id, KIND_IDENTITY_REAPPEARED,
+        master_peer_id,
+    )
+    .await;
 }
 
 /// Pin a contact device's Olm identity key, and notice when it changes.

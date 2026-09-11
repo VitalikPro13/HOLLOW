@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/providers/app_lock_provider.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
 import 'package:hollow/src/core/providers/member_panel_provider.dart';
 import 'package:hollow/src/core/providers/app_lifecycle_provider.dart';
@@ -349,6 +350,9 @@ class SystemNotificationNotifier
   /// Ties go to the toast: the card is invisible whenever the window isn't on top,
   /// so guessing "focused" loses the message, guessing "unfocused" costs a toast.
   Future<bool> _useNativeToast() async {
+    // Locked is away: the cover hides the in-app card, so the OS toast is the
+    // only surface left, exactly as on a phone's lock screen.
+    if (ref.read(appLockedProvider)) return true;
     if (await _isWindowHidden()) return true;
     if (!await _isWindowFocused()) return true;
     notifLog('window visible + focused — routing to the in-app card');

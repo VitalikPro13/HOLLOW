@@ -10,6 +10,7 @@ import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
+import 'package:hollow/src/ui/components/overlay_hosts.dart';
 import 'package:hollow/src/ui/share/share_card.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -22,19 +23,25 @@ void showDownloadManagerPopup({
 }) {
   final overlay = Overlay.of(context);
   late final OverlayEntry entry;
+  var removed = false;
+  void close() {
+    if (removed) return;
+    removed = true;
+    OverlayHosts.unregister(entry);
+    entry.remove();
+    entry.dispose();
+  }
 
   entry = OverlayEntry(
     builder: (context) => _DownloadManagerOverlay(
       anchor: anchor,
       anchorBottom: anchorBottom,
-      onDismiss: () {
-        entry.remove();
-        entry.dispose();
-      },
+      onDismiss: close,
     ),
   );
 
   overlay.insert(entry);
+  OverlayHosts.register(entry, close);
 }
 
 class _DownloadManagerOverlay extends ConsumerStatefulWidget {

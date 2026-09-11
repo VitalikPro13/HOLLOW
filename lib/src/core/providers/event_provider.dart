@@ -11,6 +11,9 @@ import 'package:hollow/src/core/providers/blocked_users_provider.dart';
 import 'package:hollow/src/core/providers/showcase_assets_provider.dart';
 import 'package:hollow/src/core/providers/connection_status_provider.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
+import 'package:hollow/src/core/providers/duress_provider.dart';
+import 'package:hollow/src/core/providers/verified_peers_provider.dart';
+import 'package:hollow/src/core/services/destroy_flow.dart';
 import 'package:hollow/src/core/providers/device_link_sync_provider.dart';
 import 'package:hollow/src/core/providers/channel_chat_provider.dart';
 import 'package:hollow/src/core/providers/conference_provider.dart';
@@ -68,6 +71,7 @@ import 'package:hollow/src/core/providers/temporary_nickname_provider.dart';
 import 'package:hollow/src/core/models/channel_chat_message.dart';
 import 'package:hollow/src/core/models/file_attachment.dart';
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
+import 'package:hollow/src/rust/api/wipe.dart' as wipe_api;
 import 'package:hollow/src/ui/app.dart' show hollowNavigatorKey;
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
@@ -122,21 +126,30 @@ class EventStreamNotifier extends Notifier<bool> {
 
   bool _selfNuking = false;
 
-  /// Step 7 self-nuke: this device was revoked. MARK a wipe and relaunch, because
-  /// the live node holds open SQLCipher handles and deleting in-process fails on
-  /// Windows; the next launch runs performPendingWipe() BEFORE the node starts.
+  /// This device lost its right to the identity (revoked, or a signed destroy
+  /// reached it). The wipe runs in Rust and leaves a marker, because the live
+  /// node holds open SQLCipher handles and an in-process delete fails on
+  /// Windows; the next launch finishes it before the node starts.
   /// Idempotent, since the event can repeat.
-  Future<void> _selfNuke() async {
+  Future<void> _selfNuke(String toastMessage) async {
     if (_selfNuking) return;
     _selfNuking = true;
 
-    // Stash the wipe FIRST, before anything that can throw: a toast raised before
+    // The wipe runs FIRST, before anything that can throw: a toast raised before
     // it aborted _selfNuke and the device never reset. Teardown is unconditional,
     // the toast best-effort. See feedback_toast_from_nonwidget_overlaystate.
     try {
-      await storage_api.stashPendingWipe();
+      await wipe_api.destroyLocal();
     } catch (e) {
-      debugPrint('[HOLLOW] self-nuke stash failed: $e');
+      debugPrint('[HOLLOW] self-nuke destroy failed: $e');
+    }
+    await clearLocalSecretsAfterDestroy();
+    // The node still holds the destroyed master in memory; stopping it here
+    // ends the window in which it could answer peers as that identity.
+    try {
+      await notifyShutdown();
+    } catch (e) {
+      debugPrint('[HOLLOW] self-nuke node shutdown failed: $e');
     }
 
     // Best-effort toast; must NEVER abort the nuke. Insert via `overlayState:`.
@@ -148,7 +161,7 @@ class EventStreamNotifier extends Notifier<bool> {
       if (overlay != null && overlayContext != null && overlayContext.mounted) {
         HollowToast.show(
           overlayContext,
-          'This device was removed from your identity. Resetting…',
+          toastMessage,
           type: HollowToastType.error,
           overlayState: overlay,
         );
@@ -804,12 +817,31 @@ class EventStreamNotifier extends Notifier<bool> {
         // deliberately NOT a toast (missable, and does not survive scrollback).
         debugPrint('[HOLLOW] Security alert for $peerId: $kind');
         ref.read(securityAlertsProvider.notifier).refresh();
+        // A reappearance is also what clears the destroyed banner, and Rust has
+        // already dropped the stamp behind it.
+        if (kind == SecurityAlertKind.identityReappeared) {
+          ref.invalidate(identityDestroyedProvider(peerId));
+        }
 
       case NetworkEvent_SelfRevoked():
         // THIS device was revoked: wipe the data dir and relaunch to a clean Welcome.
         // The cryptographic cutoff already happened; this is the honest teardown.
         debugPrint('[HOLLOW] This device was REVOKED — self-nuking');
-        _selfNuke();
+        _selfNuke('This device was removed from your identity. Resetting…');
+
+      case NetworkEvent_DestroyReceived(:final scope):
+        // A destroy signed by our own master reached this device, online or on
+        // the first connection after it was issued.
+        debugPrint('[HOLLOW] Destroy received (scope $scope) — self-nuking');
+        _selfNuke('Your identity was destroyed from another device. '
+            'Resetting…');
+
+      case NetworkEvent_IdentityDestroyedByFriend(:final masterPeerId):
+        // A friend destroyed their identity: their conversation gets the
+        // standing banner, and Rust has already dropped our verified flag.
+        debugPrint('[HOLLOW] Identity destroyed by $masterPeerId');
+        ref.invalidate(identityDestroyedProvider(masterPeerId));
+        ref.read(verifiedPeersProvider.notifier).load();
 
       case NetworkEvent_ChannelMessageEdited(
             :final serverId, :final channelId, :final messageId, :final newText, :final editedAt, :final signature, :final publicKey):

@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:hollow/src/core/hollow_data_dir.dart';
+import 'package:hollow/src/core/providers/duress_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/rust/api/identity.dart' as identity_api;
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
@@ -13,7 +13,10 @@ import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/hollow_toggle.dart';
+import 'package:hollow/src/core/services/app_lock_service.dart';
+import 'package:hollow/src/ui/settings/app_lock_card.dart';
 import 'package:hollow/src/ui/settings/blocked_users_shared.dart';
+import 'package:hollow/src/ui/settings/duress_section.dart';
 import 'package:hollow/src/ui/settings/verified_contacts_shared.dart';
 import 'package:hollow/src/ui/settings/settings_shared.dart';
 import 'package:hollow/src/ui/settings/verify_proof_section.dart';
@@ -220,21 +223,25 @@ class PeerForwardingToggle extends ConsumerWidget {
 
 /// Security category: App Lock, Device Protection, Recovery Phrase, proof
 /// verification and the blocked users list.
-class SecurityTab extends StatefulWidget {
+class SecurityTab extends ConsumerStatefulWidget {
   const SecurityTab({super.key});
   @override
-  State<SecurityTab> createState() => _SecurityTabState();
+  ConsumerState<SecurityTab> createState() => _SecurityTabState();
 }
 
-class _SecurityTabState extends State<SecurityTab> {
+class _SecurityTabState extends ConsumerState<SecurityTab> {
   bool _revealed = false;
   bool _loading = true;
   String? _mnemonic;
   String? _error;
   bool _hasPassword = false;
   bool _hasOsKeychain = false;
-  bool _osKeychainAvailable = false;
+  bool _hasLaunchSecret = false;
   bool _protectionLoading = true;
+
+  /// Hollow asks for the password before it starts: nothing holds the key for
+  /// a silent start.
+  bool get _askBeforeStart => !_hasOsKeychain && !_hasLaunchSecret;
 
   @override
   void initState() {
@@ -244,13 +251,17 @@ class _SecurityTabState extends State<SecurityTab> {
   }
 
   Future<void> _loadProtectionStatus() async {
+    // The one funnel every protection change already runs through, so the
+    // duress card's availability can never lag behind this tab's own state.
+    ref.invalidate(identityProtectionProvider);
     try {
       final status = await identity_api.getIdentityProtectionStatus();
+      final launchSecret = await AppLockService().hasLaunchSecret();
       if (!mounted) return;
       setState(() {
         _hasPassword = status.hasPassword;
         _hasOsKeychain = status.hasOsKeychain;
-        _osKeychainAvailable = status.osKeychainAvailable;
+        _hasLaunchSecret = launchSecret;
         _protectionLoading = false;
       });
     } catch (e) {
@@ -287,11 +298,17 @@ class _SecurityTabState extends State<SecurityTab> {
 
     await _runProtectionAction('enablePassword', () async {
       try {
-        await identity_api.enablePasswordProtection(password: passphrase, requireOnLaunch: true);
+        // Silent start: the keystore holds the key where the platform has one,
+        // and the secure-storage copy covers the rest, so the app lock is the
+        // only prompt and a duress code typed there signs the wide scopes.
+        await identity_api.enablePasswordProtection(password: passphrase, requireOnLaunch: false);
+        final appLock = AppLockService();
+        appLock.sessionSecret = passphrase;
+        await appLock.storeLaunchSecret(passphrase);
         if (!mounted) return;
         await _loadProtectionStatus();
         if (!mounted) return;
-        HollowToast.show(context, 'Password protection enabled', type: HollowToastType.success);
+        HollowToast.show(context, 'App lock enabled', type: HollowToastType.success);
       } catch (e) {
         if (!mounted) return;
         HollowToast.show(context, 'Failed: $e', type: HollowToastType.error);
@@ -300,8 +317,25 @@ class _SecurityTabState extends State<SecurityTab> {
   }
 
   Future<void> _toggleRequireOnLaunch(bool require) async {
+    final appLock = AppLockService();
     try {
-      await identity_api.setRequirePasswordOnLaunch(require: require);
+      if (require) {
+        await identity_api.setRequirePasswordOnLaunch(require: true);
+        await appLock.clearLaunchSecret();
+      } else {
+        // Turning the silent start back on needs the password itself, which
+        // may not be in memory if this session was unlocked by the keystore.
+        var secret = appLock.sessionSecret;
+        if (secret == null) {
+          secret = await _askPassphrase(context, 'Confirm your password',
+              buttonLabel: 'Continue');
+          if (secret == null || !mounted) return;
+          await identity_api.unlockIdentity(password: secret);
+          appLock.sessionSecret = secret;
+        }
+        await identity_api.setRequirePasswordOnLaunch(require: false);
+        await appLock.storeLaunchSecret(secret);
+      }
       if (!mounted) return;
       await _loadProtectionStatus();
     } catch (e) {
@@ -320,6 +354,11 @@ class _SecurityTabState extends State<SecurityTab> {
     await _runProtectionAction('changePassword', () async {
       try {
         await identity_api.changePassword(oldPassword: oldPass, newPassword: newPass);
+        final appLock = AppLockService();
+        appLock.sessionSecret = newPass;
+        if (await appLock.hasLaunchSecret()) {
+          await appLock.storeLaunchSecret(newPass);
+        }
         if (!mounted) return;
         HollowToast.show(context, 'Password changed', type: HollowToastType.success);
       } catch (e) {
@@ -336,6 +375,7 @@ class _SecurityTabState extends State<SecurityTab> {
     await _runProtectionAction('removePassword', () async {
       try {
         await identity_api.removePasswordProtection(password: pass);
+        await AppLockService().clearAll();
         if (!mounted) return;
         await _loadProtectionStatus();
         if (!mounted) return;
@@ -343,36 +383,6 @@ class _SecurityTabState extends State<SecurityTab> {
       } catch (e) {
         if (!mounted) return;
         HollowToast.show(context, 'Wrong password', type: HollowToastType.error);
-      }
-    });
-  }
-
-  Future<void> _enableOsKeychain() async {
-    await _runProtectionAction('enableKeychain', () async {
-      try {
-        await identity_api.enableOsKeychainProtection();
-        if (!mounted) return;
-        await _loadProtectionStatus();
-        if (!mounted) return;
-        HollowToast.show(context, 'Device protection enabled', type: HollowToastType.success);
-      } catch (e) {
-        if (!mounted) return;
-        HollowToast.show(context, 'Failed: $e', type: HollowToastType.error);
-      }
-    });
-  }
-
-  Future<void> _disableOsKeychain() async {
-    await _runProtectionAction('disableKeychain', () async {
-      try {
-        await identity_api.disableOsKeychainProtection();
-        if (!mounted) return;
-        await _loadProtectionStatus();
-        if (!mounted) return;
-        HollowToast.show(context, 'Device protection removed', type: HollowToastType.success);
-      } catch (e) {
-        if (!mounted) return;
-        HollowToast.show(context, 'Failed: $e', type: HollowToastType.error);
       }
     });
   }
@@ -433,6 +443,12 @@ class _SecurityTabState extends State<SecurityTab> {
 
           const SizedBox(height: HollowSpacing.xl),
 
+          const SettingsSectionLabel(label: 'DURESS CODE'),
+          const SizedBox(height: HollowSpacing.sm),
+          const DuressCodeCard(wideScopes: true),
+
+          const SizedBox(height: HollowSpacing.xl),
+
           const SettingsSectionLabel(label: 'RECOVERY PHRASE'),
           const SizedBox(height: HollowSpacing.sm),
 
@@ -453,6 +469,12 @@ class _SecurityTabState extends State<SecurityTab> {
           const SizedBox(height: HollowSpacing.xl),
 
           const BlockedUsersCard(),
+
+          const SizedBox(height: HollowSpacing.xl),
+
+          const SettingsSectionLabel(label: 'DANGER ZONE'),
+          const SizedBox(height: HollowSpacing.sm),
+          const AccountDangerZoneCard(),
         ],
       ),
     );
@@ -462,8 +484,8 @@ class _SecurityTabState extends State<SecurityTab> {
     return [
       Text(
         _hasPassword
-            ? 'Your identity is encrypted with a password.'
-            : 'Set a password to encrypt your identity file. Without it, anyone with access to your computer can copy your identity.',
+            ? 'Your password locks Hollow and encrypts your identity file.'
+            : 'Set a password to lock Hollow and encrypt your identity file. Without one, anyone with access to this computer can copy your identity.',
         style: HollowTypography.body.copyWith(
           color: hollow.textSecondary, fontSize: 12,
         ),
@@ -480,9 +502,6 @@ class _SecurityTabState extends State<SecurityTab> {
               : const Icon(LucideIcons.lock, size: 16),
           child: const Text('Set password'),
         ),
-
-      if (!_hasPassword && _osKeychainAvailable)
-        ..._deviceProtectionChildren(hollow),
 
       const SizedBox(height: HollowSpacing.sm),
       Row(
@@ -533,7 +552,7 @@ class _SecurityTabState extends State<SecurityTab> {
           Icon(LucideIcons.shieldCheck, size: 16, color: hollow.success),
           const SizedBox(width: HollowSpacing.xs),
           Text(
-            'Password protection active',
+            'App lock active',
             style: HollowTypography.body.copyWith(
               color: hollow.success, fontSize: 13,
             ),
@@ -541,40 +560,40 @@ class _SecurityTabState extends State<SecurityTab> {
         ],
       ),
       const SizedBox(height: HollowSpacing.md),
-      if (_osKeychainAvailable) ...[
-        Row(
-          children: [
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    'Ask for password on launch',
-                    style: HollowTypography.body.copyWith(
-                      color: hollow.textPrimary, fontSize: 13,
-                    ),
+      AppLockCard(hasPassword: _hasPassword),
+      const SizedBox(height: HollowSpacing.md),
+      Row(
+        children: [
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Ask for the password before Hollow starts',
+                  style: HollowTypography.body.copyWith(
+                    color: hollow.textPrimary, fontSize: 13,
                   ),
-                  const SizedBox(height: 2),
-                  Text(
-                    _hasOsKeychain
-                        ? 'Off: the app opens silently on this device, but your identity file is still encrypted.'
-                        : 'On: password is required every time you open Hollow.',
-                    style: HollowTypography.caption.copyWith(
-                      color: hollow.textSecondary, fontSize: 11,
-                    ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  _askBeforeStart
+                      ? 'On: Hollow stays offline until you type the password, and a duress code typed there destroys this computer only.'
+                      : 'Off: Hollow starts on its own and the app lock asks for the password, so a duress code typed there reaches your other devices too.',
+                  style: HollowTypography.caption.copyWith(
+                    color: hollow.textSecondary, fontSize: 11,
                   ),
-                ],
-              ),
+                ),
+              ],
             ),
-            const SizedBox(width: HollowSpacing.md),
-            HollowToggle(
-              value: !_hasOsKeychain,
-              onChanged: (val) => _toggleRequireOnLaunch(val),
-            ),
-          ],
-        ),
-        const SizedBox(height: HollowSpacing.md),
-      ],
+          ),
+          const SizedBox(width: HollowSpacing.md),
+          HollowToggle(
+            value: _askBeforeStart,
+            onChanged: (val) => _toggleRequireOnLaunch(val),
+          ),
+        ],
+      ),
+      const SizedBox(height: HollowSpacing.md),
       Row(
         children: [
           HollowButton.ghost(
@@ -590,98 +609,10 @@ class _SecurityTabState extends State<SecurityTab> {
             icon: _busyAction == 'removePassword'
                 ? _busySpinner(hollow.accent)
                 : const Icon(LucideIcons.shieldOff, size: 16),
-            child: const Text('Remove password'),
+            child: const Text('Remove app lock'),
           ),
         ],
       ),
-    ];
-  }
-
-  List<Widget> _deviceProtectionChildren(HollowTheme hollow) {
-    return [
-      const SizedBox(height: HollowSpacing.xl),
-      const SettingsSectionLabel(label: 'DEVICE PROTECTION'),
-      const SizedBox(height: HollowSpacing.sm),
-      Text(
-        _hasOsKeychain
-            ? 'Your identity is encrypted with this device\'s credentials. If Windows loses these credentials (OS reinstall, password reset), you\'ll need your 24-word recovery phrase.'
-            : 'Encrypt your identity with this device\'s credentials. The app unlocks silently on this device, but the identity cannot be moved to another computer without the recovery phrase.',
-        style: HollowTypography.body.copyWith(
-          color: hollow.textSecondary, fontSize: 12,
-        ),
-      ),
-      const SizedBox(height: HollowSpacing.md),
-      if (isPortableMode) ...[
-        Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Icon(LucideIcons.triangleAlert, size: 16, color: hollow.warning),
-            const SizedBox(width: HollowSpacing.xs),
-            Expanded(
-              child: Text(
-                'Portable mode: device protection is tied to THIS computer. '
-                'If you move the app folder to another machine, the identity '
-                'will not unlock there. Use password protection instead.',
-                style: HollowTypography.caption.copyWith(
-                  color: hollow.textSecondary, fontSize: 11, height: 1.4,
-                ),
-              ),
-            ),
-          ],
-        ),
-        const SizedBox(height: HollowSpacing.md),
-      ],
-      if (_hasOsKeychain) ...[
-        Row(
-          children: [
-            Icon(LucideIcons.monitor, size: 16, color: hollow.success),
-            const SizedBox(width: HollowSpacing.xs),
-            Text(
-              'Device protection active',
-              style: HollowTypography.body.copyWith(
-                color: hollow.success, fontSize: 13,
-              ),
-            ),
-          ],
-        ),
-        const SizedBox(height: HollowSpacing.md),
-        HollowButton.ghost(
-          onPressed: _busyAction == null ? _disableOsKeychain : null,
-          icon: _busyAction == 'disableKeychain'
-              ? _busySpinner(hollow.accent)
-              : const Icon(LucideIcons.shieldOff, size: 16),
-          child: const Text('Remove device protection'),
-        ),
-      ] else ...[
-        HollowButton.outline(
-          onPressed: _busyAction == null ? _enableOsKeychain : null,
-          icon: _busyAction == 'enableKeychain'
-              ? _busySpinner(hollow.accent)
-              : const Icon(LucideIcons.monitor, size: 16),
-          child: const Text('Enable device protection'),
-        ),
-      ],
-      if (Platform.isWindows) ...[
-        const SizedBox(height: HollowSpacing.sm),
-        Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Padding(
-              padding: const EdgeInsets.only(top: 2),
-              child: Icon(LucideIcons.alertTriangle, size: 14, color: hollow.warning),
-            ),
-            const SizedBox(width: HollowSpacing.xs),
-            Expanded(
-              child: Text(
-                'Windows may lose device credentials after OS reinstalls or admin password resets. Always keep your 24-word recovery phrase backed up.',
-                style: HollowTypography.caption.copyWith(
-                  color: hollow.warning, fontSize: 11,
-                ),
-              ),
-            ),
-          ],
-        ),
-      ],
     ];
   }
 

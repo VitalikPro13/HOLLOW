@@ -20,6 +20,10 @@ class AppLockService {
 
   static const _kLockType = 'hollow_app_lock_type'; // 'pin' | 'password'
   static const _kBiometricSecret = 'hollow_app_lock_secret';
+  // The unlock secret the OS keystore holds so Hollow can start on its own
+  // and the app lock is the only prompt. Absent when the person chose to be
+  // asked before Hollow starts.
+  static const _kLaunchSecret = 'hollow_app_lock_launch_secret';
 
   final _storage = const FlutterSecureStorage(
     aOptions: AndroidOptions(),
@@ -86,11 +90,37 @@ class AppLockService {
     } catch (_) {}
   }
 
+  Future<String?> readLaunchSecret() async {
+    try {
+      final v = await _storage.read(key: _kLaunchSecret);
+      return (v == null || v.isEmpty) ? null : v;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<bool> hasLaunchSecret() async => (await readLaunchSecret()) != null;
+
+  Future<void> storeLaunchSecret(String secret) async {
+    try {
+      await _storage.write(key: _kLaunchSecret, value: secret);
+    } catch (e) {
+      debugPrint('[HOLLOW-APPLOCK] storeLaunchSecret failed: $e');
+    }
+  }
+
+  Future<void> clearLaunchSecret() async {
+    try {
+      await _storage.delete(key: _kLaunchSecret);
+    } catch (_) {}
+  }
+
   /// Clear everything (called when App Lock is removed).
   Future<void> clearAll() async {
     sessionSecret = null;
     await setLockType(null);
     await disableBiometric();
+    await clearLaunchSecret();
   }
 
   /// Shows the OS biometric prompt with no secret involved, to verify the

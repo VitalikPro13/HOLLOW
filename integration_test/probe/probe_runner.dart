@@ -16,6 +16,7 @@ import 'package:hollow/src/core/providers/server_provider.dart'
 import 'package:hollow/src/core/services/attachment_export.dart'
     show exportAttachmentTo;
 import 'package:hollow/src/core/services/image_pick.dart';
+import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/rust/api/storage.dart' as storage;
 import 'package:hollow/src/ui/app.dart' show hollowNavigatorKey;
 import 'package:hollow/src/ui/chat/audio_message_bubble.dart'
@@ -62,6 +63,7 @@ import 'probe_targets.dart';
 /// | `wait_for` | `target` or `gone`, `timeout_ms`, `count` | polls until it holds |
 /// | `capture` | `as`, `target` or `from` | reads a value out of the app |
 /// | `import_pack` | `path` | imports a `.hollowpack` into the running app |
+/// | `kill_deposit` | `target`, `value` | parks a kill blob on the relay for a device |
 /// | `attach_file` | `path` | stages a file on the composer, as a drop does |
 /// | `arm_image_pick` | `path` | answers the next image pick with that file |
 /// | `channel_rows` | `serverId`, `channelId`, `limit` | the DB behind a channel |
@@ -313,6 +315,7 @@ class ProbeRunner {
         'video_state',
         'audio_state',
         'export_attachment',
+        'kill_deposit',
         'expect_text',
         'expect_no_text',
         'expect_count',
@@ -478,6 +481,9 @@ class ProbeRunner {
 
       case 'export_attachment':
         return _exportAttachment(step);
+
+      case 'kill_deposit':
+        return _killDeposit(step);
 
       case 'log':
         return '${step['message'] ?? ''}';
@@ -809,6 +815,30 @@ class ProbeRunner {
         '(${written.lengthSync()} bytes)';
   }
 
+  /// Parks an opaque kill blob on the relay for one device id, which is what
+  /// the relay-restart journey needs to prove the list survives a restart and
+  /// reaches a peer that was closed when it was deposited.
+  ///
+  /// `target` is a DEVICE id (`devicePeerId` in the dump, not `peerId`) and
+  /// `value` is the base64 blob. The relay stores it opaquely, so a journey can
+  /// deposit a blob the receiver will reject and still observe the delivery.
+  Future<String> _killDeposit(Map<String, dynamic> step) async {
+    final target = '${step['target'] ?? ''}';
+    final blob = '${step['value'] ?? ''}';
+    if (target.isEmpty) throw _ProbeFailure('kill_deposit needs a "target"');
+    if (blob.isEmpty) throw _ProbeFailure('kill_deposit needs a "value"');
+    final issuedAtMs = (step['issued_at_ms'] as num?)?.toInt() ??
+        DateTime.now().millisecondsSinceEpoch;
+
+    // Real FFI, so it runs outside the test's fake async.
+    await tester.runAsync(() => network_api.depositKillSignal(
+          targets: [target],
+          issuedAtMs: issuedAtMs,
+          blob: blob,
+        ));
+    return 'deposited a kill blob for $target';
+  }
+
   /// A mounted `ConsumerWidget`/`ConsumerStatefulWidget` element, which is
   /// both a [BuildContext] and a [WidgetRef]. Searched from the app's
   /// Navigator down, so whatever is handed it can push a dialog and toast.
@@ -1101,6 +1131,7 @@ class ProbeRunner {
       if (key == null) {
         throw _ProbeFailure('capture from a provider needs a "key"');
       }
+      await ProbeDump.warmDeviceId(tester);
       final snapshot = ProbeDump.providerSnapshot(container);
       final held = snapshot[key];
       if (held == null) {

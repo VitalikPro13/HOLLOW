@@ -17,6 +17,7 @@ import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:hollow/src/ui/components/overlay_hosts.dart';
 
 /// 2x2 mini-grid preview of the first 4 servers in a folder.
 class ServerFolderIcon extends ConsumerWidget {
@@ -170,6 +171,14 @@ void showServerFolderPopup({
 }) {
   final overlay = Overlay.of(context);
   late final OverlayEntry entry;
+  var removed = false;
+  void close() {
+    if (removed) return;
+    removed = true;
+    OverlayHosts.unregister(entry);
+    entry.remove();
+    entry.dispose();
+  }
 
   entry = OverlayEntry(
     builder: (context) => _FolderPopupOverlay(
@@ -177,22 +186,18 @@ void showServerFolderPopup({
       anchor: anchor,
       isDock: isDock,
       onServerSelected: (serverId) {
-        entry.remove();
-        entry.dispose();
+        close();
         onServerSelected(serverId);
       },
-      onDismiss: () {
-        entry.remove();
-        entry.dispose();
-      },
+      onDismiss: close,
       onRenameRequested: () {
-        entry.remove();
-        entry.dispose();
+        close();
         onRenameRequested?.call();
       },
     ),
   );
   overlay.insert(entry);
+  OverlayHosts.register(entry, close);
 }
 
 class _FolderPopupOverlay extends ConsumerStatefulWidget {

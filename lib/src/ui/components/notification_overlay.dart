@@ -2,6 +2,7 @@
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/providers/app_lock_provider.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
 import 'package:hollow/src/core/providers/selected_peer_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
@@ -25,6 +26,9 @@ class NotificationOverlay extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    // Nothing a message says may reach the lock cover.
+    if (ref.watch(appLockedProvider)) return const SizedBox.shrink();
+
     final cards = ref.watch(systemNotificationProvider);
 
     // Opening a conversation retires its pending card. Channel selection is

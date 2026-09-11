@@ -351,6 +351,40 @@ attachments by design, as does a Save-as copy, both to a path the user chose.
 
 ---
 
+## 13. Destruction orders and the relay kill list (Part 2, 2026-09-11)
+
+A destruction order is the only remote frame in Hollow whose SUCCESS is a write of
+nothing: it erases this install. It is master-signed and self-authenticating, so it
+travels three lanes that are not trusted, and the whole decision lives in ONE place
+(`node::destroy::judge_own_order`). A refusal is logged at warn and changes nothing.
+
+| Path | Site | Gate |
+|---|---|---|
+| `DestroyIdentity` over the sibling lane (Olm `MessageEnvelope::DestroyIdentityOrder` and its plaintext twin `HavenMessage::IdentityDestroyed`) | `node::destroy::handle_envelope_destroy_identity` / `handle_identity_destroyed`, dispatched from `swarm::handle_incoming_request` | FIVE clauses, all in `judge_own_order`. (1) SIGNATURE: `verify_destroy_identity` binds `master_pubkey_b64` to `master_peer_id` by derivation and checks the master's signature over the canonical `hollow-destroy:{master}:{issued_at_ms}:{sorted csv targets}:{notify_friends}`, with the targets re-sorted before verification so they cannot be reordered after signing. (2) OWN MASTER: an order for anybody else's identity is refused outright; a valid order signed by a stranger's own master says nothing about us. (3) TARGETING: a non-empty `targets` that does not name this device is refused. (4) LINK FRESHNESS: `issued_at_ms` older than the KV `device_linked_at_ms:{device}` stamp, written at the first `start_node` after `identity.device` was created, is refused. A re-linked device gets a NEW device id and the imported database carries no row for it, so it stamps fresh and a captured order cannot follow the user onto the machine they linked afterwards. (5) REPLAY: `issued_at_ms` at or below the newest order this device already acted on is refused, which is what makes the Olm and plaintext copies of one order idempotent against each other. That stamp is IN PROCESS, keyed by local device id, and deliberately NOT persisted: it is written BEFORE the wipe runs, so a disk copy would turn "the wipe never finished" into a permanent refusal that gets acked, and the device would survive forever. A fresh process acts on the same order again, which costs nothing, because a device whose wipe DID finish boots to Welcome with no identity and never authenticates as that id again. Only after all five does the node emit `DestroyReceived` and Dart run `api::wipe::destroy_local`. The order deliberately carries no authority over the SENDER: unlike a device list it never registers anybody in the resolver. Harness: `destroy_scope_c_online_sibling_wipes`, `destroy_refuses_signal_older_than_link_time`. Unit: `destroy_identity_signature_and_freshness_rules` |
+| `IdentityDestroyed` about a FRIEND (the same frame, somebody else's master) | `node::destroy::apply_friend_order` | Signature as above, and then ONE extra rule that exists purely to bound what a stranger can make us write: the stamp is recorded only for a master we already know (an accepted or pending friend row, or a stored device list). Without it any authed peer could plant an `identity_destroyed:{master}` KV row for an identity we have never met. Writes are the KV stamp the banner reads and `remove_peer_verified(master)`; a stamp at or below the one we hold is a no-op. Nothing is deleted and no message row is written. Harness: `destroy_friend_announce_flips_verified_and_banner` |
+| The banner clearing + `KIND_IDENTITY_REAPPEARED` | `node::destroy::note_identity_reappeared`, called from `ingest_device_list` BEFORE its no-change early return | Runs only behind that function's own gate (`verify_device_list` + `device_list_binds_sender`), so the list has already proved the master signed it and that the deliverer is named in it. ANY later list clears the banner, an unchanged one included: a mnemonic can rebuild a destroyed identity, the safety number is unchanged, and the alert is the whole deliverable. Deduped by the deterministic alert id like every other, so a dismissed warning stays dismissed across reconnects |
+| `kill_signal` from the RELAY (`ServerMsg::KillSignal` -> `WsEvent::KillSignal`) | `node::destroy::handle_kill_signal`, and `fetch::handle_kill_frame` in the push isolate | The blob is base64 of the same signed payload and is judged by the SAME `judge_own_order`, so the relay is a courier with no say: it never sees the master, the reason or the plaintext, and a blob it invented or somebody else deposited dies at clause (1) or (2). ACK RULE: `WsCommand::KillAck` is sent after a wipe (from `api::wipe::destroy_local`) AND after a PERMANENT rejection, never after a transient one. Without the ack the relay re-sends on every auth for 365 days, and a junk deposit by any authed peer would ride along forever; acking a transient failure would instead drop an order that was never judged. The relay's own side caps a blob at 2 KB, 16 targets per deposit, 64 entries per issuer (its OWN oldest evicted, never a refusal) and 10 000 globally, and refuses guest and fetch sockets as issuers. Harness: `destroy_scope_c_offline_sibling_wipes_on_next_auth_via_kill_list`, `kill_signal_with_foreign_blob_is_dropped` |
+| Self-revocation delivery (destruction scope (b)) | `crypto_handler::is_minimal_self_revocation`, consulted by both device-list ingest paths | `device_list_binds_sender` refuses a list delivered by a device that list tombstones, and a device revoking ITSELF is the only one that can announce its own revocation, so the two rules would cancel out. The exception is a MINIMAL DIFF against what we already store and NOTHING else: there must BE a stored list for that master, `list.version` must exceed it, `list.devices` must equal the stored devices minus the deliverer and `list.revoked` the stored revoked plus the deliverer, both as sets. This is narrow on purpose. Every device holds the master key, so the sender rule is the ONE thing that makes a revocation final against a revoked device running a modified client; a loose "the deliverer appears in `revoked`" test would let that device sign a newer list tombstoning itself AND dropping its legitimate siblings, and have it applied everywhere. With no stored list there is no diff to be minimal against, so the baseline rule decides and a self-tombstoning deliverer is refused. The deliverer gains nothing even when admitted: both paths already skip the resolver binding and the friend-list hand-off for a revoked sender. Cost of the narrowness: a receiver holding a DIFFERENT device set from the issuer refuses the self-revocation rather than guessing, which is the safe direction and heals as lists converge. Unit: `self_revocation_carve_out_admits_only_the_minimal_diff` (both lanes, three refusal shapes). Harness: `destroy_scope_b_sibling_drops_the_device` |
+
+The duress slot is not in this table because no frame reaches it: `identity.duress`
+is read only by `unlock_identity` and `change_password`, from a secret typed on this
+machine. `change_password` probes it with the NEW password and refuses a match,
+because the identity slot is tried first and would silently disarm the duress code. It is worth
+stating anyway that every password unlock derives Argon2id against BOTH slots and
+combines the results only after both finish, so the cost of a wrong password and the
+cost of a duress code are identical, and that the slot EXISTS for the life of
+password protection (random bytes under a random throwaway key when no code is set)
+so its presence reveals nothing. Unit: `duress_both_slots_always_derived`,
+`duress_slot_dummy_when_unset_is_indistinguishable_in_size`.
+
+Residual, named so a sweep does not have to re-derive it: a duress code typed at a
+COLD LAUNCH can only destroy locally. The master and device keys are wrapped by the
+real password, so nothing can be signed and no socket can be authenticated; scopes
+(b) and (c) reach the network only when the node is already running, which is what a
+mobile App Lock re-unlock looks like. The local erase always runs.
+
+---
+
 ## Related
 
 - `feedback_signature_enforcement_not_logging` — verify must REJECT; `if
@@ -363,3 +397,5 @@ attachments by design, as does a Save-as copy, both to a path the user chose.
   trusted" mistake, in the file path
 - `project_at_rest_file_encryption_plan` covers the `HFE1` format, the key ring,
   the boot sweep and the loopback media server (issue 78)
+- `feedback_ghost_device_fanout` plus the device-list rows above: the revocation
+  machinery destruction scope (b) reuses

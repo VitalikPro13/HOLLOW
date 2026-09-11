@@ -518,6 +518,29 @@ Future<void> registerPushToken({
   platform: platform,
 );
 
+/// Park a destruction order on the relay for devices that are not connected.
+///
+/// Exists for the UI probe's `kill_deposit` op, which the relay-restart journey
+/// needs to park a throwaway blob for a peer it closed. It adds no capability: the
+/// relay accepts a deposit from any authed non-guest socket already, and the blob is
+/// opaque to it and to us.
+Future<void> depositKillSignal({
+  required List<String> targets,
+  required PlatformInt64 issuedAtMs,
+  required String blob,
+}) => RustLib.instance.api.crateApiNetworkDepositKillSignal(
+  targets: targets,
+  issuedAtMs: issuedAtMs,
+  blob: blob,
+);
+
+/// Drop this device's push token from the relay (wipe step 5).
+///
+/// Fire and forget: the caller is on its way out, and a relay that never hears it
+/// simply fires a push nobody will collect.
+Future<void> unregisterPushToken() =>
+    RustLib.instance.api.crateApiNetworkUnregisterPushToken();
+
 /// Register per-server/channel push prefs with the relay: `{"<server_id>":
 /// {"level": "all|mentions|nothing", "channels": {...}}}`. RAM-only and re-sent on
 /// every reconnect. The relay filters channel pushes against these BEFORE
@@ -1785,6 +1808,18 @@ sealed class NetworkEvent with _$NetworkEvent {
 
   /// THIS device was revoked (Step 7) — Dart self-nukes (wipe + relaunch).
   const factory NetworkEvent.selfRevoked() = NetworkEvent_SelfRevoked;
+
+  /// A verified destruction order for THIS identity arrived. Dart runs the wipe
+  /// and relaunches; `scope` is `device` | `device_revoke` | `identity`.
+  const factory NetworkEvent.destroyReceived({required String scope}) =
+      NetworkEvent_DestroyReceived;
+
+  /// A contact told us their identity was destroyed. The verified flag is
+  /// already cleared; Dart shows the conversation banner.
+  const factory NetworkEvent.identityDestroyedByFriend({
+    required String masterPeerId,
+    required PlatformInt64 issuedAtMs,
+  }) = NetworkEvent_IdentityDestroyedByFriend;
   const factory NetworkEvent.channelMessageEdited({
     required String serverId,
     required String channelId,

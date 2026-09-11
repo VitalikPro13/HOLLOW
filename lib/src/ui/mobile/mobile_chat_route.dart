@@ -54,6 +54,7 @@ import 'package:hollow/src/ui/components/saved_messages_avatar.dart';
 import 'package:hollow/src/ui/chat/voice_recorder_bar.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/large_file_share_dialog.dart';
+import 'package:hollow/src/ui/components/identity_destroyed_banner.dart';
 import 'package:hollow/src/ui/components/security_alert_banner.dart';
 import 'package:hollow/src/ui/components/status_dot.dart';
 import 'package:hollow/src/ui/components/ui_scale.dart';
@@ -1472,6 +1473,8 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
               // Pinned above the message list so the warning survives
               // scrollback and restarts, and self-hiding when clear.
               if (widget.isDm) SecurityAlertBanner(peerId: widget.peerId!),
+              if (widget.isDm)
+                IdentityDestroyedBanner(peerId: widget.peerId!),
               if (widget.isDm) MobileCallStatusStrip(peerId: widget.peerId!),
               const _VoiceChannelStatusStrip(),
               if (_searchOpen) _buildSearchBar(hollow),

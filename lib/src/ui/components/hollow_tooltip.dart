@@ -6,6 +6,7 @@ import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
+import 'package:hollow/src/ui/components/overlay_hosts.dart';
 
 /// Hollow-styled tooltip, replacing Material's everywhere. Edge-aware: it
 /// repositions to stay inside the window.
@@ -86,6 +87,7 @@ class _HollowTooltipState extends State<HollowTooltip>
   /// which is a `setState() called during build` crash. [_showTooltip] rewinds
   /// instead, before the next entry is in the tree.
   void _dismiss() {
+    OverlayHosts.unregister(this);
     _hovering = false;
     _controller.stop();
     _entry?.remove();
@@ -152,6 +154,7 @@ class _HollowTooltipState extends State<HollowTooltip>
     );
 
     Overlay.of(context).insert(_entry!);
+    OverlayHosts.register(this, _dismiss);
     _controller.forward();
   }
 

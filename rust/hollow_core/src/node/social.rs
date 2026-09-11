@@ -1587,7 +1587,7 @@ pub(crate) fn send_own_profile_to_peer(
 ) {
     send_own_profile_inner(
         ws_cmd_tx, ws_room_peers, local_peer_str, master_keypair, device_peer_id,
-        target_peer, is_invisible, db_path, db_passphrase, false, None,
+        target_peer, is_invisible, db_path, db_passphrase, false, None, None,
     );
 }
 
@@ -1612,7 +1612,31 @@ pub(crate) fn send_own_profile_to_peer_in_room(
 ) {
     send_own_profile_inner(
         ws_cmd_tx, ws_room_peers, local_peer_str, master_keypair, device_peer_id,
-        target_peer, is_invisible, db_path, db_passphrase, false, Some(room_code),
+        target_peer, is_invisible, db_path, db_passphrase, false, Some(room_code), None,
+    );
+}
+
+/// Announce our profile carrying an EXPLICIT device list instead of the one
+/// `build_local_device_list` would rebuild.
+///
+/// Destruction scope (b) is the only caller: the list it publishes tombstones the
+/// device we are running on, and the rebuild deliberately refuses to do that.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn send_own_profile_with_device_list(
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    local_peer_str: &str,
+    master_keypair: &crate::identity::native_identity::NativeKeypair,
+    device_peer_id: &str,
+    target_peer: &str,
+    list: SignedDeviceList,
+    is_invisible: bool,
+    db_path: &str,
+    db_passphrase: &str,
+) {
+    send_own_profile_inner(
+        ws_cmd_tx, ws_room_peers, local_peer_str, master_keypair, device_peer_id,
+        target_peer, is_invisible, db_path, db_passphrase, false, None, Some(list),
     );
 }
 
@@ -1631,7 +1655,7 @@ pub(crate) fn send_own_profile_full_to_peer(
 ) {
     send_own_profile_inner(
         ws_cmd_tx, ws_room_peers, local_peer_str, master_keypair, device_peer_id,
-        target_peer, is_invisible, db_path, db_passphrase, true, None,
+        target_peer, is_invisible, db_path, db_passphrase, true, None, None,
     );
 }
 
@@ -1650,6 +1674,8 @@ fn send_own_profile_inner(
     // Some(room) = address the announce into THAT room (so an offline recipient
     // gets it buffered); None = today's reachable-peer lookup.
     room_code: Option<&str>,
+    // Some = publish THIS list verbatim instead of rebuilding ours.
+    override_device_list: Option<SignedDeviceList>,
 ) {
     if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
         // CRITICAL (presence collapse): ALWAYS attach and send the device list, even
@@ -1694,9 +1720,12 @@ fn send_own_profile_inner(
         } else {
             (String::new(), String::new(), String::new())
         };
-        let device_list = super::crypto_handler::build_local_device_list(
-            master_keypair, device_peer_id, db_path, db_passphrase,
-        );
+        let device_list = match override_device_list {
+            Some(list) => Some(list),
+            None => super::crypto_handler::build_local_device_list(
+                master_keypair, device_peer_id, db_path, db_passphrase,
+            ),
+        };
         // The board is small capped text, so it rides the LIGHT announce too; only
         // blobs are hash-pulled. So do the avatar frame and the two animated-media
         // hashes, which are IDs rather than art for exactly this reason.

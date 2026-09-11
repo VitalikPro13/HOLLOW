@@ -11,6 +11,7 @@ import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_toggle.dart';
 import 'package:hollow/src/ui/components/hollow_tooltip.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:hollow/src/ui/components/overlay_hosts.dart';
 
 /// Volume button for the screen-share control bars, opening the share-audio
 /// panel as a desktop popover or a mobile sheet.
@@ -75,7 +76,9 @@ class ShareVolumeButton extends ConsumerWidget {
     void remove() {
       if (removed) return;
       removed = true;
-      entry?.remove();
+      final open = entry;
+      if (open != null) OverlayHosts.unregister(open);
+      open?.remove();
       entry = null;
     }
 
@@ -113,6 +116,7 @@ class ShareVolumeButton extends ConsumerWidget {
     );
 
     overlay.insert(entry!);
+    OverlayHosts.register(entry!, remove);
   }
 }
 

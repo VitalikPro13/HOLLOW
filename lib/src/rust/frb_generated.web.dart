@@ -24,6 +24,7 @@ import 'api/storage.dart';
 import 'api/twitch.dart';
 import 'api/updater.dart';
 import 'api/verification.dart';
+import 'api/wipe.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'frb_generated.dart';
@@ -164,6 +165,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   DownloadProgress dco_decode_download_progress(dynamic raw);
+
+  @protected
+  DuressStatus dco_decode_duress_status(dynamic raw);
 
   @protected
   double dco_decode_f_32(dynamic raw);
@@ -810,6 +814,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   DownloadProgress sse_decode_download_progress(SseDeserializer deserializer);
+
+  @protected
+  DuressStatus sse_decode_duress_status(SseDeserializer deserializer);
 
   @protected
   double sse_decode_f_32(SseDeserializer deserializer);
@@ -1633,6 +1640,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
     DownloadProgress self,
     SseSerializer serializer,
   );
+
+  @protected
+  void sse_encode_duress_status(DuressStatus self, SseSerializer serializer);
 
   @protected
   void sse_encode_f_32(double self, SseSerializer serializer);

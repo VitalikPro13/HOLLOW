@@ -14,6 +14,7 @@ import 'package:hollow/src/ui/components/hollow_menu.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/hollow_tooltip.dart';
+import 'package:hollow/src/ui/components/overlay_hosts.dart';
 import 'package:hollow/src/ui/components/slashed_icon.dart';
 import 'package:hollow/src/ui/chat/emoji_picker.dart';
 import 'package:hollow/src/ui/chat/emote_image.dart';
@@ -392,9 +393,11 @@ class _MessageHoverWrapperState extends ConsumerState<MessageHoverWrapper> {
     if (_actionBarEntry != null) {
       overlay.insert(_actionBarEntry!);
     }
+    OverlayHosts.register(this, _removeOverlays);
   }
 
   void _removeOverlays() {
+    OverlayHosts.unregister(this);
     _highlightEntry?.remove();
     _highlightEntry?.dispose();
     _highlightEntry = null;

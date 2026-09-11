@@ -23,6 +23,7 @@ import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_tooltip.dart';
 import 'package:hollow/src/core/providers/node_provider.dart';
 import 'package:hollow/src/core/providers/relay_domain_provider.dart';
+import 'package:hollow/src/rust/api/network.dart' as network_api;
 
 import 'probe_targets.dart';
 
@@ -48,12 +49,31 @@ class ProbeDump {
   /// few hundred; a runaway would produce thousands and be unreadable.
   static const int maxEntries = 700;
 
+  /// The DEVICE id this instance's socket authenticates as. `peerId` in the
+  /// snapshot is the MASTER identity, and relay-side registries keyed by the
+  /// device (the kill list) need this one instead.
+  static String? _devicePeerId;
+
+  /// Fills the device id the snapshot reports. Real FFI, so it runs outside the
+  /// test's fake async, and once per process because the id never changes.
+  static Future<void> warmDeviceId(WidgetTester tester) async {
+    if (_devicePeerId != null) return;
+    await tester.runAsync(() async {
+      try {
+        _devicePeerId = await network_api
+            .getLocalDevicePeerId()
+            .timeout(const Duration(seconds: 2));
+      } catch (_) {}
+    });
+  }
+
   static Future<Map<String, dynamic>> write({
     required WidgetTester tester,
     required String name,
     required String outDir,
     ProviderContainer? container,
   }) async {
+    await warmDeviceId(tester);
     final screen = tester.view.physicalSize / tester.view.devicePixelRatio;
     final entries = collect(tester, screen);
     final providers = providerSnapshot(container);
@@ -379,6 +399,7 @@ class ProbeDump {
     if (identity != null) {
       out['peerId'] = identity.peerId;
       out['identityLoaded'] = identity.isLoaded;
+      if (_devicePeerId != null) out['devicePeerId'] = _devicePeerId;
       if (identity.error != null) out['identityError'] = identity.error;
     }
     // overallConnectionProvider is derived, so only a widget watching it ever
@@ -526,6 +547,9 @@ class ProbeDump {
     if (providers.containsKey('peerId')) {
       buffer.writeln('- identity: ${providers['peerId']} '
           '(loaded: ${providers['identityLoaded']})');
+    }
+    if (providers['devicePeerId'] != null) {
+      buffer.writeln('- device: ${providers['devicePeerId']}');
     }
     if (providers['identityError'] != null) {
       buffer.writeln('- identity ERROR: ${providers['identityError']}');

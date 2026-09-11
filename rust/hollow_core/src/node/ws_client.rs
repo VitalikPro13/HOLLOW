@@ -122,6 +122,16 @@ pub enum WsCommand {
     /// passes its watermark age plus lookback, because MLS cannot decrypt
     /// consumed generations). 0 = everything still in retention.
     TopicCatchup { room_code: String, channel_id: String, max_age_secs: i64 },
+    /// Park a destruction order for devices that are NOT connected. `blob` is
+    /// opaque to the relay (base64 of the signed payload), capped at 2 KB, at most
+    /// 16 targets per deposit. The relay hands it over on the target's next auth
+    /// and keeps it until that device acks.
+    KillDeposit { targets: Vec<String>, issued_at_ms: i64, blob: String },
+    /// Delete OUR OWN parked entry. Sent after a wipe and after a PERMANENT
+    /// rejection: without it the relay re-sends on every auth for a year.
+    KillAck,
+    /// Drop this device's push token from the relay (wipe step 5). No reply.
+    UnregisterPushToken,
     /// File a user report with the relay. One-shot — deliberately NOT cached
     /// in `track_room_change`, so it is never re-sent on reconnect (the relay
     /// also dedups per (reporter, target, category) via hashed keys).
@@ -182,6 +192,9 @@ pub enum WsEvent {
     LinkCodeError { error: String, code: String },
     /// Link code resolved to the populated sibling's peer_id.
     LinkCodeResolved { code: String, peer_id: String },
+    /// A destruction order the relay parked for this device, handed over right
+    /// after auth. Opaque here: the swarm verifies it against OUR master.
+    KillSignal { blob: String, issued_at_ms: i64 },
 }
 
 impl WsEvent {
@@ -214,6 +227,7 @@ impl WsEvent {
             Self::LinkCodeReleased => "LinkCodeReleased",
             Self::LinkCodeError { .. } => "LinkCodeError",
             Self::LinkCodeResolved { .. } => "LinkCodeResolved",
+            Self::KillSignal { .. } => "KillSignal",
         }
     }
 }
@@ -282,6 +296,8 @@ enum ServerMsg {
     LinkCodeReleased,
     LinkCodeError { error: String, #[serde(default)] code: String },
     LinkCodeResolved { code: String, peer_id: String },
+    KillSignal { #[serde(default)] blob: String, #[serde(default)] issued_at_ms: i64 },
+    KillDeposited { #[serde(default)] stored: u32 },
 }
 
 // -- State --
@@ -1061,6 +1077,35 @@ async fn send_command(write: &mut WsSink, cmd: &WsCommand) -> bool {
             }
             return true;
         }
+        WsCommand::KillDeposit { targets, issued_at_ms, blob } => {
+            let msg = serde_json::json!({
+                "type": "kill_deposit",
+                "targets": targets,
+                "issued_at_ms": issued_at_ms,
+                "blob": blob,
+            });
+            if let Err(e) = bounded_send(write, Message::Text(msg.to_string().into())).await {
+                hollow_log!("[HOLLOW-WS] KillDeposit send failed: {e}");
+                return false;
+            }
+            return true;
+        }
+        WsCommand::KillAck => {
+            let msg = serde_json::json!({ "type": "kill_ack" });
+            if let Err(e) = bounded_send(write, Message::Text(msg.to_string().into())).await {
+                hollow_log!("[HOLLOW-WS] KillAck send failed: {e}");
+                return false;
+            }
+            return true;
+        }
+        WsCommand::UnregisterPushToken => {
+            let msg = serde_json::json!({ "type": "unregister_push_token" });
+            if let Err(e) = bounded_send(write, Message::Text(msg.to_string().into())).await {
+                hollow_log!("[HOLLOW-WS] UnregisterPushToken send failed: {e}");
+                return false;
+            }
+            return true;
+        }
         _ => {}
     }
 
@@ -1246,6 +1291,16 @@ async fn handle_server_message(event_tx: &mpsc::UnboundedSender<WsEvent>, msg: S
         ServerMsg::LinkCodeResolved { code, peer_id } => {
             hollow_log!("[HOLLOW-LINK] Link code resolved: {code} -> {peer_id}");
             WsEvent::LinkCodeResolved { code, peer_id }
+        }
+        ServerMsg::KillSignal { blob, issued_at_ms } => {
+            // Nothing identifying: the blob is somebody's signed payload and the
+            // target is us.
+            hollow_log!("[HOLLOW-DESTROY] Kill signal received from the relay");
+            WsEvent::KillSignal { blob, issued_at_ms }
+        }
+        ServerMsg::KillDeposited { stored } => {
+            hollow_log!("[HOLLOW-DESTROY] Relay parked {stored} destruction order(s)");
+            return;
         }
         ServerMsg::AuthOk | ServerMsg::AuthFailed { .. } => return,
     };

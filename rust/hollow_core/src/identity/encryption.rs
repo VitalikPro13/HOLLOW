@@ -82,10 +82,23 @@ pub(crate) fn flags_has_os_keychain(flags: u8) -> bool {
     flags & FLAG_OS_KEYCHAIN != 0
 }
 
+/// Argon2id derivations run since the counter was last read. The duress design
+/// stands on "both slots, every time", and that is a property of the COUNT, not of
+/// any output a test could inspect.
+#[cfg(test)]
+static DERIVE_COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+#[cfg(test)]
+pub(crate) fn take_derive_count() -> u32 {
+    DERIVE_COUNT.swap(0, std::sync::atomic::Ordering::SeqCst)
+}
+
 pub(crate) fn derive_wrapping_key_from_password(
     password: &str,
     salt: &[u8; 16],
 ) -> Result<[u8; 32], String> {
+    #[cfg(test)]
+    DERIVE_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let params = argon2::Params::new(65536, 3, 1, Some(32))
         .map_err(|e| format!("Argon2 params error: {e}"))?;
     let argon = argon2::Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
@@ -130,7 +143,10 @@ pub(crate) fn encrypt_identity(
     Ok(output)
 }
 
-pub(crate) fn decrypt_identity(
+/// Open an HKEYV1 blob WITHOUT the keypair-shape check. The duress slot's
+/// plaintext is a tagged marker, not a keypair, and it shares this layout so the
+/// two files are indistinguishable on disk.
+pub(crate) fn decrypt_blob(
     encrypted: &[u8],
     wrapping_key: &[u8; 32],
 ) -> Result<Vec<u8>, String> {
@@ -147,9 +163,16 @@ pub(crate) fn decrypt_identity(
     let cipher =
         Aes256Gcm::new_from_slice(wrapping_key).map_err(|e| format!("Cipher init error: {e}"))?;
     let nonce = Nonce::from_slice(&nonce_bytes);
-    let plaintext = cipher
+    cipher
         .decrypt(nonce, ciphertext.as_slice())
-        .map_err(|_| "Wrong password or corrupted identity file".to_string())?;
+        .map_err(|_| "Wrong password or corrupted identity file".to_string())
+}
+
+pub(crate) fn decrypt_identity(
+    encrypted: &[u8],
+    wrapping_key: &[u8; 32],
+) -> Result<Vec<u8>, String> {
+    let plaintext = decrypt_blob(encrypted, wrapping_key)?;
 
     if plaintext.len() < 68 || plaintext[..4] != PROTOBUF_HEADER {
         return Err("Decrypted data is not a valid identity keypair".into());

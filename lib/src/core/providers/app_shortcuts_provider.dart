@@ -14,6 +14,7 @@ enum AppShortcut {
   openSettings('Open settings', 'ctrl+comma'),
   toggleMemberPanel('Toggle member panel', 'ctrl+shift+p'),
   quickSearch('Quick search', 'ctrl+k'),
+  lockNow('Lock now', 'ctrl+shift+l'),
   toggleSplitView('Toggle split view', 'ctrl+shift+backslash'),
   focusLeftPane('Focus left pane', 'ctrl+1'),
   focusRightPane('Focus right pane', 'ctrl+2'),

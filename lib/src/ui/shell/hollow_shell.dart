@@ -8,6 +8,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/android_platform.dart';
 import 'package:hollow/src/core/services/android_version.dart';
 import 'package:hollow/src/core/hollow_data_dir.dart';
+import 'package:hollow/src/core/app_relaunch.dart';
+import 'package:hollow/src/core/services/destroy_flow.dart';
 import 'package:hollow/src/core/services/app_lock_service.dart';
 import 'package:hollow/src/core/services/channel_topic_service.dart';
 import 'package:hollow/src/core/services/deep_link_service.dart';
@@ -35,6 +37,8 @@ import 'package:hollow/src/core/providers/security_alerts_provider.dart';
 import 'package:hollow/src/core/providers/verified_peers_provider.dart';
 import 'package:hollow/src/core/providers/status_provider.dart';
 import 'package:hollow/src/core/providers/annotation_mode_provider.dart';
+import 'package:hollow/src/core/providers/app_lock_provider.dart';
+import 'package:hollow/src/core/providers/duress_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/recording_provider.dart';
 import 'package:hollow/src/core/providers/selected_peer_provider.dart';
@@ -102,7 +106,9 @@ import 'package:hollow/src/rust/api/twitch.dart' as twitch_api;
 import 'package:hollow/src/ui/guides/help_panel.dart';
 import 'package:hollow/src/ui/shell/bottom_bar.dart';
 import 'package:hollow/src/ui/shell/channel_sidebar.dart';
+import 'package:hollow/src/ui/app.dart' show hollowNavigatorKey;
 import 'package:hollow/src/ui/shell/friends_bar.dart';
+import 'package:hollow/src/ui/shell/lock_cover.dart';
 import 'package:hollow/src/ui/shell/system_status_banner.dart';
 import 'package:hollow/src/core/providers/app_lifecycle_provider.dart';
 import 'package:hollow/src/core/providers/archive_provider.dart';
@@ -129,6 +135,16 @@ import 'package:window_manager/window_manager.dart';
 const _kDesktopBreakpoint = 1024.0;
 const _kTabletBreakpoint = 600.0;
 
+/// A duress code was typed and Rust has already destroyed the data. Matched on
+/// the exact word rather than a substring, because a mistyped password must
+/// never take this branch.
+bool _isDuressResult(Object error) {
+  final message = error.toString().trim();
+  return message == 'duress' ||
+      message.endsWith('(duress)') ||
+      message.endsWith(': duress');
+}
+
 /// Main application shell.
 ///
 /// Desktop is ServerStrip | ChannelSidebar | ChatPane | MemberPanel, tablet
@@ -148,6 +164,14 @@ class _HollowShellState extends ConsumerState<HollowShell>
   // slow (~1.5-3s on a phone, that is the at-rest protection), so the shell
   // shows a spinner rather than looking frozen. Only set under App Lock.
   bool _unlocking = false;
+
+  // Desktop app lock. The timer polls rather than watching input, so a mouse
+  // move costs a field write and nothing else.
+  Timer? _idleTimer;
+  bool _lockFlowRunning = false;
+  // The identity opened without a prompt, so the app lock is the launch prompt.
+  bool _silentStart = false;
+  DateTime? _pausedAt;
 
   // Master startup controller, shared down the tree by an InheritedWidget.
   late final AnimationController _revealController;
@@ -373,16 +397,124 @@ class _HollowShellState extends ConsumerState<HollowShell>
     }
   }
 
+  /// The shell's own spinner sits UNDER the lock cover, so the flag is mirrored
+  /// into a provider the cover reads.
+  void _setUnlocking(bool value) {
+    if (!mounted) return;
+    setState(() => _unlocking = value);
+    ref.read(appUnlockBusyProvider.notifier).state = value;
+  }
+
+  /// Desktop app lock, armed once the store is open. The node keeps running:
+  /// only the UI is covered, and the same prompt a launch uses lifts it.
+  void _armAppLock() {
+    // Kept warm so a lock decision never waits on the FFI.
+    ref.listenManual(identityProtectionProvider, (_, _) {},
+        fireImmediately: true);
+    ref.listenManual(windowFocusedProvider, (_, focused) {
+      if (focused) IdleClock.stamp();
+    });
+    ref.listenManual(appLockedProvider, (prev, locked) {
+      if (locked && prev != true) _runLockFlow();
+    });
+    _idleTimer = Timer.periodic(
+        const Duration(seconds: 30), (_) => _maybeAutoLock());
+  }
+
+  /// A silent start with a password set means the app lock IS the launch
+  /// prompt: the node is up, so a duress code typed here signs the wide scopes.
+  Future<void> _lockAtLaunchIfNeeded() async {
+    if (!_silentStart) return;
+    try {
+      final status = await ref.read(identityProtectionProvider.future);
+      if (!status.hasPassword || !mounted) return;
+      ref.read(appLockedProvider.notifier).setLocked(true);
+    } catch (e) {
+      debugPrint('[HOLLOW] lock at launch skipped: $e');
+    }
+  }
+
+  void _lockAfterBackground() {
+    final pausedAt = _pausedAt;
+    _pausedAt = null;
+    if (pausedAt == null) return;
+    if (DateTime.now().difference(pausedAt) < kRelockAfterBackground) return;
+    final hasPassword =
+        ref.read(identityProtectionProvider).valueOrNull?.hasPassword ?? false;
+    if (!hasPassword || ref.read(appLockedProvider)) return;
+    if (ref.read(appLockBusyProvider) != null) return;
+    ref.read(appLockedProvider.notifier).setLocked(true);
+  }
+
+  void _maybeAutoLock() {
+    if (!mounted) return;
+    final hasPassword =
+        ref.read(identityProtectionProvider).valueOrNull?.hasPassword ?? false;
+    if (!hasPassword) return;
+    if (!shouldAutoLock(
+      lockAfterMinutes: ref.read(lockAfterMinutesProvider),
+      lastInput: IdleClock.last,
+      now: DateTime.now(),
+      busy: ref.read(appLockBusyProvider) != null,
+      locked: ref.read(appLockedProvider),
+    )) {
+      return;
+    }
+    ref.read(appLockedProvider.notifier).setLocked(true);
+  }
+
+  /// Covers the window, then re-prompts until the password opens it again. The
+  /// prompt is the launch one, so a duress code typed here runs with the keys
+  /// in memory and its wider scopes reach the other devices.
+  Future<void> _runLockFlow() async {
+    if (_lockFlowRunning) return;
+    _lockFlowRunning = true;
+    final nav = hollowNavigatorKey.currentState;
+    final route = lockCoverRoute();
+    nav?.push(route);
+    try {
+      while (mounted && ref.read(appLockedProvider)) {
+        if (await _showPasswordUnlockDialog()) break;
+        // A dismissed prompt must not spin the loop.
+        await Future<void>.delayed(const Duration(milliseconds: 150));
+      }
+    } finally {
+      if (route.isActive) nav?.removeRoute(route);
+      IdleClock.stamp();
+      // The prompt arms the shell's "Unlocking" overlay and only the launch
+      // path clears it; an app-lock unlock has to clear it here.
+      _setUnlocking(false);
+      if (mounted) ref.read(appLockedProvider.notifier).setLocked(false);
+      _lockFlowRunning = false;
+    }
+  }
+
   /// Unlocks the identity, showing a blocking dialog when one is needed.
   /// Returns false when the user cancelled.
   Future<bool> _unlockIdentity() async {
     try {
       // Without a password first: DPAPI, Keychain or plaintext.
       await identity_api.unlockIdentity();
+      _silentStart = true;
       return true;
     } catch (e) {
       final msg = e.toString();
       if (msg.contains('password') || msg.contains('Password')) {
+        // The keystore-held secret starts Hollow on its own; the app lock
+        // then asks for the password with the keys already in memory.
+        final appLock = AppLockService();
+        final stored = await appLock.readLaunchSecret();
+        if (stored != null) {
+          try {
+            await identity_api.unlockIdentity(password: stored);
+            appLock.sessionSecret = stored;
+            _silentStart = true;
+            return true;
+          } catch (_) {
+            // Changed through recovery: the stored copy is stale.
+            await appLock.clearLaunchSecret();
+          }
+        }
         return _showPasswordUnlockDialog();
       }
       // A DPAPI or Keychain failure means a different machine.
@@ -457,7 +589,11 @@ class _HollowShellState extends ConsumerState<HollowShell>
                           final phrase = controller.text.trim();
                           final words = phrase.split(RegExp(r'\s+'));
                           if (words.length != 24) {
-                            HollowToast.show(ctx, 'Must be exactly 24 words', type: HollowToastType.error);
+                            // The lock cover is up while this runs, and it
+                            // silences every other toast.
+                            HollowToast.show(ctx, 'Must be exactly 24 words',
+                                type: HollowToastType.error,
+                                allowWhileLocked: true);
                             return;
                           }
                           try {
@@ -469,7 +605,9 @@ class _HollowShellState extends ConsumerState<HollowShell>
                             if (ctx.mounted) Navigator.of(ctx).pop(true);
                           } catch (e) {
                             if (ctx.mounted) {
-                              HollowToast.show(ctx, 'Recovery failed: $e', type: HollowToastType.error);
+                              HollowToast.show(ctx, 'Recovery failed: $e',
+                                  type: HollowToastType.error,
+                                  allowWhileLocked: true);
                             }
                           }
                         },
@@ -500,13 +638,13 @@ class _HollowShellState extends ConsumerState<HollowShell>
       if (secret == null) return false;
       // The slow Argon2id derivation runs next and the OS sheet has dismissed,
       // so the spinner belongs here.
-      if (mounted) setState(() => _unlocking = true);
+      _setUnlocking(true);
       try {
         await identity_api.unlockIdentity(password: secret);
         appLock.sessionSecret = secret;
         return true;
       } catch (_) {
-        if (mounted) setState(() => _unlocking = false);
+        _setUnlocking(false);
         // A stale stored secret (changed via recovery) would leave the user in
         // a failing biometric loop.
         await appLock.disableBiometric();
@@ -650,14 +788,21 @@ class _HollowShellState extends ConsumerState<HollowShell>
       }
 
       // Argon2id runs next, so the spinner covers it.
-      if (mounted) setState(() => _unlocking = true);
+      _setUnlocking(true);
       try {
         await identity_api.unlockIdentity(password: result);
         appLock.sessionSecret = result;
         return true;
-      } catch (_) {
+      } catch (e) {
+        if (_isDuressResult(e)) {
+          // A duress code was typed and Rust has already wiped. The spinner
+          // stays and nothing is said: the next thing this person sees is
+          // Welcome, never a hint that the code did anything.
+          await clearLocalSecretsAfterDestroy();
+          await relaunchApp();
+        }
         // Wrong secret: let the dialog re-prompt.
-        if (mounted) setState(() => _unlocking = false);
+        _setUnlocking(false);
         attempts++;
         controller.clear();
         continue;
@@ -961,6 +1106,10 @@ class _HollowShellState extends ConsumerState<HollowShell>
     // Dock vs Classic shell (#58): read from a provider's build() this races the
     // store open, and Classic never survives a restart.
     await ref.read(layoutModeProvider.notifier).load();
+    // App lock, same reason: the store has to be open first.
+    await ref.read(lockAfterMinutesProvider.notifier).load();
+    _armAppLock();
+    await _lockAtLaunchIfNeeded();
     // Whether the shop has been woken up here. The dock bar watches the gate on
     // the first frame, so it loads here, never in build().
     await ref.read(shopUnlockedProvider.notifier).load();
@@ -1153,11 +1302,13 @@ class _HollowShellState extends ConsumerState<HollowShell>
     if (!_initialized) return;
     if (state == AppLifecycleState.resumed) {
       debugPrint('[HOLLOW] App resumed — rejoining rooms + WiFi lock');
+      _lockAfterBackground();
       acquireWifiLock();
       _rejoinRoomsOnResume();
       _updateIosPushHeartbeat(active: true);
     } else if (state == AppLifecycleState.paused) {
       debugPrint('[HOLLOW] App paused — releasing WiFi lock');
+      _pausedAt ??= DateTime.now();
       releaseWifiLock();
       // A live node only receives while resumed, so the NSE has to run its own
       // fetch while we are gone.
@@ -1198,6 +1349,7 @@ class _HollowShellState extends ConsumerState<HollowShell>
       WidgetsBinding.instance.removeObserver(this);
     }
     HardwareKeyboard.instance.removeHandler(_handleGlobalKey);
+    _idleTimer?.cancel();
     _revealController.dispose();
     super.dispose();
   }
@@ -1207,7 +1359,11 @@ class _HollowShellState extends ConsumerState<HollowShell>
   /// carries the AltGr guard: a held Alt is the user typing a layout character
   /// (AZERTY @ is AltGr+à, issue #43), never a shortcut.
   bool _handleGlobalKey(KeyEvent event) {
+    IdleClock.stamp();
     if (event is! KeyDownEvent) return false;
+    // Locked: the unlock prompt owns the keyboard, so every binding goes quiet
+    // and the key still reaches its field.
+    if (ref.read(appLockedProvider)) return false;
     // A keybind capture field is armed: the user is TYPING a binding, and acting
     // here would fire the shortcut being rebound.
     if (ref.read(keybindCaptureActiveProvider)) return false;
@@ -1225,6 +1381,11 @@ class _HollowShellState extends ConsumerState<HollowShell>
     if (match(AppShortcut.toggleMemberPanel)) {
       final current = ref.read(memberPanelProvider);
       ref.read(memberPanelProvider.notifier).state = !current;
+      return true;
+    }
+
+    if (match(AppShortcut.lockNow)) {
+      requestAppLock(ref, context);
       return true;
     }
 
