@@ -1,6 +1,6 @@
 # Redeem phase 2: support credentials, built 2026-09-02
 
-Fable 5.1, hands on, no agents (Vitalik's call for this unit). Design: `reports/ARTIST_SHOP_DESIGN.md` sections 5, 12.6, 13.23, the audit's M4 gate. Code map: wiki `support_credentials.md`; gates: wiki `security_write_gates.md` section 9; memory `project_support_credentials_phase2`. Both repos UNCOMMITTED, nothing deployed, the live shop untouched.
+Fable 5.1, hands on, no agents (Vitalik's call for this unit). Design: `reports/shipped/shop/ARTIST_SHOP_DESIGN.md` sections 5, 12.6, 13.23, the audit's M4 gate. Code map: wiki `support_credentials.md`; gates: wiki `security_write_gates.md` section 9; memory `project_support_credentials_phase2`. Both repos UNCOMMITTED, nothing deployed, the live shop untouched.
 
 ## What exists now, in the order a buyer meets it
 

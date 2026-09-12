@@ -18,9 +18,9 @@ per-device identity, presence collapse, profile sync, sibling friend-list sync, 
 fan-out all work — a friend sees one online identity with the right name/avatar via any device, and DMs
 (message/edit/delete/reaction/file/image) fan out to all the recipient's devices AND your own siblings
 (real-time mirroring). **Step 4 (device linking + snapshot sync) DESIGN LOCKED, not yet started** — full
-design in `reports/MULTI_DEVICE_STEP4_LINK_DESIGN.md` (QR cut; codes + mnemonic; reuse
+design in `reports/shipped/multi-device/MULTI_DEVICE_STEP4_LINK_DESIGN.md` (QR cut; codes + mnemonic; reuse
 `export_backup`/`ws_stream_transfer`; honest real-time progress). Next session implements it.
-**Companion to:** `reports/MULTI_DEVICE_SYNC_PLAN.md` (the design doc — decisions, flows, rejected
+**Companion to:** `reports/shipped/multi-device/MULTI_DEVICE_SYNC_PLAN.md` (the design doc — decisions, flows, rejected
 alternatives). This file is the **execution tracker**: verified codebase facts, the real cost breakdown,
 and a step-by-step checklist with checkboxes to follow during implementation.
 **Authored:** 2026-06-14 (codebase feasibility verification session).
@@ -616,7 +616,7 @@ escape hatch (replace-only for now), QR (cut by design). These are additive and 
 
 
 *Goal: a freshly-linked device feels full immediately.*
-**Full design: `reports/MULTI_DEVICE_STEP4_LINK_DESIGN.md` (2026-06-15, all decisions Vitalik-
+**Full design: `reports/shipped/multi-device/MULTI_DEVICE_STEP4_LINK_DESIGN.md` (2026-06-15, all decisions Vitalik-
 locked). The original QR ceremony in `MULTI_DEVICE_SYNC_PLAN.md` §3 is SUPERSEDED — read the new
 design doc, not the plan §3.**
 
@@ -1083,8 +1083,8 @@ a relay — beyond one in-process `integration_test`. So the split is:
      below (9B-i) — Vitalik-approved 2026-06-18.**
 
 #### 9B-i — Multi-node integration harness (the "isolated instances" idea) — ✅ DONE 2026-06-19 (7 tests, 345/345, CI-gated)
-> **✅ COMPLETE. Full handoff: `reports/MULTINODE_TEST_HARNESS_HANDOFF.md`; coverage line:
-> `reports/HARNESS_COVERAGE_MAP.md`; wiki `rust_test_harness`.** N real `spawn_node` in one process,
+> **✅ COMPLETE. Full handoff: `reports/shipped/testing-and-tooling/MULTINODE_TEST_HARNESS_HANDOFF.md`; coverage line:
+> `reports/reference/HARNESS_COVERAGE_MAP.md`; wiki `rust_test_harness`.** N real `spawn_node` in one process,
 > in-process `MockRelay`, per-node temp DBs, two-layer inspectors (UI-collapsed + raw device-keyed) +
 > a `#[cfg(test)] DebugSnapshot` command for live MLS/Olm state. Production seam behavior-neutral.
 > **Glare deadlock FIXED** (tiebreaker now compares DEVICE ids `device_peer_id > peer_str`, not the
@@ -1340,7 +1340,7 @@ real-device pass still pending. No FFI codegen needed (all internal CRDT/wire ty
 
 ## 6. Cross-references
 
-- `reports/MULTI_DEVICE_SYNC_PLAN.md` — the design (decisions, flows, rejected alternatives).
+- `reports/shipped/multi-device/MULTI_DEVICE_SYNC_PLAN.md` — the design (decisions, flows, rejected alternatives).
 - `HOLLOW_PLAN.md` Phase 6 — "Multi-device identity & sync (major epic)".
 - `project_identity_protection_v2.md` — at-rest master-key protection.
 - `feedback_mls_patterns.md` — MLS correctness rules (re-audit for Step 6).

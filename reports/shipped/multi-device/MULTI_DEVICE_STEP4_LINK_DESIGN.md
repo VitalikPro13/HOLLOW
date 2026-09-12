@@ -3,7 +3,7 @@
 **Status:** Design for review. No code yet. Supersedes the QR-centric framing in
 `MULTI_DEVICE_SYNC_PLAN.md` §3 (see §0 below for what changed and why).
 **Authored:** 2026-06-15 (design session with Vitalik).
-**Tracker:** `reports/MULTI_DEVICE_IMPLEMENTATION_TRACKER.md` — Step 4.
+**Tracker:** `reports/shipped/multi-device/MULTI_DEVICE_IMPLEMENTATION_TRACKER.md` — Step 4.
 **Companion docs:** `MULTI_DEVICE_SYNC_PLAN.md` (epic design), the tracker (execution state).
 **Prereqs (all DONE + live-verified):** Steps 1, 2, 2.5, 3 — per-device identity, presence
 collapse, profile sync, sibling friend-list sync, Olm DM fan-out. Commit `bbf91aa`.
@@ -303,7 +303,7 @@ live server messaging (Step 6), revocation (Step 7), the full Sync Health panel 
 ## 11. Cross-references
 
 - `MULTI_DEVICE_SYNC_PLAN.md` §3 — original (now-superseded) QR ceremony.
-- `reports/MULTI_DEVICE_IMPLEMENTATION_TRACKER.md` — Step 4 checklist (to be expanded from this).
+- `reports/shipped/multi-device/MULTI_DEVICE_IMPLEMENTATION_TRACKER.md` — Step 4 checklist (to be expanded from this).
 - `project_temporary_nicknames.md`, `feedback_relay_rules.md` — the RAM-on-relay code pattern.
 - `api/storage.rs` `export_backup`/`import_backup` — the snapshot core.
 - `node/ws_stream_transfer.rs` — the chunked transfer + progress machinery.

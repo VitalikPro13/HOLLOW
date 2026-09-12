@@ -20,7 +20,7 @@ coverable; only the WebRTC-data-channel-specific path is out of scope.
 
 **Remaining (optional, heavier):** vault shard transfer with a POPULATED vault; device LINKING
 end-to-end (needs a relay link-code map in the mock + an import/restart sim — respawn a node over the
-post-`import_pending_link` data dir). See `reports/HARNESS_COVERAGE_MAP.md`.
+post-`import_pending_link` data dir). See `reports/reference/HARNESS_COVERAGE_MAP.md`.
 
 **Below: the original Fix B handoff, kept for history.**
 
