@@ -373,7 +373,7 @@ Weights: shard overlap is per-shard additive, latency 30%, uptime 20%, bandwidth
 ### Small-Message CRDT-Op Flood (Tier 2 large-server scaling, 2026-07-06)
 
 CRDT ops flood the WebRTC mesh instead of paying the relay's O(N) egress
-(`reports/LARGE_SERVER_SCALING_2026.md` §7). Wire frame: data-channel type byte
+(`reports/shipped/relay-and-sync/LARGE_SERVER_SCALING_2026.md` §7). Wire frame: data-channel type byte
 `0x04` carrying `gossip.rs:GossipCrdtOp { broadcast_id, server_id, ttl, op_json }`
 (max `MAX_GOSSIP_OP_BYTES` = 15 KB; bigger ops fall back to the relay).
 

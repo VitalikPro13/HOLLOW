@@ -1,6 +1,6 @@
 # Support credentials — the artist shop's phase 2
 
-Built 2026-09-02 (design record: `reports/ARTIST_SHOP_DESIGN.md` sections 5, 12.6, 13.23; build notes `reports/REDEEM_PHASE2.md`; memory `project_support_credentials_phase2`). A buyer redeems a Creem license key inside Hollow and gets a **support credential**: a blind signature (RFC 9474, RSABSSA-SHA384-PSS-Deterministic over RSA-3072) over a message binding their MASTER peer id to the item they bought. The shop signs it without seeing the identity; the credential rides the profile as `support_creds`; any viewer verifies it OFFLINE against one root key pinned in the app and lights a mark next to the art it vouches for, while that art is worn.
+Built 2026-09-02 (design record: `reports/shipped/shop/ARTIST_SHOP_DESIGN.md` sections 5, 12.6, 13.23; build notes `reports/shipped/shop/REDEEM_PHASE2.md`; memory `project_support_credentials_phase2`). A buyer redeems a Creem license key inside Hollow and gets a **support credential**: a blind signature (RFC 9474, RSABSSA-SHA384-PSS-Deterministic over RSA-3072) over a message binding their MASTER peer id to the item they bought. The shop signs it without seeing the identity; the credential rides the profile as `support_creds`; any viewer verifies it OFFLINE against one root key pinned in the app and lights a mark next to the art it vouches for, while that art is worn.
 
 ## The chain (design 5.2, amended for server-side approval)
 

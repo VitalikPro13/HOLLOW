@@ -66,7 +66,7 @@ pub(crate) fn fan_to_own_siblings(
 /// devices. Used by every sync-handler CRDT op whose MLS broadcast failed or was
 /// absent.
 ///
-/// Tier 2 (`reports/LARGE_SERVER_SCALING_2026.md`): when the server's gossip
+/// Tier 2 (`reports/shipped/relay-and-sync/LARGE_SERVER_SCALING_2026.md`): when the server's gossip
 /// overlay has live data channels the op floods over the P2P mesh instead, so the
 /// sender stops paying O(members x devices) relay uploads and the relay stops
 /// seeing plaintext op JSON. Falls back to the relay fan-out whenever the mesh

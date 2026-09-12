@@ -327,7 +327,7 @@ pub(crate) enum NetworkEvent {
     FriendRemoved { peer_id: String },
     /// A sibling sent our identity's friend list and we inserted `count` new rows.
     FriendsBackfilled { count: u32 },
-    // -- Conference events (see node/conference.rs + reports/CONFERENCES_PLAN.md) --
+    // -- Conference events (see node/conference.rs + reports/shipped/voice-and-media/CONFERENCES_PLAN.md) --
     /// (Host) a stranger is at the door. Blocklist already applied at ingest;
     /// `avatar_hash` is a hash, never blob bytes.
     ConferenceJoinRequestReceived { conf_id: String, peer_id: String, display_name: String, avatar_hash: String },
@@ -1671,7 +1671,7 @@ pub(crate) enum HavenMessage {
         commits: Vec<(u64, String)>,
     },
 
-    // -- Conferences (node/conference.rs; reports/CONFERENCES_PLAN.md) --
+    // -- Conferences (node/conference.rs; reports/shipped/voice-and-media/CONFERENCES_PLAN.md) --
 
     /// Joiner to the conf room: knock on the door, carrying a fresh MLS KeyPackage
     /// so admission is a single host-side commit. `avatar_hash` is a HASH (a
@@ -4009,7 +4009,7 @@ pub struct ShareRef {
 }
 
 /// Identifies the ORIGINATOR of a (potentially forwarded) media stream
-/// (reports/MEDIA_FORWARDING_PLAN.md).
+/// (reports/shipped/voice-and-media/MEDIA_FORWARDING_PLAN.md).
 ///
 /// Rides `vc_screen_offer` / `vc_screen_answer` / `vc_screen_ice` as
 /// `Option<Box<StreamOrigin>>`; absent means the delivering sender IS the

@@ -10,7 +10,7 @@ Imports from: `crypto_handler::{peer_is_reachable, send_mls_broadcast, send_mess
 
 ## Async friending (2026-08-28) — carried bundle, inbox mailbox, anti-downgrade guard
 
-Friend requests can complete with ZERO overlap (both parties offline at different moments). Full design lives in `reports/PENDING_JOINS_ASYNC_FRIENDING.md`; the durable record is memory `project_pending_joins_async_friending`.
+Friend requests can complete with ZERO overlap (both parties offline at different moments). Full design lives in `reports/shipped/relay-and-sync/PENDING_JOINS_ASYNC_FRIENDING.md`; the durable record is memory `project_pending_joins_async_friending`.
 
 - **`FriendRequest` carries** (all `#[serde(default)]`, backward-compatible): a `CarriedBundle` (fresh Olm one-time key + identity key, signed over the domain-separated `hollow-carried-keybundle:` payload, addressed to the recipient MASTER), the sender's `SignedDeviceList`, and a `carried_profile` (signed subset, verified + stored via `store_carried_profile` so the incoming card renders the sender's name/avatar). `FriendAccept` stays a UNIT variant (nothing needs a field there; the enum is INTERNALLY tagged, so `#[serde(default)]` fields can be added when needed, as `FriendReject` shows).
 - **Accepter** builds the outbound Olm session from the carried bundle at accept time, glare-gated to run ONLY when the requester is offline and session-less (`live_at_receipt`), then sends one `Encrypted` `FRIEND_HANDSHAKE_SENTINEL` that establishes the requester's inbound session with no visible DM row. `verify_carried_bundle` is its OWN freshness path (`MAX_CARRIED_BUNDLE_AGE_SECS = 7d`, never the live 300s `KEY_EXCHANGE_SKEW_SECS`).

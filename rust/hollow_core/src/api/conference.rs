@@ -1,5 +1,5 @@
 //! Conference FFI — Zoom-style rooms with an MLS-gated waiting room.
-//! Design doc: `reports/CONFERENCES_PLAN.md`; node logic in `node/conference.rs`.
+//! Design doc: `reports/shipped/voice-and-media/CONFERENCES_PLAN.md`; node logic in `node/conference.rs`.
 //!
 //! Room CRUD talks to the long-lived MessageStore, since rooms are host-local objects,
 //! while meeting lifecycle rides NodeCommands into the swarm loop. The media path is

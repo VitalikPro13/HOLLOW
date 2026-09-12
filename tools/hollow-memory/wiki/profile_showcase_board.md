@@ -8,7 +8,7 @@ by the user — no process detection, ever. Display is pure P2P off replicated
 profile data: viewers never contact IGDB, the website, or any third party.
 RELATIONAL BLOCKS ARE VETOED (mutual servers/friends = Discovery-species
 privacy leak — memory `feedback_no_relational_profile_blocks`). Design
-report: `reports/PROFILE_SHOWCASE_BOARD.md`.
+report: `reports/shipped/profile-and-assets/PROFILE_SHOWCASE_BOARD.md`.
 
 ## Data Model (lib/src/core/models/showcase_board.dart)
 

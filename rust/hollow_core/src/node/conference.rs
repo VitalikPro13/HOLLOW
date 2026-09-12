@@ -1,5 +1,5 @@
 //! Conferences: Zoom-style ad-hoc rooms with an MLS-gated waiting room.
-//! Design doc: `reports/CONFERENCES_PLAN.md`.
+//! Design doc: `reports/shipped/voice-and-media/CONFERENCES_PLAN.md`.
 //!
 //! A conference is a "virtual server": its id `conf:{conf_id}` is at once the
 //! relay WS room code, the MLS group key and the `server_id` fed to the existing

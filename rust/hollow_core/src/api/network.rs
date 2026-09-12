@@ -409,7 +409,7 @@ pub enum NetworkEvent {
         sframe_key: Vec<u8>,
         channel_id: Option<String>,
     },
-    // -- Conference events (reports/CONFERENCES_PLAN.md) --
+    // -- Conference events (reports/shipped/voice-and-media/CONFERENCES_PLAN.md) --
     /// (Host) someone is in the waiting room. `avatar_hash` is a hash, never
     /// blob bytes; Dart computes the friend badge locally.
     ConferenceJoinRequestReceived { conf_id: String, peer_id: String, display_name: String, avatar_hash: String },

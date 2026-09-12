@@ -2,7 +2,7 @@
 
 ## Overview
 
-Ad-hoc meetings between people who share no server and no friendship. A host creates a durable **room**, shares a link, and admits knockers through a waiting room. **Admission IS the cryptography**: being let in = the host commits an MLS add; until then a joiner in the relay room holds only ciphertext. Design doc: `reports/CONFERENCES_PLAN.md`; memory `project_conferences_design`.
+Ad-hoc meetings between people who share no server and no friendship. A host creates a durable **room**, shares a link, and admits knockers through a waiting room. **Admission IS the cryptography**: being let in = the host commits an MLS add; until then a joiner in the relay room holds only ciphertext. Design doc: `reports/shipped/voice-and-media/CONFERENCES_PLAN.md`; memory `project_conferences_design`.
 
 **The virtual-server model:** `conf:{conf_id}` is simultaneously the relay WS room code, the MLS group key, and the `server_id` fed to the untouched voice-channel machinery (channel id always `"main"` = `CONF_CHANNEL`). `server_states` never contains conf ids, so every CRDT-coupled path (sync, member fan-outs, restricted guards) skips naturally. v1 shipped + 2-machine field-tested 2026-07-13.
 

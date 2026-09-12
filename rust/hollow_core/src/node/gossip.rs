@@ -52,7 +52,7 @@ pub const MAX_GOSSIP_OP_BYTES: usize = 15_000;
 // ── Small-message gossip frame (Tier 2 large-server scaling) ────────────────
 
 /// Wire frame for a CRDT op flooded over the WebRTC data-channel mesh (type byte
-/// 0x04 on 'hollow-data'). See `reports/LARGE_SERVER_SCALING_2026.md`.
+/// 0x04 on 'hollow-data'). See `reports/shipped/relay-and-sync/LARGE_SERVER_SCALING_2026.md`.
 ///
 /// A receiving node re-floods ONLY when the op was NEW to its own op_log, so each
 /// node forwards a given op at most once: the flood is bounded by op-newness, not

@@ -57,7 +57,7 @@ pub(crate) async fn handle_webrtc_broadcast_received(
     }
 }
 
-/// Tier 2 (`reports/LARGE_SERVER_SCALING_2026.md`): flood a plaintext CRDT op to
+/// Tier 2 (`reports/shipped/relay-and-sync/LARGE_SERVER_SCALING_2026.md`): flood a plaintext CRDT op to
 /// this server's gossip neighbors over WebRTC data channels instead of the relay.
 /// Returns the number of neighbors the frame was dispatched to; 0 means the mesh
 /// is not usable here and the caller MUST fall back to the relay path.

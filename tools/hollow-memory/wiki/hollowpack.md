@@ -1,6 +1,6 @@
 # .hollowpack — the artist shop's art container
 
-Built 2026-08-29 for the artist shop (design record: `reports/ARTIST_SHOP_DESIGN.md`; memory `project_hollowpack_format`, `project_artist_shop_design`). Phase 1 = the store sells DRM-free art; phase 2 binds a blind-signed support credential to the art's hash.
+Built 2026-08-29 for the artist shop (design record: `reports/shipped/shop/ARTIST_SHOP_DESIGN.md`; memory `project_hollowpack_format`, `project_artist_shop_design`). Phase 1 = the store sells DRM-free art; phase 2 binds a blind-signed support credential to the art's hash.
 
 ## Format (v1)
 
@@ -34,7 +34,7 @@ The keeper no longer runs the CLI by hand. In `anonlisten-sites/shop/`, an artis
 
 ## The app client (built 2026-09-02)
 
-The buyer's side of the pack, in the app. Design record `reports/ARTIST_SHOP_DESIGN.md` §14 item 2; memory `project_shop_app_client`.
+The buyer's side of the pack, in the app. Design record `reports/shipped/shop/ARTIST_SHOP_DESIGN.md` §14 item 2; memory `project_shop_app_client`.
 
 - **Store-build gate, decided ONCE at startup** (`lib/src/core/shop_availability.dart`, primed in `main()` before `runApp`): desktop = shop; iOS and web = none; Android = none when the installer package is a store (`com.android.vending`, Amazon, Samsung, read through the `getInstallerPackage` method-channel call in `MainActivity.kt`), full shop for a sideload; the `--dart-define=HOLLOW_STORE_BUILD=true` define forces it off anywhere. Widgets read `shopAvailableProvider`, never the static. On a store build there is NO shop surface at all (design §8: "the safest sentence is no sentence"): no button, no dashboard, no import panel, no redeem dialog, and a `hollow://redeem` link reads as unrecognised. Rendering of bought art is untouched everywhere. Since 2026-09-05 the effective gate `shopAvailableProvider` is that store verdict AND a persisted `shop_unlocked` flag (`shop_unlock_provider.dart`, default off, loaded in `_bootstrap` beside the layout mode): the shop ships put away and is woken by an easter egg in Settings that is deliberately not written down here. A store build stays deaf to it. While locked, a pasted `hollow://redeem` link stays plain text in the composer and the deep link reads as unrecognized; support marks still render, their tooltips no longer name the shop.
 - **The Shop is a centre tab** (`ShellTab.shop`, `shopTabOpenProvider` in `shop_tab_provider.dart`, opened by `openShopTab(read)` which mirrors `ConferenceNotifier.openTab`): the store icon sits BEFORE Saved messages on the Dock friends strip and after Conferences on the Classic rail; lit = open, pressing the lit button closes it (issue #28 rule). Mobile reaches it from Settings ("Hollow Shop" tile after Help, `ShopDashboard(embedded: true)`).

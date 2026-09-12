@@ -1,4 +1,4 @@
-# Regenerates reports\UI_NAVIGATION_MAP.md by walking the app and writing down
+# Regenerates reports\reference\UI_NAVIGATION_MAP.md by walking the app and writing down
 # what it finds.
 #
 #   powershell -File scripts\ui_nav_map.ps1
@@ -40,7 +40,7 @@ $maps = Get-ChildItem (Join-Path $repoRoot 'build\ui_probe') -Filter 'map-*.md' 
         Sort-Object Name
 if (-not $maps) { throw 'no maps in build\ui_probe; run without -SkipRun' }
 
-$out = Join-Path $repoRoot 'reports\UI_NAVIGATION_MAP.md'
+$out = Join-Path $repoRoot 'reports\reference\UI_NAVIGATION_MAP.md'
 New-Item -ItemType Directory -Path (Split-Path $out) -Force | Out-Null
 
 $stamp = (Get-Date).ToString('yyyy-MM-dd')

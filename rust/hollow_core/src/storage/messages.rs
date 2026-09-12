@@ -3789,7 +3789,7 @@ impl MessageStore {
         collect_rows(rows, "blocked")
     }
 
-    // ── Conference rooms (host-local; reports/CONFERENCES_PLAN.md) ───
+    // ── Conference rooms (host-local; reports/shipped/voice-and-media/CONFERENCES_PLAN.md) ───
 
     pub fn upsert_conference(&self, row: &ConferenceRow) -> Result<(), String> {
         self.conn.execute(
@@ -5633,7 +5633,7 @@ pub struct PendingJoinRow {
     pub key_package: Option<String>,
 }
 
-/// Persisted conference room (host-local; reports/CONFERENCES_PLAN.md).
+/// Persisted conference room (host-local; reports/shipped/voice-and-media/CONFERENCES_PLAN.md).
 pub struct ConferenceRow {
     pub conf_id: String,
     pub name: String,

@@ -1,5 +1,5 @@
 [
-  {"op": "log", "message": "One pass over the main screens, one map each. Feeds reports/UI_NAVIGATION_MAP.md."},
+  {"op": "log", "message": "One pass over the main screens, one map each. Feeds reports/reference/UI_NAVIGATION_MAP.md."},
 
   {"op": "dump", "name": "01-home"},
   {"op": "shot", "name": "01-home"},

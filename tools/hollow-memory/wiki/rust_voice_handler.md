@@ -477,7 +477,7 @@ No frb codegen needed — `HavenMessage` is internal, and `call_send_signal`/`Ne
 
 **Recording indicator (issue #53, 2026-08-05):** Dart's `recording_start`/`recording_stop` signals are whitelisted on BOTH paths. 1:1 → `HavenMessage::CallRecordingState { call_id, recording }` (`call_recording_state`); VC → broadcast-class `MessageEnvelope::VoiceChannelRecordingState { sid, cid, recording, target }` (`vc_recording_state`) + plaintext `HavenMessage` twin — added to `is_broadcast`, the VC rate-limiter list, the MLS-only-via-Olm list, and `target()`. Receive handlers gate on VC participant membership and reconstruct the Dart-facing signal-type string from the `recording` bool. The VC Dart sender fires ONE broadcast (`peerId: ''`) — a per-peer loop would emit N duplicate MLS broadcasts. Harness-covered in both the DM and VC signal-routing tests.
 
-## Phase 3 — simulcast + upload spreading (FIELD-VERIFIED COMPLETE 2026-08-14; details in reports/MEDIA_FORWARDING_PLAN.md §7/§9)
+## Phase 3 — simulcast + upload spreading (FIELD-VERIFIED COMPLETE 2026-08-14; details in reports/shipped/voice-and-media/MEDIA_FORWARDING_PLAN.md §7/§9)
 
 **Live setParameters works on Windows now.** The historic every-call rejection was the
 plugin's parameters round-trip materializing unset optionals (`scalabilityMode ""`, `ssrc 0`)
@@ -519,7 +519,7 @@ re-watches stay on-branch (`_reofferIngest` re-registers first = low-set refresh
 clients (empty route) always get direct PCs. Field result: 2 direct viewers = ONE simulcast
 ingest, ZERO direct copies; the 15-viewer cap is effectively dynamic.
 
-## Phase 2 — viewer-peer forwarders (FIELD-VERIFIED COMPLETE 2026-08-07, all four runs; details in reports/MEDIA_FORWARDING_PLAN.md §7)
+## Phase 2 — viewer-peer forwarders (FIELD-VERIFIED COMPLETE 2026-08-07, all four runs; details in reports/shipped/voice-and-media/MEDIA_FORWARDING_PLAN.md §7)
 
 The SAME `fwd_*` contract now also terminates at an **embedded engine inside desktop app
 builds** (`node/embedded_forwarder.rs` bridges the swarm's Olm dispatch ↔ `forwarder::engine`;
@@ -572,7 +572,7 @@ forwarder is NOT a Hollow node: no CRDT, no MLS, no storage, no group keys. It t
 hop-by-hop DTLS-SRTP; payloads stay SFrame-encrypted under the ORIGINATOR's key end to end.
 Phase 1 = one infra forwarder on the VPS (`hollow-forwarder`); phase 2 = viewer-peer forwarders
 running the same module in-app. Detail + the field-bug post-mortem:
-`reports/MEDIA_FORWARDING_PLAN.md`, memory `project_media_forwarding_epic`.
+`reports/shipped/voice-and-media/MEDIA_FORWARDING_PLAN.md`, memory `project_media_forwarding_epic`.
 
 **Why a separate namespace:** a forwarder can never satisfy `is_vc_participant` / CRDT / MLS gates,
 so its signalling cannot ride the `vc_*` lane. `fwd_*` envelopes are Olm-direct inside a dedicated

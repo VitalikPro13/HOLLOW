@@ -1,4 +1,4 @@
-/// The self-curated profile showcase board (reports/PROFILE_SHOWCASE_BOARD.md).
+/// The self-curated profile showcase board (reports/shipped/profile-and-assets/PROFILE_SHOWCASE_BOARD.md).
 ///
 /// Two optional columns of composable blocks flanking the profile center card,
 /// serialized to one JSON string in the profile's `showcase_board` field.

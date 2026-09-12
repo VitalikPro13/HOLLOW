@@ -13915,7 +13915,7 @@ async fn handle_incoming_request(
             }).await;
         }
 
-        // -- Conferences (node/conference.rs; reports/CONFERENCES_PLAN.md) --
+        // -- Conferences (node/conference.rs; reports/shipped/voice-and-media/CONFERENCES_PLAN.md) --
         HavenMessage::ConferenceJoinRequest { conf_id, display_name, avatar_hash, key_package, access_hash } => {
             // Blocklist + access-code gating live inside the handler (host-only).
             super::conference::handle_inbound_join_request(

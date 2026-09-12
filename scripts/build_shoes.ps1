@@ -4,7 +4,7 @@
 # Hollow node spawns it as a local SOCKS5 proxy that tunnels the relay WSS
 # connection through VLESS+REALITY, so the traffic looks like ordinary HTTPS to
 # a censor (Russia/TSPU, China/GFW). See HOLLOW_PLAN.md "Fight Government
-# Censorship" + reports/ANTI_CENSORSHIP_TRANSPORT_2026.md.
+# Censorship" + reports/shipped/relay-and-sync/ANTI_CENSORSHIP_TRANSPORT_2026.md.
 #
 # Output: vendor/shoes/shoes-win-x64.exe (+ VERSION.txt, LICENSE.shoes.txt)
 # Bundled next to hollow.exe by windows/CMakeLists.txt.

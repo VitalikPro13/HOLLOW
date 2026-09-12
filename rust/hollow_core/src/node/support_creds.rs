@@ -1,5 +1,5 @@
 //! Support credentials: the proof that an identity bought a piece of shop art
-//! (design `reports/ARTIST_SHOP_DESIGN.md` section 5).
+//! (design `reports/shipped/shop/ARTIST_SHOP_DESIGN.md` section 5).
 //!
 //! A credential is a blind signature (RFC 9474, `support_rsa.rs`) over a message
 //! binding the buyer's MASTER peer id to an item, so the shop never learns which

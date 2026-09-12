@@ -409,7 +409,7 @@ For each needed chunk (in rarest-first or sequential order):
 3. Renames `.partial` to the sanitized filename in save_dir (see `unique_final_path()` / `safe_file_name()` below).
 4. **Collision avoidance:** If filename already exists, appends ` (1)`, ` (2)`, ... up to 999.
 5. Marks share complete in DB (`mark_share_complete()`).
-6. **Auto-seeding:** Non-hidden shares automatically start seeding. Hidden shares (channel files) don't auto-seed -- receiver opts in via "Keep & Seed". The hidden flag comes from the registry entry; if that entry vanished (race), the fallback is the persisted share row's `server_id.is_some()`, defaulting to hidden when no row exists either (fixed 2026-07-15 — used to default to visible, which would surface + auto-seed a hidden channel file). Known residual: `rebuild_seed_state` still hardcodes `hidden: false` on auto-rejoin (flagged in `reports/SONAR_CLEANUP_EPIC.md`).
+6. **Auto-seeding:** Non-hidden shares automatically start seeding. Hidden shares (channel files) don't auto-seed -- receiver opts in via "Keep & Seed". The hidden flag comes from the registry entry; if that entry vanished (race), the fallback is the persisted share row's `server_id.is_some()`, defaulting to hidden when no row exists either (fixed 2026-07-15 — used to default to visible, which would surface + auto-seed a hidden channel file). Known residual: `rebuild_seed_state` still hardcodes `hidden: false` on auto-rejoin (flagged in `reports/shipped/testing-and-tooling/SONAR_CLEANUP_EPIC.md`).
 7. Re-opens the final file read-only as `data_file` for seeding.
 8. Emits `NetworkEvent::ShareCompleted` with disk_path.
 

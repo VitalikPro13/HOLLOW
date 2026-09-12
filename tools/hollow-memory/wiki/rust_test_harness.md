@@ -1,7 +1,7 @@
 # Multi-Node Test Harness (headless integration testing)
 
 Source: `rust/hollow_core/src/node/test_harness.rs` (`#[cfg(test)]`)
-Design + ladder: `reports/MULTINODE_TEST_HARNESS_HANDOFF.md`, `reports/HARNESS_COVERAGE_MAP.md`
+Design + ladder: `reports/shipped/testing-and-tooling/MULTINODE_TEST_HARNESS_HANDOFF.md`, `reports/reference/HARNESS_COVERAGE_MAP.md`
 
 ## What it is and why it matters
 
@@ -26,7 +26,7 @@ instantly and that was previously found only by Vitalik manually copying logs ac
   C++. **Out of harness scope** — Vitalik's manual / Tier-2 pass.
 
 When green, the claim is exactly: "the distributed-logic core + control plane behave correctly across
-N devices" — NOT "the whole app works." Full map in `reports/HARNESS_COVERAGE_MAP.md`.
+N devices" — NOT "the whole app works." Full map in `reports/reference/HARNESS_COVERAGE_MAP.md`.
 
 ## The production seam (behavior-neutral)
 
@@ -111,7 +111,7 @@ The GAP between the two layers is where multi-device bugs hide, so both exist on
 
 rung1 inspectors ✅ → rung2 servers+channels+MLS ✅ → rung3 device revocation ✅ → ring-2 control plane
 (1:1 call signals, voice channels, file transfer, recovery pool) ✅. Ring 1 fully self-verifiable; the
-coverable ring-2 control plane is covered. Coverage line in `reports/HARNESS_COVERAGE_MAP.md`.
+coverable ring-2 control plane is covered. Coverage line in `reports/reference/HARNESS_COVERAGE_MAP.md`.
 
 **KEY DISCOVERY (file transfer):** the WS-relay binary-streaming fallback works fully in-process —
 `stream_to_peer` falls back to `ws_stream_send` (→ `SendBinaryDirect`, which the MockRelay routes
