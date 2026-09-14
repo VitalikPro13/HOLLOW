@@ -8,6 +8,7 @@ import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/core/providers/annotation_mode_provider.dart';
 import 'package:hollow/src/core/providers/background_provider.dart';
 import 'package:hollow/src/core/providers/theme_provider.dart';
+import 'package:hollow/src/core/services/window_fullscreen.dart';
 import 'package:hollow/src/theme/hollow_colors.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_theme_data.dart';
@@ -82,9 +83,10 @@ class HollowApp extends ConsumerWidget {
             child: Consumer(
               builder: (context, innerRef, _) {
                 final annotation = innerRef.watch(annotationModeProvider);
+                final fullscreen = innerRef.watch(fullscreenProvider);
                 return Column(
                   children: [
-                    if (!annotation) const WindowTitleBar(),
+                    if (!annotation && !fullscreen) const WindowTitleBar(),
                     Expanded(
                       child: ClipRect(
                         child: UiScale(child: _IdleActivity(child: body)),

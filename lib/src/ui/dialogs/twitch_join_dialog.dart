@@ -144,7 +144,7 @@ void showNsfwConfirmDialog(
             Text(
               'This server is moderated only by its own moderators. Hollow does '
               'not host, review, or take responsibility for its content. '
-              'Proceed at your own risk.',
+              'By continuing you confirm that you are 18 or older.',
               style: HollowTypography.caption.copyWith(
                 color: hollow.textSecondary,
                 height: 1.4,
@@ -163,7 +163,7 @@ void showNsfwConfirmDialog(
               onProceed();
             },
             compact: true,
-            child: const Text('Join'),
+            child: const Text('I am 18 or older, join'),
           ),
         ],
       );

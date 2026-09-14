@@ -16,6 +16,8 @@ import 'package:hollow/src/core/providers/server_provider.dart'
 import 'package:hollow/src/core/services/attachment_export.dart'
     show exportAttachmentTo;
 import 'package:hollow/src/core/services/image_pick.dart';
+import 'package:hollow/src/core/services/window_fullscreen.dart'
+    show fullscreenProvider;
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/rust/api/storage.dart' as storage;
 import 'package:hollow/src/ui/app.dart' show hollowNavigatorKey;
@@ -67,6 +69,9 @@ import 'probe_targets.dart';
 /// | `attach_file` | `path` | stages a file on the composer, as a drop does |
 /// | `arm_image_pick` | `path` | answers the next image pick with that file |
 /// | `channel_rows` | `serverId`, `channelId`, `limit` | the DB behind a channel |
+/// | `window_state` | `name`, `expect` | the OS window: fullscreen, style, rect |
+/// | `focus_state` | | who owns the keyboard, in Flutter and in Win32 |
+/// | `expect_window_same` | `name` | fails unless the window matches a snapshot |
 /// | `log` | `message` | a note in the results |
 /// | `quit` | | ends a live session |
 ///
@@ -105,6 +110,11 @@ class ProbeRunner {
   /// of the answer and substitutes them into the OTHER instance's steps, which
   /// is how an invite link crosses from one app to another.
   final Map<String, String> captured = {};
+
+  /// Window shapes taken by `window_state`, compared later by
+  /// `expect_window_same`. A fullscreen round trip that comes back 8px
+  /// short, or without its resize border, looks identical in a screenshot.
+  final Map<String, Map<String, Object?>> windowSnapshots = {};
 
   /// Which instance this is, when there is more than one (`UI_PROBE_PEER`).
   /// Stamped on every answer so a tail of several outboxes stays readable.
@@ -314,6 +324,9 @@ class ProbeRunner {
         'look',
         'video_state',
         'audio_state',
+        'window_state',
+        'expect_window_same',
+        'focus_state',
         'export_attachment',
         'kill_deposit',
         'expect_text',
@@ -472,6 +485,15 @@ class ProbeRunner {
 
       case 'channel_rows':
         return _channelRows(step);
+
+      case 'window_state':
+        return _windowState(step);
+
+      case 'focus_state':
+        return _focusState();
+
+      case 'expect_window_same':
+        return _expectWindowSame(step);
 
       case 'video_state':
         return _videoState(step);
@@ -758,6 +780,153 @@ class ProbeRunner {
           'bubble(s) on screen)');
     }
     throw _ProbeFailure('${describe(best, "")} - the position never advanced');
+  }
+
+  static const List<String> _windowRectKeys = ['left', 'top', 'right', 'bottom'];
+  static const List<String> _monitorRectKeys = [
+    'monLeft',
+    'monTop',
+    'monRight',
+    'monBottom',
+  ];
+
+  /// The OS window as the Windows runner sees it.
+  ///
+  /// Inside `tester.runAsync` because a platform-channel reply arrives on the
+  /// real event loop, which the test zone's fake clock never pumps.
+  Future<Map<String, Object?>?> _queryWindow() async {
+    Map<String, Object?>? out;
+    await tester.runAsync(() async {
+      final raw = await const MethodChannel('hollow/window')
+          .invokeMapMethod<String, Object?>('queryWindow');
+      if (raw != null) out = Map<String, Object?>.of(raw);
+    });
+    return out;
+  }
+
+  String _rectOf(Map<String, Object?> q, List<String> keys) =>
+      keys.map((k) => '${q[k] ?? '?'}').join(',');
+
+  bool _matchesMonitor(Map<String, Object?> q) {
+    for (final key in [..._windowRectKeys, ..._monitorRectKeys]) {
+      if (q[key] == null) return false;
+    }
+    return _rectOf(q, _windowRectKeys) == _rectOf(q, _monitorRectKeys);
+  }
+
+  /// The window's fullscreen state, style and rect, plus what Dart believes.
+  /// The native flag and the provider are printed side by side because a
+  /// fullscreen the window never entered and a provider that missed it look
+  /// the same from the app.
+  Future<String> _windowState(Map<String, dynamic> step) async {
+    if (!Platform.isWindows) return 'unsupported';
+    final q = await _queryWindow();
+    if (q == null) {
+      throw _ProbeFailure('the hollow/window channel answered nothing');
+    }
+    final name = step['name'];
+    if (name != null) windowSnapshots['$name'] = q;
+
+    final probeContainer = container;
+    final provider =
+        probeContainer != null && probeContainer.exists(fullscreenProvider)
+            ? '${probeContainer.read(fullscreenProvider)}'
+            : '-';
+    final line = 'fullscreen=${q['fullscreen']} provider=$provider '
+        'zoomed=${q['zoomed']} thickFrame=${q['thickFrame']} '
+        'rect=${_rectOf(q, _windowRectKeys)} '
+        'monitor=${_rectOf(q, _monitorRectKeys)}';
+
+    final want = step['expect'];
+    if (want is Map) {
+      final actual = <String, Object?>{
+        'fullscreen': q['fullscreen'],
+        'thickFrame': q['thickFrame'],
+        'zoomed': q['zoomed'],
+        'matchesMonitor': _matchesMonitor(q),
+      };
+      for (final entry in want.entries) {
+        final field = '${entry.key}';
+        if (!actual.containsKey(field)) {
+          throw _ProbeFailure('window_state cannot check "$field" '
+              '(known: ${actual.keys.join(', ')})');
+        }
+        if (actual[field] != entry.value) {
+          throw _ProbeFailure(
+              '$field is ${actual[field]}, expected ${entry.value}  ($line)');
+        }
+      }
+    }
+    return line;
+  }
+
+  /// Who owns the keyboard, on both sides of the embedder.
+  ///
+  /// `FocusManager._handleKeyMessage` returns early when `primaryFocus` is
+  /// null, so a dropped focus makes every focus-routed shortcut (Escape into a
+  /// dialog, every `Shortcuts` binding) silently do nothing, while a
+  /// HardwareKeyboard handler like F11 keeps working. That asymmetry is what
+  /// this op exists to tell apart.
+  Future<String> _focusState() async {
+    final focus = FocusManager.instance;
+    final primary = focus.primaryFocus;
+    final label = primary == null
+        ? 'none'
+        : '${primary.debugLabel ?? primary.runtimeType}'
+            '${primary.hasPrimaryFocus ? '' : ' (not primary)'}';
+    // Which ROUTE owns the focused node decides whether Escape reaches a
+    // dialog at all: `DismissIntent` is looked up from the focused node's
+    // context, so focus left behind in the route underneath finds that route's
+    // disabled action instead of the dialog's.
+    final ctx = primary?.context;
+    final route = ctx == null ? null : ModalRoute.of(ctx);
+    var native = '';
+    if (Platform.isWindows) {
+      final q = await _queryWindow();
+      native = ' nativeFocused=${q?['focused']} foreground=${q?['foreground']}';
+    }
+    return 'primaryFocus=$label '
+        'route=${route?.runtimeType ?? 'none'} '
+        'routeIsCurrent=${route?.isCurrent} '
+        'rootScopeHasFocus=${focus.rootScope.hasFocus}$native';
+  }
+
+  /// Whether the window came back to a shape taken earlier. This is the check
+  /// the "squished on restore" bug fails.
+  Future<String> _expectWindowSame(Map<String, dynamic> step) async {
+    if (!Platform.isWindows) return 'unsupported';
+    final name = '${step['name'] ?? ''}';
+    final before = windowSnapshots[name];
+    if (before == null) {
+      throw _ProbeFailure('no window snapshot named "$name" (take one with '
+          '{"op":"window_state","name":"$name"})');
+    }
+    final now = await _queryWindow();
+    if (now == null) {
+      throw _ProbeFailure('the hollow/window channel answered nothing');
+    }
+    const fields = [
+      'left',
+      'top',
+      'right',
+      'bottom',
+      'thickFrame',
+      'maximizeBox',
+      'zoomed',
+      'fullscreen',
+    ];
+    final drifted = <String>[];
+    for (final field in fields) {
+      if (before[field] != now[field]) {
+        drifted.add('$field ${before[field]} to ${now[field]}');
+      }
+    }
+    if (drifted.isNotEmpty) {
+      throw _ProbeFailure(
+          'the window did not come back to "$name": ${drifted.join(', ')}');
+    }
+    return 'window matches "$name" (rect=${_rectOf(now, _windowRectKeys)} '
+        'thickFrame=${now['thickFrame']} zoomed=${now['zoomed']})';
   }
 
   /// Saves an attachment out through the app's OWN export path
@@ -1414,6 +1583,7 @@ class ProbeRunner {
       'home': LogicalKeyboardKey.home,
       'end': LogicalKeyboardKey.end,
       'f10': LogicalKeyboardKey.f10,
+      'f11': LogicalKeyboardKey.f11,
       'contextMenu': LogicalKeyboardKey.contextMenu,
     };
     final key = keys[name];

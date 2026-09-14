@@ -285,7 +285,11 @@ Circular 36x36 container with the accent color. Play icon is nudged 1.5px right 
 
 ### Playing Mode
 
-Delegates to `_InlinePlayer` widget (see below). Passes the `VideoPlayerController`, hollow theme, and a fullscreen callback.
+Delegates to `InlineVideoPlayer` (shared with `LinkPreviewCard`). The controller is owned by a `MediaPlaybackSession` (`lib/src/ui/media/media_playback_session.dart`, 2026-09-14): a holder SET (the bubble and the fullscreen view), the last release pauses and awaits `dispose()` exactly once, so the bubble can scroll out of the list and die while the view is still up. Only ONE `VideoPlayer` widget is attached to the controller at a time (two on one controller double-render through fvp on Windows): while `session.viewerHolds` the bubble draws its poster layer plus a 55% black dim instead of the player. The `currentlyPlaying*` listeners and the visibility auto-pause are both no-ops while the viewer holds.
+
+### Fullscreen (2026-09-14)
+
+The inline control bar's "Enter fullscreen" button (and `_onPlayTapped(fullscreen: true)`) hands the SAME session to `FullscreenVideoView`, pushed with `fullscreenVideoRoute(session)`: `hollowMobileRoute` (fade) on mobile, an opaque `PageRouteBuilder` with a reduce-motion-aware 150 ms fade on desktop. Never a `showHollowDialog` (no blur, no padding): the view is `ColoredBox(black) > SizedBox.expand > InlineVideoPlayer(isFullscreen: true)`, contain fit, so playback position and play state survive both ways. On desktop the view enters OS fullscreen through `fullscreenProvider` in `initState` and exits it in `dispose`; the control bar button, Escape (a `HardwareKeyboard` handler, since an opaque page route is not barrier-dismissible), double-click, F11 and the app lock all close it. The view listens for the provider's true → false transition and removes its OWN route (`removeRoute` when not current), never a bare pop: the lock cover is pushed above it before the async exit lands. Mobile adds immersive mode, a rotation unlock for landscape media and a rotate button via the `FullscreenMediaChrome` mixin (`lib/src/ui/media/fullscreen_media_chrome.dart`), restoring `portraitUp` + `edgeToEdge` in `dispose` AND in the push's `.then()`. The image dialog (`_FullscreenImageView`) shares only the mobile part of that mixin; on desktop it is unchanged.
 
 ### Vault Video Resolution
 

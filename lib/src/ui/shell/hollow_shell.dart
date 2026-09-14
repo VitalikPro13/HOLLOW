@@ -93,6 +93,7 @@ import 'package:hollow/src/ui/dialogs/relay_switch_dialog.dart';
 import 'package:hollow/src/core/providers/app_shortcuts_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/core/services/hotkeys/hotkey_binding.dart';
+import 'package:hollow/src/core/services/window_fullscreen.dart';
 import 'package:hollow/src/rust/api/identity.dart' as identity_api;
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
@@ -1395,6 +1396,11 @@ class _HollowShellState extends ConsumerState<HollowShell>
       return true;
     }
 
+    if (match(AppShortcut.toggleFullscreen) && FullscreenNotifier.supported) {
+      ref.read(fullscreenProvider.notifier).toggle();
+      return true;
+    }
+
     // Interface zoom (issue #20). The DEFAULT bindings keep their aliases: "+"
     // is Shift+= on most layouts and the numpad variants count. A custom binding
     // matches exactly.
@@ -1813,6 +1819,7 @@ class _HollowShellState extends ConsumerState<HollowShell>
     final settingsOpen = ref.watch(serverSettingsOpenProvider);
 
     final layoutMode = ref.watch(layoutModeProvider);
+    final fullscreen = ref.watch(fullscreenProvider);
 
     final shellBody = LayoutBuilder(
       builder: (context, constraints) {
@@ -1874,9 +1881,15 @@ class _HollowShellState extends ConsumerState<HollowShell>
         }
 
         // setAsFrameless() removed the edge and corner resize handles; this
-        // puts them back.
+        // puts them back. Fullscreen disables every edge (no frame for them to
+        // drive) but keeps the widget MOUNTED: dropping it swaps the type above
+        // the whole shell, which re-inflates it, and the composer's autofocus
+        // then pulls focus out of an open dialog so Escape stops reaching it.
         if (isDesktopPlatform) {
-          body = DragToResizeArea(child: body);
+          body = DragToResizeArea(
+            enableResizeEdges: fullscreen ? const <ResizeEdge>[] : null,
+            child: body,
+          );
         }
 
         // Tab order follows the visual layout without any manual ordering

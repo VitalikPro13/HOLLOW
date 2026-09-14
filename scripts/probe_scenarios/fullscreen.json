@@ -1,0 +1,36 @@
+[
+  {"op": "log", "message": "Part A: true fullscreen. F11 enters, the title bar goes, F11 restores the window exactly as it was."},
+
+  {"op": "wait", "ms": 3000},
+  {"op": "window_state", "name": "before"},
+  {"op": "shot", "name": "fs-00"},
+
+  {"op": "log", "message": "enter: the window covers its monitor and loses the thick frame"},
+  {"op": "key", "value": "f11"},
+  {"op": "wait", "ms": 1000},
+  {"op": "focus_state"},
+  {"op": "window_state", "expect": {"fullscreen": true, "matchesMonitor": true, "thickFrame": false}},
+  {"op": "expect_count", "target": "type:WindowTitleBar", "value": 0},
+  {"op": "shot", "name": "fs-01-fullscreen"},
+
+  {"op": "log", "message": "exit: back to the saved placement, title bar and all"},
+  {"op": "key", "value": "f11"},
+  {"op": "wait", "ms": 1000},
+  {"op": "focus_state"},
+  {"op": "expect_window_same", "name": "before"},
+  {"op": "expect_count", "target": "type:WindowTitleBar", "value": 1},
+  {"op": "shot", "name": "fs-02-restored"},
+
+  {"op": "log", "message": "a second round trip, to prove entering and leaving twice is the same as once"},
+  {"op": "key", "value": "f11"},
+  {"op": "wait", "ms": 800},
+  {"op": "focus_state"},
+  {"op": "window_state", "expect": {"fullscreen": true, "matchesMonitor": true, "thickFrame": false}},
+  {"op": "expect_count", "target": "type:WindowTitleBar", "value": 0},
+  {"op": "key", "value": "f11"},
+  {"op": "wait", "ms": 800},
+  {"op": "focus_state"},
+  {"op": "expect_window_same", "name": "before"},
+  {"op": "expect_count", "target": "type:WindowTitleBar", "value": 1},
+  {"op": "shot", "name": "fs-03-restored-again"}
+]

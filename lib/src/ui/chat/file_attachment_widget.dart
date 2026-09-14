@@ -25,6 +25,7 @@ import 'package:hollow/src/ui/chat/file_card_status.dart';
 import 'package:hollow/src/ui/chat/sticker_pack_card.dart';
 import 'package:hollow/src/ui/chat/video_message_bubble.dart';
 import 'package:hollow/src/ui/components/attachment_image.dart';
+import 'package:hollow/src/ui/media/fullscreen_media_chrome.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// File extensions that route to the video bubble.
@@ -357,10 +358,16 @@ class FileAttachmentWidget extends ConsumerWidget {
 
       return HollowFocusRing(
         enabled: true,
-        onActivate: () => _showFullscreen(context, diskPath, isGif: isGif),
+        onActivate: () => _showFullscreen(context, diskPath,
+            isGif: isGif,
+            width: attachment.width,
+            height: attachment.height),
         borderRadius: BorderRadius.circular(hollow.radiusSm),
         child: GestureDetector(
-          onTap: () => _showFullscreen(context, diskPath, isGif: isGif),
+          onTap: () => _showFullscreen(context, diskPath,
+            isGif: isGif,
+            width: attachment.width,
+            height: attachment.height),
           child: MouseRegion(
             cursor: SystemMouseCursors.click,
             child: ConstrainedBox(
@@ -705,21 +712,59 @@ class FileAttachmentWidget extends ConsumerWidget {
     };
   }
 
-  /// Opens the image in a fullscreen overlay.
-  static void _showFullscreen(BuildContext context, String diskPath, {bool isGif = false}) {
+  /// Opens the image in a fullscreen overlay. The pixel dimensions decide
+  /// whether the mobile surface may rotate; unknown dimensions stay portrait.
+  static void _showFullscreen(
+    BuildContext context,
+    String diskPath, {
+    bool isGif = false,
+    int? width,
+    int? height,
+  }) {
+    final size = (width != null && height != null && width > 0 && height > 0)
+        ? Size(width.toDouble(), height.toDouble())
+        : null;
     showHollowDialog(
       context: context,
-      builder: (ctx) => _FullscreenImageView(diskPath: diskPath, isGif: isGif),
-    );
+      builder: (ctx) => _FullscreenImageView(
+        diskPath: diskPath,
+        isGif: isGif,
+        contentSize: size,
+      ),
+    ).then((_) => restoreAppOrientation());
   }
 }
 
 /// Fullscreen image view over a blurred backdrop.
-class _FullscreenImageView extends StatelessWidget {
+class _FullscreenImageView extends ConsumerStatefulWidget {
   final String diskPath;
   final bool isGif;
+  final Size? contentSize;
 
-  const _FullscreenImageView({required this.diskPath, this.isGif = false});
+  const _FullscreenImageView({
+    required this.diskPath,
+    this.isGif = false,
+    this.contentSize,
+  });
+
+  @override
+  ConsumerState<_FullscreenImageView> createState() =>
+      _FullscreenImageViewState();
+}
+
+class _FullscreenImageViewState extends ConsumerState<_FullscreenImageView>
+    with FullscreenMediaChrome<_FullscreenImageView> {
+  @override
+  void initState() {
+    super.initState();
+    beginFullscreenMedia(widget.contentSize);
+  }
+
+  @override
+  void dispose() {
+    endFullscreenMedia();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -735,27 +780,31 @@ class _FullscreenImageView extends StatelessWidget {
               child: ClipRRect(
                 borderRadius: BorderRadius.circular(hollow.radiusMd),
                 child: AttachmentImage(
-                  path: diskPath,
-                  animated: isGif,
+                  path: widget.diskPath,
+                  animated: widget.isGif,
                   fit: BoxFit.contain,
                 ),
               ),
             ),
-
             Positioned(
               top: HollowSpacing.lg,
               right: HollowSpacing.lg,
-              child: HollowPressable(
-                onTap: () => Navigator.of(context).pop(),
-                semanticLabel: 'Close',
-                borderRadius: BorderRadius.circular(hollow.radiusMd),
-                backgroundColor: hollow.elevated.withValues(alpha: 0.8),
-                padding: const EdgeInsets.all(HollowSpacing.sm),
-                child: Icon(
-                  LucideIcons.x,
-                  color: hollow.textPrimary,
-                  size: 20,
-                ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (isMobileMediaPlatform) ...[
+                    MediaRotateButton(
+                      landscape: forcedLandscape,
+                      onTap: toggleForcedLandscape,
+                    ),
+                    const SizedBox(width: HollowSpacing.sm),
+                  ],
+                  MediaChromeButton(
+                    icon: LucideIcons.x,
+                    label: 'Close',
+                    onTap: () => Navigator.of(context).pop(),
+                  ),
+                ],
               ),
             ),
           ],

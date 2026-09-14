@@ -183,6 +183,18 @@ that against a window the probe never took through `main()`'s `setAsFrameless` d
 process with no Dart error. Caveat learned the hard way: a resize can auto-collapse panels, so a
 target's coordinates before and after are not comparable — re-resolve, do not cache.
 
+Window and focus ops (2026-09-14, true fullscreen): **`window_state`** (`name` stores a snapshot,
+`expect` checks `fullscreen`/`thickFrame`/`zoomed`/`matchesMonitor`) reads the runner's
+`hollow/window` `queryWindow` (rect, monitor rect, style bits, native focus, foreground) next to
+`fullscreenProvider`; **`expect_window_same`** fails unless rect, style and zoom match a snapshot,
+which is the check the "squished on restore" bug fails and a screenshot cannot show;
+**`focus_state`** prints the primary focus node, the route that owns it and `routeIsCurrent`, the
+field that decides whether Escape reaches a dialog. Key `f11` joined the key map. The probe window
+is NOT frameless (see `view` above), so it keeps a real caption and ~20px side margins in
+fullscreen; the frameless restore is checked by hand. `media_fullscreen.json` needs
+`UI_PROBE_FIXTURES` = a folder with a plaintext `probe_video.mp4` and `probe_image.png`: the probe
+data's own files are at-rest ciphertext, and `build/ui_probe` is wiped per run.
+
 ## Rules that are not optional
 
 - **The fleet talks only to servers the fleet creates.** These are real identities on the real

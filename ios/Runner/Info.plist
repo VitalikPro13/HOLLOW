@@ -89,16 +89,26 @@
 	<string>LaunchScreen</string>
 	<key>UIMainStoryboardFile</key>
 	<string>Main</string>
+	<!-- The whitelist, not the policy: iOS ignores a runtime landscape request
+	     for an orientation missing here, and the fullscreen media surface needs
+	     landscape. The runtime lock in main.dart is what holds portrait
+	     everywhere else. -->
 	<key>UISupportedInterfaceOrientations</key>
 	<array>
 		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationPortraitUpsideDown</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
 	<key>UISupportedInterfaceOrientations~ipad</key>
 	<array>
 		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationPortraitUpsideDown</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
-	<!-- iPadOS ignores orientation locks for multitasking-capable apps —
-	     full screen is required for the portrait lock to hold on iPad. -->
+	<!-- iPadOS ignores orientation locks for multitasking-capable apps, so
+	     full screen is what lets the runtime lock hold on iPad. -->
 	<key>UIRequiresFullScreen</key>
 	<true/>
 </dict>

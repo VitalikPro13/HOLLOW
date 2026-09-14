@@ -366,7 +366,7 @@ MaterialApp(
             type: MaterialType.transparency,
             child: Column(
               children: [
-                if (!annotation) const WindowTitleBar(),
+                if (!annotation && !fullscreen) const WindowTitleBar(),
                 Expanded(child: ClipRect(child: UiScale(child: child))),
               ],
             ),
@@ -449,3 +449,9 @@ Performance optimization: `RepaintBoundary` wraps `ServerStrip`, `FriendsBar`, `
 ## DragToResizeArea
 
 On desktop platforms (Windows/macOS/Linux), the entire layout body is wrapped in `DragToResizeArea` from the `window_manager` package. This restores edge and corner resize handles that were removed when `setAsFrameless()` was called to enable the custom title bar. Without this wrapper, the window cannot be resized from its edges.
+
+While `fullscreenProvider` is true the wrapper STAYS MOUNTED with `enableResizeEdges: const []` (2026-09-14). Swapping it out of the tree changed the widget type at that slot, re-inflated the whole shell on every F11, and the composer's `autofocus` then stole primary focus from any open dialog, so Escape stopped closing it (memory `feedback_semantics_swap_remount_blink`).
+
+## Fullscreen (2026-09-14)
+
+`fullscreenProvider` (`lib/src/core/services/window_fullscreen.dart`, sync `Notifier<bool>`): `enter`/`exit`/`toggle`, serialized, fails closed, exits on `appLockedProvider`. Backend by platform: Windows = the runner's own `hollow/window` method channel (`windows/runner/flutter_window.cpp`; `windowManager.setFullScreen` is a silent no-op for a frameless window and its exit path is the squished restore, memory `feedback_annotation_window_management`), macOS/Linux = `windowManager.setFullScreen`, mobile = none. `test/window_fullscreen_test.dart` confines `setFullScreen(` and the channel name to that one file. F11 = `AppShortcut.toggleFullscreen`, app-wide and rebindable, handled in `_handleGlobalKey`. The `WindowTitleBar` hides on `annotation || fullscreen` in `app.dart`. The video fullscreen view uses the same provider (wiki `ui_message_bubbles`, VideoMessageBubble).

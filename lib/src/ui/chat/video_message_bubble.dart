@@ -1,22 +1,23 @@
 ﻿import 'dart:async';
 import 'dart:convert' show base64Decode;
 import 'dart:io';
-import 'dart:typed_data' show Uint8List;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:video_player/video_player.dart';
 import 'package:visibility_detector/visibility_detector.dart';
 
 import 'package:hollow/src/core/models/file_attachment.dart';
+import 'package:hollow/src/core/reduce_motion.dart';
 import 'package:hollow/src/core/providers/audio_playback_provider.dart';
 import 'package:hollow/src/core/providers/file_transfer_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/video_playback_provider.dart';
 import 'package:hollow/src/core/providers/share_tab_provider.dart';
-import 'package:hollow/src/core/services/at_rest.dart';
 import 'package:hollow/src/core/services/video_thumbnail_service.dart';
+import 'package:hollow/src/core/services/window_fullscreen.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/rust/api/share.dart' as share_api;
@@ -24,10 +25,12 @@ import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/chat/file_card_status.dart';
-import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_focus_ring.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/attachment_image.dart';
+import 'package:hollow/src/ui/media/fullscreen_media_chrome.dart';
+import 'package:hollow/src/ui/mobile/mobile_page_route.dart';
+import 'package:hollow/src/ui/media/media_playback_session.dart';
 
 /// Renders a video attachment inline in a message bubble.
 ///
@@ -68,13 +71,9 @@ enum _PlaybackState {
 
 class _VideoMessageBubbleState extends ConsumerState<VideoMessageBubble> {
   _PlaybackState _state = _PlaybackState.thumbnail;
-  VideoPlayerController? _controller;
+  MediaPlaybackSession? _session;
   ProviderSubscription<Map<String, FileTransferState>>? _vaultListener;
   bool _isVisible = true;
-
-  /// Disk path of the currently-loaded video, stashed so the fullscreen handoff
-  /// need not round-trip the controller's `Uri.file()` back to a path.
-  String? _activeVideoPath;
 
   /// Local thumbnail cache path for direct P2P videos. Null until extraction
   /// completes, and for a vault thumbnail, which is already an image on disk.
@@ -146,17 +145,22 @@ class _VideoMessageBubbleState extends ConsumerState<VideoMessageBubble> {
   @override
   void dispose() {
     _vaultListener?.close();
-    _disposeController();
+    _releaseSession();
     super.dispose();
   }
 
-  void _disposeController() {
-    final c = _controller;
-    _controller = null;
-    if (c != null) {
-      c.pause();
-      c.dispose();
-    }
+  /// Drops this bubble's hold. The fullscreen view may still be rendering the
+  /// same session, so the controller dies only once nobody holds it.
+  void _releaseSession() {
+    final session = _session;
+    _session = null;
+    if (session == null) return;
+    session.removeListener(_onSessionChanged);
+    session.release(this).catchError((Object _) {});
+  }
+
+  void _onSessionChanged() {
+    if (mounted) setState(() {});
   }
 
   Future<void> _maybeExtractLocalThumb() async {
@@ -225,15 +229,9 @@ class _VideoMessageBubbleState extends ConsumerState<VideoMessageBubble> {
 
     if (videoPath == null) return;
 
-    if (fullscreen) {
-      _disposeController();
-      if (mounted) setState(() => _state = _PlaybackState.thumbnail);
-      if (!mounted) return;
-      _showFullscreenPlayer(context, videoPath);
-      return;
-    }
-
-    await _initController(videoPath);
+    final session = await _ensureSession(videoPath);
+    if (session == null || !mounted) return;
+    if (fullscreen) _openFullscreen(session);
   }
 
   /// The disk path of the vault video, fetching it when the cache is cold.
@@ -292,35 +290,48 @@ class _VideoMessageBubbleState extends ConsumerState<VideoMessageBubble> {
     return null;
   }
 
-  Future<void> _initController(String videoPath) async {
+  /// The session for [videoPath], reusing the live one so that opening the
+  /// fullscreen view never restarts playback from zero.
+  Future<MediaPlaybackSession?> _ensureSession(String videoPath) async {
+    final existing = _session;
+    if (existing != null &&
+        !existing.isReleased &&
+        existing.diskPath == videoPath) {
+      if (mounted && _state != _PlaybackState.playing) {
+        setState(() => _state = _PlaybackState.playing);
+      }
+      return existing;
+    }
+
     if (mounted) setState(() => _state = _PlaybackState.preparing);
     try {
-      // Loopback URL, not a file: an attachment on disk is ciphertext and no
-      // player can open it directly.
-      final controller = VideoPlayerController.networkUrl(
-          Uri.parse(await AtRest.mediaUrlFor(videoPath)));
-      await controller.initialize();
+      final session = await MediaPlaybackSession.open(videoPath);
+      session.retain(this);
       if (!mounted) {
-        controller.dispose();
-        return;
+        session.release(this).catchError((Object _) {});
+        return null;
       }
-      _disposeController();
-      _controller = controller;
-      _activeVideoPath = videoPath;
-      controller.setLooping(false);
-      await controller.play();
+      _releaseSession();
+      _session = session;
+      session.addListener(_onSessionChanged);
+      await session.controller.play();
       if (mounted) setState(() => _state = _PlaybackState.playing);
+      return session;
     } catch (e) {
       debugPrint('[VideoBubble] failed to initialize player: $e');
       if (mounted) setState(() => _state = _PlaybackState.thumbnail);
+      return null;
     }
   }
 
   void _onVisibilityChanged(VisibilityInfo info) {
     final wasVisible = _isVisible;
     _isVisible = info.visibleFraction >= 0.5;
+    // The fullscreen view covers the bubble, so scrolling out from under it is
+    // not a reason to pause what the user is watching.
+    if (_session?.viewerHolds == true) return;
     if (wasVisible && !_isVisible && _state == _PlaybackState.playing) {
-      _controller?.pause();
+      _session?.controller.pause();
     }
   }
 
@@ -328,17 +339,20 @@ class _VideoMessageBubbleState extends ConsumerState<VideoMessageBubble> {
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
 
+    // Neither listener may tear the session down under the fullscreen view.
     ref.listen<String?>(currentlyPlayingVideoProvider, (prev, next) {
+      if (_session?.viewerHolds == true) return;
       if (next != _playKey && _state == _PlaybackState.playing) {
-        _disposeController();
+        _releaseSession();
         if (mounted) setState(() => _state = _PlaybackState.thumbnail);
       }
     });
 
     // Audio and video share one playback slot.
     ref.listen<String?>(currentlyPlayingAudioProvider, (prev, next) {
+      if (_session?.viewerHolds == true) return;
       if (next != null && _state == _PlaybackState.playing) {
-        _disposeController();
+        _releaseSession();
         if (mounted) setState(() => _state = _PlaybackState.thumbnail);
       }
     });
@@ -357,20 +371,7 @@ class _VideoMessageBubbleState extends ConsumerState<VideoMessageBubble> {
             child: switch (_state) {
               _PlaybackState.thumbnail => _buildThumbnail(hollow),
               _PlaybackState.preparing => _buildPreparing(hollow),
-              _PlaybackState.playing => InlineVideoPlayer(
-                  controller: _controller!,
-                  hollow: hollow,
-                  onFullscreen: () {
-                    final path = _activeVideoPath;
-                    _disposeController();
-                    if (mounted) {
-                      setState(() => _state = _PlaybackState.thumbnail);
-                    }
-                    if (path != null && mounted) {
-                      _showFullscreenPlayer(context, path);
-                    }
-                  },
-                ),
+              _PlaybackState.playing => _buildPlaying(hollow),
             },
           ),
         ),
@@ -656,11 +657,36 @@ class _VideoMessageBubbleState extends ConsumerState<VideoMessageBubble> {
     );
   }
 
-  void _showFullscreenPlayer(BuildContext context, String videoPath) {
-    showHollowDialog(
-      context: context,
-      builder: (_) => _FullscreenVideoView(videoPath: videoPath),
+  /// The playing state. While the fullscreen view holds the session the bubble
+  /// draws its poster instead: two VideoPlayer widgets on one controller
+  /// double-render through fvp on Windows.
+  Widget _buildPlaying(HollowTheme hollow) {
+    final session = _session;
+    if (session == null) return _buildThumbnail(hollow);
+    if (session.viewerHolds) {
+      return Stack(
+        fit: StackFit.expand,
+        children: [
+          _posterLayer(_resolveThumbnailImagePath()),
+          Container(color: Colors.black.withValues(alpha: 0.55)),
+        ],
+      );
+    }
+    return InlineVideoPlayer(
+      controller: session.controller,
+      hollow: hollow,
+      onFullscreen: () => _openFullscreen(session),
     );
+  }
+
+  /// Hands the live session to the fullscreen view. The controller is never
+  /// disposed for the handoff, so position and play state survive both ways.
+  void _openFullscreen(MediaPlaybackSession session) {
+    session.attachViewer();
+    Navigator.of(context).push(fullscreenVideoRoute(session)).then((_) {
+      session.releaseViewer();
+      restoreAppOrientation();
+    });
   }
 }
 
@@ -677,11 +703,15 @@ class InlineVideoPlayer extends StatefulWidget {
   /// and the fullscreen viewer takes a disk path.
   final VoidCallback? onFullscreen;
 
+  /// Inside [FullscreenVideoView], where the same control leaves the view.
+  final bool isFullscreen;
+
   const InlineVideoPlayer({
     super.key,
     required this.controller,
     required this.hollow,
     this.onFullscreen,
+    this.isFullscreen = false,
   });
 
   @override
@@ -784,8 +814,7 @@ class InlineVideoPlayerState extends State<InlineVideoPlayer> {
                     hollow: hollow,
                     onPlayPause: _togglePlayPause,
                     onFullscreen: widget.onFullscreen,
-                    // Close is fullscreen-only: inline, scrolling away is the
-                    // same thing.
+                    isFullscreen: widget.isFullscreen,
                   ),
                 ),
               ),
@@ -935,163 +964,118 @@ class _IconBtn extends StatelessWidget {
   }
 }
 
-/// Fullscreen video viewer. Owns its own controller, unlike [InlineVideoPlayer].
-class _FullscreenVideoView extends StatefulWidget {
-  final String videoPath;
-
-  const _FullscreenVideoView({required this.videoPath});
-
-  @override
-  State<_FullscreenVideoView> createState() => _FullscreenVideoViewState();
+/// The route the fullscreen video lives on: opaque and full bleed, because a
+/// dialog's blur barrier and inset box are the opposite of fullscreen.
+Route<void> fullscreenVideoRoute(MediaPlaybackSession session) {
+  const fade = Duration(milliseconds: 150);
+  if (isMobileMediaPlatform) {
+    return hollowMobileRoute<void>(
+      builder: (_) => FullscreenVideoView(session: session),
+      transition: HollowRouteTransition.fade,
+      duration: fade,
+    );
+  }
+  final reduce = ReduceMotionController.instance.isReduced;
+  return PageRouteBuilder<void>(
+    opaque: true,
+    fullscreenDialog: true,
+    transitionDuration: reduce ? Duration.zero : fade,
+    reverseTransitionDuration: reduce ? Duration.zero : fade,
+    pageBuilder: (_, _, _) => FullscreenVideoView(session: session),
+    transitionsBuilder: (_, anim, _, child) =>
+        reduce ? child : FadeTransition(opacity: anim, child: child),
+  );
 }
 
-class _FullscreenVideoViewState extends State<_FullscreenVideoView> {
-  VideoPlayerController? _controller;
-  bool _controlsVisible = true;
-  Timer? _hideTimer;
-  bool _isHovering = false;
+/// Fullscreen video view.
+///
+/// Renders the bubble's own [MediaPlaybackSession] and never owns or disposes
+/// the controller, so position and play state survive in both directions.
+class FullscreenVideoView extends ConsumerStatefulWidget {
+  final MediaPlaybackSession session;
 
+  const FullscreenVideoView({super.key, required this.session});
+
+  @override
+  ConsumerState<FullscreenVideoView> createState() =>
+      _FullscreenVideoViewState();
+}
+
+class _FullscreenVideoViewState extends ConsumerState<FullscreenVideoView>
+    with FullscreenMediaChrome<FullscreenVideoView> {
   @override
   void initState() {
     super.initState();
-    _initController();
-  }
-
-  Future<void> _initController() async {
-    try {
-      final c = VideoPlayerController.networkUrl(
-          Uri.parse(await AtRest.mediaUrlFor(widget.videoPath)));
-      await c.initialize();
-      if (!mounted) {
-        c.dispose();
-        return;
-      }
-      c.setLooping(false);
-      c.addListener(_onTick);
-      await c.play();
-      setState(() => _controller = c);
-      _scheduleHide();
-    } catch (e) {
-      debugPrint('[FullscreenVideo] init failed: $e');
-    }
-  }
-
-  void _onTick() {
-    if (mounted) setState(() {});
-  }
-
-  void _scheduleHide() {
-    _hideTimer?.cancel();
-    if (_isHovering || _controller?.value.isPlaying != true) return;
-    _hideTimer = Timer(const Duration(seconds: 1), () {
-      if (mounted) setState(() => _controlsVisible = false);
-    });
-  }
-
-  void _showControlsAndReschedule() {
-    if (!_controlsVisible) {
-      setState(() => _controlsVisible = true);
-    }
-    _scheduleHide();
-  }
-
-  void _togglePlayPause() {
-    final c = _controller;
-    if (c == null) return;
-    if (c.value.isPlaying) {
-      c.pause();
-    } else {
-      c.play();
-    }
-    _showControlsAndReschedule();
+    beginFullscreenMedia(widget.session.controller.value.size);
+    unawaited(enterWindowFullscreen());
+    // On HardwareKeyboard, not a Shortcuts binding: an opaque page route has no
+    // barrier to dismiss, and focus may sit on a control-bar button.
+    HardwareKeyboard.instance.addHandler(_onKey);
   }
 
   @override
   void dispose() {
-    _hideTimer?.cancel();
-    final c = _controller;
-    _controller = null;
-    if (c != null) {
-      c.removeListener(_onTick);
-      c.pause();
-      c.dispose();
-    }
+    HardwareKeyboard.instance.removeHandler(_onKey);
+    endFullscreenMedia();
     super.dispose();
+  }
+
+  bool _onKey(KeyEvent event) {
+    if (event is! KeyDownEvent) return false;
+    if (event.logicalKey != LogicalKeyboardKey.escape) return false;
+    if (!mounted || ModalRoute.of(context)?.isCurrent != true) return false;
+    _exit();
+    return true;
+  }
+
+  /// A plain pop takes the TOP route, which on app lock is the cover pushed
+  /// above this view before the async fullscreen exit lands.
+  void _exit() {
+    if (!mounted) return;
+    final route = ModalRoute.of(context);
+    if (route == null) return;
+    if (route.isCurrent) {
+      Navigator.of(context).pop();
+    } else {
+      Navigator.of(context).removeRoute(route);
+    }
   }
 
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
-    final c = _controller;
 
-    // Material so Text widgets inherit a DefaultTextStyle and skip the debug
-    // yellow underline.
-    return Material(
-      type: MaterialType.transparency,
-      child: GestureDetector(
-        behavior: HitTestBehavior.opaque,
-        onTap: () => Navigator.of(context).pop(),
-        child: Center(
-        child: c == null || !c.value.isInitialized
-            ? const SizedBox(
-                width: 48,
-                height: 48,
-                child: CircularProgressIndicator(),
-              )
-            : MouseRegion(
-                onEnter: (_) {
-                  _isHovering = true;
-                  _showControlsAndReschedule();
-                },
-                onExit: (_) {
-                  _isHovering = false;
-                  _scheduleHide();
-                },
-                onHover: (_) => _showControlsAndReschedule(),
-                child: GestureDetector(
-                  // Clicks INSIDE the player area must not dismiss.
-                  behavior: HitTestBehavior.opaque,
-                  onTap: _togglePlayPause,
-                  child: Padding(
-                    padding: const EdgeInsets.all(HollowSpacing.xxl),
-                    child: ClipRRect(
-                      borderRadius: BorderRadius.circular(hollow.radiusMd),
-                      child: AspectRatio(
-                        aspectRatio: c.value.aspectRatio,
-                        child: Stack(
-                          fit: StackFit.expand,
-                          children: [
-                            Container(
-                              color: Colors.black,
-                              child: VideoPlayer(c),
-                            ),
-                            Positioned(
-                              left: 0,
-                              right: 0,
-                              bottom: 0,
-                              child: AnimatedOpacity(
-                                opacity: _controlsVisible ? 1.0 : 0.0,
-                                duration: const Duration(milliseconds: 200),
-                                child: IgnorePointer(
-                                  ignoring: !_controlsVisible,
-                                  child: _ControlBar(
-                                    controller: c,
-                                    hollow: hollow,
-                                    onPlayPause: _togglePlayPause,
-                                    onFullscreen: () => Navigator.of(context).pop(),
-                                    isFullscreen: true,
-                                  ),
-                                ),
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
+    // Leaving fullscreen leaves the view, so F11 and the app lock close it too.
+    // Mobile never turns the provider true, so the transition never fires.
+    ref.listen<bool>(fullscreenProvider, (prev, next) {
+      if (prev == true && next == false) _exit();
+    });
+
+    return ColoredBox(
+      color: Colors.black,
+      child: Stack(
+        children: [
+          SizedBox.expand(
+            child: DoubleClickListener(
+              onDoubleClick: _exit,
+              child: InlineVideoPlayer(
+                controller: widget.session.controller,
+                hollow: hollow,
+                onFullscreen: _exit,
+                isFullscreen: true,
               ),
-        ),
+            ),
+          ),
+          if (isMobileMediaPlatform)
+            Positioned(
+              top: HollowSpacing.lg,
+              right: HollowSpacing.lg,
+              child: MediaRotateButton(
+                landscape: forcedLandscape,
+                onTap: toggleForcedLandscape,
+              ),
+            ),
+        ],
       ),
     );
   }

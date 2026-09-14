@@ -1,0 +1,297 @@
+# Hollow design language and the grand redesign
+
+**Status:** PLANNED. Direction agreed 2026-09-14 (Vitalik + Fable session), research done the same day. Nothing built. Starts after `reports/planned/voice-and-media/MEDIA_VIEWER_ALBUMS_SUBTITLES_PLAN.md`.
+**Owner:** Vitalik (taste, final say on every visual decision, judged by eye from renders).
+**Companion memory:** `project_hollow_design_language_direction` (the locked direction), `reference_website_design_system` (the website's system this must cohere with), `feedback_hover_state_patterns`, `feedback_ui_logic_checklist`, `reference_ux_named_laws`, `feedback_web_design_iteration_method` (renders decide, not prose), `feedback_verify_ui_by_driving`, `feedback_mobile_parity_always`, `project_accessibility_plan`.
+**Plan checklist:** HOLLOW_PLAN.md (add the bullets when phase 0 starts).
+
+---
+
+## 0. TL;DR
+
+Hollow's layout is its own and stays: Dock mode with the server strip at the bottom and pinned friends in the header. What makes the app read as generated is everything inside that layout: the system font, one radius for everything, an icon on every heading, tracked all-caps eyebrow labels, cards inside columns inside panels, and 68 competing chip implementations, because nothing ever told the agents which one to use. This is not a taste failure. It is a missing specification.
+
+The fix is the pattern this repo already uses for hover states, focus rings and context menus: a written rule, a skill loaded before the work, a CI guard behind it. Applied to the whole UI:
+
+1. **A design language** (section 3), written from the research digest in section 2 and the website system already in force: tokens, type, surfaces, components and their usage rules, motion, states, voice, and a hard list of the tells that are forbidden.
+2. **Enforcement** (section 4): the language lives in `reports/reference/HOLLOW_DESIGN_LANGUAGE.md`, a `hollow-ui` skill every agent loads before touching a widget, and source-scan CI guards for the mechanical rules.
+3. **A program** (section 5): decisions by eye first (typeface, surface ladder, background), then tokens and shared components with a mechanical migration, then every screen on desktop, then every screen on mobile, then a states pass, then a screenshot matrix that finally covers the whole app instead of eight screens.
+
+Decisions locked with Vitalik:
+
+- The Dock layout and the four-panel Classic layout are not redesigned. Fillings, tokens, components, hierarchy and states are.
+- Dense and intentional, not minimalist. Character over chrome.
+- Apple's Human Interface Guidelines, Material 3 and Fluent 2 are principle sources and checklists, never the look.
+- No mascot placeholder. Holly arrives when the art exists; the empty-state component leaves room for her and ships without her.
+- Every debatable visual choice is decided by a render Vitalik can flip, never by a paragraph.
+- Production grade means desktop and mobile both, in the same phase, with screenshots as the proof.
+
+---
+
+## 1. Where the app is today
+
+Numbers from a full inventory of `lib/src/ui` (253 files) on 2026-09-14.
+
+| Area | State |
+|---|---|
+| Typeface | System default (`hollow_typography.dart` `fontFamily: null`), mono is `Consolas` with a generic fallback. No shipped face, so the app has no typographic voice and renders differently on every OS. |
+| Type roles | 9 roles defined, but 803 `fontSize:` literals; 681 of them are `copyWith(fontSize:)` on a token, so the token is imported and contradicted in the same line. 23 distinct sizes in use including half steps (8.5, 9.5, 10.5, 11.5, 12.5, 13.5). The three most used sizes (11, 12, 10) include one with no role at all. |
+| Radius | 5 tokens exist; 204 numeric literals across 20 distinct values. Radii are exposed two ways (`HollowRadius.*` and `hollow.radiusMd`). |
+| Surfaces | 3 dark levels (background `0xFF0D0F14`, surface, elevated) and one border token. Not enough steps for canvas, sidebar, raised, overlay and hover to differ. |
+| Colour | 308 `Colors.*` uses in 93 files and 122 `Color(0x` literals in 28 files outside the theme; `Colors.amber` used where `hollow.warning` exists; the background hex re-declared in `annotation_overlay.dart`. |
+| Eyebrow caps | 38 `toUpperCase()` label sites in 29 files, 66 `letterSpacing` literals across 11 values for the same visual role. |
+| Chips, pills, tags, badges | 45 classes plus 23 `_xChip` builder functions, 68 implementations; only 7 live in `components/`. `_SubTabPill` is defined three times. The Shop alone ships three chip classes at three radii and two untokenised sizes. |
+| Section headers | 4 incompatible private helpers; icon beside heading built by hand at every site with icon sizes 13 and 18 on one screen. |
+| Empty states | No shared widget. 65 "No ..." strings in 39 files, 3 mutually incompatible local helpers, the rest inline. |
+| Dividers and Material | 50 `Divider(height: 1, color: hollow.border)` repeats (a missing `HollowDivider`), 54 raw `Material(` outside components. No `Card`, `ListTile`, `InkWell`, `TextButton` remain, so the primitives migration already worked once. |
+| Buttons | The healthy part: `HollowButton` with four variants, 505 uses, one raw constructor. What is missing is the rule for which variant goes where (the Shop header row mixes ghost, outline twice, a filter pill and a bare pressable). |
+| Icons | Lucide 1,339 uses vs Material 9. Converged. |
+| Screenshot coverage | `UI_NAVIGATION_MAP.md` covers 8 desktop screens and 0 mobile screens against 28 dialogs, 37 settings files, 36 mobile files. |
+
+The home shell and the Shop screenshots reviewed in the session show the result: calm and not garish, with none of the loud tells (no gradients, no glass, no neon borders), but anonymous. A competent default dark dashboard.
+
+---
+
+## 2. Research digest: what good looks like
+
+Distilled from Apple HIG (2026 text), Material 3 and M3 Expressive, Fluent 2, Refactoring UI, Rauno Freiberg's interface rules, Emil Kowalski's motion standards, Linear, Vercel Geist, Raycast, Discord's 2025 refresh, Telegram Desktop, NN/g on empty, loading and error states, and the 2025 to 2026 "generated UI" discourse. URLs in section 8.
+
+### 2.1 Principles that survive all sources
+
+1. Content first, chrome recedes. Messages get the brightest surface; dock, sidebar and title bar sit on the dimmest.
+2. Hierarchy by lightness and weight, not by size, borders or shadows. Two to three text colours, two weights.
+3. One colour, one meaning. The accent means interactive or primary, nothing else. Never colour alone.
+4. Separation by tone and spacing before lines. A border only where a boundary is ambiguous.
+5. Simplicity is not minimalism (Apple's own words). Keep the important close, disclose the rest progressively. Deprioritise instead of deleting: smaller and lower contrast, still visible.
+6. Familiarity over novelty. Do not rebrand known patterns; M3's research shows dropping labels and moving controls measurably hurts.
+7. One visual winner per screen. Decide the most important thing and make everything else step back.
+8. Every action visibly succeeds, fails or shows busy. Every list has its empty, loading and error state designed.
+9. Delight through craft, not decoration. Motion on rare moments, none on things seen a hundred times a day.
+10. Same tokens, different density per platform. Pointer and hover and shortcuts on desktop, thumb zone and 44 to 48 targets on mobile.
+11. Opinionated defaults over settings. The same person could have made every screen.
+12. Legibility floors: body 13 to 14 on desktop, minimum 11, no weights under 400, text 4.5:1 with 7:1 as the target on dark, icons and controls 3:1.
+
+### 2.2 The tells, and the counter-move for each
+
+| Tell | Counter-move |
+|---|---|
+| Unchosen typeface (system, Inter, Geist by default) | Choose a face on purpose, ship it, test at 12 to 14 px on Windows ClearType |
+| Gradients as decoration, gradient text on numbers | One accent, semantic; no decorative gradient anywhere |
+| Glass, blur, glow, animated ambient backgrounds | Solid surfaces; depth by luminance steps |
+| Uniform rounded cards with a hairline on everything, nested cards | Background step or spacing; one radius per component class; a card only for a repeatable self-contained unit |
+| Coloured strip on a card edge | Status as a dot or text |
+| Icon in a tinted box beside every list item | Icons only when they carry meaning; no tinted containers |
+| All-caps tracked eyebrow labels | Sentence case; hierarchy by weight and colour |
+| Three identical feature cards, bento by reflex | One layout primitive, varied content, one thing wins |
+| Emoji as bullets or icons | The icon set |
+| Everything equal weight | One focal point per screen |
+| Perfectly even spacing | Tight inside groups, generous between groups |
+| Bounce on every hover | Motion tokens; frequent actions unanimated |
+| Mid-grey body text failing contrast | Validated tiers; dark mode as a designed theme |
+| Big shadows and glows | None on dark; hairline or a lightness step |
+| Missing unhappy paths, generic microcopy | Empty, loading and error designed, copy in the product's voice |
+
+### 2.3 Numbers worth copying
+
+- **Dark surfaces.** Near black, never pure black as the default (pure black kills elevation and smears on OLED). Four to five colour-only levels suffice: canvas, sidebar or surface, raised (cards, inputs), overlay (menus, popovers), hover or active. Lighter is closer. Raycast's ladder is four steps within 11 units of luminance plus a hairline on every card and zero drop shadows. Linear uses semi-transparent white hairlines throughout instead of shadows.
+- **Text tiers.** High about 87 percent white, medium about 60 percent, disabled about 38 percent, never `#FFFFFF` body text (halation). Off-white `#E4E4E7` to `#F5F5F5`.
+- **Accents on dark.** Desaturate fills; accent text needs its own lighter tone (Hollow already has `accentText`, keep it the only accent text colour).
+- **Type scale.** Radix's nine steps: 12/16, 14/20, 16/24, 18/26, 20/28, 24/30, 28/36, 35/40, 60/60 with tracking from +0.0025em at 12 to -0.025em at 60; line heights rounded to 4. Three weights with strict roles: 400 body, 500 UI, 600 headings. Fluent: sentence case everywhere, no bold, no italic, 50 to 60 characters per line.
+- **Spacing.** 4-unit grid, 8 multiples for layout, 4 for controls; Atlassian's ramp 0, 2, 4, 6, 8, 12, 16, 20, 24, 32, 40, 48, 64; inner padding 0 to 8, container padding 12 to 24, sections 32 and up. No two adjacent stops within 25 percent.
+- **Radius.** Three to six stops from one factor. Geist never uses pill radius on primary buttons; Fluent caps controls at 4 and dialogs at 8; Radix keeps a checkbox square-ish even at "full" so it never reads as a radio.
+- **Motion.** Press 100 to 160 ms, tooltip 125 to 200, dropdown 150 to 250, modal 200 to 500, ceiling 300. Ease-out for enter and exit, ease-in-out for on-screen moves, never ease-in. Transform and opacity only; enter from scale 0.95 to 0.97 plus opacity, never from zero; popovers scale from the trigger, modals from centre. Things done 100 times a day get no animation. Reduce motion means fewer and gentler, keep fades.
+- **Density.** Discord separates message display (cozy with avatars, compact without) from UI density (compact, default, spacious) from chat text size. Telegram offers a compact single column and a message width toggle. Hollow already has `UiScale` and `ChatTextScale`; a message display mode is the missing third axis.
+- **States.** Nothing for under one second; skeleton for two to ten seconds keeping the final geometry; progress bar over ten; uploads get progress, never skeletons. Empty states say what is true now, teach what fills the space, offer one action. Errors sit next to the trigger, name the cause, suggest a fix that exists, keep the user's input, no blame words, no jokes.
+- **Buttons.** One primary per region, rarely more than one per view; ghost for everything inside compound surfaces and for Cancel; danger only on the final destructive confirmation; loading state over disabled; icon-only buttons carry a tooltip and a label.
+- **Badges versus chips.** Two components only. A badge is static (status, count, kind). A chip is interactive (filter, select, removable). Pill and tag are shapes and words, not components.
+
+### 2.4 Typeface candidates
+
+Hollow has users writing Cyrillic, so coverage is a hard filter, which rules out Figtree, DM Sans, Instrument Sans, Space Grotesk and Commit Mono. All candidates are OFL and bundle freely. From Flutter 3.41 `FontWeight` drives the variable `wght` axis, so one variable TTF per family is enough.
+
+| Family | Coverage | Character | Verdict |
+|---|---|---|---|
+| Onest | Cyrillic and extended, 100 to 900 | Distinct, designed by a Cyrillic-native team | Lead candidate for UI sans |
+| IBM Plex Sans | Cyrillic, Greek, width axis | The most character, crisp at small sizes | The "opinionated" alternative |
+| Manrope | Cyrillic, Greek | Friendly semi-geometric | The warm alternative |
+| Inter, Geist Sans | Yes (Geist since 1.7.0) | The default tell; the website already uses Geist | Only if cohesion with the website wins by eye |
+| JetBrains Mono | Cyrillic, Greek, tuned for 12 px | Wide coverage | Lead candidate for the console voice |
+| Geist Mono | Cyrillic | Pairs with the website's mono | Alternative |
+
+The website system chose Geist Sans and Geist Mono. Cohesion matters, but the research is blunt that unchosen Geist is a tell. The recommendation is one deliberate sans for the app with the mono shared with the website, decided by rendering the same three screens in each candidate (section 5, phase 0). The website can follow the app later.
+
+---
+
+## 3. The Hollow design language, version 1
+
+This section becomes `reports/reference/HOLLOW_DESIGN_LANGUAGE.md` when phase 0 closes the open choices in section 7. Rules are written to be checkable.
+
+### 3.1 Identity
+
+Hollow is encrypted, distributed and hosted by its members. Its visual identity says the same thing: honest surfaces, no decoration, verifiable details rendered like a fingerprint. The three signature elements:
+
+1. **The Dock.** The bottom server strip and the pinned-friends header. Untouched by this plan, polished by it.
+2. **The console voice.** A mono face for identities, hashes, safety numbers, relay names, versions, timestamps and counters (tabular numerals). Used on purpose, never for body copy. This is the one place the app looks like the protocol it runs.
+3. **One accent, sparingly.** Teal (`0xFF00BFA6`, hue variants stay) on interactive and primary elements only. Never tinting cards, never glows, never on headings.
+
+Holly, when she exists, appears in moments (empty states, onboarding, errors, the shop) and never in chrome. Until then, no placeholder.
+
+### 3.2 Tokens
+
+- **Surfaces, dark.** Five colour-only levels, one hairline: `canvas` (the chat and content, keep `0xFF0D0F14`), `chrome` (dock, sidebars, title bar; one step darker than canvas so content is the brightest thing), `raised` (inputs, cards that earn a card, message hover), `overlay` (menus, popovers, dialogs), `hover` (state layer, alpha over the level below). `border` stays one hairline at 8 to 14 percent white. Shadows only on `overlay`, small. Light theme mirrors all five with the same names. Exact values are chosen in phase 0 from three rendered ladders.
+- **Text.** Exactly three tiers, `textPrimary` (off-white, never pure white), `textSecondary`, `textTertiary` (already 4.5:1 guarded), plus `accentText` and `textOnAccent`. No fourth tier, no ad hoc alpha on text.
+- **Semantic colours.** `accent`, `success`, `warning`, `error`, each with a text-safe variant. `Colors.amber` and friends are forbidden outside the theme.
+- **Type roles.** One shipped variable sans and one mono. Roles, desktop sizes, with line heights rounded to 4: `title` 20/28 600, `heading` 16/24 600, `body` 14/20 400, `bodyStrong` 14/20 500, `label` 13/20 500, `caption` 12/16 400, `micro` 11/16 500, `mono` 13/20 400, `monoSmall` 11/16 400. `display` 28/36 600 exists for the few places that need it (welcome, empty states). Nothing under 11. No half steps. Weights 400, 500, 600 only. Mobile takes the same roles one step up for body and label. `copyWith(fontSize:)` is forbidden; a new size is a new role, argued in a review.
+- **Case.** Sentence case for everything except card and section titles, permission names, proper nouns. No `toUpperCase()` on labels. No tracked caps. The one exception is the mono console voice, which may be upper case for short tags.
+- **Spacing.** Keep `HollowSpacing` (2, 4, 8, 12, 16, 24, 32, 48). Rule: inner padding and icon gaps 4 to 8, container padding 12 to 16, between sections 24 to 32. Numeric `EdgeInsets` literals are forbidden outside the theme.
+- **Radius.** Four stops plus full: `xs` 4 (chips, badges, small controls), `sm` 8 (buttons, inputs, menus), `md` 12 (cards, dialogs on desktop), `lg` 16 (sheets, mobile dialogs), `full` for avatars and status dots only. Primary buttons are never pills. One exposure path (`hollow.radius.*`); `HollowRadius` becomes an alias and then goes away. Numeric `BorderRadius.circular` is forbidden outside the theme.
+- **Icons.** Lucide, stroke 1.75 at 20 px and 2 at 16 px, sizes 14, 16, 20, 24 only. Never beside a heading as decoration. Icon-only controls carry a purpose label and a tooltip (both already CI-guarded). Brand icons match stroke and optical size.
+- **Motion.** Durations `fast` 120 ms (press, hover colour), `base` 180 ms (tooltip, dropdown, chip), `slow` 260 ms (dialog, sheet, route). Curves `enter` ease-out, `move` ease-in-out, never ease-in. Transform and opacity only; enter from 0.96 plus fade. Hover never moves layout, never changes weight. Frequent actions (send, switch channel, open menu) animate nothing beyond the 120 ms colour. Reduce motion keeps fades, drops everything else.
+- **State layers.** Hover, pressed, selected and focus are alphas over the surface, luminance-aware (`_hoverLift` already does this). Selection is a chip state, never a filled button.
+
+### 3.3 Components and the rules for using them
+
+New or consolidated primitives, all in `lib/src/ui/components/`:
+
+| Component | Replaces | Rule |
+|---|---|---|
+| `HollowBadge` | ~40 static chip and tag classes (`_ShopChip`, `_KindChip`, kind and count tags) | Static only. Kinds: neutral, accent, success, warning, error, mono. Radius xs. Never clickable. |
+| `HollowChip` | ~28 interactive pill classes (`_FilterPill`, `_SubTabPill` x3, access and slow-mode chips, `SelectorPill`) | Interactive only: filter, select, removable, sub-tab. Selected = accent-muted fill and accent text. Radius xs. |
+| `HollowSectionHeader` | 4 private helpers | Title in `heading` or `label`, optional trailing action, optional count in mono. No leading icon. |
+| `HollowEmptyState` | 3 helpers and 60 inline columns | One honest line about what is true now, one optional second line, one action at most. Optional glyph at 24. A slot for Holly, empty for now. |
+| `HollowDivider` | 50 inline `Divider(height: 1, ...)` | The hairline. Nothing else. |
+| `HollowSkeleton` | none | Keeps the final geometry; used only for 2 to 10 second loads. |
+| `HollowListRow` | ad hoc rows | Dense row with leading, title, subtitle, trailing, hover on the whole row, no dead zones between rows. |
+| `HollowCard` | itself | Only for a repeatable, self-contained unit (a listing, a device, a news item). Sections and settings groups are not cards. A card has a background step or a hairline, never both plus a shadow. |
+
+Usage rules:
+
+- **Buttons.** `filled` is the one primary action of a region, at most one per visible region and rarely more than one per screen. `outline` is a secondary alternative standing next to that primary, at most two. `ghost` is everything else: toolbars, icon buttons, Cancel, links in rows. `danger` is the final destructive confirmation only. A row of actions with no primary is all ghost. Loading state, not disabled, while a request runs.
+- **Dialogs.** Ghost Cancel, filled confirm, danger only destructive (already law). Title in `title`, body in `body`, one primary.
+- **Feedback.** Inline next to the trigger for field and row errors; toast for deferrable status; dialog only when the flow must stop.
+- **Lists over cards.** Anything repeated more than three times is a list of `HollowListRow`, not a grid of cards, unless the item is the art (shop, gallery).
+- **Headings.** No icon. Count or status in mono at the trailing edge if useful.
+- **Numbers.** Tabular numerals everywhere a number can change: timestamps, counts, sizes, stats.
+- **Copy.** Sentence case, no em dashes, honest labels (`feedback_ui_logic_checklist`), the sepia gate for anything longer than a label.
+
+### 3.4 Screens and density
+
+- Desktop body text 14, rows 32 to 36 in lists, message rows grouped by sender with the timestamp in mono at low contrast. Mobile body 16, rows 48 and up, controls in the thumb zone.
+- A message display setting, cozy (avatars, current) versus compact (no avatars, tighter), separate from `UiScale` and `ChatTextScale`. Discord's three axes, and the one Hollow is missing.
+- The chat surface is the brightest thing on screen. Dock, sidebar and header sit on `chrome`.
+- The home screen is about people: conversations get the width, stats leave for System Status and the profile, relay figures go under System Status.
+
+### 3.5 The forbidden list (CI-guarded where mechanical)
+
+1. `fontSize:` outside `lib/src/theme/`.
+2. `BorderRadius.circular(<number>)` outside the theme.
+3. `Colors.<anything>` except `Colors.transparent` outside the theme; `Color(0x` outside the theme.
+4. `toUpperCase()` for a label; `letterSpacing:` outside the theme.
+5. `Divider(` outside components; raw `Material(` outside components except the documented overlay hosts.
+6. A `Chip`, `Pill`, `Tag` or `Badge` class outside components.
+7. An `Icon` as the first child of a heading row (source scan on the section-header pattern).
+8. Gradients (`LinearGradient`, `RadialGradient`) outside the theme's ambient background and the annotation overlay.
+9. `BoxShadow` with `blurRadius > 12` anywhere; any `BoxShadow` on a surface below `overlay`.
+10. `EdgeInsets.all(<number>)` and `symmetric(` with numeric literals outside the theme.
+11. `Colors.transparent` passed as an animated colour (already law).
+12. Two `HollowButton.filled` in one `Row` or `Column` (source scan, heuristic).
+
+Existing guards that stay: purpose labels, `HollowFocusRing`, `showHollowMenu`, `setShellTab`, the hover rules, the contrast checks.
+
+---
+
+## 4. Enforcement
+
+- **The document.** `reports/reference/HOLLOW_DESIGN_LANGUAGE.md`, living, regenerated when a decision changes. Section 3 of this plan is its draft.
+- **The skill.** `hollow-ui` in `.claude/skills/` (repo, so every agent on every machine gets it): the rules of 3.2 to 3.5 as a checklist, the component table, the brief template of section 5.5, and the instruction to screenshot through `scripts/ui_probe.ps1` before reporting done. CLAUDE.md gets one line: load `hollow-ui` before any widget work, the way `sepia` gates copy.
+- **The guards.** A `test/design_language_guard_test.dart` source scan (the shape the repo already uses for `mint_key_package`, hover and labels) for every mechanical rule in 3.5, with an allowlist file that must shrink and never grow. `custom_lint` can come later if the scan proves too coarse.
+- **The brief template.** Every Opus subagent redesigning a screen receives the same numbered brief (5.5). One agent, one screen, one file set, screenshots in the result.
+- **The proof.** `UI_NAVIGATION_MAP.md` regenerated to enumerate every screen, dialog and mobile route (today 8 of roughly 100), so the screenshot matrix has a target list. `FEATURE_MATRIX.md` gains a "designed states" column.
+
+---
+
+## 5. The program
+
+### Phase 0: decide by eye
+
+A hidden route `hollow://design-sheet` (debug and profile builds only) that renders the same three real screens (home, DM chat, settings) under toggles: typeface (three sans, two mono), surface ladder (three candidate ladders), radius factor, message display cozy or compact, ambient background on or off and at three intensities. Driven by `ui_probe.ps1` into a screenshot grid Vitalik flips through. The web method (`feedback_web_design_iteration_method`) adapted to Flutter: toggles default off, the recommended combination is one preset, adopted toggles become the token and their switch is removed. Verdicts recorded in the memory and in this document the same day.
+
+Outputs: the typeface, the surface values, the radius scale, the ambient decision. Then `HOLLOW_DESIGN_LANGUAGE.md` is written from section 3 with the numbers filled in.
+
+### Phase 1: tokens and primitives, mechanical
+
+- Fonts bundled (variable TTF, weights 400 to 600 subset if static), `hollow_typography.dart` rewritten to the roles, `hollow_colors.dart` to the five surfaces, radius unified to one path, motion tokens added.
+- New components from 3.3 built in isolation with a widget test each.
+- Migration sweeps, one per rule, by Opus agents with a hard scope: replace literals with tokens, replace the 68 chips with the two components, replace the 4 headers, the 50 dividers, the 60 empty states. No visual redesign in this phase; screens look the same or slightly better. The guard test lands with each sweep and its allowlist goes to zero per rule.
+- Desktop and mobile in the same sweep, since both use the same files.
+
+### Phase 2: screens, desktop
+
+In this order, each one an audit sheet, a brief, one agent, screenshots, Vitalik's verdict:
+
+1. Home (the dashboard; stats move out, conversations widen, headers lose icons, the profile column shortens).
+2. DM chat and channel chat (message rows, grouping, hover bar, composer, staged strip, reply bar; the media viewer arrives from the other plan).
+3. Dock and header (polish only: sizes, badges, hover, the accent ring on the active tab).
+4. Settings (11 categories: the cards become sections, the rail gets the type roles, every toggle row is a `HollowListRow`).
+5. Server settings panel and its tabs.
+6. Shop (the art is the card: full-bleed image, title and price under it, one badge for kind, one for owned, bigger avatars, the header row reduced to one primary).
+7. Archive, Share, Conferences, Voice channel pane, Call surfaces, Members, Friends bar.
+8. All 28 dialogs against the dialog rule.
+
+### Phase 3: screens, mobile
+
+The same order on `MobileShell` and the 36 mobile files. Parity is checked per screen, not at the end.
+
+### Phase 4: states
+
+Every list and every surface gets its empty, loading and error state through the shared components. A checklist per screen: what shows in the first second, at three seconds, on failure, when empty, when offline, when locked.
+
+### Phase 5: proof
+
+The navigation map regenerated for all screens, the screenshot matrix run on Windows, the Linux laptop, the Mac mini iOS Simulator and an Android device, the contrast guard extended to every new token, the design language document marked shipped.
+
+### 5.5 The brief template for a screen
+
+1. Screen and files (exact list).
+2. What is wrong today (from the audit sheet: which tells, which rule numbers).
+3. What must not change (layout, providers, behaviour, CI-guarded patterns).
+4. The components to use (from 3.3) and the button hierarchy for this screen (which action is the one `filled`).
+5. Mobile counterpart and its file.
+6. Screenshots required (which routes, which states) via `ui_probe.ps1`; the agent reads its own PNGs and fixes what looks wrong before reporting.
+7. Done means: guard test green, screenshots attached, no new allowlist entries.
+
+---
+
+## 6. Audit sheet seeds
+
+Two screens already audited from screenshots in the session, as the format for the rest.
+
+**Home (`home_dashboard.dart`).** Icons on four headings (tell 6, rule 3.3 headings). Eyebrow caps FRIENDS, RELAY SERVER, NEWS, YOUR STATS (tell 7). Two cards and two dividers in the profile column with a large empty gap under them (tell 4, rule lists over cards). Stats and relay RAM and bandwidth on the home (rule 3.4). Conversation previews leak raw tokens `[e:...]`, `[file:...]`, `[a:g:...]`, `[a:s:...]` (bug, tracked in the media plan section 11). Same weight on every heading. Keep: the layout, the accent H tab, the mono peer id (make it deliberate).
+
+**Shop (`shop_dashboard.dart`).** Header row mixes a filter pill class, a ghost button, two outline buttons and a bare pressable (button rule: one filled, the rest ghost; the filter is a `HollowChip` group). Three chip classes at three radii and two untokenised sizes across the dashboard and the owned panel (`HollowBadge`). The listing card floats a small image inside a large bordered box: the art should be the card. Avatars too small (Vitalik). The empty space under four items has no state (rule 3.3 empty state).
+
+---
+
+## 7. Open choices, decided in phase 0 by render
+
+- The typeface pair (section 2.4).
+- The surface ladder values and whether `chrome` is darker than `canvas` (recommended) or lighter.
+- The ambient animated background: keep as an opt-in "Ambient" background at a dimmer, slower setting with a flat default (recommended, and consistent with the website's removal of glowing blobs), or keep as the default.
+- Whether the light theme gets the same pass in phase 2 or a shorter one in phase 5 (recommended: same pass; the tokens make it nearly free).
+- The message display compact mode: phase 2 with the chat screen, or later.
+
+---
+
+## 8. Sources
+
+Principles and platforms: Apple HIG design principles, dark mode, typography, colour, materials, designing for macOS and iOS (developer.apple.com/design/human-interface-guidelines/...). Material 3 tokens, colour roles, type scale, shape scale, motion, and the M3 Expressive research (m3.material.io, design.google/library/expressive-material-design-google-research). Fluent 2 layout, typography, shapes, elevation and the Windows signature experiences (fluent2.microsoft.design, learn.microsoft.com/windows/apps/design/signature-experiences).
+
+Craft: Refactoring UI summary (sglavoie.com/posts/2023/09/09/book-summary-refactoring-ui), Rauno Freiberg's interfaces (github.com/raunofreiberg/interfaces), Emil Kowalski's animation standards (github.com/emilkowalski/skills), Karri Saarinen's rules (figma.com/blog/karri-saarinens-10-rules...), Linear's UI refresh notes (linear.app/now/how-we-redesigned-the-linear-ui, linear.app/changelog/2026-03-12-ui-refresh), Vercel Geist (vercel.com/geist/introduction), Raycast design notes (github.com/VoltAgent/awesome-design-md), Radix Themes typography and radius (radix-ui.com/themes/docs/theme), Atlassian spacing and button (atlassian.design), Primer button (primer.style), Carbon dialog and notification patterns (carbondesignsystem.com), Smart Interface Design Patterns on badges and chips, USWDS and EightShapes on cards, Lucide icon design guide (lucide.dev/contribute/icon-design-guide), Nathan Curtis on token naming, the DTCG token format 2025.10 (designtokens.org).
+
+Density: Matt Ström-Awn on UI density (mattstromawn.com/writing/ui-density), Discord display settings and the 2025 refresh (discord.com/blog), Slack message display help, Telegram Desktop compact.
+
+States: NN/g empty state design, skeleton screens, error message guidelines (nngroup.com/articles).
+
+The tells: mania.design "Spot the slop", 925studios "AI slop design tells", developersdigest "AI design slop and how to spot it", saasui.design, dev.to "The purple gradient problem", smoothui.dev, the Hacker News thread 46677824.
+
+Typefaces: fontsource API metadata per family, vercel/geist-font releases, jetbrains.com/lp/mono, Flutter font weight variation notes (docs.flutter.dev/release/breaking-changes/font-weight-variation).

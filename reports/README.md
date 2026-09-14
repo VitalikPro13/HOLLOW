@@ -13,6 +13,8 @@ Areas: `multi-device`, `relay-and-sync`, `security`, `performance`, `voice-and-m
 | Document | Area | What it is |
 |---|---|---|
 | `planned/relay-and-sync/MULTI_RELAY_CLIENT_PLAN.md` | relay-and-sync | One client holding sockets to several relays, servers and friendships bound to the relay they live on, no relay-to-relay protocol. Designed 2026-09-12. |
+| `planned/voice-and-media/MEDIA_VIEWER_ALBUMS_SUBTITLES_PLAN.md` | voice-and-media | True fullscreen on every platform, one media viewer for images and video, Telegram-style albums with a signed album id, and subtitles with a cue editor. Designed 2026-09-14. |
+| `planned/ui-and-accessibility/HOLLOW_DESIGN_LANGUAGE_PLAN.md` | ui-and-accessibility | The research digest, the Hollow design language (tokens, components, usage rules, the forbidden tells), its enforcement, and the screen-by-screen redesign program for desktop and mobile. Designed 2026-09-14, starts after the media plan. |
 
 ## Shipped
 
