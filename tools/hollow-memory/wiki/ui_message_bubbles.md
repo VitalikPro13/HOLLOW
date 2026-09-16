@@ -317,9 +317,9 @@ Listens to `currentlyPlayingAudioProvider` -- if an audio bubble starts, this on
 - Falls back to async extraction via `VideoThumbnailService.ensureCachedThumb(videoPath)`.
 - Sets `_localThumbPath` when complete.
 
-### _InlinePlayer
+### InlineVideoPlayer
 
-**Class:** `_InlinePlayer extends StatefulWidget` (private, same file)
+**Class:** `InlineVideoPlayer extends StatefulWidget` (public, same file; state class `InlineVideoPlayerState`, un-privatised for `LinkPreviewCard` in #45)
 
 Stateful inline player wrapper. Owns the auto-fade timer for the control bar. Rebuilds on controller value changes (scrub bar + timestamps sync). The `VideoPlayerController` is owned by the parent `_VideoMessageBubbleState` -- this widget never disposes it.
 
