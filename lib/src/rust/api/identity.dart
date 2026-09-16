@@ -154,8 +154,8 @@ class DuressStatus {
   final String scope;
   final bool notifyFriends;
 
-  /// A duress code needs a password PROMPT. Keychain-only and silent-unlock
-  /// installs never ask for a secret, so there is nothing to type it into.
+  /// A duress code needs a password to type it instead of. A keychain-only
+  /// install has none; a silent-unlock one still prompts at a re-lock.
   final bool available;
 
   const DuressStatus({

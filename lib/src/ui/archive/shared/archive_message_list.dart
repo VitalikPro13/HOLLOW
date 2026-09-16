@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:hollow/src/ui/components/ui_scale.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/message_preview.dart';
 import 'package:hollow/src/core/models/channel_chat_message.dart';
 import 'package:hollow/src/core/models/chat_message.dart';
 import 'package:hollow/src/core/providers/archive_provider.dart';
@@ -157,11 +158,8 @@ class ArchiveDmMessageList extends ConsumerWidget {
         final replyMsg =
             messages.where((m) => m.messageId == msg.replyToMid).firstOrNull;
         if (replyMsg == null) return null;
-        final text = replyMsg.fileAttachment != null
-            ? (replyMsg.fileAttachment!.isImage
-                ? '\u{1F4F7} Image'
-                : '\u{1F4CE} ${replyMsg.fileAttachment!.fileName}')
-            : replyMsg.text;
+        final text = messagePreviewText(replyMsg.text,
+            attachment: replyMsg.fileAttachment);
         final senderName = replyMsg.isMe
             ? displayNameFor(profiles, localPeerId)
             : displayNameFor(profiles, peerId);
@@ -245,11 +243,8 @@ class ArchiveChannelMessageList extends ConsumerWidget {
             .where((m) => m.messageId == msg.replyToMid)
             .firstOrNull;
         if (replyMsg == null) return null;
-        final text = replyMsg.fileAttachment != null
-            ? (replyMsg.fileAttachment!.isImage
-                ? '\u{1F4F7} Image'
-                : '\u{1F4CE} ${replyMsg.fileAttachment!.fileName}')
-            : replyMsg.text;
+        final text = messagePreviewText(replyMsg.text,
+            attachment: replyMsg.fileAttachment);
         return (text, displayNameFor(profiles, replyMsg.senderId));
       },
       bubbleBuilder:

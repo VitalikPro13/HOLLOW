@@ -301,6 +301,18 @@ fn stored_file_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredFile>
     })
 }
 
+/// Video extensions the media viewer treats as playable. Mirror of `_videoExtensions`
+/// in `lib/src/ui/chat/file_attachment_widget.dart`; the two must stay in step.
+pub(crate) const MEDIA_VIDEO_EXTS: &[&str] = &["mp4", "webm", "mov", "mkv", "avi", "m4v"];
+
+/// One row of a conversation's media, with the message time it belongs to.
+pub(crate) struct StoredMediaItem {
+    pub file: StoredFile,
+    /// Milliseconds. The owning message's timestamp, else the file's `created_at`.
+    pub ts: i64,
+    pub content_id: Option<String>,
+}
+
 /// Map one full profile row, blobs and proof triple included, to a StoredProfile.
 fn profile_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredProfile> {
     Ok(StoredProfile {
@@ -5027,6 +5039,81 @@ impl MessageStore {
         Ok(files)
     }
 
+    /// Images and videos of one conversation for the media viewer, newest first.
+    ///
+    /// `before_ts`/`after_ts` are exclusive millisecond bounds so a caller can page
+    /// both ways from the item it opened. Hidden, expired and incomplete files, files
+    /// whose message row is hidden, and files with no disk path are excluded.
+    pub fn list_media_for_context(
+        &self,
+        context_type: &str,
+        context_id: &str,
+        before_ts: Option<i64>,
+        after_ts: Option<i64>,
+        limit: u32,
+    ) -> Result<Vec<StoredMediaItem>, String> {
+        let video_in = MEDIA_VIDEO_EXTS
+            .iter()
+            .map(|e| format!("'{e}'"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        // A DM file can only match the DM table and a channel file the channel table,
+        // so one COALESCE over both is unambiguous.
+        let ts_expr = "COALESCE(
+                   (SELECT timestamp FROM messages WHERE message_id = files.message_id),
+                   (SELECT timestamp FROM channel_messages WHERE message_id = files.message_id),
+                   created_at)";
+        // The bounds filter an aliased expression, so the select is wrapped rather than
+        // repeating that expression three times.
+        let sql = format!(
+            "SELECT * FROM (
+               SELECT {FILE_COLS}, content_id, {ts_expr} AS ts FROM files
+               WHERE context_type = ?1 AND context_id = ?2
+                 AND completed_at IS NOT NULL
+                 AND hidden_at IS NULL
+                 AND expired_at IS NULL
+                 AND (is_image = 1 OR lower(file_ext) IN ({video_in}))
+                 AND NOT EXISTS (
+                   SELECT 1 FROM messages m
+                   WHERE m.message_id = files.message_id AND m.hidden_at IS NOT NULL)
+                 AND NOT EXISTS (
+                   SELECT 1 FROM channel_messages cm
+                   WHERE cm.message_id = files.message_id AND cm.hidden_at IS NOT NULL)
+             )
+             WHERE (?3 IS NULL OR ts < ?3) AND (?4 IS NULL OR ts > ?4)
+             ORDER BY ts DESC, file_id DESC
+             LIMIT ?5"
+        );
+        // FILE_COLS is a comma list, so its column count is what the two appended
+        // columns sit behind.
+        let extra = FILE_COLS.split(',').count();
+
+        let mut stmt = self
+            .conn
+            .prepare(&sql)
+            .map_err(|e| format!("Failed to prepare media query: {e}"))?;
+        let rows = stmt
+            .query_map(
+                params![context_type, context_id, before_ts, after_ts, limit.clamp(1, 200)],
+                |row| {
+                    Ok(StoredMediaItem {
+                        file: stored_file_from_row(row)?,
+                        content_id: row.get(extra)?,
+                        ts: row.get(extra + 1)?,
+                    })
+                },
+            )
+            .map_err(|e| format!("Failed to query media: {e}"))?;
+
+        let mut items = collect_rows(rows, "media")?;
+        for item in &mut items {
+            Self::resolve_disk_path(&mut item.file);
+        }
+        // A completed row with no path left is not viewable.
+        items.retain(|i| i.file.disk_path.is_some());
+        Ok(items)
+    }
+
     /// Get all incomplete files (for sync resume).
     pub fn get_incomplete_files(&self) -> Result<Vec<StoredFile>, String> {
         let mut stmt = self
@@ -6175,5 +6262,137 @@ mod tests {
         // Forgetting a code that was never kept is not an error.
         store.delete_redeem_code("NEVER-KEPT-0001").unwrap();
         assert_eq!(store.count_redeem_codes().unwrap(), 63);
+    }
+
+    // ── Media viewer list ──────────────────────────────────────────────────
+
+    /// Seed one file row of the media-list fixtures. `complete` false leaves it
+    /// mid-download.
+    #[allow(clippy::too_many_arguments)]
+    fn insert_media_row(
+        store: &MessageStore,
+        file_id: &str,
+        ctype: &str,
+        cid: &str,
+        ext: &str,
+        is_image: bool,
+        created_at: i64,
+        message_id: Option<&str>,
+        complete: bool,
+    ) {
+        store
+            .insert_file_metadata(
+                file_id, &format!("{file_id}.{ext}"), ext, "application/octet-stream",
+                10, 1, is_image, None, None, message_id, ctype, cid, "sender", false,
+                created_at, None, None,
+            )
+            .unwrap();
+        if complete {
+            store
+                .mark_file_complete(file_id, &format!("/tmp/{file_id}.{ext}"))
+                .unwrap();
+        }
+    }
+
+    fn media_ids(items: &[StoredMediaItem]) -> Vec<&str> {
+        items.iter().map(|m| m.file.file_id.as_str()).collect()
+    }
+
+    /// Only completed, visible images and videos come back. The video carries an
+    /// UPPERCASE extension, so the match is case-insensitive like the Dart mirror.
+    #[test]
+    fn media_list_filters_to_completed_visible_images_and_videos() {
+        let store = mem_store();
+        insert_media_row(&store, "img", "dm", "alice", "png", true, 1000, None, true);
+        insert_media_row(&store, "vid", "dm", "alice", "MP4", false, 2000, None, true);
+        insert_media_row(&store, "aud", "dm", "alice", "ogg", false, 3000, None, true);
+        insert_media_row(&store, "doc", "dm", "alice", "pdf", false, 3100, None, true);
+        insert_media_row(&store, "inc", "dm", "alice", "png", true, 3200, None, false);
+        insert_media_row(&store, "hid", "dm", "alice", "png", true, 3300, None, true);
+        insert_media_row(&store, "exp", "dm", "alice", "png", true, 3400, None, true);
+        store
+            .conn
+            .execute("UPDATE files SET hidden_at = 1 WHERE file_id = 'hid'", [])
+            .unwrap();
+        store
+            .conn
+            .execute("UPDATE files SET expired_at = 1 WHERE file_id = 'exp'", [])
+            .unwrap();
+
+        let got = store.list_media_for_context("dm", "alice", None, None, 50).unwrap();
+        assert_eq!(
+            media_ids(&got),
+            vec!["vid", "img"],
+            "newest first, images and videos only",
+        );
+    }
+
+    /// `ts` is the OWNING MESSAGE's time, not the file row's `created_at`, and the
+    /// exclusive bounds page in both directions.
+    #[test]
+    fn media_list_uses_message_timestamp_and_pages_both_ways() {
+        let store = mem_store();
+        for (fid, mid, ts) in [("f1", "m1", 1000), ("f2", "m2", 2000), ("f3", "m3", 3000)] {
+            store
+                .insert("alice", "[file:x]", false, ts, None, None, Some(mid), None, Some(fid), None)
+                .unwrap();
+            // created_at is deliberately identical and far in the future.
+            insert_media_row(&store, fid, "dm", "alice", "png", true, 9999, Some(mid), true);
+        }
+        let stamps = |items: &[StoredMediaItem]| items.iter().map(|m| m.ts).collect::<Vec<_>>();
+
+        let all = store.list_media_for_context("dm", "alice", None, None, 50).unwrap();
+        assert_eq!(stamps(&all), vec![3000, 2000, 1000], "message time wins over created_at");
+
+        let older = store.list_media_for_context("dm", "alice", Some(3000), None, 50).unwrap();
+        assert_eq!(stamps(&older), vec![2000, 1000], "before_ts is exclusive");
+
+        let newer = store.list_media_for_context("dm", "alice", None, Some(1000), 50).unwrap();
+        assert_eq!(stamps(&newer), vec![3000, 2000], "after_ts is exclusive");
+
+        let one = store.list_media_for_context("dm", "alice", None, None, 1).unwrap();
+        assert_eq!(stamps(&one), vec![3000], "limit takes the newest");
+    }
+
+    /// A file whose message row was hidden (deleted or moderated) is not listed, in
+    /// a DM or a channel.
+    #[test]
+    fn media_list_excludes_files_of_hidden_messages() {
+        let store = mem_store();
+        store
+            .insert("alice", "[file:x]", false, 1000, None, None, Some("m_gone"), None, Some("f_gone"), None)
+            .unwrap();
+        store
+            .insert("alice", "[file:x]", false, 1100, None, None, Some("m_ok"), None, Some("f_ok"), None)
+            .unwrap();
+        insert_media_row(&store, "f_gone", "dm", "alice", "png", true, 1000, Some("m_gone"), true);
+        insert_media_row(&store, "f_ok", "dm", "alice", "png", true, 1100, Some("m_ok"), true);
+        store.set_dm_message_hidden("m_gone", 5000).unwrap();
+
+        store
+            .insert_channel_message("s1", "c1", "sender", "[file:x]", false, 1200, None, None, Some("cm_gone"), None, Some("f_ch"), None)
+            .unwrap();
+        insert_media_row(&store, "f_ch", "channel", "s1:c1", "png", true, 1200, Some("cm_gone"), true);
+        store.set_channel_message_hidden("cm_gone", 5000).unwrap();
+
+        let dm = store.list_media_for_context("dm", "alice", None, None, 50).unwrap();
+        assert_eq!(media_ids(&dm), vec!["f_ok"], "hidden DM message drops its file");
+
+        let channel = store.list_media_for_context("channel", "s1:c1", None, None, 50).unwrap();
+        assert!(channel.is_empty(), "hidden channel message drops its file");
+    }
+
+    /// Media never leaks across conversations.
+    #[test]
+    fn media_list_is_scoped_to_its_context() {
+        let store = mem_store();
+        insert_media_row(&store, "a1", "dm", "alice", "png", true, 1000, None, true);
+        insert_media_row(&store, "b1", "dm", "bob", "png", true, 2000, None, true);
+        insert_media_row(&store, "c1", "channel", "s1:c1", "png", true, 3000, None, true);
+
+        let alice = store.list_media_for_context("dm", "alice", None, None, 50).unwrap();
+        assert_eq!(media_ids(&alice), vec!["a1"]);
+        let channel = store.list_media_for_context("channel", "s1:c1", None, None, 50).unwrap();
+        assert_eq!(media_ids(&channel), vec!["c1"]);
     }
 }

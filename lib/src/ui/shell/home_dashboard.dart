@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/message_preview.dart';
 import 'package:hollow/src/core/reduce_motion.dart';
 import 'package:hollow/src/core/models/chat_message.dart';
 import 'package:hollow/src/core/providers/chat_provider.dart';
@@ -796,7 +797,7 @@ class _RecentConversationsColumn extends ConsumerWidget {
                                           ),
                                         ),
                                       TextSpan(
-                                        text: conv.lastMessage!.text,
+                                        text: conv.lastMessage!.previewText,
                                         style: HollowTypography.caption
                                             .copyWith(
                                           color: hollow.textSecondary,

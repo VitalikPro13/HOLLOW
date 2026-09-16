@@ -44,8 +44,11 @@ class _ShortcutsSettingsViewState extends ConsumerState<ShortcutsSettingsView> {
     final binding = HotkeyBinding.parse(serialized);
     if (binding == null) return;
     // A bare typable key as an always-on shortcut would fire while typing a
-    // message; F-keys and friends stay allowed.
-    if (binding.isBare && binding.isTypableTrigger) {
+    // message; F-keys and friends stay allowed, and so is anything that lives
+    // only inside one surface.
+    if (!shortcut.surfaceScoped &&
+        binding.isBare &&
+        binding.isTypableTrigger) {
       HollowToast.show(
           context,
           'Add a modifier (Ctrl/Shift/Alt). A bare letter or digit would '
@@ -147,6 +150,24 @@ class _ShortcutsSettingsViewState extends ConsumerState<ShortcutsSettingsView> {
               label: 'Toggle deafen',
               provider: deafenKeybindProvider,
               fallback: 'ctrl+shift+d'),
+        ],
+      ),
+      SettingsCard(
+        title: 'Media Viewer',
+        children: [
+          for (final s in const [
+            AppShortcut.mediaZoomIn,
+            AppShortcut.mediaZoomOut,
+            AppShortcut.mediaZoomFit,
+            AppShortcut.mediaActualSize,
+            AppShortcut.mediaRotate,
+            AppShortcut.mediaSaveAs,
+            AppShortcut.mediaInfo,
+            AppShortcut.mediaPlayPause,
+            AppShortcut.mediaMute,
+            AppShortcut.mediaLoop,
+          ])
+            _appShortcutRow(hollow, s),
         ],
       ),
       SettingsCard(

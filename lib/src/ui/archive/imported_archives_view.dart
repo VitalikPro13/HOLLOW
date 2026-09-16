@@ -27,6 +27,7 @@ import 'package:hollow/src/ui/archive/shared/imported_archive_prep.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
+import 'package:hollow/src/ui/media/media_viewer_scope.dart';
 import 'package:hollow/src/ui/dialogs/message_proof_dialog.dart';
 import 'package:hollow/src/core/services/attachment_export.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -705,77 +706,81 @@ class _ImportedDmMessageListState
     final localPeerId = ref.watch(identityProvider).peerId ?? '';
     final profiles = ref.watch(profileProvider);
 
-    return ArchiveDmMessageList(
-      messages: widget.messages,
-      peerId: widget.peerId,
-      localPeerId: localPeerId,
-      editsMap: widget.editsMap,
-      proofContextFor: (_) => widget.proofContext,
-      proofMsgType: widget.proofMsgType,
-      desktopChrome: true,
-      actionWrapper: (context, msg, child) {
-        final senderPeerId = msg.isMe ? localPeerId : widget.peerId;
-        return MessageHoverWrapper(
-          isMe: msg.isMe,
-          messageId: msg.messageId,
-          currentText: msg.text,
-          onDownload: msg.fileAttachment?.diskPath != null
-              ? () => _saveFile(msg.fileAttachment!)
-              : null,
-          onCopy: msg.text.isNotEmpty &&
-                  !msg.text.startsWith('[file:')
-              ? () {
-                  Clipboard.setData(
-                      ClipboardData(text: msg.text));
-                  HollowToast.show(
-                      context, 'Copied to clipboard',
-                      type: HollowToastType.success);
-                }
-              : null,
-          onCopyImage: msg.fileAttachment != null &&
-                  msg.fileAttachment!.diskPath != null &&
-                  msg.fileAttachment!.isImage
-              ? () async {
-                  final ok = await copyImageToClipboard(
-                      msg.fileAttachment!.diskPath!);
-                  // itemBuilder shadows the State's context — check THIS element.
-                  if (context.mounted) {
+    return MediaViewerScope(
+      // Read-only: an archived file can be saved and nothing else.
+      actions: MediaViewerActions(onSaveAs: _saveFile),
+      child: ArchiveDmMessageList(
+        messages: widget.messages,
+        peerId: widget.peerId,
+        localPeerId: localPeerId,
+        editsMap: widget.editsMap,
+        proofContextFor: (_) => widget.proofContext,
+        proofMsgType: widget.proofMsgType,
+        desktopChrome: true,
+        actionWrapper: (context, msg, child) {
+          final senderPeerId = msg.isMe ? localPeerId : widget.peerId;
+          return MessageHoverWrapper(
+            isMe: msg.isMe,
+            messageId: msg.messageId,
+            currentText: msg.text,
+            onDownload: msg.fileAttachment?.diskPath != null
+                ? () => _saveFile(msg.fileAttachment!)
+                : null,
+            onCopy: msg.text.isNotEmpty &&
+                    !msg.text.startsWith('[file:')
+                ? () {
+                    Clipboard.setData(
+                        ClipboardData(text: msg.text));
                     HollowToast.show(
-                        context,
-                        ok
-                            ? 'Image copied'
-                            : 'Failed to copy image',
-                        type: ok
-                            ? HollowToastType.success
-                            : HollowToastType.error);
+                        context, 'Copied to clipboard',
+                        type: HollowToastType.success);
                   }
-                }
-              : null,
-          onInfo: () {
-            showMessageProofDialog(
-              context,
-              MessageProofData(
-                senderPeerId: senderPeerId,
-                senderDisplayName:
-                    displayNameFor(profiles, senderPeerId),
-                text: msg.text,
-                timestampMs: (msg.editedAt ?? msg.timestamp)
-                    .millisecondsSinceEpoch,
-                signature: msg.signature,
-                publicKey: msg.publicKey,
-                messageId: msg.messageId,
-                context: widget.proofMsgType == 'dm' && widget.exporterPeerId != null
-                    ? (senderPeerId == widget.exporterPeerId ? widget.proofContext : widget.exporterPeerId!)
-                    : widget.proofContext,
-                msgType: widget.proofMsgType,
-                fileAttachment: msg.fileAttachment,
-                preverified: msg.archiveSignatureValid,
-              ),
-            );
-          },
-          child: child,
-        );
-      },
+                : null,
+            onCopyImage: msg.fileAttachment != null &&
+                    msg.fileAttachment!.diskPath != null &&
+                    msg.fileAttachment!.isImage
+                ? () async {
+                    final ok = await copyImageToClipboard(
+                        msg.fileAttachment!.diskPath!);
+                    // itemBuilder shadows the State's context — check THIS element.
+                    if (context.mounted) {
+                      HollowToast.show(
+                          context,
+                          ok
+                              ? 'Image copied'
+                              : 'Failed to copy image',
+                          type: ok
+                              ? HollowToastType.success
+                              : HollowToastType.error);
+                    }
+                  }
+                : null,
+            onInfo: () {
+              showMessageProofDialog(
+                context,
+                MessageProofData(
+                  senderPeerId: senderPeerId,
+                  senderDisplayName:
+                      displayNameFor(profiles, senderPeerId),
+                  text: msg.text,
+                  timestampMs: (msg.editedAt ?? msg.timestamp)
+                      .millisecondsSinceEpoch,
+                  signature: msg.signature,
+                  publicKey: msg.publicKey,
+                  messageId: msg.messageId,
+                  context: widget.proofMsgType == 'dm' && widget.exporterPeerId != null
+                      ? (senderPeerId == widget.exporterPeerId ? widget.proofContext : widget.exporterPeerId!)
+                      : widget.proofContext,
+                  msgType: widget.proofMsgType,
+                  fileAttachment: msg.fileAttachment,
+                  preverified: msg.archiveSignatureValid,
+                ),
+              );
+            },
+            child: child,
+          );
+        },
+      ),
     );
   }
 
@@ -860,71 +865,75 @@ class _ImportedChannelMessageListState
   Widget build(BuildContext context) {
     final profiles = ref.watch(profileProvider);
 
-    return ArchiveChannelMessageList(
-      messages: widget.messages,
-      allMessages: widget.allMessages,
-      serverId: widget.serverId,
-      editsMap: widget.editsMap,
-      proofContext: widget.proofContext,
-      proofMsgType: widget.proofMsgType,
-      desktopChrome: true,
-      actionWrapper: (context, msg, child) => MessageHoverWrapper(
-        isMe: msg.isMe,
-        messageId: msg.messageId,
-        currentText: msg.text,
-        onDownload: msg.fileAttachment?.diskPath != null
-            ? () => _saveFile(msg.fileAttachment!)
-            : null,
-        onCopy: msg.text.isNotEmpty &&
-                !msg.text.startsWith('[file:')
-            ? () {
-                Clipboard.setData(
-                    ClipboardData(text: msg.text));
-                HollowToast.show(
-                    context, 'Copied to clipboard',
-                    type: HollowToastType.success);
-              }
-            : null,
-        onCopyImage: msg.fileAttachment != null &&
-                msg.fileAttachment!.diskPath != null &&
-                msg.fileAttachment!.isImage
-            ? () async {
-                final ok = await copyImageToClipboard(
-                    msg.fileAttachment!.diskPath!);
-                // itemBuilder shadows the State's context — check THIS element.
-                if (context.mounted) {
+    return MediaViewerScope(
+      // Read-only: an archived file can be saved and nothing else.
+      actions: MediaViewerActions(onSaveAs: _saveFile),
+      child: ArchiveChannelMessageList(
+        messages: widget.messages,
+        allMessages: widget.allMessages,
+        serverId: widget.serverId,
+        editsMap: widget.editsMap,
+        proofContext: widget.proofContext,
+        proofMsgType: widget.proofMsgType,
+        desktopChrome: true,
+        actionWrapper: (context, msg, child) => MessageHoverWrapper(
+          isMe: msg.isMe,
+          messageId: msg.messageId,
+          currentText: msg.text,
+          onDownload: msg.fileAttachment?.diskPath != null
+              ? () => _saveFile(msg.fileAttachment!)
+              : null,
+          onCopy: msg.text.isNotEmpty &&
+                  !msg.text.startsWith('[file:')
+              ? () {
+                  Clipboard.setData(
+                      ClipboardData(text: msg.text));
                   HollowToast.show(
-                      context,
-                      ok
-                          ? 'Image copied'
-                          : 'Failed to copy image',
-                      type: ok
-                          ? HollowToastType.success
-                          : HollowToastType.error);
+                      context, 'Copied to clipboard',
+                      type: HollowToastType.success);
                 }
-              }
-            : null,
-        onInfo: () {
-          showMessageProofDialog(
-            context,
-            MessageProofData(
-              senderPeerId: msg.senderId,
-              senderDisplayName:
-                  displayNameFor(profiles, msg.senderId),
-              text: msg.text,
-              timestampMs: (msg.editedAt ?? msg.timestamp)
-                  .millisecondsSinceEpoch,
-              signature: msg.signature,
-              publicKey: msg.publicKey,
-              messageId: msg.messageId,
-              context: widget.proofContext,
-              msgType: widget.proofMsgType,
-              fileAttachment: msg.fileAttachment,
-              preverified: msg.archiveSignatureValid,
-            ),
-          );
-        },
-        child: child,
+              : null,
+          onCopyImage: msg.fileAttachment != null &&
+                  msg.fileAttachment!.diskPath != null &&
+                  msg.fileAttachment!.isImage
+              ? () async {
+                  final ok = await copyImageToClipboard(
+                      msg.fileAttachment!.diskPath!);
+                  // itemBuilder shadows the State's context — check THIS element.
+                  if (context.mounted) {
+                    HollowToast.show(
+                        context,
+                        ok
+                            ? 'Image copied'
+                            : 'Failed to copy image',
+                        type: ok
+                            ? HollowToastType.success
+                            : HollowToastType.error);
+                  }
+                }
+              : null,
+          onInfo: () {
+            showMessageProofDialog(
+              context,
+              MessageProofData(
+                senderPeerId: msg.senderId,
+                senderDisplayName:
+                    displayNameFor(profiles, msg.senderId),
+                text: msg.text,
+                timestampMs: (msg.editedAt ?? msg.timestamp)
+                    .millisecondsSinceEpoch,
+                signature: msg.signature,
+                publicKey: msg.publicKey,
+                messageId: msg.messageId,
+                context: widget.proofContext,
+                msgType: widget.proofMsgType,
+                fileAttachment: msg.fileAttachment,
+                preverified: msg.archiveSignatureValid,
+              ),
+            );
+          },
+          child: child,
+        ),
       ),
     );
   }

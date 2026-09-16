@@ -3,6 +3,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/message_preview.dart';
 import 'package:hollow/src/core/reduce_motion.dart';
 import 'package:hollow/src/core/models/channel_chat_message.dart';
 import 'package:hollow/src/core/models/chat_message.dart';
@@ -25,6 +26,7 @@ import 'package:hollow/src/ui/archive/shared/imported_archive_prep.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
+import 'package:hollow/src/ui/media/media_viewer_scope.dart';
 import 'package:hollow/src/ui/dialogs/message_proof_dialog.dart';
 import 'package:hollow/src/ui/mobile/mobile_archive_message_actions.dart';
 import 'package:hollow/src/core/services/at_rest.dart';
@@ -286,36 +288,40 @@ class _MobileImportedArchiveViewerRouteState
           : proofContext;
     }
 
-    return ArchiveDmMessageList(
-      messages: messages,
-      peerId: data.peerId ?? '',
-      localPeerId: localPeerId,
-      editsMap: editsMap,
-      proofContextFor: dmProofCtxFor,
-      proofMsgType: proofMsgType,
-      controller: _listController,
-      scrollDuration: _scrollDuration,
-      actionWrapper: (context, msg, child) {
-        final senderPeerId =
-            msg.isMe ? localPeerId : (data.peerId ?? '');
-        return LongPressMessage(
-          onLongPress: () => _showActions(
-            msg.text,
-            displayNameFor(profiles, senderPeerId),
-            msg.timestamp,
-            senderPeerId,
-            msg.signature,
-            msg.publicKey,
-            msg.messageId,
-            msg.editedAt,
-            dmProofCtxFor(msg),
-            proofMsgType,
-            msg.fileAttachment,
-            profiles,
-          ),
-          child: child,
-        );
-      },
+    return MediaViewerScope(
+      // Read-only: an archived file can be saved and nothing else.
+      actions: MediaViewerActions(onSaveAs: _saveFile),
+      child: ArchiveDmMessageList(
+        messages: messages,
+        peerId: data.peerId ?? '',
+        localPeerId: localPeerId,
+        editsMap: editsMap,
+        proofContextFor: dmProofCtxFor,
+        proofMsgType: proofMsgType,
+        controller: _listController,
+        scrollDuration: _scrollDuration,
+        actionWrapper: (context, msg, child) {
+          final senderPeerId =
+              msg.isMe ? localPeerId : (data.peerId ?? '');
+          return LongPressMessage(
+            onLongPress: () => _showActions(
+              msg.text,
+              displayNameFor(profiles, senderPeerId),
+              msg.timestamp,
+              senderPeerId,
+              msg.signature,
+              msg.publicKey,
+              msg.messageId,
+              msg.editedAt,
+              dmProofCtxFor(msg),
+              proofMsgType,
+              msg.fileAttachment,
+              profiles,
+            ),
+            child: child,
+          );
+        },
+      ),
     );
   }
 
@@ -327,31 +333,35 @@ class _MobileImportedArchiveViewerRouteState
     String proofContext,
     String proofMsgType,
   ) {
-    return ArchiveChannelMessageList(
-      messages: messages,
-      allMessages: allMessages,
-      serverId: proofContext.split(':').first,
-      editsMap: editsMap,
-      proofContext: proofContext,
-      proofMsgType: proofMsgType,
-      controller: _listController,
-      scrollDuration: _scrollDuration,
-      actionWrapper: (context, msg, child) => LongPressMessage(
-        onLongPress: () => _showActions(
-          msg.text,
-          displayNameFor(profiles, msg.senderId),
-          msg.timestamp,
-          msg.senderId,
-          msg.signature,
-          msg.publicKey,
-          msg.messageId,
-          msg.editedAt,
-          proofContext,
-          proofMsgType,
-          msg.fileAttachment,
-          profiles,
+    return MediaViewerScope(
+      // Read-only: an archived file can be saved and nothing else.
+      actions: MediaViewerActions(onSaveAs: _saveFile),
+      child: ArchiveChannelMessageList(
+        messages: messages,
+        allMessages: allMessages,
+        serverId: proofContext.split(':').first,
+        editsMap: editsMap,
+        proofContext: proofContext,
+        proofMsgType: proofMsgType,
+        controller: _listController,
+        scrollDuration: _scrollDuration,
+        actionWrapper: (context, msg, child) => LongPressMessage(
+          onLongPress: () => _showActions(
+            msg.text,
+            displayNameFor(profiles, msg.senderId),
+            msg.timestamp,
+            msg.senderId,
+            msg.signature,
+            msg.publicKey,
+            msg.messageId,
+            msg.editedAt,
+            proofContext,
+            proofMsgType,
+            msg.fileAttachment,
+            profiles,
+          ),
+          child: child,
         ),
-        child: child,
       ),
     );
   }
@@ -374,7 +384,7 @@ class _MobileImportedArchiveViewerRouteState
         '${timestamp.hour.toString().padLeft(2, '0')}:${timestamp.minute.toString().padLeft(2, '0')}';
     showMobileArchiveMessageActions(
       context: context,
-      messageText: text,
+      messageText: messagePreviewText(text, attachment: fileAttachment),
       senderName: senderName,
       timestamp: time,
       onCopy: text.isNotEmpty && !text.startsWith('[file:')

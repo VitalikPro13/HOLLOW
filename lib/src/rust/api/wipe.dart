@@ -8,17 +8,10 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
 // These functions are ignored because they are not marked as `pub`: `close_store_singleton`, `destroy_data_root`, `publish_scope`, `run_duress`, `wait_for`, `zero_and_remove`
 
-/// Destroy THIS device's data. Scope (a), and the tail of every other scope.
-///
-/// The node is deliberately left RUNNING: Dart's step 5 (app lock, push
-/// unregister, relaunch) still needs a socket.
+/// Scope (a), and the tail of every other. Leaves the node RUNNING for Dart's step 5.
 Future<void> destroyLocal() => RustLib.instance.api.crateApiWipeDestroyLocal();
 
-/// Tell the rest of the identity, then destroy this device.
-///
-/// `scope` is `device` | `device_revoke` | `identity`. The signal is bounded at
-/// three seconds and its failure never blocks the wipe, so an offline machine
-/// still erases itself.
+/// `scope` is `device` | `device_revoke` | `identity`; its signal never blocks the wipe.
 Future<void> destroyWithScope({
   required String scope,
   required bool notifyFriends,
@@ -27,8 +20,7 @@ Future<void> destroyWithScope({
   notifyFriends: notifyFriends,
 );
 
-/// Millisecond stamp at which a contact told us their identity was destroyed, or
-/// `None`. Drives the conversation banner.
+/// Drives the conversation banner. `None` = we were never told.
 Future<PlatformInt64?> identityDestroyedAt({required String masterPeerId}) =>
     RustLib.instance.api.crateApiWipeIdentityDestroyedAt(
       masterPeerId: masterPeerId,

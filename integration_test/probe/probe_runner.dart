@@ -28,6 +28,7 @@ import 'package:hollow/src/ui/chat/file_attachment_widget.dart'
     show FileAttachmentWidget;
 import 'package:hollow/src/ui/chat/video_message_bubble.dart'
     show InlineVideoPlayer, VideoMessageBubble;
+import 'package:video_player/video_player.dart' show VideoPlayer;
 import 'package:hollow/src/ui/shop/hollowpack_import.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
@@ -407,6 +408,21 @@ class ProbeRunner {
         await settle(frames: step['frames'] as int? ?? 15);
         return 'pressed ${step['value']}';
 
+      case 'wheel':
+        final finder = _finder(step);
+        final dy = (step['dy'] as num?)?.toDouble() ?? -200;
+        final dx = (step['dx'] as num?)?.toDouble() ?? 0;
+        final at = tester.getCenter(finder);
+        // A pointer SIGNAL, not a drag: a mouse wheel is what zooms an
+        // InteractiveViewer, and a trackpad pan is a different event.
+        await tester.sendEventToBinding(PointerScrollEvent(
+          position: at,
+          scrollDelta: Offset(dx, dy),
+          kind: PointerDeviceKind.mouse,
+        ));
+        await settle(frames: step['frames'] as int? ?? 20);
+        return 'wheeled ${step['target']} by $dx,$dy';
+
       case 'scroll':
         final finder = _finder(step);
         final dx = (step['dx'] as num?)?.toDouble() ?? 0;
@@ -678,11 +694,13 @@ class ProbeRunner {
     final ms = step['timeout_ms'] as int? ?? 0;
     final deadline = DateTime.now().add(Duration(milliseconds: ms));
 
+    // The TEXTURE, not the inline player: the media viewer draws the texture
+    // on its own and owns the transport, so only this widget is common to both
+    // surfaces.
     String? describe({required bool requireInitialised}) {
-      final players = find.byType(InlineVideoPlayer).evaluate().toList();
+      final players = find.byType(VideoPlayer).evaluate().toList();
       if (index >= players.length) return null;
-      final controller =
-          (players[index].widget as InlineVideoPlayer).controller;
+      final controller = (players[index].widget as VideoPlayer).controller;
       final value = controller.value;
       if (requireInitialised && !value.isInitialized) return null;
       return 'video initialized=${value.isInitialized} '
@@ -701,11 +719,12 @@ class ProbeRunner {
     if (answer != null) return answer;
 
     final bubbles = find.byType(VideoMessageBubble).evaluate().length;
-    final players = find.byType(InlineVideoPlayer).evaluate().length;
+    final textures = find.byType(VideoPlayer).evaluate().length;
+    final inline = find.byType(InlineVideoPlayer).evaluate().length;
     throw _ProbeFailure('no initialised video player at index $index '
-        '($players mounted, $bubbles video bubble(s) on screen). '
-        'The player only exists while the bubble is playing, so tap the play '
-        'control first.');
+        '($textures texture(s), $inline inline player(s), $bubbles video '
+        'bubble(s) on screen). The texture only exists while something is '
+        'playing, so tap the play control first.');
   }
 
   /// Whether a voice note is actually moving, read off the playing row itself:
@@ -1585,6 +1604,17 @@ class ProbeRunner {
       'f10': LogicalKeyboardKey.f10,
       'f11': LogicalKeyboardKey.f11,
       'contextMenu': LogicalKeyboardKey.contextMenu,
+      // The media viewer's own keys.
+      'i': LogicalKeyboardKey.keyI,
+      'r': LogicalKeyboardKey.keyR,
+      'm': LogicalKeyboardKey.keyM,
+      'l': LogicalKeyboardKey.keyL,
+      's': LogicalKeyboardKey.keyS,
+      '0': LogicalKeyboardKey.digit0,
+      '1': LogicalKeyboardKey.digit1,
+      'equal': LogicalKeyboardKey.equal,
+      'plus': LogicalKeyboardKey.equal,
+      'minus': LogicalKeyboardKey.minus,
     };
     final key = keys[name];
     if (key == null) {

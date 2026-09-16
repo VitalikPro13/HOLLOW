@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:hollow/src/ui/components/overlay_anchor.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/message_preview.dart';
 import 'package:hollow/src/core/models/channel_chat_message.dart';
 import 'package:hollow/src/core/moderation_format.dart';
 import 'package:hollow/src/core/reduce_motion.dart';
@@ -61,6 +62,8 @@ import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
+import 'package:hollow/src/ui/media/media_item.dart';
+import 'package:hollow/src/ui/media/media_viewer_scope.dart';
 import 'package:hollow/src/ui/components/large_file_share_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_tooltip.dart';
 import 'package:hollow/src/ui/components/status_dot.dart';
@@ -362,12 +365,10 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
   static String _hhmm(DateTime t) =>
       '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}';
 
-  /// '📷 Image' or '📎 name' for attachments, else the message text.
-  String _messagePreviewText(ChannelChatMessage msg) {
-    final f = msg.fileAttachment;
-    if (f == null) return msg.text;
-    return f.isImage ? '📷 Image' : '📎 ${f.fileName}';
-  }
+  String _messagePreviewText(ChannelChatMessage msg,
+          {bool singleLine = true}) =>
+      messagePreviewText(msg.text,
+          attachment: msg.fileAttachment, singleLine: singleLine);
 
   void _showPinnedMessages(
     BuildContext context,
@@ -541,7 +542,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
       );
     }
     return Text(
-      msg.text.startsWith('[file:') ? '📎 File' : msg.text,
+      _messagePreviewText(msg, singleLine: false),
       style: HollowTypography.body.copyWith(
         color: hollow.textPrimary,
       ),
@@ -2080,7 +2081,13 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
       messageIdAt: (i) => messages[i].messageId,
       isMineAt: (i) => messages[i].isMe,
     );
-    return reversedChatList(
+    return MediaViewerScope(
+      mediaContext: MediaContext(
+        contextType: 'channel',
+        contextId: '${widget.serverId}:${widget.channelId}',
+      ),
+      actions: _mediaActions(),
+      child: reversedChatList(
       context: context,
       listKey: ValueKey('ch-list-${widget.serverId}-${widget.channelId}'),
       itemScrollController: _itemScrollController,
@@ -2103,7 +2110,38 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
         localMentionNick,
         unreadIndex,
       ),
+      ),
     );
+  }
+
+  /// What the media viewer may do to a message of this channel.
+  MediaViewerActions _mediaActions() => MediaViewerActions(
+        onReply: (messageId) {
+          final msg = _messageById(messageId);
+          if (msg != null) _replyFor(msg)?.call();
+        },
+        onJumpTo: _jumpToMessageId,
+        onDelete: _deleteMessage,
+        onReact: (messageId, emoji) async {
+          final msg = _messageById(messageId);
+          if (msg != null) await _toggleReaction(msg, emoji);
+        },
+        onSaveAs: _saveFile,
+      );
+
+  ChannelChatMessage? _messageById(String messageId) {
+    final messages = ref.read(channelChatProvider)[_stateKey] ?? const [];
+    for (final m in messages) {
+      if (m.messageId == messageId) return m;
+    }
+    return null;
+  }
+
+  void _jumpToMessageId(String messageId) {
+    final messages =
+        _displayMessages(ref.read(channelChatProvider)[_stateKey] ?? []);
+    final index = messages.indexWhere((m) => m.messageId == messageId);
+    if (index != -1) _scrollToMessage(index);
   }
 
   /// One chat row. [revIndex] is the reversed builder index.

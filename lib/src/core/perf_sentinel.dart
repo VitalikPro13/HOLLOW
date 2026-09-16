@@ -32,8 +32,12 @@ class PerfSentinel {
 
   static void _emit(String line) {
     // Fire-and-forget FFI: swallow rejections here or they hit the zone
-    // crash handler (see feedback_ffi_fire_and_forget_catcherror).
-    network_api.logFromDart(message: line).catchError((_) {});
+    // crash handler (see feedback_ffi_fire_and_forget_catcherror). A bridge
+    // that was never started throws on the way out instead, which is what a
+    // widget test has.
+    try {
+      network_api.logFromDart(message: line).catchError((_) {});
+    } catch (_) {}
   }
 
   static int _nowMs() => DateTime.now().millisecondsSinceEpoch;

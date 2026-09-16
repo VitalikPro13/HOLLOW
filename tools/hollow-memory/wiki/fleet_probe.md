@@ -195,6 +195,22 @@ fullscreen; the frameless restore is checked by hand. `media_fullscreen.json` ne
 `UI_PROBE_FIXTURES` = a folder with a plaintext `probe_video.mp4` and `probe_image.png`: the probe
 data's own files are at-rest ciphertext, and `build/ui_probe` is wiped per run.
 
+Media viewer ops (2026-09-14): **`wheel`** (`target`, `dx`/`dy`, `frames`) sends a
+`PointerScrollEvent` of `kind: mouse` at the target's centre, a pointer SIGNAL, not a drag, which
+is what zooms an `InteractiveViewer` (a trackpad pan is a different event and would not exercise the
+same code path). The key map grew nine entries for the viewer's own shortcuts: `i`, `r`, `m`, `l`,
+`s`, `0`, `1`, `equal`/`plus` (both map to `LogicalKeyboardKey.equal`), `minus`. **`video_state`**
+now reads the controller off the `VideoPlayer` widget itself (by `index`, matched across every
+`VideoPlayer` on screen) rather than off `InlineVideoPlayer`: the media viewer's video page draws
+the texture directly and owns its OWN transport outside `InlineVideoPlayer`, so `VideoPlayer` is the
+one widget common to the bubble and the viewer. `media_viewer.json` sends a video then an image into
+an open DM, taps the image bubble to open the viewer (asserting `HollowDialog` count is 0, since it
+is a route, not a dialog), opens and closes details, wheels to zoom, `1`/`0` to actual size and back
+to fit, walks back to the video with `arrowLeft`, hovers the transport and the volume popover, enters
+fullscreen from inside the viewer and proves Escape leaves the fullscreen FIRST and stays in the
+viewer (a second Escape closes it), and asserts `expect_window_same` against a snapshot taken before
+any of it, the same window-identity check `media_fullscreen.json` uses for Part A.
+
 ## Rules that are not optional
 
 - **The fleet talks only to servers the fleet creates.** These are real identities on the real

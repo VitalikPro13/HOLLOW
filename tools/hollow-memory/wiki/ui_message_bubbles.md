@@ -287,9 +287,9 @@ Circular 36x36 container with the accent color. Play icon is nudged 1.5px right 
 
 Delegates to `InlineVideoPlayer` (shared with `LinkPreviewCard`). The controller is owned by a `MediaPlaybackSession` (`lib/src/ui/media/media_playback_session.dart`, 2026-09-14): a holder SET (the bubble and the fullscreen view), the last release pauses and awaits `dispose()` exactly once, so the bubble can scroll out of the list and die while the view is still up. Only ONE `VideoPlayer` widget is attached to the controller at a time (two on one controller double-render through fvp on Windows): while `session.viewerHolds` the bubble draws its poster layer plus a 55% black dim instead of the player. The `currentlyPlaying*` listeners and the visibility auto-pause are both no-ops while the viewer holds.
 
-### Fullscreen (2026-09-14)
+### Fullscreen (2026-09-14, superseded by the media viewer)
 
-The inline control bar's "Enter fullscreen" button (and `_onPlayTapped(fullscreen: true)`) hands the SAME session to `FullscreenVideoView`, pushed with `fullscreenVideoRoute(session)`: `hollowMobileRoute` (fade) on mobile, an opaque `PageRouteBuilder` with a reduce-motion-aware 150 ms fade on desktop. Never a `showHollowDialog` (no blur, no padding): the view is `ColoredBox(black) > SizedBox.expand > InlineVideoPlayer(isFullscreen: true)`, contain fit, so playback position and play state survive both ways. On desktop the view enters OS fullscreen through `fullscreenProvider` in `initState` and exits it in `dispose`; the control bar button, Escape (a `HardwareKeyboard` handler, since an opaque page route is not barrier-dismissible), double-click, F11 and the app lock all close it. The view listens for the provider's true → false transition and removes its OWN route (`removeRoute` when not current), never a bare pop: the lock cover is pushed above it before the async exit lands. Mobile adds immersive mode, a rotation unlock for landscape media and a rotate button via the `FullscreenMediaChrome` mixin (`lib/src/ui/media/fullscreen_media_chrome.dart`), restoring `portraitUp` + `edgeToEdge` in `dispose` AND in the push's `.then()`. The image dialog (`_FullscreenImageView`) shares only the mobile part of that mixin; on desktop it is unchanged.
+`_FullscreenVideoView`/`fullscreenVideoRoute` are GONE (`test/media_viewer_guard_test.dart` keeps them gone). The inline control bar's "Enter fullscreen" button (and `_onPlayTapped(fullscreen: true)`) now calls `_openFullscreen(session)`, which hands the SAME live `MediaPlaybackSession` to `openMediaViewer(context, MediaItem(..., session: session), enterFullscreen: true)` (`lib/src/ui/media/media_viewer_route.dart`). `session.attachViewer()` is called before the push so the bubble draws its poster instead of a second `VideoPlayer` on the same controller while the viewer is up (two on one controller double-render through fvp on Windows); `session.releaseViewer()` + `restoreAppOrientation()` run in the push's `.then()`. Position and play state survive both ways because the controller itself is never disposed for the handoff. Full fullscreen-ownership rules (why `enterFullscreen: true` couples leaving the OS fullscreen to closing the viewer, and how a walked-to video differs) live in wiki `ui_media_viewer.md`.
 
 ### Vault Video Resolution
 
@@ -343,37 +343,27 @@ Stack:
 
 ### _ControlBar
 
-**Class:** `_ControlBar extends StatelessWidget` (private, shared by inline and fullscreen)
+**Class:** `_ControlBar extends StatelessWidget` (private to `video_message_bubble.dart`; shared with `LinkPreviewCard`'s inline video via `InlineVideoPlayer`, `onFullscreen` optional and null for a card)
 
-**Layout:**
+One even row, rebuilt 2026-09-14 alongside the media viewer's own transport (Vitalik's first test of the viewer found a control bar buried under the viewer's chrome, so the bubble's own bar got the same treatment for consistency):
+
 ```
 Container (gradient: transparent -> black 75%)
-  Column:
-    SliderTheme (trackHeight 3, thumb 6px, accent color)
-      Slider (position ms, clamped 0..duration)
-    Padding Row:
-      _IconBtn (play/pause)
-      SizedBox(sm)
-      Text "{position} / {duration}" (caption 11px, tabular figures, white)
-      Spacer
-      _IconBtn (maximize2 or minimize2, depending on isFullscreen)
+  LayoutBuilder > Row:
+    _IconBtn (play/pause)
+    SizedBox(xs)
+    [only when width >= _timeFloor (220px): Text "{position} / {duration}" (caption 11px, tabular figures, white) + SizedBox(xs)]
+    Expanded > SliderTheme (trackHeight 3, thumb 6px, accent color) > Slider (position ms, clamped 0..duration)
+    SizedBox(xs)
+    VerticalVolumePopover (mute icon, vertical slider on hover; shared with the media viewer's MediaVideoControls, `media_viewer_controls.dart`)
+    [only when onFullscreen != null: SizedBox(xs) + _IconBtn (maximize2 or minimize2, depending on isFullscreen)]
 ```
 
-Time format: `m:ss`.
+Time format: `m:ss` via `formatMediaDuration` (`media_viewer_controls.dart`).
 
-### _FullscreenVideoView
+### Fullscreen dialog: gone
 
-**Class:** `_FullscreenVideoView extends StatefulWidget` (private)
-
-Launched via `showHollowDialog()`. Owns its own `VideoPlayerController` initialized from the video path.
-
-- Wrapped in `Material(type: transparency)` to prevent yellow debug underline on text widgets (the `showHollowDialog` + `Material` ancestor requirement).
-- Tapping the dim background (outside the player) dismisses the dialog.
-- Tapping inside the player toggles play/pause.
-- Uses the same `_ControlBar` with `isFullscreen: true` (minimize icon, clicking it pops the dialog).
-- Same auto-fade timer pattern as `_InlinePlayer`.
-- Player is padded with `HollowSpacing.xxl` and clipped with `radiusMd`.
-- Loading state shows a centered 48px `CircularProgressIndicator`.
+`_FullscreenVideoView` is gone (2026-09-14, see "Fullscreen" above). What used to be a `showHollowDialog()` video dialog is now the shared media viewer route; full detail (ownership rules, the transport, `VerticalVolumePopover`) lives in wiki `ui_media_viewer.md`.
 
 ### _KeepAndSeedButton
 
@@ -397,6 +387,10 @@ Small rounded container with black at 65% alpha background, white text at 11px w
 **File:** `lib/src/ui/chat/file_attachment_widget.dart`
 **Class:** `FileAttachmentWidget extends ConsumerWidget`
 **Purpose:** Router widget that inspects the attachment type and delegates to the appropriate specialized bubble or renders an image preview / generic file card.
+
+### Constructor Parameters (2026-09-14)
+
+Four optional params, all forwarded straight through to `VideoMessageBubble` and into the `MediaItem` the image preview opens: `messageId`, `senderId`, `timestampMs` (all `String?`/`int?`), `isMine` (`bool`, default false). Absent wherever an attachment has no owning message (a link-card thumbnail, for instance). This is what lets the media viewer act on the message (reply, jump to it, delete, react) and walk the conversation's other media from whichever bubble it was opened from; see wiki `ui_media_viewer.md`.
 
 ### Delegation Logic
 
@@ -454,19 +448,14 @@ Toasts: info on request, error on failure.
 `_buildImagePreview(...)`:
 - Max dimensions: 300x250.
 - Aspect-ratio-preserving size calculation from `attachment.width`/`attachment.height`.
-- **Complete with file on disk:** `GestureDetector(onTap: showFullscreen)` wrapping `MouseRegion(cursor: click)` wrapping `ConstrainedBox` wrapping `ClipRRect(radiusSm)` containing either `GifFileImage` (for `.gif`) or `Image.file` with `BoxFit.contain`. Error builder falls back to placeholder.
+- **Complete with file on disk (2026-09-14):** tap opens the media viewer. `open()` calls `openMediaViewer(context, _mediaItem().withDiskPath(diskPath))` (`lib/src/ui/media/media_viewer_route.dart`), where `_mediaItem()` builds a `MediaItem` from `attachment` plus the widget's `messageId`/`senderId`/`timestampMs`/`isMine`. `.withDiskPath(diskPath)` matters because the stored row may not carry a disk path yet, so the bubble opens on the path it just resolved. Wrapped in `HollowFocusRing` + `GestureDetector` + `MouseRegion(cursor: click)` around a `ConstrainedBox` > `ClipRRect(radiusSm)` > `AttachmentImage`.
 - **Downloading:** Placeholder with `CircularProgressIndicator` (40px, determinate if progress > 0), status text below.
 - **Partial progress (not downloading):** Placeholder with 80px `LinearProgressIndicator` and percentage text.
 - **Idle / not downloaded (issue #41):** PRESSABLE placeholder — sized box with a circular download button (44px, `download` icon), plus a media-type icon (`image`/`video`, 12px) next to formattedSize. Tap = `_startManualDownload`. Falls back to the static icon-only box when no download hook (error-builder path).
 
-### Fullscreen Image Viewer
+### Fullscreen image dialog: gone
 
-`_FullscreenImageView` (private class):
-- Launched via `showHollowDialog()`.
-- Tap outside to dismiss.
-- `HollowSpacing.xxl` padding, `radiusMd` clip.
-- GIF files use `GifFileImage`, others use `Image.file`.
-- Close button at top-right: `HollowPressable` with `x` icon on elevated background at 80% alpha.
+`_FullscreenImageView` is gone (2026-09-14, superseded by the media viewer route above; `test/media_viewer_guard_test.dart` keeps it gone). Full detail on the viewer this tap now opens (zoom, walking the conversation, info panel, shortcuts) lives in wiki `ui_media_viewer.md`.
 
 ### Generic File Card
 

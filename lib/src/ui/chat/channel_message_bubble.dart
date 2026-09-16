@@ -222,6 +222,10 @@ class ChannelMessageBubble extends ConsumerWidget {
             padding: const EdgeInsets.only(top: HollowSpacing.xs),
             child: FileAttachmentWidget(
               attachment: message.fileAttachment!,
+              messageId: message.messageId,
+              senderId: senderMaster,
+              timestampMs: message.timestamp.millisecondsSinceEpoch,
+              isMine: isMe,
             ),
           )
         : null;

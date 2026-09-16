@@ -10,14 +10,12 @@ import 'package:video_player/video_player.dart';
 import 'package:visibility_detector/visibility_detector.dart';
 
 import 'package:hollow/src/core/models/file_attachment.dart';
-import 'package:hollow/src/core/reduce_motion.dart';
 import 'package:hollow/src/core/providers/audio_playback_provider.dart';
 import 'package:hollow/src/core/providers/file_transfer_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/video_playback_provider.dart';
 import 'package:hollow/src/core/providers/share_tab_provider.dart';
 import 'package:hollow/src/core/services/video_thumbnail_service.dart';
-import 'package:hollow/src/core/services/window_fullscreen.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/rust/api/share.dart' as share_api;
@@ -29,8 +27,10 @@ import 'package:hollow/src/ui/components/hollow_focus_ring.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/attachment_image.dart';
 import 'package:hollow/src/ui/media/fullscreen_media_chrome.dart';
-import 'package:hollow/src/ui/mobile/mobile_page_route.dart';
+import 'package:hollow/src/ui/media/media_item.dart';
+import 'package:hollow/src/ui/media/media_viewer_controls.dart';
 import 'package:hollow/src/ui/media/media_playback_session.dart';
+import 'package:hollow/src/ui/media/media_viewer_route.dart';
 
 /// Renders a video attachment inline in a message bubble.
 ///
@@ -52,11 +52,22 @@ class VideoMessageBubble extends ConsumerStatefulWidget {
   /// center control does. Defaults to the plain Download button.
   final FileCardStatus status;
 
+  /// What the owning message is, so the viewer can act on it and walk the
+  /// conversation. Absent where there is no message, as in a link card.
+  final String? messageId;
+  final String? senderId;
+  final int? timestampMs;
+  final bool isMine;
+
   const VideoMessageBubble({
     super.key,
     required this.attachment,
     this.onDownload,
     this.status = const FileCardStatus(control: FileCardControl.download),
+    this.messageId,
+    this.senderId,
+    this.timestampMs,
+    this.isMine = false,
   });
 
   @override
@@ -679,11 +690,22 @@ class _VideoMessageBubbleState extends ConsumerState<VideoMessageBubble> {
     );
   }
 
-  /// Hands the live session to the fullscreen view. The controller is never
-  /// disposed for the handoff, so position and play state survive both ways.
+  /// Hands the live session to the viewer. The controller is never disposed
+  /// for the handoff, so position and play state survive both ways.
   void _openFullscreen(MediaPlaybackSession session) {
     session.attachViewer();
-    Navigator.of(context).push(fullscreenVideoRoute(session)).then((_) {
+    openMediaViewer(
+      context,
+      MediaItem(
+        attachment: widget.attachment,
+        messageId: widget.messageId,
+        senderId: widget.senderId,
+        timestampMs: widget.timestampMs,
+        isMine: widget.isMine,
+        session: session,
+      ),
+      enterFullscreen: true,
+    ).then((_) {
       session.releaseViewer();
       restoreAppOrientation();
     });
@@ -703,7 +725,7 @@ class InlineVideoPlayer extends StatefulWidget {
   /// and the fullscreen viewer takes a disk path.
   final VoidCallback? onFullscreen;
 
-  /// Inside [FullscreenVideoView], where the same control leaves the view.
+  /// Inside the media viewer, where the same control leaves the fullscreen.
   final bool isFullscreen;
 
   const InlineVideoPlayer({
@@ -830,8 +852,9 @@ class _ControlBar extends StatelessWidget {
   final VideoPlayerController controller;
   final HollowTheme hollow;
   final VoidCallback onPlayPause;
+
   /// Null hides the button: a link-preview card has no disk path to hand the
-  /// fullscreen viewer.
+  /// media viewer.
   final VoidCallback? onFullscreen;
   final bool isFullscreen;
 
@@ -843,12 +866,15 @@ class _ControlBar extends StatelessWidget {
     this.isFullscreen = false,
   });
 
+  /// Below this the bubble is too narrow for the time and the slider both, and
+  /// the four controls matter more.
+  static const double _timeFloor = 220;
+
   @override
   Widget build(BuildContext context) {
     final value = controller.value;
     final isPlaying = value.isPlaying;
-    final position = value.position;
-    final duration = value.duration;
+    final durationMs = value.duration.inMilliseconds;
 
     return Container(
       decoration: BoxDecoration(
@@ -862,49 +888,25 @@ class _ControlBar extends StatelessWidget {
         ),
       ),
       padding: const EdgeInsets.fromLTRB(
-        HollowSpacing.sm,
-        HollowSpacing.lg,
-        HollowSpacing.sm,
         HollowSpacing.xs,
+        HollowSpacing.lg,
+        HollowSpacing.xs,
+        HollowSpacing.xxs,
       ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          SliderTheme(
-            data: SliderTheme.of(context).copyWith(
-              trackHeight: 3,
-              thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 6),
-              overlayShape: const RoundSliderOverlayShape(overlayRadius: 12),
-              activeTrackColor: hollow.accent,
-              inactiveTrackColor: Colors.white24,
-              thumbColor: hollow.accent,
-              overlayColor: hollow.accent.withValues(alpha: 0.2),
-            ),
-            child: Slider(
-              min: 0,
-              max: duration.inMilliseconds.toDouble().clamp(
-                    1,
-                    double.infinity,
-                  ),
-              value: position.inMilliseconds
-                  .clamp(0, duration.inMilliseconds)
-                  .toDouble(),
-              onChanged: (v) {
-                controller.seekTo(Duration(milliseconds: v.toInt()));
-              },
-            ),
-          ),
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.xs),
-            child: Row(
-              children: [
-                _IconBtn(
-                  icon: isPlaying ? LucideIcons.pause : LucideIcons.play,
-                  onTap: onPlayPause,
-                ),
-                const SizedBox(width: HollowSpacing.sm),
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final showTime = constraints.maxWidth >= _timeFloor;
+          return Row(
+            children: [
+              _IconBtn(
+                icon: isPlaying ? LucideIcons.pause : LucideIcons.play,
+                onTap: onPlayPause,
+              ),
+              const SizedBox(width: HollowSpacing.xs),
+              if (showTime) ...[
                 Text(
-                  '${_fmt(position)} / ${_fmt(duration)}',
+                  '${formatMediaDuration(value.position)} / '
+                  '${formatMediaDuration(value.duration)}',
                   style: HollowTypography.caption.copyWith(
                     color: Colors.white,
                     fontSize: 11,
@@ -912,25 +914,52 @@ class _ControlBar extends StatelessWidget {
                     decoration: TextDecoration.none,
                   ),
                 ),
-                const Spacer(),
-                if (onFullscreen != null)
-                  _IconBtn(
-                    icon:
-                        isFullscreen ? LucideIcons.minimize2 : LucideIcons.maximize2,
-                    onTap: onFullscreen!,
-                  ),
+                const SizedBox(width: HollowSpacing.xs),
               ],
-            ),
-          ),
-        ],
+              Expanded(
+                child: SliderTheme(
+                  data: SliderTheme.of(context).copyWith(
+                    trackHeight: 3,
+                    thumbShape:
+                        const RoundSliderThumbShape(enabledThumbRadius: 6),
+                    overlayShape:
+                        const RoundSliderOverlayShape(overlayRadius: 12),
+                    activeTrackColor: hollow.accent,
+                    inactiveTrackColor: Colors.white24,
+                    thumbColor: hollow.accent,
+                    overlayColor: hollow.accent.withValues(alpha: 0.2),
+                  ),
+                  child: Slider(
+                    min: 0,
+                    max: durationMs.toDouble().clamp(1, double.infinity),
+                    value: value.position.inMilliseconds
+                        .clamp(0, durationMs)
+                        .toDouble(),
+                    onChanged: (v) =>
+                        controller.seekTo(Duration(milliseconds: v.toInt())),
+                  ),
+                ),
+              ),
+              const SizedBox(width: HollowSpacing.xs),
+              VerticalVolumePopover(
+                controller: controller,
+                iconSize: 16,
+                padding: const EdgeInsets.all(6),
+              ),
+              if (onFullscreen != null) ...[
+                const SizedBox(width: HollowSpacing.xs),
+                _IconBtn(
+                  icon: isFullscreen
+                      ? LucideIcons.minimize2
+                      : LucideIcons.maximize2,
+                  onTap: onFullscreen!,
+                ),
+              ],
+            ],
+          );
+        },
       ),
     );
-  }
-
-  static String _fmt(Duration d) {
-    final mins = d.inMinutes;
-    final secs = d.inSeconds % 60;
-    return '$mins:${secs.toString().padLeft(2, '0')}';
   }
 }
 
@@ -960,123 +989,6 @@ class _IconBtn extends StatelessWidget {
       borderRadius: BorderRadius.circular(4),
       padding: const EdgeInsets.all(6),
       child: Icon(icon, color: Colors.white, size: 16),
-    );
-  }
-}
-
-/// The route the fullscreen video lives on: opaque and full bleed, because a
-/// dialog's blur barrier and inset box are the opposite of fullscreen.
-Route<void> fullscreenVideoRoute(MediaPlaybackSession session) {
-  const fade = Duration(milliseconds: 150);
-  if (isMobileMediaPlatform) {
-    return hollowMobileRoute<void>(
-      builder: (_) => FullscreenVideoView(session: session),
-      transition: HollowRouteTransition.fade,
-      duration: fade,
-    );
-  }
-  final reduce = ReduceMotionController.instance.isReduced;
-  return PageRouteBuilder<void>(
-    opaque: true,
-    fullscreenDialog: true,
-    transitionDuration: reduce ? Duration.zero : fade,
-    reverseTransitionDuration: reduce ? Duration.zero : fade,
-    pageBuilder: (_, _, _) => FullscreenVideoView(session: session),
-    transitionsBuilder: (_, anim, _, child) =>
-        reduce ? child : FadeTransition(opacity: anim, child: child),
-  );
-}
-
-/// Fullscreen video view.
-///
-/// Renders the bubble's own [MediaPlaybackSession] and never owns or disposes
-/// the controller, so position and play state survive in both directions.
-class FullscreenVideoView extends ConsumerStatefulWidget {
-  final MediaPlaybackSession session;
-
-  const FullscreenVideoView({super.key, required this.session});
-
-  @override
-  ConsumerState<FullscreenVideoView> createState() =>
-      _FullscreenVideoViewState();
-}
-
-class _FullscreenVideoViewState extends ConsumerState<FullscreenVideoView>
-    with FullscreenMediaChrome<FullscreenVideoView> {
-  @override
-  void initState() {
-    super.initState();
-    beginFullscreenMedia(widget.session.controller.value.size);
-    unawaited(enterWindowFullscreen());
-    // On HardwareKeyboard, not a Shortcuts binding: an opaque page route has no
-    // barrier to dismiss, and focus may sit on a control-bar button.
-    HardwareKeyboard.instance.addHandler(_onKey);
-  }
-
-  @override
-  void dispose() {
-    HardwareKeyboard.instance.removeHandler(_onKey);
-    endFullscreenMedia();
-    super.dispose();
-  }
-
-  bool _onKey(KeyEvent event) {
-    if (event is! KeyDownEvent) return false;
-    if (event.logicalKey != LogicalKeyboardKey.escape) return false;
-    if (!mounted || ModalRoute.of(context)?.isCurrent != true) return false;
-    _exit();
-    return true;
-  }
-
-  /// A plain pop takes the TOP route, which on app lock is the cover pushed
-  /// above this view before the async fullscreen exit lands.
-  void _exit() {
-    if (!mounted) return;
-    final route = ModalRoute.of(context);
-    if (route == null) return;
-    if (route.isCurrent) {
-      Navigator.of(context).pop();
-    } else {
-      Navigator.of(context).removeRoute(route);
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-
-    // Leaving fullscreen leaves the view, so F11 and the app lock close it too.
-    // Mobile never turns the provider true, so the transition never fires.
-    ref.listen<bool>(fullscreenProvider, (prev, next) {
-      if (prev == true && next == false) _exit();
-    });
-
-    return ColoredBox(
-      color: Colors.black,
-      child: Stack(
-        children: [
-          SizedBox.expand(
-            child: DoubleClickListener(
-              onDoubleClick: _exit,
-              child: InlineVideoPlayer(
-                controller: widget.session.controller,
-                hollow: hollow,
-                onFullscreen: _exit,
-                isFullscreen: true,
-              ),
-            ),
-          ),
-          if (isMobileMediaPlatform)
-            Positioned(
-              top: HollowSpacing.lg,
-              right: HollowSpacing.lg,
-              child: MediaRotateButton(
-                landscape: forcedLandscape,
-                onTap: toggleForcedLandscape,
-              ),
-            ),
-        ],
-      ),
     );
   }
 }

@@ -5,6 +5,7 @@ import 'package:hollow/src/ui/chat/hollow_link_utils.dart';
 import 'package:flutter/material.dart';
 import 'package:hollow/src/ui/components/speaking_border.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/message_preview.dart';
 import 'package:hollow/src/core/models/channel_info.dart';
 import 'package:hollow/src/core/models/channel_layout.dart';
 import 'package:hollow/src/core/models/chat_message.dart';
@@ -1045,7 +1046,7 @@ class _SavedMessagesCard extends StatelessWidget {
                 if (lastMessage != null) ...[
                   const SizedBox(height: HollowSpacing.xxs),
                   Text(
-                    lastMessage!.text,
+                    lastMessage!.previewText,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: HollowTypography.bodySmall.copyWith(

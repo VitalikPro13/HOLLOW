@@ -216,7 +216,7 @@ Returns a `List<Widget>` used by both the normal layout and the screen-share ove
   - `_editStartFor(msg, revIndex)`: Only own text messages (no file attachment). Captures the item's current `itemLeadingEdge` from `_itemPositionsListener`, sets `_editingMessageId`, then in a post-frame callback uses `_itemScrollController.jumpTo()` at the same alignment to preserve scroll position
   - `onEditSubmit` (inline): Clears edit state, calls `chatProvider.notifier.editMessage()`; `onEditCancel` clears edit state
   - `_deleteFor(msg)`: Only own messages. Calls `chatProvider.notifier.deleteMessage()`
-  - `_replyFor(msg)`: Sets `_replyToMessageId`, `_replyToText` via `_messagePreviewText()` (image/paperclip placeholders), `_replyToSenderName`, `_replyToImagePath`. Requests focus on input
+  - `_replyFor(msg)`: Sets `_replyToMessageId`, `_replyToText` via `_messagePreviewText()` (thin wrapper over `messagePreviewText()`, `lib/src/core/message_preview.dart`: a photo/video/voice-note/unknown attachment previews as "Photo"/"Video"/"Voice message"/its file name, an emote token as `:name:`, never an emoji glyph), `_replyToSenderName`, `_replyToImagePath`. Requests focus on input
   - `onReaction` / bubble `onToggleReaction`: both delegate to `_toggleReaction(msg, emoji)` -- checks if local peer already reacted, calls `addReaction()` or `removeReaction()`
   - `_downloadFor(context, msg)`: If file has `diskPath`, opens save dialog via `_saveFile()` (split into `_saveDialogFileName` + `_writeSavedFile`). Otherwise requests from peer via `_requestFileFromPeer()`. Guards against duplicate downloads by checking `fileTransferProvider`
   - `_copyFor(context, msg)`: Copies message text to clipboard (excludes `[file:` messages)

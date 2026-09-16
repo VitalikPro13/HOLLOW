@@ -205,6 +205,10 @@ class MessageBubble extends ConsumerWidget {
             padding: const EdgeInsets.only(top: HollowSpacing.xs),
             child: FileAttachmentWidget(
               attachment: message.fileAttachment!,
+              messageId: message.messageId,
+              senderId: senderId,
+              timestampMs: message.timestamp.millisecondsSinceEpoch,
+              isMine: isMe,
             ),
           )
         : null;

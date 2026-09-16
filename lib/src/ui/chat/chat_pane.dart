@@ -12,6 +12,7 @@ import 'package:hollow/src/ui/chat/gif_picker.dart';
 import 'package:hollow/src/ui/chat/sticker_picker.dart';
 import 'package:hollow/src/ui/chat/emote_composer.dart';
 import 'package:hollow/src/ui/chat/emote_image.dart';
+import 'package:hollow/src/core/message_preview.dart';
 import 'package:hollow/src/core/providers/profile_anim_provider.dart';
 import 'package:hollow/src/core/providers/emote_provider.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -72,6 +73,8 @@ import 'package:hollow/src/ui/components/saved_messages_avatar.dart';
 import 'package:hollow/src/ui/components/share_quality_chip.dart';
 import 'package:hollow/src/ui/components/share_volume_control.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
+import 'package:hollow/src/ui/media/media_item.dart';
+import 'package:hollow/src/ui/media/media_viewer_scope.dart';
 import 'package:hollow/src/ui/components/large_file_share_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_tooltip.dart';
 import 'package:hollow/src/ui/components/link_health_chip.dart';
@@ -1426,7 +1429,7 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
             ),
             const SizedBox(height: 2),
             Text(
-              msg.text.startsWith('[file:') ? 'File' : msg.text,
+              messagePreviewText(msg.text),
               style: HollowTypography.body.copyWith(
                 color: hollow.textPrimary,
                 fontSize: 12,
@@ -2051,7 +2054,11 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
       messageIdAt: (i) => messages[i].messageId,
       isMineAt: (i) => messages[i].isMe,
     );
-    return reversedChatList(
+    return MediaViewerScope(
+      mediaContext:
+          MediaContext(contextType: 'dm', contextId: widget.peerId),
+      actions: _mediaActions(),
+      child: reversedChatList(
       context: context,
       listKey: ValueKey('dm-list-${widget.peerId}'),
       itemScrollController: _itemScrollController,
@@ -2074,7 +2081,38 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
         localPeerId,
         unreadIndex,
       ),
+      ),
     );
+  }
+
+  /// What the media viewer may do to a message of this conversation.
+  MediaViewerActions _mediaActions() => MediaViewerActions(
+        onReply: (messageId) {
+          final msg = _messageById(messageId);
+          if (msg != null) _replyFor(msg)?.call();
+        },
+        onJumpTo: _jumpToMessageId,
+        onDelete: _deleteMessage,
+        onReact: (messageId, emoji) async {
+          final msg = _messageById(messageId);
+          if (msg != null) await _toggleReaction(msg, emoji);
+        },
+        onSaveAs: _saveFile,
+      );
+
+  ChatMessage? _messageById(String messageId) {
+    final messages = ref.read(chatProvider)[widget.peerId] ?? const [];
+    for (final m in messages) {
+      if (m.messageId == messageId) return m;
+    }
+    return null;
+  }
+
+  void _jumpToMessageId(String messageId) {
+    final messages =
+        _displayMessages(ref.read(chatProvider)[widget.peerId] ?? []);
+    final index = messages.indexWhere((m) => m.messageId == messageId);
+    if (index != -1) _scrollToMessage(index);
   }
 
   /// One chat row. [revIndex] is the reversed builder index.
@@ -2421,12 +2459,8 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
     };
   }
 
-  /// '📷 Image' / '📎 name' for attachments, else the message text.
-  String _messagePreviewText(ChatMessage msg) {
-    final att = msg.fileAttachment;
-    if (att == null) return msg.text;
-    return att.isImage ? '📷 Image' : '📎 ${att.fileName}';
-  }
+  String _messagePreviewText(ChatMessage msg) =>
+      messagePreviewText(msg.text, attachment: msg.fileAttachment);
 
   /// Unread pill, only for messages that arrived while scrolled up.
   Widget _buildUnreadPillOverlay(List<ChatMessage> allMessages) {

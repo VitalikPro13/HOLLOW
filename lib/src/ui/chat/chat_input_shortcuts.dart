@@ -157,6 +157,10 @@ String _extensionForFormat(SimpleFileFormat format) {
                   : 'webp';
 }
 
+/// Whether this platform has a clipboard that takes image bytes at all, so a
+/// surface can hide the control rather than offer one that always fails.
+bool get canCopyImageToClipboard => SystemClipboard.instance != null;
+
 /// Copies image bytes to the system clipboard.
 Future<bool> copyImageToClipboard(String filePath) async {
   final clipboard = SystemClipboard.instance;

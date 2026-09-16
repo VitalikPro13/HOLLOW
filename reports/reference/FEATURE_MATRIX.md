@@ -35,7 +35,8 @@
 |---|---------|-----------------|--------|-------------|-------|
 | 14 | Send file attachment | `chat_pane.dart`, `chat_drop_zone.dart` | Done | Click paperclip / file picker | Mobile: file picker only, no drag-drop (N/A on mobile) |
 | 15 | Image inline display | `file_attachment_widget.dart` | Done | Tap → fullscreen | Uses desktop widget, renders inline |
-| 16 | Image fullscreen lightbox | `file_attachment_widget.dart` | Done | Tap image | Uses desktop fullscreen viewer |
+| 16 | Media viewer (images, GIFs, video) | `media_viewer_route.dart`, `media_zoom_view.dart` | Done | Tap image, or a video's fullscreen button | One opaque route for every kind. Zoom (wheel, pinch, double tap) with a live percentage where 100 means one image pixel per device pixel, a 1:1 key, crisp pixels past 2x, rotate, an info panel with the content hash, and reply, react, save, copy and delete against the message it came from. An image stays in the window; a video keeps Part A's behaviour and leaves the fullscreen and the viewer together |
+| 16a | Walk a conversation's media | `media_item.dart`, `media_strip.dart`, `list_media_for_context` | Done | Arrows, chevrons, or the thumbnail strip | The route pages the whole conversation's images and videos, forty at a time in both directions, newest last. The strip hides itself for a single item |
 | 17 | Video thumbnail display | `video_message_bubble.dart` | Done | Tap → play | Uses desktop video player widget |
 | 18 | Video inline playback | `video_message_bubble.dart` | Done | Tap play | Uses desktop video player widget |
 | 19 | Audio playback inline | `audio_message_bubble.dart` | Done | Tap play | Uses desktop audio player widget |

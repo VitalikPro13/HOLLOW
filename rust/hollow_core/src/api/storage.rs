@@ -883,6 +883,40 @@ pub fn get_files_for_message(message_id: String) -> Result<Vec<StoredFileInfo>, 
         .collect())
 }
 
+/// One image or video of a conversation, for the media viewer.
+pub struct MediaListItem {
+    pub file: StoredFileInfo,
+    /// Milliseconds. The owning message's time, else the file's `created_at`.
+    pub ts: i64,
+    pub content_id: Option<String>,
+}
+
+/// Images and videos of one conversation, newest first, for the media viewer.
+///
+/// `before_ts` and `after_ts` are exclusive millisecond bounds, so a caller pages
+/// both ways from the item it opened. `limit` is clamped to 1..=200.
+#[frb]
+pub fn list_media_for_context(
+    context_type: String,
+    context_id: String,
+    before_ts: Option<i64>,
+    after_ts: Option<i64>,
+    limit: u32,
+) -> Result<Vec<MediaListItem>, String> {
+    let store = get_store();
+    let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let ms = guard.as_ref().ok_or("Message store is not open")?;
+    Ok(ms
+        .list_media_for_context(&context_type, &context_id, before_ts, after_ts, limit)?
+        .into_iter()
+        .map(|m| MediaListItem {
+            file: stored_file_to_ffi(m.file),
+            ts: m.ts,
+            content_id: m.content_id,
+        })
+        .collect())
+}
+
 /// Get all incomplete files (for sync resume).
 #[frb]
 pub fn get_incomplete_files() -> Result<Vec<StoredFileInfo>, String> {
@@ -901,8 +935,7 @@ pub fn mark_file_complete(file_id: String, disk_path: String) -> Result<(), Stri
     let store = get_store();
     let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let ms = guard.as_ref().ok_or("Message store is not open")?;
-    ms.mark_file_complete(&file_id, &disk_path);
-    Ok(())
+    ms.mark_file_complete(&file_id, &disk_path)
 }
 
 /// file_ids from messages with no completed file on disk, for post-sync downloads.

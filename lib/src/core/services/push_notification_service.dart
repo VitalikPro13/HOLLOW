@@ -7,8 +7,8 @@ import 'package:path_provider/path_provider.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:hollow/src/core/hollow_data_dir.dart';
-import 'package:hollow/src/ui/chat/emote_image.dart'
-    show emoteTokensToShortcodes;
+import 'package:hollow/src/core/message_preview.dart';
+import 'package:hollow/src/core/models/file_attachment.dart';
 import 'package:hollow/src/rust/api/identity.dart' as identity_api;
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
@@ -147,9 +147,7 @@ Future<void> showLocalDmNotification({
   Uint8List? avatarBytes,
 }) async {
   if (!Platform.isAndroid && !Platform.isIOS) return;
-  final preview = text.isEmpty || text.startsWith('[file:')
-      ? '📷 Image'
-      : (text.length > 200 ? '${text.substring(0, 200)}...' : text);
+  final preview = _clipPreview(messagePreviewText(text));
   final texts = await _accumulateLines(personKey, [MapEntry(messageId, preview)]);
   await _showNotification(
     sender: personKey,
@@ -172,9 +170,7 @@ Future<void> showLocalChannelNotification({
   required String text,
 }) async {
   if (!Platform.isAndroid && !Platform.isIOS) return;
-  final raw = text.isEmpty || text.startsWith('[file:')
-      ? '📷 Image'
-      : (text.length > 200 ? '${text.substring(0, 200)}...' : text);
+  final raw = _clipPreview(messagePreviewText(text));
   final texts = await _accumulateLines(
       _channelLineKey(serverId, channelId), [MapEntry(messageId, '$senderName: $raw')]);
   await _showChannelNotification(
@@ -427,20 +423,30 @@ Future<(bool, bool)> _tryLiveDmNudge(String sender, String personKey) async {
 
 /// Notification preview line for one fetched DM.
 ///
-/// An image DM renders as a lightweight "📷 Image" line, never a BigPicture
-/// preview: decoding and downscaling on the notification thread made the whole
-/// banner noticeably slow to appear. The image still arrives and is written to
-/// disk. A captionless image's text is the "[file:<id>]" sentinel; a captioned
-/// one carries the real caption and its image_path, so the caption is prefixed
-/// with 📷 to signal the attachment.
-String _dmPreviewText(network_api.FetchedMessage m) {
-  if (m.text.isEmpty || m.text.startsWith('[file:')) {
-    return '📷 Image';
-  }
-  final clipped =
-      m.text.length > 200 ? '${m.text.substring(0, 200)}...' : m.text;
-  return m.imagePath != null ? '📷 $clipped' : clipped;
-}
+/// An image DM renders as a plain "Photo" line, never a BigPicture preview:
+/// decoding and downscaling on the notification thread made the whole banner
+/// noticeably slow to appear. The image still arrives and is written to disk.
+/// A fetched row carries no attachment metadata, so `imagePath` is the only
+/// signal that the file landed as an image.
+String _dmPreviewText(network_api.FetchedMessage m) =>
+    _clipPreview(messagePreviewText(m.text,
+        attachment: m.imagePath == null ? null : _imagePlaceholder));
+
+/// Stands in for the attachment a fetched row does not carry, so a file-only
+/// image DM previews as "Photo" rather than the bare "File" fallback.
+const _imagePlaceholder = FileAttachment(
+  fileId: '',
+  fileName: '',
+  fileExt: 'png',
+  mimeType: 'image/png',
+  sizeBytes: 0,
+  isImage: true,
+  totalChunks: 0,
+);
+
+/// Notification bodies are one line; anything longer is cut, not wrapped.
+String _clipPreview(String s) =>
+    s.length > 200 ? '${s.substring(0, 200)}...' : s;
 
 /// iOS happy path: the APNs alert banner rewritten by the NSE is ALREADY on
 /// screen, so remove it and post ONE silent content banner in its place,
@@ -838,11 +844,8 @@ Future<(String, String)> _channelWakeBannerMeta(String server, String cid,
 
 /// Preview line for one fetched channel message, text only; the caller
 /// prefixes the sender name.
-String _channelWakePreviewText(String text) {
-  return text.isEmpty || text.startsWith('[file:')
-      ? '📷 Image'
-      : (text.length > 200 ? '${text.substring(0, 200)}...' : text);
-}
+String _channelWakePreviewText(String text) =>
+    _clipPreview(messagePreviewText(text));
 
 /// iOS: replaces the APNs/NSE banner with one silent populated banner,
 /// mirroring the DM swap flow.
@@ -1025,10 +1028,10 @@ Future<void> _showNotification({
   final plugin = FlutterLocalNotificationsPlugin();
   await _initNotificationPlugin(plugin);
 
-  // OS notifications cannot render emote images; show ':name:' instead of the
-  // raw [e:name:hash] wire token.
-  body = emoteTokensToShortcodes(body);
-  lines = lines?.map(emoteTokensToShortcodes).toList();
+  // OS notifications cannot render emote images or attachments; show the same
+  // one line every other preview surface shows.
+  body = messagePreviewText(body);
+  lines = lines?.map(messagePreviewText).toList();
 
   AndroidBitmap<Object>? largeIcon;
   if (avatarBytes != null && avatarBytes.isNotEmpty) {
@@ -1137,9 +1140,9 @@ Future<void> _showChannelNotification({
   final plugin = FlutterLocalNotificationsPlugin();
   await _initNotificationPlugin(plugin);
 
-  // Same shortcode conversion as _showNotification (see there).
-  body = emoteTokensToShortcodes(body);
-  lines = lines?.map(emoteTokensToShortcodes).toList();
+  // Same preview conversion as _showNotification (see there).
+  body = messagePreviewText(body);
+  lines = lines?.map(messagePreviewText).toList();
 
   StyleInformation? style;
   if (lines != null && lines.length > 1) {

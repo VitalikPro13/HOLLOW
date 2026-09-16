@@ -1,5 +1,6 @@
 ﻿import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/message_preview.dart';
 import 'package:hollow/src/core/models/chat_message.dart';
 import 'package:hollow/src/core/providers/notification_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
@@ -123,8 +124,8 @@ class PeerCard extends ConsumerWidget {
                       const SizedBox(height: HollowSpacing.xxs),
                       Text(
                         lastMessage!.isMe
-                            ? 'You: ${lastMessage!.text}'
-                            : lastMessage!.text,
+                            ? 'You: ${lastMessage!.previewText}'
+                            : lastMessage!.previewText,
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: HollowTypography.bodySmall.copyWith(

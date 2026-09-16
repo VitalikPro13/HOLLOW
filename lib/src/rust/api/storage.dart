@@ -235,6 +235,24 @@ Future<List<StoredFileInfo>> getFilesForMessage({required String messageId}) =>
       messageId: messageId,
     );
 
+/// Images and videos of one conversation, newest first, for the media viewer.
+///
+/// `before_ts` and `after_ts` are exclusive millisecond bounds, so a caller pages
+/// both ways from the item it opened. `limit` is clamped to 1..=200.
+Future<List<MediaListItem>> listMediaForContext({
+  required String contextType,
+  required String contextId,
+  PlatformInt64? beforeTs,
+  PlatformInt64? afterTs,
+  required int limit,
+}) => RustLib.instance.api.crateApiStorageListMediaForContext(
+  contextType: contextType,
+  contextId: contextId,
+  beforeTs: beforeTs,
+  afterTs: afterTs,
+  limit: limit,
+);
+
 /// Get all incomplete files (for sync resume).
 Future<List<StoredFileInfo>> getIncompleteFiles() =>
     RustLib.instance.api.crateApiStorageGetIncompleteFiles();
@@ -450,6 +468,29 @@ class FriendFfi {
           direction == other.direction &&
           requestedAt == other.requestedAt &&
           updatedAt == other.updatedAt;
+}
+
+/// One image or video of a conversation, for the media viewer.
+class MediaListItem {
+  final StoredFileInfo file;
+
+  /// Milliseconds. The owning message's time, else the file's `created_at`.
+  final PlatformInt64 ts;
+  final String? contentId;
+
+  const MediaListItem({required this.file, required this.ts, this.contentId});
+
+  @override
+  int get hashCode => file.hashCode ^ ts.hashCode ^ contentId.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is MediaListItem &&
+          runtimeType == other.runtimeType &&
+          file == other.file &&
+          ts == other.ts &&
+          contentId == other.contentId;
 }
 
 /// One read pointer a sibling reported, as Dart hands it back to the store.

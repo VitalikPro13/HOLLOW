@@ -170,7 +170,7 @@ Uses the shared `reversedChatList()` shell: `reverse: true`, newest at builder i
 
 **Grouping:** shared `shouldGroup()` (same sender within 5 min; channel rows compare device→master collapsed sender ids). Date separators via shared `dateSeparatedChatRow`/`DateSeparator` ("Today"/"Yesterday"/"February 16, 2026" — desktop format since 2026-07-15).
 
-**Reply context:** For each message with `replyToMid`, O(1) lookup via the per-build `indexById` map; passes `replyToSenderName` + `replyToText` (`_attachmentPreviewText` for file tokens) to the bubble.
+**Reply context:** For each message with `replyToMid`, O(1) lookup via the per-build `indexById` map; passes `replyToSenderName` + `replyToText` (`_attachmentPreviewText`, a thin wrapper over `messagePreviewText()` from `lib/src/core/message_preview.dart`: covers file, emote AND asset tokens, not file tokens alone, and never emits an emoji glyph) to the bubble.
 
 **Edit mode:** When `_editingMessageId` matches a message, `_editRow()` renders `_buildEditView()` instead of the bubble — an inline `TextField` with accent border + Save/Cancel buttons.
 

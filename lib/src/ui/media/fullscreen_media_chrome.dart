@@ -52,6 +52,15 @@ mixin FullscreenMediaChrome<T extends ConsumerStatefulWidget>
     SystemChrome.setPreferredOrientations(_allowedOrientations());
   }
 
+  /// New media on the SAME surface: landscape content unlocks rotation,
+  /// portrait content locks it back.
+  void updateFullscreenMediaSize(Size? contentSize) {
+    if (_contentSize == contentSize) return;
+    _contentSize = contentSize;
+    if (!isMobileMediaPlatform || _forcedLandscape) return;
+    SystemChrome.setPreferredOrientations(_allowedOrientations());
+  }
+
   /// Call from `dispose`.
   void endFullscreenMedia() {
     if (_enteredFullscreen) {
@@ -61,10 +70,21 @@ mixin FullscreenMediaChrome<T extends ConsumerStatefulWidget>
     restoreAppOrientation();
   }
 
+  /// True while THIS surface is the one holding the window fullscreen.
+  bool get enteredFullscreen => _enteredFullscreen;
+
   Future<void> enterWindowFullscreen() async {
     final notifier = _fullscreen;
     if (notifier == null) return;
     _enteredFullscreen = await notifier.enter();
+  }
+
+  /// Leaves the fullscreen and hands the window back: whatever happens to it
+  /// afterwards, including the user's own F11, is no longer this surface's to
+  /// undo.
+  Future<void> exitWindowFullscreen() async {
+    _enteredFullscreen = false;
+    await _fullscreen?.exit();
   }
 
   /// Forces landscape for someone with the OS rotation lock on, and back.

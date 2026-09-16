@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/message_preview.dart';
 import 'package:hollow/src/core/providers/app_lock_provider.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
 import 'package:hollow/src/core/providers/member_panel_provider.dart';
@@ -128,6 +129,9 @@ class SystemNotificationNotifier
 
     final profiles = ref.read(profileProvider);
     final senderName = displayNameFor(profiles, fromPeerId);
+    // Every surface below is a one-line preview, so the wire tokens go here
+    // once rather than in each of the four of them.
+    text = messagePreviewText(text);
 
     // Mobile: route by lifecycle. Backgrounded-but-connected gets a real OS
     // banner, since in-app banners can't draw while backgrounded.
@@ -215,6 +219,8 @@ class SystemNotificationNotifier
     final resolvedChannelName =
         channelName ?? _channelName(serverId, channelId);
     final sourceKey = '$serverId:$channelId';
+    // See notifyDm.
+    text = messagePreviewText(text);
 
     // Mobile: route by lifecycle (see notifyDm).
     if (Platform.isAndroid || Platform.isIOS) {

@@ -3,9 +3,15 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/reduce_motion.dart';
+import 'package:hollow/src/core/voice_note_name.dart';
 import 'package:hollow/src/core/services/sound_service.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
+
+/// The predicate moved to core so a pure preview can read it; re-exported
+/// here because every existing caller imports this file for it.
+export 'package:hollow/src/core/voice_note_name.dart'
+    show isVoiceMessageFile;
 
 /// Whether closing the window minimizes to the tray instead of quitting. Default true.
 final minimizeToTrayProvider =
@@ -708,17 +714,6 @@ int _effectiveAutoDownloadMb(
 /// 8 MiB many minutes of talking and still far under a smuggled payload.
 /// Mirrors the Rust twin's cap on the same exemption.
 const int kVoiceNoteMaxBytes = 8 * 1024 * 1024;
-
-/// True when [fileName] is a recorded voice message. Voice notes are exempt
-/// from the auto-download gate on every path. Matches both the UI display name
-/// and the recorder's wire basename; keep in sync with the Rust twin.
-///
-/// A name is not evidence: the sender picks it. Anything that ACTS on the
-/// answer must use [isGenuineVoiceNote] instead.
-bool isVoiceMessageFile(String fileName) {
-  return fileName == 'Voice message.ogg' ||
-      (fileName.startsWith('voice_') && fileName.endsWith('.ogg'));
-}
 
 /// True when an attachment is a genuine recorded voice note, and may therefore
 /// skip the auto-download gate the way text does.

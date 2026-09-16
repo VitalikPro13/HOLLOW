@@ -14,9 +14,8 @@ import 'package:flutter_local_notifications/flutter_local_notifications.dart'
 import 'package:flutter_local_notifications_platform_interface/flutter_local_notifications_platform_interface.dart'
     show NotificationResponse;
 import 'package:flutter_local_notifications_windows/flutter_local_notifications_windows.dart';
+import 'package:hollow/src/core/message_preview.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
-import 'package:hollow/src/ui/chat/emote_image.dart'
-    show emoteTokensToShortcodes;
 import 'package:local_notifier/local_notifier.dart';
 
 /// Notification-routing breadcrumbs into hollow_debug.log.
@@ -291,8 +290,9 @@ class DesktopNotificationService {
       notifLog('DROPPED DM toast — backend never initialized');
       return;
     }
-    // OS toasts cannot render emote images; show ':name:' not the wire token.
-    body = emoteTokensToShortcodes(body);
+    // OS toasts cannot render emote images or attachments; show the same one
+    // line every other preview surface shows.
+    body = messagePreviewText(body);
     if (Platform.isWindows) {
       await _showWindows(
         sourceHash: sourceKey.hashCode & 0x7fffffff,
@@ -330,7 +330,7 @@ class DesktopNotificationService {
       notifLog('DROPPED channel toast — backend never initialized');
       return;
     }
-    body = emoteTokensToShortcodes(body);
+    body = messagePreviewText(body);
     final key = '$serverId:$channelId';
     if (Platform.isWindows) {
       await _showWindows(

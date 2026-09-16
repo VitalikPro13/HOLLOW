@@ -310,6 +310,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<Uint8List> dco_decode_list_list_prim_u_8_strict(dynamic raw);
 
   @protected
+  List<MediaListItem> dco_decode_list_media_list_item(dynamic raw);
+
+  @protected
   List<MemberFfi> dco_decode_list_member_ffi(dynamic raw);
 
   @protected
@@ -413,6 +416,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<VaultFileStatusFfi> dco_decode_list_vault_file_status_ffi(dynamic raw);
+
+  @protected
+  MediaListItem dco_decode_media_list_item(dynamic raw);
 
   @protected
   MemberFfi dco_decode_member_ffi(dynamic raw);
@@ -993,6 +999,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  List<MediaListItem> sse_decode_list_media_list_item(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   List<MemberFfi> sse_decode_list_member_ffi(SseDeserializer deserializer);
 
   @protected
@@ -1132,6 +1143,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<VaultFileStatusFfi> sse_decode_list_vault_file_status_ffi(
     SseDeserializer deserializer,
   );
+
+  @protected
+  MediaListItem sse_decode_media_list_item(SseDeserializer deserializer);
 
   @protected
   MemberFfi sse_decode_member_ffi(SseDeserializer deserializer);
@@ -1877,6 +1891,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_list_media_list_item(
+    List<MediaListItem> self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_list_member_ffi(
     List<MemberFfi> self,
     SseSerializer serializer,
@@ -2064,6 +2084,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
     List<VaultFileStatusFfi> self,
     SseSerializer serializer,
   );
+
+  @protected
+  void sse_encode_media_list_item(MediaListItem self, SseSerializer serializer);
 
   @protected
   void sse_encode_member_ffi(MemberFfi self, SseSerializer serializer);

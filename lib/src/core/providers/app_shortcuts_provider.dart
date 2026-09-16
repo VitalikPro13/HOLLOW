@@ -26,13 +26,28 @@ enum AppShortcut {
   formatItalic('Italic', 'ctrl+i'),
   formatCode('Code', 'ctrl+e'),
   formatStrikethrough('Strikethrough', 'ctrl+shift+x'),
-  formatSpoiler('Spoiler', 'ctrl+shift+s');
+  formatSpoiler('Spoiler', 'ctrl+shift+s'),
+  mediaZoomIn('Zoom in', 'equal', surfaceScoped: true),
+  mediaZoomOut('Zoom out', 'minus', surfaceScoped: true),
+  mediaZoomFit('Fit to the window', '0', surfaceScoped: true),
+  mediaActualSize('Actual size', '1', surfaceScoped: true),
+  mediaRotate('Rotate', 'r', surfaceScoped: true),
+  mediaSaveAs('Save as', 's', surfaceScoped: true),
+  mediaInfo('Details', 'i', surfaceScoped: true),
+  mediaPlayPause('Play or pause', 'space', surfaceScoped: true),
+  mediaMute('Mute', 'm', surfaceScoped: true),
+  mediaLoop('Loop', 'l', surfaceScoped: true);
 
-  const AppShortcut(this.label, this.defaultSerialized);
+  const AppShortcut(this.label, this.defaultSerialized,
+      {this.surfaceScoped = false});
 
   /// User-facing row label on the Shortcuts page.
   final String label;
   final String defaultSerialized;
+
+  /// Live only while one surface is open, so a bare letter is safe here: the
+  /// always-on shortcuts refuse one because it would fire while typing.
+  final bool surfaceScoped;
 
   HotkeyBinding get defaultBinding => HotkeyBinding.parse(defaultSerialized)!;
 }

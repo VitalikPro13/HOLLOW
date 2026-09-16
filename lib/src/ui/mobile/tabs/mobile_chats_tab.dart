@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/message_preview.dart';
 import 'package:hollow/src/core/models/chat_message.dart';
 import 'package:hollow/src/ui/chat/hollow_link_utils.dart';
 import 'package:hollow/src/core/models/channel_info.dart';
@@ -732,8 +733,8 @@ class _DmRow extends ConsumerWidget {
                     // Every Saved message is yours, so the "You:" prefix would
                     // be noise.
                     lastMessage!.isMe && !isSavedMessages
-                        ? 'You: ${lastMessage!.text}'
-                        : lastMessage!.text,
+                        ? 'You: ${lastMessage!.previewText}'
+                        : lastMessage!.previewText,
                     style: HollowTypography.bodySmall.copyWith(
                       color: hollow.textSecondary,
                     ),

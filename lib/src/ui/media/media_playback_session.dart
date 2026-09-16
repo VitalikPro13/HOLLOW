@@ -46,6 +46,15 @@ class MediaPlaybackSession extends ChangeNotifier {
     return MediaPlaybackSession._(controller, diskPath);
   }
 
+  /// Wraps a controller a test made itself, since [open] needs the at-rest
+  /// loopback and a widget test has no FFI.
+  @visibleForTesting
+  static MediaPlaybackSession debugWrap(
+    VideoPlayerController controller,
+    String diskPath,
+  ) =>
+      MediaPlaybackSession._(controller, diskPath);
+
   VideoPlayerController get controller => _controller;
 
   /// True while the fullscreen view draws the texture, which is when the inline

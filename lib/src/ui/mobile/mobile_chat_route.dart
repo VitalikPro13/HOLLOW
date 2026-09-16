@@ -5,6 +5,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/message_preview.dart';
 import 'package:hollow/src/core/reduce_motion.dart';
 import 'package:hollow/src/core/services/channel_topic_service.dart';
 import 'package:hollow/src/core/providers/background_provider.dart';
@@ -53,6 +54,8 @@ import 'package:hollow/src/ui/components/long_press_message.dart';
 import 'package:hollow/src/ui/components/saved_messages_avatar.dart';
 import 'package:hollow/src/ui/chat/voice_recorder_bar.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
+import 'package:hollow/src/ui/media/media_item.dart';
+import 'package:hollow/src/ui/media/media_viewer_scope.dart';
 import 'package:hollow/src/ui/components/large_file_share_dialog.dart';
 import 'package:hollow/src/ui/components/identity_destroyed_banner.dart';
 import 'package:hollow/src/ui/components/security_alert_banner.dart';
@@ -1629,13 +1632,85 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
 
   Widget _buildMessageArea() {
     return Expanded(
-      child: Stack(
-        children: [
-          widget.isDm ? _buildDmMessages() : _buildChannelMessages(),
-          _buildUnreadPillOverlay(),
-        ],
+      child: MediaViewerScope(
+        mediaContext: widget.isDm
+            ? MediaContext(contextType: 'dm', contextId: widget.peerId ?? '')
+            : MediaContext(contextType: 'channel', contextId: _channelKey),
+        actions: _mediaActions(),
+        child: Stack(
+          children: [
+            widget.isDm ? _buildDmMessages() : _buildChannelMessages(),
+            _buildUnreadPillOverlay(),
+          ],
+        ),
       ),
     );
+  }
+
+  /// What the media viewer may do to a message of this conversation.
+  MediaViewerActions _mediaActions() => MediaViewerActions(
+        onReply: _setReplyTo,
+        onJumpTo: _jumpToMessageId,
+        onDelete: _deleteMessage,
+        onReact: (messageId, emoji) async {
+          if (widget.isDm) {
+            final msg = _dmMessageById(messageId);
+            if (msg != null) await _toggleDmReaction(msg, emoji);
+            return;
+          }
+          final msg = _channelMessageById(messageId);
+          if (msg != null) await _toggleChannelReaction(msg, emoji);
+        },
+        onSaveAs: _saveFile,
+      );
+
+  ChatMessage? _dmMessageById(String messageId) {
+    for (final m in ref.read(chatProvider)[widget.peerId ?? ''] ?? const []) {
+      if (m.messageId == messageId) return m;
+    }
+    return null;
+  }
+
+  ChannelChatMessage? _channelMessageById(String messageId) {
+    for (final m in ref.read(channelChatProvider)[_channelKey] ?? const []) {
+      if (m.messageId == messageId) return m;
+    }
+    return null;
+  }
+
+  void _setReplyTo(String messageId) {
+    final profiles = ref.read(profileProvider);
+    if (widget.isDm) {
+      final msg = _dmMessageById(messageId);
+      if (msg == null) return;
+      final sender = msg.isMe
+          ? (ref.read(identityProvider).peerId ?? '')
+          : (widget.peerId ?? '');
+      _setReply(messageId, displayNameFor(profiles, sender),
+          _attachmentPreviewText(msg.fileAttachment, msg.text));
+      return;
+    }
+    final msg = _channelMessageById(messageId);
+    if (msg == null) return;
+    final master = ref.read(deviceLinkProvider).identityOf(msg.senderId);
+    _setReply(messageId, displayNameFor(profiles, master),
+        _attachmentPreviewText(msg.fileAttachment, msg.text));
+  }
+
+  void _jumpToMessageId(String messageId) {
+    final ids = widget.isDm
+        ? [
+            for (final m in ref.read(chatProvider)[widget.peerId ?? ''] ??
+                const <ChatMessage>[])
+              m.messageId,
+          ]
+        : [
+            for (final m in ref.read(channelChatProvider)[_channelKey] ??
+                const <ChannelChatMessage>[])
+              m.messageId,
+          ];
+    final index = ids.indexOf(messageId);
+    if (index != -1) _scrollToMessage(index);
   }
 
   Widget _buildUnreadPillOverlay() {
@@ -2118,11 +2193,8 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
         : editWidget;
   }
 
-  /// Preview line for a reply target: a file token, or the raw text.
-  String _attachmentPreviewText(FileAttachment? att, String text) {
-    if (att == null) return text;
-    return att.isImage ? '📷 Image' : '📎 ${att.fileName}';
-  }
+  String _attachmentPreviewText(FileAttachment? att, String text) =>
+      messagePreviewText(text, attachment: att);
 
   Future<void> _toggleDmReaction(ChatMessage msg, String emoji) async {
     final localPeerId = ref.read(identityProvider).peerId ?? '';
@@ -2297,12 +2369,13 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
   void _showDmActions(ChatMessage msg, String senderName, String localPeerId) {
     showMobileMessageActions(
       context: context,
-      messageText: msg.text,
+      messageText: _attachmentPreviewText(msg.fileAttachment, msg.text),
       senderName: senderName,
       timestamp: _formatTime(msg.timestamp),
       isMe: msg.isMe,
       serverId: widget.serverId,
-      onReply: _replyActionFor(msg.messageId, senderName, msg.text),
+      onReply: _replyActionFor(msg.messageId, senderName,
+          _attachmentPreviewText(msg.fileAttachment, msg.text)),
       onEdit: _editActionFor(msg.messageId, msg.isMe, msg.fileAttachment),
       onDelete: msg.messageId != null && msg.isMe
           ? () => _deleteMessage(msg.messageId!)
@@ -2343,12 +2416,13 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
       ChannelChatMessage msg, String senderName, String localPeerId) {
     showMobileMessageActions(
       context: context,
-      messageText: msg.text,
+      messageText: _attachmentPreviewText(msg.fileAttachment, msg.text),
       senderName: senderName,
       timestamp: _formatTime(msg.timestamp),
       isMe: msg.isMe,
       serverId: widget.serverId,
-      onReply: _replyActionFor(msg.messageId, senderName, msg.text),
+      onReply: _replyActionFor(msg.messageId, senderName,
+          _attachmentPreviewText(msg.fileAttachment, msg.text)),
       onEdit: _editActionFor(msg.messageId, msg.isMe, msg.fileAttachment),
       onDelete: msg.messageId != null && msg.isMe
           ? () => _deleteMessage(msg.messageId!)
@@ -3151,9 +3225,9 @@ class _MobileChatHeader extends ConsumerWidget {
                           ),
                           const SizedBox(height: 2),
                           Text(
-                            msg.text.startsWith(_kFilePrefix)
-                                ? '📎 File'
-                                : msg.text,
+                            messagePreviewText(msg.text,
+                                attachment: msg.fileAttachment,
+                                singleLine: false),
                             style: HollowTypography.body
                                 .copyWith(color: hollow.textPrimary),
                             maxLines: 3,

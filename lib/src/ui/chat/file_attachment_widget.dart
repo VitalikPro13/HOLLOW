@@ -1,4 +1,5 @@
-﻿import 'dart:convert' show base64Decode;
+﻿import 'dart:async' show unawaited;
+import 'dart:convert' show base64Decode;
 import 'dart:io';
 import 'dart:typed_data' show Uint8List;
 import 'dart:ui' show ImageFilter;
@@ -14,7 +15,6 @@ import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 import 'package:hollow/src/ui/components/hollow_toast.dart';
-import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_focus_ring.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
@@ -25,11 +25,12 @@ import 'package:hollow/src/ui/chat/file_card_status.dart';
 import 'package:hollow/src/ui/chat/sticker_pack_card.dart';
 import 'package:hollow/src/ui/chat/video_message_bubble.dart';
 import 'package:hollow/src/ui/components/attachment_image.dart';
-import 'package:hollow/src/ui/media/fullscreen_media_chrome.dart';
+import 'package:hollow/src/ui/media/media_item.dart';
+import 'package:hollow/src/ui/media/media_viewer_route.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// File extensions that route to the video bubble.
-const _videoExtensions = {'mp4', 'webm', 'mov', 'mkv', 'avi', 'm4v'};
+const _videoExtensions = kMediaVideoExtensions;
 
 /// File extensions that route to the audio bubble.
 const _audioExtensions = {'mp3', 'ogg', 'wav', 'flac', 'm4a', 'aac', 'wma'};
@@ -39,10 +40,29 @@ const _audioExtensions = {'mp3', 'ogg', 'wav', 'flac', 'm4a', 'aac', 'wma'};
 class FileAttachmentWidget extends ConsumerWidget {
   final FileAttachment attachment;
 
+  /// The owning message, so the viewer can act on it and walk the
+  /// conversation's media. Absent wherever an attachment has no message.
+  final String? messageId;
+  final String? senderId;
+  final int? timestampMs;
+  final bool isMine;
+
   const FileAttachmentWidget({
     super.key,
     required this.attachment,
+    this.messageId,
+    this.senderId,
+    this.timestampMs,
+    this.isMine = false,
   });
+
+  MediaItem _mediaItem() => MediaItem(
+        attachment: attachment,
+        messageId: messageId,
+        senderId: senderId,
+        timestampMs: timestampMs,
+        isMine: isMine,
+      );
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -95,7 +115,14 @@ class FileAttachmentWidget extends ConsumerWidget {
     // placeholder and the bubble.
     if (_isVideoAttachment()) {
       return VideoMessageBubble(
-          attachment: attachment, onDownload: onDownload, status: status);
+        attachment: attachment,
+        onDownload: onDownload,
+        status: status,
+        messageId: messageId,
+        senderId: senderId,
+        timestampMs: timestampMs,
+        isMine: isMine,
+      );
     }
 
     // The audio bubble owns its undownloaded state too (issue #41).
@@ -355,19 +382,19 @@ class FileAttachmentWidget extends ConsumerWidget {
 
     if (isComplete && diskPath != null && File(diskPath).existsSync()) {
       final isGif = attachment.fileExt.toLowerCase() == 'gif';
+      // The stored row may not carry the disk path yet, so the item opens on
+      // the path this bubble resolved.
+      void open() => unawaited(openMediaViewer(
+            context,
+            _mediaItem().withDiskPath(diskPath),
+          ));
 
       return HollowFocusRing(
         enabled: true,
-        onActivate: () => _showFullscreen(context, diskPath,
-            isGif: isGif,
-            width: attachment.width,
-            height: attachment.height),
+        onActivate: open,
         borderRadius: BorderRadius.circular(hollow.radiusSm),
         child: GestureDetector(
-          onTap: () => _showFullscreen(context, diskPath,
-            isGif: isGif,
-            width: attachment.width,
-            height: attachment.height),
+          onTap: open,
           child: MouseRegion(
             cursor: SystemMouseCursors.click,
             child: ConstrainedBox(
@@ -710,106 +737,5 @@ class FileAttachmentWidget extends ConsumerWidget {
       'txt' || 'md' || 'log' => LucideIcons.fileText,
       _ => LucideIcons.file,
     };
-  }
-
-  /// Opens the image in a fullscreen overlay. The pixel dimensions decide
-  /// whether the mobile surface may rotate; unknown dimensions stay portrait.
-  static void _showFullscreen(
-    BuildContext context,
-    String diskPath, {
-    bool isGif = false,
-    int? width,
-    int? height,
-  }) {
-    final size = (width != null && height != null && width > 0 && height > 0)
-        ? Size(width.toDouble(), height.toDouble())
-        : null;
-    showHollowDialog(
-      context: context,
-      builder: (ctx) => _FullscreenImageView(
-        diskPath: diskPath,
-        isGif: isGif,
-        contentSize: size,
-      ),
-    ).then((_) => restoreAppOrientation());
-  }
-}
-
-/// Fullscreen image view over a blurred backdrop.
-class _FullscreenImageView extends ConsumerStatefulWidget {
-  final String diskPath;
-  final bool isGif;
-  final Size? contentSize;
-
-  const _FullscreenImageView({
-    required this.diskPath,
-    this.isGif = false,
-    this.contentSize,
-  });
-
-  @override
-  ConsumerState<_FullscreenImageView> createState() =>
-      _FullscreenImageViewState();
-}
-
-class _FullscreenImageViewState extends ConsumerState<_FullscreenImageView>
-    with FullscreenMediaChrome<_FullscreenImageView> {
-  @override
-  void initState() {
-    super.initState();
-    beginFullscreenMedia(widget.contentSize);
-  }
-
-  @override
-  void dispose() {
-    endFullscreenMedia();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-
-    return GestureDetector(
-      onTap: () => Navigator.of(context).pop(),
-      child: Center(
-        child: Stack(
-          children: [
-            Padding(
-              padding: const EdgeInsets.all(HollowSpacing.xxl),
-              child: ClipRRect(
-                borderRadius: BorderRadius.circular(hollow.radiusMd),
-                child: AttachmentImage(
-                  path: widget.diskPath,
-                  animated: widget.isGif,
-                  fit: BoxFit.contain,
-                ),
-              ),
-            ),
-            Positioned(
-              top: HollowSpacing.lg,
-              right: HollowSpacing.lg,
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  if (isMobileMediaPlatform) ...[
-                    MediaRotateButton(
-                      landscape: forcedLandscape,
-                      onTap: toggleForcedLandscape,
-                    ),
-                    const SizedBox(width: HollowSpacing.sm),
-                  ],
-                  MediaChromeButton(
-                    icon: LucideIcons.x,
-                    label: 'Close',
-                    onTap: () => Navigator.of(context).pop(),
-                  ),
-                ],
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
   }
 }
