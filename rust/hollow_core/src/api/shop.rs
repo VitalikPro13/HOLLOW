@@ -642,7 +642,7 @@ pub struct KeptRedeemCode {
     pub received_at: i64,
 }
 
-/// The shape a Creem license key takes, and the whole gate on a deep link.
+/// The shape a shop redeem code takes, and the whole gate on a deep link.
 ///
 /// `hollow://redeem/<code>` is remote-authored: anyone can put that link anywhere and
 /// get a click. Nothing downstream parses the code, so the shape check plus the row
@@ -703,7 +703,7 @@ pub fn forget_redeem_code(code: String) -> Result<(), String> {
 }
 
 // ── Support credentials: redeem (phase 2) ─────────────────────────────
-// The one WRITE this module makes against the shop: redeeming a Creem license key
+// The one WRITE this module makes against the shop: redeeming a shop redeem code
 // into a support credential. Two round trips, no cookies, no identity in the clear:
 // `/api/redeem/lookup` returns the listing's public facts and issuing key chain
 // (nothing burns), `/api/redeem` returns the blind signature and a one-shot pack
@@ -714,7 +714,7 @@ pub fn forget_redeem_code(code: String) -> Result<(), String> {
 // root key pinned in `support_creds.rs` before it is kept, and it is kept BEFORE the
 // pack is fetched, because after the second round trip the code is spent and the
 // credential is the thing that was bought. A pack that fails to arrive is a sentence
-// in the outcome, not a lost purchase: the Creem download carries the same pack.
+// in the outcome, not a lost purchase: the Ko-fi download carries the same pack.
 
 use crate::node::support_creds::{
     self, CredentialEntry, T_ITEM, T_TWITCH_FOLLOW, T_TWITCH_OWNER,
@@ -1383,7 +1383,7 @@ fn republish_support_creds() -> Result<(), String> {
 
 // ── Twitch credentials: the shop as an OAuth verifier ─────────────────
 // The same chain as a redeemed mark with a different check at the top: instead of a
-// Creem licence key the shop validates a Twitch access token, reads the facts Twitch
+// shop redeem code the shop validates a Twitch access token, reads the facts Twitch
 // reports, and blind-signs them under a key for exactly that `(type, item, period)`.
 // `/api/twitch/key` says what the credential will claim and which chain will sign it,
 // `/api/twitch/verify` returns the blind signature over OUR master id.

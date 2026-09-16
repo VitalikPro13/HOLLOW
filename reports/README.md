@@ -40,7 +40,8 @@ Areas: `multi-device`, `relay-and-sync`, `security`, `performance`, `voice-and-m
 | `shipped/profile-and-assets/PROFILE_SHOWCASE_BOARD.md` | profile-and-assets | The self-curated showcase board and why there is no rich presence. |
 | `shipped/profile-and-assets/GAME_CARD_DIALOG_PLAN.md` | profile-and-assets | The game card, landed minimal after two same-day redesigns. |
 | `shipped/shop/ARTIST_SHOP_DESIGN.md` | shop | The artist shop and support credentials, the living design with every locked decision. |
-| `shipped/shop/REDEEM_PHASE2.md` | shop | Support credentials redeem flow, built 2026-09-02. |
+| `shipped/shop/REDEEM_PHASE2.md` | shop | Support credentials redeem flow, built 2026-09-02 (the Creem rail it reads through is gone since 2026-09-16). |
+| `planned/shop/KOFI_SHOP_PLAN.md` | shop | The shop on Ko-fi: artists sell on their own Ko-fi, the shop mints codes on the webhook. Built 2026-09-16, awaiting deploy and a live test order. |
 | `shipped/ui-and-accessibility/ACCESSIBILITY_IMPLEMENTATION_PLAN.md` | ui-and-accessibility | Reduce motion, contrast, semantics, keyboard focus, larger text; all code phases done. |
 | `shipped/ui-and-accessibility/PUSH_NOTIFICATION_UX_PLAN.md` | ui-and-accessibility | Making the push notification fast and correct on first appearance. |
 | `shipped/testing-and-tooling/MULTINODE_TEST_HARNESS_HANDOFF.md` | testing-and-tooling | The in-process multi-node harness, rungs 1 to 3 and the ring-2 control plane. |

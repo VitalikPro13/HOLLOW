@@ -177,7 +177,7 @@ class _RedeemCodeDialogState extends ConsumerState<RedeemCodeDialog> {
                 const SizedBox(height: HollowSpacing.md),
                 Text(
                   'The pack did not arrive: ${outcome.packError}. Import the '
-                  '.hollowpack from your Creem download to wear the art; the '
+                  '.hollowpack from your Ko-fi download to wear the art; the '
                   'mark lights up the moment you wear it.',
                   style: HollowTypography.body
                       .copyWith(color: hollow.textSecondary),

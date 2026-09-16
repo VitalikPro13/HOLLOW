@@ -1,5 +1,7 @@
 # Redeem phase 2: support credentials, built 2026-09-02
 
+> 2026-09-16: the Creem rail this document reads codes through (`validateKey`, `activateKey`, the stand-in Creem) is gone. Codes are minted by the shop on the artist's Ko-fi webhook and resolved from the shop's own `redeem_codes` table; `burnKey` is the one lock. See `reports/planned/shop/KOFI_SHOP_PLAN.md`. Everything about the blind signature, the chain and the client is unchanged.
+
 Fable 5.1, hands on, no agents (Vitalik's call for this unit). Design: `reports/shipped/shop/ARTIST_SHOP_DESIGN.md` sections 5, 12.6, 13.23, the audit's M4 gate. Code map: wiki `support_credentials.md`; gates: wiki `security_write_gates.md` section 9; memory `project_support_credentials_phase2`. Both repos UNCOMMITTED, nothing deployed, the live shop untouched.
 
 ## What exists now, in the order a buyer meets it

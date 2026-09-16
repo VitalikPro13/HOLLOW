@@ -1496,7 +1496,7 @@ After verification, a cryptographic proof is generated and broadcast to the serv
 
 ## 20. Support Credentials for Purchased Art
 
-Hollow's artist shop sells profile art (frames, avatars, banners and bundles of them) through a merchant-of-record checkout that is entirely outside the protocol. What the protocol adds is a **support credential**: a proof, carried on the buyer's profile, that this identity bought a given piece, verifiable offline by any viewer and unlinkable by the shop to any purchase. The art itself is not protected (there is no DRM; the files are content-addressed and travel peer to peer like every other asset), so the credential is the only thing a purchase produces that cannot be copied.
+Hollow's artist shop sells profile art (frames, avatars, banners and bundles of them) through each artist's own storefront (Ko-fi today), entirely outside the protocol: the artist's store takes the payment and delivers the files, its webhook tells the shop an order was paid, and the shop mints the one-time code and mails it to the buyer. What the protocol adds is a **support credential**: a proof, carried on the buyer's profile, that this identity bought a given piece, verifiable offline by any viewer and unlinkable by the shop to any purchase. The art itself is not protected (there is no DRM; the files are content-addressed and travel peer to peer like every other asset), so the credential is the only thing a purchase produces that cannot be copied.
 
 ### 20.1 Blind Issuance
 

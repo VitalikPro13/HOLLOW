@@ -589,9 +589,8 @@ Widget _artistStrip(HollowTheme hollow) {
         Expanded(
           child: Text(
             'Avatars, banners and frames drawn by real people. The artist '
-            'gets 95% of every sale by default, and the art is yours to keep: '
-            'real files, no DRM. What you buy arrives as a .hollowpack: '
-            'import it here or drop it on this page.',
+            'gets 100% of every sale, and the art is yours to keep: '
+            'real files without DRM.',
             style: HollowTypography.caption.copyWith(
               color: color,
               fontSize: 11,
