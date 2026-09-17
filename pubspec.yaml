@@ -107,6 +107,7 @@ dependencies:
   # Referenced directly for the NotificationResponse type the Windows toast
   # callback delivers (not re-exported by the windows plugin).
   flutter_local_notifications_platform_interface: ^9.0.0
+  unifiedpush: 6.2.0
 
 dev_dependencies:
   flutter_test:

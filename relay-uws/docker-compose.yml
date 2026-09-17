@@ -81,6 +81,18 @@ services:
       start_period: 20s
     restart: unless-stopped
 
+  # Sends UnifiedPush wake-ups for phones that chose a distributor such as
+  # ntfy. It shares the relay's network namespace because the relay reaches it
+  # on 127.0.0.1, and it needs no Firebase or Apple credentials.
+  push:
+    build: ../push-sidecar
+    network_mode: service:relay
+    depends_on:
+      - relay
+    logging:
+      driver: journald
+    restart: unless-stopped
+
   coturn:
     image: coturn/coturn:4.18
     profiles: [turn]

@@ -17,6 +17,7 @@ import 'package:hollow/src/core/perf_sentinel.dart';
 import 'package:hollow/src/core/services/webrtc_native_log.dart';
 import 'package:hollow/src/core/services/deep_link_service.dart';
 import 'package:hollow/src/core/services/tray_service.dart';
+import 'package:hollow/src/core/services/unified_push_service.dart';
 import 'package:hollow/src/core/frame_schedule_probe.dart';
 import 'package:hollow/src/core/shared_tickers.dart';
 import 'package:hollow/src/core/reduce_motion.dart';
@@ -97,6 +98,12 @@ Future<void> _initCrashLogging() async {
 }
 
 Future<void> main(List<String> args) async {
+  // A push woke a dead process: run the wake handler only, never the app.
+  if (Platform.isAndroid && args.contains(kUnifiedPushBackgroundArg)) {
+    await runUnifiedPushBackground();
+    return;
+  }
+
   final binding = FrameScheduleProbe.ensureInitialized();
 
   // Portrait-only on phones and tablets: landscape and tablet layouts are

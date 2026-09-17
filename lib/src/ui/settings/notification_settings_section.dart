@@ -8,6 +8,7 @@ import 'package:hollow/src/core/providers/notification_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/services/notification_permission.dart';
+import 'package:hollow/src/core/services/unified_push_service.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
@@ -28,10 +29,11 @@ class NotificationSettingsView extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    return settingsCardList(const [
-      _SystemNotificationsCard(),
-      _ServersCard(),
-      _MutedDmsCard(),
+    return settingsCardList([
+      const _SystemNotificationsCard(),
+      if (UnifiedPushController.supported) const _PushDeliveryCard(),
+      const _ServersCard(),
+      const _MutedDmsCard(),
     ]);
   }
 }
@@ -250,6 +252,147 @@ class _SystemNotificationsCardState
         NotificationPermissionState.denied => 'Blocked',
         NotificationPermissionState.unknown => 'Unknown',
       };
+}
+
+/// Android: which push service wakes the phone, Google's or a UnifiedPush
+/// distributor the user installed.
+class _PushDeliveryCard extends ConsumerStatefulWidget {
+  const _PushDeliveryCard();
+
+  @override
+  ConsumerState<_PushDeliveryCard> createState() => _PushDeliveryCardState();
+}
+
+class _PushDeliveryCardState extends ConsumerState<_PushDeliveryCard> {
+  static const _google = '';
+
+  List<String> _distributors = const [];
+
+  /// The choice mid-switch, so every chip waits for it.
+  String? _busy;
+
+  UnifiedPushController get _controller => UnifiedPushController.instance;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadDistributors();
+  }
+
+  Future<void> _loadDistributors() async {
+    try {
+      final found = await _controller.distributors();
+      if (mounted) setState(() => _distributors = found);
+    } catch (_) {}
+  }
+
+  Future<void> _choose(String choice) async {
+    if (_busy != null) return;
+    setState(() => _busy = choice);
+    try {
+      if (choice == _google) {
+        await _controller.useFirebase();
+      } else {
+        await _controller.use(choice);
+      }
+    } catch (e) {
+      if (!mounted) return;
+      HollowToast.show(
+        context,
+        'Could not switch the push service: $e',
+        type: HollowToastType.error,
+      );
+    } finally {
+      if (mounted) setState(() => _busy = null);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
+    // Someone installs ntfy in another app and comes back.
+    ref.listen<bool>(windowFocusedProvider, (prev, next) {
+      if (next && prev != true) _loadDistributors();
+    });
+
+    return ValueListenableBuilder<UnifiedPushStatus>(
+      valueListenable: _controller.status,
+      builder: (context, status, _) {
+        final selected = status.phase == UnifiedPushPhase.off
+            ? _google
+            : status.distributor ?? _google;
+        return SettingsCard(
+          title: 'Push Delivery',
+          children: [
+            Text(
+              'The service that wakes this phone when a message arrives '
+              'while Hollow is closed. Messages stay encrypted either way.',
+              style: HollowTypography.body.copyWith(
+                color: hollow.textSecondary,
+              ),
+            ),
+            const SizedBox(height: HollowSpacing.md),
+            Wrap(
+              spacing: HollowSpacing.sm,
+              runSpacing: HollowSpacing.sm,
+              children: [
+                NotificationChoiceChip(
+                  label: 'Google',
+                  icon: LucideIcons.cloud,
+                  isSelected: selected == _google,
+                  onTap: () => _choose(_google),
+                ),
+                for (final d in _distributors)
+                  NotificationChoiceChip(
+                    label: distributorLabel(d),
+                    icon: LucideIcons.radioTower,
+                    isSelected: selected == d,
+                    onTap: () => _choose(d),
+                  ),
+              ],
+            ),
+            const SizedBox(height: HollowSpacing.sm),
+            Text(
+              _busy != null
+                  ? 'Switching…'
+                  : _statusText(status, _distributors.isEmpty),
+              style: HollowTypography.caption.copyWith(
+                color: status.phase == UnifiedPushPhase.failed
+                    ? hollow.error
+                    : hollow.textTertiary,
+                fontSize: 11,
+              ),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  static String _statusText(UnifiedPushStatus status, bool noneInstalled) {
+    final name = distributorLabel(status.distributor ?? '');
+    return switch (status.phase) {
+      UnifiedPushPhase.off => noneInstalled
+          ? 'Wake-ups come through Google. To use another service, install '
+              'a UnifiedPush app such as ntfy, then pick it here.'
+          : 'Wake-ups come through Google.',
+      UnifiedPushPhase.registering => 'Connecting to $name…',
+      UnifiedPushPhase.active => 'Wake-ups come through $name.',
+      UnifiedPushPhase.failed => switch (status.failure) {
+          FailedReason.network =>
+            '$name could not connect. Google wakes the phone until it does. '
+                'Pick it again once it is online.',
+          FailedReason.actionRequired =>
+            '$name needs you to open it first. Google wakes the phone until '
+                'then.',
+          FailedReason.vapidRequired =>
+            '$name asks for a server key Hollow does not send yet. Google '
+                'wakes the phone instead.',
+          _ => '$name did not work with Hollow. Google wakes the phone '
+              'instead.',
+        },
+    };
+  }
 }
 
 /// Every joined server with its level, each expandable to its channels.

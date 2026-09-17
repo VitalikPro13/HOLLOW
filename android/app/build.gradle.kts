@@ -41,6 +41,16 @@ android {
     }
 }
 
+// The UnifiedPush connector depends on the JVM `tink` artifact and
+// flutter_secure_storage on `tink-android`: same classes, a duplicate-class
+// build failure. tink-android is the superset (it adds the Android keystore
+// integration secure storage needs), so it alone stays, at the connector's
+// version.
+configurations.all {
+    exclude(group = "com.google.crypto.tink", module = "tink")
+    resolutionStrategy.force("com.google.crypto.tink:tink-android:1.23.0")
+}
+
 dependencies {
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")
     implementation(platform("com.google.firebase:firebase-bom:33.7.0"))

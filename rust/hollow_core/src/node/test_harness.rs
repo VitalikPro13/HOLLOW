@@ -14576,7 +14576,9 @@ async fn send_album_files(
             "gif" => album_test_gif(),
             _ => format!("album item {i}").into_bytes(),
         };
-        std::fs::write(&src, bytes).expect("write album item");
+        tokio::fs::write(&src, bytes)
+            .await
+            .expect("write album item");
         let mid = format!("{mid_prefix}-{i}");
         node.cmd_tx
             .send(NodeCommand::SendFile(Box::new(super::types::SendFilePayload {

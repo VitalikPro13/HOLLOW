@@ -13,7 +13,7 @@ Areas: `multi-device`, `relay-and-sync`, `security`, `performance`, `voice-and-m
 | Document | Area | What it is |
 |---|---|---|
 | `planned/relay-and-sync/MULTI_RELAY_CLIENT_PLAN.md` | relay-and-sync | One client holding sockets to several relays, servers and friendships bound to the relay they live on, no relay-to-relay protocol. Designed 2026-09-12. |
-| `planned/voice-and-media/MEDIA_VIEWER_ALBUMS_SUBTITLES_PLAN.md` | voice-and-media | True fullscreen on every platform, one media viewer for images and video, Telegram-style albums with a signed album id, and subtitles with a cue editor. Designed 2026-09-14. |
+| `planned/relay-and-sync/STORAGE_NODES_PLAN.md` | relay-and-sync | Always-on storage nodes that members bring: a Worker in front of a volunteer's own R2 bucket with an enforced quota and zero-bill guards, or a self-hosted blob service beside a relay or on a NAS; server pools and personal nodes, one protocol. Designed 2026-09-17. |
 | `planned/ui-and-accessibility/HOLLOW_DESIGN_LANGUAGE_PLAN.md` | ui-and-accessibility | The research digest, the Hollow design language (tokens, components, usage rules, the forbidden tells), its enforcement, and the screen-by-screen redesign program for desktop and mobile. Designed 2026-09-14, starts after the media plan. |
 
 ## Shipped
@@ -24,6 +24,8 @@ Areas: `multi-device`, `relay-and-sync`, `security`, `performance`, `voice-and-m
 | `shipped/multi-device/MULTI_DEVICE_STEP4_LINK_DESIGN.md` | multi-device | Device linking and snapshot sync design (2026-06-15). |
 | `shipped/multi-device/MULTI_DEVICE_IMPLEMENTATION_TRACKER.md` | multi-device | Execution tracker for every step; epic complete 2026-06-20. |
 | `shipped/relay-and-sync/LARGE_SERVER_SCALING_2026.md` | relay-and-sync | Why a 50k-member server keeps MLS; tiers 1 to 3 built, tier 4 (relay sharding) is the infra plan. |
+| `shipped/relay-and-sync/UNIFIEDPUSH_PLAN.md` | relay-and-sync | UnifiedPush (ntfy and other distributors) beside Firebase on Android, Web Push sent by the sidecar, self-hosted relays sending pushes with no Google credentials. Issue #75, built and verified on a phone 2026-09-17. |
+| `shipped/voice-and-media/MEDIA_VIEWER_ALBUMS_SUBTITLES_PLAN.md` | voice-and-media | True fullscreen on every platform, one media viewer for images and video, Telegram-style albums with a signed album id, and subtitles with a cue editor. Designed 2026-09-14, A to C shipped. |
 | `shipped/relay-and-sync/PENDING_JOINS_ASYNC_FRIENDING.md` | relay-and-sync | Requests that outlive both sessions: async friending and parked server joins (2026-08-27 to 29). |
 | `shipped/relay-and-sync/ANTI_CENSORSHIP_TRANSPORT_2026.md` | relay-and-sync | VLESS + REALITY transport decision; desktop shipped 2026-07-05, mobile deferred. |
 | `shipped/security/DEPENDENCY_SECURITY_AUDIT_2026-06.md` | security | Crate and package audit against advisories, June 2026. |
@@ -39,9 +41,8 @@ Areas: `multi-device`, `relay-and-sync`, `security`, `performance`, `voice-and-m
 | `shipped/profile-and-assets/ASSET_RAIL_PLAN.md` | profile-and-assets | Server banners, GIF picker, stickers; all phases done 2026-07-30. |
 | `shipped/profile-and-assets/PROFILE_SHOWCASE_BOARD.md` | profile-and-assets | The self-curated showcase board and why there is no rich presence. |
 | `shipped/profile-and-assets/GAME_CARD_DIALOG_PLAN.md` | profile-and-assets | The game card, landed minimal after two same-day redesigns. |
-| `shipped/shop/ARTIST_SHOP_DESIGN.md` | shop | The artist shop and support credentials, the living design with every locked decision. |
+| `shipped/shop/ARTIST_SHOP_DESIGN.md` | shop | The whole shop in one document: the artist shop, support credentials and the Ko-fi rail that replaced Stripe and Creem. Living record, every locked decision. |
 | `shipped/shop/REDEEM_PHASE2.md` | shop | Support credentials redeem flow, built 2026-09-02 (the Creem rail it reads through is gone since 2026-09-16). |
-| `planned/shop/KOFI_SHOP_PLAN.md` | shop | The shop on Ko-fi: artists sell on their own Ko-fi, the shop mints codes on the webhook. Built 2026-09-16, awaiting deploy and a live test order. |
 | `shipped/ui-and-accessibility/ACCESSIBILITY_IMPLEMENTATION_PLAN.md` | ui-and-accessibility | Reduce motion, contrast, semantics, keyboard focus, larger text; all code phases done. |
 | `shipped/ui-and-accessibility/PUSH_NOTIFICATION_UX_PLAN.md` | ui-and-accessibility | Making the push notification fast and correct on first appearance. |
 | `shipped/testing-and-tooling/MULTINODE_TEST_HARNESS_HANDOFF.md` | testing-and-tooling | The in-process multi-node harness, rungs 1 to 3 and the ring-2 control plane. |

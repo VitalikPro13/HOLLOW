@@ -1194,7 +1194,7 @@ Abuse handling follows Hollow's self-protection model: users defend themselves l
 
 ## 13. Push Notifications (Mobile)
 
-Mobile operating systems terminate background processes, so a Hollow client cannot hold a persistent WebSocket while the app is closed. Firebase Cloud Messaging (Android) and the Apple Push Notification service (iOS) are the only OS-sanctioned way to wake a terminated app. Hollow must therefore route a wake signal through Google and Apple infrastructure, parties it does not trust. The entire push design exists to do this **without ever exposing message content to those parties.**
+Mobile operating systems terminate background processes, so a Hollow client cannot hold a persistent WebSocket while the app is closed. Something the operating system keeps alive must therefore carry a wake signal: Firebase Cloud Messaging on Android, the Apple Push Notification service on iOS, or, on Android, a UnifiedPush distributor the user installed and chose (§13.7). Each of these is a party Hollow does not trust. The entire push design exists to route a wake through them **without ever exposing message content to those parties.**
 
 ### 13.1 The Core Privacy Guarantee
 
@@ -1205,7 +1205,7 @@ Consequently:
 - **What Apple/Google learn:** that *some* message arrived for a device token, plus an opaque sender peer ID (a `12D3KooW…` identifier, not a human name) and, for channels, opaque server/channel IDs and a single mention bit. They never see message text, message size, or who-is-who beyond opaque IDs. Push timing is coarsened by debouncing (§13.3).
 - **How E2EE is preserved:** the message *content* travels exclusively over Hollow's own existing E2EE channels (Olm for DMs, MLS for channels) between the client and Hollow's own relay, and is decrypted **on-device**. Apple and Google are pure wake-up couriers, categorically outside the content path.
 
-A small push-relay sidecar service holds the Firebase/APNs credentials and emits only the empty `{wake, sender}` payload; the relay itself never contacts Apple or Google with content.
+A small push-relay sidecar service holds the Firebase/APNs credentials and emits only the empty `{wake, sender}` payload; the relay itself never contacts a push service with content.
 
 ### 13.2 Direct Message Push Flow
 
@@ -1252,6 +1252,18 @@ The push path is the most cross-cutting place where the device/master split (§3
 - **Per-person notification grouping:** a multi-device *sender* may send from any of its device IDs, so the receiving client collapses the push `sender` device→master before resolving the display name/avatar and choosing the notification's grouping key. One person yields one notification card regardless of which of their devices sent.
 
 A fresh single-device install is unaffected throughout: every device→master resolution is the identity map, so the push path behaves byte-for-byte as it did before multi-device.
+
+### 13.7 Provider Independence (UnifiedPush)
+
+Depending on Google to wake an Android phone is a dependency Hollow does not otherwise have, and it is one a self-hosted relay cannot satisfy at all: Firebase and APNs accept a push only from whoever holds the application's credentials, which is the official deployment. Android therefore supports **UnifiedPush**, in which the wake is carried by a distributor application the user installed and a push server the user (or their relay operator) chose.
+
+The registration a device gives the relay is an opaque string either way. For UnifiedPush it is the device's push **endpoint URL** together with a Web Push public key set (`p256dh`, `auth`) that the distributor's connector generated **on the device**. The relay keeps exactly one registration per device, so choosing a distributor replaces the Firebase registration and the two can never both be live for one device.
+
+The wake itself is encrypted **to the device** under RFC 8291 (`aes128gcm`) before it leaves the sidecar. This is a stronger position than the Firebase path rather than a weaker one: where Google sees the opaque sender ID in the payload (§13.1), the push server and the distributor see only ciphertext of fixed shape, and learn nothing beyond the fact and timing of a wake for one endpoint. The receiving connector decrypts on-device, and a message that does not decrypt is discarded, so an endpoint address leaked to a third party buys the ability to make a phone check its relay, nothing more.
+
+Two consequences follow for the deployment. A self-hosted relay can send its own wake-ups with no Google or Apple account, because the sidecar needs no credentials for this path, only the ability to make an HTTPS request. And because the endpoint is a URL chosen by the client, the sender treats it as untrusted input: it must be `https`, and its host must resolve to a public address, checked at the moment of connection rather than earlier, so that no client can aim the sidecar at a service inside the relay's own network.
+
+iOS has no equivalent. Apple wakes a terminated application only through APNs, under the application's own credentials, so the iOS path is unchanged.
 
 ---
 

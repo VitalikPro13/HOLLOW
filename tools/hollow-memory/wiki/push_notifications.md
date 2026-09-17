@@ -73,6 +73,34 @@ ONLY — E2EE preserved).
   notification identifier so a new push REPLACES the peer's banner. **Must match
   the Dart `_iosCollapseId` byte-for-byte** (push_notification_service.dart).
 
+## UnifiedPush — Android alternative to FCM (#75, 2026-09-17)
+
+Plan `reports/planned/relay-and-sync/UNIFIEDPUSH_PLAN.md`. Android users pick a
+UnifiedPush distributor (ntfy etc.) in Settings > Notifications > Push Delivery.
+
+- **Relay unchanged.** `register_push_token` with `platform:"unifiedpush"`,
+  `token` = JSON `{"v":1,"endpoint","p256dh","auth"}`; one token per peer, so it
+  REPLACES the FCM token (and FCM re-registers when UnifiedPush falls back).
+- **Sidecar** `push-sidecar/unifiedpush.js`: Web Push `aes128gcm` via `web-push`,
+  TTL 24h, urgency high. SSRF guard: https only, host must resolve to a PUBLIC
+  address, checked inside the socket's `lookup` (custom `https.Agent`) AND for IP
+  literals in `parseToken` (sockets skip lookup for literals).
+  `UNIFIEDPUSH_ALLOW_PRIVATE=1` opts out. Logs only the endpoint HOST. Firebase is
+  optional (no service account = FCM/APNs answer 503); `firebase-admin` is an
+  optionalDependency. Docker: `push` service, `network_mode: service:relay`.
+- **App** `lib/src/core/services/unified_push_service.dart`: source of truth for
+  the choice = the connector's saved distributor (`UnifiedPush.getDistributor()`),
+  no second setting. Registration without a Web Push key set is REFUSED (the push
+  server would read the sender id). `_registerTokenWithRelay` (FCM) no-ops while
+  `UnifiedPushController.isActive`.
+- **Delivery:** process alive → main isolate `onMessage` (ignored when resumed);
+  process dead → the plugin runs `main()` with `--unifiedpush-bg`, which
+  short-circuits to `runUnifiedPushBackground()` before any UI/lock/Rust init.
+  Both call `handlePushWake(Map)`, the same handler the FCM background isolate
+  uses. Undecrypted messages are dropped (the sidecar always encrypts).
+- ntfy.sh answers 507 to a Web Push POST for a topic with no active subscriber,
+  so it cannot be smoke-tested without a real phone subscription.
+
 ## Rust fetch — node/fetch.rs
 
 `run_fetch(relay_domain, peer_id, local_master, keypair_proto, pub_key_b64, license,

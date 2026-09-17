@@ -181,18 +181,32 @@ they say yes, the app restarts on your relay, and their servers on the old relay
 go quiet until they switch back. Older links do not carry the address, so tell
 people your relay address alongside the link.
 
+## Push notifications on phones
+
+A phone that is asleep has to be woken when a message arrives. The wake-up
+carries no message content, only a note that something is waiting, and the app
+then collects the message from the relay itself.
+
+**Android.** Your relay can do this through UnifiedPush. The `push` container in
+the compose file sends the wake-ups and needs no accounts or keys. Each person
+installs a UnifiedPush app on their phone, [ntfy](https://ntfy.sh) being the
+common one, then picks it in Hollow under Settings > Notifications > Push
+Delivery. The wake-up is encrypted to that phone before it leaves your relay,
+so the ntfy server only sees that some app got a push. People who leave the
+setting on Google get no wake-ups on your relay, because only the official
+relay holds Hollow's Google credentials.
+
+The container only sends to public addresses. If your ntfy server sits on the
+same private network as the relay, add `UNIFIEDPUSH_ALLOW_PRIVATE=1` to the
+`push` service's environment.
+
+**iOS.** Apple wakes an iPhone only for pushes signed with the app's own
+credentials, which only the official relay holds. On your relay, iPhones get
+messages when Hollow is open.
+
 ## What a self-hosted relay does not have
 
-Three things run only on the official relay.
-
-**Push notifications on phones.** A message that arrives while a phone is asleep
-reaches it through Firebase on Android and Apple's push service on iOS. Both
-need credentials registered to the app, which only the official relay holds.
-Hollow itself never sees message content in a push, but the wake-up has to come
-from somewhere, and on your relay it does not. Phones get messages when the app
-is open. There is an open request to support UnifiedPush, which would let a
-self-hoster run this too:
-[issue #75](https://github.com/VitalikPro13/HOLLOW/issues/75).
+Two things run only on the official relay.
 
 **The media forwarder.** Large screen shares to several viewers at once are
 carried by a separate blind forwarder on the official infrastructure. Without
@@ -201,7 +215,7 @@ more upload.
 
 **Restart persistence.** On the official relay, offline message buffers survive
 a restart through a systemd handoff. Under Docker there is no such handoff, so
-buffers, channel history rings and push tokens end when the container stops.
+buffers, channel history rings and push registrations end when the container stops.
 Upgrading the relay empties them. Certificate renewals no longer restart
 anything, so those cost nothing.
 
@@ -251,7 +265,7 @@ cannot commit it by accident.
 cd HOLLOW
 git pull
 cd relay-uws
-docker compose build relay
+docker compose build relay push
 docker compose up -d
 ```
 

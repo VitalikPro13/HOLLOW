@@ -158,14 +158,14 @@ class NotificationLevelSelector extends StatelessWidget {
 
     return Row(
       children: [
-        _LevelChip(
+        NotificationChoiceChip(
           label: 'All messages',
           icon: LucideIcons.bell,
           isSelected: value == NotificationLevel.all,
           onTap: () => onChanged(NotificationLevel.all),
         ),
         const SizedBox(width: HollowSpacing.sm),
-        _LevelChip(
+        NotificationChoiceChip(
           label: 'Mentions only',
           icon: LucideIcons.atSign,
           isSelected: value == NotificationLevel.mentions,
@@ -173,7 +173,7 @@ class NotificationLevelSelector extends StatelessWidget {
           activeColor: hollow.warning,
         ),
         const SizedBox(width: HollowSpacing.sm),
-        _LevelChip(
+        NotificationChoiceChip(
           label: 'Nothing',
           icon: LucideIcons.bellOff,
           isSelected: value == NotificationLevel.nothing,
@@ -185,8 +185,8 @@ class NotificationLevelSelector extends StatelessWidget {
   }
 }
 
-/// A single level chip.
-class _LevelChip extends StatelessWidget {
+/// One selectable choice in a notification setting.
+class NotificationChoiceChip extends StatelessWidget {
   final String label;
   final IconData icon;
   final bool isSelected;
@@ -194,7 +194,8 @@ class _LevelChip extends StatelessWidget {
 
   final Color? activeColor;
 
-  const _LevelChip({
+  const NotificationChoiceChip({
+    super.key,
     required this.label,
     required this.icon,
     required this.isSelected,

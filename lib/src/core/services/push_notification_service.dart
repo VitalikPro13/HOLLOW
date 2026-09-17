@@ -9,6 +9,7 @@ import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:hollow/src/core/hollow_data_dir.dart';
 import 'package:hollow/src/core/message_preview.dart';
 import 'package:hollow/src/core/models/file_attachment.dart';
+import 'package:hollow/src/core/services/unified_push_service.dart';
 import 'package:hollow/src/rust/api/identity.dart' as identity_api;
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
@@ -286,21 +287,27 @@ Future<void> _firebaseBackgroundHandler(RemoteMessage message) async {
   try {
     await Firebase.initializeApp();
   } catch (_) {}
+  await handlePushWake(message.data);
+}
 
+/// One wake, whichever provider carried it: Firebase's data block or a
+/// decrypted UnifiedPush message, both the sidecar's
+/// `{type, sender, server, channel, mention}`.
+Future<void> handlePushWake(Map<String, dynamic> data) async {
   // PRIVACY: log only whitelisted routing keys, never the whole payload map —
   // if the sidecar ever adds a content/preview field it must not hit the log.
   await _pushLog(
-      'Handler started, type=${message.data['type']} sender=${message.data['sender']} '
-      'server=${message.data['server']} channel=${message.data['channel']}');
+      'Handler started, type=${data['type']} sender=${data['sender']} '
+      'server=${data['server']} channel=${data['channel']}');
 
   // Channel pushes carry type=channel_wake plus server and channel ids, and
   // go down a separate pipeline.
-  if (message.data['type'] == 'channel_wake') {
-    await _handleChannelWake(message);
+  if (data['type'] == 'channel_wake') {
+    await _handleChannelWake(data);
     return;
   }
 
-  final sender = message.data['sender'] as String?;
+  final sender = data['sender'] as String?;
   if (sender == null || sender.isEmpty) {
     await _pushLog('No sender in payload, showing generic');
     await _showGenericNotification();
@@ -666,11 +673,11 @@ Future<bool> _waitForLiveChannelArrival(String serverId, String channelId) async
 // LOCAL effective level is re-checked because relay prefs can be stale, then
 // the buffered channel ciphertext is fetched and decrypted via the server
 // room.
-Future<void> _handleChannelWake(RemoteMessage message) async {
-  final sender = message.data['sender'] as String? ?? '';
-  final server = message.data['server'] as String? ?? '';
-  final channel = message.data['channel'] as String? ?? '';
-  final mention = message.data['mention'] == '1';
+Future<void> _handleChannelWake(Map<String, dynamic> data) async {
+  final sender = data['sender'] as String? ?? '';
+  final server = data['server'] as String? ?? '';
+  final channel = data['channel'] as String? ?? '';
+  final mention = data['mention'] == '1';
   if (server.isEmpty) {
     await _pushLog('channel_wake: no server in payload — ignored');
     return;
@@ -1277,7 +1284,9 @@ class PushNotificationService {
   factory PushNotificationService() => _instance;
   PushNotificationService._();
 
-  final FirebaseMessaging _messaging = FirebaseMessaging.instance;
+  // A getter, not a field: with no Firebase app (a phone without Play
+  // services) it throws, and that must not stop UnifiedPush from starting.
+  FirebaseMessaging get _messaging => FirebaseMessaging.instance;
   final FlutterLocalNotificationsPlugin _localNotifications =
       FlutterLocalNotificationsPlugin();
 
@@ -1360,26 +1369,41 @@ class PushNotificationService {
     if (!Platform.isAndroid && !Platform.isIOS) return;
 
     debugPrint('████ [HOLLOW-PUSH] Initializing push notifications...');
-
-    FirebaseMessaging.onBackgroundMessage(_firebaseBackgroundHandler);
+    _initialized = true;
 
     await _initLocalNotifications();
 
-    await _requestPermissionAndToken();
+    // Before the Firebase token, so a chosen distributor already owns the
+    // relay's token slot when Firebase would register.
+    final unifiedPush = UnifiedPushController.instance;
+    unifiedPush.onFallBackToFirebase = reregisterToken;
+    try {
+      await unifiedPush.init();
+    } catch (e) {
+      debugPrint('[HOLLOW-PUSH] UnifiedPush init failed: $e');
+    }
 
-    FirebaseMessaging.onMessage.listen(_handleForegroundMessage);
+    try {
+      FirebaseMessaging.onBackgroundMessage(_firebaseBackgroundHandler);
 
-    // A banner tapped while the app was in the background: bring the user
-    // straight to the sender's chat or channel.
-    FirebaseMessaging.onMessageOpenedApp.listen(_deliverFromRemote);
+      await _requestPermissionAndToken();
+
+      FirebaseMessaging.onMessage.listen(_handleForegroundMessage);
+
+      // A banner tapped while the app was in the background: bring the user
+      // straight to the sender's chat or channel.
+      FirebaseMessaging.onMessageOpenedApp.listen(_deliverFromRemote);
+
+      _messaging.onTokenRefresh.listen((newToken) {
+        _currentToken = newToken;
+        _registerTokenWithRelay(newToken);
+      });
+    } catch (e) {
+      debugPrint('[HOLLOW-PUSH] Firebase messaging unavailable: $e');
+      await requestMobileNotificationPermission();
+    }
     await _deliverColdStartTaps();
 
-    _messaging.onTokenRefresh.listen((newToken) {
-      _currentToken = newToken;
-      _registerTokenWithRelay(newToken);
-    });
-
-    _initialized = true;
     debugPrint('[HOLLOW-PUSH] Push notification service initialized');
   }
 
@@ -1490,6 +1514,8 @@ class PushNotificationService {
   }
 
   void _registerTokenWithRelay(String token) {
+    // The relay keeps one token per device; a chosen distributor holds it.
+    if (UnifiedPushController.instance.isActive) return;
     final platform = Platform.isAndroid ? 'android' : 'ios';
     // .catchError, not try/catch: the call is fire-and-forget, so an async
     // "Node is not running" rejection would escape a sync try/catch into the

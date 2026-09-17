@@ -1,7 +1,8 @@
 const http = require('http');
 const crypto = require('crypto');
-const admin = require('firebase-admin');
+const fs = require('fs');
 const path = require('path');
+const { sendUnifiedPush } = require('./unifiedpush');
 
 const PORT = parseInt(process.env.PUSH_PORT || '3001', 10);
 const KEY_PATH = process.env.FIREBASE_KEY_PATH || path.join(__dirname, 'service-account.json');
@@ -41,9 +42,16 @@ function noteRejected() {
   rejectedSinceLog = 0;
 }
 
-admin.initializeApp({
-  credential: admin.credential.cert(KEY_PATH),
-});
+// Firebase is optional: a self-hosted relay has no service account, and its
+// UnifiedPush sends must still work. firebase-admin is an optional dependency
+// for the same reason, so it is required only when the key exists.
+let admin = null;
+if (fs.existsSync(KEY_PATH)) {
+  admin = require('firebase-admin');
+  admin.initializeApp({ credential: admin.credential.cert(KEY_PATH) });
+} else {
+  console.log('[push-sidecar] no Firebase service account, FCM/APNs disabled (UnifiedPush only)');
+}
 
 // Deterministic 31-bit hash of a peer_id, reproduced byte-for-byte in Dart
 // (push_notification_service.dart `_iosCollapseId`). Used as the iOS
@@ -80,8 +88,12 @@ const server = http.createServer((req, res) => {
   let body = '';
   req.on('data', chunk => { body += chunk; });
   req.on('end', async () => {
+    let token;
+    let platform;
     try {
-      const { token, platform, sender, server, channel, mention } = JSON.parse(body);
+      const parsed = JSON.parse(body);
+      ({ token, platform } = parsed);
+      const { sender, server, channel, mention } = parsed;
       if (!token) {
         res.writeHead(400);
         res.end('missing token');
@@ -92,9 +104,7 @@ const server = http.createServer((req, res) => {
       // on-device handler can resolve names + check local notification settings
       // — same exposure class as the sender peer_id, never any content.
       const isChannel = !!server;
-      const message = {
-        token,
-        data: isChannel
+      const data = isChannel
           ? {
               type: 'channel_wake',
               ...(sender ? { sender } : {}),
@@ -102,8 +112,22 @@ const server = http.createServer((req, res) => {
               ...(channel ? { channel } : {}),
               mention: mention ? '1' : '0', // FCM data values must be strings
             }
-          : { type: 'wake', ...(sender ? { sender } : {}) },
-      };
+          : { type: 'wake', ...(sender ? { sender } : {}) };
+
+      if (platform === 'unifiedpush') {
+        const { status, code } = await sendUnifiedPush(token, data);
+        res.writeHead(status);
+        res.end(code);
+        return;
+      }
+
+      if (!admin) {
+        res.writeHead(503);
+        res.end('fcm_disabled');
+        return;
+      }
+
+      const message = { token, data };
 
       if (platform === 'android') {
         message.android = { priority: 'high' };
