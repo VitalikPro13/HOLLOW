@@ -1220,7 +1220,9 @@ async fn run_event_loop(
     mls_persist_timer.tick().await; // consume immediate first tick
     let mut mls_dirty = false;
 
-    let mut peer_liveness_timer = tokio::time::interval(Duration::from_secs(60));
+    // cfg(test) shortens the period so the harness can watch a query.
+    let liveness_secs: u64 = if cfg!(test) { 3 } else { 60 };
+    let mut peer_liveness_timer = tokio::time::interval(Duration::from_secs(liveness_secs));
     peer_liveness_timer.tick().await; // consume immediate first tick
 
     // Asset-rail retry sweep: rotate a pull that has gone quiet to its next holder.
@@ -5811,9 +5813,17 @@ async fn run_event_loop(
                         let local_peer = local_peer_str.to_string();
                         for (friend_pid, _, _, _, _) in &friends {
                             if friend_pid == &local_peer { continue; }
-                            let is_reachable = ws_room_peers.values().any(|ps| ps.contains(friend_pid));
-                            if !is_reachable {
+                            // Friends are MASTER-keyed; rooms and the relay hold DEVICE ids.
+                            // A master-keyed check reads every fresh install as offline and
+                            // asks the relay about an id no socket authenticates as.
+                            if crypto_handler::peer_is_reachable(&ws_room_peers, friend_pid) {
+                                continue;
+                            }
+                            let devices = super::resolver::devices_for(friend_pid);
+                            if devices.is_empty() {
                                 check_peers.push(friend_pid.clone());
+                            } else {
+                                check_peers.extend(devices);
                             }
                         }
                     }

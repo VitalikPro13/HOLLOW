@@ -58,10 +58,11 @@ Top-level function:
 
 `_listenForLicenseErrors()` is called from `initState()`. It uses `ref.listenManual(licenseErrorProvider, ...)` to react to license errors pushed from the Rust event stream. On error:
 
+0. `'license_key_in_use'` only: resets the error provider, shows an info toast ("Your license key is in use on another device. Hollow keeps retrying.") and returns. The node keeps retrying on its own and the stored key is kept; clearing it here turned a transient collision with our own ghost socket into a surprise key prompt (issue #86).
 1. Stops the node (`nodeProvider.notifier.stop()`).
 2. Clears the cached key (`licenseKeyProvider.notifier.clearKey()`).
 3. Resets the error provider to `null`.
-4. Maps the reason string to a user-friendly message: `'invalid_license_key'` / `'license_key_in_use'` / `'license_key_required'` / fallback.
+4. Maps the reason string to a user-friendly message: `'invalid_license_key'` / `'license_key_required'` / fallback.
 5. Shows `LicenseKeyDialog` with the error message.
 6. If user enters a new key, saves it and restarts the node.
 

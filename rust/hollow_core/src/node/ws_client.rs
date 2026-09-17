@@ -391,6 +391,7 @@ async fn ws_client_loop(
 
     let mut backoff_secs = 1u64;
     let mut pending_commands: Vec<WsCommand> = Vec::new();
+    let mut license_busy_notified = false;
 
     'reconnect: loop {
         hollow_log!("[HOLLOW-WS] Connecting to {relay_url}...");
@@ -403,6 +404,7 @@ async fn ws_client_loop(
                 backoff_secs = 1; // Reset backoff on successful connect.
                 let _ = event_tx.send(WsEvent::Connected);
                 hollow_log!("[HOLLOW-WS] Connected and authenticated");
+                license_busy_notified = false;
 
                 let (mut ws_write, mut ws_read) = ws_stream.split();
                 {
@@ -608,7 +610,15 @@ async fn ws_client_loop(
             }
             Err(e) => {
                 hollow_log!("[HOLLOW-WS] Connection failed: {e}");
-                if e.contains("license_key") || e.contains("license key") {
+                // A busy key is still OUR key: the holder is usually our own ghost
+                // socket or a sibling device, so keep the backoff going and tell
+                // the UI once per outage; only a refused key stops the loop.
+                if e.contains("license_key_in_use") {
+                    if !license_busy_notified {
+                        license_busy_notified = true;
+                        let _ = event_tx.send(WsEvent::LicenseError { reason: e });
+                    }
+                } else if e.contains("license_key") || e.contains("license key") {
                     hollow_log!("[HOLLOW-WS] License error — not retrying");
                     let _ = event_tx.send(WsEvent::LicenseError { reason: e });
                     return;

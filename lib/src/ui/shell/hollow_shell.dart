@@ -375,14 +375,24 @@ class _HollowShellState extends ConsumerState<HollowShell>
   }
 
   Future<void> _handleLicenseError(String reason) async {
+    // The node keeps retrying a busy key on its own; the key stays stored.
+    if (reason == 'license_key_in_use') {
+      ref.read(licenseErrorProvider.notifier).state = null;
+      if (!mounted) return;
+      HollowToast.show(
+        context,
+        'Your license key is in use on another device. Hollow keeps retrying.',
+        type: HollowToastType.info,
+        duration: const Duration(seconds: 6),
+      );
+      return;
+    }
     ref.read(nodeProvider.notifier).stop();
     await ref.read(licenseKeyProvider.notifier).clearKey();
     ref.read(licenseErrorProvider.notifier).state = null;
 
     final friendlyMessage = switch (reason) {
       'invalid_license_key' => 'Invalid license key',
-      'license_key_in_use' =>
-        'This key is already in use on another device',
       'license_key_required' => 'A license key is required to connect',
       _ => 'License error: $reason',
     };

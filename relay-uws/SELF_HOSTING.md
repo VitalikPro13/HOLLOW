@@ -238,7 +238,9 @@ give a key to, create `keys/keys.json`:
 Keys are four groups of four characters, each `A-Z` or `0-9`, separated by
 hyphens. Make them up. The relay reads the file every 30 seconds, so adding a
 key takes effect without a restart, and removing one disconnects whoever is
-using it. The app asks for a key when it connects to a relay that requires one.
+using it. One key admits up to 5 devices at a time, so a person's phone and
+desktop share one key. The app asks for a key when it connects to a relay that
+requires one.
 
 The file is mounted read-only into the container and is gitignored, so you
 cannot commit it by accident.

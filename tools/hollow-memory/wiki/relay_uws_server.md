@@ -329,16 +329,18 @@ The ONE thing the relay persists about peers — deliberately minimal.
 | `Ok` | Key is valid and has been reserved for this peer |
 | `NotRequired` | License system is disabled (`enabled = false`) |
 | `InvalidKey` | Key not found in the valid key set |
-| `KeyInUse` | Key is valid but already bound to a different peer_id |
+| `KeyInUse` | Key is valid but already held by `MAX_DEVICES_PER_KEY` (5) other peer_ids |
 | `KeyRequired` | License system is enabled but no key was provided |
 
-### LicenseState struct
+### LicensePool / LicenseState structs
+
+`LicensePool` (`license_pool.h`, header-only, pure, unit-tested by `test/test_license_pool.cpp`) holds the registry; `LicenseState` derives from it and adds the file. Since 2026-09-17 one key admits up to `MAX_DEVICES_PER_KEY = 5` sockets at once: a person's linked devices share one key (the linked device inherits it with the imported database) and the relay keeps a dead socket for up to its 120 s idle timeout, so a cap of one refused every second device and every reconnect that raced its own ghost (issue #86's surprise license prompt).
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `enabled` | `bool` | Whether license enforcement is active |
 | `keys` | `unordered_set<string>` | Set of valid license key strings |
-| `active_keys` | `unordered_map<string, string>` | license_key -> peer_id mapping for in-use keys |
+| `holders` | `unordered_map<string, unordered_set<string>>` | license_key -> peer_ids currently holding it |
 | `file_path` | `string` | Path to keys.json (saved for reload) |
 | `last_mtime` | `time_t` | Last modification time of keys.json (for change detection) |
 
@@ -367,14 +369,13 @@ Called during WebSocket auth (`handle_auth()`):
 1. If `!enabled`, return `NotRequired` (all peers connect freely).
 2. If no key provided (`key == nullptr || key->empty()`), return `KeyRequired`.
 3. If key not in `keys` set, return `InvalidKey`.
-4. If key is in `active_keys` mapped to a DIFFERENT peer_id, return `KeyInUse`.
-5. Otherwise, bind the key to this peer_id in `active_keys` and return `Ok`.
-
-One key can be reused by the same peer_id (reconnection). One key cannot be shared across different peer_ids simultaneously.
+4. If this peer_id already holds the key, return `Ok` (reconnection).
+5. If the key already has `MAX_DEVICES_PER_KEY` holders, return `KeyInUse`.
+6. Otherwise, add this peer_id to the key's holders and return `Ok`.
 
 ### license.cpp:release_key()
 
-Called when a peer disconnects (`cleanup_peer()`). Iterates `active_keys` and removes all entries where `value == peer_id`. A peer could theoretically hold multiple keys (though the current client sends only one).
+Called when a peer disconnects (`cleanup_peer()`). Removes the peer_id from every key's holder set and drops keys left with no holders.
 
 ### license.cpp:try_reload()
 
@@ -382,9 +383,8 @@ Called every 30 seconds by the license reload timer:
 1. `stat()` the keys file. If `st_mtime == last_mtime`, return (no change).
 2. Re-read and parse the JSON file.
 3. Build a new key set.
-4. **Revocation check:** For every `(license_key, peer_id)` in `active_keys`, if `license_key` is NOT in the new key set, add `peer_id` to `peers_to_kick`.
-5. Update `enabled`, `keys`, and `last_mtime`.
-6. Remove kicked peers from `active_keys`.
+4. `replace_keys()`: every holder of a key that is NOT in the new set is returned as `peers_to_kick` and forgotten; `enabled` and `keys` are swapped in.
+5. Update `last_mtime`.
 7. **Active connection revocation:** For each peer to kick, look up their `SSLWebSocket*` in `state.peer_sockets`, send `{"type":"auth_failed","error":"invalid_license_key"}`, and call `ws->end(1008, "license_revoked")`. This triggers the close handler which calls `cleanup_peer()`.
 
 The 30-second reload cycle means key revocation takes at most 30 seconds to take effect on active connections.
@@ -1020,7 +1020,7 @@ The `deploy/` templates assume the repo cloned at `/opt/HOLLOW` and a `hollow` u
 | Timestamp skew > 60s | `auth_failed`, connection closed 1008 |
 | License key required but missing | `license_key_required`, connection closed 1008 |
 | License key invalid | `invalid_license_key`, connection closed 1008 |
-| License key in use by another peer | `license_key_in_use`, connection closed 1008 |
+| License key already held by 5 other peers | `license_key_in_use`, connection closed 1008; the client keeps retrying with backoff and keeps its key |
 | IP has ≥34 active connections | `ip_limit`, connection closed 1008 (pre-auth) |
 | IP opened ≥10 connections in last 60s | `rate_limit`, connection closed 1008 (pre-auth) |
 | Guest joins > 3 rooms | `{"type":"error","error":"Guest room limit reached"}` |

@@ -1,24 +1,12 @@
 #pragma once
+#include "license_pool.h"
 #include <string>
-#include <unordered_set>
-#include <unordered_map>
 #include <ctime>
 
 struct RelayState;
 
-enum class LicenseResult {
-    Ok,
-    NotRequired,
-    InvalidKey,
-    KeyInUse,
-    KeyRequired,
-};
-
-struct LicenseState {
-    bool enabled = false;
-    std::unordered_set<std::string> keys;
-    std::unordered_map<std::string, std::string> active_keys; // license_key -> peer_id
-
+// The pool plus the file it is loaded from.
+struct LicenseState : LicensePool {
     std::string file_path;
     time_t last_mtime = 0;
 

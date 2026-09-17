@@ -142,7 +142,7 @@ TURN_SECRET=your_secret ./build/hollow-relay \
 
 Where keyN is four groups of four characters [A-Z0-9] separated by hyphens. (eg. AB12-CD32-BA30-LJ50)
 
-The file is hot-reloaded every 30 seconds. Removing a key revokes the active connection using it.
+The file is hot-reloaded every 30 seconds. Removing a key revokes the active connections using it. One key admits up to 5 devices at a time, so a person's linked devices share one key.
 
 ## Deployment
 

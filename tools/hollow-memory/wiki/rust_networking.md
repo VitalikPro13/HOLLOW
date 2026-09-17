@@ -30,7 +30,7 @@ Persistent WSS connection to the relay (configurable domain, default `relay.anon
 - `SendToRoom { room_code, data }` — binary frame: `[0x03][room_bytes][0x00][data]`. Relay broadcasts to all room members.
 - `SendDirect { room_code, target_peer, data }` — binary frame: `[0x04][room_bytes][0x00][target_bytes][0x00][data]`. Relay routes to one peer. Used for shard transfers.
 - `SendBinaryDirect { room_code, target_peer, data }` — binary frame: `[0x02][room_bytes][0x00][target_bytes][0x00][data]`. Used for file/shard streaming chunks.
-- `CheckPeers { peers, rooms }` — sends JSON `{"type":"check_peers","peers":[...],"rooms":[...]}` to relay. Relay does O(1) hashmap lookups, returns which peers are connected and which rooms are populated. Used by the 60s peer liveness timer (friends only, not servers).
+- `CheckPeers { peers, rooms }` — sends JSON `{"type":"check_peers","peers":[...],"rooms":[...]}` to relay. Relay does O(1) hashmap lookups, returns which peers are connected and which rooms are populated. Used by the 60s peer liveness timer (3 s under `cfg(test)`; friends only; since 2026-09-17 reachability is `peer_is_reachable` (device-aware) and the query names `resolver::devices_for(master)`, falling back to the master only for an identity with no known devices, because the relay only ever sees DEVICE ids and a master-keyed check read every fresh install as offline forever, not servers).
 
 ### WsEvent Enum (WS client -> swarm)
 
@@ -42,7 +42,7 @@ Persistent WSS connection to the relay (configurable domain, default `relay.anon
 - `Message { room, from, data }` — decrypted text message payload from relay binary frame type `0x05`
 - `DirectMessage { room, from, data }` — direct message from relay binary frame type `0x06`
 - `BinaryDirect { room, from, data }` — binary streaming chunk from relay binary frame type `0x02`
-- `LicenseError { reason }` — auth failed due to invalid license key; client stops reconnecting
+- `LicenseError { reason }` — auth failed on the license key. `invalid_license_key` / `license_key_required` stop the reconnect loop; `license_key_in_use` is emitted ONCE per outage (`license_busy_notified`, reset on a successful auth) and the loop keeps its backoff, because the holder is usually our own ghost socket or a sibling device
 - `RoomBudgetUpdate { joined, limit }` — tracks how many rooms are joined vs the 2000 cap (`ROOM_BUDGET_LIMIT`)
 - `RoomCapHit { room }` — server rejected a room join because cap was hit
 - `PeerStatus { online, active_rooms }` — response to `CheckPeers`. Lists which queried peers are actually connected and which rooms are populated. Swarm re-joins DM/inbox rooms for online friends to trigger RoomMembers → full state healing.
@@ -89,7 +89,7 @@ Persistent WSS connection to the relay (configurable domain, default `relay.anon
 **CRITICAL — every sink write goes through `bounded_send(write, msg)`** (30s `tokio::time::timeout` around `SinkExt::send`; all ~30 sites incl. auth, rejoin, ping, pong, every `send_command` arm). An unbounded send on a wedged TCP connection (zero-window zombie peer) pends FOREVER with no error, and while that await is pending `select!` polls no other arm — the liveness watchdog itself can never run. Timeout ⇒ error ⇒ existing break-to-reconnect paths. Never add a raw `write.send(...)` here. See memory `feedback_ws_zombie_liveness_timeout`.
 6. On disconnect: emit `WsEvent::Disconnected`, drain `cmd_rx` into `pending_commands` buffer
 7. Exponential backoff: sleep `backoff_secs` (starts 1, doubles to max 30), then loop back to step 1
-8. **License error special case**: if `connect_and_auth` error contains "license_key" or "license key", emit `LicenseError` and `return` (no reconnect)
+8. **License error special case**: a `license_key_in_use` error emits `LicenseError` once per outage and keeps reconnecting; any other error containing "license_key" or "license key" emits `LicenseError` and `return`s (no reconnect)
 
 ### Binary Frame Protocol
 

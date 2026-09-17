@@ -75,6 +75,9 @@ struct RelayInner {
     /// later (a captured older announce is a replay, not a forgery).
     recording: HashSet<String>,
     recorded: Vec<(String, Vec<u8>)>,
+    /// (querying device, queried ids) for every `check_peers`: what a node ASKS the
+    /// relay, which the reply alone cannot show.
+    check_peers_log: Vec<(String, Vec<String>)>,
     /// target device id -> a parked destruction order, mirroring the relay's kill
     /// list: one entry per target, overwritten only by a NEWER deposit, handed over
     /// on that device's next auth and deleted only by its own ack.
@@ -404,6 +407,26 @@ impl MockRelay {
         }
     }
 
+    /// Every `check_peers` query `from` sent, oldest first.
+    pub(crate) fn check_peers_queries(&self, from: &str) -> Vec<Vec<String>> {
+        let inner = self.inner.lock().unwrap();
+        inner
+            .check_peers_log
+            .iter()
+            .filter(|(f, _)| f == from)
+            .map(|(_, q)| q.clone())
+            .collect()
+    }
+
+    /// A device back online at the relay that has NOT re-joined any room, the one
+    /// state a liveness query exists to detect.
+    pub(crate) fn mark_online_silently(&self, peer_id: &str) {
+        let mut inner = self.inner.lock().unwrap();
+        if let Some(conn) = inner.conns.get_mut(peer_id) {
+            conn.online = true;
+        }
+    }
+
     /// Keep a copy of every data frame this device sends.
     pub(crate) fn set_recording(&self, peer_id: &str, on: bool) {
         let mut inner = self.inner.lock().unwrap();
@@ -648,6 +671,7 @@ impl MockRelay {
                 }
             }
             WsCommand::CheckPeers { peers, rooms } => {
+                inner.check_peers_log.push((from.to_string(), peers.clone()));
                 let online: Vec<String> = peers
                     .into_iter()
                     .filter(|p| inner.conns.get(p).map(|c| c.online).unwrap_or(false))
@@ -23112,5 +23136,67 @@ async fn destroy_friend_announce_flips_verified_and_banner() {
         "the banner clears once the identity is back, the alert carries the story",
     );
     drop(a);
+    drop(b);
+}
+
+/// Friend liveness is DEVICE-keyed. Friends are stored by MASTER while rooms and the
+/// relay hold device ids, and a fresh install's device is never its master: a
+/// master-keyed check reads every such friend as offline each minute and asks the
+/// relay about an id no socket authenticates as, so the DM-room heal never fires.
+/// The friend is a raw socket: a node behind it would heal itself back into the
+/// room on its own first tick and hide what A does.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn friend_liveness_check_is_device_keyed() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+
+    const A_MASTER: u8 = 201;
+    const A_DEV: u8 = 202;
+    const B_MASTER: u8 = 203;
+    const B_DEV: u8 = 204;
+    let b_master = NativeKeypair::from_secret_bytes(&seed_bytes(B_MASTER)).peer_id();
+    let b_dev = NativeKeypair::from_secret_bytes(&seed_bytes(B_DEV)).peer_id();
+    super::resolver::update(&b_dev, &b_master);
+    let b = raw_socket(&relay, &b_dev);
+    let a = spawn_node_with_friends(&relay, A_MASTER, A_DEV, &[&b_master]).await;
+    let dm_room = super::types::dm_room_code(&a.master_id, &b_master);
+
+    b.cmd_tx.send(WsCommand::JoinRoom { room_code: dm_room.clone() }).unwrap();
+    assert!(
+        wait_until(15, async || a.sees_peer(&b_dev).await).await,
+        "A must see B's device in the DM room"
+    );
+    // Two liveness periods with B co-present: a reachable friend is never queried.
+    let names_b = |q: &Vec<String>| q.contains(&b_master) || q.contains(&b_dev);
+    let queried = wait_until(7, async || relay.check_peers_queries(&a.device_id).iter().any(names_b)).await;
+    assert!(
+        !queried,
+        "a co-present friend must not be queried, got {:?}",
+        relay.check_peers_queries(&a.device_id)
+    );
+
+    // B's socket dies politely, then the device is back at the relay without having
+    // re-joined a room: exactly what the liveness query is for.
+    relay.set_online(&b_dev, false);
+    assert!(
+        wait_until(10, async || !a.sees_peer(&b_dev).await).await,
+        "A must drop B's device after PeerLeft"
+    );
+    relay.mark_online_silently(&b_dev);
+    let asked_device = wait_until(15, async || {
+        relay.check_peers_queries(&a.device_id).iter().any(|q| q.contains(&b_dev))
+    })
+    .await;
+    let queries = relay.check_peers_queries(&a.device_id);
+    assert!(asked_device, "the liveness query must name B's DEVICE, got {queries:?}");
+    assert!(
+        queries.iter().all(|q| !q.contains(&b_master)),
+        "a master id is never a relay query target, got {queries:?}"
+    );
+    // The relay answered "online", so A re-joined the DM room it already sat in.
+    assert!(relay.room_devices(&dm_room).contains(&a.device_id));
     drop(b);
 }

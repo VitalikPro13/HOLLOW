@@ -45,28 +45,11 @@ bool LicenseState::load_from_file(const std::string& path) {
 
 LicenseResult LicenseState::validate_key(const std::string* key,
                                           const std::string& peer_id) {
-    if (!enabled) return LicenseResult::NotRequired;
-
-    if (!key || key->empty()) return LicenseResult::KeyRequired;
-
-    if (keys.find(*key) == keys.end()) return LicenseResult::InvalidKey;
-
-    auto it = active_keys.find(*key);
-    if (it != active_keys.end() && it->second != peer_id) {
-        return LicenseResult::KeyInUse;
-    }
-
-    active_keys[*key] = peer_id;
-    return LicenseResult::Ok;
+    return validate(key, peer_id);
 }
 
 void LicenseState::release_key(const std::string& peer_id) {
-    for (auto it = active_keys.begin(); it != active_keys.end(); ) {
-        if (it->second == peer_id)
-            it = active_keys.erase(it);
-        else
-            ++it;
-    }
+    release(peer_id);
 }
 
 void LicenseState::try_reload(RelayState& state) {
@@ -101,28 +84,9 @@ void LicenseState::try_reload(RelayState& state) {
         }
     }
 
-    // Collect peers to kick (keys removed)
-    std::vector<std::string> peers_to_kick;
-    for (auto& [lic_key, pid] : active_keys) {
-        if (new_keys.find(lic_key) == new_keys.end()) {
-            peers_to_kick.push_back(pid);
-            // No logging of the revoked peer_id (user-identifying).
-        }
-    }
-
-    enabled = j.value("enabled", false);
-    keys = std::move(new_keys);
+    // No logging of the revoked peer_ids (user-identifying).
+    std::vector<std::string> peers_to_kick = replace_keys(std::move(new_keys), j.value("enabled", false));
     last_mtime = st.st_mtime;
-
-    // Remove revoked from active tracking
-    if (!peers_to_kick.empty()) {
-        for (auto& pid : peers_to_kick) {
-            for (auto it = active_keys.begin(); it != active_keys.end(); ) {
-                if (it->second == pid) it = active_keys.erase(it);
-                else ++it;
-            }
-        }
-    }
 
     fprintf(stderr, "[license] Reloaded: %zu key(s), enabled=%s\n",
             keys.size(), enabled ? "true" : "false");
