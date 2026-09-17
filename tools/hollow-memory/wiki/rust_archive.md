@@ -64,12 +64,15 @@ One file per message in the ZIP.
 | `sender_id` | String | PeerId of the sender |
 | `text` | String | Message content |
 | `timestamp` | i64 | Original send time (millis) |
-| `signature` | Option | Base64 Ed25519 signature of message_signing_payload() |
+| `signature` | Option | Base64 Ed25519 signature over the canonical v2 payload (v3 when `album_id` is set) |
 | `public_key` | Option | Base64 Ed25519 public key (protobuf-encoded) |
 | `edited_at` | Option | Timestamp of latest edit |
 | `hidden_at` | Option | Timestamp of hide/delete action |
 | `reply_to_mid` | Option | Message ID being replied to |
 | `file_id` | Option | Attached file ID |
+| `order_us` | Option | Microsecond send stamp the signature binds |
+| `lp_digest` | Option | Link-preview digest the signature binds |
+| `album_id` | Option | Album grouping id; the loader feeds it to `SignedExtras.album`, so an album row verifies against v3 |
 | `channel_id` | Option | Populated only in server (multi-channel) archives |
 | `reactions` | Vec\<ArchiveReaction\> | Inline reactions (default empty) |
 

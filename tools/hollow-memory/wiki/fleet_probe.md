@@ -174,7 +174,9 @@ alive is worse than a noisy log.
   to paste it.
 
 Every string in a step is `${VAR}`-substituted before it runs — captured values first, then the
-environment (so `${PEER}` resolves via `UI_PROBE_PEER`).
+environment (so `${PEER}` resolves via `UI_PROBE_PEER`). `Expand-FleetVars` also expands every string
+inside an array value. `fleet.ps1` seeds `${RUN}` and `${REPO}` (the repo root with forward slashes,
+for fixture paths in scenarios).
 
 A fourth op joined them for issue #54: **`view`** — `width`/`height` (or `reset: true`) resizes the
 FRAMEWORK viewport, which is what "the user maximized the window" looks like to every widget, and
@@ -210,6 +212,14 @@ to fit, walks back to the video with `arrowLeft`, hovers the transport and the v
 fullscreen from inside the viewer and proves Escape leaves the fullscreen FIRST and stays in the
 viewer (a second Escape closes it), and asserts `expect_window_same` against a snapshot taken before
 any of it, the same window-identity check `media_fullscreen.json` uses for Part A.
+
+**Albums (Part C, 2026-09-17).** `attach_file` takes `path` or `paths` (a list) and stages every
+file on the open composer as a multi-file drop does. `album_dm.json` needs fixtures from
+`python scripts/make_album_fixtures.py` (Pillow; three stills plus a 9.5 MB noisy animated GIF in
+`build/album_fixtures`, referenced as `${REPO}/build/album_fixtures/...`): friends a and b, then a
+sends two captioned albums with the slow GIF between stills and both sides must render them in
+strip order with the caption visible. It is the journey that found items reordering by conversion
+time (the send stamp was minted after the image encode).
 
 ## Rules that are not optional
 

@@ -444,7 +444,7 @@ The `sig_event_rx` select arm and the whole HTTP signaling task are gone (see `r
 
 Two CPU-heavy send paths hop off the event loop via `spawn_blocking` and RE-ENTER through `cmd_tx` so the dispatcher keeps processing messages/CRDT/call signaling meanwhile:
 
-- `NodeCommand::SendFileConverted(Box<SendFileConvertedPayload>)` — image WebP/GIF conversion result; `handle_send_file` offloads convertible images, `finish_send_file` resumes at the store/fan-out steps (non-image files go straight through inline).
+- `NodeCommand::SendFileConverted(Box<SendFileConvertedPayload>)` — image WebP/GIF conversion result; `handle_send_file` offloads convertible images, `finish_send_file` resumes at the store/fan-out steps with the `order_us` and `album` minted before the hop (non-image files go straight through inline).
 - `NodeCommand::VaultUploadPrepared(Box<VaultUploadPreparedPayload>)` — Reed-Solomon encode + local shard writes done on the blocking pool; `handle_vault_upload_prepared` resumes distribution/manifest broadcast. Failures emit `FileFailed`/`VaultUploadFailed` from the spawned task directly.
 
 ## Coordination Between WS, WebRTC, and Gossip

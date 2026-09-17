@@ -59,6 +59,10 @@ class VideoMessageBubble extends ConsumerStatefulWidget {
   final int? timestampMs;
   final bool isMine;
 
+  /// A fixed album cell: the poster fills it and a tap opens the viewer,
+  /// which owns playback, instead of playing inline in a tile.
+  final Size? tileSize;
+
   const VideoMessageBubble({
     super.key,
     required this.attachment,
@@ -68,6 +72,7 @@ class VideoMessageBubble extends ConsumerStatefulWidget {
     this.senderId,
     this.timestampMs,
     this.isMine = false,
+    this.tileSize,
   });
 
   @override
@@ -396,6 +401,8 @@ class _VideoMessageBubbleState extends ConsumerState<VideoMessageBubble> {
   /// Falls back to the poster's intrinsic aspect and then to 16:9, for an old
   /// client or a failed ffmpeg probe that left no dimensions.
   Size _resolveDisplaySize() {
+    final tile = widget.tileSize;
+    if (tile != null) return tile;
     const maxWidth = 320.0;
     const maxHeight = 260.0;
     double? srcW = widget.attachment.width?.toDouble();
@@ -482,8 +489,9 @@ class _VideoMessageBubbleState extends ConsumerState<VideoMessageBubble> {
         (isInVaultCache ? _findShareRootHash(resolvedDiskPath!) : null);
     final showKeepAndSeed = shareRoot != null && isInVaultCache;
 
+    final isTile = widget.tileSize != null;
     final tapAction = canPlay
-        ? _onPlayTapped
+        ? (isTile ? _openInViewer : _onPlayTapped)
         : (showDownload ? () => widget.onDownload!() : null);
     // A surface that takes no taps must not be announced as a button, nor offer
     // "Download" to a screen reader.
@@ -593,6 +601,7 @@ class _VideoMessageBubbleState extends ConsumerState<VideoMessageBubble> {
                 bottom: HollowSpacing.sm,
                 child: _Badge(text: _formatDuration(_vthumb!.durMs), hollow: hollow),
               ),
+            if (!isTile)
             Positioned(
               right: HollowSpacing.sm,
               bottom: HollowSpacing.sm,
@@ -605,7 +614,7 @@ class _VideoMessageBubbleState extends ConsumerState<VideoMessageBubble> {
                 hollow: hollow,
               ),
             ),
-            if (showKeepAndSeed && _state == _PlaybackState.thumbnail)
+            if (showKeepAndSeed && !isTile && _state == _PlaybackState.thumbnail)
               Positioned(
                 right: HollowSpacing.sm,
                 top: HollowSpacing.sm,
@@ -688,6 +697,23 @@ class _VideoMessageBubbleState extends ConsumerState<VideoMessageBubble> {
       hollow: hollow,
       onFullscreen: () => _openFullscreen(session),
     );
+  }
+
+  /// Opens the viewer on this video without an inline session: an album
+  /// cell is too small to play in, and the viewer opens its own.
+  void _openInViewer() {
+    final path = _resolveVideoPath();
+    final item = MediaItem(
+      attachment: widget.attachment,
+      messageId: widget.messageId,
+      senderId: widget.senderId,
+      timestampMs: widget.timestampMs,
+      isMine: widget.isMine,
+    );
+    unawaited(openMediaViewer(
+      context,
+      path == null ? item : item.withDiskPath(path),
+    ).then((_) => restoreAppOrientation()));
   }
 
   /// Hands the live session to the viewer. The controller is never disposed

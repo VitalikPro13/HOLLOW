@@ -361,6 +361,9 @@ class ArchiveMessageFfi {
 
   /// Channel ID — populated only in server (multi-channel) archives.
   final String? channelId;
+
+  /// Album this message renders grouped into, `None` when standalone.
+  final String? albumId;
   final List<ArchiveReactionFfi> reactions;
 
   /// Whether this message's signature is valid (None if not yet verified).
@@ -378,6 +381,7 @@ class ArchiveMessageFfi {
     this.replyToMid,
     this.fileId,
     this.channelId,
+    this.albumId,
     required this.reactions,
     this.signatureValid,
   });
@@ -395,6 +399,7 @@ class ArchiveMessageFfi {
       replyToMid.hashCode ^
       fileId.hashCode ^
       channelId.hashCode ^
+      albumId.hashCode ^
       reactions.hashCode ^
       signatureValid.hashCode;
 
@@ -414,6 +419,7 @@ class ArchiveMessageFfi {
           replyToMid == other.replyToMid &&
           fileId == other.fileId &&
           channelId == other.channelId &&
+          albumId == other.albumId &&
           reactions == other.reactions &&
           signatureValid == other.signatureValid;
 }

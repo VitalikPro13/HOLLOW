@@ -103,7 +103,7 @@ The FFI-facing event enum — ~80 variants covering every domain in the app. Org
 
 **Core networking:** `PeerDiscovered`, `PeerExpired`, `PeerDisconnected`, `RoomCleared`, `Listening`, `SessionEstablished`, `Error`, `KeyExchangeStarted`, `KeyExchangeProgress`.
 
-**DM messaging:** `MessageReceived` (from_peer, text, timestamp, message_id, reply_to_mid, link_preview, signature, public_key), `MessageSent`, `MessageSendFailed`, `DmMessageEdited`, `DmMessageDeleted`, `DmReactionAdded`, `DmReactionRemoved`, `DmSyncCompleted`.
+**DM messaging:** `MessageReceived` (from_peer, text, timestamp, message_id, reply_to_mid, link_preview, signature, public_key, album_id, is_own, duplicate), `MessageSent`, `MessageSendFailed`, `DmMessageEdited`, `DmMessageDeleted`, `DmReactionAdded`, `DmReactionRemoved`, `DmSyncCompleted`.
 
 **Channel messaging:** `ChannelMessageReceived`, `ChannelMessageSent`, `ChannelMessageEdited`, `ChannelMessageDeleted`, `ChannelReactionAdded`, `ChannelReactionRemoved`.
 
@@ -375,9 +375,9 @@ Does NOT send a graceful shutdown command — `notify_shutdown()` should be call
 
 ### send_file()
 
-`network.rs:send_file(peer_id, server_id, channel_id, file_path, message_id, message_text, vthumb, override_width, override_height, share_root_hash, share_key_hex)` -> `Result<(), String>`
+`network.rs:send_file(peer_id, server_id, channel_id, file_path, message_id, message_text, vthumb, override_width, override_height, share_root_hash, share_key_hex, is_voice, poster_bytes, album)` -> `Result<(), String>`
 
-Sends `NodeCommand::SendFile`. Handles both DM and channel file sends based on which IDs are provided (empty strings filtered to `None`). The `share_root_hash`/`share_key_hex` pair is reassembled into `Option<node::ShareRef>` for share-backed large files (>34 MB). `vthumb` is converted to internal `node::VideoThumbRef` for video thumbnail back-references. `override_width`/`override_height` are for video files where Dart passes pixel dimensions (Rust extracts these itself for images).
+Sends `NodeCommand::SendFile`. Handles both DM and channel file sends based on which IDs are provided (empty strings filtered to `None`). The `share_root_hash`/`share_key_hex` pair is reassembled into `Option<node::ShareRef>` for share-backed large files (>34 MB). `vthumb` is converted to internal `node::VideoThumbRef` for video thumbnail back-references. `override_width`/`override_height` are for video files where Dart passes pixel dimensions (Rust extracts these itself for images). `album` (trailing) = the signed album id shared by 1 to 10 back-to-back sends; empty = none, a non-UUID returns `Err("Invalid album id")`.
 
 ### request_file_from_peer()
 

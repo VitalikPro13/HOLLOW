@@ -477,11 +477,18 @@ class MediaListItem {
   /// Milliseconds. The owning message's time, else the file's `created_at`.
   final PlatformInt64 ts;
   final String? contentId;
+  final String? albumId;
 
-  const MediaListItem({required this.file, required this.ts, this.contentId});
+  const MediaListItem({
+    required this.file,
+    required this.ts,
+    this.contentId,
+    this.albumId,
+  });
 
   @override
-  int get hashCode => file.hashCode ^ ts.hashCode ^ contentId.hashCode;
+  int get hashCode =>
+      file.hashCode ^ ts.hashCode ^ contentId.hashCode ^ albumId.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -490,7 +497,8 @@ class MediaListItem {
           runtimeType == other.runtimeType &&
           file == other.file &&
           ts == other.ts &&
-          contentId == other.contentId;
+          contentId == other.contentId &&
+          albumId == other.albumId;
 }
 
 /// One read pointer a sibling reported, as Dart hands it back to the store.
@@ -642,6 +650,9 @@ class StoredChannelMessage {
   /// Link preview for the first URL in this message (Phase 6.75).
   final LinkPreviewRef? linkPreview;
 
+  /// Album this message renders grouped into, `None` when standalone.
+  final String? albumId;
+
   const StoredChannelMessage({
     required this.id,
     required this.serverId,
@@ -658,6 +669,7 @@ class StoredChannelMessage {
     this.replyToMid,
     this.fileId,
     this.linkPreview,
+    this.albumId,
   });
 
   @override
@@ -676,7 +688,8 @@ class StoredChannelMessage {
       hiddenAt.hashCode ^
       replyToMid.hashCode ^
       fileId.hashCode ^
-      linkPreview.hashCode;
+      linkPreview.hashCode ^
+      albumId.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -697,7 +710,8 @@ class StoredChannelMessage {
           hiddenAt == other.hiddenAt &&
           replyToMid == other.replyToMid &&
           fileId == other.fileId &&
-          linkPreview == other.linkPreview;
+          linkPreview == other.linkPreview &&
+          albumId == other.albumId;
 }
 
 /// File metadata returned to Dart.
@@ -837,6 +851,9 @@ class StoredMessage {
   /// Link preview for the first URL in this message (Phase 6.75).
   final LinkPreviewRef? linkPreview;
 
+  /// Album this message renders grouped into, `None` when standalone.
+  final String? albumId;
+
   const StoredMessage({
     required this.id,
     required this.peerId,
@@ -851,6 +868,7 @@ class StoredMessage {
     this.replyToMid,
     this.fileId,
     this.linkPreview,
+    this.albumId,
   });
 
   @override
@@ -867,7 +885,8 @@ class StoredMessage {
       hiddenAt.hashCode ^
       replyToMid.hashCode ^
       fileId.hashCode ^
-      linkPreview.hashCode;
+      linkPreview.hashCode ^
+      albumId.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -886,7 +905,8 @@ class StoredMessage {
           hiddenAt == other.hiddenAt &&
           replyToMid == other.replyToMid &&
           fileId == other.fileId &&
-          linkPreview == other.linkPreview;
+          linkPreview == other.linkPreview &&
+          albumId == other.albumId;
 }
 
 /// A single edit history entry.

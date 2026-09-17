@@ -223,6 +223,11 @@ pub struct PersonalEmoteEntry {
     pub added_at: i64,
 }
 
+/// An album id behind one pointer: these enums sit by value in the swarm's async
+/// frames, which already brush the tokio worker stack (a `String` overflowed it).
+#[allow(clippy::box_collection)]
+pub(crate) type BoxedAlbumId = Box<String>;
+
 /// Events emitted by the network node.
 pub(crate) enum NetworkEvent {
     PeerDiscovered { peer: DiscoveredPeer },
@@ -231,6 +236,7 @@ pub(crate) enum NetworkEvent {
     RoomCleared,
     Listening { address: String },
     MessageReceived { from_peer: String, text: String, timestamp: i64, message_id: String, reply_to_mid: String, link_preview: Option<LinkPreviewRef>, signature: Option<String>, public_key: Option<String>,
+        album_id: Option<BoxedAlbumId>,
         /// True when this DM is our OWN message echoed from a sibling device: then
         /// `from_peer` is the recipient master and Dart must render it as outgoing.
         is_own: bool,
@@ -239,6 +245,7 @@ pub(crate) enum NetworkEvent {
         /// skip unread increments and notifications.
         duplicate: bool },
     ChannelMessageReceived { server_id: String, channel_id: String, from_peer: String, text: String, timestamp: i64, message_id: String, reply_to_mid: String, link_preview: Option<LinkPreviewRef>, signature: Option<String>, public_key: Option<String>,
+        album_id: Option<BoxedAlbumId>,
         /// True when `reply_to_mid` points at a message WE authored; Dart's
         /// mentions-only notification gate reads this.
         reply_to_own: bool,
@@ -681,6 +688,8 @@ pub(crate) struct SendFilePayload {
     /// into `FileHeaderPayload::thumb` and falls back to its dimensions when the
     /// ffmpeg probe found none, so receivers always get the right aspect.
     pub poster: Option<Vec<u8>>,
+    /// Album grouping id, already shape-checked at the FFI boundary.
+    pub album: Option<String>,
 }
 
 /// Internal re-entry payload: an image SendFile whose WebP/GIF conversion ran
@@ -703,6 +712,9 @@ pub(crate) struct SendFileConvertedPayload {
     /// Tiny base64 WebP placeholder built alongside the conversion.
     pub thumb: Option<String>,
     pub voice: bool,
+    pub album: Option<String>,
+    /// Send stamp reserved before the conversion hop.
+    pub order_us: i64,
 }
 
 /// Internal re-entry payload: erasure coding and the local shard writes ran off
@@ -2057,6 +2069,9 @@ pub(crate) enum HavenMessage {
         /// default. `None` from a pre-0.8.3 sender, whose v1 signature omits it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         order_us: Option<i64>,
+        /// Album grouping id, bound by the v3 message signature.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        album: Option<BoxedAlbumId>,
         /// Attachment metadata for GUESTS, who cannot decrypt the MLS FileHeader
         /// (never bytes). The v2 signature binds `file_id`, not this blob, so receivers
         /// require `file_meta.fid == file_id`; members ignore it entirely and take
@@ -2784,6 +2799,9 @@ pub(crate) struct DirectMessagePayload {
     /// `None` from a pre-9C peer → receiver falls back to `ts * 1000`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub order_us: Option<i64>,
+    /// Album grouping id (hyphenated UUID), bound by the v3 message signature.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub album: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2808,6 +2826,9 @@ pub(crate) struct ChannelMessagePayload {
     /// `None` from a pre-9C peer → receiver falls back to `ts * 1000`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub order_us: Option<i64>,
+    /// Album grouping id (hyphenated UUID), bound by the v3 message signature.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub album: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2851,6 +2872,9 @@ pub(crate) struct FileHeaderPayload {
     /// `ts*1000` default stores a row whose signature fails when re-served.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub order_us: Option<i64>,
+    /// Album grouping id (hyphenated UUID), bound by the v3 message signature.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub album: Option<String>,
     /// Base64 of the AES-encrypted file bytes, INLINED into the header. Only set
     /// when delivering a small image to an OFFLINE peer, so the relay buffers them
     /// alongside the message and the FCM fetch node can write the file to disk with
@@ -3918,6 +3942,9 @@ pub(crate) struct SyncMessageItem {
     /// preview, or a pre-0.8.3 responder whose rows are v1-signed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lp_digest: Option<String>,
+    /// Album grouping id (hyphenated UUID), bound by the v3 message signature.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub album: Option<String>,
     /// The message's link preview, carried IN FULL, so a peer catching up through
     /// backfill can render the card its row's signature already binds.
     ///
@@ -4173,6 +4200,9 @@ pub(crate) struct DmSyncItem {
     /// Hex link-preview digest; see [`SyncMessageItem::lp_digest`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lp_digest: Option<String>,
+    /// Album grouping id; see [`SyncMessageItem::album`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub album: Option<String>,
     /// The DM's link preview, carried in full. See [`SyncMessageItem::lp`] —
     /// same field, same recompute-the-digest rule, same reason it exists.
     #[serde(default, skip_serializing_if = "Option::is_none")]

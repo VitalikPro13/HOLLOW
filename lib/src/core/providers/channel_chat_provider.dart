@@ -82,7 +82,8 @@ class ChannelChatNotifier
       String text, int timestampMs, String messageId, String replyToMid,
       {network_api.LinkPreviewRef? linkPreview,
       String? signature,
-      String? publicKey}) {
+      String? publicKey,
+      String? albumId}) {
     final key = _key(serverId, channelId);
     final existing = state[key] ?? [];
 
@@ -102,6 +103,7 @@ class ChannelChatNotifier
       linkPreview: linkPreview,
       signature: signature,
       publicKey: publicKey,
+      albumId: albumId,
     );
     _addMessage(serverId, channelId, msg);
     // No DB save here — Rust already persisted before emitting the event.
@@ -407,6 +409,7 @@ class ChannelChatNotifier
                       ? fileMap[m.fileId]
                       : null,
                   linkPreview: m.linkPreview,
+                  albumId: m.albumId,
                 ))
             .toList();
 
@@ -554,6 +557,7 @@ class ChannelChatNotifier
               m.messageId != null ? reactionsMap[m.messageId] : null,
           fileAttachment: m.fileId != null ? fileMap[m.fileId] : null,
           linkPreview: m.linkPreview,
+          albumId: m.albumId,
         ));
       }
 
@@ -591,6 +595,7 @@ class ChannelChatNotifier
     bool isImage,
     String localPath, {
     String text = '',
+    String? albumId,
   }) {
     final localPeerId = ref.read(identityProvider).peerId ?? '';
     _addMessage(
@@ -601,6 +606,7 @@ class ChannelChatNotifier
         text: text,
         isMe: true,
         messageId: messageId,
+        albumId: albumId,
         fileAttachment: FileAttachment(
           fileId: messageId,
           fileName: fileName,

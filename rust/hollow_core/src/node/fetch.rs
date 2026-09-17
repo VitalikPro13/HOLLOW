@@ -492,7 +492,7 @@ fn try_process_channel_msg(
                 MessageEnvelope::ChannelMessage { inner } => {
                     let ChannelMessagePayload {
                         sid, cid, text, ts, sig, pk, mid, reply_to, file_id,
-                        link_preview, order_us,
+                        link_preview, order_us, album,
                     } = *inner;
                     // Conference chat is live-only — it must never be persisted
                     // by a push-fetch either (mirrors the live-ingest guard).
@@ -513,6 +513,7 @@ fn try_process_channel_msg(
                         file_id: file_id.as_deref(),
                         order_us,
                         lp_digest: lp_digest.as_deref(),
+                        album: album.as_deref(),
                     };
                     if fetch_channel_sig_rejected(
                         &sender_master, &sid, &cid, ts, &text, sig.as_deref(), pk.as_deref(),
@@ -524,7 +525,7 @@ fn try_process_channel_msg(
                     insert_channel_row(
                         db_path, db_passphrase, &sid, &cid, &sender_master, &text, ts,
                         sig.as_deref(), pk.as_deref(), mid.as_deref(), reply_to.as_deref(),
-                        file_id.as_deref(), order_us, link_preview.as_ref(),
+                        file_id.as_deref(), order_us, album.as_deref(), link_preview.as_ref(),
                     );
                     Some(FetchedDm {
                         from_peer: sender_master,
@@ -543,7 +544,7 @@ fn try_process_channel_msg(
         }
         HavenMessage::PublicChannelMessage {
             server_id, channel_id, text, ts, sig, pk, mid, reply_to, file_id,
-            link_preview, order_us,
+            link_preview, order_us, album,
             // Guest display metadata — irrelevant to the push-fetch path
             // (members store metadata from the MLS FileHeader instead).
             file_meta: _,
@@ -563,6 +564,7 @@ fn try_process_channel_msg(
                 file_id: file_id.as_deref(),
                 order_us,
                 lp_digest: lp_digest.as_deref(),
+                album: album.as_deref().map(String::as_str),
             };
             if fetch_channel_sig_rejected(
                 &sender_master, &server_id, &channel_id, ts, &text,
@@ -574,7 +576,7 @@ fn try_process_channel_msg(
             insert_channel_row(
                 db_path, db_passphrase, &server_id, &channel_id, &sender_master, &text, ts,
                 sig.as_deref(), pk.as_deref(), Some(&mid), reply_to.as_deref(),
-                file_id.as_deref(), order_us, link_preview.as_ref(),
+                file_id.as_deref(), order_us, album.as_deref().map(String::as_str), link_preview.as_ref(),
             );
             Some(FetchedDm {
                 from_peer: sender_master,
@@ -641,6 +643,7 @@ fn insert_channel_row(
     reply_to: Option<&str>,
     file_id: Option<&str>,
     order_us: Option<i64>,
+    album: Option<&str>,
     link_preview: Option<&LinkPreviewRef>,
 ) {
     if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
@@ -652,7 +655,7 @@ fn insert_channel_row(
         if !exists {
             let inserted = store.insert_channel_message(
                 server_id, channel_id, sender, text, false, ts, sig, pk, mid,
-                reply_to, file_id, order_us,
+                reply_to, file_id, order_us, album,
             );
             // Persist the preview too: dedup by mid means the full app never
             // re-ingests this row, so a dropped card is lost forever.
@@ -871,6 +874,7 @@ fn handle_direct_message(
         pk,
         link_preview,
         order_us,
+        album,
         ..
     } = inner;
 
@@ -884,6 +888,7 @@ fn handle_direct_message(
         file_id: file_id.as_deref(),
         order_us,
         lp_digest: lp_digest.as_deref(),
+        album: album.as_deref(),
     };
     if fetch_dm_sig_rejected(convo, local_master, ts, &msg_text, sig.as_deref(), pk.as_deref(), &extras) {
         return None;
@@ -893,7 +898,8 @@ fn handle_direct_message(
 
     persist_direct_message(
         from, convo, &msg_text, ts, mid.as_deref(), reply_to.as_deref(), file_id.as_deref(),
-        order_us, sig.as_deref(), pk.as_deref(), link_preview.as_ref(), db_path, db_passphrase,
+        order_us, album.as_deref(), sig.as_deref(), pk.as_deref(), link_preview.as_ref(),
+        db_path, db_passphrase,
     );
 
     Some(FetchedDm {
@@ -922,6 +928,7 @@ fn persist_direct_message(
     // The SENDER's Lamport stamp from the wire — persisted faithfully because
     // the v2 signature binds it (a ts*1000 default would wedge later re-serves).
     order_us: Option<i64>,
+    album: Option<&str>,
     sig: Option<&str>,
     pk: Option<&str>,
     link_preview: Option<&LinkPreviewRef>,
@@ -950,6 +957,7 @@ fn persist_direct_message(
                 reply_to,
                 file_id,
                 order_us,
+                album,
             );
             if let (Some(lp), Some(message_id)) = (link_preview, mid) {
                 if let Ok(lp_json) = serde_json::to_string(lp) {
@@ -1007,6 +1015,7 @@ fn handle_link_preview_set(
         file_id: row.file_id.as_deref(),
         order_us: row.order_us,
         lp_digest: lp_digest.as_deref(),
+        album: row.album_id.as_deref(),
     };
     if fetch_dm_sig_rejected(
         convo, local_master, ts, &row.text, sig.as_deref(), pk.as_deref(), &extras,
@@ -1053,6 +1062,7 @@ fn handle_edit_message(
         file_id: row_extras.as_ref().and_then(|r| r.file_id.as_deref()),
         order_us: row_extras.as_ref().and_then(|r| r.order_us),
         lp_digest: lp_digest.as_deref(),
+        album: row_extras.as_ref().and_then(|r| r.album_id.as_deref()),
     };
     if fetch_dm_sig_rejected(convo, local_master, ts, &new_text, sig.as_deref(), pk.as_deref(), &extras) {
         return None;
@@ -1241,6 +1251,7 @@ fn persist_inline_image(
             file_id: Some(&p.fid),
             order_us: p.order_us,
             lp_digest: None,
+            album: p.album.as_deref(),
         };
         let sentinel_sig_ok = check_backfill_signature(
             convo, "dm", local_master, p.ts, None, &extras, msg_text,
@@ -1254,7 +1265,7 @@ fn persist_inline_image(
             let _ = store.insert(
                 convo, msg_text, false, p.ts,
                 p.sig.as_deref(), p.pk.as_deref(),
-                p.mid.as_deref(), None, Some(&p.fid), p.order_us,
+                p.mid.as_deref(), None, Some(&p.fid), p.order_us, p.album.as_deref(),
             );
         }
         // context_id + sender_id key on the MASTER so the file lands under the

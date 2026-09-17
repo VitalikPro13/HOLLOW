@@ -47,6 +47,10 @@ class FileAttachmentWidget extends ConsumerWidget {
   final int? timestampMs;
   final bool isMine;
 
+  /// A fixed cell inside an album mosaic: media fill it cropped instead of
+  /// sizing to their own aspect. Null everywhere else.
+  final Size? tileSize;
+
   const FileAttachmentWidget({
     super.key,
     required this.attachment,
@@ -54,6 +58,7 @@ class FileAttachmentWidget extends ConsumerWidget {
     this.senderId,
     this.timestampMs,
     this.isMine = false,
+    this.tileSize,
   });
 
   MediaItem _mediaItem() => MediaItem(
@@ -104,7 +109,7 @@ class FileAttachmentWidget extends ConsumerWidget {
     }
 
     // The same flow as the hover-bar Download button (issue #41).
-    void onDownload() => _startManualDownload(context, ref);
+    void onDownload() => startManualAttachmentDownload(context, ref, attachment);
 
     if (status.control == FileCardControl.retry) {
       return _buildUnavailableCard(hollow, status, onDownload);
@@ -122,6 +127,7 @@ class FileAttachmentWidget extends ConsumerWidget {
         senderId: senderId,
         timestampMs: timestampMs,
         isMine: isMine,
+        tileSize: tileSize,
       );
     }
 
@@ -152,76 +158,6 @@ class FileAttachmentWidget extends ConsumerWidget {
       return _buildImagePreview(context, hollow, isComplete, diskPath, isDownloading, progress, bytesReceived, vaultPhase, status, onDownload);
     }
     return _buildFileCard(hollow, isComplete, isDownloading, progress, bytesReceived, vaultPhase, status, onDownload);
-  }
-
-  /// Starts a manual download, the placeholder twin of the hover-bar Download
-  /// button (issue #41).
-  ///
-  /// A share-backed file rejoins its swarm through the PERSISTED share ref,
-  /// because a FileRequest response would hit our own size cap and cannot
-  /// resume a share. A guest in a public channel goes through the
-  /// receipt-gated RequestPublicFile; everything else is a FileRequest.
-  Future<void> _startManualDownload(BuildContext context, WidgetRef ref) async {
-    final transfer = ref.read(fileTransferProvider)[attachment.fileId];
-    if (transfer?.isDownloading == true) {
-      HollowToast.show(context, 'File is already downloading...',
-          type: HollowToastType.info);
-      return;
-    }
-    ref.read(fileTransferProvider.notifier).clearDeclined(attachment.fileId);
-    try {
-      final info =
-          await storage_api.getFileMetadata(fileId: attachment.fileId);
-      final shareRoot = attachment.shareRootHash ??
-          info?.shareRootHash ??
-          transfer?.shareRootHash;
-      final shareKey = attachment.shareKeyHex ?? info?.shareKeyHex;
-      final contextType = info?.contextType ?? '';
-      final contextId = info?.contextId ?? '';
-      final isChannel = contextType == 'channel' && contextId.contains(':');
-      final serverId = isChannel ? contextId.split(':').first : '';
-
-      // A FileRequest answers itself on the card; the other two branches have
-      // no such state, so they keep their toast.
-      var announce = true;
-
-      if (shareRoot != null && shareKey != null) {
-        final isVideo =
-            _videoExtensions.contains(attachment.fileExt.toLowerCase());
-        await ref.read(eventStreamProvider.notifier).startManualShareDownload(
-              fileId: attachment.fileId,
-              rootHash: shareRoot,
-              keyHex: shareKey,
-              serverId: serverId,
-              sequential: isVideo,
-            );
-      } else if (isChannel &&
-          !ref.read(serverListProvider).containsKey(serverId)) {
-        // A guest viewing a public channel.
-        await crdt_api.requestPublicFile(
-          serverId: serverId,
-          fileId: attachment.fileId,
-          peerHint: info?.senderId,
-        );
-      } else {
-        final target = contextType == 'dm' ? contextId : info?.senderId;
-        if (target == null || target.isEmpty) {
-          throw Exception('no known holder for this file');
-        }
-        await network_api.requestFileFromPeer(
-            fileId: attachment.fileId, peerId: target, chunks: []);
-        announce = false;
-      }
-      if (announce && context.mounted) {
-        HollowToast.show(context, 'Requesting file...',
-            type: HollowToastType.info);
-      }
-    } catch (e) {
-      if (context.mounted) {
-        HollowToast.show(context, 'Download failed: $e',
-            type: HollowToastType.error);
-      }
-    }
   }
 
   /// True for a vault video, or for a direct P2P video by extension.
@@ -345,6 +281,8 @@ class FileAttachmentWidget extends ConsumerWidget {
   /// Display box for the preview or placeholder, at the attachment's intrinsic
   /// aspect, or the full box when the dimensions are unknown.
   ({double w, double h}) _displayBoxSize() {
+    final tile = tileSize;
+    if (tile != null) return (w: tile.width, h: tile.height);
     double displayWidth = _previewMaxWidth;
     double displayHeight = _previewMaxHeight;
     if (attachment.width != null && attachment.height != null && attachment.height! > 0) {
@@ -398,16 +336,18 @@ class FileAttachmentWidget extends ConsumerWidget {
           child: MouseRegion(
             cursor: SystemMouseCursors.click,
             child: ConstrainedBox(
-              constraints: const BoxConstraints(
-                maxWidth: maxWidth,
-                maxHeight: maxHeight,
-              ),
+              constraints: tileSize != null
+                  ? BoxConstraints.tight(tileSize!)
+                  : const BoxConstraints(
+                      maxWidth: maxWidth,
+                      maxHeight: maxHeight,
+                    ),
               child: ClipRRect(
                 borderRadius: BorderRadius.circular(hollow.radiusSm),
                 child: AttachmentImage(
                   path: diskPath,
                   animated: isGif,
-                  fit: BoxFit.contain,
+                  fit: tileSize != null ? BoxFit.cover : BoxFit.contain,
                   // Decode at bubble size: a 12 MP camera image decoded on
                   // first paint is a visible beat on phones. ResizeImage never
                   // upscales, and the fullscreen view decodes full-res
@@ -434,7 +374,13 @@ class FileAttachmentWidget extends ConsumerWidget {
     // A header thumbnail (issue #41) renders BLURRED under the content behind a
     // scrim, so the download button and progress labels keep their contrast.
     final thumbBytes = _thumbBytes();
-    Widget shell(Widget child) => Container(
+    // An album cell can be smaller than the button and its caption.
+    Widget fit(Widget child) => tileSize == null
+        ? child
+        : Center(child: FittedBox(fit: BoxFit.scaleDown, child: child));
+    Widget shell(Widget content) {
+      final child = fit(content);
+      return Container(
           width: width,
           height: height,
           clipBehavior: Clip.antiAlias,
@@ -462,7 +408,8 @@ class FileAttachmentWidget extends ConsumerWidget {
                     child,
                   ],
                 ),
-        );
+      );
+    }
 
     // Idle with a download hook gives the pressable placeholder (issue #41): an
     // image-sized box with a download button rather than a dead rectangle. When
@@ -737,5 +684,76 @@ class FileAttachmentWidget extends ConsumerWidget {
       'txt' || 'md' || 'log' => LucideIcons.fileText,
       _ => LucideIcons.file,
     };
+  }
+}
+
+/// Starts a manual download, the placeholder twin of the hover-bar Download
+/// button (issue #41).
+///
+/// A share-backed file rejoins its swarm through the PERSISTED share ref,
+/// because a FileRequest response would hit our own size cap and cannot
+/// resume a share. A guest in a public channel goes through the
+/// receipt-gated RequestPublicFile; everything else is a FileRequest.
+Future<void> startManualAttachmentDownload(
+  BuildContext context, WidgetRef ref, FileAttachment attachment) async {
+  final transfer = ref.read(fileTransferProvider)[attachment.fileId];
+  if (transfer?.isDownloading == true) {
+    HollowToast.show(context, 'File is already downloading...',
+        type: HollowToastType.info);
+    return;
+  }
+  ref.read(fileTransferProvider.notifier).clearDeclined(attachment.fileId);
+  try {
+    final info =
+        await storage_api.getFileMetadata(fileId: attachment.fileId);
+    final shareRoot = attachment.shareRootHash ??
+        info?.shareRootHash ??
+        transfer?.shareRootHash;
+    final shareKey = attachment.shareKeyHex ?? info?.shareKeyHex;
+    final contextType = info?.contextType ?? '';
+    final contextId = info?.contextId ?? '';
+    final isChannel = contextType == 'channel' && contextId.contains(':');
+    final serverId = isChannel ? contextId.split(':').first : '';
+
+    // A FileRequest answers itself on the card; the other two branches have
+    // no such state, so they keep their toast.
+    var announce = true;
+
+    if (shareRoot != null && shareKey != null) {
+      final isVideo =
+          _videoExtensions.contains(attachment.fileExt.toLowerCase());
+      await ref.read(eventStreamProvider.notifier).startManualShareDownload(
+            fileId: attachment.fileId,
+            rootHash: shareRoot,
+            keyHex: shareKey,
+            serverId: serverId,
+            sequential: isVideo,
+          );
+    } else if (isChannel &&
+        !ref.read(serverListProvider).containsKey(serverId)) {
+      // A guest viewing a public channel.
+      await crdt_api.requestPublicFile(
+        serverId: serverId,
+        fileId: attachment.fileId,
+        peerHint: info?.senderId,
+      );
+    } else {
+      final target = contextType == 'dm' ? contextId : info?.senderId;
+      if (target == null || target.isEmpty) {
+        throw Exception('no known holder for this file');
+      }
+      await network_api.requestFileFromPeer(
+          fileId: attachment.fileId, peerId: target, chunks: []);
+      announce = false;
+    }
+    if (announce && context.mounted) {
+      HollowToast.show(context, 'Requesting file...',
+          type: HollowToastType.info);
+    }
+  } catch (e) {
+    if (context.mounted) {
+      HollowToast.show(context, 'Download failed: $e',
+          type: HollowToastType.error);
+    }
   }
 }

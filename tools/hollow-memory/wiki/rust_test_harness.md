@@ -187,6 +187,10 @@ Fleet cross-check (real app, real relay, zero overlap between the two peers unti
 
 ## Current tests (13)
 
+Albums (Part C, 2026-09-17), sharing helper `send_album_files(node, dir, peer_id, server_id, channel_id, mid_prefix, kinds, caption)` (one `SendFile` per `kinds` entry, `png`/`gif`/other, caption on item 0, fixed `HARNESS_ALBUM` id) and `assert_album_row_verifies` (v3 signature over the stored row):
+- `album_files_over_dm_persist_and_verify_album_id`: a still, a slow animated GIF and a still over a DM: every receiver row and live event carries the album, the caption stays on item 0, rows verify, and `order_us` stays in SEND order despite the GIF encoding slowest (guards stamping before the conversion hop).
+- `album_files_over_channel_reach_live_and_backfilled_members`: a live member stores the album; a member joining afterwards backfills it through channel sync with the v3 signature intact.
+
 Step 9C/9D added 6 more (2026-06-19), each negative-tested where it guards a fix:
 - `sibling_recovers_own_channel_messages_from_present_member` (9C/C3) — a fresh-joining sibling recovers its
   OWN identity's channel history from a present member (verify-only: no code needed); also asserts `order_us`

@@ -21,6 +21,8 @@ pub struct StoredMessage {
     pub file_id: Option<String>,
     /// Link preview for the first URL in this message (Phase 6.75).
     pub link_preview: Option<crate::api::network::LinkPreviewRef>,
+    /// Album this message renders grouped into, `None` when standalone.
+    pub album_id: Option<String>,
 }
 
 // Global message store: None = not opened, Some = ready.
@@ -131,6 +133,7 @@ pub fn load_messages(peer_id: String, limit: i32) -> Result<Vec<StoredMessage>, 
             reply_to_mid: r.reply_to_mid,
             file_id: r.file_id,
             link_preview: r.link_preview.map(Into::into),
+            album_id: r.album_id,
         })
         .collect())
 }
@@ -160,6 +163,7 @@ pub fn load_all_dm_messages(peer_id: String) -> Result<Vec<StoredMessage>, Strin
             reply_to_mid: r.reply_to_mid,
             file_id: r.file_id,
             link_preview: r.link_preview.map(Into::into),
+            album_id: r.album_id,
         })
         .collect())
 }
@@ -191,6 +195,7 @@ pub fn load_all_channel_messages(server_id: String, channel_id: String) -> Resul
             reply_to_mid: r.reply_to_mid,
             file_id: r.file_id,
             link_preview: r.link_preview.map(Into::into),
+            album_id: r.album_id,
         })
         .collect())
 }
@@ -666,6 +671,7 @@ pub fn search_channel_messages(
                     reply_to_mid: m.reply_to_mid,
                     file_id: m.file_id,
                     link_preview: m.link_preview.map(Into::into),
+                    album_id: m.album_id,
                 })
                 .collect()
         })
@@ -698,6 +704,7 @@ pub fn search_dm_messages(
                     reply_to_mid: m.reply_to_mid,
                     file_id: m.file_id,
                     link_preview: m.link_preview.map(Into::into),
+                    album_id: m.album_id,
                 })
                 .collect()
         })
@@ -751,6 +758,8 @@ pub struct StoredChannelMessage {
     pub file_id: Option<String>,
     /// Link preview for the first URL in this message (Phase 6.75).
     pub link_preview: Option<crate::api::network::LinkPreviewRef>,
+    /// Album this message renders grouped into, `None` when standalone.
+    pub album_id: Option<String>,
 }
 
 /// Load recent channel messages from the local database.
@@ -784,6 +793,7 @@ pub fn load_channel_messages(
             reply_to_mid: r.reply_to_mid,
             file_id: r.file_id,
             link_preview: r.link_preview.map(Into::into),
+            album_id: r.album_id,
         })
         .collect())
 }
@@ -889,6 +899,7 @@ pub struct MediaListItem {
     /// Milliseconds. The owning message's time, else the file's `created_at`.
     pub ts: i64,
     pub content_id: Option<String>,
+    pub album_id: Option<String>,
 }
 
 /// Images and videos of one conversation, newest first, for the media viewer.
@@ -913,6 +924,7 @@ pub fn list_media_for_context(
             file: stored_file_to_ffi(m.file),
             ts: m.ts,
             content_id: m.content_id,
+            album_id: m.album_id,
         })
         .collect())
 }

@@ -35,6 +35,8 @@ the only acceptable verdict — see `REQUIRE_SIGNED_BACKFILL`.
 | `remove_reaction` | live envelope + Olm arms | `unreaction:{mid}:{emoji}:{ts}`, same rule |
 | Guest public-channel preview (RAM, no DB) | `swarm.rs` PublicChannelSyncResponse | 0.8.5: `guest_item_accepted` drops unverified items; hidden flag via `verified_guest_hidden_at`; reactions per-item |
 
+**`album_id` on `messages` / `channel_messages` (Part C albums, 2026-09-17):** no new write path; the wire `album` rides the `insert` / `insert_channel_message` rows above and is bound by the same signature, which switches to the v3 payload (`hollow-msg3`, album before text) when an album is present. A present album that is not a hyphenated UUID (`is_album_id_shape`) fails verification, so the whole message is REJECTED, never stored with the field dropped; edit, delete and `lp_set` signatures bind the row's `album_id` like every other extra.
+
 ## 2. Gated by content addressing
 
 Bytes are named by their own SHA-256, so tampering is self-detecting and the

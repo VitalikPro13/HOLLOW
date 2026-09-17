@@ -304,6 +304,7 @@ mod tests {
                     .insert_channel_message(
                         "srv", chan, "sender", "hi", false, ts,
                         None, None, Some(&format!("{chan}-{ts}")), None, None, None,
+                        None,
                     )
                     .expect("insert");
             }

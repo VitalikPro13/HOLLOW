@@ -69,6 +69,8 @@ import 'package:hollow/src/core/providers/room_budget_provider.dart';
 import 'package:hollow/src/core/providers/guest_provider.dart';
 import 'package:hollow/src/core/providers/temporary_nickname_provider.dart';
 import 'package:hollow/src/core/models/channel_chat_message.dart';
+import 'package:hollow/src/core/album_notification_gate.dart';
+import 'package:hollow/src/core/message_preview.dart';
 import 'package:hollow/src/core/models/file_attachment.dart';
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 import 'package:hollow/src/rust/api/wipe.dart' as wipe_api;
@@ -94,6 +96,18 @@ class EventStreamNotifier extends Notifier<bool> {
   /// Message IDs already processed via ChannelMessageReceived, so a
   /// ChannelNotificationHint for the same id is not double-counted.
   final Set<String> _processedChannelMessageIds = {};
+
+  final _albumNotifications = AlbumNotificationGate();
+
+  /// An album notification's body: its caption, else what it holds once
+  /// every item's file is known, else a count.
+  static String _albumText(
+      String caption, int count, List<FileAttachment?> attachments) {
+    final text = albumNotificationText(caption, count);
+    if (text != '$count files') return text;
+    if (attachments.length != count || attachments.contains(null)) return text;
+    return albumPreviewText(attachments);
+  }
 
   /// Servers that have completed their initial message sync. Share-backed files
   /// auto-download only for live messages, never during the sync burst.
@@ -339,7 +353,7 @@ class EventStreamNotifier extends Notifier<bool> {
       case NetworkEvent_Listening(:final address):
         debugPrint('[HOLLOW] Listening: $address');
 
-      case NetworkEvent_MessageReceived(:final fromPeer, :final text, :final timestamp, :final messageId, :final replyToMid, :final linkPreview, :final signature, :final publicKey, :final isOwn, :final duplicate):
+      case NetworkEvent_MessageReceived(:final fromPeer, :final text, :final timestamp, :final messageId, :final replyToMid, :final linkPreview, :final signature, :final publicKey, :final isOwn, :final duplicate, :final albumId):
         // MULTI-DEVICE: unread counts, the seen pointer, mute and notifications key
         // on the MASTER identity. Belt-and-braces (the main receive path already
         // resolves), protecting the pill from a device-keyed entry markDmSeen misses.
@@ -349,6 +363,7 @@ class EventStreamNotifier extends Notifier<bool> {
               linkPreview: linkPreview,
               signature: signature,
               publicKey: publicKey,
+              albumId: albumId,
               isOwn: isOwn,
             );
         // A sibling echo of OUR OWN sent message: outgoing, so it must NOT mark the
@@ -385,12 +400,22 @@ class EventStreamNotifier extends Notifier<bool> {
               dmMaster, messageId, isViewingDm);
         }
         if (!isViewingDm && !isDmMuted) {
-          ref.read(systemNotificationProvider.notifier).notifyDm(
-                fromPeerId: dmMaster,
-                text: text,
-                replyToMid: replyToMid,
-                messageId: messageId,
-              );
+          _albumNotifications.offer(
+            albumId: albumId,
+            conversation: 'dm:$dmMaster',
+            text: text,
+            textFor: (caption, count) => _albumText(caption, count, [
+              for (final m in ref.read(chatProvider)[fromPeer] ?? const [])
+                if (m.albumId == albumId) m.fileAttachment,
+            ]),
+            fire: (body) =>
+                ref.read(systemNotificationProvider.notifier).notifyDm(
+                      fromPeerId: dmMaster,
+                      text: body,
+                      replyToMid: replyToMid,
+                      messageId: messageId,
+                    ),
+          );
         } else if (isViewingDm && !Platform.isAndroid && !Platform.isIOS) {
           // The one path that produces NO notification and NO log downstream. If this
           // shows while the window was behind another app, `windowFocusedProvider` is
@@ -400,12 +425,13 @@ class EventStreamNotifier extends Notifier<bool> {
         }
 
       case NetworkEvent_ChannelMessageReceived(
-            :final serverId, :final channelId, :final fromPeer, :final text, :final timestamp, :final messageId, :final replyToMid, :final linkPreview, :final signature, :final publicKey, :final replyToOwn, :final duplicate, :final isOwn):
+            :final serverId, :final channelId, :final fromPeer, :final text, :final timestamp, :final messageId, :final replyToMid, :final linkPreview, :final signature, :final publicKey, :final replyToOwn, :final duplicate, :final isOwn, :final albumId):
         ref.read(channelChatProvider.notifier).receiveMessage(
               serverId, channelId, fromPeer, text, timestamp, messageId, replyToMid,
               linkPreview: linkPreview,
               signature: signature,
               publicKey: publicKey,
+              albumId: albumId,
             );
         ref.read(typingProvider.notifier).clearTyping('$serverId:$channelId', fromPeer);
         // Our own post from another device (#80): being last to speak reads the
@@ -468,8 +494,19 @@ class EventStreamNotifier extends Notifier<bool> {
             !isChannelMuted &&
             !isMentionFiltered &&
             !senderMasterBlocked) {
-          _notifyChannelWithName(
-              serverId, channelId, fromPeer, text, isMentioned, messageId);
+          _albumNotifications.offer(
+            albumId: albumId,
+            conversation: '$serverId:$channelId:'
+                '${ref.read(deviceLinkProvider).identityOf(fromPeer)}',
+            text: text,
+            textFor: (caption, count) => _albumText(caption, count, [
+              for (final m in ref.read(channelChatProvider)['$serverId:$channelId'] ??
+                  const [])
+                if (m.albumId == albumId) m.fileAttachment,
+            ]),
+            fire: (body) => _notifyChannelWithName(
+                serverId, channelId, fromPeer, body, isMentioned, messageId),
+          );
         } else if (isViewingChannel &&
             !Platform.isAndroid &&
             !Platform.isIOS) {

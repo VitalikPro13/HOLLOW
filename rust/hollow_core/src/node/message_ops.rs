@@ -23,6 +23,7 @@ pub(crate) struct RowExtras {
     pub file_id: Option<String>,
     pub order_us: Option<i64>,
     pub lp_digest: Option<String>,
+    pub album: Option<String>,
 }
 
 impl RowExtras {
@@ -36,7 +37,7 @@ impl RowExtras {
 
     fn from_row(row: Option<crate::storage::messages::MessageSigRow>) -> Self {
         let Some(r) = row else {
-            return Self { text: None, reply_to: None, file_id: None, order_us: None, lp_digest: None };
+            return Self { text: None, reply_to: None, file_id: None, order_us: None, lp_digest: None, album: None };
         };
         Self {
             lp_digest: r.link_preview.as_ref().map(link_preview_digest),
@@ -44,6 +45,7 @@ impl RowExtras {
             reply_to: r.reply_to_mid,
             file_id: r.file_id,
             order_us: r.order_us,
+            album: r.album_id,
         }
     }
 
@@ -54,6 +56,7 @@ impl RowExtras {
             file_id: self.file_id.as_deref(),
             order_us: self.order_us,
             lp_digest: self.lp_digest.as_deref(),
+            album: self.album.as_deref(),
         }
     }
 }
@@ -211,6 +214,7 @@ pub(crate) fn guest_item_accepted(
         file_id: m.file_id.as_deref(),
         order_us: m.order_us,
         lp_digest: lp_digest.as_deref(),
+        album: m.album.as_deref(),
     };
     let verdict = super::crypto_handler::check_backfill_signature(
         &super::resolver::resolve(&m.s), "ch", &format!("{sid}:{cid}"),
@@ -249,6 +253,7 @@ pub(crate) fn verified_guest_hidden_at(
         file_id: m.file_id.as_deref(),
         order_us: m.order_us,
         lp_digest: lp_digest.as_deref(),
+        album: m.album.as_deref(),
     };
     verify_message_signature_v2(
         &signer, Some(sig), Some(pk), "ch-delete", &format!("{sid}:{cid}"),
@@ -299,6 +304,7 @@ pub(crate) async fn handle_send_message(
         file_id: None,
         order_us: Some(dm_order_us),
         lp_digest: lp_digest.as_deref(),
+        album: None,
     };
     let (sig, pk) = sign_message_versioned(
         bundle_keypair, pub_key_b64, "dm", &peer_id_str, &local_peer,
@@ -317,6 +323,7 @@ pub(crate) async fn handle_send_message(
             link_preview: link_preview.clone(),
             convo,
             order_us: Some(dm_order_us),
+            album: None,
         }),
     };
     let envelope_json = serde_json::to_string(&build_dm(None))
@@ -332,7 +339,7 @@ pub(crate) async fn handle_send_message(
             let _ = store.insert(
                 &peer_id_str, &text, true, dm_timestamp,
                 sig.as_deref(), pk.as_deref(), Some(&message_id),
-                reply_to_mid.as_deref(), None, Some(dm_order_us),
+                reply_to_mid.as_deref(), None, Some(dm_order_us), None,
             );
             if let Some(lp) = &link_preview {
                 if let Ok(lp_json) = serde_json::to_string(lp) {
@@ -833,6 +840,7 @@ pub(crate) async fn handle_send_channel_message(
         file_id: None,
         order_us: Some(order_us),
         lp_digest: lp_digest.as_deref(),
+        album: None,
     };
     let (sig, pk) = sign_message_versioned(
         bundle_keypair, pub_key_b64, "ch", &format!("{}:{}", server_id, channel_id),
@@ -861,6 +869,7 @@ pub(crate) async fn handle_send_channel_message(
             file_id: None,
             link_preview: link_preview.clone(),
             order_us: Some(order_us),
+            album: None,
             file_meta: None,
         };
         send_public_channel_msg(ws_cmd_tx, &server_id, &channel_id, &msg)
@@ -878,6 +887,7 @@ pub(crate) async fn handle_send_channel_message(
                 file_id: None,
                 link_preview: link_preview.clone(),
                 order_us: Some(order_us),
+                album: None,
             }),
         };
         broadcast_channel_envelope(
@@ -1289,7 +1299,7 @@ fn persist_sent_channel_message(
     let _ = store.insert_channel_message(
         server_id, channel_id, local_peer, text, true, timestamp,
         sig, pk, Some(message_id),
-        reply_to_mid, None, Some(order_us),
+        reply_to_mid, None, Some(order_us), None,
     );
     if let Some(lp) = link_preview {
         if let Ok(lp_json) = serde_json::to_string(lp) {
@@ -1536,6 +1546,7 @@ fn rewrite_pending_entry_if_edited(
             link_preview: inner.link_preview.clone(),
             convo: inner.convo.clone(),
             order_us: inner.order_us, // preserve original ordering on edit
+            album: inner.album.clone(),
         }),
     };
     if let Ok(json) = serde_json::to_string(&updated) {
@@ -1586,6 +1597,7 @@ fn sign_attached_preview(
         file_id: row.file_id.as_deref(),
         order_us: row.order_us,
         lp_digest: lp_digest.as_deref(),
+        album: row.album_id.as_deref(),
     };
     let ts = row.edited_at.unwrap_or(row.timestamp);
     let (sig, pk) = sign_message_versioned(
@@ -2377,6 +2389,7 @@ pub(crate) async fn handle_envelope_channel_message(
     file_id: Option<String>,
     link_preview: Option<LinkPreviewRef>,
     order_us: Option<i64>,
+    album: Option<String>,
     db_path: &str,
     db_passphrase: &str,
 ) {
@@ -2399,6 +2412,7 @@ pub(crate) async fn handle_envelope_channel_message(
         file_id: file_id.as_deref(),
         order_us,
         lp_digest: lp_digest.as_deref(),
+        album: album.as_deref(),
     };
     if channel_sig_rejected(
         &sender_peer_id, &sid, &cid, ts, &text, sig.as_deref(), pk.as_deref(), &extras,
@@ -2422,7 +2436,7 @@ pub(crate) async fn handle_envelope_channel_message(
     let Some((is_new, reply_author)) = persist_incoming_channel_message(
         &sid, &cid, &sender_peer_id, &text, is_mine, ts,
         sig.as_deref(), pk.as_deref(), mid.as_deref(),
-        reply_to.as_deref(), file_id.as_deref(), order_us,
+        reply_to.as_deref(), file_id.as_deref(), order_us, album.as_deref(),
         &link_preview, db_path, db_passphrase,
     ) else {
         // Store-open failure — the message is silently gone otherwise; log
@@ -2448,6 +2462,7 @@ pub(crate) async fn handle_envelope_channel_message(
         link_preview,
         signature: sig,
         public_key: pk,
+        album_id: album.map(Box::new),
         reply_to_own,
         duplicate: !is_new,
         is_own: is_mine,
@@ -2573,6 +2588,7 @@ fn persist_incoming_channel_message(
     reply_to: Option<&str>,
     file_id: Option<&str>,
     order_us: Option<i64>,
+    album: Option<&str>,
     link_preview: &Option<LinkPreviewRef>,
     db_path: &str,
     db_passphrase: &str,
@@ -2589,7 +2605,7 @@ fn persist_incoming_channel_message(
     } else {
         store.insert_channel_message(
             sid, cid, sender_peer_id, text, is_mine, ts,
-            sig, pk, mid, reply_to, file_id, order_us,
+            sig, pk, mid, reply_to, file_id, order_us, album,
         ).map(|r| r > 0).unwrap_or(false)
     };
     if is_new {
@@ -2759,6 +2775,7 @@ pub(crate) async fn handle_envelope_link_preview_set(
         file_id: row.file_id.as_deref(),
         order_us: row.order_us,
         lp_digest: lp_digest.as_deref(),
+        album: row.album_id.as_deref(),
     };
     let msg_type = if is_channel { "ch" } else { "dm" };
     if !verify_message_signature_v2(
@@ -3039,6 +3056,7 @@ mod tests {
         store.insert_channel_message(
             sid, cid, &author_id, "to be deleted", false, 1_000,
             None, None, Some(mid), None, None, Some(1_000_000),
+            None,
         ).unwrap();
         let mut cache = PkCache::new();
 
@@ -3094,7 +3112,7 @@ mod tests {
         let mut cache = PkCache::new();
 
         // THEIR message (our is_mine=false): their proof (ctx = us) hides it.
-        store.insert(&them_id, "their message", false, 1_000, None, None, Some("dm-1"), None, None, None).unwrap();
+        store.insert(&them_id, "their message", false, 1_000, None, None, Some("dm-1"), None, None, None, None).unwrap();
         let row = RowExtras::load_dm(&store, "dm-1");
         let (sig, pk) = sign_message_versioned(
             &them, &them_pk, "dm-delete", &us_id, &them_id, 2_000,
@@ -3107,7 +3125,7 @@ mod tests {
 
         // OUR message (is_mine=true): the friend signs a "deletion" of it with
         // their own key, and the row says WE authored it, so it must be rejected.
-        store.insert(&them_id, "our message", true, 3_000, None, None, Some("dm-2"), None, None, None).unwrap();
+        store.insert(&them_id, "our message", true, 3_000, None, None, Some("dm-2"), None, None, None, None).unwrap();
         let row2 = RowExtras::load_dm(&store, "dm-2");
         let text2 = row2.text.clone().unwrap_or_default();
         let (esig, epk) = sign_message_versioned(
@@ -3136,8 +3154,8 @@ mod tests {
     #[test]
     fn deletion_proof_fields_serves_only_signed_proofs() {
         let store = mem_store();
-        store.insert_channel_message("s", "c", "peer-a", "signed del", false, 1_000, None, None, Some("m-signed"), None, None, None).unwrap();
-        store.insert_channel_message("s", "c", "peer-a", "legacy del", false, 1_100, None, None, Some("m-legacy"), None, None, None).unwrap();
+        store.insert_channel_message("s", "c", "peer-a", "signed del", false, 1_000, None, None, Some("m-signed"), None, None, None, None).unwrap();
+        store.insert_channel_message("s", "c", "peer-a", "legacy del", false, 1_100, None, None, Some("m-legacy"), None, None, None, None).unwrap();
         store.hide_channel_message("m-signed", 2_000, Some("SIG"), Some("PK")).unwrap();
         store.set_channel_message_hidden("m-legacy", 2_100).unwrap();
 
@@ -3164,6 +3182,7 @@ mod tests {
         let extras = SignedExtras {
             mid: Some("g-1"), reply_to: None, file_id: None,
             order_us: Some(42), lp_digest: None,
+            album: None,
         };
         let (sig, pk) = sign_message_versioned(
             &author, &author_pk, "ch-delete", &format!("{sid}:{cid}"),
@@ -3187,6 +3206,7 @@ mod tests {
             lp_digest: None,
             lp: None,
             reactions: Vec::new(),
+            album: None,
         };
         let mut cache = PkCache::new();
         assert_eq!(verified_guest_hidden_at(&item, sid, cid, &mut cache), Some(5_000));
@@ -3218,6 +3238,7 @@ mod tests {
         let extras = SignedExtras {
             mid: Some(mid), reply_to: None, file_id: None,
             order_us: Some(ts * 1000), lp_digest: None,
+            album: None,
         };
         let (sig, pk) = sign_message_versioned(
             signer, &pk_b64(signer), "ch", &format!("{sid}:{cid}"),
@@ -3241,6 +3262,7 @@ mod tests {
             lp_digest: None,
             lp: None,
             reactions: Vec::new(),
+            album: None,
         }
     }
 
@@ -3289,6 +3311,7 @@ mod tests {
         let extras = SignedExtras {
             mid: Some(mid), reply_to: None, file_id: None,
             order_us: Some(ts * 1000), lp_digest: Some(&digest),
+            album: None,
         };
         let (sig, pk) = sign_message_versioned(
             &author, &pk_b64(&author), "ch", &format!("{sid}:{cid}"),
@@ -3314,6 +3337,7 @@ mod tests {
             lp_digest: Some(digest.clone()),
             lp: Some(Box::new(card.clone())),
             reactions: Vec::new(),
+            album: None,
         };
 
         let verdict = |it: &crate::node::types::SyncMessageItem| {
@@ -3324,6 +3348,7 @@ mod tests {
                 mid: it.mid.as_deref(), reply_to: it.reply_to.as_deref(),
                 file_id: it.file_id.as_deref(), order_us: it.order_us,
                 lp_digest: d.as_deref(),
+                album: None,
             };
             crate::node::crypto_handler::check_backfill_signature(
                 &it.s, "ch", &format!("{sid}:{cid}"),

@@ -15,7 +15,7 @@ Orchestrates all file transfer flows: sending files in DMs and channels, receivi
 `file_handler.rs:handle_send_file()` -- Entry point for `NodeCommand::SendFile`. Handles both DM and channel file sends.
 
 ### Parameters
-Receives: `peer_id` (Some for DM), `server_id`+`channel_id` (Some for channel), `file_path`, `message_id`, `message_text`, `vthumb` (video thumbnail back-reference), `override_width`/`override_height` (Dart-supplied dimensions for video previews), `share_ref` (hidden Share back-reference for >34 MB files), plus the full swarm state suite (event_tx, server_states, keypair, olm, mls, ws_cmd_tx, ws_room_peers, webrtc_peers, pending_webrtc_sends, gossip_overlays).
+Receives: `peer_id` (Some for DM), `server_id`+`channel_id` (Some for channel), `file_path`, `message_id`, `message_text`, `vthumb` (video thumbnail back-reference), `override_width`/`override_height` (Dart-supplied dimensions for video previews), `share_ref` (hidden Share back-reference for >34 MB files), `album` (signed album id, bound into the v3 payload), plus the full swarm state suite (event_tx, server_states, keypair, olm, mls, ws_cmd_tx, ws_room_peers, webrtc_peers, pending_webrtc_sends, gossip_overlays).
 
 ### Step-by-step flow
 
@@ -24,6 +24,8 @@ Receives: `peer_id` (Some for DM), `server_id`+`channel_id` (Some for channel), 
 2. **Extract filename and extension.** Original name preserved for metadata; extension lowercased for MIME detection.
 
 3. **Size limit check (share_ref bypass #1).** Default 34 MB for DMs (`file_transfer::DEFAULT_MAX_FILE_SIZE`). For channels, reads `max_file_size_mb` from the server's CRDT settings (falls back to 34). **When `share_ref.is_some()`, the size check is skipped entirely** -- Share handles delivery with no size limit. This is the first of three share_ref bypass points. On size violation, emits `FileFailed`.
+
+3b. **Mint the send stamp.** `order_us = chat_clock::next_send_stamp_us()` is taken BEFORE the conversion / video-poster hop and rides `SendFileConvertedPayload` (with `album`) into `finish_send_file`, whose `timestamp` is `order_us / 1000`. Conversions finish in any order (an animated GIF encodes slowest); stamping after them reordered an album's items.
 
 4. **WebP conversion (image pipeline).** Reads the user's `image_quality` setting from SQLCipher (`app_settings` table) to determine `WebpQuality` tier. Then branches:
    - **Convertible images** (png/jpg/jpeg/bmp/tiff): `image_convert::convert_to_webp_with_quality()`. On failure, falls back to original bytes via `std::mem::take()` (zero-copy).
@@ -41,7 +43,7 @@ Receives: `peer_id` (Some for DM), `server_id`+`channel_id` (Some for channel), 
 
 9. **Emit sender-side FileCompleted.** When `store_full_file` is true, emits `NetworkEvent::FileCompleted` so the sender's UI reloads from DB and picks up the real width/height/videoThumb. Without this, the sender's optimistic FileAttachment built by `addFileMessage` in Dart would be stuck with wrong dimensions. Receivers already get this via the stream-receive code path.
 
-10. **Sign the message.** Uses `message_signing_payload()` with canonical format. Text is `[file:{file_id}]` if `message_text` is empty. DMs sign with context=recipient, channels sign with context=`{sid}:{cid}`.
+10. **Sign the message.** Uses `sign_message_versioned()` over the canonical payload (v3 when `album` is set), binding mid, file_id, order_us and album exactly as they ride the envelope, `FileHeaderPayload` and the stored row. Text is `[file:{file_id}]` if `message_text` is empty. DMs sign with context=recipient, channels sign with context=`{sid}:{cid}`.
 
 11. **DM path** (`peer_id` is Some):
     - Builds `MessageEnvelope::DirectMessage` with `file_id`.

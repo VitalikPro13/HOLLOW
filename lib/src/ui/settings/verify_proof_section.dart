@@ -129,9 +129,18 @@ class _VerifyProofSectionState extends State<VerifyProofSection> {
       final fileId = message['file_id'] as String? ?? '';
       final orderUs = message['order_us']?.toString() ?? '';
       final lpDigest = message['link_preview_digest'] as String? ?? '';
-      final reconstructed =
-          'hollow-msg2:${_canonicalMsgType(contextType)}:$contextId:$peerId:'
-          '$timestampMs:${messageId ?? ''}:$replyTo:$fileId:$orderUs:$lpDigest:$text';
+      // An album id is signed in its own slot (v3); a colon in it would let
+      // the text boundary move, so anything but a UUID is refused.
+      final album = message['album'] as String? ?? '';
+      if (album.isNotEmpty && !_albumIdShape.hasMatch(album)) {
+        fail('Invalid album id in the proof.');
+        return;
+      }
+      final fields = '${_canonicalMsgType(contextType)}:$contextId:$peerId:'
+          '$timestampMs:${messageId ?? ''}:$replyTo:$fileId:$orderUs:$lpDigest';
+      final reconstructed = album.isEmpty
+          ? 'hollow-msg2:$fields:$text'
+          : 'hollow-msg3:$fields:$album:$text';
       if (reconstructed != canonicalPayload) {
         fail('Payload mismatch: the message fields do not match the '
             'canonical payload. The proof JSON may have been tampered with.\n\n'
@@ -172,6 +181,9 @@ class _VerifyProofSectionState extends State<VerifyProofSection> {
 
   /// Returns the error to show for an invalid proof envelope, or null when its
   /// fields all hold their expected values.
+  static final _albumIdShape = RegExp(
+      r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$');
+
   static String? _envelopeError(
     Map<String, dynamic> map,
     Map<String, dynamic>? message,

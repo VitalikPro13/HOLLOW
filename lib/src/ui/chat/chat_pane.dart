@@ -5,7 +5,10 @@ import 'package:flutter/material.dart';
 import 'package:hollow/src/ui/components/hollow_menu.dart';
 import 'package:hollow/src/ui/components/overlay_anchor.dart';
 import 'package:flutter/services.dart';
+import 'package:hollow/src/core/album_grouping.dart';
+import 'package:hollow/src/ui/chat/album_bubble.dart';
 import 'package:hollow/src/ui/chat/chat_drop_zone.dart';
+import 'package:hollow/src/ui/chat/staged_attachments.dart';
 import 'package:hollow/src/ui/chat/chat_input_shortcuts.dart';
 import 'package:hollow/src/ui/chat/emoji_picker.dart';
 import 'package:hollow/src/ui/chat/gif_picker.dart';
@@ -422,9 +425,7 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
   final FocusNode _searchFocusNode = FocusNode();
   List<storage_api.StoredMessage> _searchResults = const [];
   /// Picked but not yet sent.
-  String? _stagedFilePath;
-  String? _stagedFileName;
-  bool _stagedFileIsImage = false;
+  List<StagedAttachment> _staged = const [];
   /// True while recording, which swaps the input row for the
   /// [VoiceRecorderBar].
   bool _isRecordingVoice = false;
@@ -615,11 +616,18 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
   /// Non-null while the user is scrolled up: display list capped here.
   int? _frozenLen;
 
-  /// The messages currently displayed (frozen prefix while scrolled up).
+  /// Albums of the list last displayed, for the rows built from it.
+  AlbumCollapse<ChatMessage> _albums = collapseDmAlbums(const []);
+
+  /// The messages currently displayed: the frozen prefix while scrolled up,
+  /// with every album folded into its first item.
   List<ChatMessage> _displayMessages(List<ChatMessage> messages) {
     final frozen = _frozenLen;
-    if (frozen == null || messages.length <= frozen) return messages;
-    return messages.sublist(0, frozen);
+    final visible = (frozen == null || messages.length <= frozen)
+        ? messages
+        : messages.sublist(0, frozen);
+    _albums = collapseDmAlbums(visible);
+    return _albums.display;
   }
 
   bool get _isNearBottom {
@@ -773,7 +781,7 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
 
   Future<void> _handleSend({bool refocus = true}) async {
     _emoteAutocomplete.dismiss();
-    if (_stagedFilePath != null) {
+    if (_staged.isNotEmpty) {
       // FileHeaderPayload has no link_preview slot, so the staged card must be
       // cleared here or it stays on screen attached to a message that never
       // carried it.
@@ -784,7 +792,9 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
         _stagedPreviewLoading = false;
         _stagedHollowLink = null;
       });
-      await _sendStagedFile();
+      final items = _staged;
+      setState(() => _staged = const []);
+      await _sendFiles(items);
       return;
     }
     // Expand inline-emote placeholders to [e:name:hash] wire tokens.
@@ -845,34 +855,17 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
   }
 
   void _stageClipboardImage(String path, String name) {
-    if (!mounted) return;
-    setState(() {
-      _stagedFilePath = path;
-      _stagedFileName = name;
-      _stagedFileIsImage = true;
-    });
-    _focusNode.requestFocus();
+    unawaited(_stageFiles([StagedAttachment.fromPath(path, name: name)]));
   }
 
-  /// Stages a file dropped from the OS. Over 34 MB it prompts to host the file
-  /// as a Hollow Share instead.
-  Future<void> _handleDroppedFile(String path, String name, int sizeBytes) async {
-    if (!mounted) return;
-
-    // Over 34 MB: confirm hosting it as a Hollow Share rather than rejecting.
-    if (sizeBytes > kLargeFileThresholdBytes) {
-      final ok = await confirmLargeFileShare(context,
-          fileName: name, sizeBytes: sizeBytes);
-      if (!ok || !mounted) return;
-    }
-
-    final ext = name.contains('.') ? name.split('.').last.toLowerCase() : '';
-    setState(() {
-      _stagedFilePath = path;
-      _stagedFileName = name;
-      _stagedFileIsImage =
-          ['png', 'jpg', 'jpeg', 'gif', 'bmp', 'webp'].contains(ext);
-    });
+  /// Adds files to the composer's album. Over 34 MB they are offered as
+  /// Hollow Shares, one question for the whole batch.
+  Future<void> _stageFiles(List<StagedAttachment> incoming) async {
+    if (!mounted || incoming.isEmpty) return;
+    final accepted = await admitStagedAttachments(context,
+        current: _staged, incoming: incoming);
+    if (!mounted || accepted.isEmpty) return;
+    setState(() => _staged = appendStaged(_staged, accepted));
     _focusNode.requestFocus();
   }
 
@@ -880,30 +873,13 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
     if (_isPicking) return;
     _isPicking = true;
     try {
-      final result = await FilePicker.platform.pickFiles();
-      if (result == null || result.files.isEmpty) { _isPicking = false; return; }
-      final file = result.files.first;
-      if (file.path == null) { _isPicking = false; return; }
-
-      // Over 34 MB: confirm hosting it as a Hollow Share rather than rejecting.
-      if (file.size > kLargeFileThresholdBytes) {
-        final ok = mounted &&
-            await confirmLargeFileShare(context,
-                fileName: file.name, sizeBytes: file.size);
-        if (!ok) {
-          _isPicking = false;
-          return;
-        }
-      }
-
-      final ext = file.name.contains('.')
-          ? file.name.split('.').last.toLowerCase()
-          : '';
-      setState(() {
-        _stagedFilePath = file.path!;
-        _stagedFileName = file.name;
-        _stagedFileIsImage = ['png', 'jpg', 'jpeg', 'gif', 'bmp', 'webp'].contains(ext);
-      });
+      final result = await FilePicker.platform.pickFiles(allowMultiple: true);
+      if (result == null || result.files.isEmpty) return;
+      await _stageFiles([
+        for (final f in result.files)
+          if (f.path != null)
+            StagedAttachment(path: f.path!, name: f.name, sizeBytes: f.size),
+      ]);
       // Defer the re-focus until the OS has returned window focus from the
       // native file dialog: a synchronous requestFocus() marks the node focused
       // while keystrokes still go nowhere.
@@ -913,8 +889,8 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
     } finally { _isPicking = false; }
   }
 
-  /// Stages the recorder's `.ogg` and sends it immediately, because a voice
-  /// message should not need a confirmation click.
+  /// Sends the recorder's `.ogg` immediately, because a voice message should
+  /// not need a confirmation click.
   Future<void> _stageVoiceMessage(VoiceRecordingResult result) async {
     if (!mounted) return;
     final file = File(result.filePath);
@@ -933,13 +909,11 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
         return;
       }
     }
-    setState(() {
-      _isRecordingVoice = false;
-      _stagedFilePath = result.filePath;
-      _stagedFileName = 'Voice message.ogg';
-      _stagedFileIsImage = false;
-    });
-    await _sendStagedFile();
+    setState(() => _isRecordingVoice = false);
+    await _sendFiles([
+      StagedAttachment(
+          path: result.filePath, name: 'Voice message.ogg', sizeBytes: size),
+    ]);
   }
 
   /// Sends an already-written file straight into this conversation with no save
@@ -949,57 +923,53 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
   /// so it lives out its life in the temp directory the OS sweeps.
   Future<void> _shareFileToChat(String path, String fileName) async {
     if (!mounted) return;
-    setState(() {
-      _stagedFilePath = path;
-      _stagedFileName = fileName;
-      _stagedFileIsImage = false;
-    });
-    await _sendStagedFile();
+    await _sendFiles([StagedAttachment.fromPath(path, name: fileName)]);
   }
 
-  Future<void> _sendStagedFile() async {
-    final filePath = _stagedFilePath;
-    final fileName = _stagedFileName;
-    if (filePath == null || fileName == null) return;
-
-    final messageText = _controller.expandedText().trim();
-    final messageId = generateMessageId();
-    final ext = fileName.contains('.')
-        ? fileName.split('.').last.toLowerCase()
-        : '';
-    final isImage = _stagedFileIsImage;
-
-    setState(() {
-      _stagedFilePath = null;
-      _stagedFileName = null;
-      _stagedFileIsImage = false;
-    });
+  /// Sends [items] with the composer text as the caption: one file message,
+  /// or an album for two or more.
+  Future<void> _sendFiles(List<StagedAttachment> items) async {
+    if (items.isEmpty) return;
+    final caption = _controller.expandedText().trim();
     _controller.clear();
-
-    ref.read(chatProvider.notifier).addFileMessage(
-          widget.peerId,
-          messageId,
-          fileName,
-          File(filePath).lengthSync(),
-          ext,
-          isImage,
-          filePath,
-          text: messageText,
-        );
-    _jumpToBottom();
-
-    await ref.read(fileTransferProvider.notifier).sendFile(
-          peerId: widget.peerId,
-          filePath: filePath,
-          messageId: messageId,
-          messageText: messageText,
-          // The display name is the voice-recorder signal; the wire carries a
-          // dedicated flag (auto-download gate exemption, issue #41).
-          isVoice: fileName == 'Voice message.ogg',
-        );
-
-    if (fileName.endsWith('.ogg') && filePath.contains('temp')) {
-      try { await File(filePath).delete(); } catch (_) {}
+    final failed = await sendStagedAttachments(
+      items: items,
+      caption: caption,
+      addOptimistic: (item, messageId, text, albumId) {
+        ref.read(chatProvider.notifier).addFileMessage(
+              widget.peerId,
+              messageId,
+              item.name,
+              item.sizeBytes,
+              item.ext,
+              item.isImage,
+              item.path,
+              text: text,
+              albumId: albumId,
+            );
+        _jumpToBottom();
+      },
+      send: (item, messageId, text, albumId) async {
+        await ref.read(fileTransferProvider.notifier).sendFile(
+              peerId: widget.peerId,
+              filePath: item.path,
+              messageId: messageId,
+              messageText: text,
+              // The display name is the voice-recorder signal; the wire carries a
+              // dedicated flag (auto-download gate exemption, issue #41).
+              isVoice: item.name == 'Voice message.ogg',
+              album: albumId,
+            );
+        if (item.name.endsWith('.ogg') && item.path.contains('temp')) {
+          try { await File(item.path).delete(); } catch (_) {}
+        }
+      },
+    );
+    if (failed > 0 && mounted) {
+      HollowToast.show(
+          context,
+          failed == 1 ? 'A file failed to send' : '$failed files failed to send',
+          type: HollowToastType.error);
     }
   }
 
@@ -1142,7 +1112,7 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
 
         Expanded(
           child: ChatDropZone(
-            onFileDropped: _handleDroppedFile,
+            onFilesDropped: _stageFiles,
             child: Column(
       children: [
         _buildHeader(hollow,
@@ -1927,12 +1897,13 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
           onCancel: _cancelReply,
         ),
 
-      if (_stagedFilePath != null)
-        StagedFilePreviewBar(
-          filePath: _stagedFilePath!,
-          fileName: _stagedFileName,
-          isImage: _stagedFileIsImage,
-          onRemove: _removeStagedFile,
+      if (_staged.isNotEmpty)
+        StagedAttachmentStrip(
+          items: _staged,
+          onRemove: (i) =>
+              setState(() => _staged = [..._staged]..removeAt(i)),
+          onReorder: (from, to) =>
+              setState(() => _staged = reorderStaged(_staged, from, to)),
         ),
 
       StagedLinkArea(
@@ -1954,14 +1925,6 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
       _replyToText = null;
       _replyToSenderName = null;
       _replyToImagePath = null;
-    });
-  }
-
-  void _removeStagedFile() {
-    setState(() {
-      _stagedFilePath = null;
-      _stagedFileName = null;
-      _stagedFileIsImage = false;
     });
   }
 
@@ -2044,13 +2007,18 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
       for (var i = 0; i < messages.length; i++)
         if (messages[i].messageId != null) messages[i].messageId!: i,
     };
+    // A reply or jump to an album item lands on the album's row.
+    for (final e in _albums.anchorIdByItemId.entries) {
+      final anchorIndex = replyIndexById[e.value];
+      if (anchorIndex != null) replyIndexById.putIfAbsent(e.key, () => anchorIndex);
+    }
     // Computed once per build against the list actually on screen, so the
     // reversed index handed to the rail and the chronological one handed to the
     // rows cannot disagree (issue #54).
     final unreadIndex = unreadDividerIndex(
       count: messages.length,
-      entrySeenId:
-          ref.watch(unreadMarkerProvider)[dmMarkerKey(widget.peerId)],
+      entrySeenId: _albumRowId(
+          ref.watch(unreadMarkerProvider)[dmMarkerKey(widget.peerId)]),
       messageIdAt: (i) => messages[i].messageId,
       isMineAt: (i) => messages[i].isMe,
     );
@@ -2111,7 +2079,8 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
   void _jumpToMessageId(String messageId) {
     final messages =
         _displayMessages(ref.read(chatProvider)[widget.peerId] ?? []);
-    final index = messages.indexWhere((m) => m.messageId == messageId);
+    final rowId = _albums.anchorIdByItemId[messageId] ?? messageId;
+    final index = messages.indexWhere((m) => m.messageId == rowId);
     if (index != -1) _scrollToMessage(index);
   }
 
@@ -2129,6 +2098,7 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
     // below stays in chronological terms.
     final index = messages.length - 1 - revIndex;
     final msg = messages[index];
+    final isAlbum = _albums.itemsFor(msg.messageId) != null;
     final showHeader = index == 0 ||
         !shouldGroup(
           currentIsMe: msg.isMe,
@@ -2153,12 +2123,14 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
       onReaction: msg.messageId != null
           ? (emoji) => _toggleReaction(msg, emoji)
           : null,
-      onDownload: _downloadFor(context, msg),
+      // An album row's file actions would act on its first item only; the
+      // viewer offers them per item instead.
+      onDownload: isAlbum ? null : _downloadFor(context, msg),
       // The hover bar and the message menu mirror the card: no Download while
       // nobody can serve the file.
-      fileAttachment: msg.fileAttachment,
+      fileAttachment: isAlbum ? null : msg.fileAttachment,
       onCopy: _copyFor(context, msg),
-      onCopyImage: _copyImageFor(context, msg),
+      onCopyImage: isAlbum ? null : _copyImageFor(context, msg),
       onInfo: _infoFor(context, msg),
       child: _buildBubble(
           msg, index, showHeader, messages, replyIndexById, profiles,
@@ -2223,7 +2195,7 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
       final idx = replyIndexById[msg.replyToMid] ?? -1;
       if (idx != -1) {
         replyIndex = idx;
-        final original = messages[idx];
+        final original = _albumItemById(messages[idx], msg.replyToMid!);
         replyText = _messagePreviewText(original);
         final origSenderId = original.isMe ? localPeerId : widget.peerId;
         replySender = displayNameFor(profiles, origSenderId);
@@ -2232,10 +2204,15 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
         }
       }
     }
+    final albumMessages = _albums.itemsFor(msg.messageId);
     return MessageBubble(
       message: msg,
       peerId: widget.peerId,
       showHeader: showHeader,
+      album: albumMessages == null
+          ? null
+          : dmAlbumItems(albumMessages,
+              localPeerId: localPeerId, peerId: widget.peerId),
       replyToSenderName: replySender,
       replyToText: replyText,
       replyToImagePath: replyImagePath,
@@ -2275,7 +2252,14 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
 
   VoidCallback? _deleteFor(ChatMessage msg) {
     if (msg.messageId == null || !msg.isMe) return null;
-    return () => _deleteMessage(msg.messageId!);
+    final album = _albums.itemsFor(msg.messageId);
+    if (album == null) return () => _deleteMessage(msg.messageId!);
+    return () async {
+      if (!await confirmDeleteAlbum(context, album.length)) return;
+      for (final item in album) {
+        if (item.messageId != null) await _deleteMessage(item.messageId!);
+      }
+    };
   }
 
   Future<void> _deleteMessage(String messageId) async {
@@ -2459,8 +2443,29 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
     };
   }
 
-  String _messagePreviewText(ChatMessage msg) =>
-      messagePreviewText(msg.text, attachment: msg.fileAttachment);
+  /// A row's preview; an album row says what the whole album holds.
+  String _messagePreviewText(ChatMessage msg) {
+    final album = _albums.itemsFor(msg.messageId);
+    if (album != null) {
+      return albumPreviewText([for (final m in album) m.fileAttachment],
+          caption: albumCaption([for (final m in album) m.text]));
+    }
+    return messagePreviewText(msg.text, attachment: msg.fileAttachment);
+  }
+
+  /// The row a message id renders in: its album's row when it was folded.
+  String? _albumRowId(String? messageId) =>
+      messageId == null ? null : _albums.anchorIdByItemId[messageId] ?? messageId;
+
+  /// The message [messageId] names inside [row]: the row itself, or the album
+  /// item a reply points at.
+  ChatMessage _albumItemById(ChatMessage row, String messageId) {
+    if (row.messageId == messageId) return row;
+    for (final m in _albums.itemsFor(row.messageId) ?? const <ChatMessage>[]) {
+      if (m.messageId == messageId) return m;
+    }
+    return row;
+  }
 
   /// Unread pill, only for messages that arrived while scrolled up.
   Widget _buildUnreadPillOverlay(List<ChatMessage> allMessages) {
@@ -2501,7 +2506,7 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
     return chatInputBarShell(
       hollow,
       flushTop: _replyToMessageId != null ||
-          _stagedFilePath != null ||
+          _staged.isNotEmpty ||
           _stagedPreviewUrl != null,
       child: _isRecordingVoice
           ? VoiceRecorderBar(
@@ -2529,14 +2534,14 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
         const SizedBox(width: HollowSpacing.xs),
         HollowPressable(
           semanticLabel: 'Record voice message',
-          onTap: _stagedFilePath != null
+          onTap: _staged.isNotEmpty
               ? null
               : () => setState(() => _isRecordingVoice = true),
           borderRadius: BorderRadius.circular(hollow.radiusMd),
           padding: const EdgeInsets.all(HollowSpacing.sm),
           child: Icon(
             LucideIcons.mic,
-            color: _stagedFilePath != null
+            color: _staged.isNotEmpty
                 ? hollow.textSecondary.withValues(alpha: 0.4)
                 : hollow.textSecondary,
             size: 20,

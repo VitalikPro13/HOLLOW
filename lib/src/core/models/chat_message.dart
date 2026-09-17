@@ -25,6 +25,10 @@ class ChatMessage {
   /// `verifyMessageProofV2` against the local DB row an archive does not have.
   final bool? archiveSignatureValid;
 
+  /// Album this message belongs to: items sent together share it and render
+  /// as one grouped bubble. Signed, so nobody who re-serves the row can regroup it.
+  final String? albumId;
+
   ChatMessage({
     required this.text,
     required this.isMe,
@@ -39,6 +43,7 @@ class ChatMessage {
     this.fileAttachment,
     this.linkPreview,
     this.archiveSignatureValid,
+    this.albumId,
   })  : timestamp = timestamp ?? DateTime.now(),
         reactions = reactions ?? const {};
 
@@ -72,6 +77,7 @@ class ChatMessage {
       fileAttachment: fileAttachment ?? this.fileAttachment,
       linkPreview: clearLinkPreview ? null : (linkPreview ?? this.linkPreview),
       archiveSignatureValid: archiveSignatureValid,
+      albumId: albumId,
     );
   }
 }

@@ -46,6 +46,29 @@ String _attachmentLabel(FileAttachment a) {
   return a.fileName;
 }
 
+/// Preview for a whole album: what kind of files, and how many.
+///
+/// A caption on the album wins, since it says more than a count does.
+String albumPreviewText(List<FileAttachment?> attachments, {String caption = ''}) {
+  final captionText = messagePreviewText(caption.replaceAll(fileTokenRegex, ''));
+  if (captionText.isNotEmpty) return captionText;
+  final n = attachments.length;
+  var images = 0;
+  var videos = 0;
+  for (final a in attachments) {
+    if (a == null) continue;
+    if (a.isImage) {
+      images++;
+    } else if (_videoExtensions.contains(a.fileExt.toLowerCase())) {
+      videos++;
+    }
+  }
+  if (images == n) return '$n photos';
+  if (videos == n) return '$n videos';
+  if (images + videos == n) return '$n photos and videos';
+  return '$n files';
+}
+
 /// A DM row's own preview, so a conversation list never reaches for the raw
 /// text and its attachment separately.
 extension ChatMessagePreview on ChatMessage {

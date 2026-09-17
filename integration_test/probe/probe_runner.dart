@@ -24,6 +24,7 @@ import 'package:hollow/src/ui/app.dart' show hollowNavigatorKey;
 import 'package:hollow/src/ui/chat/audio_message_bubble.dart'
     show AudioMessageBubble;
 import 'package:hollow/src/ui/chat/chat_drop_zone.dart';
+import 'package:hollow/src/ui/chat/staged_attachments.dart';
 import 'package:hollow/src/ui/chat/file_attachment_widget.dart'
     show FileAttachmentWidget;
 import 'package:hollow/src/ui/chat/video_message_bubble.dart'
@@ -67,7 +68,7 @@ import 'probe_targets.dart';
 /// | `capture` | `as`, `target` or `from` | reads a value out of the app |
 /// | `import_pack` | `path` | imports a `.hollowpack` into the running app |
 /// | `kill_deposit` | `target`, `value` | parks a kill blob on the relay for a device |
-/// | `attach_file` | `path` | stages a file on the composer, as a drop does |
+/// | `attach_file` | `path` or `paths` | stages files on the composer, as a drop does |
 /// | `arm_image_pick` | `path` | answers the next image pick with that file |
 /// | `channel_rows` | `serverId`, `channelId`, `limit` | the DB behind a channel |
 /// | `window_state` | `name`, `expect` | the OS window: fullscreen, style, rect |
@@ -563,29 +564,33 @@ class ProbeRunner {
     return 'imported $path';
   }
 
-  /// Stages a file on the open composer through the SAME callback a
-  /// drag-and-drop lands on ([ChatDropZone.onFileDropped]), so the probe
-  /// exercises the pane's own staging, size confirmation and media-only rules.
+  /// Stages files on the open composer through the SAME callback a
+  /// drag-and-drop lands on ([ChatDropZone.onFilesDropped]), so the probe
+  /// exercises the pane's own staging, album cap, size confirmation and
+  /// media-only rules. `path` stages one file, `paths` several (an album).
   ///
   /// Deliberately NOT `FilePicker`: the native picker is a modal owned by the
   /// OS, which a widget test can neither open nor answer.
   Future<String> _attachFile(Map<String, dynamic> step) async {
-    final path = '${step['path'] ?? ''}';
-    if (path.isEmpty) throw _ProbeFailure('attach_file needs a "path"');
-    final file = File(path);
-    if (!file.existsSync()) throw _ProbeFailure('no file at "$path"');
+    final paths = [
+      if (step['path'] != null) '${step['path']}',
+      for (final p in (step['paths'] as List<dynamic>? ?? const [])) '$p',
+    ].where((p) => p.isNotEmpty).toList();
+    if (paths.isEmpty) throw _ProbeFailure('attach_file needs a "path" or "paths"');
+    for (final path in paths) {
+      if (!File(path).existsSync()) throw _ProbeFailure('no file at "$path"');
+    }
     final zones = find.byType(ChatDropZone).evaluate();
     if (zones.isEmpty) {
       throw _ProbeFailure('no chat composer is open to attach a file to');
     }
     final zone = zones.first.widget as ChatDropZone;
-    final name = path.split(RegExp(r'[\\/]')).last;
-    final size = file.lengthSync();
+    final files = [for (final path in paths) StagedAttachment.fromPath(path)];
     // Async on the pane side (it may await a confirmation dialog), so it is
     // fired and pumped rather than awaited.
-    zone.onFileDropped(path, name, size);
+    zone.onFilesDropped(files);
     await settle(frames: step['frames'] as int? ?? 30);
-    return 'attached $name ($size bytes)';
+    return 'attached ${files.map((f) => '${f.name} (${f.sizeBytes} bytes)').join(', ')}';
   }
 
   /// Answers the NEXT image pick (emote or sticker upload) with this file.

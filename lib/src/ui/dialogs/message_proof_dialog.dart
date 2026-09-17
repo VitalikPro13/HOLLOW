@@ -207,6 +207,7 @@ class _MessageProofDialogContentState
           if (v2.fileId != null) 'file_id': v2.fileId,
           if (v2.orderUs != null) 'order_us': v2.orderUs,
           if (v2.lpDigest != null) 'link_preview_digest': v2.lpDigest,
+          if (v2.albumId != null) 'album': v2.albumId,
         },
         'sender': {
           'peer_id': proof.senderPeerId,
@@ -218,7 +219,7 @@ class _MessageProofDialogContentState
         },
         'signature': {
           'algorithm': 'Ed25519',
-          'payload_version': 2,
+          'payload_version': v2.albumId != null ? 3 : 2,
           'canonical_payload': v2.canonicalPayload,
           'signature_base64': v2.signatureB64,
         },
@@ -227,7 +228,7 @@ class _MessageProofDialogContentState
             '1. Base64-decode the public_key to get the protobuf-wrapped Ed25519 pubkey (36 bytes: header 08 01 12 20 + 32-byte key)',
             '2. Extract the raw 32-byte Ed25519 public key (bytes 4..36)',
             '3. Base64-decode the signature to get the 64-byte Ed25519 signature',
-            '4. Rebuild the payload: hollow-msg2:{type}:{context}:{sender}:{timestamp_ms}:{message_id}:{reply_to}:{file_id}:{order_us}:{link_preview_digest}:{text} (absent fields = empty string) and check it equals canonical_payload',
+            '4. Rebuild the payload: hollow-msg2:{type}:{context}:{sender}:{timestamp_ms}:{message_id}:{reply_to}:{file_id}:{order_us}:{link_preview_digest}:{text} (absent fields = empty string), or for a message with an album hollow-msg3:{type}:{context}:{sender}:{timestamp_ms}:{message_id}:{reply_to}:{file_id}:{order_us}:{link_preview_digest}:{album}:{text}, and check it equals canonical_payload',
             '5. Verify: Ed25519_verify(public_key, signature, canonical_payload.as_bytes())',
             '6. Derive PeerId: Identity-multihash(protobuf_pubkey) -> Base58btc -> must match sender.peer_id',
           ],

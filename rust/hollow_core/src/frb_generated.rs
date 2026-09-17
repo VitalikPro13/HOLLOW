@@ -9847,6 +9847,7 @@ fn wire__crate__api__network__send_file_impl(
             let api_share_key_hex = <Option<String>>::sse_decode(&mut deserializer);
             let api_is_voice = <Option<bool>>::sse_decode(&mut deserializer);
             let api_poster_bytes = <Option<Vec<u8>>>::sse_decode(&mut deserializer);
+            let api_album = <Option<String>>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| {
                 transform_result_sse::<_, String>((move || {
@@ -9864,6 +9865,7 @@ fn wire__crate__api__network__send_file_impl(
                         api_share_key_hex,
                         api_is_voice,
                         api_poster_bytes,
+                        api_album,
                     )?;
                     Ok(output_ok)
                 })())
@@ -14320,6 +14322,7 @@ impl SseDecode for crate::api::archive::ArchiveMessageFfi {
         let mut var_replyToMid = <Option<String>>::sse_decode(deserializer);
         let mut var_fileId = <Option<String>>::sse_decode(deserializer);
         let mut var_channelId = <Option<String>>::sse_decode(deserializer);
+        let mut var_albumId = <Option<String>>::sse_decode(deserializer);
         let mut var_reactions =
             <Vec<crate::api::archive::ArchiveReactionFfi>>::sse_decode(deserializer);
         let mut var_signatureValid = <Option<bool>>::sse_decode(deserializer);
@@ -14335,6 +14338,7 @@ impl SseDecode for crate::api::archive::ArchiveMessageFfi {
             reply_to_mid: var_replyToMid,
             file_id: var_fileId,
             channel_id: var_channelId,
+            album_id: var_albumId,
             reactions: var_reactions,
             signature_valid: var_signatureValid,
         };
@@ -15711,10 +15715,12 @@ impl SseDecode for crate::api::storage::MediaListItem {
         let mut var_file = <crate::api::storage::StoredFileInfo>::sse_decode(deserializer);
         let mut var_ts = <i64>::sse_decode(deserializer);
         let mut var_contentId = <Option<String>>::sse_decode(deserializer);
+        let mut var_albumId = <Option<String>>::sse_decode(deserializer);
         return crate::api::storage::MediaListItem {
             file: var_file,
             ts: var_ts,
             content_id: var_contentId,
+            album_id: var_albumId,
         };
     }
 }
@@ -15753,6 +15759,7 @@ impl SseDecode for crate::api::network::MessageProofV2 {
         let mut var_fileId = <Option<String>>::sse_decode(deserializer);
         let mut var_orderUs = <Option<i64>>::sse_decode(deserializer);
         let mut var_lpDigest = <Option<String>>::sse_decode(deserializer);
+        let mut var_albumId = <Option<String>>::sse_decode(deserializer);
         let mut var_signatureB64 = <Option<String>>::sse_decode(deserializer);
         let mut var_publicKeyB64 = <Option<String>>::sse_decode(deserializer);
         return crate::api::network::MessageProofV2 {
@@ -15767,6 +15774,7 @@ impl SseDecode for crate::api::network::MessageProofV2 {
             file_id: var_fileId,
             order_us: var_orderUs,
             lp_digest: var_lpDigest,
+            album_id: var_albumId,
             signature_b64: var_signatureB64,
             public_key_b64: var_publicKeyB64,
         };
@@ -15827,6 +15835,7 @@ impl SseDecode for crate::api::network::NetworkEvent {
                     <Option<crate::api::network::LinkPreviewRef>>::sse_decode(deserializer);
                 let mut var_signature = <Option<String>>::sse_decode(deserializer);
                 let mut var_publicKey = <Option<String>>::sse_decode(deserializer);
+                let mut var_albumId = <Option<String>>::sse_decode(deserializer);
                 let mut var_isOwn = <bool>::sse_decode(deserializer);
                 let mut var_duplicate = <bool>::sse_decode(deserializer);
                 return crate::api::network::NetworkEvent::MessageReceived {
@@ -15838,6 +15847,7 @@ impl SseDecode for crate::api::network::NetworkEvent {
                     link_preview: var_linkPreview,
                     signature: var_signature,
                     public_key: var_publicKey,
+                    album_id: var_albumId,
                     is_own: var_isOwn,
                     duplicate: var_duplicate,
                 };
@@ -15854,6 +15864,7 @@ impl SseDecode for crate::api::network::NetworkEvent {
                     <Option<crate::api::network::LinkPreviewRef>>::sse_decode(deserializer);
                 let mut var_signature = <Option<String>>::sse_decode(deserializer);
                 let mut var_publicKey = <Option<String>>::sse_decode(deserializer);
+                let mut var_albumId = <Option<String>>::sse_decode(deserializer);
                 let mut var_replyToOwn = <bool>::sse_decode(deserializer);
                 let mut var_duplicate = <bool>::sse_decode(deserializer);
                 let mut var_isOwn = <bool>::sse_decode(deserializer);
@@ -15868,6 +15879,7 @@ impl SseDecode for crate::api::network::NetworkEvent {
                     link_preview: var_linkPreview,
                     signature: var_signature,
                     public_key: var_publicKey,
+                    album_id: var_albumId,
                     reply_to_own: var_replyToOwn,
                     duplicate: var_duplicate,
                     is_own: var_isOwn,
@@ -18117,6 +18129,7 @@ impl SseDecode for crate::api::storage::StoredChannelMessage {
         let mut var_fileId = <Option<String>>::sse_decode(deserializer);
         let mut var_linkPreview =
             <Option<crate::api::network::LinkPreviewRef>>::sse_decode(deserializer);
+        let mut var_albumId = <Option<String>>::sse_decode(deserializer);
         return crate::api::storage::StoredChannelMessage {
             id: var_id,
             server_id: var_serverId,
@@ -18133,6 +18146,7 @@ impl SseDecode for crate::api::storage::StoredChannelMessage {
             reply_to_mid: var_replyToMid,
             file_id: var_fileId,
             link_preview: var_linkPreview,
+            album_id: var_albumId,
         };
     }
 }
@@ -18225,6 +18239,7 @@ impl SseDecode for crate::api::storage::StoredMessage {
         let mut var_fileId = <Option<String>>::sse_decode(deserializer);
         let mut var_linkPreview =
             <Option<crate::api::network::LinkPreviewRef>>::sse_decode(deserializer);
+        let mut var_albumId = <Option<String>>::sse_decode(deserializer);
         return crate::api::storage::StoredMessage {
             id: var_id,
             peer_id: var_peerId,
@@ -18239,6 +18254,7 @@ impl SseDecode for crate::api::storage::StoredMessage {
             reply_to_mid: var_replyToMid,
             file_id: var_fileId,
             link_preview: var_linkPreview,
+            album_id: var_albumId,
         };
     }
 }
@@ -19729,6 +19745,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::archive::ArchiveMessageFfi {
             self.reply_to_mid.into_into_dart().into_dart(),
             self.file_id.into_into_dart().into_dart(),
             self.channel_id.into_into_dart().into_dart(),
+            self.album_id.into_into_dart().into_dart(),
             self.reactions.into_into_dart().into_dart(),
             self.signature_valid.into_into_dart().into_dart(),
         ]
@@ -20446,6 +20463,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::storage::MediaListItem {
             self.file.into_into_dart().into_dart(),
             self.ts.into_into_dart().into_dart(),
             self.content_id.into_into_dart().into_dart(),
+            self.album_id.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -20498,6 +20516,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::network::MessageProofV2 {
             self.file_id.into_into_dart().into_dart(),
             self.order_us.into_into_dart().into_dart(),
             self.lp_digest.into_into_dart().into_dart(),
+            self.album_id.into_into_dart().into_dart(),
             self.signature_b64.into_into_dart().into_dart(),
             self.public_key_b64.into_into_dart().into_dart(),
         ]
@@ -20563,6 +20582,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::network::NetworkEvent {
                 link_preview,
                 signature,
                 public_key,
+                album_id,
                 is_own,
                 duplicate,
             } => [
@@ -20575,6 +20595,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::network::NetworkEvent {
                 link_preview.into_into_dart().into_dart(),
                 signature.into_into_dart().into_dart(),
                 public_key.into_into_dart().into_dart(),
+                album_id.into_into_dart().into_dart(),
                 is_own.into_into_dart().into_dart(),
                 duplicate.into_into_dart().into_dart(),
             ]
@@ -20590,6 +20611,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::network::NetworkEvent {
                 link_preview,
                 signature,
                 public_key,
+                album_id,
                 reply_to_own,
                 duplicate,
                 is_own,
@@ -20605,6 +20627,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::network::NetworkEvent {
                 link_preview.into_into_dart().into_dart(),
                 signature.into_into_dart().into_dart(),
                 public_key.into_into_dart().into_dart(),
+                album_id.into_into_dart().into_dart(),
                 reply_to_own.into_into_dart().into_dart(),
                 duplicate.into_into_dart().into_dart(),
                 is_own.into_into_dart().into_dart(),
@@ -22771,6 +22794,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::storage::StoredChannelMessage
             self.reply_to_mid.into_into_dart().into_dart(),
             self.file_id.into_into_dart().into_dart(),
             self.link_preview.into_into_dart().into_dart(),
+            self.album_id.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -22865,6 +22889,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::storage::StoredMessage {
             self.reply_to_mid.into_into_dart().into_dart(),
             self.file_id.into_into_dart().into_dart(),
             self.link_preview.into_into_dart().into_dart(),
+            self.album_id.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -23240,6 +23265,7 @@ impl SseEncode for crate::api::archive::ArchiveMessageFfi {
         <Option<String>>::sse_encode(self.reply_to_mid, serializer);
         <Option<String>>::sse_encode(self.file_id, serializer);
         <Option<String>>::sse_encode(self.channel_id, serializer);
+        <Option<String>>::sse_encode(self.album_id, serializer);
         <Vec<crate::api::archive::ArchiveReactionFfi>>::sse_encode(self.reactions, serializer);
         <Option<bool>>::sse_encode(self.signature_valid, serializer);
     }
@@ -24206,6 +24232,7 @@ impl SseEncode for crate::api::storage::MediaListItem {
         <crate::api::storage::StoredFileInfo>::sse_encode(self.file, serializer);
         <i64>::sse_encode(self.ts, serializer);
         <Option<String>>::sse_encode(self.content_id, serializer);
+        <Option<String>>::sse_encode(self.album_id, serializer);
     }
 }
 
@@ -24235,6 +24262,7 @@ impl SseEncode for crate::api::network::MessageProofV2 {
         <Option<String>>::sse_encode(self.file_id, serializer);
         <Option<i64>>::sse_encode(self.order_us, serializer);
         <Option<String>>::sse_encode(self.lp_digest, serializer);
+        <Option<String>>::sse_encode(self.album_id, serializer);
         <Option<String>>::sse_encode(self.signature_b64, serializer);
         <Option<String>>::sse_encode(self.public_key_b64, serializer);
     }
@@ -24281,6 +24309,7 @@ impl SseEncode for crate::api::network::NetworkEvent {
                 link_preview,
                 signature,
                 public_key,
+                album_id,
                 is_own,
                 duplicate,
             } => {
@@ -24293,6 +24322,7 @@ impl SseEncode for crate::api::network::NetworkEvent {
                 <Option<crate::api::network::LinkPreviewRef>>::sse_encode(link_preview, serializer);
                 <Option<String>>::sse_encode(signature, serializer);
                 <Option<String>>::sse_encode(public_key, serializer);
+                <Option<String>>::sse_encode(album_id, serializer);
                 <bool>::sse_encode(is_own, serializer);
                 <bool>::sse_encode(duplicate, serializer);
             }
@@ -24307,6 +24337,7 @@ impl SseEncode for crate::api::network::NetworkEvent {
                 link_preview,
                 signature,
                 public_key,
+                album_id,
                 reply_to_own,
                 duplicate,
                 is_own,
@@ -24322,6 +24353,7 @@ impl SseEncode for crate::api::network::NetworkEvent {
                 <Option<crate::api::network::LinkPreviewRef>>::sse_encode(link_preview, serializer);
                 <Option<String>>::sse_encode(signature, serializer);
                 <Option<String>>::sse_encode(public_key, serializer);
+                <Option<String>>::sse_encode(album_id, serializer);
                 <bool>::sse_encode(reply_to_own, serializer);
                 <bool>::sse_encode(duplicate, serializer);
                 <bool>::sse_encode(is_own, serializer);
@@ -26142,6 +26174,7 @@ impl SseEncode for crate::api::storage::StoredChannelMessage {
         <Option<String>>::sse_encode(self.reply_to_mid, serializer);
         <Option<String>>::sse_encode(self.file_id, serializer);
         <Option<crate::api::network::LinkPreviewRef>>::sse_encode(self.link_preview, serializer);
+        <Option<String>>::sse_encode(self.album_id, serializer);
     }
 }
 
@@ -26200,6 +26233,7 @@ impl SseEncode for crate::api::storage::StoredMessage {
         <Option<String>>::sse_encode(self.reply_to_mid, serializer);
         <Option<String>>::sse_encode(self.file_id, serializer);
         <Option<crate::api::network::LinkPreviewRef>>::sse_encode(self.link_preview, serializer);
+        <Option<String>>::sse_encode(self.album_id, serializer);
     }
 }
 

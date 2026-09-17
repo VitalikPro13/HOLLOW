@@ -35,6 +35,8 @@ CREATE TABLE IF NOT EXISTS messages (
 --   reply_to_mid TEXT
 --   file_id TEXT
 --   link_preview_json TEXT
+--   order_us INTEGER
+--   album_id TEXT      (signed album grouping id; rendering only)
 ```
 
 Indexes:
@@ -82,6 +84,8 @@ CREATE TABLE IF NOT EXISTS channel_messages (
 --   reply_to_mid TEXT
 --   file_id TEXT
 --   link_preview_json TEXT
+--   order_us INTEGER
+--   album_id TEXT      (signed album grouping id; rendering only)
 ```
 
 Indexes:
@@ -551,7 +555,7 @@ A persisted server join that has not completed yet. Survives restarts on purpose
 ## Stored Structs
 
 ### StoredMessage
-Fields: id (i64), peer_id, text, is_mine (bool), timestamp (i64), signature (Option), public_key (Option), message_id (Option), edited_at (Option<i64>), hidden_at (Option<i64>), reply_to_mid (Option), file_id (Option), link_preview (Option<LinkPreviewRef> -- deserialized from link_preview_json column).
+Fields: id (i64), peer_id, text, is_mine (bool), timestamp (i64), signature (Option), public_key (Option), message_id (Option), edited_at (Option<i64>), hidden_at (Option<i64>), reply_to_mid (Option), file_id (Option), link_preview (Option<LinkPreviewRef> -- deserialized from link_preview_json column), order_us (Option<i64>), album_id (Option).
 
 ### StoredChannelMessage
 Same as StoredMessage plus: server_id, channel_id, sender_id (replaces peer_id/is_mine split).
@@ -604,6 +608,7 @@ Tables created in `MessageStore::open()` constructor order:
 22. video_thumb_json, expired_at, content_id migrations on files
 23. file_id migration on messages/channel_messages
 24. link_preview_json migration on messages/channel_messages
+24b. album_id migration on messages/channel_messages
 25. avatar/banner migration on user_profiles
 26. verified_peers
 27. shares + share_chunks

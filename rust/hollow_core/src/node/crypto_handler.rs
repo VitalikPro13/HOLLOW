@@ -184,13 +184,36 @@ pub(crate) struct SignedExtras<'a> {
     pub file_id: Option<&'a str>,
     pub order_us: Option<i64>,
     pub lp_digest: Option<&'a str>,
+    /// Album grouping id; `Some("")` is treated as absent.
+    pub album: Option<&'a str>,
 }
 
-/// Canonical v2 signing payload:
+impl SignedExtras<'_> {
+    /// The album id that selects the v3 payload, with empty normalised to none.
+    fn album(&self) -> Option<&str> {
+        self.album.filter(|a| !a.is_empty())
+    }
+}
+
+/// True for a hyphenated UUID (8-4-4-4-12 hex digits, either case). The album
+/// slot sits before `text` in the v3 payload, so anything else (a colon above
+/// all) would make the layout ambiguous.
+pub(crate) fn is_album_id_shape(s: &str) -> bool {
+    let b = s.as_bytes();
+    b.len() == 36
+        && b.iter().enumerate().all(|(i, c)| match i {
+            8 | 13 | 18 | 23 => *c == b'-',
+            _ => c.is_ascii_hexdigit(),
+        })
+}
+
+/// Canonical signing payload. v2 without an album, byte-identical to 0.8.5:
 ///   hollow-msg2:{type}:{context}:{sender}:{ts}:{mid}:{reply_to}:{file_id}:{order_us}:{lp}:{text}
-/// Every field before `text` is colon-free (UUIDs / hex hashes / a number / a
-/// hex digest), so `text` — the only field that may contain a colon — stays
-/// LAST, exactly like v1, and the layout is unambiguous.
+/// v3 when the message belongs to an album:
+///   hollow-msg3:{type}:{context}:{sender}:{ts}:{mid}:{reply_to}:{file_id}:{order_us}:{lp}:{album}:{text}
+/// Every field before `text` is colon-free, so `text` stays LAST and the layout
+/// is unambiguous. The two prefixes differ, so stripping or adding an album
+/// can never keep a signature valid.
 pub(crate) fn message_signing_payload_v2(
     msg_type: &str,
     context: &str,
@@ -204,11 +227,18 @@ pub(crate) fn message_signing_payload_v2(
     let file_id = extras.file_id.unwrap_or("");
     let order_us = extras.order_us.map(|n| n.to_string()).unwrap_or_default();
     let lp = extras.lp_digest.unwrap_or("");
-    format!("hollow-msg2:{msg_type}:{context}:{sender}:{ts}:{mid}:{reply_to}:{file_id}:{order_us}:{lp}:{text}")
+    match extras.album() {
+        Some(album) => format!(
+            "hollow-msg3:{msg_type}:{context}:{sender}:{ts}:{mid}:{reply_to}:{file_id}:{order_us}:{lp}:{album}:{text}"
+        ),
+        None => format!(
+            "hollow-msg2:{msg_type}:{context}:{sender}:{ts}:{mid}:{reply_to}:{file_id}:{order_us}:{lp}:{text}"
+        ),
+    }
 }
 
-/// Sign a message over the canonical v2 payload. Every sign site in the crate
-/// goes through here.
+/// Sign a message over the canonical payload (v3 iff the extras carry an album).
+/// Every sign site in the crate goes through here.
 pub(crate) fn sign_message_versioned(
     keypair: &crate::identity::native_identity::NativeKeypair,
     pub_key_b64: &str,
@@ -223,11 +253,13 @@ pub(crate) fn sign_message_versioned(
     sign_message(keypair, pub_key_b64, &payload)
 }
 
-/// Verify a message signature against the v2 payload — and ONLY the v2 payload.
+/// Verify a message signature against the canonical payload: v3 when the
+/// received extras carry an album, v2 otherwise, never both.
 ///
 /// There is deliberately no v1 fallback: it would be a downgrade oracle, since
-/// the attacker rather than the sender picks which payload is checked. Reuses
-/// `pk_cache` across a batch; a missing signature returns false.
+/// the attacker rather than the sender picks which payload is checked. A
+/// malformed album fails. Reuses `pk_cache` across a batch; a missing signature
+/// returns false.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn verify_message_signature_v2(
     sender_peer_str: &str,
@@ -240,8 +272,11 @@ pub(crate) fn verify_message_signature_v2(
     text: &str,
     pk_cache: &mut PkCache,
 ) -> bool {
-    let v2 = message_signing_payload_v2(msg_type, context, sender_peer_str, ts, extras, text);
-    verify_message_signature_cached(sender_peer_str, sig_b64, pk_b64, &v2, pk_cache)
+    if extras.album().is_some_and(|a| !is_album_id_shape(a)) {
+        return false;
+    }
+    let payload = message_signing_payload_v2(msg_type, context, sender_peer_str, ts, extras, text);
+    verify_message_signature_cached(sender_peer_str, sig_b64, pk_b64, &payload, pk_cache)
 }
 
 // -- Signed profiles (0.8.5) --
@@ -3931,6 +3966,7 @@ mod tests {
             file_id: Some("file-1"),
             order_us: Some(42),
             lp_digest: Some(&preview_digest),
+            album: None,
         };
         let payload = message_signing_payload_v2("dm", "recipient", &a_id, 1_000, &extras, "hi");
         let (sig, pk) = sign_message(&a, &a_pk, &payload);
@@ -3968,6 +4004,132 @@ mod tests {
         assert!(!verify_message_signature_v2(
             &a_id, sig.as_deref(), pk.as_deref(), "dm", "recipient", 1_000, &extras, "bye", &mut cache,
         ), "text must be covered");
+    }
+
+    const ALBUM: &str = "3f2a9c1e-7b4d-4e8a-9c2f-1a2b3c4d5e6f";
+
+    fn album_extras(album: Option<&str>) -> SignedExtras<'_> {
+        SignedExtras {
+            mid: Some("mid-a1"),
+            file_id: Some("file-a1"),
+            order_us: Some(1_000_001),
+            album,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn album_id_shape_accepts_only_hyphenated_uuids() {
+        assert!(is_album_id_shape(ALBUM));
+        assert!(is_album_id_shape(&ALBUM.to_uppercase()));
+        assert!(!is_album_id_shape(""));
+        assert!(!is_album_id_shape(&ALBUM.replace('-', "")));
+        assert!(!is_album_id_shape(&format!("{ALBUM}0")));
+        assert!(!is_album_id_shape("3f2a9c1e:7b4d-4e8a-9c2f-1a2b3c4d5e6f"));
+        assert!(!is_album_id_shape("3f2a9c1e-7b4d-4e8a-9c2f-1a2b3c4d5e6g"));
+        assert!(!is_album_id_shape("3f2a9c1e7-b4d-4e8a-9c2f-1a2b3c4d5e6f"));
+    }
+
+    /// Non-album traffic must keep the exact 0.8.5 bytes, or every stored
+    /// signature in the world stops verifying.
+    #[test]
+    fn no_album_payload_is_byte_identical_v2() {
+        let extras = SignedExtras {
+            mid: Some("m"), reply_to: Some("r"), file_id: Some("f"),
+            order_us: Some(7), lp_digest: Some("d"), album: None,
+        };
+        let expected = "hollow-msg2:dm:ctx:snd:5:m:r:f:7:d:a:b";
+        assert_eq!(message_signing_payload_v2("dm", "ctx", "snd", 5, &extras, "a:b"), expected);
+        let empty = SignedExtras { album: Some(""), ..extras };
+        assert_eq!(
+            message_signing_payload_v2("dm", "ctx", "snd", 5, &empty, "a:b"), expected,
+            "an empty album is no album",
+        );
+        let v3 = SignedExtras { album: Some(ALBUM), ..extras };
+        assert_eq!(
+            message_signing_payload_v2("dm", "ctx", "snd", 5, &v3, "a:b"),
+            format!("hollow-msg3:dm:ctx:snd:5:m:r:f:7:d:{ALBUM}:a:b"),
+        );
+    }
+
+    #[test]
+    fn album_v3_signature_round_trips_and_resists_downgrade() {
+        let a = kp(24);
+        let a_id = a.peer_id();
+        let a_pk = pk_b64(&a);
+        let mut cache = PkCache::new();
+
+        let v3 = album_extras(Some(ALBUM));
+        let (sig, pk) = sign_message_versioned(&a, &a_pk, "ch", "srv:chan", &a_id, 9, &v3, "[file:file-a1]");
+        assert!(verify_message_signature_v2(
+            &a_id, sig.as_deref(), pk.as_deref(), "ch", "srv:chan", 9, &v3, "[file:file-a1]", &mut cache,
+        ), "v3 round trip");
+
+        let stripped = album_extras(None);
+        assert!(!verify_message_signature_v2(
+            &a_id, sig.as_deref(), pk.as_deref(), "ch", "srv:chan", 9, &stripped, "[file:file-a1]", &mut cache,
+        ), "stripping the album from a v3 signature must reject");
+
+        let other = "00000000-0000-4000-8000-000000000000";
+        let regrouped = album_extras(Some(other));
+        assert!(!verify_message_signature_v2(
+            &a_id, sig.as_deref(), pk.as_deref(), "ch", "srv:chan", 9, &regrouped, "[file:file-a1]", &mut cache,
+        ), "moving an item into another album must reject");
+
+        let (sig2, pk2) = sign_message_versioned(&a, &a_pk, "ch", "srv:chan", &a_id, 9, &stripped, "[file:file-a1]");
+        assert!(!verify_message_signature_v2(
+            &a_id, sig2.as_deref(), pk2.as_deref(), "ch", "srv:chan", 9, &v3, "[file:file-a1]", &mut cache,
+        ), "adding an album to a v2 signature must reject");
+    }
+
+    /// A colon in the album slot would let two layouts produce one byte string,
+    /// so a malformed album fails even under a signature over those exact bytes.
+    #[test]
+    fn malformed_album_is_rejected_even_when_signed() {
+        let a = kp(25);
+        let a_id = a.peer_id();
+        let a_pk = pk_b64(&a);
+        let mut cache = PkCache::new();
+        for bad in ["a:b", "short", "3f2a9c1e-7b4d-4e8a-9c2f-1a2b3c4d5e6f-extra"] {
+            let extras = album_extras(Some(bad));
+            let (sig, pk) = sign_message_versioned(&a, &a_pk, "dm", "rcpt", &a_id, 3, &extras, "x");
+            assert!(!verify_message_signature_v2(
+                &a_id, sig.as_deref(), pk.as_deref(), "dm", "rcpt", 3, &extras, "x", &mut cache,
+            ), "malformed album {bad:?} must reject");
+        }
+    }
+
+    /// Old peers parse album-bearing payloads (unknown fields are ignored) and
+    /// album-less traffic serializes exactly as before.
+    #[test]
+    fn album_wire_field_is_tolerant_both_ways() {
+        use crate::node::types::{ChannelMessagePayload, DirectMessagePayload, SyncMessageItem};
+        let old = r#"{"sid":"s","cid":"c","text":"t","ts":1,"mid":"m","order_us":5}"#;
+        let parsed: ChannelMessagePayload = serde_json::from_str(old).expect("old shape parses");
+        assert!(parsed.album.is_none());
+        let reserialized = serde_json::to_string(&parsed).unwrap();
+        assert!(!reserialized.contains("album"), "no album means no album key on the wire");
+
+        #[derive(serde::Deserialize)]
+        struct PreAlbumDm {
+            text: String,
+            #[serde(default)]
+            order_us: Option<i64>,
+        }
+        let new_dm = DirectMessagePayload {
+            text: "t".into(), ts: 1, sig: None, pk: None, mid: Some("m".into()),
+            reply_to: None, file_id: None, link_preview: None, convo: None,
+            order_us: Some(5), album: Some(ALBUM.into()),
+        };
+        let json = serde_json::to_string(&new_dm).unwrap();
+        let old_view: PreAlbumDm = serde_json::from_str(&json).expect("an old struct ignores album");
+        assert_eq!((old_view.text.as_str(), old_view.order_us), ("t", Some(5)));
+        let back: DirectMessagePayload = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.album.as_deref(), Some(ALBUM));
+
+        let item: SyncMessageItem =
+            serde_json::from_str(r#"{"s":"x","t":"t","ts":1}"#).expect("old sync item parses");
+        assert!(item.album.is_none());
     }
 
     /// The transition window is CLOSED (0.8.5): a legacy v1 signature is
@@ -4018,6 +4180,7 @@ mod tests {
         let extras = SignedExtras {
             mid: Some("mid"), reply_to: None, file_id: Some("fid"),
             order_us: Some(7), lp_digest: Some(&preview_digest),
+            album: None,
         };
         let (sig, pk) = sign_message_versioned(
             &a, &a_pk, "dm", "recipient", &a_id, 500, &extras, "payload",
@@ -4263,6 +4426,7 @@ mod tests {
         let extras = SignedExtras {
             mid: Some("mid-edit"), reply_to: Some("parent-1"),
             file_id: None, order_us: Some(1_000_042), lp_digest: None,
+            album: None,
         };
         let edit_payload = message_signing_payload_v2("ch", "srv:chan", &a_id, edit_ts, &extras, "edited text");
         let (sig, pk) = sign_message(&a, &a_pk, &edit_payload);
@@ -4307,6 +4471,7 @@ mod tests {
         let extras = SignedExtras {
             mid: Some("mid-rt"), reply_to: None, file_id: Some("file-rt"),
             order_us: Some(777), lp_digest: None,
+            album: None,
         };
         let (sig, pk) = sign_message_versioned(
             &a, &a_pk, "ch", "srv:chan", &a_id, 3_000, &extras, "round trip",

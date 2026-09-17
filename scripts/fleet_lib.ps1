@@ -166,6 +166,10 @@ function Expand-FleetVars($value) {
             return $m.Value
         })
     }
+    # A list of strings (attach_file's `paths`) expands item by item.
+    if ($value -is [array]) {
+        return ,@($value | ForEach-Object { Expand-FleetVars $_ })
+    }
     return $value
 }
 

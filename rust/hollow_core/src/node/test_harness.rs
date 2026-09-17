@@ -3273,6 +3273,7 @@ async fn dm_file_transfer_completes_and_decrypts() {
             share_ref: None,
             voice: false,
             poster: None,
+            album: None,
         })))
         .await
         .unwrap();
@@ -3368,6 +3369,7 @@ async fn dm_auto_download_off_declines_push_then_manual_request_completes() {
             share_ref: None,
             voice: false,
             poster: None,
+            album: None,
         })))
         .await
         .unwrap();
@@ -3480,6 +3482,7 @@ async fn dm_receiver_pref_prenegotiation_skips_push_bytes() {
             share_ref: None,
             voice: false,
             poster: None,
+            album: None,
         })))
         .await
         .unwrap();
@@ -3600,6 +3603,7 @@ async fn dm_voice_message_bypasses_auto_download_gate() {
             share_ref: None,
             voice: true,
             poster: None,
+            album: None,
         })))
         .await
         .unwrap();
@@ -3692,6 +3696,7 @@ async fn dm_file_request_gets_honest_gone_answer_when_holder_lost_bytes() {
             share_ref: None,
             voice: false,
             poster: None,
+            album: None,
         })))
         .await
         .unwrap();
@@ -3767,6 +3772,7 @@ async fn dm_file_request_gets_honest_gone_answer_when_holder_lost_bytes() {
             share_ref: None,
             voice: false,
             poster: None,
+            album: None,
         })))
         .await
         .unwrap();
@@ -3866,6 +3872,7 @@ async fn dm_file_request_waits_for_offline_holder_then_fetches_on_return() {
             share_ref: None,
             voice: false,
             poster: None,
+            album: None,
         })))
         .await
         .unwrap();
@@ -4002,6 +4009,7 @@ async fn file_unavailable_from_unasked_device_changes_nothing() {
             share_ref: None,
             voice: false,
             poster: None,
+            album: None,
         })))
         .await
         .unwrap();
@@ -4143,6 +4151,7 @@ async fn file_unavailable_never_answers_a_non_entitled_requester() {
             share_ref: None,
             voice: false,
             poster: None,
+            album: None,
         })))
         .await
         .unwrap();
@@ -4283,6 +4292,7 @@ async fn channel_file_request_rotates_to_next_holder_after_gone() {
             share_ref: None,
             voice: false,
             poster: None,
+            album: None,
         })))
         .await
         .unwrap();
@@ -4471,6 +4481,7 @@ async fn expired_answer_is_verified_locally_before_marking_our_row() {
             share_ref: None,
             voice: false,
             poster: None,
+            album: None,
         })))
         .await
         .unwrap();
@@ -4627,6 +4638,7 @@ async fn cancel_file_request_drops_the_queued_ask_and_its_receipt() {
             share_ref: None,
             voice: false,
             poster: None,
+            album: None,
         })))
         .await
         .unwrap();
@@ -4716,6 +4728,7 @@ async fn cancel_file_request_drops_the_queued_ask_and_its_receipt() {
             share_ref: None,
             voice: false,
             poster: None,
+            album: None,
         })))
         .await
         .unwrap();
@@ -4858,6 +4871,7 @@ async fn forged_voice_flag_does_not_bypass_auto_download_gate() {
                 share_ref: None,
                 voice,
                 poster: None,
+                album: None,
             })))
             .await
             .unwrap();
@@ -4964,6 +4978,7 @@ async fn dm_video_send_carries_poster_thumb_and_dims() {
             share_ref: None,
             voice: false,
             poster: Some(poster_png),
+            album: None,
         })))
         .await
         .unwrap();
@@ -10498,6 +10513,7 @@ async fn channel_relay_catchup_delivers_public_channel_file_caption() {
             share_ref: None,
             voice: false,
             poster: None,
+            album: None,
         })))
         .await
         .unwrap();
@@ -10618,6 +10634,7 @@ async fn channel_relay_catchup_survives_subscribe_before_room_join() {
             share_ref: None,
             voice: false,
             poster: None,
+            album: None,
         })))
         .await
         .unwrap();
@@ -10747,6 +10764,7 @@ async fn channel_relay_catchup_delivers_file_message_and_header() {
             share_ref: None,
             voice: false,
             poster: None,
+            album: None,
         })))
         .await
         .unwrap();
@@ -10868,6 +10886,7 @@ async fn channel_file_request_reroutes_to_online_holder_when_sender_offline() {
             share_ref: None,
             voice: false,
             poster: None,
+            album: None,
         })))
         .await
         .unwrap();
@@ -10994,6 +11013,7 @@ async fn file_request_gate_refuses_stranger_and_serves_guest_public() {
             share_ref: None,
             voice: false,
             poster: None,
+            album: None,
         })))
         .await
         .unwrap();
@@ -11106,6 +11126,7 @@ async fn file_request_gate_refuses_stranger_and_serves_guest_public() {
             share_ref: None,
             voice: false,
             poster: None,
+            album: None,
         })))
         .await
         .unwrap();
@@ -14199,6 +14220,7 @@ async fn late_link_preview_lands_on_recipient_and_sibling_without_marking_edited
             file_id: row.file_id.as_deref(),
             order_us: row.order_us,
             lp_digest: Some(&digest),
+            album: None,
         };
         // A DM signature binds the RECIPIENT's master as context, and every
         // side reconstructs that same value — the sender from who it sent to,
@@ -14334,6 +14356,7 @@ async fn clearing_a_link_preview_re_signs_and_propagates() {
             file_id: row.file_id.as_deref(),
             order_us: row.order_us,
             lp_digest: None,
+            album: None,
         };
         let ctx = a_master.clone(); // the recipient's master, on both sides
         assert!(
@@ -14496,6 +14519,7 @@ async fn backfilled_member_gets_link_preview_through_channel_sync() {
         file_id: row.file_id.as_deref(),
         order_us: row.order_us,
         lp_digest: Some(&digest),
+        album: None,
     };
     assert!(
         crate::node::crypto_handler::verify_message_signature_v2(
@@ -14529,6 +14553,273 @@ async fn backfilled_member_gets_link_preview_through_channel_sync() {
 
     drop(o);
     drop(j);
+}
+
+const HARNESS_ALBUM: &str = "5b0e8f7a-2c4d-4a6b-8e9f-0a1b2c3d4e5f";
+
+/// Sends `n` small files back to back into one album, as the composer does.
+async fn send_album_files(
+    node: &TestNode,
+    dir: &std::path::Path,
+    peer_id: Option<String>,
+    server_id: Option<String>,
+    channel_id: Option<String>,
+    mid_prefix: &str,
+    kinds: &[&str],
+    caption: &str,
+) -> Vec<String> {
+    let mut mids = Vec::new();
+    for (i, kind) in kinds.iter().enumerate() {
+        let src = dir.join(format!("{mid_prefix}-{i}.{kind}"));
+        let bytes = match *kind {
+            "png" => album_test_png(),
+            "gif" => album_test_gif(),
+            _ => format!("album item {i}").into_bytes(),
+        };
+        std::fs::write(&src, bytes).expect("write album item");
+        let mid = format!("{mid_prefix}-{i}");
+        node.cmd_tx
+            .send(NodeCommand::SendFile(Box::new(super::types::SendFilePayload {
+                peer_id: peer_id.clone(),
+                server_id: server_id.clone(),
+                channel_id: channel_id.clone(),
+                file_path: src.to_str().unwrap().to_string(),
+                message_id: mid.clone(),
+                message_text: if i == 0 { caption.to_string() } else { String::new() },
+                vthumb: None,
+                override_width: None,
+                override_height: None,
+                share_ref: None,
+                voice: false,
+                poster: None,
+                album: Some(HARNESS_ALBUM.to_string()),
+            })))
+            .await
+            .unwrap();
+        mids.push(mid);
+    }
+    mids
+}
+
+/// A tiny still: converts to WebP almost instantly.
+fn album_test_png() -> Vec<u8> {
+    let img = image::RgbaImage::from_pixel(8, 8, image::Rgba([10, 200, 30, 255]));
+    let mut out = std::io::Cursor::new(Vec::new());
+    img.write_to(&mut out, image::ImageFormat::Png).expect("encode png");
+    out.into_inner()
+}
+
+/// A noisy multi-frame GIF: its animated WebP encode is far slower than a
+/// still's, which is exactly what used to reorder an album.
+fn album_test_gif() -> Vec<u8> {
+    use image::codecs::gif::{GifEncoder, Repeat};
+    use image::{Delay, Frame, Rgba, RgbaImage};
+    let mut seed: u32 = 0x9e37_79b9;
+    let mut out = Vec::new();
+    {
+        let mut enc = GifEncoder::new(&mut out);
+        enc.set_repeat(Repeat::Infinite).expect("gif repeat");
+        for _ in 0..12 {
+            let frame = RgbaImage::from_fn(256, 192, |_, _| {
+                seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                let v = seed.to_le_bytes();
+                Rgba([v[0], v[1], v[2], 255])
+            });
+            enc.encode_frame(Frame::from_parts(frame, 0, 0, Delay::from_numer_denom_ms(80, 1)))
+                .expect("gif frame");
+        }
+    }
+    out
+}
+
+/// The row must hold the album AND verify under it, or re-serving it later
+/// computes a v2 payload the sender never signed.
+fn assert_album_row_verifies(
+    row: &crate::storage::messages::MessageSigRow,
+    mid: &str,
+    signer: &str,
+    msg_type: &str,
+    context: &str,
+) {
+    assert_eq!(row.album_id.as_deref(), Some(HARNESS_ALBUM), "album_id persisted for {mid}");
+    let lp_digest = row.link_preview.as_ref().map(crate::node::crypto_handler::link_preview_digest);
+    let extras = crate::node::crypto_handler::SignedExtras {
+        mid: Some(mid),
+        reply_to: row.reply_to_mid.as_deref(),
+        file_id: row.file_id.as_deref(),
+        order_us: row.order_us,
+        lp_digest: lp_digest.as_deref(),
+        album: row.album_id.as_deref(),
+    };
+    assert!(
+        crate::node::crypto_handler::verify_message_signature_v2(
+            signer, row.signature.as_deref(), row.public_key.as_deref(), msg_type, context,
+            row.edited_at.unwrap_or(row.timestamp), &extras, &row.text,
+            &mut crate::node::crypto_handler::PkCache::new(),
+        ),
+        "album row {mid} must verify under its v3 signature"
+    );
+}
+
+/// Part C albums over a DM: three back-to-back files carry one signed album id
+/// into every receiver row and live event, in the order they were sent even
+/// when a slow animated GIF sits between two stills, with the caption on the
+/// item it was sent with.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn album_files_over_dm_persist_and_verify_album_id() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    const A_MASTER: u8 = 146;
+    const B_MASTER: u8 = 147;
+    let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER)).peer_id();
+    let b_master = NativeKeypair::from_secret_bytes(&seed_bytes(B_MASTER)).peer_id();
+
+    let mut a = spawn_node_with_friends(&relay, A_MASTER, A_MASTER, &[&b_master]).await;
+    sleep_ms(1200).await;
+    let mut b = spawn_node_with_friends(&relay, B_MASTER, B_MASTER, &[&a_master]).await;
+    expect_dm_pair_ready(&relay, &a, &b, 15).await;
+    // Auto-download pref advert has no live probe; see dm_file_transfer_completes_and_decrypts.
+    sleep_ms(1000).await;
+    drain_events(&mut a);
+    drain_events(&mut b);
+
+    let mids = send_album_files(
+        &a, global_tmp.path(), Some(b.master_id.clone()), None, None, "dm-album",
+        &["png", "gif", "png"], "Our trip",
+    ).await;
+
+    let mut seen = std::collections::HashSet::new();
+    let all = wait_event(&mut b, std::time::Duration::from_secs(10), |ev| {
+        if let NetworkEvent::MessageReceived { message_id, album_id, .. } = ev
+            && mids.contains(message_id)
+        {
+            assert_eq!(album_id.as_deref().map(String::as_str), Some(HARNESS_ALBUM), "live event carries the album");
+            seen.insert(message_id.clone());
+        }
+        seen.len() == mids.len()
+    })
+    .await;
+    assert!(all, "every album item must arrive, got {seen:?}");
+
+    let first = b.store().get_dm_message_sig_row(&mids[0]).expect("receiver row");
+    assert_eq!(first.text, "Our trip", "the caption stays on the first item");
+
+    let order: Vec<i64> = mids
+        .iter()
+        .map(|mid| {
+            let row = b.store().get_dm_message_sig_row(mid).expect("receiver row");
+            assert_album_row_verifies(&row, mid, &a_master, "dm", &b_master);
+            let own = a.store().get_dm_message_sig_row(mid).expect("sender row");
+            assert_eq!(own.album_id.as_deref(), Some(HARNESS_ALBUM), "sender row keeps the album");
+            row.order_us.expect("order_us")
+        })
+        .collect();
+    assert!(order.windows(2).all(|w| w[0] < w[1]), "album items keep send order: {order:?}");
+
+    drop(a);
+    drop(b);
+}
+
+/// Part C albums over a server channel: a live member stores the album, and a
+/// member who joins afterwards backfills it through channel sync with the v3
+/// signature intact.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn album_files_over_channel_reach_live_and_backfilled_members() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    const O_MASTER: u8 = 148;
+    const J_MASTER: u8 = 149;
+    const K_MASTER: u8 = 150;
+    let o_master = NativeKeypair::from_secret_bytes(&seed_bytes(O_MASTER)).peer_id();
+    let j_master = NativeKeypair::from_secret_bytes(&seed_bytes(J_MASTER)).peer_id();
+    let k_master = NativeKeypair::from_secret_bytes(&seed_bytes(K_MASTER)).peer_id();
+
+    let mut o = spawn_node_with_friends(&relay, O_MASTER, O_MASTER, &[&j_master, &k_master]).await;
+    sleep_ms(1200).await;
+    let mut j = spawn_node_with_friends(&relay, J_MASTER, J_MASTER, &[&o_master]).await;
+    expect_dm_pair_ready(&relay, &o, &j, 15).await;
+
+    let server_id = create_server_and_wait(&mut o, "Album Server").await;
+    let general = general_channel_of(&server_id);
+
+    j.cmd_tx
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false })
+        .await
+        .unwrap();
+    let joined = wait_event(&mut j, std::time::Duration::from_secs(8), |ev| {
+        matches!(ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id)
+    })
+    .await;
+    assert!(joined, "live member J should join the server");
+    expect_mls_group(&[&o, &j], &server_id, 15).await;
+    drain_events(&mut o);
+    drain_events(&mut j);
+
+    let mids = send_album_files(
+        &o, global_tmp.path(), None, Some(server_id.clone()), Some(general.clone()), "ch-album",
+        &["txt", "txt", "txt"], "",
+    ).await;
+
+    let mut seen = std::collections::HashSet::new();
+    let all = wait_event(&mut j, std::time::Duration::from_secs(10), |ev| {
+        if let NetworkEvent::ChannelMessageReceived { message_id, album_id, .. } = ev
+            && mids.contains(message_id)
+        {
+            assert_eq!(album_id.as_deref().map(String::as_str), Some(HARNESS_ALBUM), "live event carries the album");
+            seen.insert(message_id.clone());
+        }
+        seen.len() == mids.len()
+    })
+    .await;
+    assert!(all, "every album item must reach the live member, got {seen:?}");
+
+    let context = format!("{server_id}:{general}");
+    for mid in &mids {
+        let row = j.store().get_channel_message_sig_row(mid).expect("live member row");
+        assert_album_row_verifies(&row, mid, &o_master, "ch", &context);
+    }
+
+    // K arrives after the album was sent, so channel sync is the only vehicle.
+    let mut k = spawn_node_with_friends(&relay, K_MASTER, K_MASTER, &[&o_master]).await;
+    expect_dm_pair_ready(&relay, &o, &k, 15).await;
+    assert!(
+        k.store().get_channel_message_sig_row(&mids[0]).is_none(),
+        "precondition: the late member has no album rows yet"
+    );
+    drain_events(&mut k);
+    k.cmd_tx
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false })
+        .await
+        .unwrap();
+    let joined = wait_event(&mut k, std::time::Duration::from_secs(10), |ev| {
+        matches!(ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id)
+    })
+    .await;
+    assert!(joined, "late member K should join the server");
+    // A row in K's DB is the settle signal; see backfilled_member_gets_link_preview_through_channel_sync.
+    sleep_ms(4000).await;
+
+    for mid in &mids {
+        let row = k
+            .store()
+            .get_channel_message_sig_row(mid)
+            .expect("the late member must backfill every album row");
+        assert_album_row_verifies(&row, mid, &o_master, "ch", &context);
+    }
+
+    drop(o);
+    drop(j);
+    drop(k);
 }
 
 /// The DM half of the same fix: a card reaching a device through
@@ -14644,6 +14935,7 @@ async fn freshly_linked_device_backfills_dm_link_previews_from_its_sibling() {
         file_id: row.file_id.as_deref(),
         order_us: row.order_us,
         lp_digest: Some(&digest),
+        album: None,
     };
     assert!(
         crate::node::crypto_handler::verify_message_signature_v2(
@@ -19799,6 +20091,7 @@ async fn channel_file_header_reaches_a_member_without_a_leaf() {
             share_ref: None,
             voice: false,
             poster: None,
+            album: None,
         })))
         .await
         .unwrap();
@@ -19988,6 +20281,7 @@ async fn restricted_channel_history_and_files_never_reach_a_non_qualifier() {
             share_ref: None,
             voice: false,
             poster: None,
+            album: None,
         })))
         .await
         .unwrap();
@@ -20184,7 +20478,9 @@ fn harness_fixed_sleep_budget_does_not_grow() {
     // 2026-09-11: the destruction tests added ONE 300 ms settle, in
     // `shutdown_and_wipe` - there is no signal for "an aborted task has finished
     // dropping its SQLCipher handles", which is the same reason `restart_node` pays it.
-    const BUDGET_MS: u64 = 613_200;
+    // 2026-09-17: the two album tests added two spawn staggers, one auto-download
+    // advert window and one backfill DB-row settle (7.4 s).
+    const BUDGET_MS: u64 = 620_600;
 
     let src = include_str!("test_harness.rs");
     // Built from pieces so this scan does not count its own source text.
@@ -22142,8 +22438,8 @@ async fn read_markers_reach_siblings_on_verify_and_live() {
     // B has read a DM up to ts 4000 before C ever exists.
     {
         let store = b.store();
-        store.insert("friend_master", "one", false, 3000, None, None, Some("f1"), None, None, None).unwrap();
-        store.insert("friend_master", "two", false, 4000, None, None, Some("f2"), None, None, None).unwrap();
+        store.insert("friend_master", "one", false, 3000, None, None, Some("f1"), None, None, None, None).unwrap();
+        store.insert("friend_master", "two", false, 4000, None, None, Some("f2"), None, None, None, None).unwrap();
         store.save_setting("seen:dm:friend_master", "f2").unwrap();
     }
 
@@ -22262,6 +22558,7 @@ async fn at_rest_dm_file_lands_encrypted_on_receiver_disk() {
             share_ref: None,
             voice: false,
             poster: None,
+            album: None,
         })))
         .await
         .unwrap();
@@ -22476,6 +22773,7 @@ async fn at_rest_delete_for_me_erases_key_row_and_bytes() {
             share_ref: None,
             voice: false,
             poster: None,
+            album: None,
         })))
         .await
         .unwrap();

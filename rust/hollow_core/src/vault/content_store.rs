@@ -1033,6 +1033,7 @@ mod tests {
                 ms.insert_channel_message(
                     "srv1", "general", "sender", "", false,
                     old_ms, None, None, Some(id), None, Some(id), None,
+                    None,
                 )
                 .unwrap();
             }

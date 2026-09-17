@@ -23,13 +23,14 @@ This module provides helper functions called from `swarm.rs` and other node modu
 
 ### Message Signing Payload — Canonical Format (VERSIONED since 0.8.3)
 
-Current (v2): `crypto_handler:message_signing_payload_v2(msg_type, context, sender, ts, &SignedExtras, text)`:
+Current: `crypto_handler:message_signing_payload_v2(msg_type, context, sender, ts, &SignedExtras, text)` (name kept) emits v2 without an album, v3 with one:
 
 ```
 hollow-msg2:{type}:{context}:{sender}:{ts}:{mid}:{reply_to}:{file_id}:{order_us}:{lp_digest}:{text}
+hollow-msg3:{type}:{context}:{sender}:{ts}:{mid}:{reply_to}:{file_id}:{order_us}:{lp_digest}:{album}:{text}
 ```
 
-`SignedExtras { mid, reply_to, file_id, order_us, lp_digest }` — absent `Option` ≡ empty string; `lp_digest` = `link_preview_digest()` (length-prefixed SHA-256 hex over the preview's fields + thumb). Legacy v1 (`hollow-msg:...`) is NO LONGER ACCEPTED anywhere (0.8.5); `message_signing_payload()` is `#[cfg(test)]`-only so tests can prove v1 is rejected. Signers: `sign_message_versioned()` (always v2). Verifiers: `verify_message_signature_v2()` (live) and `check_backfill_signature(... &SignedExtras ...)` → gate on `BackfillSig::is_acceptable()`, which under `REQUIRE_SIGNED_BACKFILL` refuses ABSENT as well as forged.
+`SignedExtras { mid, reply_to, file_id, order_us, lp_digest, album }` — absent `Option` ≡ empty string (an empty album is no album, so non-album bytes stay identical to 0.8.5); the distinct prefixes make stripping, adding or moving an album fail verification, and a present album that fails `is_album_id_shape` (hyphenated UUID) is rejected even when signed (a colon there would make the layout ambiguous); `lp_digest` = `link_preview_digest()` (length-prefixed SHA-256 hex over the preview's fields + thumb). Legacy v1 (`hollow-msg:...`) is NO LONGER ACCEPTED anywhere (0.8.5); `message_signing_payload()` is `#[cfg(test)]`-only so tests can prove v1 is rejected. Signers: `sign_message_versioned()` (always v2). Verifiers: `verify_message_signature_v2()` (live) and `check_backfill_signature(... &SignedExtras ...)` → gate on `BackfillSig::is_acceptable()`, which under `REQUIRE_SIGNED_BACKFILL` refuses ABSENT as well as forged.
 
 Two message types:
 - **Channel messages:** `msg_type = "ch"`, `context = "{server_id}:{channel_id}"`

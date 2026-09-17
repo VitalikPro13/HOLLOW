@@ -62,6 +62,7 @@ class ChatNotifier extends Notifier<Map<String, List<ChatMessage>>> {
       {network_api.LinkPreviewRef? linkPreview,
       String? signature,
       String? publicKey,
+      String? albumId,
       bool isOwn = false}) {
     // Multi-device self fan-out: `isOwn` means this is an echo of a message WE
     // sent from a sibling, so `fromPeer` is the recipient and it must render as
@@ -76,6 +77,7 @@ class ChatNotifier extends Notifier<Map<String, List<ChatMessage>>> {
       linkPreview: linkPreview,
       signature: signature,
       publicKey: publicKey,
+      albumId: albumId,
     );
     // Dedup by message_id: the same message arrives from loadHistory (the DB, as
     // written by the background push-fetch node) AND as a live event. The loaded
@@ -376,6 +378,7 @@ class ChatNotifier extends Notifier<Map<String, List<ChatMessage>>> {
                     ? fileMap[m.fileId]
                     : null,
                 linkPreview: m.linkPreview,
+                albumId: m.albumId,
               ))
           .toList();
 
@@ -420,6 +423,7 @@ class ChatNotifier extends Notifier<Map<String, List<ChatMessage>>> {
     bool isImage,
     String localPath, {
     String text = '',
+    String? albumId,
   }) {
     _addMessage(
       peerId,
@@ -427,6 +431,7 @@ class ChatNotifier extends Notifier<Map<String, List<ChatMessage>>> {
         text: text,
         isMe: true,
         messageId: messageId,
+        albumId: albumId,
         fileAttachment: FileAttachment(
           fileId: messageId,
           fileName: fileName,

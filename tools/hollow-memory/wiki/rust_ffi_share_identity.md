@@ -309,7 +309,7 @@ Per-channel metadata for multi-channel (server) archives: `channel_id`, `channel
 
 #### `ArchiveMessageFfi`
 
-Full message record: `message_id`, `sender_id`, `text`, `timestamp`, `signature`, `public_key`, `edited_at`, `hidden_at`, `reply_to_mid`, `file_id`, `channel_id` (server archives only), `reactions: Vec<ArchiveReactionFfi>`, `signature_valid: Option<bool>` (verified during load).
+Full message record: `message_id`, `sender_id`, `text`, `timestamp`, `signature`, `public_key`, `edited_at`, `hidden_at`, `reply_to_mid`, `file_id`, `album_id` (the loader verifies it into the v3 payload), `channel_id` (server archives only), `reactions: Vec<ArchiveReactionFfi>`, `signature_valid: Option<bool>` (verified during load).
 
 #### `ArchiveReactionFfi`
 

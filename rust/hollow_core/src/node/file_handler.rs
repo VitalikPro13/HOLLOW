@@ -235,6 +235,7 @@ pub(crate) async fn handle_send_file(
     share_ref: Option<super::types::ShareRef>,
     voice: bool,
     poster: Option<Vec<u8>>,
+    album: Option<String>,
     cmd_tx: &mpsc::Sender<super::types::NodeCommand>,
     event_tx: &mpsc::Sender<NetworkEvent>,
     server_states: &HashMap<String, ServerState>,
@@ -325,6 +326,11 @@ pub(crate) async fn handle_send_file(
     let mime = file_transfer::mime_from_ext(&original_ext);
     let is_image = file_transfer::is_image_mime(&mime);
 
+    // The send stamp is taken HERE, in command order, not after the conversion
+    // hop: conversions finish in any order (an animated GIF encodes slowest),
+    // and an album's items must keep the order they were sent in.
+    let order_us = crate::chat_clock::next_send_stamp_us();
+
     let needs_convert = is_image
         && (image_convert::should_convert_to_webp(&original_ext)
             || original_ext == "webp"
@@ -335,7 +341,7 @@ pub(crate) async fn handle_send_file(
         // SendFileConverted, so messages, CRDT and call signaling keep flowing.
         spawn_image_conversion(
             peer_id, server_id, channel_id, message_id, message_text,
-            vthumb, share_ref, original_name, is_image, voice,
+            vthumb, share_ref, original_name, is_image, voice, album, order_us,
             file_data, original_ext, override_width, override_height,
             cmd_tx.clone(), db_path, db_passphrase,
         );
@@ -353,7 +359,7 @@ pub(crate) async fn handle_send_file(
     if !is_image && let Some(poster_bytes) = poster.filter(|p| !p.is_empty()) {
         spawn_video_poster_encode(
             peer_id, server_id, channel_id, message_id, message_text,
-            vthumb, share_ref, original_name, voice,
+            vthumb, share_ref, original_name, voice, album, order_us,
             std::mem::take(&mut file_data), original_ext,
             override_width, override_height, poster_bytes,
             cmd_tx.clone(),
@@ -369,7 +375,7 @@ pub(crate) async fn handle_send_file(
         peer_id, server_id, channel_id, message_id, message_text,
         vthumb, share_ref, original_name, is_image,
         final_data, final_ext, override_width, override_height,
-        None, voice,
+        None, voice, album, order_us,
         event_tx, server_states, bundle_keypair, device_keypair, pub_key_b64, local_peer_str,
         device_peer_id, olm, crypto_store, mls,
         ws_cmd_tx, ws_room_peers, webrtc_peers, pending_webrtc_sends,
@@ -391,6 +397,8 @@ fn spawn_video_poster_encode(
     share_ref: Option<super::types::ShareRef>,
     original_name: String,
     voice: bool,
+    album: Option<String>,
+    order_us: i64,
     file_data: Vec<u8>,
     original_ext: String,
     override_width: Option<u32>,
@@ -417,7 +425,7 @@ fn spawn_video_poster_encode(
                     peer_id, server_id, channel_id, message_id, message_text,
                     vthumb, share_ref, original_name, is_image: false,
                     final_data: file_data, final_ext: original_ext,
-                    width, height, thumb, voice,
+                    width, height, thumb, voice, album, order_us,
                 },
             )))
             .await;
@@ -629,6 +637,8 @@ fn spawn_image_conversion(
     original_name: String,
     is_image: bool,
     voice: bool,
+    album: Option<String>,
+    order_us: i64,
     file_data: Vec<u8>,
     original_ext: String,
     override_width: Option<u32>,
@@ -664,7 +674,7 @@ fn spawn_image_conversion(
                     peer_id, server_id, channel_id, message_id, message_text,
                     vthumb, share_ref, original_name, is_image,
                     final_data, final_ext, width, height,
-                    thumb, voice,
+                    thumb, voice, album, order_us,
                 },
             )))
             .await;
@@ -691,6 +701,9 @@ pub(crate) async fn finish_send_file(
     height: Option<u32>,
     thumb: Option<String>,
     voice: bool,
+    album: Option<String>,
+    // Taken when the send command arrived; see handle_send_file.
+    order_us: i64,
     event_tx: &mpsc::Sender<NetworkEvent>,
     server_states: &HashMap<String, ServerState>,
     bundle_keypair: &crate::identity::native_identity::NativeKeypair,
@@ -750,8 +763,6 @@ pub(crate) async fn finish_send_file(
     }
 
     let local_peer = local_peer_str.to_string();
-    // Lamport-bumped send stamp — see message_ops DM send / chat_clock.rs.
-    let order_us = crate::chat_clock::next_send_stamp_us();
     let timestamp = order_us / 1000;
 
     let ctx_type;
@@ -793,7 +804,7 @@ pub(crate) async fn finish_send_file(
     // verify_message_signature on the receive path.
     let (sig, pk) = sign_file_message(
         &peer_id, &server_id, &channel_id, &local_peer, timestamp,
-        &signing_payload_text, &message_id, &file_id, order_us,
+        &signing_payload_text, &message_id, &file_id, order_us, album.as_deref(),
         bundle_keypair, pub_key_b64,
     );
 
@@ -805,6 +816,7 @@ pub(crate) async fn finish_send_file(
         persist_sent_dm_row(
             db_path, db_passphrase, &peer_str, &signing_payload_text,
             timestamp, sig.as_deref(), pk.as_deref(), &message_id, &file_id, order_us,
+            album.as_deref(),
         );
 
         let msg = DmFileMsg {
@@ -815,6 +827,7 @@ pub(crate) async fn finish_send_file(
             message_id: &message_id,
             file_id: &file_id,
             order_us,
+            album: album.as_deref(),
             final_data: &final_data,
             original_name: &original_name,
             final_ext: &final_ext,
@@ -841,7 +854,7 @@ pub(crate) async fn finish_send_file(
         // Channel path — broadcast via MLS.
         send_channel_file(
             &sid, &cid, &signing_payload_text, timestamp, &sig, &pk,
-            &message_id, &file_id, order_us, &final_data,
+            &message_id, &file_id, order_us, album.as_deref(), &final_data,
             &original_name, &final_ext, &final_mime, file_size,
             is_image, width, height, &vthumb, &thumb, voice, &share_ref, &local_peer,
             event_tx, server_states, olm, crypto_store, mls,
@@ -866,6 +879,7 @@ fn sign_file_message(
     message_id: &str,
     file_id: &str,
     order_us: i64,
+    album: Option<&str>,
     bundle_keypair: &crate::identity::native_identity::NativeKeypair,
     pub_key_b64: &str,
 ) -> (Option<String>, Option<String>) {
@@ -875,6 +889,7 @@ fn sign_file_message(
         file_id: Some(file_id),
         order_us: Some(order_us),
         lp_digest: None,
+        album,
     };
     if let Some(peer_str) = peer_id {
         // DM: context = recipient, sender = local
@@ -950,12 +965,13 @@ fn persist_sent_dm_row(
     message_id: &str,
     file_id: &str,
     order_us: i64,
+    album: Option<&str>,
 ) {
     if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
         let _ = store.insert(
             peer_str, text, true, timestamp,
             sig, pk, Some(message_id),
-            None, Some(file_id), Some(order_us),
+            None, Some(file_id), Some(order_us), album,
         );
     }
 }
@@ -971,6 +987,7 @@ struct DmFileMsg<'a> {
     message_id: &'a str,
     file_id: &'a str,
     order_us: i64,
+    album: Option<&'a str>,
     final_data: &'a [u8],
     original_name: &'a str,
     final_ext: &'a str,
@@ -1027,6 +1044,7 @@ fn build_dm_file_header(
             vthumb: msg.vthumb.clone(),
             share_ref: None,
             order_us: Some(msg.order_us),
+            album: msg.album.map(str::to_owned),
             inline_bytes,
             thumb: msg.thumb.clone(),
             voice: msg.voice,
@@ -1197,6 +1215,7 @@ async fn send_dm_file_to_device(
             link_preview: None,
             convo: if is_sibling_target { Some(recipient_master.to_string()) } else { None },
             order_us: Some(msg.order_us),
+            album: msg.album.map(str::to_owned),
         }),
     };
     let envelope_json = serde_json::to_string(&envelope)
@@ -1459,12 +1478,13 @@ fn persist_sent_channel_row(
     message_id: &str,
     file_id: &str,
     order_us: i64,
+    album: Option<&str>,
 ) {
     if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
         let _ = store.insert_channel_message(
             sid, cid, local_peer, text, true, timestamp,
             sig, pk, Some(message_id),
-            None, Some(file_id), Some(order_us),
+            None, Some(file_id), Some(order_us), album,
         );
     }
 }
@@ -1483,6 +1503,7 @@ async fn send_channel_file(
     message_id: &str,
     file_id: &str,
     order_us: i64,
+    album: Option<&str>,
     final_data: &[u8],
     original_name: &str,
     final_ext: &str,
@@ -1522,12 +1543,13 @@ async fn send_channel_file(
             file_id: Some(file_id.to_string()),
             link_preview: None,
             order_us: Some(order_us),
+            album: album.map(str::to_owned),
         }),
     };
 
     persist_sent_channel_row(
         db_path, db_passphrase, sid, cid, local_peer, signing_payload_text,
-        timestamp, sig.as_deref(), pk.as_deref(), message_id, file_id, order_us,
+        timestamp, sig.as_deref(), pk.as_deref(), message_id, file_id, order_us, album,
     );
 
     // Send the TEXT MESSAGE via the MLS TOPIC broadcast, the SAME path normal
@@ -1555,6 +1577,7 @@ async fn send_channel_file(
             file_id: Some(file_id.to_string()),
             link_preview: None,
             order_us: Some(order_us),
+            album: album.map(|a| Box::new(a.to_owned())),
             file_meta: Some(super::types::SyncFileMetaItem {
                 fid: file_id.to_string(),
                 name: original_name.to_string(),
@@ -1616,6 +1639,7 @@ async fn send_channel_file(
             vthumb: vthumb.clone(),
             share_ref: share_ref.clone(),
             order_us: Some(order_us),
+            album: album.map(str::to_owned),
             inline_bytes: None,
             thumb: thumb.clone(),
             voice,

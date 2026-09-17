@@ -9,6 +9,7 @@ import 'package:hollow/src/core/message_preview.dart';
 import 'package:hollow/src/core/reduce_motion.dart';
 import 'package:hollow/src/core/services/channel_topic_service.dart';
 import 'package:hollow/src/core/providers/background_provider.dart';
+import 'package:hollow/src/core/album_grouping.dart';
 import 'package:hollow/src/core/models/channel_chat_message.dart';
 import 'package:hollow/src/core/models/channel_info.dart';
 import 'package:hollow/src/core/models/chat_message.dart';
@@ -34,7 +35,9 @@ import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/core/providers/link_preview_settings_provider.dart';
+import 'package:hollow/src/ui/chat/album_bubble.dart';
 import 'package:hollow/src/ui/chat/chat_pane_shared.dart';
+import 'package:hollow/src/ui/chat/staged_attachments.dart';
 import 'package:hollow/src/ui/chat/hollow_link_utils.dart';
 import 'package:hollow/src/ui/chat/message_bubble.dart';
 import 'package:hollow/src/ui/chat/channel_message_bubble.dart';
@@ -138,9 +141,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
   DateTime? _slowModeReadyAt;
   Timer? _slowModeTimer;
   bool _isInAutoScrollZone = true;
-  String? _stagedFilePath;
-  String? _stagedFileName;
-  bool _stagedFileIsImage = false;
+  List<StagedAttachment> _staged = const [];
   static final RegExp _urlRegex = RegExp(r'(?:https?|hollow)://[^\s<>"' "'" r')\]}]+');
   String? _stagedPreviewUrl;
   network_api.LinkPreviewRef? _stagedPreview;
@@ -317,11 +318,33 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
   /// Non-null while the user is scrolled up: display list capped here.
   int? _frozenLen;
 
-  /// The messages currently displayed (frozen prefix while scrolled up).
+  /// Albums of the lists last displayed, for the rows built from them.
+  AlbumCollapse<ChatMessage> _dmAlbums = collapseDmAlbums(const []);
+  AlbumCollapse<ChannelChatMessage> _channelAlbums =
+      collapseChannelAlbums(const [], identityOf: (id) => id);
+
+  /// Anchor message id for every album item of this conversation.
+  Map<String, String> get _albumAnchors => widget.isDm
+      ? _dmAlbums.anchorIdByItemId
+      : _channelAlbums.anchorIdByItemId;
+
+  /// The messages currently displayed: the frozen prefix while scrolled up,
+  /// with every album folded into its first item.
   List<T> _displayMessages<T>(List<T> messages) {
     final frozen = _frozenLen;
-    if (frozen == null || messages.length <= frozen) return messages;
-    return messages.sublist(0, frozen);
+    final visible = (frozen == null || messages.length <= frozen)
+        ? messages
+        : messages.sublist(0, frozen);
+    if (visible is List<ChatMessage>) {
+      _dmAlbums = collapseDmAlbums(visible as List<ChatMessage>);
+      return _dmAlbums.display as List<T>;
+    }
+    if (visible is List<ChannelChatMessage>) {
+      _channelAlbums = collapseChannelAlbums(visible as List<ChannelChatMessage>,
+          identityOf: ref.read(deviceLinkProvider).identityOf);
+      return _channelAlbums.display as List<T>;
+    }
+    return visible;
   }
 
   int _conversationLength() => widget.isDm
@@ -377,11 +400,13 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     });
   }
 
-  int _displayLength() {
-    final frozen = _frozenLen;
-    final len = _conversationLength();
-    return frozen != null && frozen < len ? frozen : len;
-  }
+  int _displayLength() => widget.isDm
+      ? _displayMessages(
+              ref.read(chatProvider)[widget.peerId!] ?? const <ChatMessage>[])
+          .length
+      : _displayMessages(ref.read(channelChatProvider)[_channelKey] ??
+              const <ChannelChatMessage>[])
+          .length;
 
   Future<void> _onSearch(String query) async {
     if (query.trim().isEmpty) {
@@ -801,14 +826,12 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     _dismissEmotePanel();
     // Expand inline-emote placeholders to [e:name:hash] wire tokens.
     final text = _controller.expandedText().trim();
-    final filePath = _stagedFilePath;
-    final fileName = _stagedFileName;
-    final fileIsImage = _stagedFileIsImage;
+    final staged = _staged;
     final preview = _stagedPreview;
     // The card has to land after the send when the fetch is still running or
     // never started (issue #45); a file send has no preview slot on the wire.
     final wasLoading = _stagedPreviewLoading;
-    final pendingUrl = filePath != null
+    final pendingUrl = staged.isNotEmpty
         ? null
         : pendingPreviewUrl(
             previewsEnabled: ref.read(linkPreviewsEnabledProvider),
@@ -819,9 +842,9 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
             urlRegex: _urlRegex,
           );
 
-    if (text.isEmpty && filePath == null) return;
+    if (text.isEmpty && staged.isEmpty) return;
     if (_blockedBySlowMode()) return;
-    if (!_passesMediaOnlyGate(filePath, fileName)) return;
+    if (!_passesMediaOnlyGate(staged)) return;
     if (exceedsAssetLimit(text)) {
       HollowToast.show(context, kAssetLimitMessage,
           type: HollowToastType.error);
@@ -834,16 +857,8 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     _urlDebounce?.cancel();
     _clearComposerState();
 
-    if (filePath != null) {
-      final name = fileName ?? filePath.replaceAll('\\', '/').split('/').last;
-      await _sendFileMessage(
-        filePath: filePath,
-        fileName: name,
-        sizeBytes: File(filePath).lengthSync(),
-        isImage: fileIsImage,
-        text: text,
-        errorToast: 'Failed to send file',
-      );
+    if (staged.isNotEmpty) {
+      await _sendFiles(staged, caption: text, errorToast: 'Failed to send file');
     } else {
       // The provider adds the bubble only AFTER the network send, so a failure
       // here would vanish silently: composer cleared, no bubble.
@@ -886,9 +901,9 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
 
   /// Media-only channel gate: false, and toasts, unless the staged send is an
   /// accepted image, GIF or video.
-  bool _passesMediaOnlyGate(String? filePath, String? fileName) {
+  bool _passesMediaOnlyGate(List<StagedAttachment> staged) {
     if (!_channelMediaOnly) return true;
-    if (filePath == null) {
+    if (staged.isEmpty) {
       HollowToast.show(
         context,
         'This is a media-only channel. Attach an image, GIF, or video',
@@ -896,10 +911,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
       );
       return false;
     }
-    final stagedExt = (fileName ?? '').contains('.')
-        ? fileName!.split('.').last.toLowerCase()
-        : '';
-    if (!kMediaOnlyExtensions.contains(stagedExt)) {
+    if (staged.any((a) => !kMediaOnlyExtensions.contains(a.ext))) {
       HollowToast.show(
         context,
         'This is a media-only channel. Only images, GIFs, and videos can be posted',
@@ -916,9 +928,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
       _replyToMessageId = null;
       _replyToText = null;
       _replyToSenderName = null;
-      _stagedFilePath = null;
-      _stagedFileName = null;
-      _stagedFileIsImage = false;
+      _staged = const [];
       _stagedPreviewUrl = null;
       _stagedPreview = null;
       _stagedPreviewLoading = false;
@@ -928,69 +938,70 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     });
   }
 
-  /// The optimistic insert and send pipeline shared by staged files and voice
-  /// messages. The insert comes BEFORE the network send so the bubble renders
-  /// from the local path; the sender's FileCompleted reload then replaces it,
-  /// and dedup by message_id prevents a second bubble.
-  Future<void> _sendFileMessage({
-    required String filePath,
-    required String fileName,
-    required int sizeBytes,
-    required bool isImage,
-    required String text,
+  /// The optimistic insert and send pipeline shared by staged files, voice
+  /// messages and shared packs: one file message, or an album for two or more.
+  /// Every insert comes BEFORE its network send so the bubble renders from the
+  /// local path; the sender's FileCompleted reload then replaces it, and dedup
+  /// by message_id prevents a second bubble.
+  Future<void> _sendFiles(
+    List<StagedAttachment> items, {
+    required String caption,
     required String errorToast,
   }) async {
-    final messageId = generateMessageId();
-    final ext = fileName.contains('.')
-        ? fileName.split('.').last.toLowerCase()
-        : '';
-    if (widget.isDm) {
-      ref.read(chatProvider.notifier).addFileMessage(
-            widget.peerId!,
-            messageId,
-            fileName,
-            sizeBytes,
-            ext,
-            isImage,
-            filePath,
-            text: text,
-          );
-    } else {
-      ref.read(channelChatProvider.notifier).addFileMessage(
-            widget.serverId!,
-            widget.channelId!,
-            messageId,
-            fileName,
-            sizeBytes,
-            ext,
-            isImage,
-            filePath,
-            text: text,
-          );
-    }
-    _jumpToBottom();
-    try {
-      // The full pipeline rather than raw sendFile: transfer progress, video
-      // thumbnail pre-extraction and >34 MB share-backed routing.
-      final members = widget.isDm
-          ? null
-          : ref.read(serverMembersProvider(widget.serverId!)).valueOrNull;
-      await ref.read(fileTransferProvider.notifier).sendFile(
-            peerId: widget.isDm ? widget.peerId : null,
-            serverId: widget.isDm ? null : widget.serverId,
-            channelId: widget.isDm ? null : widget.channelId,
-            filePath: filePath,
-            messageId: messageId,
-            messageText: text,
-            memberCount: members?.length ?? 0,
-            // The display name is the voice-recorder signal; the wire carries a
-            // dedicated flag (auto-download gate exemption, issue #41).
-            isVoice: fileName == _kVoiceMessageName,
-          );
-    } catch (e) {
-      if (mounted) {
-        HollowToast.show(context, errorToast, type: HollowToastType.error);
-      }
+    // The full pipeline rather than raw sendFile: transfer progress, video
+    // thumbnail pre-extraction and >34 MB share-backed routing.
+    final members = widget.isDm
+        ? null
+        : ref.read(serverMembersProvider(widget.serverId!)).valueOrNull;
+    final failed = await sendStagedAttachments(
+      items: items,
+      caption: caption,
+      addOptimistic: (item, messageId, text, albumId) {
+        if (widget.isDm) {
+          ref.read(chatProvider.notifier).addFileMessage(
+                widget.peerId!,
+                messageId,
+                item.name,
+                item.sizeBytes,
+                item.ext,
+                item.isImage,
+                item.path,
+                text: text,
+                albumId: albumId,
+              );
+        } else {
+          ref.read(channelChatProvider.notifier).addFileMessage(
+                widget.serverId!,
+                widget.channelId!,
+                messageId,
+                item.name,
+                item.sizeBytes,
+                item.ext,
+                item.isImage,
+                item.path,
+                text: text,
+                albumId: albumId,
+              );
+        }
+        _jumpToBottom();
+      },
+      send: (item, messageId, text, albumId) =>
+          ref.read(fileTransferProvider.notifier).sendFile(
+                peerId: widget.isDm ? widget.peerId : null,
+                serverId: widget.isDm ? null : widget.serverId,
+                channelId: widget.isDm ? null : widget.channelId,
+                filePath: item.path,
+                messageId: messageId,
+                messageText: text,
+                memberCount: members?.length ?? 0,
+                // The display name is the voice-recorder signal; the wire carries
+                // a dedicated flag (auto-download gate exemption, issue #41).
+                isVoice: item.name == _kVoiceMessageName,
+                album: albumId,
+              ),
+    );
+    if (failed > 0 && mounted && !_routeDeactivated) {
+      HollowToast.show(context, errorToast, type: HollowToastType.error);
     }
   }
 
@@ -1009,32 +1020,26 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
       allowedExtensions: !imagesOnly && _channelMediaOnly
           ? kMediaOnlyExtensions.toList()
           : null,
+      allowMultiple: true,
     );
-    if (result == null || result.files.isEmpty) return;
-    final file = result.files.first;
-    if (file.path == null) return;
+    if (result == null || result.files.isEmpty || !mounted) return;
 
-    // Over 34 MB: confirm hosting it as a Hollow Share rather than rejecting or
-    // converting silently.
-    if (file.size > kLargeFileThresholdBytes) {
-      final ok = mounted &&
-          await confirmLargeFileShare(context,
-              fileName: file.name, sizeBytes: file.size);
-      if (!ok) return;
-    }
-
-    // STAGED rather than auto-sent, so a caption can be added and `_handleSend`
-    // bundles the two. The re-focus waits for the OS to return window focus from
-    // the file dialog, which a synchronous requestFocus would race.
-    final ext = file.name.contains('.')
-        ? file.name.split('.').last.toLowerCase()
-        : '';
-    setState(() {
-      _stagedFilePath = file.path!;
-      _stagedFileName = file.name;
-      _stagedFileIsImage =
-          ['png', 'jpg', 'jpeg', 'gif', 'bmp', 'webp'].contains(ext);
-    });
+    // STAGED rather than auto-sent, so a caption can be added and more files
+    // joined into an album. Over 34 MB they are offered as Hollow Shares, one
+    // question for the batch. The re-focus waits for the OS to return window
+    // focus from the file dialog, which a synchronous requestFocus would race.
+    final accepted = await admitStagedAttachments(
+      context,
+      current: _staged,
+      incoming: [
+        for (final f in result.files)
+          if (f.path != null)
+            StagedAttachment(path: f.path!, name: f.name, sizeBytes: f.size),
+      ],
+      mediaOnly: _channelMediaOnly,
+    );
+    if (!mounted || accepted.isEmpty) return;
+    setState(() => _staged = appendStaged(_staged, accepted));
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) _focusNode.requestFocus();
     });
@@ -1129,14 +1134,8 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
   /// so it lives out its life in the temp directory the OS sweeps.
   Future<void> _shareFileToChat(String path, String fileName) async {
     if (!mounted) return;
-    await _sendFileMessage(
-      filePath: path,
-      fileName: fileName,
-      sizeBytes: File(path).lengthSync(),
-      isImage: false,
-      text: '',
-      errorToast: 'Failed to share pack',
-    );
+    await _sendFiles([StagedAttachment.fromPath(path, name: fileName)],
+        caption: '', errorToast: 'Failed to share pack');
   }
 
   /// Sticker picker as a bottom sheet. A pick SENDS immediately and the sheet
@@ -1264,14 +1263,10 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     }
     // Optimistic insert first, so the FileCompleted reload repoints diskPath to
     // the files/ copy before the temp file below is deleted.
-    await _sendFileMessage(
-      filePath: result.filePath,
-      fileName: _kVoiceMessageName,
-      sizeBytes: size,
-      isImage: false,
-      text: '',
-      errorToast: 'Failed to send voice message',
-    );
+    await _sendFiles([
+      StagedAttachment(
+          path: result.filePath, name: _kVoiceMessageName, sizeBytes: size),
+    ], caption: '', errorToast: 'Failed to send voice message');
     try { await file.delete(); } catch (_) {}
   }
 
@@ -1508,12 +1503,13 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
                 onDismissHollowLink: _dismissStagedHollowLink,
                 onDismissPreview: _dismissStagedPreview,
               ),
-              if (_stagedFilePath != null)
-                StagedFilePreviewBar(
-                  filePath: _stagedFilePath!,
-                  fileName: _stagedFileName ?? '',
-                  isImage: _stagedFileIsImage,
-                  onRemove: _clearStagedFile,
+              if (_staged.isNotEmpty)
+                StagedAttachmentStrip(
+                  items: _staged,
+                  onRemove: (i) =>
+                      setState(() => _staged = [..._staged]..removeAt(i)),
+                  onReorder: (from, to) => setState(
+                      () => _staged = reorderStaged(_staged, from, to)),
                 ),
               if (!widget.isDm && _slowModeReadyAt != null)
                 _buildSlowModePill(hollow),
@@ -1700,16 +1696,18 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
   void _jumpToMessageId(String messageId) {
     final ids = widget.isDm
         ? [
-            for (final m in ref.read(chatProvider)[widget.peerId ?? ''] ??
-                const <ChatMessage>[])
+            for (final m in _displayMessages(
+                ref.read(chatProvider)[widget.peerId ?? ''] ??
+                    const <ChatMessage>[]))
               m.messageId,
           ]
         : [
-            for (final m in ref.read(channelChatProvider)[_channelKey] ??
-                const <ChannelChatMessage>[])
+            for (final m in _displayMessages(
+                ref.read(channelChatProvider)[_channelKey] ??
+                    const <ChannelChatMessage>[]))
               m.messageId,
           ];
-    final index = ids.indexOf(messageId);
+    final index = ids.indexOf(_albumAnchors[messageId] ?? messageId);
     if (index != -1) _scrollToMessage(index);
   }
 
@@ -1754,14 +1752,6 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
       _stagedPreviewUrl = null;
       _stagedPreview = null;
       _stagedPreviewLoading = false;
-    });
-  }
-
-  void _clearStagedFile() {
-    setState(() {
-      _stagedFilePath = null;
-      _stagedFileName = null;
-      _stagedFileIsImage = false;
     });
   }
 
@@ -1853,10 +1843,10 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
         focusNode: _focusNode,
         onSend: _handleSend,
         onAttach: _showAttachSheet,
-        onMic: _stagedFilePath != null ? null : _startVoiceRecording,
+        onMic: _staged.isNotEmpty ? null : _startVoiceRecording,
         onEmoji: _showEmojiSheet,
         onChanged: _onTextChanged,
-        hasStagedFile: _stagedFilePath != null,
+        hasStagedFile: _staged.isNotEmpty,
       ),
     );
   }
@@ -2001,10 +1991,18 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
       for (var i = 0; i < messages.length; i++)
         if (messageIdOf(messages[i]) != null) messageIdOf(messages[i])!: i,
     };
+    // A reply to an album item lands on the album's row.
+    for (final e in _albumAnchors.entries) {
+      final anchorIndex = indexById[e.value];
+      if (anchorIndex != null) indexById.putIfAbsent(e.key, () => anchorIndex);
+    }
 
     final unreadIndex = unreadDividerIndex(
       count: messages.length,
-      entrySeenId: ref.watch(unreadMarkerProvider)[markerKey],
+      entrySeenId: () {
+        final seen = ref.watch(unreadMarkerProvider)[markerKey];
+        return seen == null ? null : _albumAnchors[seen] ?? seen;
+      }(),
       messageIdAt: (i) => messageIdOf(messages[i]),
       isMineAt: (i) => isMine(messages[i]),
     );
@@ -2124,9 +2122,8 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     if (msg.replyToMid != null) {
       final idx = indexById[msg.replyToMid] ?? -1;
       if (idx != -1) {
-        final original = messages[idx];
-        replyText =
-            _attachmentPreviewText(original.fileAttachment, original.text);
+        final original = _dmItemById(messages[idx], msg.replyToMid!);
+        replyText = _dmPreview(original);
         final origSenderId = original.isMe ? localPeerId : widget.peerId!;
         replySender = displayNameFor(profiles, origSenderId);
       }
@@ -2153,6 +2150,10 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
         message: msg,
         peerId: widget.peerId!,
         showHeader: showHeader,
+        album: _dmAlbums.itemsFor(msg.messageId) == null
+            ? null
+            : dmAlbumItems(_dmAlbums.itemsFor(msg.messageId)!,
+                localPeerId: localPeerId, peerId: widget.peerId!),
         replyToSenderName: replySender,
         replyToText: replyText,
         onToggleReaction: msg.messageId != null
@@ -2195,6 +2196,51 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
 
   String _attachmentPreviewText(FileAttachment? att, String text) =>
       messagePreviewText(text, attachment: att);
+
+  /// A DM row's preview; an album row says what the whole album holds.
+  String _dmPreview(ChatMessage msg) {
+    final album = _dmAlbums.itemsFor(msg.messageId);
+    if (album == null) return _attachmentPreviewText(msg.fileAttachment, msg.text);
+    return albumPreviewText([for (final m in album) m.fileAttachment],
+        caption: albumCaption([for (final m in album) m.text]));
+  }
+
+  String _channelPreview(ChannelChatMessage msg) {
+    final album = _channelAlbums.itemsFor(msg.messageId);
+    if (album == null) return _attachmentPreviewText(msg.fileAttachment, msg.text);
+    return albumPreviewText([for (final m in album) m.fileAttachment],
+        caption: albumCaption([for (final m in album) m.text]));
+  }
+
+  /// The message [messageId] names inside [row]: the row itself, or the album
+  /// item a reply points at.
+  ChatMessage _dmItemById(ChatMessage row, String messageId) {
+    for (final m in _dmAlbums.itemsFor(row.messageId) ?? const <ChatMessage>[]) {
+      if (m.messageId == messageId) return m;
+    }
+    return row;
+  }
+
+  ChannelChatMessage _channelItemById(ChannelChatMessage row, String messageId) {
+    for (final m in _channelAlbums.itemsFor(row.messageId) ??
+        const <ChannelChatMessage>[]) {
+      if (m.messageId == messageId) return m;
+    }
+    return row;
+  }
+
+  /// Delete for the row's action sheet: one message, or after a confirm every
+  /// item of the album it anchors.
+  VoidCallback? _deleteActionFor(String? messageId, bool isMe, List<String?>? album) {
+    if (messageId == null || !isMe) return null;
+    if (album == null) return () => _deleteMessage(messageId);
+    return () async {
+      if (!await confirmDeleteAlbum(context, album.length)) return;
+      for (final id in album) {
+        if (id != null) await _deleteMessage(id);
+      }
+    };
+  }
 
   Future<void> _toggleDmReaction(ChatMessage msg, String emoji) async {
     final localPeerId = ref.read(identityProvider).peerId ?? '';
@@ -2314,9 +2360,8 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     if (msg.replyToMid != null) {
       final idx = indexById[msg.replyToMid] ?? -1;
       if (idx != -1) {
-        final original = messages[idx];
-        replyText =
-            _attachmentPreviewText(original.fileAttachment, original.text);
+        final original = _channelItemById(messages[idx], msg.replyToMid!);
+        replyText = _channelPreview(original);
         replySender =
             displayNameFor(profiles, links.identityOf(original.senderId));
       }
@@ -2345,6 +2390,10 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
         message: msg,
         serverId: widget.serverId!,
         showHeader: showHeader,
+        album: _channelAlbums.itemsFor(msg.messageId) == null
+            ? null
+            : channelAlbumItems(_channelAlbums.itemsFor(msg.messageId)!,
+                identityOf: links.identityOf),
         isHighlighted: _highlightIndex == index,
         replyToSenderName: replySender,
         replyToText: replyText,
@@ -2367,23 +2416,25 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
   }
 
   void _showDmActions(ChatMessage msg, String senderName, String localPeerId) {
+    final album = _dmAlbums.itemsFor(msg.messageId);
+    // An album row's file actions would act on its first item only; the viewer
+    // offers them per item instead.
+    final file = album == null ? msg.fileAttachment : null;
     showMobileMessageActions(
       context: context,
-      messageText: _attachmentPreviewText(msg.fileAttachment, msg.text),
+      messageText: _dmPreview(msg),
       senderName: senderName,
       timestamp: _formatTime(msg.timestamp),
       isMe: msg.isMe,
       serverId: widget.serverId,
-      onReply: _replyActionFor(msg.messageId, senderName,
-          _attachmentPreviewText(msg.fileAttachment, msg.text)),
+      onReply: _replyActionFor(msg.messageId, senderName, _dmPreview(msg)),
       onEdit: _editActionFor(msg.messageId, msg.isMe, msg.fileAttachment),
-      onDelete: msg.messageId != null && msg.isMe
-          ? () => _deleteMessage(msg.messageId!)
-          : null,
+      onDelete: _deleteActionFor(msg.messageId, msg.isMe,
+          album == null ? null : [for (final m in album) m.messageId]),
       onCopy: _copyActionFor(msg.text),
-      onDownload: _downloadActionFor(msg.fileAttachment, widget.peerId!),
-      fileAction: _fileActionFor(msg.fileAttachment),
-      onStopWaiting: _stopWaitingActionFor(msg.fileAttachment),
+      onDownload: _downloadActionFor(file, widget.peerId!),
+      fileAction: _fileActionFor(file),
+      onStopWaiting: _stopWaitingActionFor(file),
       onReaction: msg.messageId != null
           ? (emoji) => _toggleDmReaction(msg, emoji)
           : null,
@@ -2414,23 +2465,23 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
 
   void _showChannelActions(
       ChannelChatMessage msg, String senderName, String localPeerId) {
+    final album = _channelAlbums.itemsFor(msg.messageId);
+    final file = album == null ? msg.fileAttachment : null;
     showMobileMessageActions(
       context: context,
-      messageText: _attachmentPreviewText(msg.fileAttachment, msg.text),
+      messageText: _channelPreview(msg),
       senderName: senderName,
       timestamp: _formatTime(msg.timestamp),
       isMe: msg.isMe,
       serverId: widget.serverId,
-      onReply: _replyActionFor(msg.messageId, senderName,
-          _attachmentPreviewText(msg.fileAttachment, msg.text)),
+      onReply: _replyActionFor(msg.messageId, senderName, _channelPreview(msg)),
       onEdit: _editActionFor(msg.messageId, msg.isMe, msg.fileAttachment),
-      onDelete: msg.messageId != null && msg.isMe
-          ? () => _deleteMessage(msg.messageId!)
-          : null,
+      onDelete: _deleteActionFor(msg.messageId, msg.isMe,
+          album == null ? null : [for (final m in album) m.messageId]),
       onCopy: _copyActionFor(msg.text),
-      onDownload: _downloadActionFor(msg.fileAttachment, msg.senderId),
-      fileAction: _fileActionFor(msg.fileAttachment),
-      onStopWaiting: _stopWaitingActionFor(msg.fileAttachment),
+      onDownload: _downloadActionFor(file, msg.senderId),
+      fileAction: _fileActionFor(file),
+      onStopWaiting: _stopWaitingActionFor(file),
       onReaction: msg.messageId != null
           ? (emoji) => _toggleChannelReaction(msg, emoji)
           : null,

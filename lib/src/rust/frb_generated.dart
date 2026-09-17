@@ -1150,6 +1150,7 @@ abstract class RustLibApi extends BaseApi {
     String? shareKeyHex,
     bool? isVoice,
     Uint8List? posterBytes,
+    String? album,
   });
 
   Future<void> crateApiNetworkSendFriendRequest({required String peerId});
@@ -10778,6 +10779,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     String? shareKeyHex,
     bool? isVoice,
     Uint8List? posterBytes,
+    String? album,
   }) {
     return handler.executeNormal(
       NormalTask(
@@ -10796,6 +10798,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           sse_encode_opt_String(shareKeyHex, serializer);
           sse_encode_opt_box_autoadd_bool(isVoice, serializer);
           sse_encode_opt_list_prim_u_8_strict(posterBytes, serializer);
+          sse_encode_opt_String(album, serializer);
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
@@ -10822,6 +10825,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           shareKeyHex,
           isVoice,
           posterBytes,
+          album,
         ],
         apiImpl: this,
       ),
@@ -10844,6 +10848,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       "shareKeyHex",
       "isVoice",
       "posterBytes",
+      "album",
     ],
   );
 
@@ -15027,8 +15032,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ArchiveMessageFfi dco_decode_archive_message_ffi(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 13)
-      throw Exception('unexpected arr length: expect 13 but see ${arr.length}');
+    if (arr.length != 14)
+      throw Exception('unexpected arr length: expect 14 but see ${arr.length}');
     return ArchiveMessageFfi(
       messageId: dco_decode_String(arr[0]),
       senderId: dco_decode_String(arr[1]),
@@ -15041,8 +15046,9 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       replyToMid: dco_decode_opt_String(arr[8]),
       fileId: dco_decode_opt_String(arr[9]),
       channelId: dco_decode_opt_String(arr[10]),
-      reactions: dco_decode_list_archive_reaction_ffi(arr[11]),
-      signatureValid: dco_decode_opt_box_autoadd_bool(arr[12]),
+      albumId: dco_decode_opt_String(arr[11]),
+      reactions: dco_decode_list_archive_reaction_ffi(arr[12]),
+      signatureValid: dco_decode_opt_box_autoadd_bool(arr[13]),
     );
   }
 
@@ -16023,12 +16029,13 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   MediaListItem dco_decode_media_list_item(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 3)
-      throw Exception('unexpected arr length: expect 3 but see ${arr.length}');
+    if (arr.length != 4)
+      throw Exception('unexpected arr length: expect 4 but see ${arr.length}');
     return MediaListItem(
       file: dco_decode_stored_file_info(arr[0]),
       ts: dco_decode_i_64(arr[1]),
       contentId: dco_decode_opt_String(arr[2]),
+      albumId: dco_decode_opt_String(arr[3]),
     );
   }
 
@@ -16052,8 +16059,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   MessageProofV2 dco_decode_message_proof_v_2(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 13)
-      throw Exception('unexpected arr length: expect 13 but see ${arr.length}');
+    if (arr.length != 14)
+      throw Exception('unexpected arr length: expect 14 but see ${arr.length}');
     return MessageProofV2(
       hasSignature: dco_decode_bool(arr[0]),
       valid: dco_decode_bool(arr[1]),
@@ -16066,8 +16073,9 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       fileId: dco_decode_opt_String(arr[8]),
       orderUs: dco_decode_opt_box_autoadd_i_64(arr[9]),
       lpDigest: dco_decode_opt_String(arr[10]),
-      signatureB64: dco_decode_opt_String(arr[11]),
-      publicKeyB64: dco_decode_opt_String(arr[12]),
+      albumId: dco_decode_opt_String(arr[11]),
+      signatureB64: dco_decode_opt_String(arr[12]),
+      publicKeyB64: dco_decode_opt_String(arr[13]),
     );
   }
 
@@ -16110,8 +16118,9 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           linkPreview: dco_decode_opt_box_autoadd_link_preview_ref(raw[6]),
           signature: dco_decode_opt_String(raw[7]),
           publicKey: dco_decode_opt_String(raw[8]),
-          isOwn: dco_decode_bool(raw[9]),
-          duplicate: dco_decode_bool(raw[10]),
+          albumId: dco_decode_opt_String(raw[9]),
+          isOwn: dco_decode_bool(raw[10]),
+          duplicate: dco_decode_bool(raw[11]),
         );
       case 6:
         return NetworkEvent_ChannelMessageReceived(
@@ -16125,9 +16134,10 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           linkPreview: dco_decode_opt_box_autoadd_link_preview_ref(raw[8]),
           signature: dco_decode_opt_String(raw[9]),
           publicKey: dco_decode_opt_String(raw[10]),
-          replyToOwn: dco_decode_bool(raw[11]),
-          duplicate: dco_decode_bool(raw[12]),
-          isOwn: dco_decode_bool(raw[13]),
+          albumId: dco_decode_opt_String(raw[11]),
+          replyToOwn: dco_decode_bool(raw[12]),
+          duplicate: dco_decode_bool(raw[13]),
+          isOwn: dco_decode_bool(raw[14]),
         );
       case 7:
         return NetworkEvent_MessageSent(
@@ -17589,8 +17599,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   StoredChannelMessage dco_decode_stored_channel_message(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 15)
-      throw Exception('unexpected arr length: expect 15 but see ${arr.length}');
+    if (arr.length != 16)
+      throw Exception('unexpected arr length: expect 16 but see ${arr.length}');
     return StoredChannelMessage(
       id: dco_decode_i_64(arr[0]),
       serverId: dco_decode_String(arr[1]),
@@ -17607,6 +17617,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       replyToMid: dco_decode_opt_String(arr[12]),
       fileId: dco_decode_opt_String(arr[13]),
       linkPreview: dco_decode_opt_box_autoadd_link_preview_ref(arr[14]),
+      albumId: dco_decode_opt_String(arr[15]),
     );
   }
 
@@ -17661,8 +17672,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   StoredMessage dco_decode_stored_message(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 13)
-      throw Exception('unexpected arr length: expect 13 but see ${arr.length}');
+    if (arr.length != 14)
+      throw Exception('unexpected arr length: expect 14 but see ${arr.length}');
     return StoredMessage(
       id: dco_decode_i_64(arr[0]),
       peerId: dco_decode_String(arr[1]),
@@ -17677,6 +17688,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       replyToMid: dco_decode_opt_String(arr[10]),
       fileId: dco_decode_opt_String(arr[11]),
       linkPreview: dco_decode_opt_box_autoadd_link_preview_ref(arr[12]),
+      albumId: dco_decode_opt_String(arr[13]),
     );
   }
 
@@ -18047,6 +18059,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_replyToMid = sse_decode_opt_String(deserializer);
     var var_fileId = sse_decode_opt_String(deserializer);
     var var_channelId = sse_decode_opt_String(deserializer);
+    var var_albumId = sse_decode_opt_String(deserializer);
     var var_reactions = sse_decode_list_archive_reaction_ffi(deserializer);
     var var_signatureValid = sse_decode_opt_box_autoadd_bool(deserializer);
     return ArchiveMessageFfi(
@@ -18061,6 +18074,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       replyToMid: var_replyToMid,
       fileId: var_fileId,
       channelId: var_channelId,
+      albumId: var_albumId,
       reactions: var_reactions,
       signatureValid: var_signatureValid,
     );
@@ -19543,7 +19557,13 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_file = sse_decode_stored_file_info(deserializer);
     var var_ts = sse_decode_i_64(deserializer);
     var var_contentId = sse_decode_opt_String(deserializer);
-    return MediaListItem(file: var_file, ts: var_ts, contentId: var_contentId);
+    var var_albumId = sse_decode_opt_String(deserializer);
+    return MediaListItem(
+      file: var_file,
+      ts: var_ts,
+      contentId: var_contentId,
+      albumId: var_albumId,
+    );
   }
 
   @protected
@@ -19579,6 +19599,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_fileId = sse_decode_opt_String(deserializer);
     var var_orderUs = sse_decode_opt_box_autoadd_i_64(deserializer);
     var var_lpDigest = sse_decode_opt_String(deserializer);
+    var var_albumId = sse_decode_opt_String(deserializer);
     var var_signatureB64 = sse_decode_opt_String(deserializer);
     var var_publicKeyB64 = sse_decode_opt_String(deserializer);
     return MessageProofV2(
@@ -19593,6 +19614,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       fileId: var_fileId,
       orderUs: var_orderUs,
       lpDigest: var_lpDigest,
+      albumId: var_albumId,
       signatureB64: var_signatureB64,
       publicKeyB64: var_publicKeyB64,
     );
@@ -19642,6 +19664,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         );
         var var_signature = sse_decode_opt_String(deserializer);
         var var_publicKey = sse_decode_opt_String(deserializer);
+        var var_albumId = sse_decode_opt_String(deserializer);
         var var_isOwn = sse_decode_bool(deserializer);
         var var_duplicate = sse_decode_bool(deserializer);
         return NetworkEvent_MessageReceived(
@@ -19653,6 +19676,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           linkPreview: var_linkPreview,
           signature: var_signature,
           publicKey: var_publicKey,
+          albumId: var_albumId,
           isOwn: var_isOwn,
           duplicate: var_duplicate,
         );
@@ -19669,6 +19693,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         );
         var var_signature = sse_decode_opt_String(deserializer);
         var var_publicKey = sse_decode_opt_String(deserializer);
+        var var_albumId = sse_decode_opt_String(deserializer);
         var var_replyToOwn = sse_decode_bool(deserializer);
         var var_duplicate = sse_decode_bool(deserializer);
         var var_isOwn = sse_decode_bool(deserializer);
@@ -19683,6 +19708,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           linkPreview: var_linkPreview,
           signature: var_signature,
           publicKey: var_publicKey,
+          albumId: var_albumId,
           replyToOwn: var_replyToOwn,
           duplicate: var_duplicate,
           isOwn: var_isOwn,
@@ -21702,6 +21728,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_linkPreview = sse_decode_opt_box_autoadd_link_preview_ref(
       deserializer,
     );
+    var var_albumId = sse_decode_opt_String(deserializer);
     return StoredChannelMessage(
       id: var_id,
       serverId: var_serverId,
@@ -21718,6 +21745,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       replyToMid: var_replyToMid,
       fileId: var_fileId,
       linkPreview: var_linkPreview,
+      albumId: var_albumId,
     );
   }
 
@@ -21809,6 +21837,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_linkPreview = sse_decode_opt_box_autoadd_link_preview_ref(
       deserializer,
     );
+    var var_albumId = sse_decode_opt_String(deserializer);
     return StoredMessage(
       id: var_id,
       peerId: var_peerId,
@@ -21823,6 +21852,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       replyToMid: var_replyToMid,
       fileId: var_fileId,
       linkPreview: var_linkPreview,
+      albumId: var_albumId,
     );
   }
 
@@ -22199,6 +22229,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_opt_String(self.replyToMid, serializer);
     sse_encode_opt_String(self.fileId, serializer);
     sse_encode_opt_String(self.channelId, serializer);
+    sse_encode_opt_String(self.albumId, serializer);
     sse_encode_list_archive_reaction_ffi(self.reactions, serializer);
     sse_encode_opt_box_autoadd_bool(self.signatureValid, serializer);
   }
@@ -23455,6 +23486,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_stored_file_info(self.file, serializer);
     sse_encode_i_64(self.ts, serializer);
     sse_encode_opt_String(self.contentId, serializer);
+    sse_encode_opt_String(self.albumId, serializer);
   }
 
   @protected
@@ -23485,6 +23517,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_opt_String(self.fileId, serializer);
     sse_encode_opt_box_autoadd_i_64(self.orderUs, serializer);
     sse_encode_opt_String(self.lpDigest, serializer);
+    sse_encode_opt_String(self.albumId, serializer);
     sse_encode_opt_String(self.signatureB64, serializer);
     sse_encode_opt_String(self.publicKeyB64, serializer);
   }
@@ -23527,6 +23560,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         linkPreview: final linkPreview,
         signature: final signature,
         publicKey: final publicKey,
+        albumId: final albumId,
         isOwn: final isOwn,
         duplicate: final duplicate,
       ):
@@ -23539,6 +23573,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         sse_encode_opt_box_autoadd_link_preview_ref(linkPreview, serializer);
         sse_encode_opt_String(signature, serializer);
         sse_encode_opt_String(publicKey, serializer);
+        sse_encode_opt_String(albumId, serializer);
         sse_encode_bool(isOwn, serializer);
         sse_encode_bool(duplicate, serializer);
       case NetworkEvent_ChannelMessageReceived(
@@ -23552,6 +23587,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         linkPreview: final linkPreview,
         signature: final signature,
         publicKey: final publicKey,
+        albumId: final albumId,
         replyToOwn: final replyToOwn,
         duplicate: final duplicate,
         isOwn: final isOwn,
@@ -23567,6 +23603,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         sse_encode_opt_box_autoadd_link_preview_ref(linkPreview, serializer);
         sse_encode_opt_String(signature, serializer);
         sse_encode_opt_String(publicKey, serializer);
+        sse_encode_opt_String(albumId, serializer);
         sse_encode_bool(replyToOwn, serializer);
         sse_encode_bool(duplicate, serializer);
         sse_encode_bool(isOwn, serializer);
@@ -25387,6 +25424,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_opt_String(self.replyToMid, serializer);
     sse_encode_opt_String(self.fileId, serializer);
     sse_encode_opt_box_autoadd_link_preview_ref(self.linkPreview, serializer);
+    sse_encode_opt_String(self.albumId, serializer);
   }
 
   @protected
@@ -25445,6 +25483,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_opt_String(self.replyToMid, serializer);
     sse_encode_opt_String(self.fileId, serializer);
     sse_encode_opt_box_autoadd_link_preview_ref(self.linkPreview, serializer);
+    sse_encode_opt_String(self.albumId, serializer);
   }
 
   @protected

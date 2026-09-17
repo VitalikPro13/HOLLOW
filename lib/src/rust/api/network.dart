@@ -753,7 +753,8 @@ Future<void> stopNode() => RustLib.instance.api.crateApiNetworkStopNode();
 /// `is_voice` must be set explicitly for recorded voice messages, because the wire
 /// name is the recorder's temp basename and the flag is what exempts them from the
 /// receiver's auto-download gate. `poster_bytes` is a video's extracted first frame,
-/// re-encoded here into the FileHeader's small poster.
+/// re-encoded here into the FileHeader's small poster. `album` groups back-to-back
+/// sends into one rendered album; empty means none, a non-UUID is refused.
 Future<void> sendFile({
   String? peerId,
   String? serverId,
@@ -768,6 +769,7 @@ Future<void> sendFile({
   String? shareKeyHex,
   bool? isVoice,
   Uint8List? posterBytes,
+  String? album,
 }) => RustLib.instance.api.crateApiNetworkSendFile(
   peerId: peerId,
   serverId: serverId,
@@ -782,6 +784,7 @@ Future<void> sendFile({
   shareKeyHex: shareKeyHex,
   isVoice: isVoice,
   posterBytes: posterBytes,
+  album: album,
 );
 
 /// Request file chunks from a specific peer.
@@ -1553,7 +1556,8 @@ class MessageProofV2 {
   final bool hasSignature;
   final bool valid;
 
-  /// 2 = verified against the v2 payload, 0 = did not verify. `1` (legacy v1, text
+  /// 2 = verified against the v2 payload, 3 = against the v3 (album) payload,
+  /// 0 = did not verify. `1` (legacy v1, text
   /// only) is no longer produced; the variant stays out of the contract rather than
   /// out of the range so old Dart builds that switch on `== 2` keep behaving.
   final int sigVersion;
@@ -1570,6 +1574,7 @@ class MessageProofV2 {
   final String? fileId;
   final PlatformInt64? orderUs;
   final String? lpDigest;
+  final String? albumId;
   final String? signatureB64;
   final String? publicKeyB64;
 
@@ -1585,6 +1590,7 @@ class MessageProofV2 {
     this.fileId,
     this.orderUs,
     this.lpDigest,
+    this.albumId,
     this.signatureB64,
     this.publicKeyB64,
   });
@@ -1602,6 +1608,7 @@ class MessageProofV2 {
       fileId.hashCode ^
       orderUs.hashCode ^
       lpDigest.hashCode ^
+      albumId.hashCode ^
       signatureB64.hashCode ^
       publicKeyB64.hashCode;
 
@@ -1621,6 +1628,7 @@ class MessageProofV2 {
           fileId == other.fileId &&
           orderUs == other.orderUs &&
           lpDigest == other.lpDigest &&
+          albumId == other.albumId &&
           signatureB64 == other.signatureB64 &&
           publicKeyB64 == other.publicKeyB64;
 }
@@ -1647,6 +1655,7 @@ sealed class NetworkEvent with _$NetworkEvent {
     LinkPreviewRef? linkPreview,
     String? signature,
     String? publicKey,
+    String? albumId,
     required bool isOwn,
     required bool duplicate,
   }) = NetworkEvent_MessageReceived;
@@ -1661,6 +1670,7 @@ sealed class NetworkEvent with _$NetworkEvent {
     LinkPreviewRef? linkPreview,
     String? signature,
     String? publicKey,
+    String? albumId,
     required bool replyToOwn,
     required bool duplicate,
     required bool isOwn,

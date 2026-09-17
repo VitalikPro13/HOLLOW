@@ -2,7 +2,7 @@
 
 **Files:** `lib/src/ui/media/` (route, `media_item.dart`, `media_viewer_scope.dart`, `media_zoom_math.dart`, `media_zoom_view.dart`, `media_video_page.dart`, `media_viewer_controls.dart`, `media_strip.dart`, `media_info_panel.dart`, `media_playback_session.dart`, `fullscreen_media_chrome.dart`).
 **Rust:** `rust/hollow_core/src/storage/messages.rs` (`list_media_for_context`), `rust/hollow_core/src/api/storage.rs` (`MediaListItem`, FFI wrapper).
-**Status:** Part B phase 1 shipped 2026-09-14. Phase 3 (eyedropper, annotate-and-send-back, media tab, frame step, copy frame) and Parts C/D (albums, subtitles) are planned: `reports/planned/voice-and-media/MEDIA_VIEWER_ALBUMS_SUBTITLES_PLAN.md`.
+**Status:** Part B phase 1 shipped 2026-09-14; Part C (albums, `ui_chat_dm.md` / `ui_message_bubbles.md`) shipped 2026-09-17: an album tile opens this viewer like any attachment, and per-item delete stays here. Phase 3 (eyedropper, annotate-and-send-back, media tab, frame step, copy frame) and Part D (subtitles) are planned: `reports/planned/voice-and-media/MEDIA_VIEWER_ALBUMS_SUBTITLES_PLAN.md`.
 
 One route replaces the old `_FullscreenImageView` dialog (`file_attachment_widget.dart`) and `_FullscreenVideoView` dialog (`video_message_bubble.dart`) for images, GIFs and video. `test/media_viewer_guard_test.dart` keeps both gone.
 
@@ -42,7 +42,7 @@ One route replaces the old `_FullscreenImageView` dialog (`file_attachment_widge
 
 The three chat panes wire all five actions (`_mediaActions()` in each). The four archive viewers wire only `onSaveAs`: archives are read-only, so reply/jump/delete/react are absent rather than disabled; the viewer's `_actionSpecs()` omits an action outright when its callback is null instead of rendering it greyed out.
 
-`_delete()` is the one place in the app that confirms this delete: none of the three panes ask on their own, since the viewer is now the only surface reachable from all of them. On success with more than one item left, the viewer removes the deleted item from `_items` and advances rather than closing.
+`_delete()` is the one place that confirms a single media item's delete: none of the three panes ask on their own, since the viewer is the only surface reachable from all of them (an album BUBBLE's delete is the other confirm, `confirmDeleteAlbum`, and removes every item). On success with more than one item left, the viewer removes the deleted item from `_items` and advances rather than closing.
 
 ---
 
@@ -122,9 +122,9 @@ Ten `AppShortcut` entries with `surfaceScoped: true` (`app_shortcuts_provider.da
 
 ## Rust: `list_media_for_context`
 
-`rust/hollow_core/src/storage/messages.rs::MessageStore::list_media_for_context(context_type, context_id, before_ts, after_ts, limit)` → `Vec<StoredMediaItem>` (`{file, content_id, ts}`); FFI mirror `rust/hollow_core/src/api/storage.rs::list_media_for_context` returns `MediaListItem { file: StoredFileInfo, ts: i64, content_id: Option<String> }`.
+`rust/hollow_core/src/storage/messages.rs::MessageStore::list_media_for_context(context_type, context_id, before_ts, after_ts, limit)` → `Vec<StoredMediaItem>` (`{file, content_id, ts, album_id}`); FFI mirror `rust/hollow_core/src/api/storage.rs::list_media_for_context` returns `MediaListItem { file: StoredFileInfo, ts: i64, content_id: Option<String>, album_id: Option<String> }`.
 
-- **Ordering:** `ts DESC, file_id DESC`: newest first. `ts` is `COALESCE(messages.timestamp, channel_messages.timestamp, files.created_at)`, the OWNING MESSAGE's timestamp (a DM file can only match the `messages` table and a channel file only `channel_messages`, so one `COALESCE` over both is unambiguous), falling back to the file row's own `created_at` when no message row matches.
+- **Ordering:** `ts DESC, ord DESC, file_id DESC`: newest first, ties within one millisecond broken by the owning row's `order_us` (`ord`, 0 when absent) then `file_id`, so an album's items walk in send order. `ts` is `COALESCE(messages.timestamp, channel_messages.timestamp, files.created_at)`, the OWNING MESSAGE's timestamp (a DM file can only match the `messages` table and a channel file only `channel_messages`, so one `COALESCE` over both is unambiguous), falling back to the file row's own `created_at` when no message row matches.
 - **Matched rows:** `files` where `context_type`/`context_id` match, `completed_at IS NOT NULL`, `hidden_at IS NULL`, `expired_at IS NULL`, and either `is_image = 1` or the lowercased extension is in `MEDIA_VIDEO_EXTS` (`mp4/webm/mov/mkv/avi/m4v`, `pub(crate) const` in `messages.rs`, mirrored in Dart as `kMediaVideoExtensions`).
 - **Exclusions:** a file whose owning row in `messages` OR `channel_messages` has `hidden_at IS NOT NULL` is dropped via `NOT EXISTS`. After `resolve_disk_path`, any row left with no disk path (`disk_path.is_none()`) is filtered out too: a completed row can still have no bytes on disk.
 - **Both-way paging:** `before_ts`/`after_ts` are exclusive millisecond bounds on the wrapped `ts` expression (`ts < ?3`, `ts > ?4`, either side nullable): a caller pages both directions from the item it opened.

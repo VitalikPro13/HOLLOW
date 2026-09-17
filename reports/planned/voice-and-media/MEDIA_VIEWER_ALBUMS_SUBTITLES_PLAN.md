@@ -1,6 +1,6 @@
 # Media viewer, albums and subtitles
 
-**Status:** Part A SHIPPED 2026-09-14 (3.6). Part B phase 1 SHIPPED 2026-09-14 (4.5, with section 11). Part B phase 3 extras, Parts C and D PLANNED. Design agreed 2026-09-14 (Vitalik + Fable session).
+**Status:** Part A SHIPPED 2026-09-14 (3.6). Part B phase 1 SHIPPED 2026-09-14 (4.5, with section 11). Part C SHIPPED 2026-09-17 (5.8). Part B phase 3 extras and Part D PLANNED. Design agreed 2026-09-14 (Vitalik + Fable session).
 **Owner:** Vitalik (architect).
 **Companion memory:** `feedback_annotation_window_management` (why `window_manager` fullscreen is off limits and what this replaces it with), `project_autodownload_gate` (every album item passes the same gate), `feedback_chat_clock_lamport` (album order comes from `order_us`), `project_ffmpeg_minimal_build` (the rebuild subtitles need), `feedback_mobile_parity_always`.
 **Plan checklist:** HOLLOW_PLAN.md (add the bullets when this starts).
@@ -271,6 +271,24 @@ Harness: a v3 round trip, the two downgrade cases, and `parse_ops_tolerant` styl
 ### 5.7 Everything else that touches a message
 
 Archive export and import carry `album_id`; the web public viewer ignores it (no previews there anyway); moderation acts per message; the Saved messages self-DM works unchanged; multi-device siblings see the same rows and group the same way.
+
+### 5.8 What shipped (2026-09-17)
+
+Built as written in 5.1 to 5.7, with these decisions made during the build and Vitalik's review:
+
+- **Signing.** `SignedExtras.album`; the payload builder emits `hollow-msg3` with the album slot iff an album is present, and the v2 string byte for byte otherwise. The verifier rejects a present album that is not a hyphenated UUID, because a colon in that slot would move the text boundary. The helper keeps its `_v2` names to avoid churn across forty call sites. A malformed album REJECTS the whole message rather than dropping the field (5.2 said drop): a stripped field would fail verification the moment the row is re-served anyway.
+- **Wire and storage.** `album` on the file header, DM, channel, public channel and both sync item payloads, `skip_serializing_if` so non-album traffic is unchanged; `album_id` columns on `messages` and `channel_messages`; every receive path verifies with the wire album and persists it; edits, deletes, late link previews and the proof dialog bind the stored row's album. `NetworkEvent` and `PublicChannelMessage` carry a boxed album: one more `Option<String>` overflowed the 2 MB tokio stack in the channel harness tests.
+- **The send stamp is minted when the send command arrives, not after conversion.** Found by Vitalik: an album of two images and a GIF always put the GIF last, whatever the strip said, and the caption vanished. `order_us` was minted in `finish_send_file`, after the image conversion hop, and an animated GIF encodes slowest. It is now reserved in `handle_send_file` and carried through `SendFileConvertedPayload`. The harness album test sends PNG, animated GIF, PNG with a caption, and fails without the fix.
+- **Caption from whichever item carries it** (`albumCaption`), not the anchor's text, in the bubble, reply quotes and previews, so an out-of-order arrival can never hide it.
+- **Grouping is a display fold, not a provider change.** Each pane's `_displayMessages` folds albums into their earliest item (`collapseDmAlbums` / `collapseChannelAlbums`, keyed by sender master AND album id, eleven items start a second group, only live file rows group), so every index-based path (scroll, jump, freeze, unread line) stays consistent. Reply and jump targets and the unread marker map an album item to its anchor row.
+- **Mosaic** (`AlbumBubble`): 2 side by side, 3 one large and two stacked, 4 a grid, 5 two plus three, 6 or more three plus three with "+N". Cells are the ordinary `FileAttachmentWidget` / `VideoMessageBubble` in a new tile mode, so every item keeps its honest download state; a video cell opens the viewer rather than playing inline. "Download all (N)" appears once two items wait. Non-media files stack under the mosaic.
+- **Delete from the bubble removes every item** after a confirm; one item is deleted from the viewer, where "this item" is unambiguous. Album rows hide Download, Copy image and the file menu, which would act on the first item only.
+- **Staging** (`staged_attachments.dart`): one list on all three composers, `allowMultiple` pickers, every dropped file, paste appends, a reorderable strip with "N of 10", one large-file question for the batch (`confirmLargeFilesShare`). `sendStagedAttachments` adds every optimistic row first, then sends one at a time.
+- **Notifications.** `AlbumNotificationGate` holds an album's first item for 1.5 s and fires one notification ("4 photos", or the caption). Channel push needed no change: file sends never fan `0x09` frames, and the relay already debounces DM wakes.
+- **Viewer walk** follows send order: `list_media_for_context` ties within a millisecond by `order_us`.
+- **Not grouped:** guests' synced public-channel history (`GuestSyncMessageFfi` has no album) and the imported-archive viewers. A file over 34 MB inside an album sends once its Share exists, so it can land late in the group.
+- **Verified:** 7 Rust tests (v3 round trip, both downgrades, malformed album, v2 bytes unchanged, wire tolerance, DM and channel harness incl. backfill), 19 Dart tests, and the fleet scenario `album_dm` (two instances, two captioned albums with the slow GIF in the middle, strip order and captions on both sides; fixtures from `scripts/make_album_fixtures.py`).
+
 
 ---
 

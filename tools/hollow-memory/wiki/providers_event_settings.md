@@ -78,11 +78,11 @@ The entire body is wrapped in `try-catch` to prevent unhandled exceptions from k
 
 #### DM Message Events
 
-**`NetworkEvent_MessageReceived`** (fromPeer, text, timestamp, messageId, replyToMid, linkPreview, signature, publicKey)
-- `chatProvider.notifier.receiveMessage(...)` with all fields including linkPreview, signature, publicKey.
+**`NetworkEvent_MessageReceived`** (fromPeer, text, timestamp, messageId, replyToMid, linkPreview, signature, publicKey, albumId, isOwn, duplicate)
+- `chatProvider.notifier.receiveMessage(...)` with all fields including linkPreview, signature, publicKey, albumId.
 - `typingProvider.notifier.clearTyping(fromPeer, fromPeer)`
 - Unread tracking: Reads `windowVisibleProvider`, `selectedPeerProvider`, `selectedServerProvider`, and `chatAtBottomProvider` to determine if user is currently viewing this DM. Checks `notificationSettingsProvider.notifier.isDmEnabled(fromPeer)`. If not muted, calls `unreadProvider.notifier.onDmMessage(fromPeer, messageId, isViewingDm)`.
-- System notification: If not viewing and not muted, calls `systemNotificationProvider.notifier.notifyDm(fromPeerId, text, replyToMid)`.
+- System notification: If not viewing and not muted, calls `systemNotificationProvider.notifier.notifyDm(fromPeerId, text, replyToMid)` through `_albumNotifications` (`AlbumNotificationGate`, `lib/src/core/album_notification_gate.dart`): a lone message fires at once; an album's first item is held 1.5 s so the whole album fires ONE notification (the caption if any item carries one, else `albumPreviewText` once every item's file is known, e.g. "4 photos", else "N files"), and later items of an album that already fired are swallowed. Keyed per conversation + album id.
 
 **`NetworkEvent_MessageSent`** (toPeer, messageId, timestamp, signature, publicKey)
 - `chatProvider.notifier.hydrateSignature(toPeer, messageId, timestamp.toInt(), signature, publicKey)` -- Hydrates the optimistic in-memory entry with Rust's signed timestamp and signature/publicKey so Message Proof shows VERIFIED on fresh sends. Critical because Dart's `DateTime.now()` can differ from Rust's `SystemTime::now()` by a few ms.
@@ -108,11 +108,11 @@ The entire body is wrapped in `try-catch` to prevent unhandled exceptions from k
 
 #### Channel Message Events
 
-**`NetworkEvent_ChannelMessageReceived`** (serverId, channelId, fromPeer, text, timestamp, messageId, replyToMid, linkPreview, signature, publicKey)
+**`NetworkEvent_ChannelMessageReceived`** (serverId, channelId, fromPeer, text, timestamp, messageId, replyToMid, linkPreview, signature, publicKey, albumId, replyToOwn, duplicate, isOwn)
 - `channelChatProvider.notifier.receiveMessage(...)` with all fields.
 - `typingProvider.notifier.clearTyping('$serverId:$channelId', fromPeer)`
 - Unread tracking: Checks `windowVisibleProvider`, `selectedServerProvider`, `selectedChannelProvider`, and `chatAtBottomProvider`. Gets effective channel notification level. If level is `mentions`, checks if message actually mentions local user via `@everyone`, `@displayName`, `@nickname`, or is a reply. If not muted and not mention-filtered, calls `unreadProvider.notifier.onChannelMessage(serverId, channelId, messageId, isViewingChannel, isMention: isMentioned)`. Always adds channel to `_recentLiveChannels` dedup set (even if mention-filtered) so notification hints are properly deduped.
-- System notification: If not viewing and not filtered, calls `_notifyChannelWithName(serverId, channelId, fromPeer, text, replyToMid)`.
+- System notification: If not viewing and not filtered, calls `_notifyChannelWithName(serverId, channelId, fromPeer, text, replyToMid)` through the same `AlbumNotificationGate` (one notification per album).
 
 **`NetworkEvent_ChannelNotificationHint`** (serverId, channelId, fromPeer, hasEveryone, mentionedNames, isReply)
 - Lightweight hint broadcast via SendToRoom (0x03) by the message sender. Allows unsubscribed channels (topic routing) to track unread/mentions without receiving the full message.

@@ -169,6 +169,7 @@ class _PendingShareSend {
   final String filePath;
   final bool isVideo;
   final VideoThumbnailResult? videoThumb;
+  final String? album;
   _PendingShareSend({
     this.peerId,
     this.serverId,
@@ -179,6 +180,7 @@ class _PendingShareSend {
     required this.filePath,
     required this.isVideo,
     this.videoThumb,
+    this.album,
   });
 }
 
@@ -198,7 +200,8 @@ class FileTransferNotifier
   /// Initiate a file send. [memberCount] >= 6 also triggers a vault upload.
   /// [isVoice] marks a recorded voice message: the FileHeader carries a `voice`
   /// flag exempting it from the receiver's auto-download gate (the wire name is
-  /// the recorder's temp basename, so Rust can't tell).
+  /// the recorder's temp basename, so Rust can't tell). [album] is the id every
+  /// item of one album shares, null for a lone file.
   Future<void> sendFile({
     String? peerId,
     String? serverId,
@@ -208,6 +211,7 @@ class FileTransferNotifier
     String messageText = '',
     int memberCount = 0,
     bool isVoice = false,
+    String? album,
   }) async {
     final parts = filePath.replaceAll('\\', '/').split('/');
     final fileName = parts.isNotEmpty ? parts.last : 'file';
@@ -259,6 +263,7 @@ class FileTransferNotifier
           filePath: filePath,
           isVideo: isVideo,
           videoThumb: videoThumb,
+          album: album,
         );
         await share_api.shareCreateFromFile(sourcePath: filePath);
         return;
@@ -274,6 +279,7 @@ class FileTransferNotifier
           messageId: messageId,
           messageText: messageText,
           preExtractedThumb: videoThumb,
+          album: album,
         );
         return;
       }
@@ -295,6 +301,7 @@ class FileTransferNotifier
         // Poster frame for the receiver's bubble: Rust re-encodes it small and rides
         // it on the FileHeader, so the video previews before any bytes download.
         posterBytes: videoThumb?.webpBytes,
+        album: album,
       );
 
       // 6+ member servers (non-video) also trigger a vault upload: P2P streaming
@@ -348,6 +355,7 @@ class FileTransferNotifier
     required String messageId,
     required String messageText,
     VideoThumbnailResult? preExtractedThumb,
+    String? album,
   }) async {
     // Reuse sendFile()'s thumbnail if provided, else extract one now.
     final thumb = preExtractedThumb ??
@@ -368,6 +376,7 @@ class FileTransferNotifier
         vthumb: null,
         overrideWidth: null,
         overrideHeight: null,
+        album: album,
       );
       try {
         final contentId = await crdt_api.vaultUploadFile(
@@ -429,6 +438,7 @@ class FileTransferNotifier
         vthumb: vthumb,
         overrideWidth: thumb.sourceWidth,
         overrideHeight: thumb.sourceHeight,
+        album: album,
       );
 
       // So our own UI renders the play button immediately on the sender side.
@@ -477,6 +487,7 @@ class FileTransferNotifier
         shareRootHash: decoded.rootHash,
         shareKeyHex: keyHex,
         posterBytes: ctx.videoThumb?.webpBytes,
+        album: ctx.album,
       );
     }).catchError((e) {
       debugPrint('[HOLLOW] Failed to send share-backed file: $e');

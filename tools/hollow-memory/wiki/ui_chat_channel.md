@@ -4,7 +4,7 @@ Primary chat view for server text channels. Located at `lib/src/ui/chat/channel_
 
 **Decomposed structure (2026-07-14 Sonar refactor, behavior unchanged):** `build()` is a slim skeleton; each Column section is a private builder on the State: `_buildHeader` (+ `_buildPinnedHeaderButton`/`_buildSearchToggleButton`/`_buildSplitToggleButton`), `_buildSearchBar` (+ `_buildSearchResultTile`/`_jumpToSearchResult`), `_buildMessageArea` → `_buildMessageListLayer` → `_buildMessageList` → per-row `_buildMessageRow` → `_buildBubble`, `_buildUnreadPillOverlay`, `_buildTypingBar`, `_buildReplyPreviewBar`, `_buildStagedFilePreview`, `_buildInputBar` → `_buildComposerRow` (+ `_buildSlowModePill`). The four `ref.listen` blocks live in `_registerBuildListeners()` — invoked from `build()` every frame (Riverpod requires build-time registration) — with bodies in `_onMessageListGrowth`/`_onWindowFocusChanged`/`_onSearchOpenChanged`. Row action callbacks are nullable factory methods (`_editStartFor`, `_deleteFor`, `_replyFor`, `_pinFor`, `_downloadFor`, `_copyFor`, `_copyImageFor`, `_infoFor`) — null hides the affordance; gate order preserved (`_pinFor` short-circuits on conference/messageId BEFORE the `myPermissionsProvider` watch). Shared small helpers: `_toggleReaction` (wrapper onReaction + bubble onToggleReaction), `_messagePreviewText`, `_hhmm`, `_saveAttachmentAs`, `_vaultFetchToCache`. `chat_pane.dart` and `mobile_chat_route.dart` were decomposed with this same shape (both done 2026-07-15).
 
-**Shared-module adoption (2026-07-15, wiki ui_chat_pane_shared):** the twin pieces now come from `chat_pane_shared.dart` — `_buildMessageList` calls `reversedChatList()`, `_buildMessageRow` returns through `dateSeparatedChatRow()`, `_buildReplyPreviewBar`/`_buildStagedFilePreview` are thin wrappers over `ChatReplyPreviewBar`/`StagedFilePreviewBar` (with `_cancelReply`/`_removeStagedFile` callbacks), the staged link block is `StagedLinkArea` (+ `_dismissStagedHollowLink`/`_dismissStagedPreview`), `_buildInputBar` uses `chatInputBarShell`, `_buildComposerRow` uses `chatComposerField` + `composerEmojiButton`, the unread pill is the shared `UnreadJumpPill`, and `_gifAwareImage` became the shared `gifAwareImage()`. Keep the wrapper-vs-inline call-shape asymmetry vs chat_pane.dart (CPD divergence).
+**Shared-module adoption (2026-07-15, wiki ui_chat_pane_shared):** the twin pieces now come from `chat_pane_shared.dart` — `_buildMessageList` calls `reversedChatList()`, `_buildMessageRow` returns through `dateSeparatedChatRow()`, `_buildReplyPreviewBar`/`_buildStagedFilePreview` are thin wrappers over `ChatReplyPreviewBar`/`StagedAttachmentStrip` (with `_cancelReply` and the strip's remove/reorder callbacks), the staged link block is `StagedLinkArea` (+ `_dismissStagedHollowLink`/`_dismissStagedPreview`), `_buildInputBar` uses `chatInputBarShell`, `_buildComposerRow` uses `chatComposerField` + `composerEmojiButton`, the unread pill is the shared `UnreadJumpPill`, and `_gifAwareImage` became the shared `gifAwareImage()`. Keep the wrapper-vs-inline call-shape asymmetry vs chat_pane.dart (CPD divergence).
 
 ## Widget Class Hierarchy
 
@@ -55,9 +55,8 @@ ChatPane (`lib/src/ui/chat/chat_pane.dart`) handles 1:1 DMs with Olm encryption.
 - `_searchResults` -- `List<dynamic>`, results from `searchChannelMessages()`.
 - `_searchFocusNode` -- `FocusNode` for the search bar.
 - `_showScrollPill` -- bool, true when user is scrolled away from bottom.
-- `_stagedFilePath` -- nullable String, path of file picked but not yet sent.
-- `_stagedFileName` -- nullable String, name of staged file.
-- `_stagedFileIsImage` -- bool, whether staged file is an image (png/jpg/jpeg/gif/bmp/webp).
+- `_staged` -- `List<StagedAttachment>`, files picked/dropped/pasted but not yet sent (cap `kMaxAlbumItems` = 10; two or more send as one album).
+- `_albums` -- `AlbumCollapse<ChannelChatMessage>`, album grouping of the list last displayed (`_displayMessages` rebuilds it via `collapseChannelAlbums(visible, identityOf: deviceLinkProvider.identityOf)`, AFTER the blocked-sender filter), read by the row builders.
 - `_isRecordingVoice` -- bool, true while voice message recording is active (swaps input row for `VoiceRecorderBar`).
 - `_stagedPreviewUrl` -- nullable String, URL detected in input for link preview.
 - `_stagedPreview` -- nullable `network_api.LinkPreviewRef`, fetched OG metadata for staged URL.
@@ -190,7 +189,7 @@ These are UI-only restrictions. All members still receive all messages via the s
 
 ## Message List Rendering
 
-Wrapped in `ChatDropZone` (for drag-and-drop file attach). Main structure is a `Column` of: header, optional search bar, message list (Expanded), typing indicator, reply preview, staged file preview, staged link preview, input bar.
+Wrapped in `ChatDropZone` (for drag-and-drop file attach). Main structure is a `Column` of: header, optional search bar, message list (Expanded), typing indicator, reply preview, staged attachments strip, staged link preview, input bar.
 
 **Empty state**: If `messages.isEmpty` and `_historyLoaded`, shows welcome message: large hash icon, "Welcome to #channelName", "This is the beginning of the channel." If not loaded yet, shows nothing.
 
@@ -204,7 +203,8 @@ Each message item: checks `shouldGroup()` for grouping consecutive messages from
 - `onEditStart`: only for own messages without file attachment. Captures the item's current `itemLeadingEdge` from `_itemPositionsListener`, sets `_editingMessageId`, then in a post-frame callback uses `_itemScrollController.jumpTo()` at the same alignment to preserve scroll position (prevents the edit view's height change from shifting the message behind the input bar).
 - `onEditSubmit(newText)`: clears `_editingMessageId`, calls `channelChatProvider.notifier.editMessage()`.
 - `onEditCancel`: clears `_editingMessageId`.
-- `onDelete`: only for own messages. Calls `channelChatProvider.notifier.deleteMessage()`.
+- `onDelete`: only for own messages. Calls `channelChatProvider.notifier.deleteMessage()`; an album row asks `confirmDeleteAlbum` first and deletes every item.
+- Album rows (`_albums.itemsFor(msg.messageId) != null`) pass null for `onDownload`, `fileAttachment` and `onCopyImage` (they would act on the first item only); the bubble gets `album: channelAlbumItems(...)`. Reply and jump targets plus the unread marker map album items to the anchor row (`_albums.anchorIdByItemId`, `_albumRowId`), and a reply preview reads the exact item.
 - `onReply`: sets `_replyToMessageId`, `_replyToText`, `_replyToSenderName`, `_replyToImagePath`. Focuses input.
 - `onReaction(emoji)`: toggles reaction. Checks if user already reacted via `msg.reactions[emoji]?.contains(localPeerId)`. Calls `addReaction()` or `removeReaction()` on notifier.
 - `onPin`: only if user has `Permission.manageChannels`. Toggles pin via `crdt_api.pinMessage()` / `crdt_api.unpinMessage()`.
@@ -231,9 +231,9 @@ Watches `typingProvider[stateKey]` which returns a `Set<String>` of peer IDs cur
 
 Shown when `_replyToMessageId != null`. Left accent border (3px) + surface background. Contains: reply icon, "Replying to {senderName}" in accent color, reply text preview (1 line, ellipsis), optional image thumbnail (32x32, supports GIF via `GifFileImage`), close button (X icon).
 
-## Staged File Preview
+## Staged Attachments
 
-Shown when `_stagedFilePath != null`. Surface background with top border. Contains: image thumbnail (48x48) or file icon, filename text, close button. Supports GIF preview via `GifFileImage`.
+Shown when `_staged` is non-empty: the shared `StagedAttachmentStrip` (`staged_attachments.dart`), one row for a single file, a reorderable thumbnail strip for an album (remove by index, reorder via `reorderStaged`).
 
 ## Link Preview (Phase 6.75)
 
@@ -274,9 +274,9 @@ The `Focus` widget wrapping the text field has an `onKeyEvent` handler with two 
 
 ## Sending Messages
 
-**`_handleSend()`**: (1) Dismisses @mention overlay. (2) If file is staged, delegates to `_sendStagedFile()` and returns. (3) Trims text; if empty, returns. (4) Clears controller, resets typing state, requests focus. (5) Captures reply ID and staged preview. (6) Clears all staged state. (7) Calls `channelChatProvider.notifier.sendMessage(serverId, channelId, text, replyToMid, linkPreview)`. (8) Scrolls to bottom.
+**`_handleSend()`**: (1) Dismisses @mention overlay. (2) If `_staged` is non-empty, clears the staged link preview, takes and clears `_staged`, calls `_sendFiles(items)` and returns. (3) Trims text; if empty, returns. (4) Clears controller, resets typing state, requests focus. (5) Captures reply ID and staged preview. (6) Clears all staged state. (7) Calls `channelChatProvider.notifier.sendMessage(serverId, channelId, text, replyToMid, linkPreview)`. (8) Scrolls to bottom.
 
-**`_sendStagedFile()`**: Reads staged file path/name, clears staged state + input. Adds optimistic file message via `channelChatProvider.notifier.addFileMessage()`. Jumps to bottom. Then calls `fileTransferProvider.notifier.sendFile()` with server/channel/file info and member count.
+**`_sendFiles(items)`**: Caption = composer `expandedText()`, controller cleared, then the shared `sendStagedAttachments()`: album id when 2+ items, every optimistic `channelChatProvider.notifier.addFileMessage(..., albumId:)` first, then `fileTransferProvider.notifier.sendFile(serverId, channelId, ..., memberCount, album:)` one at a time (send order = strip order), caption on item 0, a failure toast counts the items that failed. Voice notes and "Share pack to this chat" send through it as a one-item list.
 
 ## Typing Indicators
 
@@ -296,13 +296,13 @@ The `onDownload` callback in `MessageHoverWrapper` handles three scenarios:
 
 ## File Dropping and Clipboard Paste
 
-**ChatDropZone**: Wraps the entire pane. `onFileDropped` callback calls `_handleDroppedFile(path, name, sizeBytes)` which determines if the file is an image by extension and stages it.
+**ChatDropZone**: Wraps the entire pane. `onFilesDropped: _stageFiles` receives every dropped file. `_stageFiles` runs `admitStagedAttachments(context, current: _staged, incoming:, mediaOnly: _channelMediaOnly)` (media-only channel filter with a toast, 10-item cap, ONE `confirmLargeFilesShare` for the batch) then `appendStaged`. The picker (`_pickAndStageFile`) uses `allowMultiple: true`, restricted to media extensions in a media-only channel.
 
-**Clipboard image paste**: `_stageClipboardImage(path, name)` called from `handleChatInputKey()` when Ctrl+V contains an image. Sets staged file state and focuses input.
+**Clipboard image paste**: `_stageClipboardImage(path, name)` called from `handleChatInputKey()` when Ctrl+V contains an image. Stages it via `_stageFiles` and focuses input.
 
 ## Voice Messages
 
-`_stageVoiceMessage(VoiceRecordingResult)`: Called by `VoiceRecorderBar.onFinished`. Validates file exists and is under 34 MB limit. On success, stages as `.ogg` file and immediately calls `_sendStagedFile()`. On failure (too large), shows error toast and deletes the file.
+`_stageVoiceMessage(VoiceRecordingResult)`: Called by `VoiceRecorderBar.onFinished`. Validates the file exists; over the large-file threshold it asks `confirmLargeFileShare` (declined = delete the file). Then sends it at once via `_sendFiles([...])` as "Voice message.ogg".
 
 ## Providers Read by This Widget
 

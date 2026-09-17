@@ -149,8 +149,8 @@ pub enum NetworkEvent {
     PeerDisconnected { peer_id: String },
     RoomCleared,
     Listening { address: String },
-    MessageReceived { from_peer: String, text: String, timestamp: i64, message_id: String, reply_to_mid: String, link_preview: Option<LinkPreviewRef>, signature: Option<String>, public_key: Option<String>, is_own: bool, duplicate: bool },
-    ChannelMessageReceived { server_id: String, channel_id: String, from_peer: String, text: String, timestamp: i64, message_id: String, reply_to_mid: String, link_preview: Option<LinkPreviewRef>, signature: Option<String>, public_key: Option<String>, reply_to_own: bool, duplicate: bool, is_own: bool },
+    MessageReceived { from_peer: String, text: String, timestamp: i64, message_id: String, reply_to_mid: String, link_preview: Option<LinkPreviewRef>, signature: Option<String>, public_key: Option<String>, album_id: Option<String>, is_own: bool, duplicate: bool },
+    ChannelMessageReceived { server_id: String, channel_id: String, from_peer: String, text: String, timestamp: i64, message_id: String, reply_to_mid: String, link_preview: Option<LinkPreviewRef>, signature: Option<String>, public_key: Option<String>, album_id: Option<String>, reply_to_own: bool, duplicate: bool, is_own: bool },
     MessageSent { to_peer: String, message_id: String, timestamp: i64, signature: Option<String>, public_key: Option<String> },
     ChannelMessageSent { server_id: String, channel_id: String, message_id: String, timestamp: i64, signature: Option<String>, public_key: Option<String> },
     MessageSendFailed { to_peer: String, error: String },
@@ -873,11 +873,11 @@ fn to_ffi_event(event: node::NetworkEvent) -> NetworkEvent {
         }
         node::NetworkEvent::RoomCleared => NetworkEvent::RoomCleared,
         node::NetworkEvent::Listening { address } => NetworkEvent::Listening { address },
-        node::NetworkEvent::MessageReceived { from_peer, text, timestamp, message_id, reply_to_mid, link_preview, signature, public_key, is_own, duplicate } => {
-            NetworkEvent::MessageReceived { from_peer, text, timestamp, message_id, reply_to_mid, link_preview: link_preview.map(Into::into), signature, public_key, is_own, duplicate }
+        node::NetworkEvent::MessageReceived { from_peer, text, timestamp, message_id, reply_to_mid, link_preview, signature, public_key, album_id, is_own, duplicate } => {
+            NetworkEvent::MessageReceived { from_peer, text, timestamp, message_id, reply_to_mid, link_preview: link_preview.map(Into::into), signature, public_key, album_id: album_id.map(|a| *a), is_own, duplicate }
         }
-        node::NetworkEvent::ChannelMessageReceived { server_id, channel_id, from_peer, text, timestamp, message_id, reply_to_mid, link_preview, signature, public_key, reply_to_own, duplicate, is_own } => {
-            NetworkEvent::ChannelMessageReceived { server_id, channel_id, from_peer, text, timestamp, message_id, reply_to_mid, link_preview: link_preview.map(Into::into), signature, public_key, reply_to_own, duplicate, is_own }
+        node::NetworkEvent::ChannelMessageReceived { server_id, channel_id, from_peer, text, timestamp, message_id, reply_to_mid, link_preview, signature, public_key, album_id, reply_to_own, duplicate, is_own } => {
+            NetworkEvent::ChannelMessageReceived { server_id, channel_id, from_peer, text, timestamp, message_id, reply_to_mid, link_preview: link_preview.map(Into::into), signature, public_key, album_id: album_id.map(|a| *a), reply_to_own, duplicate, is_own }
         }
         node::NetworkEvent::MessageSent { to_peer, message_id, timestamp, signature, public_key } => {
             NetworkEvent::MessageSent { to_peer, message_id, timestamp, signature, public_key }
@@ -1873,7 +1873,8 @@ pub fn verify_message_proof(
 pub struct MessageProofV2 {
     pub has_signature: bool,
     pub valid: bool,
-    /// 2 = verified against the v2 payload, 0 = did not verify. `1` (legacy v1, text
+    /// 2 = verified against the v2 payload, 3 = against the v3 (album) payload,
+    /// 0 = did not verify. `1` (legacy v1, text
     /// only) is no longer produced; the variant stays out of the contract rather than
     /// out of the range so old Dart builds that switch on `== 2` keep behaving.
     pub sig_version: i32,
@@ -1888,6 +1889,7 @@ pub struct MessageProofV2 {
     pub file_id: Option<String>,
     pub order_us: Option<i64>,
     pub lp_digest: Option<String>,
+    pub album_id: Option<String>,
     pub signature_b64: Option<String>,
     pub public_key_b64: Option<String>,
 }
@@ -1932,6 +1934,7 @@ pub fn verify_message_proof_v2(
         file_id: row.file_id.as_deref(),
         order_us: row.order_us,
         lp_digest: lp_digest.as_deref(),
+        album: row.album_id.as_deref(),
     };
     let ts = row.edited_at.unwrap_or(row.timestamp);
     let v2 = crate::node::crypto_handler::message_signing_payload_v2(
@@ -1941,11 +1944,14 @@ pub fn verify_message_proof_v2(
     // v2 or nothing: a row signed by an old build reports sig_version 0 and displays
     // as unverified, because the v1 grammar covered text only and accepting it here
     // would let a grafted file_id, reply_to or preview show as VERIFIED.
+    let album = row.album_id.as_deref().filter(|a| !a.is_empty());
     let valid = has_signature
+        && album.is_none_or(crate::node::crypto_handler::is_album_id_shape)
         && crate::node::verify_message_signature(
             &sender_peer_id, row.signature.as_deref(), row.public_key.as_deref(), &v2,
         );
-    let (sig_version, canonical_payload) = (if valid { 2 } else { 0 }, v2);
+    let version = if album.is_some() { 3 } else { 2 };
+    let (sig_version, canonical_payload) = (if valid { version } else { 0 }, v2);
     Ok(MessageProofV2 {
         has_signature,
         valid,
@@ -1958,6 +1964,7 @@ pub fn verify_message_proof_v2(
         file_id: row.file_id,
         order_us: row.order_us,
         lp_digest,
+        album_id: row.album_id,
         signature_b64: row.signature,
         public_key_b64: row.public_key,
     })
@@ -3647,7 +3654,8 @@ pub fn stop_node() -> Result<(), String> {
 /// `is_voice` must be set explicitly for recorded voice messages, because the wire
 /// name is the recorder's temp basename and the flag is what exempts them from the
 /// receiver's auto-download gate. `poster_bytes` is a video's extracted first frame,
-/// re-encoded here into the FileHeader's small poster.
+/// re-encoded here into the FileHeader's small poster. `album` groups back-to-back
+/// sends into one rendered album; empty means none, a non-UUID is refused.
 #[frb]
 pub fn send_file(
     peer_id: Option<String>,
@@ -3663,7 +3671,12 @@ pub fn send_file(
     share_key_hex: Option<String>,
     is_voice: Option<bool>,
     poster_bytes: Option<Vec<u8>>,
+    album: Option<String>,
 ) -> Result<(), String> {
+    let album = album.filter(|a| !a.is_empty());
+    if album.as_deref().is_some_and(|a| !node::crypto_handler::is_album_id_shape(a)) {
+        return Err("Invalid album id".to_string());
+    }
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let state = guard.as_ref().ok_or("Node is not running")?;
@@ -3695,6 +3708,7 @@ pub fn send_file(
                 voice: is_voice.unwrap_or(false),
                 // Defensive cap: a poster is one extracted frame, a few hundred KB at most.
                 poster: poster_bytes.filter(|p| !p.is_empty() && p.len() <= 8 * 1024 * 1024),
+                album,
             }))),
     )
     .map_err(|e| format!("Failed to send command: {e}"))?;

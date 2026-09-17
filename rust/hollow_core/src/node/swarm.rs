@@ -2443,10 +2443,10 @@ async fn run_event_loop(
 
                     // -- File sharing --
                     NodeCommand::SendFile(box_payload) => {
-                        let SendFilePayload { peer_id, server_id, channel_id, file_path, message_id, message_text, vthumb, override_width, override_height, share_ref, voice, poster } = *box_payload;
+                        let SendFilePayload { peer_id, server_id, channel_id, file_path, message_id, message_text, vthumb, override_width, override_height, share_ref, voice, poster, album } = *box_payload;
                         file_handler::handle_send_file(
                             peer_id, server_id, channel_id, file_path, message_id, message_text,
-                            vthumb, override_width, override_height, share_ref, voice, poster,
+                            vthumb, override_width, override_height, share_ref, voice, poster, album,
                             &cmd_tx,
                             &event_tx, &server_states, &bundle_keypair, &device_keypair, &pub_key_b64, &local_peer_str,
                             &device_peer_id,
@@ -2464,12 +2464,12 @@ async fn run_event_loop(
                         let SendFileConvertedPayload {
                             peer_id, server_id, channel_id, message_id, message_text,
                             vthumb, share_ref, original_name, is_image,
-                            final_data, final_ext, width, height, thumb, voice,
+                            final_data, final_ext, width, height, thumb, voice, album, order_us,
                         } = *box_payload;
                         file_handler::finish_send_file(
                             peer_id, server_id, channel_id, message_id, message_text,
                             vthumb, share_ref, original_name, is_image,
-                            final_data, final_ext, width, height, thumb, voice,
+                            final_data, final_ext, width, height, thumb, voice, album, order_us,
                             &event_tx, &server_states, &bundle_keypair, &device_keypair, &pub_key_b64, &local_peer_str,
                             &device_peer_id,
                             &mut olm, &crypto_store, &mut mls,
@@ -6031,6 +6031,7 @@ fn build_dm_sync_items(
             hidden_pk,
             order_us: m.order_us,
             lp_digest: m.link_preview.as_ref().map(crypto_handler::link_preview_digest),
+            album: m.album_id.clone(),
             lp: m.link_preview.clone().map(Box::new),
             reactions,
         });
@@ -6965,7 +6966,7 @@ async fn handle_incoming_request(
 
             match serde_json::from_str::<MessageEnvelope>(&text) {
                 Ok(MessageEnvelope::ChannelMessage { inner }) => {
-                    let ChannelMessagePayload { sid, cid, text: msg_text, ts, sig, pk, mid, reply_to, file_id, link_preview, order_us } = *inner;
+                    let ChannelMessagePayload { sid, cid, text: msg_text, ts, sig, pk, mid, reply_to, file_id, link_preview, order_us, album } = *inner;
                     // Multi-device: this Olm-direct path (MLS-failure fallback plus
                     // offline replay) authenticates the sender's DEVICE socket, but
                     // channel messages are SIGNED by and attributed to the sender's
@@ -6996,6 +6997,7 @@ async fn handle_incoming_request(
                             file_id: file_id.as_deref(),
                             order_us,
                             lp_digest: lp_digest.as_deref(),
+                            album: album.as_deref(),
                         };
                         if !crypto_handler::verify_message_signature_v2(
                             &sender_master, sig.as_deref(), pk.as_deref(),
@@ -7036,7 +7038,7 @@ async fn handle_incoming_request(
                             match store.insert_channel_message(
                                 &sid, &cid, &sender_master, &msg_text, is_mine, ts,
                                 sig.as_deref(), pk.as_deref(), mid.as_deref(),
-                                reply_to.as_deref(), file_id.as_deref(), order_us,
+                                reply_to.as_deref(), file_id.as_deref(), order_us, album.as_deref(),
                             ) {
                                 Ok(0) => { is_new = false; } // Duplicate (legacy no-mid row)
                                 Ok(_) => {}
@@ -7068,6 +7070,7 @@ async fn handle_incoming_request(
                             link_preview,
                             signature: sig,
                             public_key: pk,
+                            album_id: album.map(Box::new),
                             reply_to_own,
                             duplicate: !is_new,
                             is_own: is_mine,
@@ -7098,6 +7101,7 @@ async fn handle_incoming_request(
                                 file_id: msg.file_id.as_deref(),
                                 order_us: msg.order_us,
                                 lp_digest: lp_digest.as_deref(),
+                                album: msg.album.as_deref(),
                             };
                             let sig_check = check_backfill_signature(
                                 &msg.s, "ch", &format!("{sid}:{cid}"),
@@ -7127,6 +7131,7 @@ async fn handle_incoming_request(
                                     &sid, &cid, &msg.s, &msg.t, is_mine, msg.ts,
                                     msg.sig.as_deref(), msg.pk.as_deref(), msg.mid.as_deref(),
                                     msg.reply_to.as_deref(), msg.file_id.as_deref(), msg.order_us,
+                                    msg.album.as_deref(),
                                 ) {
                                     Ok(1) => {
                                         new_count += 1;
@@ -7289,7 +7294,7 @@ async fn handle_incoming_request(
                     }
                 }
                 Ok(MessageEnvelope::DirectMessage { inner }) => {
-                    let DirectMessagePayload { text: msg_text, ts, sig, pk, mid, reply_to, file_id, link_preview, convo, order_us } = *inner;
+                    let DirectMessagePayload { text: msg_text, ts, sig, pk, mid, reply_to, file_id, link_preview, convo, order_us, album } = *inner;
                     // NOTE: the length clamp lives AFTER signature verification —
                     // the signature covers the text the sender actually sent, so
                     // clipping first would invalidate it. See below.
@@ -7350,6 +7355,7 @@ async fn handle_incoming_request(
                             file_id: file_id.as_deref(),
                             order_us,
                             lp_digest: lp_digest.as_deref(),
+                            album: album.as_deref(),
                         };
                         if !crypto_handler::verify_message_signature_v2(
                             signer_m, sig.as_deref(), pk.as_deref(),
@@ -7383,7 +7389,7 @@ async fn handle_incoming_request(
                                 match store.insert(
                                     &convo_peer, &msg_text, is_own_device, ts,
                                     sig.as_deref(), pk.as_deref(), mid.as_deref(),
-                                    reply_to.as_deref(), file_id.as_deref(), order_us,
+                                    reply_to.as_deref(), file_id.as_deref(), order_us, album.as_deref(),
                                 ) {
                                     Ok(0) => { is_new = false; } // Duplicate (legacy no-mid row)
                                     Ok(_) => {}
@@ -7414,6 +7420,7 @@ async fn handle_incoming_request(
                             link_preview,
                             signature: sig,
                             public_key: pk,
+                            album_id: album.map(Box::new),
                             // Sibling echo of our OWN send → render outgoing.
                             is_own: is_own_device,
                             duplicate: !is_new,
@@ -7473,6 +7480,7 @@ async fn handle_incoming_request(
                                 file_id: msg.file_id.as_deref(),
                                 order_us: msg.order_us,
                                 lp_digest: lp_digest.as_deref(),
+                                album: msg.album.as_deref(),
                             };
                             let sig_check = check_backfill_signature(
                                 sender_m, "dm", recipient_m,
@@ -7531,6 +7539,7 @@ async fn handle_incoming_request(
                                     &convo_peer, &msg.t, is_mine, msg.ts,
                                     msg.sig.as_deref(), msg.pk.as_deref(), msg.mid.as_deref(),
                                     msg.reply_to.as_deref(), msg.file_id.as_deref(), msg.order_us,
+                                    msg.album.as_deref(),
                                 ) {
                                     Ok(id) if id > 0 => {
                                         new_count += 1;
@@ -7720,6 +7729,7 @@ async fn handle_incoming_request(
                                 file_id: msg.file_id.as_deref(),
                                 order_us: msg.order_us,
                                 lp_digest: lp_digest.as_deref(),
+                                album: msg.album.as_deref(),
                             };
                             let sig_check = check_backfill_signature(
                                 sender_m, "dm", recipient_m,
@@ -7770,6 +7780,7 @@ async fn handle_incoming_request(
                                     &convo_peer, &msg.t, msg.mine, msg.ts,
                                     msg.sig.as_deref(), msg.pk.as_deref(), msg.mid.as_deref(),
                                     msg.reply_to.as_deref(), msg.file_id.as_deref(), msg.order_us,
+                                    msg.album.as_deref(),
                                 ) {
                                     Ok(id) if id > 0 => {
                                         new_count += 1;
@@ -8227,7 +8238,7 @@ async fn handle_incoming_request(
                 }
                 // -- File transfer receive handlers --
                 Ok(MessageEnvelope::FileHeader { inner }) => {
-                    let FileHeaderPayload { fid, name, ext, mime, size, chunks, img, w, h, mid, sid, cid, ts, sig, pk, aes_key, aes_nonce, vthumb, share_ref, order_us, inline_bytes, thumb, voice, .. } = *inner;
+                    let FileHeaderPayload { fid, name, ext, mime, size, chunks, img, w, h, mid, sid, cid, ts, sig, pk, aes_key, aes_nonce, vthumb, share_ref, order_us, album, inline_bytes, thumb, voice, .. } = *inner;
                     // Envelope-borne thumb: image blur placeholder or video
                     // poster, size-capped — see accept_header_thumb.
                     let thumb = file_handler::accept_header_thumb(thumb, img, &mime);
@@ -8434,6 +8445,7 @@ async fn handle_incoming_request(
                                             file_id: Some(&fid),
                                             order_us,
                                             lp_digest: None,
+                                            album: album.as_deref(),
                                         };
                                         check_backfill_signature(
                                             &dm_convo, "dm", master_peer_str, ts, None,
@@ -8451,6 +8463,7 @@ async fn handle_incoming_request(
                                             &dm_convo, &sentinel_text, false, ts,
                                             sig.as_deref(), pk.as_deref(),
                                             mid.as_deref(), None, Some(&fid), order_us,
+                                            album.as_deref(),
                                         );
                                     }
                                 }
@@ -9434,6 +9447,7 @@ async fn handle_incoming_request(
                             link_preview: None,
                             signature: None,
                             public_key: None,
+                            album_id: None,
                             is_own: false,
                             duplicate: false,
                         })
@@ -11006,12 +11020,12 @@ async fn handle_incoming_request(
 
                         match envelope {
                             MessageEnvelope::ChannelMessage { inner } => {
-                                let ChannelMessagePayload { sid, cid, text, ts, sig, pk, mid, reply_to, file_id, link_preview, order_us } = *inner;
+                                let ChannelMessagePayload { sid, cid, text, ts, sig, pk, mid, reply_to, file_id, link_preview, order_us, album } = *inner;
                                 let mod_state = server_states.get(&sid);
                                 message_ops::handle_envelope_channel_message(
                                     event_tx, bundle_keypair, mod_state, &local_peer,
                                     sender_master.clone(), sid, cid, text, ts,
-                                    sig, pk, mid, reply_to, file_id, link_preview, order_us,
+                                    sig, pk, mid, reply_to, file_id, link_preview, order_us, album,
                                     db_path, db_passphrase,
                                 ).await;
                             }
@@ -12935,7 +12949,7 @@ async fn handle_incoming_request(
             let _ = event_tx.send(NetworkEvent::LinkPushComplete { bytes: 0 }).await;
         }
 
-        HavenMessage::PublicChannelMessage { server_id, channel_id, text, ts, sig, pk, mid, reply_to, file_id, link_preview, order_us, file_meta } => {
+        HavenMessage::PublicChannelMessage { server_id, channel_id, text, ts, sig, pk, mid, reply_to, file_id, link_preview, order_us, album, file_meta } => {
             if peer_str == local_peer_str { return; }
             // Multi-device: the relay frame author (`peer_str`) is the sender's DEVICE
             // id, but a public channel message is SIGNED by and must be attributed to
@@ -12949,7 +12963,7 @@ async fn handle_incoming_request(
                 &event_tx, &bundle_keypair, server_states.get(&server_id), &local_peer_str,
                 sender_master.clone(),
                 server_id.clone(), channel_id.clone(), text, ts, sig, pk,
-                Some(mid.clone()), reply_to, file_id.clone(), link_preview, order_us,
+                Some(mid.clone()), reply_to, file_id.clone(), link_preview, order_us, album.map(|a| *a),
                 &db_path, &db_passphrase,
             ).await;
             // GUEST live file card: we cannot decrypt the MLS FileHeader that
@@ -13164,6 +13178,7 @@ async fn handle_incoming_request(
                                 hidden_pk,
                                 order_us: m.order_us,
                                 lp_digest: m.link_preview.as_ref().map(crypto_handler::link_preview_digest),
+                                album: m.album_id.clone(),
                                 lp: m.link_preview.clone().map(Box::new),
                                 reactions,
                             });
@@ -13737,6 +13752,7 @@ async fn handle_incoming_request(
                                             // no sentinel insert happens (no inline_bytes),
                                             // so no ordering stamp to carry.
                                             order_us: None,
+                                            album: None,
                                             inline_bytes: None,
                                             thumb: file_meta.thumb_b64.clone(),
                                             // Explicit-pull response — the receiver's

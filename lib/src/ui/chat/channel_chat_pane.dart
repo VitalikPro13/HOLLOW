@@ -16,7 +16,6 @@ import 'package:hollow/src/core/providers/link_preview_settings_provider.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
 import 'package:hollow/src/core/providers/blocked_users_provider.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
-import 'package:hollow/src/core/providers/chat_provider.dart' show generateMessageId;
 import 'package:hollow/src/core/providers/composer_insert_provider.dart';
 import 'package:hollow/src/core/providers/connection_status_provider.dart';
 import 'package:hollow/src/core/providers/download_manager_provider.dart';
@@ -41,7 +40,10 @@ import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/chat/channel_message_bubble.dart';
+import 'package:hollow/src/core/album_grouping.dart';
+import 'package:hollow/src/ui/chat/album_bubble.dart';
 import 'package:hollow/src/ui/chat/chat_drop_zone.dart';
+import 'package:hollow/src/ui/chat/staged_attachments.dart';
 import 'package:hollow/src/ui/chat/chat_input_shortcuts.dart';
 import 'package:hollow/src/ui/chat/emoji_picker.dart';
 import 'package:hollow/src/ui/chat/gif_picker.dart';
@@ -126,9 +128,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
   final _searchFocusNode = FocusNode();
   bool _showScrollPill = false;
   /// Picked but not yet sent.
-  String? _stagedFilePath;
-  String? _stagedFileName;
-  bool _stagedFileIsImage = false;
+  List<StagedAttachment> _staged = const [];
   /// True while recording, which swaps the input row for the
   /// [VoiceRecorderBar].
   bool _isRecordingVoice = false;
@@ -319,8 +319,14 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
           .where((m) => !blocked.contains(links.identityOf(m.senderId)))
           .toList();
     }
-    return visible;
+    _albums = collapseChannelAlbums(visible,
+        identityOf: ref.read(deviceLinkProvider).identityOf);
+    return _albums.display;
   }
+
+  /// Albums of the list last displayed, for the rows built from it.
+  AlbumCollapse<ChannelChatMessage> _albums =
+      collapseChannelAlbums(const [], identityOf: (id) => id);
 
   bool get _isNearBottom {
     final positions = _itemPositionsListener.itemPositions.value;
@@ -365,10 +371,31 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
   static String _hhmm(DateTime t) =>
       '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}';
 
-  String _messagePreviewText(ChannelChatMessage msg,
-          {bool singleLine = true}) =>
-      messagePreviewText(msg.text,
-          attachment: msg.fileAttachment, singleLine: singleLine);
+  /// A row's preview; an album row says what the whole album holds.
+  String _messagePreviewText(ChannelChatMessage msg, {bool singleLine = true}) {
+    final album = _albums.itemsFor(msg.messageId);
+    if (album != null) {
+      return albumPreviewText([for (final m in album) m.fileAttachment],
+          caption: albumCaption([for (final m in album) m.text]));
+    }
+    return messagePreviewText(msg.text,
+        attachment: msg.fileAttachment, singleLine: singleLine);
+  }
+
+  /// The row a message id renders in: its album's row when it was folded.
+  String? _albumRowId(String? messageId) =>
+      messageId == null ? null : _albums.anchorIdByItemId[messageId] ?? messageId;
+
+  /// The message [messageId] names inside [row]: the row itself, or the album
+  /// item a reply points at.
+  ChannelChatMessage _albumItemById(ChannelChatMessage row, String messageId) {
+    if (row.messageId == messageId) return row;
+    for (final m
+        in _albums.itemsFor(row.messageId) ?? const <ChannelChatMessage>[]) {
+      if (m.messageId == messageId) return m;
+    }
+    return row;
+  }
 
   void _showPinnedMessages(
     BuildContext context,
@@ -964,7 +991,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
     _dismissMentionOverlay();
     _emoteAutocomplete.dismiss();
     if (_blockedBySlowMode()) return;
-    if (_stagedFilePath != null) {
+    if (_staged.isNotEmpty) {
       // FileHeaderPayload has no link_preview slot, so the staged card must be
       // cleared here or it stays on screen attached to a message that never
       // carried it.
@@ -975,7 +1002,9 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
         _stagedPreviewLoading = false;
         _stagedHollowLink = null;
       });
-      await _sendStagedFile();
+      final items = _staged;
+      setState(() => _staged = const []);
+      await _sendFiles(items);
       return;
     }
     // Expand inline-emote placeholders to [e:name:hash] wire tokens.
@@ -1045,40 +1074,18 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
   }
 
   void _stageClipboardImage(String path, String name) {
-    if (!mounted) return;
-    setState(() {
-      _stagedFilePath = path;
-      _stagedFileName = name;
-      _stagedFileIsImage = true;
-    });
-    _focusNode.requestFocus();
+    unawaited(_stageFiles([StagedAttachment.fromPath(path, name: name)]));
   }
 
-  /// Stages a file dropped from the OS.
-  Future<void> _handleDroppedFile(String path, String name, int sizeBytes) async {
-    if (!mounted) return;
-    // Over 34 MB: confirm hosting it as a Hollow Share rather than converting
-    // silently, which left receivers behind symmetric NATs unable to download.
-    if (sizeBytes > kLargeFileThresholdBytes) {
-      final ok = await confirmLargeFileShare(context,
-          fileName: name, sizeBytes: sizeBytes);
-      if (!ok || !mounted) return;
-    }
-    final ext = name.contains('.') ? name.split('.').last.toLowerCase() : '';
-    if (_channelMediaOnly && !_mediaExtensions.contains(ext)) {
-      HollowToast.show(
-        context,
-        'This is a media-only channel. Only images, GIFs, and videos can be posted',
-        type: HollowToastType.info,
-      );
-      return;
-    }
-    setState(() {
-      _stagedFilePath = path;
-      _stagedFileName = name;
-      _stagedFileIsImage =
-          ['png', 'jpg', 'jpeg', 'gif', 'bmp', 'webp'].contains(ext);
-    });
+  /// Adds files to the composer's album. A media-only channel keeps only
+  /// media; over 34 MB they are offered as Hollow Shares, one question for
+  /// the whole batch.
+  Future<void> _stageFiles(List<StagedAttachment> incoming) async {
+    if (!mounted || incoming.isEmpty) return;
+    final accepted = await admitStagedAttachments(context,
+        current: _staged, incoming: incoming, mediaOnly: _channelMediaOnly);
+    if (!mounted || accepted.isEmpty) return;
+    setState(() => _staged = appendStaged(_staged, accepted));
     _focusNode.requestFocus();
   }
 
@@ -1092,31 +1099,15 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
           ? await FilePicker.platform.pickFiles(
               type: FileType.custom,
               allowedExtensions: _mediaExtensions.toList(),
+              allowMultiple: true,
             )
-          : await FilePicker.platform.pickFiles();
-      if (result == null || result.files.isEmpty) { _isPicking = false; return; }
-      final file = result.files.first;
-      if (file.path == null) { _isPicking = false; return; }
-
-      // Over 34 MB: confirm hosting it as a Hollow Share.
-      if (file.size > kLargeFileThresholdBytes) {
-        final ok = mounted &&
-            await confirmLargeFileShare(context,
-                fileName: file.name, sizeBytes: file.size);
-        if (!ok) {
-          _isPicking = false;
-          return;
-        }
-      }
-
-      final ext = file.name.contains('.')
-          ? file.name.split('.').last.toLowerCase()
-          : '';
-      setState(() {
-        _stagedFilePath = file.path!;
-        _stagedFileName = file.name;
-        _stagedFileIsImage = ['png', 'jpg', 'jpeg', 'gif', 'bmp', 'webp'].contains(ext);
-      });
+          : await FilePicker.platform.pickFiles(allowMultiple: true);
+      if (result == null || result.files.isEmpty) return;
+      await _stageFiles([
+        for (final f in result.files)
+          if (f.path != null)
+            StagedAttachment(path: f.path!, name: f.name, sizeBytes: f.size),
+      ]);
       // Defer the re-focus until the OS has returned window focus from the
       // native file dialog: a synchronous requestFocus() marks the node focused
       // while keystrokes still go nowhere.
@@ -1126,7 +1117,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
     } finally { _isPicking = false; }
   }
 
-  /// Stages the recorder's `.ogg` and sends it immediately.
+  /// Sends the recorder's `.ogg` immediately.
   Future<void> _stageVoiceMessage(VoiceRecordingResult result) async {
     if (!mounted) return;
     final file = File(result.filePath);
@@ -1145,14 +1136,11 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
         return;
       }
     }
-
-    setState(() {
-      _isRecordingVoice = false;
-      _stagedFilePath = result.filePath;
-      _stagedFileName = 'Voice message.ogg';
-      _stagedFileIsImage = false;
-    });
-    await _sendStagedFile();
+    setState(() => _isRecordingVoice = false);
+    await _sendFiles([
+      StagedAttachment(
+          path: result.filePath, name: 'Voice message.ogg', sizeBytes: size),
+    ]);
   }
 
   /// Sends an already-written file straight into this channel with no save
@@ -1162,27 +1150,15 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
   /// so it lives out its life in the temp directory the OS sweeps.
   Future<void> _shareFileToChat(String path, String fileName) async {
     if (!mounted) return;
-    setState(() {
-      _stagedFilePath = path;
-      _stagedFileName = fileName;
-      _stagedFileIsImage = false;
-    });
-    await _sendStagedFile();
+    await _sendFiles([StagedAttachment.fromPath(path, name: fileName)]);
   }
 
-  Future<void> _sendStagedFile() async {
-    final filePath = _stagedFilePath;
-    final fileName = _stagedFileName;
-    if (filePath == null || fileName == null) return;
-
-    final messageText = _controller.expandedText().trim();
-    final messageId = generateMessageId();
-    final ext = fileName.contains('.')
-        ? fileName.split('.').last.toLowerCase()
-        : '';
-    final isImage = _stagedFileIsImage;
-
-    if (_channelMediaOnly && !_mediaExtensions.contains(ext)) {
+  /// Sends [items] with the composer text as the caption: one file message,
+  /// or an album for two or more.
+  Future<void> _sendFiles(List<StagedAttachment> items) async {
+    if (items.isEmpty) return;
+    if (_channelMediaOnly &&
+        items.any((i) => !_mediaExtensions.contains(i.ext))) {
       HollowToast.show(
         context,
         'This is a media-only channel. Only images, GIFs, and videos can be posted',
@@ -1190,43 +1166,51 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
       );
       return;
     }
-
-    setState(() {
-      _stagedFilePath = null;
-      _stagedFileName = null;
-      _stagedFileIsImage = false;
-    });
+    final caption = _controller.expandedText().trim();
     _controller.clear();
-
-    ref.read(channelChatProvider.notifier).addFileMessage(
-          widget.serverId,
-          widget.channelId,
-          messageId,
-          fileName,
-          File(filePath).lengthSync(),
-          ext,
-          isImage,
-          filePath,
-          text: messageText,
-        );
-    _jumpToBottom();
-
     final members = ref.read(serverMembersProvider(widget.serverId)).valueOrNull;
-    await ref.read(fileTransferProvider.notifier).sendFile(
-          serverId: widget.serverId,
-          channelId: widget.channelId,
-          filePath: filePath,
-          messageId: messageId,
-          messageText: messageText,
-          memberCount: members?.length ?? 0,
-          // The display name is the voice-recorder signal; the wire carries a
-          // dedicated flag (auto-download gate exemption, issue #41).
-          isVoice: fileName == 'Voice message.ogg',
-        );
+    final failed = await sendStagedAttachments(
+      items: items,
+      caption: caption,
+      addOptimistic: (item, messageId, text, albumId) {
+        ref.read(channelChatProvider.notifier).addFileMessage(
+              widget.serverId,
+              widget.channelId,
+              messageId,
+              item.name,
+              item.sizeBytes,
+              item.ext,
+              item.isImage,
+              item.path,
+              text: text,
+              albumId: albumId,
+            );
+        _jumpToBottom();
+      },
+      send: (item, messageId, text, albumId) async {
+        await ref.read(fileTransferProvider.notifier).sendFile(
+              serverId: widget.serverId,
+              channelId: widget.channelId,
+              filePath: item.path,
+              messageId: messageId,
+              messageText: text,
+              memberCount: members?.length ?? 0,
+              // The display name is the voice-recorder signal; the wire carries a
+              // dedicated flag (auto-download gate exemption, issue #41).
+              isVoice: item.name == 'Voice message.ogg',
+              album: albumId,
+            );
+        if (item.name.endsWith('.ogg') && item.path.contains('temp')) {
+          try { await File(item.path).delete(); } catch (_) {}
+        }
+      },
+    );
     _recomputeSlowMode();
-
-    if (fileName.endsWith('.ogg') && filePath.contains('temp')) {
-      try { await File(filePath).delete(); } catch (_) {}
+    if (failed > 0 && mounted) {
+      HollowToast.show(
+          context,
+          failed == 1 ? 'A file failed to send' : '$failed files failed to send',
+          type: HollowToastType.error);
     }
   }
 
@@ -1543,7 +1527,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
     return EmoteScope(
       serverId: widget.serverId,
       child: ChatDropZone(
-        onFileDropped: _handleDroppedFile,
+        onFilesDropped: _stageFiles,
         child: Column(
           children: [
             _buildHeader(hollow),
@@ -1555,7 +1539,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
             if (typingPeers.isNotEmpty) _buildTypingBar(typingPeers),
 
             if (_replyToMessageId != null) _buildReplyPreviewBar(),
-            if (_stagedFilePath != null) _buildStagedFilePreview(),
+            if (_staged.isNotEmpty) _buildStagedFilePreview(),
             StagedLinkArea(
               hollowLink: _stagedHollowLink,
               previewUrl: _stagedPreviewUrl,
@@ -2064,6 +2048,11 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
       for (var i = 0; i < messages.length; i++)
         if (messages[i].messageId != null) messages[i].messageId!: i,
     };
+    // A reply or jump to an album item lands on the album's row.
+    for (final e in _albums.anchorIdByItemId.entries) {
+      final anchorIndex = replyIndexById[e.value];
+      if (anchorIndex != null) replyIndexById.putIfAbsent(e.key, () => anchorIndex);
+    }
     final localPeerIdForMentions = ref.read(identityProvider).peerId ?? '';
     final localMentionName =
         '@${displayNameFor(profiles, localPeerIdForMentions)}';
@@ -2076,8 +2065,8 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
     // carries the line (issue #54).
     final unreadIndex = unreadDividerIndex(
       count: messages.length,
-      entrySeenId: ref.watch(unreadMarkerProvider)[
-          channelMarkerKey(widget.serverId, widget.channelId)],
+      entrySeenId: _albumRowId(ref.watch(unreadMarkerProvider)[
+          channelMarkerKey(widget.serverId, widget.channelId)]),
       messageIdAt: (i) => messages[i].messageId,
       isMineAt: (i) => messages[i].isMe,
     );
@@ -2140,7 +2129,8 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
   void _jumpToMessageId(String messageId) {
     final messages =
         _displayMessages(ref.read(channelChatProvider)[_stateKey] ?? []);
-    final index = messages.indexWhere((m) => m.messageId == messageId);
+    final rowId = _albums.anchorIdByItemId[messageId] ?? messageId;
+    final index = messages.indexWhere((m) => m.messageId == rowId);
     if (index != -1) _scrollToMessage(index);
   }
 
@@ -2161,6 +2151,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
     // Grouping collapses each sender to its MASTER, or a person writing from
     // two devices reads as two people; `isMe` folds into the same-master test.
     final links = ref.watch(deviceLinkProvider);
+    final isAlbum = _albums.itemsFor(msg.messageId) != null;
     final showHeader = index == 0 ||
         !shouldGroup(
           currentIsMe: false,
@@ -2189,12 +2180,14 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
           : null,
       onPin: _pinFor(msg),
       isPinned: _isPinned(msg),
-      onDownload: _downloadFor(context, msg),
+      // An album row's file actions would act on its first item only; the
+      // viewer offers them per item instead.
+      onDownload: isAlbum ? null : _downloadFor(context, msg),
       // The hover bar and the message menu mirror the card: no Download while
       // nobody can serve the file.
-      fileAttachment: msg.fileAttachment,
+      fileAttachment: isAlbum ? null : msg.fileAttachment,
       onCopy: _copyFor(context, msg),
-      onCopyImage: _copyImageFor(context, msg),
+      onCopyImage: isAlbum ? null : _copyImageFor(context, msg),
       onInfo: _infoFor(context, msg),
       child: _buildBubble(msg, index, showHeader, messages, replyIndexById,
           localMentionName, localMentionNick,
@@ -2264,7 +2257,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
       final idx = replyIndexById[msg.replyToMid] ?? -1;
       if (idx != -1) {
         replyIndex = idx;
-        final original = messages[idx];
+        final original = _albumItemById(messages[idx], msg.replyToMid!);
         replyText = _messagePreviewText(original);
         // Collapse device to master so the reply preview shows the sender, not
         // a device id.
@@ -2285,10 +2278,15 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
     final msgMentioned = msg.text.contains('@everyone') ||
         msg.text.contains(localMentionName) ||
         (localMentionNick != null && msg.text.contains(localMentionNick));
+    final albumMessages = _albums.itemsFor(msg.messageId);
     return ChannelMessageBubble(
       message: msg,
       serverId: widget.serverId,
       showHeader: showHeader,
+      album: albumMessages == null
+          ? null
+          : channelAlbumItems(albumMessages,
+              identityOf: ref.read(deviceLinkProvider).identityOf),
       replyToSenderName: replySender,
       replyToText: replyText,
       replyToImagePath: replyImagePath,
@@ -2332,7 +2330,14 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
 
   VoidCallback? _deleteFor(ChannelChatMessage msg) {
     if (_isConference || msg.messageId == null || !msg.isMe) return null;
-    return () => _deleteMessage(msg.messageId!);
+    final album = _albums.itemsFor(msg.messageId);
+    if (album == null) return () => _deleteMessage(msg.messageId!);
+    return () async {
+      if (!await confirmDeleteAlbum(context, album.length)) return;
+      for (final item in album) {
+        if (item.messageId != null) await _deleteMessage(item.messageId!);
+      }
+    };
   }
 
   Future<void> _deleteMessage(String messageId) async {
@@ -2661,20 +2666,12 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
   }
 
   Widget _buildStagedFilePreview() {
-    return StagedFilePreviewBar(
-      filePath: _stagedFilePath!,
-      fileName: _stagedFileName,
-      isImage: _stagedFileIsImage,
-      onRemove: _removeStagedFile,
+    return StagedAttachmentStrip(
+      items: _staged,
+      onRemove: (i) => setState(() => _staged = [..._staged]..removeAt(i)),
+      onReorder: (from, to) =>
+          setState(() => _staged = reorderStaged(_staged, from, to)),
     );
-  }
-
-  void _removeStagedFile() {
-    setState(() {
-      _stagedFilePath = null;
-      _stagedFileName = null;
-      _stagedFileIsImage = false;
-    });
   }
 
   void _dismissStagedHollowLink() {
@@ -2728,7 +2725,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
     return chatInputBarShell(
       hollow,
       flushTop: _replyToMessageId != null ||
-          _stagedFilePath != null ||
+          _staged.isNotEmpty ||
           _stagedPreviewUrl != null,
       child: _isRecordingVoice
           ? VoiceRecorderBar(
@@ -2759,12 +2756,12 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
           const SizedBox(width: HollowSpacing.xs),
           HollowPressable(
             semanticLabel: 'Record voice message',
-            onTap: _stagedFilePath != null ? null : _startVoiceRecording,
+            onTap: _staged.isNotEmpty ? null : _startVoiceRecording,
             borderRadius: BorderRadius.circular(hollow.radiusMd),
             padding: const EdgeInsets.all(HollowSpacing.sm),
             child: Icon(
               LucideIcons.mic,
-              color: _stagedFilePath != null
+              color: _staged.isNotEmpty
                   ? hollow.textSecondary.withValues(alpha: 0.4)
                   : hollow.textSecondary,
               size: 20,

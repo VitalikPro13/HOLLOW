@@ -254,10 +254,10 @@ Signature: `fn open_message_store() -> Result<(), String>`. Must be called after
 ## FFI Struct Definitions (storage.rs)
 
 ### StoredMessage
-DM message struct. Fields: `id: i64`, `peer_id: String`, `text: String`, `is_mine: bool`, `timestamp: i64`, `signature: Option<String>`, `public_key: Option<String>`, `message_id: Option<String>`, `edited_at: Option<i64>`, `hidden_at: Option<i64>`, `reply_to_mid: Option<String>`, `file_id: Option<String>`, `link_preview: Option<LinkPreviewRef>`. Returned by `load_messages()`, `load_all_dm_messages()`, `search_dm_messages()`.
+DM message struct. Fields: `id: i64`, `peer_id: String`, `text: String`, `is_mine: bool`, `timestamp: i64`, `signature: Option<String>`, `public_key: Option<String>`, `message_id: Option<String>`, `edited_at: Option<i64>`, `hidden_at: Option<i64>`, `reply_to_mid: Option<String>`, `file_id: Option<String>`, `link_preview: Option<LinkPreviewRef>`, `album_id: Option<String>`. Returned by `load_messages()`, `load_all_dm_messages()`, `search_dm_messages()`.
 
 ### StoredChannelMessage
-Server channel message struct. Fields: `id: i64`, `server_id: String`, `channel_id: String`, `sender_id: String`, `text: String`, `is_mine: bool`, `timestamp: i64`, `signature: Option<String>`, `public_key: Option<String>`, `message_id: Option<String>`, `edited_at: Option<i64>`, `hidden_at: Option<i64>`, `reply_to_mid: Option<String>`, `file_id: Option<String>`, `link_preview: Option<LinkPreviewRef>`. Returned by `load_channel_messages()`, `load_all_channel_messages()`, `search_channel_messages()`.
+Server channel message struct. Fields: `id: i64`, `server_id: String`, `channel_id: String`, `sender_id: String`, `text: String`, `is_mine: bool`, `timestamp: i64`, `signature: Option<String>`, `public_key: Option<String>`, `message_id: Option<String>`, `edited_at: Option<i64>`, `hidden_at: Option<i64>`, `reply_to_mid: Option<String>`, `file_id: Option<String>`, `link_preview: Option<LinkPreviewRef>`, `album_id: Option<String>`. Returned by `load_channel_messages()`, `load_all_channel_messages()`, `search_channel_messages()`.
 
 ### StoredMessageEdit
 Edit history entry. Fields: `message_id: String`, `old_text: String`, `new_text: String`, `edited_at: i64`, `signature: Option<String>`, `public_key: Option<String>`, `prev_signature: Option<String>`, `prev_public_key: Option<String>`, `prev_timestamp: Option<i64>`. Returned by `load_message_edits()`.

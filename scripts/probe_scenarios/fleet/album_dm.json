@@ -1,0 +1,73 @@
+{
+  "_": [
+    "Part C albums over a DM, the journey that found the reorder bug (2026-09-17):",
+    "an animated GIF between two stills converts slowest, and its send stamp used",
+    "to be taken after the conversion, so it sorted last and the caption rode an",
+    "item that no longer led the album. Both albums below must render in strip",
+    "order on BOTH sides with the caption visible.",
+    "",
+    "Fixtures: run `python scripts/make_album_fixtures.py` first. It writes",
+    "red.png, blue.png, yellow.png and a 9.5 MB noisy green_noise.gif into",
+    "build/album_fixtures.",
+    "",
+    "run: powershell -File scripts/fleet.ps1 -Scenario album_dm -Keep"
+  ],
+  "peers": ["a", "b"],
+  "steps": [
+    { "peer": "all", "op": "wait_for", "target": "text:Connected", "timeout_ms": 120000 },
+    { "peer": "a", "op": "capture", "from": "provider", "key": "peerId", "as": "PEER_A" },
+
+    { "peer": "b", "op": "tap", "target": "semantics:Add friend", "index": 0 },
+    { "peer": "b", "op": "tap", "target": "text:Add Friend", "index": 0 },
+    { "peer": "b", "op": "enter_text", "target": "hint:Peer ID or nickname...", "value": "${PEER_A}" },
+    { "peer": "b", "op": "tap", "target": "text:Send Request", "index": 0 },
+
+    { "peer": "a", "op": "tap", "target": "semantics:Add friend", "index": 0 },
+    { "peer": "a", "op": "tap", "target": "text:Incoming", "index": 0 },
+    { "peer": "a", "op": "wait_for", "target": "semantics:Accept friend request", "timeout_ms": 60000 },
+    { "peer": "a", "op": "tap", "target": "semantics:Accept friend request", "index": 0 },
+    { "peer": "a", "op": "wait_for", "target": "text:probe-b", "timeout_ms": 60000 },
+    { "peer": "b", "op": "wait_for", "target": "text:probe-a", "timeout_ms": 60000 },
+
+    { "peer": "a", "op": "tap", "target": "type:_FriendsManager > semantics:Close", "index": 0 },
+    { "peer": "a", "op": "wait_for", "gone": "type:_FriendsManager", "timeout_ms": 10000 },
+    { "peer": "b", "op": "tap", "target": "type:_FriendsManager > semantics:Close", "index": 0 },
+    { "peer": "b", "op": "wait_for", "gone": "type:_FriendsManager", "timeout_ms": 10000 },
+    { "peer": "a", "op": "tap", "target": "tooltip:probe-b" },
+    { "peer": "b", "op": "tap", "target": "tooltip:probe-a" },
+    { "peer": "all", "op": "wait", "ms": 1500 },
+
+    { "peer": "a", "op": "log", "message": "album one: red, slow GIF, blue, with a caption" },
+    { "peer": "a", "op": "attach_file", "paths": [
+        "${REPO}/build/album_fixtures/red.png",
+        "${REPO}/build/album_fixtures/green_noise.gif",
+        "${REPO}/build/album_fixtures/blue.png"
+    ] },
+    { "peer": "a", "op": "expect_text", "value": "3 of 10" },
+    { "peer": "a", "op": "shot", "name": "album-00-staged" },
+    { "peer": "a", "op": "enter_text", "target": "field", "value": "album one ${RUN}" },
+    { "peer": "a", "op": "key", "value": "enter" },
+    { "peer": "b", "op": "wait_for", "target": "text:album one ${RUN}", "timeout_ms": 90000 },
+
+    { "peer": "a", "op": "log", "message": "album two: yellow, slow GIF second, red, with a caption" },
+    { "peer": "a", "op": "attach_file", "paths": [
+        "${REPO}/build/album_fixtures/yellow.png",
+        "${REPO}/build/album_fixtures/green_noise.gif",
+        "${REPO}/build/album_fixtures/red.png"
+    ] },
+    { "peer": "a", "op": "enter_text", "target": "field", "value": "album two ${RUN}" },
+    { "peer": "a", "op": "key", "value": "enter" },
+    { "peer": "b", "op": "wait_for", "target": "text:album two ${RUN}", "timeout_ms": 90000 },
+
+    { "peer": "all", "op": "wait", "ms": 20000 },
+    { "peer": "all", "op": "log", "message": "each album is ONE bubble with its caption still showing, after the sender's reload too" },
+    { "peer": "all", "op": "expect_count", "target": "text:album one ${RUN}", "value": 1 },
+    { "peer": "all", "op": "expect_count", "target": "text:album two ${RUN}", "value": 1 },
+    { "peer": "all", "op": "expect_count", "target": "type:AlbumBubble", "value": 2 },
+    { "peer": "all", "op": "shot", "name": "album-01-both" },
+    { "peer": "all", "op": "dump", "name": "album-converged" }
+  ],
+  "cleanup": [
+    { "peer": "all", "op": "log", "message": "nothing to undo: the fixtures restore on the next boot, and no server was created" }
+  ]
+}

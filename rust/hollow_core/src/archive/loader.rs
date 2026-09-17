@@ -260,6 +260,7 @@ fn verify_one_message(
             file_id: msg.file_id.as_deref(),
             order_us: msg.order_us,
             lp_digest: msg.lp_digest.as_deref(),
+            album: msg.album_id.as_deref(),
         };
         crate::node::crypto_handler::verify_message_signature_v2(
             &msg.sender_id,

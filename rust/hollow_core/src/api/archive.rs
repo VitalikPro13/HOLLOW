@@ -45,6 +45,8 @@ pub struct ArchiveMessageFfi {
     pub file_id: Option<String>,
     /// Channel ID — populated only in server (multi-channel) archives.
     pub channel_id: Option<String>,
+    /// Album this message renders grouped into, `None` when standalone.
+    pub album_id: Option<String>,
     pub reactions: Vec<ArchiveReactionFfi>,
     /// Whether this message's signature is valid (None if not yet verified).
     pub signature_valid: Option<bool>,
@@ -312,6 +314,7 @@ pub fn load_archive(archive_path: String) -> Result<ArchiveData, String> {
                 reply_to_mid: m.reply_to_mid,
                 file_id: m.file_id,
                 channel_id: m.channel_id,
+                album_id: m.album_id,
                 reactions: m
                     .reactions
                     .into_iter()

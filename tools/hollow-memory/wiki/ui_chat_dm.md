@@ -37,9 +37,8 @@ Primary file: `lib/src/ui/chat/chat_pane.dart` (~4500 lines). The ChatPane is th
 | `_lastTypingSent` | `DateTime?` | Throttle: last time a typing indicator was sent (3s cooldown) |
 | `_highlightIndex` | `int?` | Index of the message to flash-highlight (reply scroll target) |
 | `_showScrollPill` | `bool` | Whether the unread pill / scroll-to-bottom should be visible |
-| `_stagedFilePath` | `String?` | Path of staged file attachment awaiting send |
-| `_stagedFileName` | `String?` | Display name of staged file |
-| `_stagedFileIsImage` | `bool` | Whether the staged file is an image format |
+| `_staged` | `List<StagedAttachment>` | Files staged for send (0 to `kMaxAlbumItems` = 10); two or more go out as one album |
+| `_albums` | `AlbumCollapse<ChatMessage>` | Album grouping of the list last displayed, rebuilt by `_displayMessages` for the row builders |
 | `_isRecordingVoice` | `bool` | True while VoiceRecorderBar is shown instead of text input |
 | `_stagedPreviewUrl` | `String?` | URL currently being previewed in the compose area |
 | `_stagedPreview` | `network_api.LinkPreviewRef?` | Fetched OG metadata for the staged URL |
@@ -129,27 +128,27 @@ Async. Calls `network_api.fetchLinkPreview(url: url)` (Rust FFI). On success, se
 
 ### _handleSend()
 Entry point for the send button and Enter key. Two paths:
-1. If `_stagedFilePath != null`: delegates to `_sendStagedFile()`.
+1. If `_staged` is non-empty: clears the staged link preview (`FileHeaderPayload` has no link_preview slot), takes and clears `_staged`, and calls `_sendFiles(items)`.
 2. Otherwise: trims text, returns if empty. Clears controller, resets `_lastTypingSent`, requests focus. Captures `_replyToMessageId` and `_stagedPreview` before clearing reply and preview state. Calls `chatProvider.notifier.sendMessage(peerId, text, replyToMid, linkPreview)`. Scrolls to bottom.
 
-### _sendStagedFile()
-Captures staged file path and name. Generates a message ID via `generateMessageId()`. Clears staged file state and controller text. Adds the file message optimistically to the chat via `chatProvider.notifier.addFileMessage()` (with filename, size, extension, isImage, diskPath, and optional caption text). Jumps to bottom. Then initiates the actual file transfer via `fileTransferProvider.notifier.sendFile(peerId, filePath, messageId, messageText)`.
+### _sendFiles(List<StagedAttachment> items)
+Takes the composer's `expandedText()` as the caption, clears the controller, and runs the shared `sendStagedAttachments()` (`staged_attachments.dart`): an album id (`generateAlbumId()`) when there are 2+ items, EVERY optimistic row first via `chatProvider.notifier.addFileMessage(..., text:, albumId:)` so the bubble groups at once, then the `fileTransferProvider.notifier.sendFile(peerId, filePath, messageId, messageText, isVoice, album)` calls ONE AT A TIME so send stamps follow the strip order. The caption rides item 0. Failed items toast ("A file failed to send" / "N files failed to send"); the rest still go out. Voice notes and "Share pack to this chat" (`_shareFileToChat`) also send through here as a one-item list.
 
 ## File Staging
 
-### _stageClipboardImage(String path, String name)
-Called by the clipboard paste handler when an image is found. Sets `_stagedFilePath`, `_stagedFileName`, `_stagedFileIsImage = true`. Requests focus on the text input.
+### _stageFiles(List<StagedAttachment> incoming)
+The one staging entry (paste, drop, picker). `admitStagedAttachments(context, current: _staged, incoming:)` applies the 10-item album cap (toast for the overflow) and asks ONE `confirmLargeFilesShare` for every file over `kLargeFileThresholdBytes` in the batch (declined ones drop out); then `appendStaged` re-applies the cap against whatever `_staged` became while the question was open. Requests focus.
 
-### _handleDroppedFile(String path, String name, int sizeBytes)
-Called by `ChatDropZone` on file drop. Enforces 34 MB DM limit (`34 * 1024 * 1024` bytes). If too large, shows an error toast with the file size. Otherwise detects image extensions (png, jpg, jpeg, gif, bmp, webp) and sets staged file state. Requests focus.
+### _stageClipboardImage(String path, String name)
+Called by the clipboard paste handler when an image is found; stages it via `_stageFiles`.
 
 ### _pickAndStageFile()
-Opens the system file picker via `FilePicker.platform.pickFiles()`. Guarded by `_isPicking` mutex. Enforces the same 34 MB DM limit. Detects image extensions and sets staged file state. Always runs in a try/finally to reset `_isPicking`.
+Opens `FilePicker.platform.pickFiles(allowMultiple: true)` and stages every picked file via `_stageFiles`. Guarded by `_isPicking` mutex (try/finally); re-focus is deferred a frame so the OS has returned window focus from the native dialog.
 
 ## Voice Recording
 
 ### _stageVoiceMessage(VoiceRecordingResult result)
-Callback from `VoiceRecorderBar` when the user finishes recording. Checks that the `.ogg` file exists and is under 34 MB. If too large, shows error toast and deletes the temp file. Otherwise sets staged file state with filename "Voice message.ogg" and immediately calls `_sendStagedFile()` -- voice messages auto-send without a confirmation step. Sets `_isRecordingVoice = false`.
+Callback from `VoiceRecorderBar` when the user finishes recording. Checks that the `.ogg` file exists; over the large-file threshold it asks `confirmLargeFileShare` (declined = delete the temp file). Otherwise sends it at once via `_sendFiles([...])` named "Voice message.ogg" (the name sets `isVoice`) -- voice messages auto-send without a confirmation step. Sets `_isRecordingVoice = false`.
 
 Voice recording is toggled by tapping the microphone button in the input bar. When `_isRecordingVoice` is true, the entire text input row is replaced by `VoiceRecorderBar`. The mic button is disabled when a file is already staged.
 
@@ -208,22 +207,23 @@ Returns a `List<Widget>` used by both the normal layout and the screen-share ove
 
 **_buildMessageListLayer** -- `MessageActionBarScope` wrapping a `NotificationListener<ScrollNotification>` that dismisses all action bars on scroll. Contains either:
 - `_buildEmptyDmState` (if `messages.isEmpty` after history loaded): centered `LucideIcons.messageCircle` (size 48, 0.3 alpha) + "No messages yet. Say hello!". Before history loaded: `SizedBox.shrink()`.
-- `_buildMessageList`: precomputes `replyIndexById` (one pass per build), then calls the shared `reversedChatList()` shell (see wiki ui_chat_pane_shared) with `listKey: ValueKey('dm-list-${peerId}')`, the instance scroll controllers, and `itemBuilder: _buildMessageRow`. The shell owns `reverse: true`, index-0-bottom pinning, and `findChildIndexCallback` keyed-row reuse.
+- `_buildMessageList`: renders `_displayMessages(messages)` (the frozen prefix while scrolled up, every album folded into its earliest item via `collapseDmAlbums`, see `album_grouping.dart`); precomputes `replyIndexById` (one pass per build, every album item also mapped to its anchor row's index; `_jumpToMessageId` maps through `_albums.anchorIdByItemId` the same way) and the unread divider (entry seen id mapped to its album row via `_albumRowId`), then calls the shared `reversedChatList()` shell (see wiki ui_chat_pane_shared) with `listKey: ValueKey('dm-list-${peerId}')`, the instance scroll controllers, and `itemBuilder: _buildMessageRow`. The shell owns `reverse: true`, index-0-bottom pinning, and `findChildIndexCallback` keyed-row reuse.
 
 **_buildMessageRow(context, revIndex, messages, replyIndexById, profiles, localPeerId)** -- maps the reversed index back to chronological, determines `showHeader` via `shouldGroup()`, and builds a `MessageHoverWrapper` whose action callbacks come from nullable factories (null hides the affordance; tap-time reads use `ref.read` for freshness):
 
 > Since issue #61 `MessageHoverWrapper` also owns the message CONTEXT MENU: right-click builds a `showHollowMenu` from these same callbacks (quick reaction strip, Add reaction, Reply, Copy text, Copy image, Download, Pin/Unpin, Edit, Delete, Message proof, Copy message ID). Because it is built from props the wrapper already holds, all SEVEN surfaces that use it got the menu with no call-site changes: DM chat, channel chat, guest chat and the four archive viewers. A row can never offer an action the surface did not wire up. `isPinned` (passed by `channel_chat_pane`) only changes the wording between Pin and Unpin.
   - `_editStartFor(msg, revIndex)`: Only own text messages (no file attachment). Captures the item's current `itemLeadingEdge` from `_itemPositionsListener`, sets `_editingMessageId`, then in a post-frame callback uses `_itemScrollController.jumpTo()` at the same alignment to preserve scroll position
   - `onEditSubmit` (inline): Clears edit state, calls `chatProvider.notifier.editMessage()`; `onEditCancel` clears edit state
-  - `_deleteFor(msg)`: Only own messages. Calls `chatProvider.notifier.deleteMessage()`
-  - `_replyFor(msg)`: Sets `_replyToMessageId`, `_replyToText` via `_messagePreviewText()` (thin wrapper over `messagePreviewText()`, `lib/src/core/message_preview.dart`: a photo/video/voice-note/unknown attachment previews as "Photo"/"Video"/"Voice message"/its file name, an emote token as `:name:`, never an emoji glyph), `_replyToSenderName`, `_replyToImagePath`. Requests focus on input
+  - `_deleteFor(msg)`: Only own messages. Calls `chatProvider.notifier.deleteMessage()`; on an album row it first asks `confirmDeleteAlbum(context, n)` and then deletes every item (the viewer deletes one item at a time)
+  - `_replyFor(msg)`: Sets `_replyToMessageId`, `_replyToText` via `_messagePreviewText()` (an album row previews via `albumPreviewText(attachments, caption: albumCaption(texts))`, anything else via `messagePreviewText()`, `lib/src/core/message_preview.dart`: a photo/video/voice-note/unknown attachment previews as "Photo"/"Video"/"Voice message"/its file name, an emote token as `:name:`, never an emoji glyph), `_replyToSenderName`, `_replyToImagePath`. Requests focus on input
   - `onReaction` / bubble `onToggleReaction`: both delegate to `_toggleReaction(msg, emoji)` -- checks if local peer already reacted, calls `addReaction()` or `removeReaction()`
+  - Album rows (`_albums.itemsFor(msg.messageId) != null`) pass null for `onDownload`, `fileAttachment` and `onCopyImage`: those would act on the first item only; the album bubble's "Download all (N)" chip and the viewer cover them
   - `_downloadFor(context, msg)`: If file has `diskPath`, opens save dialog via `_saveFile()` (split into `_saveDialogFileName` + `_writeSavedFile`). Otherwise requests from peer via `_requestFileFromPeer()`. Guards against duplicate downloads by checking `fileTransferProvider`
   - `_copyFor(context, msg)`: Copies message text to clipboard (excludes `[file:` messages)
   - `_copyImageFor(context, msg)`: For image attachments with disk path, calls `copyImageToClipboard()`; guards the itemBuilder's own context
   - `_infoFor(context, msg)`: Opens `MessageProofDialog` with signature verification data
 
-The wrapper's child is `_buildBubble(...)`: resolves reply preview via `replyIndexById` + `_messagePreviewText`, then returns `MessageBubble` with `onReplyTap: _scrollToMessage(replyIndex)`. The row returns through the shared `dateSeparatedChatRow()` (keyed subtree, optional DateSeparator, group-header padding).
+The wrapper's child is `_buildBubble(...)`: resolves reply preview via `replyIndexById` + `_messagePreviewText` (a reply to an album item reads that item via `_albumItemById`), then returns `MessageBubble` with `album: dmAlbumItems(...)` for an album anchor and `onReplyTap: _scrollToMessage(replyIndex)`. The row returns through the shared `dateSeparatedChatRow()` (keyed subtree, optional DateSeparator, group-header padding).
 
 **_buildUnreadPillOverlay** -- reads `unreadProvider.dmUnreadCounts[peerId]`. Shown only when count > 0 AND `_showScrollPill`. Bottom-center `UnreadJumpPill`; tapping calls `_scrollToBottom()` and `markDmSeen()` against the TRUE newest message.
 
@@ -235,9 +235,9 @@ The wrapper's child is `_buildBubble(...)`: resolves reply preview via `replyInd
 
 Shown when `_replyToMessageId != null` -- the shared `ChatReplyPreviewBar` widget (accent left border, "Replying to {name}", single-line preview, optional 32x32 gif-aware thumb, cancel X -> `_cancelReply()`).
 
-### Staged File Preview
+### Staged Attachments
 
-Shown when `_stagedFilePath != null` -- the shared `StagedFilePreviewBar` (48x48 gif-aware thumb or file icon, filename, remove X -> `_removeStagedFile()`).
+Shown when `_staged` is non-empty -- the shared `StagedAttachmentStrip` (`staged_attachments.dart`): one row for a single file, a reorderable thumbnail strip for an album; remove X drops that index, reorder goes through `reorderStaged`.
 
 ### Staged Link Preview
 
@@ -280,9 +280,9 @@ The shared `StagedLinkArea` widget: `StagedHollowLinkCard` for `hollow://` links
 
 File: `lib/src/ui/chat/chat_drop_zone.dart`. `StatefulWidget` wrapping any child in a `DropTarget` (from `desktop_drop` package). State tracks `_dragging` bool.
 
-**Drag overlay**: When dragging over, displays a full-overlay with `hollow.background` at 0.85 alpha. Centered card with accent border (2px), accent glow shadow (0.3 alpha, blur 24, spread 4), `LucideIcons.upload` icon (size 48), and "Drop file to attach" text.
+**Drag overlay**: When dragging over, displays a full-overlay with `hollow.background` at 0.85 alpha. Centered card with accent border (2px), accent glow shadow (0.3 alpha, blur 24, spread 4), `LucideIcons.upload` icon (size 48), and "Drop files to attach" text.
 
-**Drop handling** (`_handleDrop`): Takes only the first file from `DropDoneDetails.files`. Gets file size from disk via `File(path).length()`. Calls `onFileDropped(path, name, sizeBytes)` callback. The callback is responsible for size validation and staging.
+**Drop handling** (`_handleDrop`): Builds a `StagedAttachment.fromPath` for EVERY dropped path that exists as a file (a dropped folder is skipped) and hands the list to `onFilesDropped(List<StagedAttachment>)`. The callback (each pane's `_stageFiles`) owns the album cap, the large-file question and the media-only filter.
 
 **Events**: `onDragEntered` sets `_dragging = true`, `onDragExited` sets `_dragging = false`, `onDragDone` calls `_handleDrop`.
 

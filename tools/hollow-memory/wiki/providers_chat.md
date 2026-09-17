@@ -220,7 +220,9 @@ Used by the home dashboard to show DM conversation previews.
 
 Removes the peer's message list from state. Forces a full `loadHistory()` reload on next view.
 
-### addFileMessage(peerId, messageId, fileName, sizeBytes, ext, isImage, localPath, {text})
+### addFileMessage(peerId, messageId, fileName, sizeBytes, ext, isImage, localPath, {text, albumId})
+
+`albumId` stamps the optimistic row so the pane groups an album before any send returns; `ChatMessage.albumId` is also hydrated from `StoredMessage.album_id` on history load and from `MessageReceived.albumId` live.
 
 **Optimistic file message (sender side).**
 1. Creates a `ChatMessage` with `isMe: true`, the given `messageId`, and a `FileAttachment` with:
@@ -350,9 +352,9 @@ Unlike `loadHistory()`, this method preserves live-delivered messages that arriv
 
 Removes ALL channel message lists for the given server. Uses `removeWhere` with prefix match `'$serverId:'`.
 
-### addFileMessage(serverId, channelId, messageId, fileName, sizeBytes, ext, isImage, localPath, {text})
+### addFileMessage(serverId, channelId, messageId, fileName, sizeBytes, ext, isImage, localPath, {text, albumId})
 
-Same pattern as DM's `addFileMessage` but reads `identityProvider` to set `senderId` on the `ChannelChatMessage`.
+Same pattern as DM's `addFileMessage` but reads `identityProvider` to set `senderId` on the `ChannelChatMessage`. `ChannelChatMessage.albumId` likewise comes from load, live receive and this optimistic insert.
 
 ---
 

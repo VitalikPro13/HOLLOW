@@ -23,6 +23,7 @@ Covers every message rendering widget, action bar, text parser, link preview car
 | `isHighlighted` | `bool` | Amber-tinted background when this message is scroll-targeted |
 | `onReplyTap` | `VoidCallback?` | Callback to scroll to the original replied-to message |
 | `onToggleReaction` | `void Function(String emoji)?` | Callback to toggle an emoji reaction |
+| `album` | `List<AlbumItem>?` | Every item of the album this row anchors, itself first; null for a plain message. The file slot then renders `AlbumBubble` and the text is `albumCaption(...)` over the items, so the caption shows whichever item carries it. `ChannelMessageBubble` takes the same param |
 
 ### Layout — Header Mode (`showHeader == true`)
 
@@ -97,7 +98,7 @@ Extracts `hollow://` links from message text (code blocks stripped first via reg
 
 ### File Attachment Widget
 
-When `message.fileAttachment != null`: renders `FileAttachmentWidget` with `xs` top padding.
+When `message.fileAttachment != null`: renders `FileAttachmentWidget` with `xs` top padding, or `AlbumBubble` when `album` is set.
 
 **Honest states (2026-09-05, memory `project_file_card_honest_states`).** A file whose bytes are not on disk no longer shows one Download button that can silently do nothing. `lib/src/ui/chat/file_card_status.dart::fileCardStatus()` is the ONE decision point (caption + control) read by the generic file card, the image placeholder, `AudioMessageBubble`, `VideoMessageBubble` and `StickerPackCard`; mobile reuses the same bubbles. Precedence: expired (`attachment.isExpired`, caption `Removed by this server's retention policy`, no control) > share-backed with zero seeders (`Waiting for a peer who has this file`, tap to retry) > Rust's `FileAvailability` state on the transfer row (`requesting` = the button's footprint holds a spinner, caption `Requesting...`; `waiting` = no control, DM caption `<name> is offline. Hollow will fetch it when they return.` / channel caption `Waiting for a peer who has this file`; `gone` = no control, `<name> no longer has this file`) > default Download. The caption replaces the size line. The `Requesting file...` toasts are gone on the FileRequest branch: the card is the feedback.
 
@@ -382,6 +383,17 @@ Small rounded container with black at 65% alpha background, white text at 11px w
 
 ---
 
+## AlbumBubble
+
+**File:** `lib/src/ui/chat/album_bubble.dart` (grouping itself lives in `lib/src/core/album_grouping.dart`)
+**Class:** `AlbumBubble extends StatelessWidget`, built from `List<AlbumItem>` (`{attachment, messageId, senderId (master), timestampMs, isMine, text}`, via `dmAlbumItems` / `channelAlbumItems`, which skip rows that lost their file).
+
+- **Album model:** 1 to 10 ordinary messages sharing a signed `album` id (hyphenated UUID); `collapseAlbums` groups by sender AND album id (nobody can graft into another sender's album), only live file rows group, a group with one loaded item stays a plain message, and a run past `kMaxAlbumItems` starts a second group. Panes fold each group into its EARLIEST item.
+- **Mosaic** (max width 320, 2 px gap) for images and videos: 2 side by side, 3 = one large left plus two stacked, 4 = 2x2 grid, 5 = 2 over 3, 6+ = 3 over 3 with a "+N" overlay on the sixth cell. A single media item renders as a normal cell. Non-media items (files, sticker packs) stack underneath.
+- **Cells** are the ordinary `FileAttachmentWidget(tileSize:)` (which forwards `tileSize` to `VideoMessageBubble`): tight box, `BoxFit.cover`, and each keeps its own honest download state, progress, and media-viewer open.
+- **"Download all (N)" chip** (`_DownloadAllChip`): shown once two or more items are not complete, not expired and not already downloading; watches only the COUNT (the transfer map is replaced on every chunk) and calls the top-level `startManualAttachmentDownload(context, ref, attachment)` for each.
+- **`confirmDeleteAlbum(context, count)`**: the bubble's delete confirmation, which deletes every item; per-item delete stays in the media viewer.
+
 ## FileAttachmentWidget
 
 **File:** `lib/src/ui/chat/file_attachment_widget.dart`
@@ -390,7 +402,7 @@ Small rounded container with black at 65% alpha background, white text at 11px w
 
 ### Constructor Parameters (2026-09-14)
 
-Four optional params, all forwarded straight through to `VideoMessageBubble` and into the `MediaItem` the image preview opens: `messageId`, `senderId`, `timestampMs` (all `String?`/`int?`), `isMine` (`bool`, default false). Absent wherever an attachment has no owning message (a link-card thumbnail, for instance). This is what lets the media viewer act on the message (reply, jump to it, delete, react) and walk the conversation's other media from whichever bubble it was opened from; see wiki `ui_media_viewer.md`.
+`tileSize: Size?` (album mosaic cell: fixed box, cover fit, forwarded to `VideoMessageBubble`). Four optional params, all forwarded straight through to `VideoMessageBubble` and into the `MediaItem` the image preview opens: `messageId`, `senderId`, `timestampMs` (all `String?`/`int?`), `isMine` (`bool`, default false). Absent wherever an attachment has no owning message (a link-card thumbnail, for instance). This is what lets the media viewer act on the message (reply, jump to it, delete, react) and walk the conversation's other media from whichever bubble it was opened from; see wiki `ui_media_viewer.md`.
 
 ### Delegation Logic
 
@@ -398,6 +410,8 @@ Four optional params, all forwarded straight through to `VideoMessageBubble` and
 2. If share-backed with no seeders and no chunks received -- renders unavailable card.
 3. If `_isVideoAttachment()` -- delegates to `VideoMessageBubble`.
 4. If `_isAudioAttachment()` -- delegates to `AudioMessageBubble`.
+
+A manual download (placeholder tap, album chip) goes through the top-level `startManualAttachmentDownload(context, ref, attachment)` in the same file: share-backed files rejoin their swarm via the persisted share ref, a public-channel guest uses `RequestPublicFile`, everything else a FileRequest.
 5. If `attachment.isImage` -- renders inline image preview.
 6. Otherwise -- renders generic file card.
 

@@ -227,6 +227,7 @@ fn dm_target_data(
                 order_us: m.order_us,
                 lp_digest: m.link_preview.as_ref()
                     .map(crate::node::crypto_handler::link_preview_digest),
+                album_id: m.album_id,
                 reactions: Vec::new(),
             }
         })
@@ -272,6 +273,7 @@ fn channel_target_data(
                 order_us: m.order_us,
                 lp_digest: m.link_preview.as_ref()
                     .map(crate::node::crypto_handler::link_preview_digest),
+                album_id: m.album_id,
                 reactions: Vec::new(),
             }
         })
@@ -319,6 +321,7 @@ fn server_target_data(
                 order_us: m.order_us,
                 lp_digest: m.link_preview.as_ref()
                     .map(crate::node::crypto_handler::link_preview_digest),
+                album_id: m.album_id,
                 reactions: Vec::new(),
             });
         }

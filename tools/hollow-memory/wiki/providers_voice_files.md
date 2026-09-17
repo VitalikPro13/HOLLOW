@@ -539,7 +539,9 @@ Stores context for a large file (>34 MB) that is being turned into a hidden Shar
 
 ### Methods: Sending
 
-**`sendFile({peerId, serverId, channelId, filePath, messageId, messageText, memberCount})`**
+**`sendFile({peerId, serverId, channelId, filePath, messageId, messageText, memberCount, isVoice, album})`**
+
+`album` (the id every item of one album shares, null for a lone file) is threaded through every branch below: the default `network_api.sendFile(album:)`, `_sendVaultVideo`, and the pending Share context (`_pendingShareSends` entry) that `onShareCreatedForFile` sends later.
 Complex routing logic for different file types and server sizes:
 
 1. Creates optimistic `FileTransferState` entry with `isSending: true`.

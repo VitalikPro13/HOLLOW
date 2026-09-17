@@ -115,6 +115,9 @@ pub(crate) struct ArchiveMessage {
     /// Hex link-preview digest (0.8.3, v2 signatures) — same rationale.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lp_digest: Option<String>,
+    /// Album grouping id, bound by the v3 message signature.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub album_id: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reactions: Vec<ArchiveReaction>,
 }

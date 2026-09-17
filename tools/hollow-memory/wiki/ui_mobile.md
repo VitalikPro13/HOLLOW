@@ -128,7 +128,8 @@ New "Channels" section (gated by `Permission.manageChannels`) with:
 - `_editController` / `_editFocusNode` — edit TextField controllers
 - `_lastTypingSent` — 3s throttle for typing indicators. `_onTextChanged` sends `sendTypingIndicator` for BOTH DMs (`serverId:''`, `channelId:peerId`) AND server channels (`serverId`/`channelId`) — previously it early-returned on `!isDm`, so a phone never showed as "typing…" in a server channel (fixed 2026-06-19; the Rust path was already correct).
 - `_isInAutoScrollZone` — auto-scroll on new messages
-- `_stagedFilePath` / `_stagedFileName` / `_stagedFileIsImage` — staged file attachment
+- `_staged` (`List<StagedAttachment>`) — staged attachments, up to 10; two or more send as one album
+- `_dmAlbums` / `_channelAlbums`: album grouping of the list last displayed (`collapseDmAlbums` / `collapseChannelAlbums`), read by the row builders
 - `_isRecordingVoice` — swaps input bar for VoiceRecorderBar
 - `_searchOpen` / `_searchController` / `_searchFocusNode` / `_searchResults` — channel search
 - `_highlightIndex` — search result highlight (auto-clears after 1.5s)
@@ -160,13 +161,13 @@ Scaffold
 │       ├── _buildMentionPanel / _buildEmotePanel (autocomplete)
 │       ├── ChatReplyPreviewBar (if replying, shared)
 │       ├── StagedLinkArea (shared; hollow-link or OG preview)
-│       ├── StagedFilePreviewBar (if file staged, shared)
+│       ├── StagedAttachmentStrip (if files staged, shared; reorderable for an album)
 │       ├── _buildSlowModePill (channel, cooldown active)
 │       └── _buildComposerOrBanner: blocked banner (no-post/muted) OR VoiceRecorderBar OR _MobileInputBar ([+] attach + text + emoji-in-field + mic + send)
 ```
 
 ### Message Rendering
-Uses the shared `reversedChatList()` shell: `reverse: true`, newest at builder index 0 bottom-pinned, `findChildIndexCallback` keyed-row reuse, `_frozenLen` display freeze while scrolled up (see chat_pane scroll model).
+Uses the shared `reversedChatList()` shell: `reverse: true`, newest at builder index 0 bottom-pinned, `findChildIndexCallback` keyed-row reuse, `_frozenLen` display freeze while scrolled up (see chat_pane scroll model). The displayed list folds every album into its earliest item; `indexById` also maps each album item to its anchor row (replies, jumps, unread marker), and the anchor's bubble gets `album: dmAlbumItems(...)` / `channelAlbumItems(...)` with a preview from `albumPreviewText`.
 
 **Grouping:** shared `shouldGroup()` (same sender within 5 min; channel rows compare device→master collapsed sender ids). Date separators via shared `dateSeparatedChatRow`/`DateSeparator` ("Today"/"Yesterday"/"February 16, 2026" — desktop format since 2026-07-15).
 
@@ -183,8 +184,8 @@ Wraps each message bubble. Provides:
 ### File Actions
 - `_saveFile(FileAttachment)` — reads bytes, passes to `FilePicker.platform.saveFile(bytes:)`. Android requires `bytes:` param (crashes without it). Converts WebP→PNG if needed via `network_api.convertImageFormat()`.
 - `_requestFileFromPeer(FileAttachment, senderId)` — requests file via P2P when not on disk.
-- `_handleSend()` — slow-mode + media-only gates (`_blockedBySlowMode`/`_passesMediaOnlyGate`), clears composer state (`_clearComposerState`), then `_sendFileMessage(...)` if a file is staged (optimistic insert + `fileTransferProvider.sendFile`) else the text `sendMessage`.
-- `_pickFile({bool imagesOnly = false})` — `FilePicker.platform.pickFiles` (media-only channels restrict extensions), STAGES the file above the input bar (caption-friendly, desktop parity). One [+] attach button opens `_showAttachSheet` (Photo / File rows).
+- `_handleSend()` — slow-mode + media-only gates (`_blockedBySlowMode`/`_passesMediaOnlyGate`), clears composer state (`_clearComposerState`), then `_sendFiles(staged, caption: text, ...)` if files are staged (shared `sendStagedAttachments`: every optimistic insert first, then sequential `fileTransferProvider.sendFile(album:)`, caption on item 0) else the text `sendMessage`. An album row's action sheet drops the single-file actions and its delete asks `confirmDeleteAlbum` then deletes every item (`_deleteActionFor`).
+- `_pickFile({bool imagesOnly = false})` — `FilePicker.platform.pickFiles(allowMultiple: true)` (media-only channels restrict extensions), STAGES the files above the input bar through `admitStagedAttachments` + `appendStaged` (media-only filter, 10-item cap, one large-file Share question for the batch; caption-friendly, desktop parity). One [+] attach button opens `_showAttachSheet` (Photo / File rows).
 
 ### Pin Messages (Channel Only)
 - `pinnedProvider` loaded after channel history loads in `initState` `.then()` callback

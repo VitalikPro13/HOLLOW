@@ -43,7 +43,7 @@ Emitted via `StreamSink` from the Rust event loop to Dart. Consumed by `EventStr
 
 ### Direct Messages
 
-- **`MessageReceived { from_peer, text, timestamp, message_id, reply_to_mid, link_preview, signature, public_key }`** — an incoming DM was decrypted and delivered. `link_preview` is `Option<LinkPreviewRef>` for sender-generated URL previews. `signature`/`public_key` are Ed25519 verification data.
+- **`MessageReceived { from_peer, text, timestamp, message_id, reply_to_mid, link_preview, signature, public_key, album_id }`** — an incoming DM was decrypted and delivered. `link_preview` is `Option<LinkPreviewRef>` for sender-generated URL previews. `signature`/`public_key` are Ed25519 verification data.
 - **`MessageSent { to_peer, message_id, timestamp, signature, public_key }`** — confirms a DM was successfully encrypted and dispatched. Timestamp is hydrated from Rust's signed value (not Dart `DateTime.now()`).
 - **`MessageSendFailed { to_peer, error }`** — DM send failed (no session, peer offline, etc.).
 - **`DmMessageEdited { peer_id, message_id, new_text, edited_at, signature, public_key }`** — a DM was edited by the sender.
@@ -52,7 +52,7 @@ Emitted via `StreamSink` from the Rust event loop to Dart. Consumed by `EventStr
 
 ### Channel Messages
 
-- **`ChannelMessageReceived { server_id, channel_id, from_peer, text, timestamp, message_id, reply_to_mid, link_preview, signature, public_key }`** — a channel message received (decrypted from MLS or Olm). Same signature/preview fields as DM.
+- **`ChannelMessageReceived { server_id, channel_id, from_peer, text, timestamp, message_id, reply_to_mid, link_preview, signature, public_key, album_id }`** — a channel message received (decrypted from MLS or Olm). Same signature/preview/album fields as DM. Internally `album_id` is `Option<BoxedAlbumId>` (`Box<String>`): a by-value `String` grew `NetworkEvent` enough to overflow the tokio worker stack; the FFI mirror unboxes it.
 - **`ChannelMessageSent { server_id, channel_id, message_id, timestamp, signature, public_key }`** — confirms channel message sent.
 - **`ChannelMessageEdited { server_id, channel_id, message_id, new_text, edited_at, signature, public_key }`** — channel message edited.
 - **`ChannelMessageDeleted { server_id, channel_id, message_id, deleted_at }`** — channel message soft-deleted.
@@ -297,7 +297,7 @@ Commands sent from the Flutter FFI layer into the Rust swarm event loop via `mps
 
 ### File Sharing
 
-- **`SendFile(Box<SendFilePayload>)`** — send a file. Boxed to reduce enum size. `SendFilePayload` fields: `peer_id` (DMs), `server_id`+`channel_id` (channels), `file_path`, `message_id`, `message_text`, `vthumb: Option<VideoThumbRef>`, `override_width`/`override_height` (video preview), `share_ref: Option<ShareRef>` (>34 MB files). Handler: `file_handler.rs:handle_send_file()`.
+- **`SendFile(Box<SendFilePayload>)`** — send a file. Boxed to reduce enum size. `SendFilePayload` fields: `peer_id` (DMs), `server_id`+`channel_id` (channels), `file_path`, `message_id`, `message_text`, `vthumb: Option<VideoThumbRef>`, `override_width`/`override_height` (video preview), `share_ref: Option<ShareRef>` (>34 MB files), `album: Option<String>` (signed album grouping id). Handler: `file_handler.rs:handle_send_file()`. `DirectMessagePayload`, `ChannelMessagePayload` and `FileHeaderPayload` also carry `album` (serde default, skipped when none, so album-less traffic serializes byte-identically).
 - **`RequestFile { file_id, peer_id, chunks }`** — request file chunks from a peer. `chunks` empty = all. Handler: `file_handler.rs:handle_request_file()`.
 
 ### Storage Pledge
@@ -392,7 +392,7 @@ These are the plaintext variants used before MLS is established or as fallback. 
 
 These variants carry channel messages for public channels. They are Ed25519-signed but NOT MLS-encrypted, sent as plaintext `SendToRoom` broadcasts. All room participants receive them. Receive handlers in `swarm.rs` delegate to the same `handle_envelope_*` functions used by the MLS path.
 
-- **`PublicChannelMessage { server_id, channel_id, text, ts, sig, pk, mid, reply_to, file_id, link_preview }`** — `"pub_ch_msg"` — plaintext channel message for public channels.
+- **`PublicChannelMessage { server_id, channel_id, text, ts, sig, pk, mid, reply_to, file_id, link_preview, order_us, album }`** (`album` boxed like the event's) — `"pub_ch_msg"` — plaintext channel message for public channels.
 - **`PublicChannelEdit { server_id, channel_id, mid, text, ts, sig, pk }`** — `"pub_ch_edit"` — plaintext edit for public channels.
 - **`PublicChannelDelete { server_id, channel_id, mid, ts, sig, pk }`** — `"pub_ch_del"` — plaintext delete for public channels.
 - **`PublicChannelAddReaction { server_id, channel_id, mid, emoji, ts, sig, pk }`** — `"pub_ch_react"` — plaintext reaction add for public channels.
@@ -869,6 +869,7 @@ A single message in a channel sync batch (`ChannelSyncBatch.messages`).
 - `reply_to: Option<String>` — reply threading
 - `file_id: Option<String>` — file attachment
 - `file_meta: Option<SyncFileMetaItem>` — file metadata for late joiners (so they can create file cards)
+- `album: Option<String>`: album grouping id (hyphenated UUID), bound by the v3 signature, so it must survive every carrier
 - `hidden_at: Option<i64>` — deletion timestamp (if soft-deleted)
 - `hidden_sig, hidden_pk: Option<String>` — author's `"ch-delete"` deletion proof for `hidden_at` (0.8.4; receivers REJECT-ABSENT — no proof, no hide)
 - `reactions: Vec<SyncReactionItem>` — reactions on this message
@@ -905,6 +906,7 @@ A single DM in a DM sync batch (`DmSyncBatch.messages`).
 - `reply_to: Option<String>` — reply threading
 - `file_id: Option<String>` — file attachment
 - `file_meta: Option<SyncFileMetaItem>` — file metadata for late joiners
+- `album: Option<String>`: album grouping id, as on `SyncMessageItem`
 - `hidden_at: Option<i64>` — deletion timestamp
 - `hidden_sig, hidden_pk: Option<String>` — author's `"dm-delete"` deletion proof (0.8.4; REJECT-ABSENT)
 - `reactions: Vec<SyncReactionItem>` — reactions

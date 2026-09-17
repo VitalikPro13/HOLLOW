@@ -258,6 +258,7 @@ final archiveDmMessagesProvider = FutureProvider.autoDispose
             reactions:
                 m.messageId != null ? reactionsMap[m.messageId] : null,
             fileAttachment: m.fileId != null ? fileMap[m.fileId] : null,
+            albumId: m.albumId,
             linkPreview: m.linkPreview,
           ))
       .toList();
@@ -341,6 +342,7 @@ final archiveChannelMessagesProvider = FutureProvider.autoDispose
             reactions:
                 m.messageId != null ? reactionsMap[m.messageId] : null,
             fileAttachment: m.fileId != null ? fileMap[m.fileId] : null,
+            albumId: m.albumId,
             linkPreview: m.linkPreview,
           ))
       .toList();
@@ -444,6 +446,7 @@ List<ChatMessage> convertArchiveDmMessages(
       // The Rust loader already verified this row against the v2 payload with every
       // signed field in hand; carry its verdict rather than re-deriving one.
       archiveSignatureValid: m.signatureValid,
+      albumId: m.albumId,
     );
   }).toList();
 }
@@ -482,6 +485,7 @@ List<ChannelChatMessage> convertArchiveChannelMessages(
       fileAttachment: fileAttachment,
       // See the DM converter above — the loader's v2 verdict is authoritative.
       archiveSignatureValid: m.signatureValid,
+      albumId: m.albumId,
     );
   }).toList();
 }

@@ -8,6 +8,8 @@ import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
+import 'package:hollow/src/core/album_grouping.dart';
+import 'package:hollow/src/ui/chat/album_bubble.dart';
 import 'package:hollow/src/ui/chat/file_attachment_widget.dart';
 import 'package:hollow/src/ui/chat/hollow_link_card.dart';
 import 'package:hollow/src/ui/chat/bubble_perf.dart';
@@ -41,6 +43,10 @@ class MessageBubble extends ConsumerWidget {
   final bool tileWithPrev;
   final bool tileWithNext;
 
+  /// Every item of the album this message anchors, itself first. Null for a
+  /// message that renders on its own.
+  final List<AlbumItem>? album;
+
   const MessageBubble({
     super.key,
     required this.message,
@@ -54,6 +60,7 @@ class MessageBubble extends ConsumerWidget {
     this.onToggleReaction,
     this.tileWithPrev = false,
     this.tileWithNext = false,
+    this.album,
   });
 
   @override
@@ -150,12 +157,17 @@ class MessageBubble extends ConsumerWidget {
     }
 
     // A file placeholder carries no text of its own.
+    // An album shows its caption whichever item carries it.
+    final albumItems = album;
+    final text = albumItems == null
+        ? message.text
+        : albumCaption([for (final i in albumItems) i.text]);
     final isFileOnly = message.fileAttachment != null &&
-        (message.text.isEmpty || message.text.startsWith('[file:'));
+        (text.isEmpty || text.startsWith('[file:'));
     final messageTextWidget = isFileOnly
         ? null
         : buildMessageText(
-            message.text,
+            text,
             context,
             tiling: (top: tileWithPrev, bottom: tileWithNext),
             suffixSpans: isEdited
@@ -183,8 +195,8 @@ class MessageBubble extends ConsumerWidget {
 
     // Cheap gate first: no per-row RegExp compile or full-text scan for the
     // overwhelmingly common no-link message.
-    final hollowLinks = mightContainHollowLinks(message.text)
-        ? extractHollowLinks(message.text.replaceAll(codeBlockRegex, ''))
+    final hollowLinks = mightContainHollowLinks(text)
+        ? extractHollowLinks(text.replaceAll(codeBlockRegex, ''))
         : const <HollowLink>[];
     final hollowLinkWidgets = hollowLinks.isNotEmpty
         ? Column(
@@ -200,7 +212,12 @@ class MessageBubble extends ConsumerWidget {
           )
         : null;
 
-    final fileWidget = message.fileAttachment != null
+    final fileWidget = albumItems != null
+        ? Padding(
+            padding: const EdgeInsets.only(top: HollowSpacing.xs),
+            child: AlbumBubble(items: albumItems),
+          )
+        : message.fileAttachment != null
         ? Padding(
             padding: const EdgeInsets.only(top: HollowSpacing.xs),
             child: FileAttachmentWidget(

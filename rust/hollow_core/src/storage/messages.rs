@@ -80,6 +80,8 @@ pub(crate) struct StoredMessage {
     /// Microsecond send timestamp for stable ordering. `None` for legacy rows, whose
     /// callers fall back to `timestamp * 1000`.
     pub order_us: Option<i64>,
+    /// Signed album grouping id, `None` for a standalone message.
+    pub album_id: Option<String>,
 }
 
 /// A stored channel message.
@@ -103,6 +105,8 @@ pub(crate) struct StoredChannelMessage {
     /// Microsecond send timestamp for stable ordering. `None` for legacy rows, whose
     /// callers fall back to `timestamp * 1000`.
     pub order_us: Option<i64>,
+    /// Signed album grouping id, `None` for a standalone message.
+    pub album_id: Option<String>,
 }
 
 /// One message row's signature-relevant fields (v2 message signing). Not a display
@@ -117,6 +121,7 @@ pub(crate) struct MessageSigRow {
     pub file_id: Option<String>,
     pub order_us: Option<i64>,
     pub link_preview: Option<crate::node::LinkPreviewRef>,
+    pub album_id: Option<String>,
 }
 
 /// A stored file metadata entry.
@@ -205,10 +210,10 @@ fn collect_rows<T>(
 pub(crate) type SignedEmojiRow = (String, String, i64, Option<String>, Option<String>);
 
 /// Column list every DM-message query selects, in [`dm_message_from_row`] order.
-const DM_MSG_COLS: &str = "id, peer_id, text, is_mine, timestamp, signature, public_key, message_id, edited_at, hidden_at, reply_to_mid, file_id, link_preview_json, order_us";
+const DM_MSG_COLS: &str = "id, peer_id, text, is_mine, timestamp, signature, public_key, message_id, edited_at, hidden_at, reply_to_mid, file_id, link_preview_json, order_us, album_id";
 
 /// Column list every channel-message query selects, in [`channel_message_from_row`] order.
-const CHANNEL_MSG_COLS: &str = "id, server_id, channel_id, sender_id, text, is_mine, timestamp, signature, public_key, message_id, edited_at, hidden_at, reply_to_mid, file_id, link_preview_json, order_us";
+const CHANNEL_MSG_COLS: &str = "id, server_id, channel_id, sender_id, text, is_mine, timestamp, signature, public_key, message_id, edited_at, hidden_at, reply_to_mid, file_id, link_preview_json, order_us, album_id";
 
 /// The column tail shared by DM and channel message rows, in select order.
 struct MsgTail {
@@ -224,6 +229,7 @@ struct MsgTail {
     file_id: Option<String>,
     link_preview: Option<crate::node::LinkPreviewRef>,
     order_us: Option<i64>,
+    album_id: Option<String>,
 }
 
 /// Read the shared message-column tail starting at column index `base` (2 for DM
@@ -243,6 +249,7 @@ fn msg_tail_from_row(row: &rusqlite::Row<'_>, base: usize) -> rusqlite::Result<M
         link_preview: row.get::<_, Option<String>>(base + 10)?
             .and_then(|s| serde_json::from_str(&s).ok()),
         order_us: row.get(base + 11)?,
+        album_id: row.get(base + 12)?,
     })
 }
 
@@ -264,6 +271,7 @@ fn dm_message_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredMessag
         file_id: t.file_id,
         link_preview: t.link_preview,
         order_us: t.order_us,
+        album_id: t.album_id,
     })
 }
 
@@ -311,6 +319,7 @@ pub(crate) struct StoredMediaItem {
     /// Milliseconds. The owning message's timestamp, else the file's `created_at`.
     pub ts: i64,
     pub content_id: Option<String>,
+    pub album_id: Option<String>,
 }
 
 /// Map one full profile row, blobs and proof triple included, to a StoredProfile.
@@ -383,6 +392,7 @@ fn channel_message_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredC
         file_id: t.file_id,
         link_preview: t.link_preview,
         order_us: t.order_us,
+        album_id: t.album_id,
     })
 }
 
@@ -778,6 +788,11 @@ impl MessageStore {
         // SENDER, carried over the wire untouched, NULL for legacy rows.
         migrate(conn, "ALTER TABLE messages ADD COLUMN order_us INTEGER;");
         migrate(conn, "ALTER TABLE channel_messages ADD COLUMN order_us INTEGER;");
+
+        // album_id groups a sender's back-to-back items for rendering only; it is
+        // bound by the v3 message signature.
+        migrate(conn, "ALTER TABLE messages ADD COLUMN album_id TEXT;");
+        migrate(conn, "ALTER TABLE channel_messages ADD COLUMN album_id TEXT;");
 
         // updated_at tracks the last edit or delete, so sync queries catch changes to old
         // messages they would otherwise miss.
@@ -1264,6 +1279,7 @@ impl MessageStore {
         reply_to_mid: Option<&str>,
         file_id: Option<&str>,
         order_us: Option<i64>,
+        album_id: Option<&str>,
     ) -> Result<i64, String> {
         let order_us = order_us.unwrap_or(timestamp.saturating_mul(1000));
         // Every persisted stamp advances the Lamport send clock, so our NEXT send stamps
@@ -1272,8 +1288,8 @@ impl MessageStore {
         crate::chat_clock::observe(order_us.max(timestamp.saturating_mul(1000)));
         let rows = self.conn
             .execute(
-                "INSERT OR IGNORE INTO messages (peer_id, text, is_mine, timestamp, signature, public_key, message_id, reply_to_mid, file_id, order_us) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-                params![peer_id, text, is_mine as i32, timestamp, signature, public_key, message_id, reply_to_mid, file_id, order_us],
+                "INSERT OR IGNORE INTO messages (peer_id, text, is_mine, timestamp, signature, public_key, message_id, reply_to_mid, file_id, order_us, album_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                params![peer_id, text, is_mine as i32, timestamp, signature, public_key, message_id, reply_to_mid, file_id, order_us, album_id],
             )
             .map_err(|e| format!("Failed to insert message: {e}"))?;
         if rows > 0 {
@@ -1799,15 +1815,16 @@ impl MessageStore {
         reply_to_mid: Option<&str>,
         file_id: Option<&str>,
         order_us: Option<i64>,
+        album_id: Option<&str>,
     ) -> Result<usize, String> {
         let order_us = order_us.unwrap_or(timestamp.saturating_mul(1000));
         // Lamport chat clock — see [`Self::insert`] and chat_clock.rs.
         crate::chat_clock::observe(order_us.max(timestamp.saturating_mul(1000)));
         let rows = self.conn
             .execute(
-                "INSERT OR IGNORE INTO channel_messages (server_id, channel_id, sender_id, text, is_mine, timestamp, signature, public_key, message_id, reply_to_mid, file_id, order_us)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-                params![server_id, channel_id, sender_id, text, is_mine as i32, timestamp, signature, public_key, message_id, reply_to_mid, file_id, order_us],
+                "INSERT OR IGNORE INTO channel_messages (server_id, channel_id, sender_id, text, is_mine, timestamp, signature, public_key, message_id, reply_to_mid, file_id, order_us, album_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                params![server_id, channel_id, sender_id, text, is_mine as i32, timestamp, signature, public_key, message_id, reply_to_mid, file_id, order_us, album_id],
             )
             .map_err(|e| format!("Failed to insert channel message: {e}"))?;
         Ok(rows)
@@ -2841,7 +2858,7 @@ impl MessageStore {
             .query_row(
                 &format!(
                     "SELECT text, timestamp, signature, public_key, edited_at, \
-                     reply_to_mid, file_id, order_us, link_preview_json \
+                     reply_to_mid, file_id, order_us, link_preview_json, album_id \
                      FROM {table} WHERE message_id = ?1"
                 ),
                 params![message_id],
@@ -2858,6 +2875,7 @@ impl MessageStore {
                         link_preview: row
                             .get::<_, Option<String>>(8)?
                             .and_then(|json| serde_json::from_str(&json).ok()),
+                        album_id: row.get(9)?,
                     })
                 },
             )
@@ -3438,7 +3456,7 @@ impl MessageStore {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT cm.id, cm.server_id, cm.channel_id, cm.sender_id, cm.text, cm.is_mine, cm.timestamp, cm.signature, cm.public_key, cm.message_id, cm.edited_at, cm.hidden_at, cm.reply_to_mid, cm.file_id, cm.link_preview_json, cm.order_us
+                "SELECT cm.id, cm.server_id, cm.channel_id, cm.sender_id, cm.text, cm.is_mine, cm.timestamp, cm.signature, cm.public_key, cm.message_id, cm.edited_at, cm.hidden_at, cm.reply_to_mid, cm.file_id, cm.link_preview_json, cm.order_us, cm.album_id
                  FROM channel_messages cm
                  JOIN channel_messages_fts fts ON cm.id = fts.rowid
                  WHERE fts.text MATCH ?3 AND cm.server_id = ?1 AND cm.channel_id = ?2 AND cm.hidden_at IS NULL
@@ -3468,7 +3486,7 @@ impl MessageStore {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT m.id, m.peer_id, m.text, m.is_mine, m.timestamp, m.signature, m.public_key, m.message_id, m.edited_at, m.hidden_at, m.reply_to_mid, m.file_id, m.link_preview_json, m.order_us
+                "SELECT m.id, m.peer_id, m.text, m.is_mine, m.timestamp, m.signature, m.public_key, m.message_id, m.edited_at, m.hidden_at, m.reply_to_mid, m.file_id, m.link_preview_json, m.order_us, m.album_id
                  FROM messages m
                  JOIN messages_fts fts ON m.id = fts.rowid
                  WHERE fts.text MATCH ?2 AND m.peer_id = ?1 AND m.hidden_at IS NULL
@@ -5063,11 +5081,19 @@ impl MessageStore {
                    (SELECT timestamp FROM messages WHERE message_id = files.message_id),
                    (SELECT timestamp FROM channel_messages WHERE message_id = files.message_id),
                    created_at)";
+        let ord_expr = "COALESCE(
+                   (SELECT order_us FROM messages WHERE message_id = files.message_id),
+                   (SELECT order_us FROM channel_messages WHERE message_id = files.message_id),
+                   0)";
+        let album_expr = "COALESCE(
+                   (SELECT album_id FROM messages WHERE message_id = files.message_id),
+                   (SELECT album_id FROM channel_messages WHERE message_id = files.message_id))";
         // The bounds filter an aliased expression, so the select is wrapped rather than
         // repeating that expression three times.
         let sql = format!(
             "SELECT * FROM (
-               SELECT {FILE_COLS}, content_id, {ts_expr} AS ts FROM files
+               SELECT {FILE_COLS}, content_id, {ts_expr} AS ts,
+                      {ord_expr} AS ord, {album_expr} AS album FROM files
                WHERE context_type = ?1 AND context_id = ?2
                  AND completed_at IS NOT NULL
                  AND hidden_at IS NULL
@@ -5081,10 +5107,10 @@ impl MessageStore {
                    WHERE cm.message_id = files.message_id AND cm.hidden_at IS NOT NULL)
              )
              WHERE (?3 IS NULL OR ts < ?3) AND (?4 IS NULL OR ts > ?4)
-             ORDER BY ts DESC, file_id DESC
+             ORDER BY ts DESC, ord DESC, file_id DESC
              LIMIT ?5"
         );
-        // FILE_COLS is a comma list, so its column count is what the two appended
+        // FILE_COLS is a comma list, so its column count is what the appended
         // columns sit behind.
         let extra = FILE_COLS.split(',').count();
 
@@ -5100,6 +5126,7 @@ impl MessageStore {
                         file: stored_file_from_row(row)?,
                         content_id: row.get(extra)?,
                         ts: row.get(extra + 1)?,
+                        album_id: row.get(extra + 3)?,
                     })
                 },
             )
@@ -5797,12 +5824,12 @@ mod tests {
         let store = mem_store();
         let convo = "friend_master";
         // Three messages WE sent to the friend, three the friend sent to us.
-        store.insert(convo, "mine 1", true, 100, None, None, Some("m1"), None, None, None).unwrap();
-        store.insert(convo, "theirs 1", false, 110, None, None, Some("t1"), None, None, None).unwrap();
-        store.insert(convo, "mine 2", true, 120, None, None, Some("m2"), None, None, None).unwrap();
-        store.insert(convo, "theirs 2", false, 130, None, None, Some("t2"), None, None, None).unwrap();
-        store.insert(convo, "mine 3", true, 140, None, None, Some("m3"), None, None, None).unwrap();
-        store.insert(convo, "theirs 3", false, 150, None, None, Some("t3"), None, None, None).unwrap();
+        store.insert(convo, "mine 1", true, 100, None, None, Some("m1"), None, None, None, None).unwrap();
+        store.insert(convo, "theirs 1", false, 110, None, None, Some("t1"), None, None, None, None).unwrap();
+        store.insert(convo, "mine 2", true, 120, None, None, Some("m2"), None, None, None, None).unwrap();
+        store.insert(convo, "theirs 2", false, 130, None, None, Some("t2"), None, None, None, None).unwrap();
+        store.insert(convo, "mine 3", true, 140, None, None, Some("m3"), None, None, None, None).unwrap();
+        store.insert(convo, "theirs 3", false, 150, None, None, Some("t3"), None, None, None, None).unwrap();
 
         // Friend path (one-directional): only the messages WE sent.
         let friend = store.get_dm_messages_since(convo, 0, 200).unwrap();
@@ -5821,8 +5848,8 @@ mod tests {
     #[test]
     fn deletion_proof_load_and_verified_setter_idempotency() {
         let store = mem_store();
-        store.insert_channel_message("s", "c", "peer", "msg a", false, 100, None, None, Some("ma"), None, None, None).unwrap();
-        store.insert_channel_message("s", "c", "peer", "msg b", false, 110, None, None, Some("mb"), None, None, None).unwrap();
+        store.insert_channel_message("s", "c", "peer", "msg a", false, 100, None, None, Some("ma"), None, None, None, None).unwrap();
+        store.insert_channel_message("s", "c", "peer", "msg b", false, 110, None, None, Some("mb"), None, None, None, None).unwrap();
 
         // A local (real) delete stores the proof; the loader returns it.
         store.hide_channel_message("ma", 200, Some("sig-a"), Some("pk-a")).unwrap();
@@ -5837,7 +5864,7 @@ mod tests {
 
         // Verified sync setter: hides + stores the proof ONCE — a re-apply
         // (sync overlap) must not add a second, competing evidence row.
-        store.insert("friend", "dm msg", false, 120, None, None, Some("md"), None, None, None).unwrap();
+        store.insert("friend", "dm msg", false, 120, None, None, Some("md"), None, None, None, None).unwrap();
         store.set_dm_message_hidden_verified("md", 220, "sig-d", "pk-d").unwrap();
         store.set_dm_message_hidden_verified("md", 220, "sig-DIFFERENT", "pk-DIFFERENT").unwrap();
         assert_eq!(store.get_dm_message_hidden_at("md"), Some(220));
@@ -5958,8 +5985,8 @@ mod tests {
         let store = mem_store();
         let convo = "friend_master";
         // Our latest OUTGOING is newer than the latest INCOMING.
-        store.insert(convo, "theirs", false, 100, None, None, Some("t1"), None, None, None).unwrap();
-        store.insert(convo, "mine newer", true, 200, None, None, Some("m1"), None, None, None).unwrap();
+        store.insert(convo, "theirs", false, 100, None, None, Some("t1"), None, None, None, None).unwrap();
+        store.insert(convo, "mine newer", true, 200, None, None, Some("m1"), None, None, None, None).unwrap();
 
         // is_mine=0-only high-water stops at the incoming message.
         assert_eq!(store.get_latest_dm_timestamp(convo).unwrap(), Some(100));
@@ -5981,7 +6008,7 @@ mod tests {
         // True send order: P1,P2,P3 then A1,A2,A3 — strictly increasing order_us.
         let send = |sender: &str, text: &str, mid: &str, ous: i64| {
             store.insert_channel_message(sid, cid, sender, text, false, ms,
-                None, None, Some(mid), None, None, Some(ous)).unwrap();
+                None, None, Some(mid), None, None, Some(ous), None).unwrap();
         };
         send(pixel, "P1", "p1", ms * 1000 + 10);
         send(pixel, "P2", "p2", ms * 1000 + 20);
@@ -6011,9 +6038,9 @@ mod tests {
         let (sid, cid) = ("s1", "c1");
         // Distinct timestamps, NULL order_us (legacy rows) → ordered by timestamp.
         store.insert_channel_message(sid, cid, "x", "first", false, 100,
-            None, None, Some("m1"), None, None, None).unwrap();
+            None, None, Some("m1"), None, None, None, None).unwrap();
         store.insert_channel_message(sid, cid, "y", "second", false, 200,
-            None, None, Some("m2"), None, None, None).unwrap();
+            None, None, Some("m2"), None, None, None, None).unwrap();
         let order: Vec<String> = store
             .load_channel_messages(sid, cid, 100)
             .unwrap()
@@ -6032,13 +6059,13 @@ mod tests {
 
         // DM: seen row at ts=1000.
         let peer = "friend_master";
-        store.insert(peer, "seen", false, 1000, None, None, Some("seen"), None, None, None).unwrap();
+        store.insert(peer, "seen", false, 1000, None, None, Some("seen"), None, None, None, None).unwrap();
         // Same-ms burst sibling (higher rowid, same millisecond) — NOT unread.
-        store.insert(peer, "same-ms", false, 1000, None, None, Some("m2"), None, None, None).unwrap();
+        store.insert(peer, "same-ms", false, 1000, None, None, Some("m2"), None, None, None, None).unwrap();
         // Sync backfill: OLDER timestamp, higher rowid — NOT unread.
-        store.insert(peer, "backfill", false, 500, None, None, Some("m3"), None, None, None).unwrap();
+        store.insert(peer, "backfill", false, 500, None, None, Some("m3"), None, None, None, None).unwrap();
         // Genuinely newer — unread.
-        store.insert(peer, "newer", false, 2000, None, None, Some("m4"), None, None, None).unwrap();
+        store.insert(peer, "newer", false, 2000, None, None, Some("m4"), None, None, None, None).unwrap();
         assert_eq!(store.count_unread_dm(peer, "seen"), 1, "only the strictly-newer message is unread");
         // Missing seen row → 0, never count-everything.
         assert_eq!(store.count_unread_dm(peer, "no-such-mid"), 0);
@@ -6046,13 +6073,13 @@ mod tests {
         // Channel: same shape.
         let (sid, cid) = ("s-unread", "c-unread");
         store.insert_channel_message(sid, cid, "al", "seen", false, 1000,
-            None, None, Some("ch-seen"), None, None, None).unwrap();
+            None, None, Some("ch-seen"), None, None, None, None).unwrap();
         store.insert_channel_message(sid, cid, "al", "same-ms", false, 1000,
-            None, None, Some("ch2"), None, None, None).unwrap();
+            None, None, Some("ch2"), None, None, None, None).unwrap();
         store.insert_channel_message(sid, cid, "al", "backfill", false, 500,
-            None, None, Some("ch3"), None, None, None).unwrap();
+            None, None, Some("ch3"), None, None, None, None).unwrap();
         store.insert_channel_message(sid, cid, "al", "newer", false, 2000,
-            None, None, Some("ch4"), None, None, None).unwrap();
+            None, None, Some("ch4"), None, None, None, None).unwrap();
         assert_eq!(store.count_unread_channel(sid, cid, "ch-seen"), 1);
         assert_eq!(store.count_unread_channel(sid, cid, "gone"), 0);
         let (total, _) = store.count_unread_channel_with_mentions(sid, cid, Some("ch-seen"), &[]);
@@ -6065,10 +6092,10 @@ mod tests {
     fn own_message_floors_unread_counts() {
         let store = mem_store();
         let peer = "friend_master";
-        store.insert(peer, "theirs-old", false, 1000, None, None, Some("t1"), None, None, None).unwrap();
-        store.insert(peer, "theirs-2", false, 1500, None, None, Some("t2"), None, None, None).unwrap();
-        store.insert(peer, "mine", true, 2000, None, None, Some("m1"), None, None, None).unwrap();
-        store.insert(peer, "theirs-new", false, 3000, None, None, Some("t3"), None, None, None).unwrap();
+        store.insert(peer, "theirs-old", false, 1000, None, None, Some("t1"), None, None, None, None).unwrap();
+        store.insert(peer, "theirs-2", false, 1500, None, None, Some("t2"), None, None, None, None).unwrap();
+        store.insert(peer, "mine", true, 2000, None, None, Some("m1"), None, None, None, None).unwrap();
+        store.insert(peer, "theirs-new", false, 3000, None, None, Some("t3"), None, None, None, None).unwrap();
         // Pointer at the oldest row, yet only the message after our reply counts.
         assert_eq!(store.count_unread_dm(peer, "t1"), 1);
         // Never opened on this device: same floor.
@@ -6076,11 +6103,11 @@ mod tests {
 
         let (sid, cid) = ("s-floor", "c-floor");
         store.insert_channel_message(sid, cid, "al", "theirs", false, 1000,
-            None, None, Some("c1"), None, None, None).unwrap();
+            None, None, Some("c1"), None, None, None, None).unwrap();
         store.insert_channel_message(sid, cid, "me", "mine", true, 2000,
-            None, None, Some("c2"), None, None, None).unwrap();
+            None, None, Some("c2"), None, None, None, None).unwrap();
         store.insert_channel_message(sid, cid, "al", "@everyone later", false, 3000,
-            None, None, Some("c3"), None, None, None).unwrap();
+            None, None, Some("c3"), None, None, None, None).unwrap();
         assert_eq!(store.count_unread_channel(sid, cid, "c1"), 1);
         assert_eq!(store.count_all_unread_channel(sid, cid), 1);
         let (total, mentions) = store.count_unread_channel_with_mentions(
@@ -6096,9 +6123,9 @@ mod tests {
     fn remote_read_marker_advances_by_time_and_never_regresses() {
         let store = mem_store();
         let peer = "friend_master";
-        store.insert(peer, "a", false, 1000, None, None, Some("d1"), None, None, None).unwrap();
-        store.insert(peer, "b", false, 2000, None, None, Some("d2"), None, None, None).unwrap();
-        store.insert(peer, "c", false, 3000, None, None, Some("d3"), None, None, None).unwrap();
+        store.insert(peer, "a", false, 1000, None, None, Some("d1"), None, None, None, None).unwrap();
+        store.insert(peer, "b", false, 2000, None, None, Some("d2"), None, None, None, None).unwrap();
+        store.insert(peer, "c", false, 3000, None, None, Some("d3"), None, None, None, None).unwrap();
         let key = format!("dm:{peer}");
 
         // The sibling read a row we do not hold (ts 2500): the newest row at or
@@ -6113,23 +6140,23 @@ mod tests {
         // Forward again: the pointer lands on the newest row, the mark keeps 9000
         // so a row backfilled later at 4000 stays read.
         assert_eq!(store.apply_remote_read_marker(&key, 9000).unwrap(), Some("d3".into()));
-        store.insert(peer, "late", false, 4000, None, None, Some("d4"), None, None, None).unwrap();
+        store.insert(peer, "late", false, 4000, None, None, Some("d4"), None, None, None, None).unwrap();
         assert_eq!(store.count_unread_dm(peer, "d3"), 0);
         assert_eq!(store.read_marker_floor(&key), Some(9000));
-        store.insert(peer, "after", false, 9500, None, None, Some("d5"), None, None, None).unwrap();
+        store.insert(peer, "after", false, 9500, None, None, Some("d5"), None, None, None, None).unwrap();
         assert_eq!(store.count_unread_dm(peer, "d3"), 1);
         // Earlier than every local row and no pointer yet: the mark alone is
         // kept, and the count without a pointer floors on it.
         assert_eq!(store.apply_remote_read_marker("dm:nobody", 5).unwrap(), Some(String::new()));
-        store.insert("nobody", "x", false, 3, None, None, Some("n1"), None, None, None).unwrap();
-        store.insert("nobody", "y", false, 8, None, None, Some("n2"), None, None, None).unwrap();
+        store.insert("nobody", "x", false, 3, None, None, Some("n1"), None, None, None, None).unwrap();
+        store.insert("nobody", "y", false, 8, None, None, Some("n2"), None, None, None, None).unwrap();
         assert_eq!(store.count_all_unread_dm("nobody"), 1);
 
         let (sid, cid) = ("s-rm", "c-rm");
         store.insert_channel_message(sid, cid, "al", "x", false, 100,
-            None, None, Some("k1"), None, None, None).unwrap();
+            None, None, Some("k1"), None, None, None, None).unwrap();
         store.insert_channel_message(sid, cid, "al", "y", false, 200,
-            None, None, Some("k2"), None, None, None).unwrap();
+            None, None, Some("k2"), None, None, None, None).unwrap();
         let ch_key = format!("ch:{sid}:{cid}");
         assert_eq!(store.apply_remote_read_marker(&ch_key, 150).unwrap(), Some("k1".into()));
         assert!(store.apply_remote_read_marker("bogus:key", 1).is_err());
@@ -6334,7 +6361,7 @@ mod tests {
         let store = mem_store();
         for (fid, mid, ts) in [("f1", "m1", 1000), ("f2", "m2", 2000), ("f3", "m3", 3000)] {
             store
-                .insert("alice", "[file:x]", false, ts, None, None, Some(mid), None, Some(fid), None)
+                .insert("alice", "[file:x]", false, ts, None, None, Some(mid), None, Some(fid), None, None)
                 .unwrap();
             // created_at is deliberately identical and far in the future.
             insert_media_row(&store, fid, "dm", "alice", "png", true, 9999, Some(mid), true);
@@ -6360,17 +6387,17 @@ mod tests {
     fn media_list_excludes_files_of_hidden_messages() {
         let store = mem_store();
         store
-            .insert("alice", "[file:x]", false, 1000, None, None, Some("m_gone"), None, Some("f_gone"), None)
+            .insert("alice", "[file:x]", false, 1000, None, None, Some("m_gone"), None, Some("f_gone"), None, None)
             .unwrap();
         store
-            .insert("alice", "[file:x]", false, 1100, None, None, Some("m_ok"), None, Some("f_ok"), None)
+            .insert("alice", "[file:x]", false, 1100, None, None, Some("m_ok"), None, Some("f_ok"), None, None)
             .unwrap();
         insert_media_row(&store, "f_gone", "dm", "alice", "png", true, 1000, Some("m_gone"), true);
         insert_media_row(&store, "f_ok", "dm", "alice", "png", true, 1100, Some("m_ok"), true);
         store.set_dm_message_hidden("m_gone", 5000).unwrap();
 
         store
-            .insert_channel_message("s1", "c1", "sender", "[file:x]", false, 1200, None, None, Some("cm_gone"), None, Some("f_ch"), None)
+            .insert_channel_message("s1", "c1", "sender", "[file:x]", false, 1200, None, None, Some("cm_gone"), None, Some("f_ch"), None, None)
             .unwrap();
         insert_media_row(&store, "f_ch", "channel", "s1:c1", "png", true, 1200, Some("cm_gone"), true);
         store.set_channel_message_hidden("cm_gone", 5000).unwrap();

@@ -505,6 +505,7 @@ pub(crate) fn channel_sync_items(
             order_us: m.order_us,
             lp_digest: m.link_preview.as_ref()
                 .map(super::crypto_handler::link_preview_digest),
+            album: m.album_id.clone(),
             lp: m.link_preview.clone().map(Box::new),
             reactions,
         });
@@ -3456,6 +3457,7 @@ fn verify_sync_item_sig(
         file_id: msg.file_id.as_deref(),
         order_us: msg.order_us,
         lp_digest: lp_digest.as_deref(),
+        album: msg.album.as_deref(),
     };
     super::crypto_handler::check_backfill_signature(
         &msg.s, "ch", &format!("{sid}:{cid}"),
@@ -3487,6 +3489,7 @@ fn upsert_synced_channel_message(
             sid, cid, &msg.s, &msg.t, is_mine, msg.ts,
             msg.sig.as_deref(), msg.pk.as_deref(), msg.mid.as_deref(),
             msg.reply_to.as_deref(), msg.file_id.as_deref(), msg.order_us,
+            msg.album.as_deref(),
         ) {
             // If the synced message was already edited, stamp edited_at directly.
             // edit_channel_message would skip it (old_text == new_text).

@@ -140,7 +140,8 @@ $script:FleetOutRoot = Join-Path (Join-Path $repoRoot 'build') 'fleet_out'
 # earlier run can be delivered into a later one: a `wait_for` on a fixed string
 # would then pass before the send it was supposed to be waiting for. A run tag
 # in the text makes that impossible.
-$script:FleetVars = @{ RUN = (Get-Date -Format 'HHmmss') }
+# `${REPO}` is the repo root with forward slashes, for fixture paths in scenarios.
+$script:FleetVars = @{ RUN = (Get-Date -Format 'HHmmss'); REPO = ($repoRoot.Replace('\', '/')) }
 . (Join-Path $PSScriptRoot 'fleet_lib.ps1')
 
 $stageRoot   = $script:FleetStageRoot
