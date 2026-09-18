@@ -10,8 +10,8 @@ import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
+import 'package:hollow/src/ui/components/hollow_chip.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
-import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/share/paste_link_dialog.dart';
 import 'package:hollow/src/ui/share/share_card.dart';
@@ -74,15 +74,15 @@ class _ShareDashboardState extends ConsumerState<ShareDashboard> {
         children: [
           Text('Share', style: HollowTypography.heading.copyWith(color: hollow.textPrimary)),
           const SizedBox(width: HollowSpacing.lg),
-          _SubTabPill(
+          HollowChip(
             label: 'My Shares${userCount > 0 ? ' ($userCount)' : ''}',
-            isSelected: _subTab == _ShareSubTab.myShares,
+            selected: _subTab == _ShareSubTab.myShares,
             onTap: () => setState(() => _subTab = _ShareSubTab.myShares),
           ),
           const SizedBox(width: HollowSpacing.sm),
-          _SubTabPill(
+          HollowChip(
             label: 'Server Files${serverCount > 0 ? ' ($serverCount)' : ''}',
-            isSelected: _subTab == _ShareSubTab.serverFiles,
+            selected: _subTab == _ShareSubTab.serverFiles,
             onTap: () => setState(() => _subTab = _ShareSubTab.serverFiles),
           ),
           const Spacer(),
@@ -290,48 +290,3 @@ class _ShareDashboardState extends ConsumerState<ShareDashboard> {
   }
 }
 
-/// Pill-shaped sub-tab button, matching the Archive dashboard.
-class _SubTabPill extends StatelessWidget {
-  final String label;
-  final bool isSelected;
-  final VoidCallback onTap;
-
-  const _SubTabPill({
-    required this.label,
-    required this.isSelected,
-    required this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-
-    return HollowPressable(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(hollow.radiusMd),
-      padding: EdgeInsets.zero,
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
-        decoration: BoxDecoration(
-          color: isSelected
-              ? hollow.accent.withValues(alpha: 0.15)
-              : Colors.transparent,
-          borderRadius: BorderRadius.circular(hollow.radiusMd),
-          border: Border.all(
-            color: isSelected
-                ? hollow.accent.withValues(alpha: 0.3)
-                : hollow.border,
-          ),
-        ),
-        child: Text(
-          label,
-          style: HollowTypography.body.copyWith(
-            color: isSelected ? hollow.accent : hollow.textSecondary,
-            fontWeight: isSelected ? FontWeight.w600 : FontWeight.normal,
-            fontSize: 13,
-          ),
-        ),
-      ),
-    );
-  }
-}

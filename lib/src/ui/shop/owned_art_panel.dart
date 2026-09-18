@@ -16,6 +16,7 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/animated_gif_image.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
+import 'package:hollow/src/ui/components/hollow_badge.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
@@ -322,7 +323,7 @@ class _OwnedItemRowState extends ConsumerState<_OwnedItemRow> {
                   runSpacing: HollowSpacing.xs,
                   crossAxisAlignment: WrapCrossAlignment.center,
                   children: [
-                    for (final kind in item.kinds) _KindChip(label: kind),
+                    for (final kind in item.kinds) HollowBadge(kind),
                     for (final kind in item.kinds)
                       if (_isWorn(kind, worn))
                         const HollowButton.ghost(
@@ -354,30 +355,6 @@ class _OwnedItemRowState extends ConsumerState<_OwnedItemRow> {
             ),
           ),
         ],
-      ),
-    );
-  }
-}
-
-class _KindChip extends StatelessWidget {
-  final String label;
-
-  const _KindChip({required this.label});
-
-  @override
-  Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-      decoration: BoxDecoration(
-        color: hollow.elevated,
-        borderRadius: BorderRadius.circular(hollow.radiusSm),
-        border: Border.all(color: hollow.border),
-      ),
-      child: Text(
-        label,
-        style: HollowTypography.caption
-            .copyWith(color: hollow.textSecondary, fontSize: 10),
       ),
     );
   }

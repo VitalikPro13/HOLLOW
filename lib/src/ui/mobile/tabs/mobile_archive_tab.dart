@@ -16,6 +16,7 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
+import 'package:hollow/src/ui/components/hollow_chip.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
@@ -69,9 +70,10 @@ class MobileArchiveTab extends ConsumerWidget {
               Row(
                 children: [
                   Expanded(
-                    child: _SubTabPill(
+                    child: HollowChip(
+                      expand: true,
                       label: 'My Data',
-                      isSelected: subTab == ArchiveSubTab.myData,
+                      selected: subTab == ArchiveSubTab.myData,
                       onTap: () => ref
                           .read(archiveSubTabProvider.notifier)
                           .state = ArchiveSubTab.myData,
@@ -79,9 +81,10 @@ class MobileArchiveTab extends ConsumerWidget {
                   ),
                   const SizedBox(width: HollowSpacing.sm),
                   Expanded(
-                    child: _SubTabPill(
+                    child: HollowChip(
+                      expand: true,
                       label: 'Imported',
-                      isSelected:
+                      selected:
                           subTab == ArchiveSubTab.importedArchives,
                       onTap: () => ref
                           .read(archiveSubTabProvider.notifier)
@@ -105,53 +108,6 @@ class MobileArchiveTab extends ConsumerWidget {
           ),
         ),
       ],
-    );
-  }
-}
-
-class _SubTabPill extends StatelessWidget {
-  final String label;
-  final bool isSelected;
-  final VoidCallback onTap;
-
-  const _SubTabPill({
-    required this.label,
-    required this.isSelected,
-    required this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-    return HollowPressable(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(20),
-      padding: EdgeInsets.zero,
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 200),
-        alignment: Alignment.center,
-        padding: const EdgeInsets.symmetric(
-          horizontal: HollowSpacing.lg,
-          vertical: HollowSpacing.sm,
-        ),
-        decoration: BoxDecoration(
-          color: isSelected ? hollow.accent : hollow.surface,
-          borderRadius: BorderRadius.circular(20),
-          border: Border.all(
-            color: isSelected
-                ? hollow.accent
-                : hollow.border,
-          ),
-        ),
-        child: Text(
-          label,
-          style: HollowTypography.body.copyWith(
-            color: isSelected ? hollow.textOnAccent : hollow.textSecondary,
-            fontWeight: isSelected ? FontWeight.w600 : FontWeight.w400,
-            fontSize: 13,
-          ),
-        ),
-      ),
     );
   }
 }
@@ -184,29 +140,32 @@ class _MobileMyDataViewState extends ConsumerState<_MobileMyDataView> {
           child: Row(
             children: [
               Expanded(
-                child: _InnerTabPill(
+                child: HollowChip(
                   label: 'DMs',
-                  isSelected: innerTab == MyDataInnerTab.dms,
+                  expand: true,
+                  selected: innerTab == MyDataInnerTab.dms,
                   onTap: () => ref
                       .read(myDataInnerTabProvider.notifier)
                       .state = MyDataInnerTab.dms,
                 ),
               ),
-              const SizedBox(width: HollowSpacing.xs),
+              const SizedBox(width: HollowSpacing.sm),
               Expanded(
-                child: _InnerTabPill(
+                child: HollowChip(
                   label: 'Channels',
-                  isSelected: innerTab == MyDataInnerTab.channels,
+                  expand: true,
+                  selected: innerTab == MyDataInnerTab.channels,
                   onTap: () => ref
                       .read(myDataInnerTabProvider.notifier)
                       .state = MyDataInnerTab.channels,
                 ),
               ),
-              const SizedBox(width: HollowSpacing.xs),
+              const SizedBox(width: HollowSpacing.sm),
               Expanded(
-                child: _InnerTabPill(
+                child: HollowChip(
                   label: 'Vault',
-                  isSelected: innerTab == MyDataInnerTab.vaultFiles,
+                  expand: true,
+                  selected: innerTab == MyDataInnerTab.vaultFiles,
                   onTap: () => ref
                       .read(myDataInnerTabProvider.notifier)
                       .state = MyDataInnerTab.vaultFiles,
@@ -246,51 +205,6 @@ class _MobileMyDataViewState extends ConsumerState<_MobileMyDataView> {
           },
         ),
       ],
-    );
-  }
-}
-
-class _InnerTabPill extends StatelessWidget {
-  final String label;
-  final bool isSelected;
-  final VoidCallback onTap;
-
-  const _InnerTabPill({
-    required this.label,
-    required this.isSelected,
-    required this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-    return HollowPressable(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(hollow.radiusSm),
-      padding: const EdgeInsets.symmetric(vertical: 6),
-      child: Container(
-        alignment: Alignment.center,
-        padding: const EdgeInsets.symmetric(vertical: 4),
-        decoration: BoxDecoration(
-          color: isSelected
-              ? hollow.accent.withValues(alpha: 0.15)
-              : Colors.transparent,
-          borderRadius: BorderRadius.circular(hollow.radiusSm),
-          border: Border.all(
-            color: isSelected
-                ? hollow.accent.withValues(alpha: 0.3)
-                : hollow.border,
-          ),
-        ),
-        child: Text(
-          label,
-          style: HollowTypography.caption.copyWith(
-            color: isSelected ? hollow.accent : hollow.textSecondary,
-            fontWeight: isSelected ? FontWeight.w600 : FontWeight.normal,
-            fontSize: 13,
-          ),
-        ),
-      ),
     );
   }
 }

@@ -103,7 +103,7 @@ final _rules = <_Rule>[
         'not a literal',
     pattern: RegExp(r'\bfontSize\s*:'),
     excludeDirs: [_theme],
-    baseline: 817,
+    baseline: 809,
   ),
   _Rule(
     id: 'material-colors',
@@ -128,7 +128,7 @@ final _rules = <_Rule>[
     fix: 'use hollow.radiusXs / radiusSm / radiusMd / radiusLg / radiusXl',
     pattern: RegExp(r'BorderRadius\.circular\(\s*[0-9]'),
     excludeDirs: [_theme],
-    baseline: 177,
+    baseline: 175,
   ),
   _Rule(
     id: 'letter-spacing',
@@ -162,7 +162,7 @@ final _rules = <_Rule>[
         'option',
     pattern: RegExp(r'^\s*class\s+\w*(Chip|Pill|Tag|Badge)\w*\b'),
     excludeDirs: [_theme, _components],
-    baseline: 36,
+    baseline: 28,
   ),
   _Rule(
     id: 'edge-insets-literal',
@@ -172,7 +172,7 @@ final _rules = <_Rule>[
     pattern:
         RegExp(r'EdgeInsets\.(all|symmetric|only|fromLTRB)\([^)]*\b\d'),
     excludeDirs: [_theme],
-    baseline: 266,
+    baseline: 257,
   ),
   _Rule(
     id: 'sized-box-gap',

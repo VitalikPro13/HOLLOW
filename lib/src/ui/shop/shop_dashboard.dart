@@ -15,9 +15,12 @@ import 'package:hollow/src/ui/components/animated_gif_image.dart';
 import 'package:hollow/src/ui/components/avatar_frame.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hover_scope.dart';
+import 'package:hollow/src/ui/components/hollow_badge.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
+import 'package:hollow/src/ui/components/hollow_chip.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
+import 'package:hollow/src/ui/components/hollow_tooltip.dart';
 import 'package:hollow/src/ui/shop/hollowpack_import.dart';
 import 'package:hollow/src/ui/shop/shop_item_dialog.dart';
 import 'package:hollow/src/ui/shop/redeem_code_dialog.dart';
@@ -105,13 +108,17 @@ class _ShopDashboardState extends ConsumerState<ShopDashboard> {
   Widget _buildHeader(HollowTheme hollow) {
     final pills = [
       for (final filter in _ShopFilter.values)
-        _FilterPill(
+        HollowChip(
           label: _filterLabel(filter),
-          isSelected: _filter == filter,
+          selected: _filter == filter,
           onTap: () => setState(() => _filter = filter),
         ),
     ];
 
+    // Nothing here is the primary action: buying happens on a card, and these
+    // four are utilities. An action row with no primary is all ghost, so the
+    // two outlines went, and the bare pressable became a button like its
+    // neighbours.
     final actions = [
       HollowButton.ghost(
         onPressed: _openInBrowser,
@@ -119,33 +126,34 @@ class _ShopDashboardState extends ConsumerState<ShopDashboard> {
         icon: const Icon(LucideIcons.externalLink, size: 14),
         child: const Text('Open in browser'),
       ),
-      const SizedBox(width: HollowSpacing.xs),
-      HollowButton.outline(
+      const SizedBox(width: HollowSpacing.sm),
+      HollowButton.ghost(
         onPressed: () => showRedeemEntryDialog(context),
         compact: true,
         icon: const Icon(LucideIcons.ticket, size: 14),
         child: const Text('Redeem a code'),
       ),
-      const SizedBox(width: HollowSpacing.xs),
-      HollowButton.outline(
+      const SizedBox(width: HollowSpacing.sm),
+      HollowButton.ghost(
         onPressed: () => pickAndImportHollowpack(context, ref),
         compact: true,
         icon: const Icon(LucideIcons.packageOpen, size: 14),
         child: const Text('Import a pack'),
       ),
-      const SizedBox(width: HollowSpacing.xs),
-      HollowPressable(
-        semanticLabel: 'Refresh the shop',
-        onTap: () {
-          ref.invalidate(shop.shopCatalogProvider);
-          // The catalog is fetched fresh every time, so the toast is the only
-          // sign the tap did anything when nothing on the wall changed.
-          HollowToast.show(context, 'Shop refreshed');
-        },
-        borderRadius: BorderRadius.circular(hollow.radiusSm),
-        padding: const EdgeInsets.all(HollowSpacing.xs),
-        child: Icon(LucideIcons.refreshCw,
-            size: 16, color: hollow.textSecondary),
+      const SizedBox(width: HollowSpacing.sm),
+      HollowTooltip(
+        message: 'Refresh the shop',
+        child: HollowButton.ghost(
+          semanticLabel: 'Refresh the shop',
+          compact: true,
+          onPressed: () {
+            ref.invalidate(shop.shopCatalogProvider);
+            // The catalog is fetched fresh every time, so the toast is the only
+            // sign the tap did anything when nothing on the wall changed.
+            HollowToast.show(context, 'Shop refreshed');
+          },
+          child: const Icon(LucideIcons.refreshCw, size: 16),
+        ),
       ),
     ];
 
@@ -357,52 +365,6 @@ class _ShopDashboardState extends ConsumerState<ShopDashboard> {
   }
 }
 
-/// Pill-shaped filter. Selection is a chip, never a filled button.
-class _FilterPill extends StatelessWidget {
-  final String label;
-  final bool isSelected;
-  final VoidCallback onTap;
-
-  const _FilterPill({
-    required this.label,
-    required this.isSelected,
-    required this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-
-    return HollowPressable(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(hollow.radiusMd),
-      padding: EdgeInsets.zero,
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
-        decoration: BoxDecoration(
-          color: isSelected
-              ? hollow.accent.withValues(alpha: 0.15)
-              : Colors.transparent,
-          borderRadius: BorderRadius.circular(hollow.radiusMd),
-          border: Border.all(
-            color: isSelected
-                ? hollow.accent.withValues(alpha: 0.3)
-                : hollow.border,
-          ),
-        ),
-        child: Text(
-          label,
-          style: HollowTypography.body.copyWith(
-            color: isSelected ? hollow.accentText : hollow.textSecondary,
-            fontWeight: isSelected ? FontWeight.w600 : FontWeight.normal,
-            fontSize: 13,
-          ),
-        ),
-      ),
-    );
-  }
-}
-
 class _ShopCard extends ConsumerWidget {
   final shop.ShopListing listing;
 
@@ -426,29 +388,41 @@ class _ShopCard extends ConsumerWidget {
       padding: EdgeInsets.zero,
       child: Container(
         decoration: BoxDecoration(
+          // A background step, not a step AND a hairline: the art fills the
+          // tile, so the boundary is never in doubt and an outline on top of it
+          // only makes the wall read as a grid of boxes.
           color: hollow.surface,
           borderRadius: BorderRadius.circular(hollow.radiusLg),
-          border: Border.all(color: hollow.border),
         ),
         clipBehavior: Clip.antiAlias,
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            // Square art in a flexible slot: the cell height comes from the
-            // grid delegate, and a hard AspectRatio would overflow the text
-            // below it at narrow column widths.
+            // The art IS the card, so it takes the whole slot the caption
+            // leaves rather than a fixed 96px floating in the middle of it.
+            // Measured rather than given a hard AspectRatio, because the cell
+            // height comes from the grid delegate and a square that does not
+            // fit would overflow the text below.
             Expanded(
               child: Padding(
                 padding: const EdgeInsets.all(HollowSpacing.sm),
-                child: Center(
-                  child: AspectRatio(
-                    aspectRatio: 1,
-                    child: ShopArtPreview(
-                      listing: listing,
-                      size: 96,
-                      neutralFace: true,
-                    ),
-                  ),
+                child: LayoutBuilder(
+                  builder: (context, constraints) {
+                    final side = constraints.maxWidth < constraints.maxHeight
+                        ? constraints.maxWidth
+                        : constraints.maxHeight;
+                    return Center(
+                      child: SizedBox(
+                        width: side,
+                        height: side,
+                        child: ShopArtPreview(
+                          listing: listing,
+                          size: side,
+                          neutralFace: true,
+                        ),
+                      ),
+                    );
+                  },
                 ),
               ),
             ),
@@ -516,18 +490,27 @@ class _ShopCard extends ConsumerWidget {
                           ),
                         ),
                       ),
-                      const SizedBox(width: HollowSpacing.xs),
-                      _ShopChip(
-                        label: listing.bundle
-                            ? 'bundle'
-                            : (listing.primaryKind.isEmpty
-                                ? 'art'
-                                : listing.primaryKind),
+                      const SizedBox(width: HollowSpacing.sm),
+                      // The badges are one group at the trailing edge. Left as
+                      // siblings of the price, spaceBetween spreads all three
+                      // evenly and strands the kind in the middle of the row.
+                      Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          HollowBadge(
+                            listing.bundle
+                                ? 'bundle'
+                                : (listing.primaryKind.isEmpty
+                                    ? 'art'
+                                    : listing.primaryKind),
+                          ),
+                          if (isOwned) ...[
+                            const SizedBox(width: HollowSpacing.xs),
+                            const HollowBadge('Owned',
+                                kind: HollowBadgeKind.success),
+                          ],
+                        ],
                       ),
-                      if (isOwned) ...[
-                        const SizedBox(width: HollowSpacing.xs),
-                        _ShopChip(label: 'Owned', color: hollow.success),
-                      ],
                     ],
                   ),
                 ],
@@ -535,31 +518,6 @@ class _ShopCard extends ConsumerWidget {
             ),
           ],
         ),
-      ),
-    );
-  }
-}
-
-class _ShopChip extends StatelessWidget {
-  final String label;
-  final Color? color;
-
-  const _ShopChip({required this.label, this.color});
-
-  @override
-  Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-    final tint = color ?? hollow.textSecondary;
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-      decoration: BoxDecoration(
-        color: hollow.elevated,
-        borderRadius: BorderRadius.circular(hollow.radiusSm),
-        border: Border.all(color: tint.withValues(alpha: 0.35)),
-      ),
-      child: Text(
-        label,
-        style: HollowTypography.caption.copyWith(color: tint, fontSize: 10),
       ),
     );
   }

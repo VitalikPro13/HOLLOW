@@ -10,6 +10,7 @@ import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
+import 'package:hollow/src/ui/components/hollow_chip.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/saved_messages_avatar.dart';
@@ -34,27 +35,30 @@ class ArchiveConversationList extends ConsumerWidget {
           child: Row(
             children: [
               Expanded(
-                child: _TabPill(
+                child: HollowChip(
                   label: 'DMs',
-                  isSelected: innerTab == MyDataInnerTab.dms,
+                  expand: true,
+                  selected: innerTab == MyDataInnerTab.dms,
                   onTap: () => ref.read(myDataInnerTabProvider.notifier).state =
                       MyDataInnerTab.dms,
                 ),
               ),
-              const SizedBox(width: HollowSpacing.xs),
+              const SizedBox(width: HollowSpacing.sm),
               Expanded(
-                child: _TabPill(
+                child: HollowChip(
                   label: 'Channels',
-                  isSelected: innerTab == MyDataInnerTab.channels,
+                  expand: true,
+                  selected: innerTab == MyDataInnerTab.channels,
                   onTap: () => ref.read(myDataInnerTabProvider.notifier).state =
                       MyDataInnerTab.channels,
                 ),
               ),
-              const SizedBox(width: HollowSpacing.xs),
+              const SizedBox(width: HollowSpacing.sm),
               Expanded(
-                child: _TabPill(
+                child: HollowChip(
                   label: 'Vault Files',
-                  isSelected: innerTab == MyDataInnerTab.vaultFiles,
+                  expand: true,
+                  selected: innerTab == MyDataInnerTab.vaultFiles,
                   onTap: () => ref.read(myDataInnerTabProvider.notifier).state =
                       MyDataInnerTab.vaultFiles,
                 ),
@@ -88,53 +92,6 @@ class ArchiveConversationList extends ConsumerWidget {
           },
         ),
       ],
-    );
-  }
-}
-
-class _TabPill extends StatelessWidget {
-  final String label;
-  final bool isSelected;
-  final VoidCallback onTap;
-
-  const _TabPill({
-    required this.label,
-    required this.isSelected,
-    required this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-
-    // Spacing lives OUTSIDE the pressable: padding on the pressable itself
-    // paints the hover fill beyond the pill's outline, and hover must never
-    // read bigger than the control.
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 6),
-      child: HollowPressable(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(hollow.radiusSm),
-      child: Container(
-        alignment: Alignment.center,
-        padding: const EdgeInsets.symmetric(vertical: 4),
-        decoration: BoxDecoration(
-          color: isSelected ? hollow.accent.withValues(alpha: 0.15) : null,
-          borderRadius: BorderRadius.circular(hollow.radiusSm),
-          border: Border.all(
-            color: isSelected ? hollow.accent.withValues(alpha: 0.3) : hollow.border,
-          ),
-        ),
-        child: Text(
-          label,
-          style: HollowTypography.caption.copyWith(
-            color: isSelected ? hollow.accent : hollow.textSecondary,
-            fontWeight: isSelected ? FontWeight.w600 : FontWeight.normal,
-            fontSize: 12,
-          ),
-        ),
-      ),
-      ),
     );
   }
 }

@@ -1,6 +1,64 @@
 # Hollow design language and the grand redesign
 
-**Status:** PLANNED. Direction agreed 2026-09-14 (Vitalik + Fable session), research done the same day. Nothing built. Starts after `reports/planned/voice-and-media/MEDIA_VIEWER_ALBUMS_SUBTITLES_PLAN.md`.
+**Status:** IN PROGRESS, session 1 of N done 2026-09-18. Direction agreed 2026-09-14, research the same day.
+
+**Read this section first in a new session.** It is the handoff: what exists, what it changed, and the next thing to pick up. Everything below section 0 is the original plan, kept for its research digest and its screen-by-screen program; where it and this section disagree, this section is right.
+
+---
+
+## STATE OF PLAY (2026-09-18)
+
+### What shipped
+
+| Artifact | What it is |
+|---|---|
+| `reports/reference/HOLLOW_DESIGN_LANGUAGE.md` | **The live rule set.** Supersedes section 3 below. Principles, tokens, the two label components, the button-variant rule, states, the forbidden list, and 11 open decisions. |
+| `.claude/skills/hollow-ui/` | The skill every agent loads before widget work. Repo-tracked (`.gitignore` now admits `.claude/skills/`), so it reaches the VM, the mini and any other machine. CLAUDE.md gates on it. |
+| `test/design_language_guard_test.dart` | The ratchet: 13 rules, a baseline count each. Fails when a count goes UP **and** when it goes DOWN without the baseline being lowered in the same commit. `HOLLOW_DESIGN_BASELINE=print` prints current counts. |
+| 7 primitives in `lib/src/ui/components/` | `HollowBadge`, `HollowChip`, `HollowSectionHeader`, `HollowEmptyState`, `HollowDivider` (+`HollowVerticalDivider`), `HollowListRow`, `HollowSkeleton`. 27 widget tests in `test/widget/design_primitives_test.dart`. |
+| `integration_test/probe/design_gallery.dart` | **The design sheet.** `scripts/ui_probe.ps1 -Widget design-gallery` renders every primitive in every state, dark beside light, with no data dir, identity or relay. This replaced phase 0's toggle route. |
+| `scripts/probe_scenarios/fleet/design_sweep_mobile.json` | The mobile half of a sweep: Archive sub-tabs, inner tabs, Settings. One peer, ~23 s on an iOS Simulator. |
+
+New tokens: `HollowTypography.micro` (10/500, absorbs 155 orphaned sites) and `monoSmall` (11/400); `HollowRadius.xs` 4 exposed as `hollow.radiusXs`.
+
+### Sweeps done
+
+- **Sweep 1, sub-tab pills.** Five classes doing one job into `HollowChip`: `_SubTabPill` (byte-identical in `shell/archive_dashboard.dart` and `share/share_dashboard.dart`), `_TabPill` (`archive/archive_conversation_list.dart`), `_SubTabPill` + `_InnerTabPill` (`mobile/tabs/mobile_archive_tab.dart`). They had 2 radii plus a 20px pill, 3 paddings, 2 type sizes, and the mobile one used a SOLID accent fill for mere selection.
+- **Sweep 2, the Shop.** `_FilterPill` into `HollowChip`; `_ShopChip` and `_KindChip` into `HollowBadge`; the header row (ghost + outline + outline + a bare `HollowPressable` at 4px gaps) to four ghost actions at 8px; and the listing card rebuilt so the art fills it (a hard `size: 96` in a ~228px cell became a `LayoutBuilder`-measured ~212px), the card keeping a background step and dropping its hairline, badges grouped at the trailing edge.
+
+Guard baselines moved: local-label-class **36 to 28**, font-size 824 to 809, edge-insets 266 to 257, radius 177 to 175.
+
+### Four bugs the work surfaced, all fixed
+
+1. **Ghost and outline buttons failed contrast.** They drew their label in raw `hollow.accent`, which is 2.33:1 on the light theme. 244 ghost uses. Now `accentText`.
+2. **`accentText` was validated against the wrong surface.** Computed against `background` (the best case), it was 4.45:1 on `elevated`, where ghost buttons actually sit. Now computed against `elevated` on every factory, and `contrast_test.dart` loops all three surfaces. See `feedback_contrast_token_worst_case_surface`.
+3. **`HollowButton` did not colour an icon passed as its `child`**, only the `icon:` slot, so every icon-only ghost button rendered in the ambient colour. Found because the Shop's refresh icon sat grey beside three teal siblings.
+4. **`HollowChip` labels could overflow.** Three equal-width chips on a narrow mobile column overflowed by 2px at 1.0x text scale and 54px at 1.5x. Labels are now `Flexible` + ellipsis. Caught by `text_scale_overflow_test`.
+
+### Verification standard used, and worth keeping
+
+Every sweep: probe screenshots **before**, change, probe screenshots **after**, stack the pair, read them, fix what looks wrong, then report. Desktop through `scripts/ui_probe.ps1`, mobile through `scripts/fleet.ps1 -Scenario design_sweep_mobile -Peers a` on the Mac mini. Three of the four bugs above were invisible in the source and only showed up in a render.
+
+**The mini needs a machine-local build fix** before it can build the simulator app at all (Xcode 27 + webcrypto's BoringSSL hook): see `feedback_webcrypto_boringssl_native_assets`. It lives in the gitignored `ios/Flutter/LocalSigning.xcconfig` and is already applied.
+
+### Where to pick up next
+
+1. **Sweep 3: the remaining 28 label classes.** Biggest clusters are settings (`_ChannelTypeChip`, `_AccessChip`, `_SlowModeChip`, `_EngineChip`, `_LegendChip`, `NotificationChoiceChip`, `DeviceBadge`, `_KeyBadge`, `_BindingBadges`) and chat (`_NsfwBadge` x2, `UnreadJumpPill`, `_VoiceControlsPill`). Same recipe: clickable is `HollowChip`, static is `HollowBadge`, before/after renders, lower the baselines in the same commit.
+2. **Sweep 4: the 111 `Divider(` sites** onto `HollowDivider`. Mechanical and low risk.
+3. **Sweep 5: the ~60 inline empty states** onto `HollowEmptyState`.
+4. **Then the open decisions** in section 9 of the rule set, which need Vitalik and a render. The two biggest: **ghost buttons being accent-coloured** (244 of them, so the accent is on nearly every button in the app) and **the action inside a list row, ghost or outline** (recurs on the owned-art panel, devices, member cards).
+5. **Then the screen work**, phases 2 onward below. The Shop card still letterboxes non-square kinds (banners `BoxFit.contain` in a square slot), which needs a layout decision, not a guess.
+
+### Decisions already taken, do not relitigate
+
+- **Consolidate and guard first, decide the look second.** Phase 0's toggle route was a workaround for a codebase that does not read tokens. Once it does, editing `lib/src/theme/` and re-shooting the design sheet gives the same grid on every screen for no new code.
+- **Type roles are pinned to the sizes the app already renders**, so adopting them is a visual no-op. Section 3.2's scale (body 14, floor 11) was not a tokenization but a global density change: the app is built at 10/11/12/13 (556 of ~800 sites) and only 23 sites use 14. The bump stays available later as one flip of the role table.
+- **Motion and radius are pinned to today's values too.** The rule set documents what the code does (`HollowDurations` 150/250/400, buttons at `radiusMd` 8) and lists the retunes as open decisions, rather than quietly changing app-wide behaviour.
+- The measured counts in section 1 hold, except `Divider(` is 111 (not 50) and the `copyWith(fontSize:)` split was wrong: almost every site is a raw `TextStyle` constructor, not a token contradicted in place. The guard's baselines are the authority.
+- This plan no longer waits on the media viewer plan: A+B+C shipped and the rest does not touch these files.
+
+---
+
 **Owner:** Vitalik (taste, final say on every visual decision, judged by eye from renders).
 **Companion memory:** `project_hollow_design_language_direction` (the locked direction), `reference_website_design_system` (the website's system this must cohere with), `feedback_hover_state_patterns`, `feedback_ui_logic_checklist`, `reference_ux_named_laws`, `feedback_web_design_iteration_method` (renders decide, not prose), `feedback_verify_ui_by_driving`, `feedback_mobile_parity_always`, `project_accessibility_plan`.
 **Plan checklist:** HOLLOW_PLAN.md (add the bullets when phase 0 starts).
@@ -212,7 +270,16 @@ Existing guards that stay: purpose labels, `HollowFocusRing`, `showHollowMenu`, 
 
 ## 5. The program
 
-### Phase 0: decide by eye
+### Phase 0: decide by eye  (SUPERSEDED, see the status note)
+
+The hidden-route version below is not what was built. The design sheet is
+`integration_test/probe/design_gallery.dart`, pumped in place of `HollowApp` by
+`ui_probe.ps1 -Widget design-gallery`: no toggles, no route, no data directory.
+Candidates are compared by editing `lib/src/theme/` and re-shooting, which
+costs a rebuild and covers every screen in the app rather than three. The
+original text is kept below for the list of choices it enumerates.
+
+### Phase 0, as originally planned
 
 A hidden route `hollow://design-sheet` (debug and profile builds only) that renders the same three real screens (home, DM chat, settings) under toggles: typeface (three sans, two mono), surface ladder (three candidate ladders), radius factor, message display cozy or compact, ambient background on or off and at three intensities. Driven by `ui_probe.ps1` into a screenshot grid Vitalik flips through. The web method (`feedback_web_design_iteration_method`) adapted to Flutter: toggles default off, the recommended combination is one preset, adopted toggles become the token and their switch is removed. Verdicts recorded in the memory and in this document the same day.
 

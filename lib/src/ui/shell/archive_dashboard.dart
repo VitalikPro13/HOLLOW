@@ -6,7 +6,7 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/archive/imported_archives_view.dart';
 import 'package:hollow/src/ui/archive/my_data_view.dart';
-import 'package:hollow/src/ui/components/hollow_pressable.dart';
+import 'package:hollow/src/ui/components/hollow_chip.dart';
 
 /// Archive dashboard, with the My Data and Imported Archives sub-tabs.
 class ArchiveDashboard extends ConsumerWidget {
@@ -33,16 +33,16 @@ class ArchiveDashboard extends ConsumerWidget {
               children: [
                 Text('Archive', style: HollowTypography.heading.copyWith(color: hollow.textPrimary)),
                 const Spacer(),
-                _SubTabPill(
+                HollowChip(
                   label: 'My Data',
-                  isSelected: subTab == ArchiveSubTab.myData,
+                  selected: subTab == ArchiveSubTab.myData,
                   onTap: () => ref.read(archiveSubTabProvider.notifier).state =
                       ArchiveSubTab.myData,
                 ),
                 const SizedBox(width: HollowSpacing.sm),
-                _SubTabPill(
+                HollowChip(
                   label: 'Imported Archives',
-                  isSelected: subTab == ArchiveSubTab.importedArchives,
+                  selected: subTab == ArchiveSubTab.importedArchives,
                   onTap: () => ref.read(archiveSubTabProvider.notifier).state =
                       ArchiveSubTab.importedArchives,
                 ),
@@ -63,48 +63,3 @@ class ArchiveDashboard extends ConsumerWidget {
 
 }
 
-/// Pill-shaped sub-tab button.
-class _SubTabPill extends StatelessWidget {
-  final String label;
-  final bool isSelected;
-  final VoidCallback onTap;
-
-  const _SubTabPill({
-    required this.label,
-    required this.isSelected,
-    required this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-
-    return HollowPressable(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(hollow.radiusMd),
-      padding: EdgeInsets.zero,
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
-        decoration: BoxDecoration(
-          color: isSelected
-              ? hollow.accent.withValues(alpha: 0.15)
-              : Colors.transparent,
-          borderRadius: BorderRadius.circular(hollow.radiusMd),
-          border: Border.all(
-            color: isSelected
-                ? hollow.accent.withValues(alpha: 0.3)
-                : hollow.border,
-          ),
-        ),
-        child: Text(
-          label,
-          style: HollowTypography.body.copyWith(
-            color: isSelected ? hollow.accent : hollow.textSecondary,
-            fontWeight: isSelected ? FontWeight.w600 : FontWeight.normal,
-            fontSize: 13,
-          ),
-        ),
-      ),
-    );
-  }
-}
