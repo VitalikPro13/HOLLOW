@@ -394,7 +394,7 @@ class _GuestServerSection extends ConsumerWidget {
                             color: avatarColor,
                             alignment: Alignment.center,
                             child: Text(
-                              name[0].toUpperCase(),
+                              name[0].toUpperCase(), // design-ignore: avatar initial
                               style: const TextStyle(
                                 color: Colors.white,
                                 fontSize: 10,

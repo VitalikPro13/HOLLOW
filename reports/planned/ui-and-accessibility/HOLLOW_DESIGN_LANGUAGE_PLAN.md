@@ -1,6 +1,6 @@
 # Hollow design language and the grand redesign
 
-**Status:** IN PROGRESS, sessions 1 to 3 done 2026-09-18 (decisions picked and applied). Direction agreed 2026-09-14, research the same day.
+**Status:** IN PROGRESS, sessions 1 to 4 done 2026-09-18 (decisions applied, sweep 3c done). Direction agreed 2026-09-14, research the same day.
 
 **Read this section first in a new session.** It is the handoff: what exists, what it changed, and the next thing to pick up. Everything below section 0 is the original plan, kept for its research digest and its screen-by-screen program; where it and this section disagree, this section is right.
 
@@ -44,7 +44,19 @@ New tokens: `HollowTypography.micro` (10/500, absorbs 155 orphaned sites) and `m
   - Scenario `scripts/probe_scenarios/design_sweep3b_lookalikes.json`. A picker is an overlay host that Escape does not close; the scenario closes each by tapping its own button.
   - **Open for Vitalik:** chip density inside the 360px pickers. At the one chip size, a user with several GIF lists sees two or three before the scroll arrows, where the old 11px pills fit four. A denser chip variant would break "one size"; the alternative is accepting the scroll.
 
-Guard baselines moved: local-label-class **36 to 28 to 0**, font-size 824 to 809 to 791 to 785, edge-insets 266 to 257 to 248 to 236, radius 177 to 175 to 168, letter-spacing 66 to 64 to 63, sized-box-gap 202 to 192 to 182.
+- **Sweep 3c, section headers and eyebrow caps (session 4).** Every tracked-caps label and private header class in the app is gone; `upper-case-label` and `letter-spacing` are both **0** and a new rule `local-section-header` (a `*Section(Label|Header|Title)` class outside components) starts at 0.
+  - `SettingsCard` titles render through `HollowSectionHeader` (subheading, Title Case as written). `SettingsSectionLabel` became `SettingsFieldLabel`: the label above ONE input, `label` in `textSecondary`, sentence case. A group of settings takes a `HollowSectionHeader` (Security's six sections, Profile's Connections, owned art, server Overview).
+  - `TriStateSegment` is a row of equal-width `HollowChip`s, so Dock / Classic and the other eight segmented controls select with the chip state; mobile's image and audio quality pickers too (mobile has no Dock / Classic).
+  - Deleted: home `_SectionLabel`, `game_card_dialog` `_SectionLabel`, mobile chats `_SectionLabel` and settings `_SectionLabel` (centred between two dividers), mobile friends `_SectionHeader`, `_RoleDivider`, `_SectionDivider` (mobile server settings), `_SectionCaption`, `server_template._sectionHeader`, `about_section._aboutSectionLabel`, `storage_dashboard_dialog._buildSection`'s accent icon. Icons beside headings dropped on Home (Recent Conversations, Network, Your Stats), the storage dashboard, vault categories, mobile member sheet, storage route and pinned sheet.
+  - Category names (channel sidebar, channels tab, mobile chats, archive groups) render as the user typed them.
+  - One-offs: role capitalisation (14 copies) is `roleDisplayName()` in `core/role_hierarchy.dart`; server initials (3 copies) are `initialsFromName()` in `core/name_initials.dart`; the remaining `toUpperCase()` calls are data with a `design-ignore` reason.
+  - Bug found by the probe: Settings > Security asserted on open in debug builds (`ref.invalidate` inside `initState`); the invalidate now runs past the first await.
+  - Scenarios `design_sweep3c_headers.json` (desktop, 17 screens) and `fleet/design_sweep3c_mobile.json` (mini, 8 shots).
+  - **Follow-ups the same session (Vitalik's review):** the shimmer is gone. `member_panel._SectionDivider` draws label and count with no line (the collapsible chevron stays), and `ShimmerDividerLine` is deleted: its uses (home "Online", About's "Follow ~ Support", mobile Settings) are a plain `HollowDivider`. `HollowSectionHeader` gained `subtitle` (one quiet line, the action centres on both lines), which closed the gap under "Art You Own" and carries the Profiles description. Profile rows lost their hairline: the active row's 1 px accent border fell on a fractional pixel under UiScale and drew its right edge at half strength; the Active badge and accent icon mark it now.
+  - **Decided:** section titles stay Title Case, as the rules allow (Vitalik, "follow the rules").
+  - **Left for later:** home's "Online" stat row keeps its icon; `HollowSectionHeader` has no danger tone, so mobile server settings' Danger Zone header is neutral; `selection_shimmer.dart` (selected channel and peer rows) is the next gradient to go, in the gradient pass.
+
+Guard baselines moved: local-label-class **36 to 28 to 0**, upper-case-label 42 to 0, letter-spacing 57 to 0, raw-divider 51 to 41, font-size 744 to 703, gradient 23 to 21, font-size 824 to 809 to 791 to 785, edge-insets 266 to 257 to 248 to 236, radius 177 to 175 to 168, letter-spacing 66 to 64 to 63, sized-box-gap 202 to 192 to 182.
 
 ### Four bugs the work surfaced, all fixed
 
@@ -61,10 +73,10 @@ Every sweep: probe screenshots **before**, change, probe screenshots **after**, 
 
 ### Where to pick up next
 
-**The decisions are done** (session 3, all 14 applied, pushed). **Next session starts at sweep 3c.** Vitalik loved the result ("freaking awesome ... actually looks so much better").
+**Sweeps 3 to 3c are done** (session 4). **Next session starts at sweep 4.**
 
-1. **Sweep 3c: section headers and eyebrow caps. START HERE.** `HollowSectionHeader` has 0 uses; 8 private `_SectionLabel`-style classes (`SettingsSectionLabel` in settings_shared among them) plus inline headers, and the tracked-caps eyebrow labels (guard `upper-case-label` baseline 42: THEME / BACKGROUND / YOUR DEVICES / MAINTENANCE / ART YOU OWN / RELAY SERVER / NEWS / YOUR STATS). Mostly Settings, desktop and mobile. While in Settings: the Appearance Dock / Classic segmented control selects with a SOLID accent fill (selection is a chip state, never a fill). Verify with `design_surfaces.json` before/after plus the mobile fleet scenario; the Settings pages are the bulk of it.
-2. **Sweep 4: the `Divider(` sites** onto `HollowDivider` (guard `raw-divider` baseline 51). Mechanical and low risk.
+1. ~~Sweep 3c~~ done, see above.
+2. **Sweep 4: the `Divider(` sites** onto `HollowDivider` (guard `raw-divider` baseline 41). Mechanical and low risk. START HERE.
 3. **Sweep 5: the ~60 inline empty states** onto `HollowEmptyState`.
 4. **Sweeps 6 to 9:** `showHollowSheet()` + one Hollow spinner (new primitives, then their sweeps), remaining Material `Switch` / `Slider`, the dialog pass (28 files), the filled-button audit.
 5. **Then the screen work**, phases 2 onward below, with the Shop's per-kind card shapes (verdict 9) and the compact message mode (verdict 8) inside it.

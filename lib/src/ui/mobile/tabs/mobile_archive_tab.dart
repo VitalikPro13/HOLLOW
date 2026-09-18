@@ -16,6 +16,8 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
+import 'package:hollow/src/ui/components/hollow_badge.dart';
+import 'package:hollow/src/ui/components/hollow_section_header.dart';
 import 'package:hollow/src/ui/components/hollow_chip.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
@@ -572,29 +574,12 @@ class _HiddenHeader extends StatelessWidget {
           const SizedBox(width: HollowSpacing.xs),
           Text(
             'Hidden',
-            style: HollowTypography.caption.copyWith(
+            style: HollowTypography.label.copyWith(
               color: hollow.textSecondary,
-              fontWeight: FontWeight.w700,
-              fontSize: 11,
-              letterSpacing: 0.5,
             ),
           ),
-          const SizedBox(width: 6),
-          Container(
-            padding:
-                const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-            decoration: BoxDecoration(
-              color: hollow.elevated,
-              borderRadius: BorderRadius.circular(10),
-            ),
-            child: Text(
-              '$count',
-              style: HollowTypography.caption.copyWith(
-                color: hollow.textSecondary,
-                fontSize: 10,
-              ),
-            ),
-          ),
+          const SizedBox(width: HollowSpacing.sm),
+          HollowBadge('$count'),
         ],
       ),
     );
@@ -675,24 +660,11 @@ class _MobileChannelList extends ConsumerWidget {
                     left: HollowSpacing.sm,
                     right: HollowSpacing.sm,
                     top: index == 0 ? 0 : HollowSpacing.md,
-                    bottom: HollowSpacing.xs,
                   ),
-                  child: Row(
-                    children: [
-                      Expanded(
-                        child: Text(
-                          item.headerName!.toUpperCase(),
-                          style: HollowTypography.caption.copyWith(
-                            color: hollow.textSecondary,
-                            fontWeight: FontWeight.w700,
-                            fontSize: 10,
-                            letterSpacing: 0.5,
-                          ),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ),
-                      HollowPressable(
+                  child: HollowSectionHeader(
+                    item.headerName!,
+                    dense: true,
+                    action: HollowPressable(
                         onTap: () {
                           final g = item.group!;
                           final totalMsgCount = g.channels.fold<int>(
@@ -716,11 +688,10 @@ class _MobileChannelList extends ConsumerWidget {
                         semanticLabel: 'Export conversation',
                         borderRadius:
                             BorderRadius.circular(hollow.radiusMd),
-                        padding: const EdgeInsets.all(4),
+                        padding: const EdgeInsets.all(HollowSpacing.xs),
                         child: Icon(LucideIcons.fileOutput,
                             size: 14, color: hollow.accent),
                       ),
-                    ],
                   ),
                 ),
               );

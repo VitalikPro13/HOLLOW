@@ -25,6 +25,7 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
+import 'package:hollow/src/ui/components/hollow_section_header.dart';
 import 'package:hollow/src/ui/components/saved_messages_avatar.dart';
 import 'package:hollow/src/ui/components/status_dot.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
@@ -929,7 +930,7 @@ class _ServerRow extends ConsumerWidget {
                   borderRadius: BorderRadius.zero,
                   fallback: Center(
                     child: Text(
-                      name.isNotEmpty ? name[0].toUpperCase() : '?',
+                      name.isNotEmpty ? name[0].toUpperCase() : '?', // design-ignore: avatar initial
                       style: HollowTypography.heading.copyWith(
                         color: hollow.accent,
                       ),
@@ -1320,12 +1321,10 @@ class _CategoryHeaderRow extends StatelessWidget {
           ),
           const SizedBox(width: HollowSpacing.xs),
           Text(
-            name.toUpperCase(),
+            name,
             style: HollowTypography.caption.copyWith(
               color: hollow.textSecondary,
               fontWeight: FontWeight.w600,
-              letterSpacing: 0.8,
-              fontSize: 11,
             ),
           ),
         ],
@@ -1691,11 +1690,7 @@ class _NewConversationDialogState
                   ),
                   const SizedBox(height: HollowSpacing.xl),
 
-                  const _SectionLabel(
-                    icon: LucideIcons.logIn,
-                    label: 'Join a Server',
-                  ),
-                  const SizedBox(height: HollowSpacing.sm),
+                  const HollowSectionHeader('Join a Server'),
                   _InputRow(
                     controller: _joinController,
                     hint: 'Invite link or server ID',
@@ -1706,11 +1701,7 @@ class _NewConversationDialogState
 
                   const SizedBox(height: HollowSpacing.xl),
 
-                  const _SectionLabel(
-                    icon: LucideIcons.plusCircle,
-                    label: 'Create a Server',
-                  ),
-                  const SizedBox(height: HollowSpacing.sm),
+                  const HollowSectionHeader('Create a Server'),
                   _InputRow(
                     controller: _createController,
                     hint: 'Server name',
@@ -1725,28 +1716,6 @@ class _NewConversationDialogState
           ),
         ),
       ),
-    );
-  }
-}
-
-class _SectionLabel extends StatelessWidget {
-  final IconData icon;
-  final String label;
-
-  const _SectionLabel({required this.icon, required this.label});
-
-  @override
-  Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-    return Row(
-      children: [
-        Icon(icon, size: 16, color: hollow.accent),
-        const SizedBox(width: HollowSpacing.sm),
-        Text(
-          label,
-          style: HollowTypography.label.copyWith(color: hollow.textPrimary),
-        ),
-      ],
     );
   }
 }

@@ -12,6 +12,7 @@ import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_card.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
+import 'package:hollow/src/ui/components/hollow_section_header.dart';
 import 'package:hollow/src/ui/components/status_dot.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
@@ -196,7 +197,6 @@ class _StorageDashboardContentState
                 _buildSection(
                   hollow,
                   'Server Storage',
-                  LucideIcons.server,
                   _buildServerOverview(hollow, memberCount),
                 )
               else
@@ -208,7 +208,6 @@ class _StorageDashboardContentState
                         child: _buildSection(
                           hollow,
                           'Server Storage',
-                          LucideIcons.server,
                           _buildServerOverview(hollow, memberCount),
                         ),
                       ),
@@ -217,7 +216,6 @@ class _StorageDashboardContentState
                         child: _buildSection(
                           hollow,
                           'Your Storage',
-                          LucideIcons.user,
                           _buildYourStorage(hollow),
                         ),
                       ),
@@ -234,7 +232,6 @@ class _StorageDashboardContentState
                       child: _buildSection(
                         hollow,
                         'Retention Policy',
-                        LucideIcons.clock,
                         _buildRetentionPolicy(hollow),
                       ),
                     ),
@@ -243,7 +240,6 @@ class _StorageDashboardContentState
                       child: _buildSection(
                         hollow,
                         'Vault Health',
-                        LucideIcons.shield,
                         _buildVaultHealth(hollow, vaultStatus, memberCount),
                       ),
                     ),
@@ -256,7 +252,6 @@ class _StorageDashboardContentState
                 _buildSection(
                   hollow,
                   'Member Pledges',
-                  LucideIcons.users,
                   _buildMemberPledges(hollow, memberCount),
                 ),
               ],
@@ -270,28 +265,14 @@ class _StorageDashboardContentState
   Widget _buildSection(
     HollowTheme hollow,
     String title,
-    IconData icon,
     Widget content,
   ) {
     return HollowCard(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(
-            children: [
-              Icon(icon, size: 14, color: hollow.accent),
-              const SizedBox(width: HollowSpacing.sm),
-              Text(
-                title,
-                style: HollowTypography.caption.copyWith(
-                  color: hollow.accent,
-                  fontWeight: FontWeight.w600,
-                  letterSpacing: 0.5,
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: HollowSpacing.md),
+          HollowSectionHeader(title, dense: true),
+          const SizedBox(height: HollowSpacing.xs),
           content,
         ],
       ),

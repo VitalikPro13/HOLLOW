@@ -125,7 +125,7 @@ Scrollable list of channel conversations grouped by server.
 
 **Flattening:** Builds a flat list of `_ChannelListItem` objects, alternating between header items (server name) and channel items. Headers appear only if the group has matching channels after search filtering.
 
-**Header row:** Server name in uppercase caption style + export button (fileOutput icon). The export button calls `showExportArchiveDialog()` with `isServer: true`, passing all channels in the group and a total message count.
+**Header row:** `HollowSectionHeader(serverName, dense: true)` (name as written) with the export button (fileOutput icon) as its `action`. The export button calls `showExportArchiveDialog()` with `isServer: true`, passing all channels in the group and a total message count.
 
 **Channel row:** Hash `#` prefix, channel name text, message count badge. Selection sets `archiveSelectedChannelProvider` to `serverId:channelId` and clears `archiveSelectedDmProvider`.
 
@@ -384,15 +384,10 @@ Expandable section for one server showing its vault files grouped by file type.
 2. **Grouped file list** via `_buildGroupedFileList()`.
 
 **File grouping (`_buildGroupedFileList`):**
-Files are categorized by extension into `_FileCategory` enum values (videos, audio, images, documents, other). Each group sorted by `createdAt` descending (newest first). Rendered in fixed enum order with category headers showing icon, label, and count.
+Files are categorized by extension into `_FileCategory` enum values (videos, audio, images, documents, other). Each group sorted by `createdAt` descending (newest first). Rendered in fixed enum order with category headers `HollowSectionHeader(label, dense: true, count:)` (no icon).
 
 ### _FileCategory (enum)
-Five categories with display labels and icons:
-- `videos` — "Videos", `fileVideo`
-- `audio` — "Audio", `fileAudio`
-- `images` — "Images", `image`
-- `documents` — "Documents", `fileText`
-- `other` — "Other", `file`
+Five categories, each carrying only its display label: `videos` "Videos", `audio` "Audio", `images` "Images", `documents` "Documents", `other` "Other".
 
 Extension mapping in `_categorize()`:
 - Videos: mp4, webm, mov, mkv, avi, m4v
@@ -463,12 +458,12 @@ Dashboard for an active recovery pool. Shows progress ring, statistics, member l
    - "Missing" (grey) — noShards count.
 
 5. **Members section:**
-   - "MEMBERS (N)" header in uppercase caption.
+   - `HollowSectionHeader('Members', dense: true, count: N)`.
    - Empty: "Waiting for members to join..." text.
    - Each member: Container with user icon, truncated peer ID (6...6 format), green status dot.
 
 6. **Recovered files section (if non-empty):**
-   - "RECOVERED FILES (N)" header.
+   - `HollowSectionHeader('Recovered files', dense: true, count: N)`.
    - Each file: Green-tinted container with checkCircle icon, truncated content ID (8...8 format).
 
 ### _stopPool() / _leavePool()

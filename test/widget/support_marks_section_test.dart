@@ -122,7 +122,7 @@ void main() {
       (tester) async {
     final ffi = await _pump(tester, creds: [_cred]);
 
-    expect(find.text('SUPPORT MARKS'), findsOneWidget);
+    expect(find.text('Support marks'), findsOneWidget);
     expect(find.text('Hide my support marks'), findsOneWidget);
     expect(
       find.text(

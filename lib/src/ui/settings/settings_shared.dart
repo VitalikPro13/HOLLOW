@@ -4,12 +4,12 @@ import 'package:hollow/src/core/providers/accent_color_provider.dart';
 import 'package:hollow/src/core/providers/display_scale_provider.dart';
 import 'package:hollow/src/core/providers/layout_prefs_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
-import 'package:hollow/src/core/shared_tickers.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
-import 'package:hollow/src/ui/animations/hollow_curves.dart';
+import 'package:hollow/src/ui/components/hollow_chip.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
+import 'package:hollow/src/ui/components/hollow_section_header.dart';
 import 'package:hollow/src/ui/components/hollow_toggle.dart';
 import 'package:hollow/src/ui/components/rainbow_slider_track.dart';
 import 'package:hollow/src/ui/components/ui_scale.dart';
@@ -59,16 +59,8 @@ class SettingsCard extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisSize: MainAxisSize.min,
         children: [
-          Text(
-            title.toUpperCase(),
-            style: HollowTypography.caption.copyWith(
-              color: hollow.textSecondary,
-              fontWeight: FontWeight.w700,
-              letterSpacing: 0.5,
-              fontSize: 10,
-            ),
-          ),
-          const SizedBox(height: HollowSpacing.md),
+          HollowSectionHeader(title),
+          const SizedBox(height: HollowSpacing.xs),
           ...children,
         ],
       ),
@@ -76,22 +68,20 @@ class SettingsCard extends StatelessWidget {
   }
 }
 
-/// Small uppercase section/field label (e.g. "APP LOCK", "DISPLAY NAME").
-class SettingsSectionLabel extends StatelessWidget {
+/// The label above a single field ("Display name", "Content rating").
+///
+/// A group of fields gets a [HollowSectionHeader] instead: this names one
+/// input and carries no spacing of its own.
+class SettingsFieldLabel extends StatelessWidget {
   final String label;
-  const SettingsSectionLabel({super.key, required this.label});
+  const SettingsFieldLabel({super.key, required this.label});
 
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
     return Text(
       label,
-      style: HollowTypography.caption.copyWith(
-        color: hollow.textSecondary,
-        fontWeight: FontWeight.w700,
-        letterSpacing: 0.5,
-        fontSize: 10,
-      ),
+      style: HollowTypography.label.copyWith(color: hollow.textSecondary),
     );
   }
 }
@@ -152,9 +142,8 @@ class SettingsToggleRow extends StatelessWidget {
   }
 }
 
-/// Horizontal segmented control for a small set of mutually-exclusive options.
-/// Each segment is a [HollowPressable], so it is keyboard- and
-/// screen-reader-actionable.
+/// A row of equal-width chips for a small set of mutually exclusive options.
+/// Selection is the chip state, never a solid accent fill.
 class TriStateSegment<T> extends StatelessWidget {
   final T value;
   final List<(T, String)> options;
@@ -169,45 +158,20 @@ class TriStateSegment<T> extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-    return Container(
-      decoration: BoxDecoration(
-        color: hollow.surface,
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: hollow.border),
-      ),
-      padding: const EdgeInsets.all(2),
-      child: Row(
-        children: [
-          for (final (opt, label) in options)
-            Expanded(
-              child: HollowPressable(
-                onTap: () => onChanged(opt),
-                borderRadius: BorderRadius.circular(hollow.radiusXs),
-                child: AnimatedContainer(
-                  duration: HollowDurations.fast,
-                  alignment: Alignment.center,
-                  padding:
-                      const EdgeInsets.symmetric(vertical: HollowSpacing.sm),
-                  decoration: BoxDecoration(
-                    color: opt == value ? hollow.accent : Colors.transparent,
-                    borderRadius: BorderRadius.circular(hollow.radiusXs),
-                  ),
-                  child: Text(
-                    label,
-                    style: HollowTypography.body.copyWith(
-                      color: opt == value
-                          ? hollow.textOnAccent
-                          : hollow.textSecondary,
-                      fontWeight:
-                          opt == value ? FontWeight.w600 : FontWeight.w400,
-                    ),
-                  ),
-                ),
-              ),
+    return Row(
+      children: [
+        for (final (i, (opt, label)) in options.indexed) ...[
+          if (i > 0) const SizedBox(width: HollowSpacing.sm),
+          Expanded(
+            child: HollowChip(
+              label: label,
+              selected: opt == value,
+              expand: true,
+              onTap: () => onChanged(opt),
             ),
+          ),
         ],
-      ),
+      ],
     );
   }
 }
@@ -607,37 +571,6 @@ class _ScaleSliderBlock extends StatelessWidget {
           ),
         ),
       ],
-    );
-  }
-}
-
-/// 1px divider with a looping accent shimmer sweep, on [SharedTickers.shimmer]
-/// rather than an AnimationController of its own.
-class ShimmerDividerLine extends StatelessWidget {
-  final HollowTheme hollow;
-  const ShimmerDividerLine({super.key, required this.hollow});
-
-  @override
-  Widget build(BuildContext context) {
-    return ValueListenableBuilder<double>(
-      valueListenable: SharedTickers.instance.shimmer,
-      builder: (context, value, _) {
-        final pos = value * 4.0 - 1.5;
-        return Container(
-          height: 1,
-          decoration: BoxDecoration(
-            gradient: LinearGradient(
-              begin: Alignment(pos - 0.5, 0),
-              end: Alignment(pos + 0.5, 0),
-              colors: [
-                hollow.border,
-                hollow.accent.withValues(alpha: 0.6),
-                hollow.border,
-              ],
-            ),
-          ),
-        );
-      },
     );
   }
 }

@@ -75,8 +75,8 @@ class HotkeyBinding {
   String display() {
     final name = _nameOfKey(trigger) ?? '?';
     final pretty = name.length == 1
-        ? name.toUpperCase()
-        : name[0].toUpperCase() + name.substring(1);
+        ? name.toUpperCase() // design-ignore: key names (F1, ESC)
+        : name[0].toUpperCase() + name.substring(1); // design-ignore: capitalises a key name
     return [
       if (ctrl) 'Ctrl',
       if (shift) 'Shift',

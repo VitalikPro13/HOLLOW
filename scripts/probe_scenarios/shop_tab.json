@@ -136,7 +136,7 @@
   },
   {
     "op": "scroll",
-    "target": "text:ABOUT ME",
+    "target": "text:About me",
     "dy": -900
   },
   {

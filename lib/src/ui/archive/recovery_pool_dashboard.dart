@@ -9,6 +9,7 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
+import 'package:hollow/src/ui/components/hollow_section_header.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/status_dot.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -162,16 +163,11 @@ class RecoveryPoolDashboard extends ConsumerWidget {
           ),
           const SizedBox(height: HollowSpacing.lg),
 
-          Text(
-            'MEMBERS (${pool.memberPeerIds.length})',
-            style: HollowTypography.caption.copyWith(
-              color: hollow.textSecondary,
-              fontSize: 11,
-              fontWeight: FontWeight.w600,
-              letterSpacing: 0.5,
-            ),
+          HollowSectionHeader(
+            'Members',
+            dense: true,
+            count: '${pool.memberPeerIds.length}',
           ),
-          const SizedBox(height: HollowSpacing.sm),
           if (pool.memberPeerIds.isEmpty)
             Text(
               'Waiting for members to join...',
@@ -219,16 +215,11 @@ class RecoveryPoolDashboard extends ConsumerWidget {
           const SizedBox(height: HollowSpacing.lg),
 
           if (pool.recoveredFiles.isNotEmpty) ...[
-            Text(
-              'RECOVERED FILES (${pool.recoveredFiles.length})',
-              style: HollowTypography.caption.copyWith(
-                color: hollow.textSecondary,
-                fontSize: 11,
-                fontWeight: FontWeight.w600,
-                letterSpacing: 0.5,
-              ),
+            HollowSectionHeader(
+              'Recovered files',
+              dense: true,
+              count: '${pool.recoveredFiles.length}',
             ),
-            const SizedBox(height: HollowSpacing.sm),
             for (final file in pool.recoveredFiles)
               Padding(
                 padding: const EdgeInsets.only(bottom: HollowSpacing.xs),

@@ -9,6 +9,7 @@ library;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/role_hierarchy.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart'
     show mutedMembersProvider;
 import 'package:hollow/src/core/providers/server_provider.dart';
@@ -105,7 +106,7 @@ Future<void> showChangeRoleDialog(
   required String displayName,
   required String newRole,
 }) async {
-  final roleName = newRole[0].toUpperCase() + newRole.substring(1);
+  final roleName = roleDisplayName(newRole);
   final ok = await _confirm(
     context,
     title: 'Change role',

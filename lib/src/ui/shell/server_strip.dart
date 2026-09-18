@@ -1,4 +1,5 @@
 ﻿import 'package:flutter/material.dart';
+import 'package:hollow/src/core/name_initials.dart';
 import 'package:hollow/src/ui/components/overlay_anchor.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/color_utils.dart';
@@ -414,7 +415,7 @@ class _ServerStripState extends ConsumerState<ServerStrip> {
       size: 44,
       isSelected: isSelected,
       fallback: Text(
-        _initialsFromName(name.isNotEmpty ? name : serverId),
+        initialsFromName(name.isNotEmpty ? name : serverId),
         style: const TextStyle(
           color: Colors.white,
           fontSize: 18,
@@ -748,14 +749,6 @@ class _StripDragData {
   });
 }
 
-/// Extract 1–2 letter initials from a server name.
-String _initialsFromName(String name) {
-  final words = name.trim().split(RegExp(r'\s+'));
-  if (words.length >= 2) {
-    return '${words[0][0]}${words[1][0]}'.toUpperCase();
-  }
-  return name.substring(0, name.length.clamp(0, 2)).toUpperCase();
-}
 
 /// Wraps a server icon with a left-edge selection indicator and an optional
 /// unread count badge.

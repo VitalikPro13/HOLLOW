@@ -168,8 +168,10 @@ option and no local variant.
 
 ## The rest of the components
 
-`HollowSectionHeader` (title in `subheading` or `label`, optional trailing
-action, optional count in mono, **no leading icon**) · `HollowEmptyState` (one
+`HollowSectionHeader` (title in `subheading`, or `label` with `dense: true`
+for a sub-group; optional trailing action, optional count in mono, its own
+8 px bottom gap, **no leading icon**; the label above ONE settings field is
+`SettingsFieldLabel`) · `HollowEmptyState` (one
 honest line about what is true now, one optional second line, at most one
 action) · `HollowDivider` (the hairline, nothing else) · `HollowListRow`
 (leading / title / subtitle / trailing, hover on the whole row) ·

@@ -178,14 +178,7 @@ class _ImageQualitySelector extends ConsumerWidget {
       crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
       children: [
-        Text(
-          'Image quality',
-          style: HollowTypography.body.copyWith(
-            color: hollow.textPrimary,
-            fontWeight: FontWeight.w500,
-            fontSize: 13,
-          ),
-        ),
+        const SettingsFieldLabel(label: 'Image quality'),
         const SizedBox(height: HollowSpacing.xs),
         Text(
           current.description,

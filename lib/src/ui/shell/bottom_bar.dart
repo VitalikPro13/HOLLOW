@@ -1,4 +1,5 @@
 ﻿import 'package:flutter/material.dart';
+import 'package:hollow/src/core/name_initials.dart';
 import 'package:hollow/src/ui/components/edge_scroll_row.dart';
 import 'package:hollow/src/ui/components/overlay_anchor.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -572,7 +573,7 @@ class _BottomBarState extends ConsumerState<BottomBar> {
       size: 38,
       isSelected: isSelected || isRightPaneServer,
       fallback: Text(
-        _initialsFromName(name.isNotEmpty ? name : serverId),
+        initialsFromName(name.isNotEmpty ? name : serverId),
         style: const TextStyle(
           color: Colors.white,
           fontSize: 14,
@@ -821,14 +822,6 @@ class _BottomBarState extends ConsumerState<BottomBar> {
   }
 }
 
-/// Extracts one or two letter initials from a server name.
-String _initialsFromName(String name) {
-  final words = name.trim().split(RegExp(r'\s+'));
-  if (words.length >= 2) {
-    return '${words[0][0]}${words[1][0]}'.toUpperCase();
-  }
-  return name.substring(0, name.length.clamp(0, 2)).toUpperCase();
-}
 
 /// Drag data for server strip items.
 class _StripDragData {

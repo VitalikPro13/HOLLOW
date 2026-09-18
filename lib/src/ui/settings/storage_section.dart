@@ -14,6 +14,7 @@ import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
+import 'package:hollow/src/ui/components/hollow_section_header.dart';
 import 'package:hollow/src/ui/components/overlay_anchor.dart';
 import 'package:hollow/src/ui/components/hollow_tooltip.dart';
 import 'package:hollow/src/ui/components/hollow_menu.dart';
@@ -48,9 +49,8 @@ class StorageBreakdownView extends ConsumerWidget {
             _SummaryHeader(breakdown: b),
             if (contexts.isNotEmpty) ...[
               const SizedBox(height: HollowSpacing.md),
-              _SectionCaption(
-                  'By conversation (${contexts.length})'),
-              const SizedBox(height: HollowSpacing.xs),
+              HollowSectionHeader('By conversation',
+                  count: '${contexts.length}', dense: true),
               for (final c in contexts) _ContextRow(usage: c),
             ] else ...[
               const SizedBox(height: HollowSpacing.md),
@@ -62,22 +62,6 @@ class StorageBreakdownView extends ConsumerWidget {
         );
       },
     );
-  }
-}
-
-class _SectionCaption extends StatelessWidget {
-  const _SectionCaption(this.text);
-  final String text;
-  @override
-  Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-    return Text(text.toUpperCase(),
-        style: HollowTypography.caption.copyWith(
-          color: hollow.textSecondary,
-          fontSize: 10,
-          letterSpacing: 0.6,
-          fontWeight: FontWeight.w600,
-        ));
   }
 }
 

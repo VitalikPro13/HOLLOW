@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:hollow/src/core/role_hierarchy.dart';
 import 'package:hollow/src/ui/components/overlay_anchor.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
@@ -13,7 +14,6 @@ import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:hollow/src/core/providers/support_marks_provider.dart';
 import 'package:hollow/src/core/providers/sync_progress_provider.dart';
 import 'package:hollow/src/core/providers/webrtc_provider.dart';
-import 'package:hollow/src/core/shared_tickers.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
@@ -155,13 +155,11 @@ class _MemberListEntry {
     );
 }
 
-/// Section divider. The online variant sweeps a glow along the line, on the
-/// shared shimmer ticker rather than a controller per instance.
+/// A role group's header in the member list: label, then the count at the
+/// trailing edge.
 class _SectionDivider extends StatelessWidget {
   final String label;
   final int count;
-  final bool isOnline;
-  final Color? glowColor;
 
   /// Non-null makes the section foldable (issue #54): a busy server's member
   /// list is mostly Offline, and nobody scrolls past it to reach who is here.
@@ -172,8 +170,6 @@ class _SectionDivider extends StatelessWidget {
     super.key,
     required this.label,
     required this.count,
-    required this.isOnline,
-    this.glowColor,
     this.onToggle,
     this.collapsed = false,
   });
@@ -182,12 +178,8 @@ class _SectionDivider extends StatelessWidget {
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
 
-    final textStyle = HollowTypography.caption.copyWith(
-      color: hollow.textSecondary,
-      fontWeight: FontWeight.w600,
-      letterSpacing: 0.8,
-      fontSize: 11,
-    );
+    final textStyle =
+        HollowTypography.label.copyWith(color: hollow.textSecondary);
 
     final row = Padding(
       padding: const EdgeInsets.symmetric(
@@ -206,57 +198,14 @@ class _SectionDivider extends StatelessWidget {
           ],
           Text(label, style: textStyle),
           const SizedBox(width: HollowSpacing.sm),
-          Expanded(
-            child: isOnline
-                // Own layer: this rebuilds a gradient Container at vsync, once
-                // per online member, and unscoped each repaint dirties the whole
-                // member panel.
-                ? RepaintBoundary(
-                    child: ValueListenableBuilder<double>(
-                    valueListenable: SharedTickers.instance.shimmer,
-                    builder: (context, value, _) {
-                      final pingPong = value < 0.5
-                          ? value * 2.0
-                          : 2.0 - value * 2.0;
-                      final curved =
-                          Curves.easeInOut.transform(pingPong);
-                      // Overshoots both ends so the glow fully exits the line.
-                      final t = -0.2 + curved * 1.4;
-                      const glowWidth = 0.15;
-                      final color = glowColor ?? hollow.accent;
-                      return Container(
-                        height: 1,
-                        decoration: BoxDecoration(
-                          gradient: LinearGradient(
-                            colors: [
-                              hollow.border,
-                              color.withValues(alpha: 0.5),
-                              hollow.border,
-                            ],
-                            stops: [
-                              (t - glowWidth).clamp(0.0, 1.0),
-                              t.clamp(0.0, 1.0),
-                              (t + glowWidth).clamp(0.0, 1.0),
-                            ],
-                          ),
-                          boxShadow: [
-                            BoxShadow(
-                              color: color.withValues(alpha: 0.2),
-                              blurRadius: 4,
-                            ),
-                          ],
-                        ),
-                      );
-                    },
-                    ),
-                  )
-                : Container(
-                    height: 1,
-                    color: hollow.border,
-                  ),
+          const Spacer(),
+          Text(
+            '$count',
+            style: HollowTypography.monoSmall.copyWith(
+              color: hollow.textTertiary,
+              fontFeatures: const [FontFeature.tabularFigures()],
+            ),
           ),
-          const SizedBox(width: HollowSpacing.sm),
-          Text('$count', style: textStyle),
         ],
       ),
     );
@@ -315,17 +264,6 @@ class _SpinningRefreshIconState extends State<_SpinningRefreshIcon>
       child: Icon(LucideIcons.refreshCw, size: widget.size, color: widget.color),
     );
   }
-}
-
-/// Glow colour for role-grouped dividers.
-Color _roleGlowColor(String role, HollowTheme hollow) {
-  return switch (role) {
-    'owner' => hollow.warning,
-    'admin' => const Color(0xFFA78BFA),
-    'moderator' =>
-      Color.lerp(hollow.warning, hollow.error, 0.5) ?? hollow.warning,
-    _ => hollow.accent,
-  };
 }
 
 String _roleDividerLabel(String role) {
@@ -457,12 +395,8 @@ class _ServerMemberContent extends ConsumerWidget {
     final (entries, totalCount, isLoading, error) =
         ref.watch(_serverMemberEntriesProvider(serverId));
 
-    final captionStyle = HollowTypography.caption.copyWith(
-      color: hollow.textSecondary,
-      fontWeight: FontWeight.w600,
-      letterSpacing: 0.8,
-      fontSize: 11,
-    );
+    final captionStyle =
+        HollowTypography.label.copyWith(color: hollow.textSecondary);
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -496,7 +430,6 @@ class _ServerMemberContent extends ConsumerWidget {
                     : _SectionDivider(
                         label: 'Members',
                         count: totalCount,
-                        isOnline: false,
                       ),
           ),
         ),
@@ -543,15 +476,11 @@ class _ServerMemberContent extends ConsumerWidget {
                                 key: ValueKey('div-${entry.label}'),
                                 label: entry.label!,
                                 count: entry.count!,
-                                isOnline: entry.isOnline,
                                 collapsed: entry.collapsed,
                                 onToggle: () => ref
                                     .read(collapsedMemberGroupsProvider
                                         .notifier)
                                     .toggle(serverId, entry.label!),
-                                glowColor: entry.dividerRole != null
-                                    ? _roleGlowColor(entry.dividerRole!, hollow)
-                                    : null,
                               );
                             }
                             return _ServerMemberTile(
@@ -616,7 +545,6 @@ class _PeerMemberContent extends ConsumerWidget {
                 return _SectionDivider(
                   label: 'Online',
                   count: peers.length,
-                  isOnline: true,
                 );
               }
               final peerIndex = index - 1;
@@ -766,7 +694,7 @@ class _ServerMemberTile extends ConsumerWidget {
                     ),
                     if (role != 'member')
                       Text(
-                        role[0].toUpperCase() + role.substring(1),
+                        roleDisplayName(role),
                         style: HollowTypography.caption.copyWith(
                           color: _roleLabelColor(role, hollow),
                           fontSize: 10,

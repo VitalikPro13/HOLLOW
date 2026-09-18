@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/role_hierarchy.dart';
 import 'package:hollow/src/core/providers/profile_anim_provider.dart';
 import 'package:hollow/src/core/providers/banner_provider.dart';
 import 'package:hollow/src/core/providers/blocked_users_provider.dart';
@@ -236,7 +237,7 @@ class MobileProfileSheet extends ConsumerWidget {
                     borderRadius: BorderRadius.circular(hollow.radiusXs),
                   ),
                   child: Text(
-                    role![0].toUpperCase() + role!.substring(1),
+                    roleDisplayName(role!),
                     style: HollowTypography.bodySmall.copyWith(
                       color: _roleColor(role!, hollow),
                       fontWeight: FontWeight.w600,

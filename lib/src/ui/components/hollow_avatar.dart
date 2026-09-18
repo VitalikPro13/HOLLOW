@@ -54,7 +54,7 @@ class HollowAvatar extends ConsumerWidget {
 
   String _initialsFromId(String id) {
     if (id.length < 2) return '??';
-    return id.substring(0, 2).toUpperCase();
+    return id.substring(0, 2).toUpperCase(); // design-ignore: avatar initials
   }
 
   Widget _buildFallback(HollowTheme hollow) {

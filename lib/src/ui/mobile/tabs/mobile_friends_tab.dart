@@ -14,6 +14,7 @@ import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
+import 'package:hollow/src/ui/components/hollow_section_header.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/status_dot.dart';
@@ -137,7 +138,7 @@ class _MobileFriendsTabState extends ConsumerState<MobileFriendsTab> {
         ),
 
         if (hasPending && _searchQuery.isEmpty) ...[
-          _SectionHeader(label: 'REQUESTS', count: incoming.length + outgoing.length),
+          _sectionHeaderSliver('Requests', incoming.length + outgoing.length),
           SliverList(
             delegate: SliverChildBuilderDelegate(
               (context, index) {
@@ -152,7 +153,7 @@ class _MobileFriendsTabState extends ConsumerState<MobileFriendsTab> {
         ],
 
         if (favFriends.isNotEmpty) ...[
-          _SectionHeader(label: 'FAVOURITES', count: favFriends.length),
+          _sectionHeaderSliver('Favourites', favFriends.length),
           SliverList(
             delegate: SliverChildBuilderDelegate(
               (context, index) => _FriendRow(
@@ -165,7 +166,7 @@ class _MobileFriendsTabState extends ConsumerState<MobileFriendsTab> {
         ],
 
         if (onlineFriends.isNotEmpty) ...[
-          _SectionHeader(label: 'ONLINE', count: onlineFriends.length),
+          _sectionHeaderSliver('Online', onlineFriends.length),
           SliverList(
             delegate: SliverChildBuilderDelegate(
               (context, index) => _FriendRow(peerId: onlineFriends[index].peerId),
@@ -175,7 +176,7 @@ class _MobileFriendsTabState extends ConsumerState<MobileFriendsTab> {
         ],
 
         if (offlineFriends.isNotEmpty) ...[
-          _SectionHeader(label: 'OFFLINE', count: offlineFriends.length),
+          _sectionHeaderSliver('Offline', offlineFriends.length),
           SliverList(
             delegate: SliverChildBuilderDelegate(
               (context, index) => _FriendRow(peerId: offlineFriends[index].peerId),
@@ -233,41 +234,14 @@ class _MobileFriendsTabState extends ConsumerState<MobileFriendsTab> {
   }
 }
 
-class _SectionHeader extends StatelessWidget {
-  final String label;
-  final int count;
-
-  const _SectionHeader({required this.label, required this.count});
-
-  @override
-  Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-    return SliverToBoxAdapter(
+Widget _sectionHeaderSliver(String title, int count) => SliverToBoxAdapter(
       child: Padding(
-        padding: const EdgeInsets.symmetric(
-          horizontal: HollowSpacing.lg, vertical: HollowSpacing.sm,
+        padding: const EdgeInsets.only(
+          left: HollowSpacing.lg, right: HollowSpacing.lg, top: HollowSpacing.sm,
         ),
-        child: Row(
-          children: [
-            Expanded(child: Divider(color: hollow.border, height: 1)),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.md),
-              child: Text(
-                '$label  $count',
-                style: HollowTypography.caption.copyWith(
-                  color: hollow.textSecondary,
-                  fontWeight: FontWeight.w600,
-                  letterSpacing: 1.0,
-                ),
-              ),
-            ),
-            Expanded(child: Divider(color: hollow.border, height: 1)),
-          ],
-        ),
+        child: HollowSectionHeader(title, count: '$count', dense: true),
       ),
     );
-  }
-}
 
 class _FriendRow extends ConsumerWidget {
   final String peerId;

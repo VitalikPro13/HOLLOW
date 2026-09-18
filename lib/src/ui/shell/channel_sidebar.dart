@@ -43,6 +43,7 @@ import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_menu.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
+import 'package:hollow/src/ui/components/hollow_section_header.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/link_health_chip.dart';
@@ -584,31 +585,24 @@ class _ServerContentState extends State<_ServerContent> {
       children: [
         if (!hasCategories)
           Padding(
-            padding: const EdgeInsets.fromLTRB(
-              HollowSpacing.lg, HollowSpacing.sm, HollowSpacing.sm, HollowSpacing.sm,
+            padding: const EdgeInsets.only(
+              left: HollowSpacing.lg,
+              top: HollowSpacing.sm,
+              right: HollowSpacing.sm,
             ),
-            child: Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    'TEXT CHANNELS',
-                    style: HollowTypography.caption.copyWith(
-                      color: w.hollow.textSecondary,
-                      fontWeight: FontWeight.w600,
-                      letterSpacing: 0.8,
-                    ),
-                  ),
-                ),
-                if (w.canManageChannels)
-                  HollowPressable(
-                    semanticLabel: 'Create channel',
-                    onTap: w.onCreateChannel,
-                    borderRadius: BorderRadius.circular(w.hollow.radiusMd),
-                    padding: const EdgeInsets.all(HollowSpacing.xs),
-                    child: Icon(LucideIcons.plus,
-                        size: 14, color: w.hollow.textSecondary),
-                  ),
-              ],
+            child: HollowSectionHeader(
+              'Text channels',
+              dense: true,
+              action: w.canManageChannels
+                  ? HollowPressable(
+                      semanticLabel: 'Create channel',
+                      onTap: w.onCreateChannel,
+                      borderRadius: BorderRadius.circular(w.hollow.radiusMd),
+                      padding: const EdgeInsets.all(HollowSpacing.xs),
+                      child: Icon(LucideIcons.plus,
+                          size: 14, color: w.hollow.textSecondary),
+                    )
+                  : null,
             ),
           ),
         if (!hasCategories) Divider(height: 1, color: w.hollow.border),
@@ -765,12 +759,12 @@ class _CategoryHeaderState extends State<_CategoryHeader> {
             const SizedBox(width: HollowSpacing.xs),
             Expanded(
               child: Text(
-                widget.name.toUpperCase(),
-                style: HollowTypography.caption.copyWith(
+                widget.name,
+                style: HollowTypography.label.copyWith(
                   color: widget.hollow.textSecondary,
-                  fontWeight: FontWeight.w600,
-                  letterSpacing: 0.8,
                 ),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
               ),
             ),
           ],
@@ -807,13 +801,6 @@ class _HomeContent extends ConsumerWidget {
     // A friend is online if ANY of their devices is, collapsed to the master
     // identity.
     final online = ref.watch(onlineIdentitiesProvider);
-    final dividerTextStyle = HollowTypography.caption.copyWith(
-      color: hollow.textSecondary,
-      fontWeight: FontWeight.w600,
-      letterSpacing: 0.8,
-      fontSize: 11,
-    );
-
     final accepted = friends.values
         .where((f) => f.status == 'accepted')
         .toList();
@@ -867,19 +854,15 @@ class _HomeContent extends ConsumerWidget {
 
         if (hasPending) ...[
           Padding(
-            padding: const EdgeInsets.symmetric(
-              horizontal: HollowSpacing.sm + 2,
-              vertical: HollowSpacing.sm,
+            padding: const EdgeInsets.only(
+              left: HollowSpacing.sm + 2,
+              top: HollowSpacing.sm,
+              right: HollowSpacing.sm + 2,
             ),
-            child: Row(
-              children: [
-                Text('PENDING', style: dividerTextStyle),
-                const SizedBox(width: HollowSpacing.sm),
-                Expanded(child: Divider(height: 1, color: hollow.border)),
-                const SizedBox(width: HollowSpacing.sm),
-                Text('${pendingIncoming.length + pendingOutgoing.length}',
-                    style: dividerTextStyle),
-              ],
+            child: HollowSectionHeader(
+              'Pending',
+              dense: true,
+              count: '${pendingIncoming.length + pendingOutgoing.length}',
             ),
           ),
           for (final req in pendingIncoming)
@@ -922,18 +905,15 @@ class _HomeContent extends ConsumerWidget {
         ],
 
         Padding(
-          padding: const EdgeInsets.symmetric(
-            horizontal: HollowSpacing.sm + 2,
-            vertical: HollowSpacing.sm,
+          padding: const EdgeInsets.only(
+            left: HollowSpacing.sm + 2,
+            top: HollowSpacing.sm,
+            right: HollowSpacing.sm + 2,
           ),
-          child: Row(
-            children: [
-              Text('FRIENDS', style: dividerTextStyle),
-              const SizedBox(width: HollowSpacing.sm),
-              Expanded(child: Divider(height: 1, color: hollow.border)),
-              const SizedBox(width: HollowSpacing.sm),
-              Text('${accepted.length}', style: dividerTextStyle),
-            ],
+          child: HollowSectionHeader(
+            'Friends',
+            dense: true,
+            count: '${accepted.length}',
           ),
         ),
 

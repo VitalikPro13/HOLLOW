@@ -246,8 +246,8 @@ void main() {
         channelName: 'staff-lounge',
       );
     });
-    expect(find.text('ACTIVE GRANTS'), findsOneWidget);
-    expect(find.text('GRANT ACCESS'), findsOneWidget);
+    expect(find.text('Active Grants'), findsOneWidget);
+    expect(find.text('Grant access'), findsOneWidget);
     await capture(tester, 'grants_overview');
   });
 

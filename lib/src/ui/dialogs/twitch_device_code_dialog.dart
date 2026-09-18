@@ -146,7 +146,6 @@ class _TwitchDeviceCodeDialogState extends State<TwitchDeviceCodeDialog> {
                       _userCode!,
                       style: HollowTypography.heading.copyWith(
                         color: hollow.textPrimary,
-                        letterSpacing: 4,
                         fontSize: 24,
                       ),
                     ),

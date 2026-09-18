@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/role_hierarchy.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/local_nickname_provider.dart';
@@ -13,10 +14,10 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
+import 'package:hollow/src/ui/components/hollow_section_header.dart';
 import 'package:hollow/src/ui/components/status_dot.dart';
 import 'package:hollow/src/ui/mobile/mobile_profile_sheet.dart';
 import 'package:hollow/src/core/brand_icons.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 void showMobileMemberPanel(BuildContext context, String serverId) {
@@ -90,20 +91,11 @@ class _MemberPanelContent extends ConsumerWidget {
           ),
         ),
 
-        Padding(
-          padding: const EdgeInsets.symmetric(
-            horizontal: HollowSpacing.lg, vertical: HollowSpacing.sm,
+        const Padding(
+          padding: EdgeInsets.only(
+            left: HollowSpacing.lg, right: HollowSpacing.lg, top: HollowSpacing.sm,
           ),
-          child: Row(
-            children: [
-              Icon(LucideIcons.users, size: 18, color: hollow.textSecondary),
-              const SizedBox(width: HollowSpacing.sm),
-              Text('Members', style: HollowTypography.body.copyWith(
-                fontWeight: FontWeight.w600,
-                color: hollow.textPrimary,
-              )),
-            ],
-          ),
+          child: HollowSectionHeader('Members'),
         ),
 
         Divider(height: 1, color: hollow.border),
@@ -126,11 +118,17 @@ class _MemberPanelContent extends ConsumerWidget {
                 itemBuilder: (context, index) {
                   final entry = entries[index];
                   if (entry.isDivider) {
-                    return _RoleDivider(
-                      label: entry.label!,
-                      count: entry.count!,
-                      isOnline: entry.isOnline,
-                      hollow: hollow,
+                    return Padding(
+                      padding: const EdgeInsets.only(
+                        left: HollowSpacing.lg,
+                        right: HollowSpacing.lg,
+                        top: HollowSpacing.lg,
+                      ),
+                      child: HollowSectionHeader(
+                        entry.label!,
+                        count: '${entry.count!}',
+                        dense: true,
+                      ),
                     );
                   }
                   return _MemberTile(
@@ -218,46 +216,6 @@ class _MemberEntry {
 
   _MemberEntry.member(this.member, this.isOnline)
       : isDivider = false, label = null, count = null;
-}
-
-class _RoleDivider extends StatelessWidget {
-  final String label;
-  final int count;
-  final bool isOnline;
-  final HollowTheme hollow;
-
-  const _RoleDivider({
-    required this.label,
-    required this.count,
-    required this.isOnline,
-    required this.hollow,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(
-        HollowSpacing.lg, HollowSpacing.lg, HollowSpacing.lg, HollowSpacing.xs,
-      ),
-      child: Row(
-        children: [
-          Expanded(child: Divider(color: hollow.border, height: 1)),
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.md),
-            child: Text(
-              '$label  $count',
-              style: HollowTypography.caption.copyWith(
-                color: hollow.textSecondary,
-                fontWeight: FontWeight.w600,
-                letterSpacing: 1.0,
-              ),
-            ),
-          ),
-          Expanded(child: Divider(color: hollow.border, height: 1)),
-        ],
-      ),
-    );
-  }
 }
 
 class _MemberTile extends ConsumerWidget {
@@ -361,7 +319,7 @@ class _MemberTile extends ConsumerWidget {
                             borderRadius: BorderRadius.circular(4),
                           ),
                           child: Text(
-                            member.role[0].toUpperCase() + member.role.substring(1),
+                            roleDisplayName(member.role),
                             style: HollowTypography.caption.copyWith(
                               color: _roleGlowColor(member.role, hollow),
                               fontWeight: FontWeight.w700,

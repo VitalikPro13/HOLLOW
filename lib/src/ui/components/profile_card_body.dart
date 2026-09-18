@@ -26,6 +26,7 @@ import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
+import 'package:hollow/src/ui/components/hollow_section_header.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/hollow_tooltip.dart';
@@ -422,21 +423,12 @@ class _ProfileCardBodyState extends ConsumerState<ProfileCardBody> {
     );
   }
 
-  /// The ABOUT ME header + text, or [] when empty.
+  /// The About me header + text, or [] when empty.
   List<Widget> _aboutSection(HollowTheme hollow, String aboutMe) {
     if (aboutMe.isEmpty) return const [];
     return [
       SizedBox(height: _compact ? HollowSpacing.sm + 2 : HollowSpacing.md + 2),
-      Text(
-        'ABOUT ME',
-        style: HollowTypography.caption.copyWith(
-          color: hollow.textSecondary,
-          fontWeight: FontWeight.w700,
-          letterSpacing: 0.5,
-          fontSize: _compact ? 9 : 10,
-        ),
-      ),
-      const SizedBox(height: HollowSpacing.xxs),
+      const HollowSectionHeader('About me', dense: true),
       Text(
         aboutMe,
         style: _compact
@@ -462,7 +454,7 @@ class _ProfileCardBodyState extends ConsumerState<ProfileCardBody> {
     final role = widget.role;
     if (role != null && role.isNotEmpty) {
       chips.add(_ProfileChip(
-        text: role[0].toUpperCase() + role.substring(1),
+        text: roleDisplayName(role),
         color: profileRoleColor(role, hollow),
         compact: _compact,
       ));

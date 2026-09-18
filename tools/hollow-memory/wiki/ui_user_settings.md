@@ -2,7 +2,7 @@
 
 Source: `lib/src/ui/dialogs/user_settings_dialog.dart` (~740-line shell) + per-category sections in `lib/src/ui/settings/`
 
-**SPLIT 2026-07-15 (Sonar epic close):** the former 6,406-line monolith is now 19 files. The dialog file keeps `showUserSettingsDialog` (toggle), the `_SettingsCategory` enum + search metadata, the rail/search shell, and the dialog-scoped state that must survive category switches (profile edit state, relay selection + Apply & Restart). Category bodies are imported widgets: `profile_section.dart`, `appearance_section.dart`, `accessibility_section.dart`, `network_section.dart`, `storage_settings_cards.dart`, `audio_section.dart`, `shortcuts_section.dart`, `security_section.dart` (incl. `askPassphraseDialog`), `devices_section.dart`, `backup_section.dart`, `updates_section.dart`, `about_section.dart`. Shared with mobile (`mobile_settings_tab.dart` adopted them, −990 lines): `settings_shared.dart` (SettingsCard/ToggleRow/TriStateSegment/LabeledSlider/ShimmerDividerLine/AccentHue widgets/shortenPeerId), `verify_proof_section.dart`, `device_management_shared.dart`, `blocked_users_shared.dart`, `about_shared.dart`, plus `components/selector_pill.dart`. Everything below describes behavior, which is unchanged — section names map 1:1 to the new files.
+**SPLIT 2026-07-15 (Sonar epic close):** the former 6,406-line monolith is now 19 files. The dialog file keeps `showUserSettingsDialog` (toggle), the `_SettingsCategory` enum + search metadata, the rail/search shell, and the dialog-scoped state that must survive category switches (profile edit state, relay selection + Apply & Restart). Category bodies are imported widgets: `profile_section.dart`, `appearance_section.dart`, `accessibility_section.dart`, `network_section.dart`, `storage_settings_cards.dart`, `audio_section.dart`, `shortcuts_section.dart`, `security_section.dart` (incl. `askPassphraseDialog`), `devices_section.dart`, `backup_section.dart`, `updates_section.dart`, `about_section.dart`. Shared with mobile (`mobile_settings_tab.dart` adopted them, −990 lines): `settings_shared.dart` (SettingsCard/SettingsFieldLabel/ToggleRow/TriStateSegment/LabeledSlider/AccentHue widgets/shortenPeerId), `verify_proof_section.dart`, `device_management_shared.dart`, `blocked_users_shared.dart`, `about_shared.dart`, plus `components/selector_pill.dart`. Everything below describes behavior, which is unchanged — section names map 1:1 to the new files.
 
 Formerly the largest UI file in the project. **Redesigned 2026-06-21** from a fixed 680×540 dialog with 5 lopsided tabs into a responsive (~920×680, 90% of window) dialog with a **searchable side rail of 10 focused categories** and **card-based content**. Opened via `showUserSettingsDialog()`, which acts as a toggle (re-calling while open closes the dialog).
 
@@ -28,14 +28,20 @@ The old monolithic "System" tab (8 sections) split into **Appearance / Network /
 
 The former separate `files` + `storage` categories are merged into one `storage` category labelled **"Files & Storage"** (`_storageCards`). Cards: **Usage** (the storage dashboard), **Cache Limits** (auto-download threshold + downloaded-files cap + vault-cache cap sliders), **Media** (image quality), **Data Location**. Mobile twin: a single `_StorageTab` (the old `_FilesTab` was removed) reached from one "Files & Storage" nav tile.
 
-The dashboard widgets live in `lib/src/ui/settings/storage_section.dart` (shared desktop+mobile): `StorageBreakdownView` renders a modern summary header — big "Storage used" total + a segmented proportional usage bar (Downloads = accent, Vault cache = warning, Held shards = success) + a legend, a "⋯" `_CleanupMenu` (ghost icon button opening `showHollowMenu` right-aligned, each row with its size as the trailing text: "Clear all downloads" / "Clear vault cache" / "Clear unused emotes & GIFs" / "Clear GIF search cache"; held shards intentionally absent — read-only, deleting them hurts group availability), then a per-conversation/server list of `_ContextRow`s (avatar/channel icon, name, "size · N files", hover-reveal red trash for scoped clear). Backed by `storage_provider.dart` (`storageBreakdownProvider` + `storageActionsProvider`) and `filesCacheCapProvider` in `settings_provider.dart`. FFI: `get_storage_breakdown`, `clear_all_file_bytes`, `clear_file_bytes_for_context`, `clear_vault_cache`, `evict_files_cache`, `enforce_storage_caps` (api/storage.rs). Caps are ENFORCED after each download via `enforce_storage_caps` in `event_provider`'s `FileCompleted` handler (both sliders were no-op before). Clearing bytes keeps the signed FileHeader rows so messages render as re-downloadable cards.
+The dashboard widgets live in `lib/src/ui/settings/storage_section.dart` (shared desktop+mobile): `StorageBreakdownView` renders a modern summary header — big "Storage used" total + a segmented proportional usage bar (Downloads = accent, Vault cache = warning, Held shards = success) + a legend, a "⋯" `_CleanupMenu` (ghost icon button opening `showHollowMenu` right-aligned, each row with its size as the trailing text: "Clear all downloads" / "Clear vault cache" / "Clear unused emotes & GIFs" / "Clear GIF search cache"; held shards intentionally absent — read-only, deleting them hurts group availability), then `HollowSectionHeader('By conversation', count:, dense: true)` over a per-conversation/server list of `_ContextRow`s (avatar/channel icon, name, "size · N files", hover-reveal red trash for scoped clear). Backed by `storage_provider.dart` (`storageBreakdownProvider` + `storageActionsProvider`) and `filesCacheCapProvider` in `settings_provider.dart`. FFI: `get_storage_breakdown`, `clear_all_file_bytes`, `clear_file_bytes_for_context`, `clear_vault_cache`, `evict_files_cache`, `enforce_storage_caps` (api/storage.rs). Caps are ENFORCED after each download via `enforce_storage_caps` in `event_provider`'s `FileCompleted` handler (both sliders were no-op before). Clearing bytes keeps the signed FileHeader rows so messages render as re-downloadable cards.
 
 The 188px-wide left rail has: "Settings" heading, a `HollowTextField` **search filter** (updates `_searchQuery`, filters via `_filteredCategories`), then a scrolling `ListView` of `_TabItem`s for the matching categories. If the active category gets filtered out mid-type, `activeForContent` falls back to the first match so the content area never goes blank. The content area is a `Stack`: `_buildCategoryContent()` + a floating top-right X close button (`Positioned`, no tooltip).
 
-`_buildCategoryContent()` dispatches via a Dart 3 `switch`: Profile → `_buildProfileTab()`; Appearance/Network/Files/Audio/Shortcuts → `_cardList(_xxxCards())` (lists of `_SettingsCard`); Security/Devices/Backup/Updates/About → standalone widgets (`_SecurityTab`, `_DevicesCategory`, `_BackupCategory`, `_UpdatesTab`, `_AboutTab`). Content padding is `fromLTRB(xl, 44, xl, xl)` — the 44px top clears the floating X.
+`_buildCategoryContent()` dispatches via a Dart 3 `switch`: Profile → `_buildProfileTab()`; Appearance/Network/Files/Audio/Shortcuts → `_cardList(_xxxCards())` (lists of `SettingsCard`); Security/Devices/Backup/Updates/About → standalone widgets (`_SecurityTab`, `_DevicesCategory`, `_BackupCategory`, `_UpdatesTab`, `_AboutTab`). Content padding is `fromLTRB(xl, 44, xl, xl)` — the 44px top clears the floating X.
 
-### _SettingsCard
-The visual unit of the redesign. `StatelessWidget` with `title` + `children`. Renders an uppercase caption title + a bordered, `surface`-tinted rounded container. Categories are short stacks of these instead of one undifferentiated scroll.
+### SettingsCard
+The visual unit of the redesign (`settings_shared.dart`). `StatelessWidget` with `title` + `children`. An `elevated`-filled `radiusLg` container (no border, no hairline) whose title renders through the shared `HollowSectionHeader(title)`, written as-is (Title Case, no uppercase, no tracking). Categories are short stacks of these instead of one undifferentiated scroll.
+
+### SettingsFieldLabel
+`settings_shared.dart`. The label above ONE input ("Display name", "Content rating", "Image quality"): `HollowTypography.label` in `textSecondary`, no spacing of its own. A group of fields gets a `HollowSectionHeader` instead.
+
+### TriStateSegment<T>
+`settings_shared.dart`. A `Row` of equal-width `HollowChip`s (`expand: true`, `sm` gaps) for a small set of mutually exclusive options; selection is the chip's `selected` state, never a solid accent fill. Used for Reduce Motion, the Window layout picker, notification levels on narrow rows, and the mobile twins.
 
 ### _TabItem
 Stateless widget. Props: `icon` (IconData), `label` (String), `isActive` (bool), `onTap` (VoidCallback). Renders a `HollowPressable` with `subtle: true`, icon + label in a Row. Active state: icon uses `hollow.accent`, label uses `hollow.textPrimary` with `FontWeight.w600`. Inactive: icon and label use `hollow.textSecondary`.
@@ -52,7 +58,7 @@ Stateless widget. Props: `icon` (IconData), `label` (String), `isActive` (bool),
 
 `_UserSettingsContentState` no longer holds `_pending*`/`_initial*`/`_*Initialized` fields for the toggles — those were removed when the deferred-save model was dropped. Toggle/slider cards read provider values directly (`ref.watch(...).valueOrNull`) and write via the notifier in `onChanged` (e.g. dark mode, dock mode, animations, invisible, minimize-to-tray, auto-download threshold, cache cap). The state class now only tracks: `_activeTab` (`_SettingsCategory`), `_searchController`/`_searchQuery`, relay selection (`_initialRelayDomain`/`_selectedRelay`/`_showAddRelay`/`_newRelayController`), `_profileDirty` (+ the avatar/banner/live-name fields for the Profile preview). `_saveProfile()` commits the profile and clears `_profileDirty`; it does NOT close the dialog.
 
-Reduce Motion (formerly "Disable Animations") moved out of Appearance into the new **Accessibility** category (2026-06-24) as a tri-state Auto/On/Off segmented control (`_TriStateSegment`), writing `reduceMotionProvider.notifier.setMode()` → `ReduceMotionController` (which owns both motion statics + ticker; see `services_media_storage.md`). Relay change uses an explicit "Apply & Restart" button (`_applyRelayAndRestart()`) since it requires a process restart.
+Reduce Motion (formerly "Disable Animations") moved out of Appearance into the new **Accessibility** category (2026-06-24) as a tri-state Auto/On/Off segmented control (`TriStateSegment`), writing `reduceMotionProvider.notifier.setMode()` → `ReduceMotionController` (which owns both motion statics + ticker; see `services_media_storage.md`). Relay change uses an explicit "Apply & Restart" button (`_applyRelayAndRestart()`) since it requires a process restart.
 
 **Accessibility category** (`_SettingsCategory.accessibility`, between Appearance and Network; icon `LucideIcons.accessibility`): three cards — **Display Size**, **Motion** (Reduce Motion tri-state, "Auto follows your system setting") and **Transparency** (Reduce Transparency toggle → `reduceTransparencyProvider`, which drops dialog glass blur to sigma 0 via a `reduceTransparencyFlag` ValueNotifier mirror read in `hollow_dialog.dart`, and skips the background-image panel-opacity override in `app.dart`).
 
@@ -96,7 +102,7 @@ Built by `_buildProfileTab(HollowTheme hollow)`. Layout is a `SingleChildScrollV
 
 ### Profiles block (`ProfileLocationsCard`, profile_locations_card.dart)
 
-Switch/erase separate identities, each in its own data folder. Rows come from the SHARED `listProfileRows(registry)` in `core/hollow_data_dir.dart` (the welcome screen renders the same list, so the two cannot drift): **Default** (OS data root), **Portable folder** (`hollow_data` next to the exe — ALWAYS listed; if missing shows "Not created yet…" and hides Erase; switching creates it), and custom entries from `profiles.json` (Rename/Remove). Icons are chosen per surface, not carried in the row. Active row = accent border + ACTIVE chip; active detection compares against `runningProfileRoot()` (env override included). Switch = confirm dialog → pin path in registry (even for Default — the pin must beat portable folder auto-detection) → `relaunchApp()`. "Add Profile Folder" (FilePicker) refuses non-empty non-Hollow folders; picking the portable folder redirects to its row. Card copy warns the OS-keychain protection holds ONE identity per computer (fixed Credential Manager slot). Desktop-only — no mobile twin (sandboxed roots; iOS NSE opens one fixed App Group DB path). See memory `project_profile_switcher_issue47`.
+Switch/erase separate identities, each in its own data folder. Rows come from the SHARED `listProfileRows(registry)` in `core/hollow_data_dir.dart` (the welcome screen renders the same list, so the two cannot drift): **Default** (OS data root), **Portable folder** (`hollow_data` next to the exe — ALWAYS listed; if missing shows "Not created yet…" and hides Erase; switching creates it), and custom entries from `profiles.json` (Rename/Remove). Icons are chosen per surface, not carried in the row. Header = `HollowSectionHeader('Profiles on This Computer', subtitle: <description>, action: busy spinner)`. Rows have no border; the active row = accent icon + `HollowBadge('Active', kind: accent)`; active detection compares against `runningProfileRoot()` (env override included). Switch = confirm dialog → pin path in registry (even for Default — the pin must beat portable folder auto-detection) → `relaunchApp()`. "Add Profile Folder" (FilePicker) refuses non-empty non-Hollow folders; picking the portable folder redirects to its row. Card copy warns the OS-keychain protection holds ONE identity per computer (fixed Credential Manager slot). Desktop-only — no mobile twin (sandboxed roots; iOS NSE opens one fixed App Group DB path). See memory `project_profile_switcher_issue47`.
 
 **Erase routes.** Running profile → `stashPendingWipe()` + `relaunchApp()` (in-process SQLCipher deletes fail on Windows while the node holds handles); offline profile → recursive delete guarded by an in-use check on that profile's `hollow.lock` (`SingleInstanceLock.heldByAnotherProcess`: a non-blocking kernel-lock probe first, the pid + process-name check only where the filesystem has no locks; a pid equal to our own is never another instance, since every flatpak launch is pid 2, issue #69) and a looks-like-Hollow-data check (`identity.key`/`messages.db`/etc. or empty), keeping `profiles.json` + `*.lock`.
 
@@ -125,7 +131,7 @@ A live-updating miniature profile card showing how the user's profile will appea
 
 **Status**: Shown only if non-empty. 10px italic caption, textSecondary color.
 
-**About Me**: Shown only if non-empty. Section header "ABOUT ME" (9px bold uppercase) + 10px caption, max 3 lines.
+**About Me**: Shown only if non-empty. "About me" label (`micro`, w600, textSecondary) + 10px caption, max 3 lines.
 
 **Peer ID footer**: Last 8 chars of peer ID in 8px mono, with tiny copy icon, at 0.35 alpha.
 
@@ -168,7 +174,7 @@ Separated by 1px divider + spacing. Header: `_FieldLabel(label: 'CONNECTIONS')`.
 
 ## Categories split from the old "System" tab
 
-The old `_buildSystemTab()` is gone. Its sections now live in per-category card builders, all returning `List<Widget>` of `_SettingsCard`s:
+The old `_buildSystemTab()` is gone. Its sections now live in per-category card builders, all returning `List<Widget>` of `SettingsCard`s:
 
 - **Appearance** (`_appearanceCards`): Theme card (dark mode + `_AccentColorPicker`), Background card (`_BackgroundPicker`), Layout card (Window layout picker, appear-invisible, + minimize-to-tray on desktop). All apply immediately.
 - **Network** (`_networkCards`): Relay card — relay list (`_buildRelayRow`), add-relay field (`_buildAddRelayField`), and "Apply & Restart" when the selection differs from the active relay.
@@ -188,9 +194,9 @@ The Layout card's first control is a labelled `TriStateSegment<LayoutMode>` (fro
 
 **Sentence case** for anything that reads as an instruction or a value: control labels and their subtitles, shortcut and action names (`AppShortcut` display names: "Open settings", "Toggle member panel", "Zoom interface in"), button labels ("Refresh devices", "Test microphone", "Play processed"), option values and chips ("Voice activity", "Push to talk"), dialog titles, and `FilePicker(dialogTitle:)` ("Select ringtone", "Export backup", "Import server template").
 
-**Title Case is retained** where the text names a container or a proper noun: `SettingsCard(title:)` ("Theme", "Background", "Layout", "Identity Backup", "Link a Device"; a few newer cards such as "Active grants" and "Temporary channel access" read as sentence case and were left alone), the ALL-CAPS `SettingsSectionLabel` / `_SectionLabel` headers (which uppercase anyway), role permission names (`roles_tab.dart` / `mobile_roles_route.dart`: "Manage Channels", "Kick Members"), document titles, and proper nouns and acronyms (Hollow, Twitch, GIF, MLS, TURN).
+**Title Case is retained** where the text names a container or a proper noun: `SettingsCard(title:)` and other `HollowSectionHeader` titles ("Theme", "Background", "Layout", "Identity Backup", "Link a Device"; a few newer cards such as "Active grants" and "Temporary channel access" read as sentence case), role permission names (`roles_tab.dart` / `mobile_roles_route.dart`: "Manage Channels", "Kick Members"), document titles, and proper nouns and acronyms (Hollow, Twitch, GIF, MLS, TURN).
 
-Rule of thumb when adding UI text: if it is a thing the user acts on, sentence case; if it is the name of a box the things live in, Title Case.
+Rule of thumb when adding UI text: if it is a thing the user acts on, sentence case; if it is the name of a box the things live in, Title Case. Titles are written as they should read: no `toUpperCase()`, no `letterSpacing` eyebrows anywhere.
 
 ### (Legacy) System Tab sections — for reference
 
@@ -378,7 +384,7 @@ Sits at the bottom of the same card, under the ringtone rows: a `LucideIcons.mus
 - **"Play sound effects"** `SettingsToggleRow` (`LucideIcons.volume2`, subtitle "Voice channel joins and leaves, screen shares, mute, notifications") → `soundEffectsEnabledProvider.notifier.setEnabled()`. Turning it ON plays `HollowSound.notification` immediately, confirming the setting with the sound it just enabled.
 - **Volume row** (`_buildSoundEffectsVolumeRow`): icon + "Volume" + `Slider` + percentage, wrapped in `Opacity(0.4)` with `onChanged: null` while the toggle is off. `onChanged` writes `soundEffectsVolumeProvider`; the preview (`HollowSound.joinVoice`) fires on **`onChangeEnd` only**, because a sound per drag frame would be a machine-gun.
 
-Mobile twin: `_SoundEffectsControls` under a `_SectionLabel(label: 'Sound Effects')` in `mobile_settings_tab.dart`, same providers and same preview-on-release behaviour.
+Mobile twin: `_SoundEffectsControls` under a `HollowSectionHeader('Sound Effects')` in `mobile_settings_tab.dart`, same providers and same preview-on-release behaviour.
 
 ---
 
@@ -423,14 +429,14 @@ Laid out as a single full-width `Row` (so Preview sits on the LEFT, Cancel/Save 
 The old `_SecurityTab` (which held App Lock, Device Protection, Recovery Phrase, Account Backup, Your Devices, Multi-Device, Verify a Proof) split into three categories:
 
 - **`_SecurityTab`** (Security category) — now just **App Lock + Device Protection + Recovery Phrase + Verify a Proof** (the proof verifier moved here, at the bottom, per 2026-06-21 feedback). Still a `StatefulWidget`.
-- **`_DevicesCategory`** (`ConsumerStatefulWidget`) — Your Devices card (`_DevicesSection`), Link a Device card (`showDeviceLinkDialog`), Maintenance card (`_resetDeviceLists` → `network_api.resetDeviceLists()`). Each in a `_SettingsCard`.
+- **`_DevicesCategory`** (`ConsumerStatefulWidget`) — Your Devices card (`_DevicesSection`), Link a Device card (`showDeviceLinkDialog`), Maintenance card (`_resetDeviceLists` → `network_api.resetDeviceLists()`). Each in a `SettingsCard`.
 - **`_BackupCategory`** (`StatefulWidget`) — "Identity Backup" card only (`_includeVault`/`_includeFiles` checkboxes + `_exportBackup`). Renamed from "Account Backup" 2026-07-02: ALL user-facing "account" copy is now "identity" (welcome dialog "Create New Identity", device-list strings, help lessons; Twitch-account references untouched).
 
 The passphrase prompt is now a **top-level** `askPassphraseDialog(context, title, {confirm, buttonLabel})` shared by App Lock and Identity Backup (was a private method on `_SecurityTabState`).
 
 ### Security category (`_SecurityTab`)
 
-`StatefulWidget` (not Consumer — uses `storage_api` directly).
+`SecurityTab`, a `ConsumerStatefulWidget` (`security_section.dart`).
 
 ### State:
 - `_revealed` (bool) — whether mnemonic is shown
@@ -439,9 +445,9 @@ The passphrase prompt is now a **top-level** `askPassphraseDialog(context, title
 - `_mnemonic` (String?) — the 24-word recovery phrase
 - `_error` (String?) — load error
 
-### APP LOCK Section
+### App Lock Section
 
-**Protection status state**: `_hasPassword`, `_hasOsKeychain`, `_osKeychainAvailable`, `_protectionLoading` — loaded via `identity_api.getIdentityProtectionStatus()` in `initState`.
+**Protection status state**: `_hasPassword`, `_hasOsKeychain`, `_osKeychainAvailable`, `_protectionLoading` — loaded via `identity_api.getIdentityProtectionStatus()` in `initState` (`_loadProtectionStatus`). After that first await it calls `ref.invalidate(identityProtectionProvider)` so the duress card never lags this tab; the invalidate must stay past the await, because `initState` also runs this method and an invalidate there asserts.
 
 **No password set**: Description text about setting password to encrypt identity. "Set Password" filled button calls `_enablePassword()` which opens `_askPassphrase()` dialog then calls `identity_api.enablePasswordProtection(password, requireOnLaunch: true)`.
 
@@ -464,7 +470,7 @@ Only shown when `!_hasPassword && _osKeychainAvailable`. Standalone device-level
 
 **Recovery tip**: Info icon + "Forgot your password? You can recover with your 24-word recovery phrase."
 
-### RECOVERY PHRASE Section
+### Recovery Phrase Section
 
 **Loading state**: 20x20 accent-colored `CircularProgressIndicator`.
 
@@ -508,7 +514,7 @@ Description: "Exports your identity, profile, servers, friends, and messages."
 ### _askPassphrase() dialog
 A `showHollowDialog` with a 360px container. Shows title, passphrase `HollowTextField` (obscured, autofocused), optional confirmation field (when `confirm: true`). Cancel returns null. Encrypt button validates non-empty, matches confirmation if required, returns passphrase string.
 
-### VERIFY A PROOF Section
+### Verify a Proof Section
 
 `_VerifyProofSection` — `StatefulWidget`. Allows pasting or importing a proof JSON to verify Ed25519 message signatures.
 
@@ -528,7 +534,7 @@ A `showHollowDialog` with a 360px container. Shows title, passphrase `HollowText
 
 **Result display (`_buildResult()`):**
 - **Error**: Red container with shieldAlert icon + error message.
-- **Valid/Invalid**: Accent (valid) or red (invalid) container. Shows "VERIFIED" or "INVALID SIGNATURE" badge with shield icon. Below: MESSAGE section (text, max 300 chars, 4 lines), SENDER section (selectable mono peer ID), context type + UTC ISO 8601 timestamp.
+- **Valid/Invalid**: Accent (valid) or red (invalid) container. Shows a "Verified" or "Invalid signature" badge with shield icon. Below: "Message" (`SettingsFieldLabel`; text, max 300 chars, 4 lines), "Sender" (`SettingsFieldLabel`; selectable mono peer ID), context type + UTC ISO 8601 timestamp.
 
 ### _ProofResult
 Data class: `valid` (bool), `error` (String?), `text`, `timestampMs`, `messageId`, `senderPeerId`, `contextType`, `contextId`.
@@ -559,7 +565,7 @@ Shown during `UpdateStatus.downloading` or `UpdateStatus.extracting`. Styled con
 Shown when `UpdateStatus.readyToInstall`. Accent-tinted container with checkCircle icon + "Ready to install v{version}". "Install & Restart" filled button calls `notifier.installAndRestart()`. Subtitle: "Hollow will close and relaunch automatically."
 
 ### Version List
-Shown when manifest is loaded. "Versions" section label + list of `_VersionCard` widgets for each version in the manifest.
+Shown when manifest is loaded. `HollowSectionHeader('Versions')` + list of `_VersionCard` widgets for each version in the manifest.
 
 ### _VersionCard
 Stateless. Props: `version` (VersionInfo), `isCurrent`, `isLatest`, `isDownloading`, `onInstall` (nullable).
@@ -590,9 +596,9 @@ Row: 72x72 rounded app logo (`assets/hollow_logo_rounded.png`) + Column with "Ho
 - **Website**: Ghost button "anonlisten.com" with globe icon. Opens in external browser.
 
 ### Follow & Support Section
-Header: `_aboutShimmerLabel('Follow', 'Support', hollow)` — "Follow" text, shimmer line, "Support" text.
+Header: `_aboutShimmerLabel('Follow', 'Support', hollow)` — "Follow" and "Support" in `subheading` with a plain `HollowDivider` (in an `Expanded`) between them.
 
-Icon row with animated shimmer divider between Follow and Support groups:
+Icon row with the Follow group, a divider, then the Support group:
 
 **Follow icons (left):**
 - YouTube (SimpleIcons.youtube, red) -> youtube.com/@Anon_Listen
@@ -601,7 +607,7 @@ Icon row with animated shimmer divider between Follow and Support groups:
 - Twitch (SimpleIcons.twitch, purple) -> twitch.tv/AnonListen
 - Kick (SimpleIcons.kick) -> kick.com/AnonListen
 
-**Shimmer divider**: `_AboutShimmerLine`
+**Divider** between the groups.
 
 **Support icons (right):**
 - Patreon (SimpleIcons.patreon, textPrimary) -> patreon.com/AnonListen
@@ -616,9 +622,6 @@ Same pattern as `_BrandIcon` but renders an SVG asset. Uses `ColorFilter.mode(te
 ### _KickBotIcon
 Variant with custom green color (#C0FF00). Same hover pattern. Uses `assets/kickbot-logo.svg`.
 
-### _AboutShimmerLine
-`StatelessWidget` that reads `SharedTickers.instance.shimmer` ValueListenable. Renders a 1px gradient line that animates a shimmer highlight across its width using accent color.
-
 ### Legal Section
 - **Privacy Policy**: Ghost button with shield icon. Opens `_showLegalDocument()` with `legal/PRIVACY_POLICY.md`.
 - **Terms of Use**: Ghost button with scroll icon. Opens `_showLegalDocument()` with `legal/TERMS_OF_USE.md`.
@@ -632,21 +635,15 @@ Top-level function. Loads markdown from asset bundle, strips the `# Title` headi
 
 ---
 
-## _ToggleRow
+## SettingsToggleRow
 
-Reusable `StatelessWidget` for System tab toggle settings. Props: `icon`, `label`, `subtitle` (optional), `value`, `onChanged`. Layout: icon (16px) + Expanded column (label + optional subtitle in 10px caption) + `HollowToggle`.
-
----
-
-## _SectionLabel
-
-`StatelessWidget`. Renders uppercase label text in 10px bold caption with 0.5 letter spacing, textSecondary color. Used throughout the System and Security tabs.
+Reusable `StatelessWidget` in `settings_shared.dart` for toggle settings. Props: `icon`, `label`, `subtitle` (optional), `value`, `onChanged`. Layout: icon (16px) + Expanded column (label + optional subtitle in 10px caption) + `HollowToggle`.
 
 ---
 
-## _FieldLabel
+## Group and field labels
 
-`StatelessWidget`. Same style as `_SectionLabel` — uppercase, 10px, bold, letterspaced. Used in the Profile tab for field labels.
+Group titles inside a category use the shared `HollowSectionHeader` (`dense: true` for a sub-group); a label above a single input uses `SettingsFieldLabel` (see above). There is no private section-label class in the settings files.
 
 ---
 
@@ -677,7 +674,7 @@ Reusable `StatelessWidget` for System tab toggle settings. Props: `icon`, `label
 
 ### UI States:
 - **Loading** (no code yet): 20x20 spinner.
-- **Code displayed**: "Enter this code on Twitch:" + large user code (24px heading, letterspacing 4, tappable to copy) in accent-bordered container with copy icon. Below: polling spinner + "Waiting for authorization..." if polling.
+- **Code displayed**: "Enter this code on Twitch:" + large user code (24px heading, tappable to copy) in accent-bordered container with copy icon. Below: polling spinner + "Waiting for authorization..." if polling.
 - **Success**: Green checkCircle + "Twitch connected!" in accent.
 - **Error**: Red alertCircle + error text.
 

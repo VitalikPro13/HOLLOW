@@ -24,18 +24,19 @@ import 'package:hollow/src/core/providers/unread_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
+import 'package:hollow/src/ui/components/hollow_divider.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/stat_bar.dart';
 import 'package:hollow/src/ui/animations/startup_reveal.dart';
 import 'package:hollow/src/ui/components/hollow_focus_ring.dart';
 import 'package:hollow/src/ui/components/hollow_menu.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
+import 'package:hollow/src/ui/components/hollow_section_header.dart';
 import 'package:hollow/src/ui/shell/user_context_menu.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/status_dot.dart';
 import 'package:hollow/src/ui/shell/system_status_banner.dart';
 import 'package:hollow/src/ui/dialogs/user_settings_dialog.dart';
-import 'package:hollow/src/ui/settings/settings_shared.dart';
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:hollow/src/core/brand_icons.dart';
@@ -488,23 +489,7 @@ class _SyncStatsCard extends ConsumerWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(
-            children: [
-              Icon(LucideIcons.chartColumn, size: 13,
-                  color: hollow.textSecondary),
-              const SizedBox(width: HollowSpacing.xs),
-              Text(
-                'YOUR STATS',
-                style: HollowTypography.caption.copyWith(
-                  color: hollow.textSecondary,
-                  fontWeight: FontWeight.w600,
-                  letterSpacing: 0.8,
-                  fontSize: 10,
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: HollowSpacing.sm),
+          const HollowSectionHeader('Your Stats', dense: true),
 
           _StatRow(
             hollow: hollow,
@@ -632,31 +617,12 @@ class _RecentConversationsColumn extends ConsumerWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Padding(
-          padding: const EdgeInsets.only(
+        const Padding(
+          padding: EdgeInsets.only(
             top: HollowSpacing.lg,
-            bottom: HollowSpacing.md,
+            bottom: HollowSpacing.xs,
           ),
-          child: Row(
-            children: [
-              Icon(LucideIcons.messageCircle, size: 18,
-                  color: hollow.textSecondary),
-              const SizedBox(width: HollowSpacing.sm),
-              // This column is the Expanded one, so the zoom squeezes it
-              // first and a bare Text here overflows.
-              Flexible(
-                child: Text(
-                  'Recent Conversations',
-                  style: HollowTypography.subheading.copyWith(
-                    color: hollow.textPrimary,
-                    fontWeight: FontWeight.w600,
-                  ),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ),
-            ],
-          ),
+          child: HollowSectionHeader('Recent Conversations'),
         ),
 
         if (conversations.isEmpty)
@@ -955,25 +921,12 @@ class _NetworkColumn extends ConsumerWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Padding(
-          padding: const EdgeInsets.only(
+        const Padding(
+          padding: EdgeInsets.only(
             top: HollowSpacing.lg,
-            bottom: HollowSpacing.md,
+            bottom: HollowSpacing.xs,
           ),
-          child: Row(
-            children: [
-              Icon(LucideIcons.activity, size: 18,
-                  color: hollow.textSecondary),
-              const SizedBox(width: HollowSpacing.sm),
-              Text(
-                'Network',
-                style: HollowTypography.subheading.copyWith(
-                  color: hollow.textPrimary,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-            ],
-          ),
+          child: HollowSectionHeader('Network'),
         ),
 
         Container(
@@ -1032,8 +985,7 @@ class _NetworkColumn extends ConsumerWidget {
 
         const SizedBox(height: HollowSpacing.lg),
 
-        _SectionLabel(hollow: hollow, label: 'FRIENDS'),
-        const SizedBox(height: HollowSpacing.sm),
+        const HollowSectionHeader('Friends', dense: true),
 
         for (final cs in activeFriends)
           _ConnectionRow(
@@ -1083,8 +1035,7 @@ class _NetworkColumn extends ConsumerWidget {
 
         const SizedBox(height: HollowSpacing.lg),
 
-        _SectionLabel(hollow: hollow, label: 'RELAY SERVER'),
-        const SizedBox(height: HollowSpacing.sm),
+        const HollowSectionHeader('Relay Server', dense: true),
 
         _RelayStatsCard(hollow: hollow, stats: relayStats),
 
@@ -1121,9 +1072,7 @@ class _NetworkColumn extends ConsumerWidget {
                 ),
               ),
               const SizedBox(width: HollowSpacing.sm),
-              Expanded(
-                child: ShimmerDividerLine(hollow: hollow),
-              ),
+              const Expanded(child: HollowDivider()),
               const SizedBox(width: HollowSpacing.sm),
               Text(
                 '${relayStats.onlineUsers}',
@@ -1137,26 +1086,6 @@ class _NetworkColumn extends ConsumerWidget {
           ),
         ),
       ],
-    );
-  }
-}
-
-/// Section label (e.g., "FRIENDS", "SERVERS").
-class _SectionLabel extends StatelessWidget {
-  final HollowTheme hollow;
-  final String label;
-  const _SectionLabel({required this.hollow, required this.label});
-
-  @override
-  Widget build(BuildContext context) {
-    return Text(
-      label,
-      style: HollowTypography.caption.copyWith(
-        color: hollow.textSecondary,
-        fontWeight: FontWeight.w600,
-        letterSpacing: 0.8,
-        fontSize: 10,
-      ),
     );
   }
 }
@@ -1179,8 +1108,7 @@ class _NewsPanel extends ConsumerWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        _SectionLabel(hollow: hollow, label: 'NEWS'),
-        const SizedBox(height: HollowSpacing.sm),
+        const HollowSectionHeader('News', dense: true),
         Expanded(
           child: Container(
             width: double.infinity,

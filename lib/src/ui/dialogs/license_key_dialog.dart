@@ -44,7 +44,7 @@ class _LicenseKeyContentState extends State<_LicenseKeyContent> {
 
   void _onChanged(String value) {
     // Uppercased and re-dashed as the user types.
-    final raw = value.toUpperCase().replaceAll(RegExp(r'[^A-Z0-9]'), '');
+    final raw = value.toUpperCase().replaceAll(RegExp(r'[^A-Z0-9]'), ''); // design-ignore: normalises a typed key
     final limited = raw.length > 16 ? raw.substring(0, 16) : raw;
 
     final buffer = StringBuffer();
@@ -160,7 +160,6 @@ class _LicenseKeyContentState extends State<_LicenseKeyContent> {
                     style: HollowTypography.body.copyWith(
                       color: hollow.textPrimary,
                       fontFamily: 'monospace',
-                      letterSpacing: 1.5,
                     ),
                   ),
 

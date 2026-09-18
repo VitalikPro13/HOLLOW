@@ -12,11 +12,12 @@ import 'package:hollow/src/rust/api/wipe.dart' as wipe_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
+import 'package:hollow/src/ui/components/hollow_badge.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
+import 'package:hollow/src/ui/components/hollow_section_header.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
-import 'package:hollow/src/ui/settings/settings_shared.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Profiles block (issue #47): switch between or erase separate identities,
@@ -360,46 +361,33 @@ class _ProfileLocationsCardState extends State<ProfileLocationsCard> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Row(
-          children: [
-            const Expanded(
-                child: SettingsSectionLabel(label: 'PROFILES ON THIS COMPUTER')),
-            if (_busy)
-              SizedBox(
-                width: 14,
-                height: 14,
-                child: CircularProgressIndicator(
-                  strokeWidth: 2,
-                  color: hollow.textSecondary,
-                ),
-              ),
-          ],
-        ),
-        const SizedBox(height: HollowSpacing.xs),
-        Text(
-          'Each profile is a separate identity stored in its own folder. '
-          'Switching restarts Hollow; the profile you leave stays on disk. '
-          'Identity protection via the OS keychain holds only one '
-          'identity per computer. Use password protection for additional '
-          'profiles.',
-          style: HollowTypography.caption.copyWith(
-            color: hollow.textSecondary,
-            fontSize: 10,
-            height: 1.4,
-          ),
+        HollowSectionHeader(
+          'Profiles on This Computer',
+          subtitle: 'Each profile is a separate identity stored in its own '
+              'folder. Switching restarts Hollow; the profile you leave '
+              'stays on disk. Identity protection via the OS keychain holds '
+              'only one identity per computer. Use password protection for '
+              'additional profiles.',
+          action: _busy
+              ? SizedBox(
+                  width: 14,
+                  height: 14,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2,
+                    color: hollow.textSecondary,
+                  ),
+                )
+              : null,
         ),
         if (_envOverrideActive) ...[
-          const SizedBox(height: HollowSpacing.xs),
           Text(
             'HOLLOW_DATA_DIR is set. It overrides the profile selection '
             'until Hollow is started without it.',
-            style: HollowTypography.caption.copyWith(
-              color: hollow.warning,
-              fontSize: 10,
-            ),
+            style: HollowTypography.caption.copyWith(color: hollow.warning),
           ),
+          const SizedBox(height: HollowSpacing.sm),
         ],
-        const SizedBox(height: HollowSpacing.md),
+        const SizedBox(height: HollowSpacing.xs),
         for (final row in rows) ...[
           _buildRow(hollow, row),
           const SizedBox(height: HollowSpacing.xs),
@@ -427,7 +415,6 @@ class _ProfileLocationsCardState extends State<ProfileLocationsCard> {
       decoration: BoxDecoration(
         color: hollow.elevated,
         borderRadius: BorderRadius.circular(hollow.radiusMd),
-        border: Border.all(color: active ? hollow.accent : hollow.border),
       ),
       child: Row(
         children: [
@@ -453,21 +440,8 @@ class _ProfileLocationsCardState extends State<ProfileLocationsCard> {
                     ),
                     if (active) ...[
                       const SizedBox(width: HollowSpacing.xs),
-                      Container(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: HollowSpacing.xs, vertical: 1),
-                        decoration: BoxDecoration(
-                          borderRadius: BorderRadius.circular(hollow.radiusXs),
-                          border: Border.all(color: hollow.accent),
-                        ),
-                        child: Text(
-                          'ACTIVE',
-                          style: HollowTypography.micro.copyWith(
-                            color: hollow.accentText,
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
-                      ),
+                      const HollowBadge('Active',
+                          kind: HollowBadgeKind.accent),
                     ],
                   ],
                 ),

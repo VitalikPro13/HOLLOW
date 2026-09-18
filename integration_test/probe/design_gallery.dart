@@ -284,6 +284,14 @@ class _GalleryPane extends StatelessWidget {
                   child: const Text('Manage'),
                 ),
               ),
+              HollowSectionHeader(
+                'With a subtitle and a tall action',
+                subtitle: 'The action centres on both lines',
+                action: HollowButton.outline(
+                  onPressed: () {},
+                  child: const Text('Import'),
+                ),
+              ),
               const HollowSectionHeader('A dense sub-group', dense: true),
               const SizedBox(height: HollowSpacing.xl),
 

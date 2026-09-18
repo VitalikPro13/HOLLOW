@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_theme_data.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
@@ -356,6 +357,22 @@ void main() {
           tester.getBottomRight(find.byType(HollowSectionHeader)).dx;
       final actionRight = tester.getBottomRight(find.text('Add')).dx;
       expect(actionRight, closeTo(headerRight, 1));
+    });
+
+    testWidgets('a tall action never pushes the subtitle off its title',
+        (tester) async {
+      await _pump(
+        tester,
+        const HollowSectionHeader(
+          'Art you own',
+          subtitle: 'or drop a pack here',
+          action: SizedBox(width: 40, height: 80),
+        ),
+      );
+
+      final titleBottom = tester.getBottomLeft(find.text('Art you own')).dy;
+      final subtitleTop = tester.getTopLeft(find.text('or drop a pack here')).dy;
+      expect(subtitleTop - titleBottom, lessThanOrEqualTo(HollowSpacing.xs));
     });
   });
 

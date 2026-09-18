@@ -51,13 +51,16 @@ import 'package:hollow/src/rust/api/twitch.dart' as twitch_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
+import 'package:hollow/src/ui/components/hollow_divider.dart';
 import 'package:hollow/src/ui/components/animated_gif_image.dart';
 import 'package:hollow/src/ui/components/version_egg_tap_target.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/dialogs/avatar_frame_picker.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
+import 'package:hollow/src/ui/components/hollow_chip.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
+import 'package:hollow/src/ui/components/hollow_section_header.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/stat_bar.dart';
@@ -334,18 +337,16 @@ class _MobileOnlineCounter extends ConsumerWidget {
           'Online',
           style: HollowTypography.caption.copyWith(
             color: hollow.textSecondary,
-            fontSize: 11,
           ),
         ),
         const SizedBox(width: HollowSpacing.sm),
-        Expanded(child: ShimmerDividerLine(hollow: hollow)),
+        const Expanded(child: HollowDivider()),
         const SizedBox(width: HollowSpacing.sm),
         Text(
           '${relayStats.onlineUsers}',
-          style: HollowTypography.body.copyWith(
+          style: HollowTypography.bodySmall.copyWith(
             color: hollow.textPrimary,
             fontWeight: FontWeight.w600,
-            fontSize: 12,
           ),
         ),
       ],
@@ -1131,11 +1132,11 @@ class _ProfileTabState extends ConsumerState<_ProfileTab> {
 
                       if (previewAbout.isNotEmpty) ...[
                         const SizedBox(height: HollowSpacing.sm),
-                        Text('ABOUT ME', style: HollowTypography.micro.copyWith(
+                        Text('About me', style: HollowTypography.micro.copyWith(
                           color: hollow.textSecondary,
                           fontWeight: FontWeight.w600,
                         )),
-                        const SizedBox(height: 2),
+                        const SizedBox(height: HollowSpacing.xxs),
                         Text(
                           previewAbout,
                           style: HollowTypography.caption.copyWith(
@@ -1450,8 +1451,7 @@ class _NetworkTabState extends ConsumerState<_NetworkTab> {
     return ListView(
       padding: const EdgeInsets.all(HollowSpacing.lg),
       children: [
-        const _SectionLabel(label: 'Peer ID'),
-        const SizedBox(height: HollowSpacing.sm),
+        const HollowSectionHeader('Peer ID'),
         HollowPressable(
           onTap: () {
             Clipboard.setData(ClipboardData(text: peerId));
@@ -1483,14 +1483,12 @@ class _NetworkTabState extends ConsumerState<_NetworkTab> {
 
         const SizedBox(height: HollowSpacing.xl),
 
-        const _SectionLabel(label: 'Network'),
-        const SizedBox(height: HollowSpacing.sm),
+        const HollowSectionHeader('Network'),
         _buildRelaySection(hollow),
 
         const SizedBox(height: HollowSpacing.xl),
 
-        const _SectionLabel(label: 'Offline Delivery'),
-        const SizedBox(height: HollowSpacing.sm),
+        const HollowSectionHeader('Offline Delivery'),
         const _OfflineInboxSection(),
 
         const SizedBox(height: HollowSpacing.xl),
@@ -1715,20 +1713,17 @@ class _AppearanceTab extends StatelessWidget {
     return ListView(
       padding: const EdgeInsets.all(HollowSpacing.lg),
       children: const [
-        _SectionLabel(label: 'Theme'),
-        SizedBox(height: HollowSpacing.sm),
+        HollowSectionHeader('Theme'),
         _ThemeToggleRow(),
         SizedBox(height: HollowSpacing.md),
         _AccentHueSection(),
         SizedBox(height: HollowSpacing.xl),
-        _SectionLabel(label: 'Background'),
-        SizedBox(height: HollowSpacing.sm),
+        HollowSectionHeader('Background'),
         _BackgroundSection(),
         SizedBox(height: HollowSpacing.md),
         AmbientBackgroundToggle(),
         SizedBox(height: HollowSpacing.xl),
-        _SectionLabel(label: 'Layout'),
-        SizedBox(height: HollowSpacing.sm),
+        HollowSectionHeader('Layout'),
         _InvisibleToggleRow(),
         SizedBox(height: HollowSpacing.xl),
       ],
@@ -1744,20 +1739,17 @@ class _AccessibilityTab extends StatelessWidget {
     return ListView(
       padding: const EdgeInsets.all(HollowSpacing.lg),
       children: const [
-        _SectionLabel(label: 'Display Size'),
-        SizedBox(height: HollowSpacing.sm),
+        HollowSectionHeader('Display Size'),
         InterfaceScaleControl(),
         SizedBox(height: HollowSpacing.lg),
         ChatTextScaleControl(),
         SizedBox(height: HollowSpacing.sm),
         _DisplaySizeFootnote(),
         SizedBox(height: HollowSpacing.xl),
-        _SectionLabel(label: 'Motion'),
-        SizedBox(height: HollowSpacing.sm),
+        HollowSectionHeader('Motion'),
         _ReduceMotionRow(),
         SizedBox(height: HollowSpacing.xl),
-        _SectionLabel(label: 'Transparency'),
-        SizedBox(height: HollowSpacing.sm),
+        HollowSectionHeader('Transparency'),
         _ReduceTransparencyRow(),
         SizedBox(height: HollowSpacing.xl),
       ],
@@ -1773,8 +1765,7 @@ class _AudioTab extends StatelessWidget {
     return ListView(
       padding: const EdgeInsets.all(HollowSpacing.lg),
       children: [
-        const _SectionLabel(label: 'Voice & Audio'),
-        const SizedBox(height: HollowSpacing.sm),
+        const HollowSectionHeader('Voice & Audio'),
         _AudioQualityPicker(),
         const SizedBox(height: HollowSpacing.md),
         _MicGainSlider(),
@@ -1783,14 +1774,12 @@ class _AudioTab extends StatelessWidget {
         const SizedBox(height: HollowSpacing.md),
         _AudioProcessingInfo(),
         const SizedBox(height: HollowSpacing.xl),
-        const _SectionLabel(label: 'Ringtone'),
-        const SizedBox(height: HollowSpacing.sm),
+        const HollowSectionHeader('Ringtone'),
         _RingtonePicker(),
         const SizedBox(height: HollowSpacing.md),
         _RingtoneVolumeSlider(),
         const SizedBox(height: HollowSpacing.xl),
-        const _SectionLabel(label: 'Sound Effects'),
-        const SizedBox(height: HollowSpacing.sm),
+        const HollowSectionHeader('Sound Effects'),
         _SoundEffectsControls(),
         const SizedBox(height: HollowSpacing.xl),
       ],
@@ -1898,12 +1887,10 @@ class _StorageTab extends StatelessWidget {
     return ListView(
       padding: const EdgeInsets.all(HollowSpacing.lg),
       children: const [
-        _SectionLabel(label: 'Usage'),
-        SizedBox(height: HollowSpacing.sm),
+        HollowSectionHeader('Usage'),
         StorageBreakdownView(),
         SizedBox(height: HollowSpacing.xl),
-        _SectionLabel(label: 'Cache Limits'),
-        SizedBox(height: HollowSpacing.sm),
+        HollowSectionHeader('Cache Limits'),
         _AutoDownloadSlider(),
         SizedBox(height: HollowSpacing.lg),
         _FilesCacheCapSlider(),
@@ -1912,8 +1899,7 @@ class _StorageTab extends StatelessWidget {
         SizedBox(height: HollowSpacing.lg),
         _AssetCacheCapSlider(),
         SizedBox(height: HollowSpacing.xl),
-        _SectionLabel(label: 'Media'),
-        SizedBox(height: HollowSpacing.sm),
+        HollowSectionHeader('Media'),
         _ImageQualityPicker(),
         SizedBox(height: HollowSpacing.xl),
       ],
@@ -1930,16 +1916,14 @@ class _DevicesTab extends ConsumerWidget {
     return ListView(
       padding: const EdgeInsets.all(HollowSpacing.lg),
       children: [
-        const _SectionLabel(label: 'Your Devices'),
-        const SizedBox(height: HollowSpacing.sm),
+        const HollowSectionHeader('Your Devices'),
         DevicesListSection(
           infoStyle: (hollow) => HollowTypography.body
               .copyWith(color: hollow.textSecondary, fontSize: 12),
           rowBuilder: (d) => _DeviceRowMobile(device: d),
         ),
         const SizedBox(height: HollowSpacing.xl),
-        const _SectionLabel(label: 'Link a Device'),
-        const SizedBox(height: HollowSpacing.sm),
+        const HollowSectionHeader('Link a Device'),
         Text(
           'Link another device to this identity. Show a code here, then enter it '
           'on your other (empty) device to copy your messages, friends and '
@@ -1974,8 +1958,7 @@ class _BackupTab extends StatelessWidget {
     return ListView(
       padding: const EdgeInsets.all(HollowSpacing.lg),
       children: [
-        const _SectionLabel(label: 'Identity Backup'),
-        const SizedBox(height: HollowSpacing.sm),
+        const HollowSectionHeader('Identity Backup'),
         Text(
           'Export an encrypted backup of your identity and messages. '
           'To restore it, reinstall and choose "Restore from backup" on '
@@ -1987,8 +1970,7 @@ class _BackupTab extends StatelessWidget {
         const _BackupExportButton(),
         if (Platform.isIOS) ...[
           const SizedBox(height: HollowSpacing.xl),
-          const _SectionLabel(label: 'Diagnostics'),
-          const SizedBox(height: HollowSpacing.sm),
+          const HollowSectionHeader('Diagnostics'),
           const _ExportDiagnosticsButton(),
         ],
       ],
@@ -2594,40 +2576,28 @@ class _ImageQualityPicker extends ConsumerWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text('Image quality', style: HollowTypography.bodySmall.copyWith(
-          color: hollow.textSecondary,
-        )),
+        const SettingsFieldLabel(label: 'Image quality'),
         const SizedBox(height: HollowSpacing.sm),
-        Row(
+        Wrap(
+          spacing: HollowSpacing.sm,
+          runSpacing: HollowSpacing.sm,
           children: ImageQuality.values.map((q) {
-            final isSelected = q == current;
             final shortLabel = switch (q) {
               ImageQuality.lossless => 'Lossless',
               ImageQuality.balanced => 'Balanced',
               ImageQuality.small => 'Small',
             };
-            return Padding(
-              padding: const EdgeInsets.only(right: HollowSpacing.sm),
-              child: HollowPressable(
-                onTap: () => ref.read(imageQualityProvider.notifier).setQuality(q),
-                borderRadius: BorderRadius.circular(20),
-                backgroundColor: isSelected ? hollow.accent : hollow.elevated,
-                padding: const EdgeInsets.symmetric(
-                  horizontal: HollowSpacing.md, vertical: HollowSpacing.sm,
-                ),
-                child: Text(shortLabel,
-                    style: HollowTypography.caption.copyWith(
-                      color: isSelected ? hollow.textOnAccent : hollow.textSecondary,
-                      fontWeight: isSelected ? FontWeight.w600 : FontWeight.w400,
-                    )),
-              ),
+            return HollowChip(
+              label: shortLabel,
+              selected: q == current,
+              onTap: () => ref.read(imageQualityProvider.notifier).setQuality(q),
             );
           }).toList(),
         ),
         const SizedBox(height: HollowSpacing.xs),
         Text(current.description,
             style: HollowTypography.caption.copyWith(
-              color: hollow.textSecondary, fontSize: 11,
+              color: hollow.textSecondary,
             )),
       ],
     );
@@ -2846,37 +2816,18 @@ class _AudioQualityPicker extends ConsumerWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text('Audio quality',
-            style: HollowTypography.bodySmall
-                .copyWith(color: hollow.textSecondary)),
+        const SettingsFieldLabel(label: 'Audio quality'),
         const SizedBox(height: HollowSpacing.sm),
-        Row(
+        Wrap(
+          spacing: HollowSpacing.sm,
+          runSpacing: HollowSpacing.sm,
           children: AudioQualityPreset.values.map((preset) {
-            final isSelected = preset == current;
-            return Padding(
-              padding: const EdgeInsets.only(right: HollowSpacing.sm),
-              child: HollowPressable(
-                onTap: () => ref
-                    .read(audioQualityProvider.notifier)
-                    .setPreset(preset),
-                borderRadius: BorderRadius.circular(20),
-                backgroundColor:
-                    isSelected ? hollow.accent : hollow.elevated,
-                padding: const EdgeInsets.symmetric(
-                  horizontal: HollowSpacing.md,
-                  vertical: HollowSpacing.sm,
-                ),
-                child: Text(
-                  preset.label,
-                  style: HollowTypography.caption.copyWith(
-                    color: isSelected
-                        ? hollow.textOnAccent
-                        : hollow.textSecondary,
-                    fontWeight:
-                        isSelected ? FontWeight.w600 : FontWeight.w400,
-                  ),
-                ),
-              ),
+            return HollowChip(
+              label: preset.label,
+              selected: preset == current,
+              onTap: () => ref
+                  .read(audioQualityProvider.notifier)
+                  .setPreset(preset),
             );
           }).toList(),
         ),
@@ -2885,7 +2836,6 @@ class _AudioQualityPicker extends ConsumerWidget {
           descriptions[current] ?? '',
           style: HollowTypography.caption.copyWith(
             color: hollow.textSecondary,
-            fontSize: 11,
           ),
         ),
       ],
@@ -3344,8 +3294,7 @@ class _SecurityTabState extends ConsumerState<_SecurityTab> {
     return ListView(
       padding: const EdgeInsets.all(HollowSpacing.lg),
       children: [
-        const _SectionLabel(label: 'Call Privacy'),
-        const SizedBox(height: HollowSpacing.sm),
+        const HollowSectionHeader('Call Privacy'),
         Container(
           padding: const EdgeInsets.all(HollowSpacing.md),
           decoration: BoxDecoration(
@@ -3357,8 +3306,7 @@ class _SecurityTabState extends ConsumerState<_SecurityTab> {
 
         const SizedBox(height: HollowSpacing.xl),
 
-        const _SectionLabel(label: 'App Lock'),
-        const SizedBox(height: HollowSpacing.sm),
+        const HollowSectionHeader('App Lock'),
         Container(
           padding: const EdgeInsets.all(HollowSpacing.md),
           decoration: BoxDecoration(
@@ -3493,8 +3441,7 @@ class _SecurityTabState extends ConsumerState<_SecurityTab> {
 
         const SizedBox(height: HollowSpacing.xl),
 
-        const _SectionLabel(label: 'Duress Code'),
-        const SizedBox(height: HollowSpacing.sm),
+        const HollowSectionHeader('Duress Code'),
         Container(
           padding: const EdgeInsets.all(HollowSpacing.md),
           decoration: BoxDecoration(
@@ -3508,18 +3455,15 @@ class _SecurityTabState extends ConsumerState<_SecurityTab> {
 
         const SizedBox(height: HollowSpacing.xl),
 
-        const _SectionLabel(label: 'Recovery'),
-        const SizedBox(height: HollowSpacing.sm),
+        const HollowSectionHeader('Recovery'),
         _RecoveryPhraseButton(),
         const SizedBox(height: HollowSpacing.xl),
 
-        const _SectionLabel(label: 'Verify a Proof'),
-        const SizedBox(height: HollowSpacing.sm),
+        const HollowSectionHeader('Verify a Proof'),
         const VerifyProofSection(),
         const SizedBox(height: HollowSpacing.xl),
 
-        const _SectionLabel(label: 'Danger Zone'),
-        const SizedBox(height: HollowSpacing.sm),
+        const HollowSectionHeader('Danger Zone'),
         Container(
           padding: const EdgeInsets.all(HollowSpacing.md),
           decoration: BoxDecoration(
@@ -4164,8 +4108,7 @@ class _AboutTab extends ConsumerWidget {
 
         const SizedBox(height: HollowSpacing.xl),
 
-        const _SectionLabel(label: 'Info'),
-        const SizedBox(height: HollowSpacing.sm),
+        const HollowSectionHeader('Info'),
         // Seven taps on this row wake the Hollow Shop or put it away; the
         // widget is shared with desktop About so the two cannot drift.
         VersionEggTapTarget(
@@ -4179,8 +4122,7 @@ class _AboutTab extends ConsumerWidget {
 
         const SizedBox(height: HollowSpacing.xl),
 
-        const _SectionLabel(label: 'Relay'),
-        const SizedBox(height: HollowSpacing.sm),
+        const HollowSectionHeader('Relay'),
         Container(
           padding: const EdgeInsets.all(HollowSpacing.md),
           decoration: BoxDecoration(
@@ -4236,8 +4178,7 @@ class _AboutTab extends ConsumerWidget {
 
         const SizedBox(height: HollowSpacing.xl),
 
-        const _SectionLabel(label: 'News'),
-        const SizedBox(height: HollowSpacing.sm),
+        const HollowSectionHeader('News'),
         if (!newsState.hasFetched)
           Padding(
             padding: const EdgeInsets.all(HollowSpacing.lg),
@@ -4292,8 +4233,7 @@ class _AboutTab extends ConsumerWidget {
 
         const SizedBox(height: HollowSpacing.xl),
 
-        const _SectionLabel(label: 'Contact'),
-        const SizedBox(height: HollowSpacing.sm),
+        const HollowSectionHeader('Contact'),
         aboutLinkButton(
           onPressed: () => copySupportEmail(context),
           icon: LucideIcons.mail,
@@ -4318,16 +4258,12 @@ class _AboutTab extends ConsumerWidget {
           children: [
             Text('Follow', style: HollowTypography.label.copyWith(
               color: hollow.textSecondary,
-              fontWeight: FontWeight.w600,
-              letterSpacing: 0.5,
             )),
             const SizedBox(width: HollowSpacing.sm),
-            Expanded(child: ShimmerDividerLine(hollow: hollow)),
+            const Expanded(child: HollowDivider()),
             const SizedBox(width: HollowSpacing.sm),
             Text('Support', style: HollowTypography.label.copyWith(
               color: hollow.textSecondary,
-              fontWeight: FontWeight.w600,
-              letterSpacing: 0.5,
             )),
           ],
         ),
@@ -4358,7 +4294,7 @@ class _AboutTab extends ConsumerWidget {
               url: 'https://kick.com/AnonListen',
             ),
             const SizedBox(width: HollowSpacing.sm),
-            Expanded(child: ShimmerDividerLine(hollow: hollow)),
+            const Expanded(child: HollowDivider()),
             const SizedBox(width: HollowSpacing.sm),
             _MobileBrandIcon(
               icon: BrandIcons.patreon,
@@ -4376,8 +4312,7 @@ class _AboutTab extends ConsumerWidget {
 
         const SizedBox(height: HollowSpacing.xl),
 
-        const _SectionLabel(label: 'Legal'),
-        const SizedBox(height: HollowSpacing.sm),
+        const HollowSectionHeader('Legal'),
         aboutLinkButton(
           onPressed: () => _showLegalSheet(context, 'Privacy Policy', 'legal/PRIVACY_POLICY.md'),
           icon: LucideIcons.shield,
@@ -4618,30 +4553,6 @@ class _StatBar extends StatelessWidget {
             ),
           ),
         ),
-      ],
-    );
-  }
-}
-
-class _SectionLabel extends StatelessWidget {
-  final String label;
-  const _SectionLabel({required this.label});
-
-  @override
-  Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-    return Row(
-      children: [
-        Expanded(child: Divider(color: hollow.border, height: 1)),
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.md),
-          child: Text(label, style: HollowTypography.caption.copyWith(
-            color: hollow.textSecondary,
-            fontWeight: FontWeight.w600,
-            letterSpacing: 1.0,
-          )),
-        ),
-        Expanded(child: Divider(color: hollow.border, height: 1)),
       ],
     );
   }

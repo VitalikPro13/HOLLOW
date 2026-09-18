@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/name_initials.dart';
 import 'package:hollow/src/core/color_utils.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/core/models/strip_item.dart';
@@ -60,7 +61,7 @@ class ServerFolderIcon extends ConsumerWidget {
                     color: colorFromId(sid),
                     alignment: Alignment.center,
                     child: Text(
-                      _initialsFromName(name.isNotEmpty ? name : sid),
+                      initialsFromName(name.isNotEmpty ? name : sid),
                       style: TextStyle(
                         color: Colors.white,
                         fontSize: cellSize * 0.4,
@@ -106,7 +107,7 @@ class ServerFolderIcon extends ConsumerWidget {
                       color: colorFromId(sid),
                       alignment: Alignment.center,
                       child: Text(
-                        _initialsFromName(cName.isNotEmpty ? cName : sid),
+                        initialsFromName(cName.isNotEmpty ? cName : sid),
                         style: TextStyle(
                           color: Colors.white,
                           fontSize: actualCellSize * 0.38,
@@ -499,7 +500,7 @@ class _FolderServerItem extends StatelessWidget {
                           fit: BoxFit.cover)
                       : Center(
                           child: Text(
-                            _initialsFromName(
+                            initialsFromName(
                                 name.isNotEmpty ? name : serverId),
                             style: const TextStyle(
                               color: Colors.white,
@@ -676,10 +677,3 @@ class _FolderRenameDialogState extends ConsumerState<_FolderRenameDialog> {
   }
 }
 
-String _initialsFromName(String name) {
-  final words = name.trim().split(RegExp(r'\s+'));
-  if (words.length >= 2) {
-    return '${words[0][0]}${words[1][0]}'.toUpperCase();
-  }
-  return name.substring(0, name.length.clamp(0, 2)).toUpperCase();
-}

@@ -9,6 +9,7 @@ import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
+import 'package:hollow/src/ui/components/hollow_section_header.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
@@ -18,10 +19,8 @@ import 'package:hollow/src/ui/settings/app_lock_card.dart';
 import 'package:hollow/src/ui/settings/blocked_users_shared.dart';
 import 'package:hollow/src/ui/settings/duress_section.dart';
 import 'package:hollow/src/ui/settings/verified_contacts_shared.dart';
-import 'package:hollow/src/ui/settings/settings_shared.dart';
 import 'package:hollow/src/ui/settings/verify_proof_section.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
-import 'dart:io' show Platform;
 
 /// Passphrase prompt shared by App Lock and Identity Backup. Returns the
 /// passphrase, or null if cancelled; [confirm] adds a second field that must
@@ -251,13 +250,15 @@ class _SecurityTabState extends ConsumerState<SecurityTab> {
   }
 
   Future<void> _loadProtectionStatus() async {
-    // The one funnel every protection change already runs through, so the
-    // duress card's availability can never lag behind this tab's own state.
-    ref.invalidate(identityProtectionProvider);
     try {
       final status = await identity_api.getIdentityProtectionStatus();
       final launchSecret = await AppLockService().hasLaunchSecret();
       if (!mounted) return;
+      // The one funnel every protection change already runs through, so the
+      // duress card's availability can never lag behind this tab's own state.
+      // Past the first await: initState also calls this, and an invalidate
+      // there asserts.
+      ref.invalidate(identityProtectionProvider);
       setState(() {
         _hasPassword = status.hasPassword;
         _hasOsKeychain = status.hasOsKeychain;
@@ -419,16 +420,14 @@ class _SecurityTabState extends ConsumerState<SecurityTab> {
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const SettingsSectionLabel(label: 'CALL PRIVACY'),
-          const SizedBox(height: HollowSpacing.sm),
+          const HollowSectionHeader('Call Privacy'),
           const AlwaysRelayCallsToggle(),
           const SizedBox(height: HollowSpacing.md),
           const PeerForwardingToggle(),
 
           const SizedBox(height: HollowSpacing.xl),
 
-          const SettingsSectionLabel(label: 'APP LOCK'),
-          const SizedBox(height: HollowSpacing.sm),
+          const HollowSectionHeader('App Lock'),
 
           if (_protectionLoading)
             Padding(
@@ -443,21 +442,18 @@ class _SecurityTabState extends ConsumerState<SecurityTab> {
 
           const SizedBox(height: HollowSpacing.xl),
 
-          const SettingsSectionLabel(label: 'DURESS CODE'),
-          const SizedBox(height: HollowSpacing.sm),
+          const HollowSectionHeader('Duress Code'),
           const DuressCodeCard(wideScopes: true),
 
           const SizedBox(height: HollowSpacing.xl),
 
-          const SettingsSectionLabel(label: 'RECOVERY PHRASE'),
-          const SizedBox(height: HollowSpacing.sm),
+          const HollowSectionHeader('Recovery Phrase'),
 
           ..._recoveryChildren(hollow),
 
           const SizedBox(height: HollowSpacing.xl),
 
-          const SettingsSectionLabel(label: 'VERIFY A PROOF'),
-          const SizedBox(height: HollowSpacing.sm),
+          const HollowSectionHeader('Verify a Proof'),
           const VerifyProofSection(),
 
           const SizedBox(height: HollowSpacing.xl),
@@ -472,8 +468,7 @@ class _SecurityTabState extends ConsumerState<SecurityTab> {
 
           const SizedBox(height: HollowSpacing.xl),
 
-          const SettingsSectionLabel(label: 'DANGER ZONE'),
-          const SizedBox(height: HollowSpacing.sm),
+          const HollowSectionHeader('Danger Zone'),
           const AccountDangerZoneCard(),
         ],
       ),

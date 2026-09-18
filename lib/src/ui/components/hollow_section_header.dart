@@ -22,6 +22,11 @@ class HollowSectionHeader extends StatelessWidget {
   /// the screen's single primary.
   final Widget? action;
 
+  /// One quiet line under the title ("or drop a .hollowpack here"). The
+  /// action centres on the title and this line together, so a tall button
+  /// never pushes the line away from its title.
+  final String? subtitle;
+
   /// A sub-group inside a section, rather than the section itself.
   final bool dense;
 
@@ -30,12 +35,36 @@ class HollowSectionHeader extends StatelessWidget {
     super.key,
     this.count,
     this.action,
+    this.subtitle,
     this.dense = false,
   });
 
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
+
+    final titleRow = Row(
+      children: [
+        Flexible(
+          child: Text(
+            title,
+            style: (dense ? HollowTypography.label : HollowTypography.subheading)
+                .copyWith(color: hollow.textPrimary),
+            overflow: TextOverflow.ellipsis,
+          ),
+        ),
+        if (count != null) ...[
+          const SizedBox(width: HollowSpacing.sm),
+          Text(
+            count!,
+            style: HollowTypography.monoSmall.copyWith(
+              color: hollow.textTertiary,
+              fontFeatures: const [FontFeature.tabularFigures()],
+            ),
+          ),
+        ],
+      ],
+    );
 
     return Padding(
       padding: const EdgeInsets.only(bottom: HollowSpacing.sm),
@@ -45,26 +74,17 @@ class HollowSectionHeader extends StatelessWidget {
           // less the action. A Spacer here instead would share the free space
           // with the title's own Flexible and strand the action mid-row.
           Expanded(
-            child: Row(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
               children: [
-                Flexible(
-                  child: Text(
-                    title,
-                    style: (dense
-                            ? HollowTypography.label
-                            : HollowTypography.subheading)
-                        .copyWith(color: hollow.textPrimary),
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ),
-                if (count != null) ...[
-                  const SizedBox(width: HollowSpacing.sm),
+                titleRow,
+                if (subtitle != null) ...[
+                  const SizedBox(height: HollowSpacing.xxs),
                   Text(
-                    count!,
-                    style: HollowTypography.monoSmall.copyWith(
-                      color: hollow.textTertiary,
-                      fontFeatures: const [FontFeature.tabularFigures()],
-                    ),
+                    subtitle!,
+                    style: HollowTypography.caption
+                        .copyWith(color: hollow.textSecondary),
                   ),
                 ],
               ],

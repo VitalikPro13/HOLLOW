@@ -485,7 +485,6 @@ class _TwitchJoinDialogState extends State<_TwitchJoinDialog> {
                   _userCode!,
                   style: HollowTypography.heading.copyWith(
                     color: hollow.textPrimary,
-                    letterSpacing: 4,
                     fontSize: 24,
                   ),
                 ),

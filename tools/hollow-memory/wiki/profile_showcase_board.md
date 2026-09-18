@@ -156,8 +156,9 @@ live DS3 full payload + cache-hit path + Zelda TOTK no-Steam degrade.
   event_provider). Text renders via chat's `buildMessageText` (links open
   only on tap; no fetches). Covers/artwork via Image.memory /
   AnimatedGifImage; gamepad/image placeholders while assets replicate.
-- Composer: `ui/dialogs/showcase_editor.dart` — per-side block list with
-  drag reorder (`onReorderItem` pattern), block picker, game search dialog
+- Composer: `ui/dialogs/showcase_editor.dart` — per-side block list
+  (headed `HollowSectionHeader('Left board' / 'Right board', dense: true,
+  count: 'n/max')`) with drag reorder (`onReorderItem` pattern), block picker, game search dialog
   (450ms debounce, type tag chip + year, "Game data from IGDB" attribution),
   shelf editor (prefillable), artwork via FilePicker → Rust processing.
   **Picker feedback states (2026-07-10)**: spinner / wifi-off error row /
@@ -206,6 +207,9 @@ live DS3 full payload + cache-hit path + Zelda TOTK no-Steam degrade.
   chips), Credits, **System Requirements demoted to a closed-by-default
   `_SysReqSection` expander** (store-page utility, not showcase material),
   copyright + "Game data from IGDB & Steam". PURE display, zero fetch.
+  Section titles (About, Platforms, Info, Credits) are
+  `HollowSectionHeader(label, dense: true)` as written; the expander reads
+  "System requirements" in the `label` style.
   **Accent theming**: `components/showcase_image_stats.dart`
   `showcaseImageStats(bytes)` — RENDER-time pixel probe (40px decode,
   FNV-keyed cache): extracts the cover's dominant-vibrant color (hue

@@ -17,6 +17,7 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
+import 'package:hollow/src/ui/components/hollow_section_header.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/hollow_toggle.dart';
@@ -583,15 +584,8 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
       padding: const EdgeInsets.all(HollowSpacing.xl),
       children: [
         if (widget.canManageServer) ...[
-          Text(
-            'SERVER SETTINGS',
-            style: HollowTypography.caption.copyWith(
-              color: hollow.textSecondary,
-              fontWeight: FontWeight.w700,
-              letterSpacing: 1.2,
-            ),
-          ),
-          const SizedBox(height: HollowSpacing.md),
+          const HollowSectionHeader('Server Settings'),
+          const SizedBox(height: HollowSpacing.xs),
 
           Text(
             'Server icon',
@@ -807,15 +801,8 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
           Divider(color: hollow.border),
           const SizedBox(height: HollowSpacing.xl),
 
-          Text(
-            'ACCESS',
-            style: HollowTypography.caption.copyWith(
-              color: hollow.textSecondary,
-              fontWeight: FontWeight.w700,
-              letterSpacing: 1.2,
-            ),
-          ),
-          const SizedBox(height: HollowSpacing.md),
+          const HollowSectionHeader('Access'),
+          const SizedBox(height: HollowSpacing.xs),
           Row(
             children: [
               Expanded(
@@ -919,15 +906,8 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
           Divider(color: hollow.border),
           const SizedBox(height: HollowSpacing.xl),
 
-          Text(
-            'OFFLINE CATCH-UP',
-            style: HollowTypography.caption.copyWith(
-              color: hollow.textSecondary,
-              fontWeight: FontWeight.w700,
-              letterSpacing: 1.2,
-            ),
-          ),
-          const SizedBox(height: HollowSpacing.md),
+          const HollowSectionHeader('Offline Catch-up'),
+          const SizedBox(height: HollowSpacing.xs),
           Row(
             children: [
               Expanded(
@@ -1007,15 +987,7 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
           Divider(color: hollow.border),
           const SizedBox(height: HollowSpacing.xl),
 
-          Text(
-            'SERVER TEMPLATE',
-            style: HollowTypography.caption.copyWith(
-              color: hollow.textSecondary,
-              fontWeight: FontWeight.w700,
-              letterSpacing: 1.2,
-            ),
-          ),
-          const SizedBox(height: HollowSpacing.sm),
+          const HollowSectionHeader('Server Template'),
           Text(
             'Export your server structure as a template, or import one to reconfigure this server.',
             style: HollowTypography.caption.copyWith(
@@ -1090,15 +1062,7 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
           Divider(color: hollow.border),
           const SizedBox(height: HollowSpacing.xl),
 
-          Text(
-            'TWITCH VERIFICATION',
-            style: HollowTypography.caption.copyWith(
-              color: hollow.textSecondary,
-              fontWeight: FontWeight.w700,
-              letterSpacing: 1.2,
-            ),
-          ),
-          const SizedBox(height: HollowSpacing.sm),
+          const HollowSectionHeader('Twitch Verification'),
           Text(
             'Gate join requests behind Twitch follow or subscription checks.',
             style: HollowTypography.caption.copyWith(
@@ -1289,15 +1253,8 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
           const SizedBox(height: HollowSpacing.xl),
         ],
 
-        Text(
-          'YOUR IDENTITY',
-          style: HollowTypography.caption.copyWith(
-            color: hollow.textSecondary,
-            fontWeight: FontWeight.w700,
-            letterSpacing: 1.2,
-          ),
-        ),
-        const SizedBox(height: HollowSpacing.md),
+        const HollowSectionHeader('Your Identity'),
+        const SizedBox(height: HollowSpacing.xs),
 
         Text(
           'Server nickname',

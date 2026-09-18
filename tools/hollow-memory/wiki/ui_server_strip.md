@@ -589,7 +589,7 @@ All badges: `hollow.error` background, `hollow.background` border (2px in strip 
 
 ## Shared Helper Functions
 
-Duplicated in all three files:
+Shared by the strip, the bottom bar and the folder popup (one copy each, in `lib/src/core/`):
 
-- `_colorFromId(String id)` — deterministic HSL color: `hue = (id.hashCode % 360).abs()`, saturation 0.5, lightness 0.45. Same algorithm as `HollowAvatar`.
-- `_initialsFromName(String name)` — splits on whitespace, takes first letter of first two words (uppercase). If single word, takes first 2 characters. Clamped to avoid empty string crash.
+- `colorFromId(String id)` (`color_utils.dart`) — deterministic HSL color: `hue = (id.hashCode % 360).abs()`, saturation 0.5, lightness 0.45. Same algorithm as `HollowAvatar`.
+- `initialsFromName(String name)` (`name_initials.dart`) — first letter of the first two words, uppercased; a single word gives its first 2 characters. Clamped to avoid an empty-string crash. Callers pass the server id when the name is empty.

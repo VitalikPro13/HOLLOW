@@ -143,7 +143,7 @@ void main() {
   testWidgets('lists owned items, and a worn kind says so', (tester) async {
     await _pumpPanel(tester);
 
-    expect(find.text('ART YOU OWN'), findsOneWidget);
+    expect(find.text('Art You Own'), findsOneWidget);
     expect(find.text('Import a pack'), findsOneWidget);
 
     expect(find.text('Winter Frame'), findsOneWidget);

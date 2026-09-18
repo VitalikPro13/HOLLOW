@@ -15,6 +15,7 @@ import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/animated_gif_image.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
+import 'package:hollow/src/ui/components/hollow_section_header.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
@@ -130,8 +131,7 @@ class ProfileSection extends ConsumerWidget {
           Container(height: 1, color: hollow.border),
           const SizedBox(height: HollowSpacing.xl),
 
-          const SettingsSectionLabel(label: 'CONNECTIONS'),
-          const SizedBox(height: HollowSpacing.sm),
+          const HollowSectionHeader('Connections'),
           TwitchConnectionRow(hollow: hollow),
 
           // Text fields and cropped images benefit from a single commit, unlike
@@ -321,7 +321,7 @@ class ProfileSection extends ConsumerWidget {
         if (aboutMeController.text.trim().isNotEmpty) ...[
           const SizedBox(height: HollowSpacing.sm),
           Text(
-            'ABOUT ME',
+            'About me',
             style: HollowTypography.micro.copyWith(
               color: hollow.textSecondary,
               fontWeight: FontWeight.w600,
@@ -416,7 +416,7 @@ class ProfileSection extends ConsumerWidget {
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        const SettingsSectionLabel(label: 'DISPLAY NAME'),
+        const SettingsFieldLabel(label: 'Display name'),
         const SizedBox(height: HollowSpacing.xs),
         HollowTextField(
           controller: displayNameController,
@@ -427,7 +427,7 @@ class ProfileSection extends ConsumerWidget {
 
         const SizedBox(height: HollowSpacing.lg),
 
-        const SettingsSectionLabel(label: 'STATUS'),
+        const SettingsFieldLabel(label: 'Status'),
         const SizedBox(height: HollowSpacing.xs),
         HollowTextField(
           controller: statusController,
@@ -437,7 +437,7 @@ class ProfileSection extends ConsumerWidget {
 
         const SizedBox(height: HollowSpacing.lg),
 
-        const SettingsSectionLabel(label: 'ABOUT ME'),
+        const SettingsFieldLabel(label: 'About me'),
         const SizedBox(height: HollowSpacing.xs),
         HollowTextField(
           controller: aboutMeController,

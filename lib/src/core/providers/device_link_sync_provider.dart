@@ -188,11 +188,11 @@ class DeviceLinkSyncNotifier extends Notifier<DeviceLinkState> {
   /// (Empty device) Resolve a code shown on the populated device and request its
   /// snapshot with the chosen scope.
   Future<void> enterCode(String code, {required bool includeVault, required bool includeFiles}) async {
-    if (!_beginWaiting(DeviceLinkState(phase: LinkPhase.waiting, code: code.toUpperCase()))) return;
+    if (!_beginWaiting(DeviceLinkState(phase: LinkPhase.waiting, code: code.toUpperCase()))) return; // design-ignore: link code, data
     final attempt = state;
     try {
       await network_api.resolveLinkCode(
-        code: code.toUpperCase(),
+        code: code.toUpperCase(), // design-ignore: link code, data
         includeVault: includeVault,
         includeFiles: includeFiles,
       );

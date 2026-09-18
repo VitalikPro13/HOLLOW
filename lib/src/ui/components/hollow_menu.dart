@@ -423,12 +423,10 @@ class _HollowMenuHostState extends State<_HollowMenuHost> {
             HollowSpacing.xxs,
           ),
           child: Text(
-            label.toUpperCase(),
+            label,
             style: HollowTypography.caption.copyWith(
               color: hollow.textTertiary,
-              fontWeight: FontWeight.w700,
-              letterSpacing: 0.6,
-              fontSize: 10,
+              fontWeight: FontWeight.w500,
             ),
           ),
         );

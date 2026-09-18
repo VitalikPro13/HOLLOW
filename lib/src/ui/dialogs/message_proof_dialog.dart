@@ -60,7 +60,7 @@ class MessageProofData {
     try {
       final bytes = base64.decode(publicKey!);
       final hex = bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
-      final fingerprint = hex.substring(0, 32).toUpperCase();
+      final fingerprint = hex.substring(0, 32).toUpperCase(); // design-ignore: hex fingerprint, data
       return '${fingerprint.substring(0, 4)} ${fingerprint.substring(4, 8)} '
           '${fingerprint.substring(8, 12)} ${fingerprint.substring(12, 16)} '
           '${fingerprint.substring(16, 20)} ${fingerprint.substring(20, 24)} '
@@ -396,7 +396,7 @@ class _MessageProofDialogContentState
 
                           _stagger(2, child: _InfoRow(
                             hollow: hollow,
-                            label: 'Sender Peer ID',
+                            label: 'Sender peer ID',
                             value: proof.senderPeerId,
                             mono: true,
                             copyable: true,
@@ -422,7 +422,7 @@ class _MessageProofDialogContentState
                             const SizedBox(height: HollowSpacing.sm),
                             _stagger(5, child: _InfoRow(
                               hollow: hollow,
-                              label: 'Public Key Fingerprint',
+                              label: 'Public key fingerprint',
                               value: fingerprint,
                               mono: true,
                               copyable: true,
@@ -432,7 +432,7 @@ class _MessageProofDialogContentState
                             const SizedBox(height: HollowSpacing.sm),
                             _stagger(5, child: _InfoRow(
                               hollow: hollow,
-                              label: 'Ed25519 Signature',
+                              label: 'Ed25519 signature',
                               value: proof.signature!,
                               mono: true,
                               copyable: true,
@@ -687,9 +687,7 @@ class _InfoRow extends StatelessWidget {
           label,
           style: HollowTypography.caption.copyWith(
             color: hollow.textSecondary,
-            fontSize: 10,
             fontWeight: FontWeight.w600,
-            letterSpacing: 0.5,
           ),
         ),
         const SizedBox(height: 2),

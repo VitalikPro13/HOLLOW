@@ -759,7 +759,7 @@ Two formats detected by `encryption::detect_format()`:
 
 **Dart bootstrap flow:** `_bootstrap()` in `hollow_shell.dart` calls `_unlockIdentity()` before `identityProvider.load()`. Silent unlock for plaintext/keychain/flags=0x03. Full-screen password dialog for flags=0x01. Full-screen recovery dialog for keychain failure (flags=0x02 on different machine).
 
-**Settings UI:** Security tab in `user_settings_dialog.dart` has "APP LOCK" section (password + "Ask for password on launch" toggle) and "DEVICE PROTECTION" section (standalone keychain, hidden when password is active).
+**Settings UI:** Security tab in `user_settings_dialog.dart` has "App Lock" section (password + "Ask for password on launch" toggle) and "DEVICE PROTECTION" section (standalone keychain, hidden when password is active).
 
 ## Dedup indexes, unread counts, sync lookback (2026-07-03)
 

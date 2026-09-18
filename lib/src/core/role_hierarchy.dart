@@ -24,3 +24,7 @@ List<String> assignableRoles(String actorRole) {
   }
   return [];
 }
+
+/// A role id as the UI shows it: 'moderator' becomes 'Moderator'.
+String roleDisplayName(String role) =>
+    role.isEmpty ? role : role[0].toUpperCase() + role.substring(1); // design-ignore: capitalises a role id

@@ -75,7 +75,7 @@ Long-press on a channel row in the expanded accordion opens `showMobileChannelAc
 Channel accordion now respects layout ordering + categories:
 - Fetches both `ChannelListNotifier.fetchChannels()` AND `ChannelLayoutNotifier.fetchLayout()` via `Future.wait`
 - Builds `effectiveLayoutFrom(parseLayoutJson(layoutJson), channels)` into a `_DisplayItem` sealed class hierarchy: `_CategoryDisplayItem`, `_ChannelDisplayItem`, `_SeparatorDisplayItem`
-- Categories render as collapsible `_CategoryHeaderRow` (uppercase, chevron toggle, `AnimatedRotation`)
+- Categories render as collapsible `_CategoryHeaderRow` (name as the user typed it, no uppercase; chevron toggle, `AnimatedRotation`)
 - Separators render as `_TreeSeparatorRow` (12px gap with vertical tree line)
 - **Channels missing from the layout come out of the normalisation, NOT a second loop.** Appending them separately (as this did until issue #61) leaves them outside the pass that tracks `currentCategory`, so a channel drawn under a trailing category carries `category: null` and stays on screen when that category is collapsed. `test/sidebar_effective_layout_guard_test.dart` guards this list and the desktop sidebar together. `channels` is pre-filtered by `meCanSee`, so normalisation also drops layout entries for channels this user cannot see.
 - "+" `_CreateChannelRow` at bottom when `canManage` (calls `showCreateChannelDialog` with `onCreated: _loadChannels`)
@@ -229,10 +229,10 @@ Smiley icon (`LucideIcons.smile`) between mic and send buttons. Opens `showModal
 - **Server ID** — `SelectableText` (mono font) + copy button. Always visible.
 - **Your Nickname** — `HollowTextField` + Save. `crdt_api.setNickname()`. Always visible.
 - **Server Template** — Export/Import buttons in a `Row`. Gated by `canManage`. Calls `exportServerTemplate(context, server)` and `importServerTemplate(context, ref, server)` from `server_template.dart`. Export passes `bytes:` on Android/iOS.
-- **Danger Zone** — `_SectionDivider(danger: true)` + `HollowButton.danger()`. Owner: Delete Server (`crdt_api.deleteServer`). Member: Leave Server (`crdt_api.leaveServer`). Both show confirmation dialog and clear server/channel providers on success.
+- **Danger Zone** — `HollowSectionHeader('Danger Zone')` + `HollowButton.danger()`. Owner: Delete Server (`crdt_api.deleteServer`). Member: Leave Server (`crdt_api.leaveServer`). Both show confirmation dialog and clear server/channel providers on success.
 
-### ASOT-Style Section Dividers
-`_SectionDivider` widget: `Row` with two `Divider`s flanking centered label text. Optional `danger: true` for red color.
+### Section headers
+Group titles ("Server Banner", "Access", "Offline Catch-up", "Channels", "Management", "Notifications", "Server ID", "Server Template", "Danger Zone") are the shared `HollowSectionHeader`; the label above a single input ("Server name", "Description", "Your nickname") is `SettingsFieldLabel` from `settings_shared.dart`.
 
 ### Management Drill-Down Rows
 Below the Channels section, a "Management" section with `_NavRow` widgets (icon + label + chevron right):
@@ -277,13 +277,13 @@ Below the Channels section, a "Management" section with `_NavRow` widgets (icon 
 
 ### Layout
 `DraggableScrollableSheet` (initial: 0.5, min: 0.3, max: 0.9) with:
-- Drag handle + "Members" header with users icon
+- Drag handle + `HollowSectionHeader('Members')` (no icon)
 - `ListView.builder` with `_MemberEntry` sealed class (divider or member)
 
 ### Role Grouping
 - Online members grouped by role (Owner → Admin → Moderator → Members) if mixed roles, single "Online" divider if all 'member'
 - Offline members in separate section
-- Role divider labels: "Owner"/"Admin"/"Moderator"/"Members" with glow colors (gold/purple/orange/teal)
+- Group headers: `HollowSectionHeader(label, count:, dense: true)` for "Owner"/"Admin"/"Moderator"/"Members"/"Online"/"Offline"; role words in tiles come from `roleDisplayName()`
 
 ### Member Tile
 - Avatar (36px) + status dot (syncing=yellow, online=green, offline=gray)
@@ -376,7 +376,7 @@ Full-screen scaffold matching MobileServerSettingsRoute chrome: `SafeArea > Colu
   - Avatar (64px, overlapping banner, tappable/long-press)
   - Display name (bold, live-updates on keystroke)
   - Status (italic, live-updates)
-  - Divider + "ABOUT ME" label + about text (live-updates)
+  - Divider + "About me" label + about text (live-updates)
   - Peer ID footer (faded short ID)
 - Text fields below: Display Name (32), Status (48), About Me (128, 3 lines)
 - Save Profile button
@@ -384,7 +384,7 @@ Full-screen scaffold matching MobileServerSettingsRoute chrome: `SafeArea > Colu
 - `_populated` flag ensures fields fill from `profileProvider` on first available build (not stale `initState`)
 
 ### System Tab (`_SystemTab` — `ConsumerStatefulWidget`)
-Sections in order:
+Every settings subpage titles its groups with the shared `HollowSectionHeader` (Title Case, e.g. "Peer ID", "Offline Delivery", "Display Size", "Cache Limits", "Identity Backup"); there is no private section-label class. Sections in order:
 1. **Peer ID** — copyable (mono font, accent color, tap → clipboard)
 2. **Network** — relay domain management:
    - Relay list from `savedRelayListProvider` (radio-style selection, official badge on default)
@@ -392,8 +392,8 @@ Sections in order:
    - Remove relay: X button on non-default relays
    - "Apply & Close App" (conditional) → `relayDomainProvider.setDomain()` → `notifyShutdown()` → `SystemNavigator.pop()`
 3. **Appearance** — `_ThemeToggleRow` (dark/light switch, immediate apply via `themeModeProvider`), `_AccentHueSection` (rainbow slider 0-359° via `RainbowSliderTrackShape`, preset swatches 28x28 in Wrap, long-press to remove, + to save), `_BackgroundSection` (file picker → mobile crop 9:16 → `backgroundProvider.setImage()`, opacity slider 0.0–0.92), `_InvisibleToggleRow` (`invisibleModeProvider`). **Reduce Motion moved out of Appearance** (2026-06-24) into a new **Accessibility** nav tile → `_AccessibilityTab`: a **Display Size** section (`InterfaceScaleControl` + `ChatTextScaleControl` imported from `settings_shared.dart` — the SAME widgets the desktop dialog uses, so the two surfaces cannot drift) + `_ReduceMotionRow` (tri-state Auto/On/Off `_MobileSegment` → `reduceMotionProvider`/`ReduceMotionController`) + `_ReduceTransparencyRow` (`reduceTransparencyProvider`)
-4. **Voice & Audio** — audio quality pills, mic gain slider, audio processing info
-5. **Files** — `_ImageQualityPicker` (Lossless/Balanced/Small pills via `imageQualityProvider`), `_AutoDownloadSlider` (34-2048 MB), `_CacheCapSlider` (256-10240 MB, formatted as GB when ≥1024)
+4. **Voice & Audio** — audio quality chips, mic gain slider, audio processing info
+5. **Files** — `_ImageQualityPicker` (`SettingsFieldLabel` + a `Wrap` of Lossless/Balanced/Small `HollowChip`s via `imageQualityProvider`), `_AutoDownloadSlider` (34-2048 MB), `_CacheCapSlider` (256-10240 MB, formatted as GB when ≥1024)
 6. **Ringtone** — ringtone picker + volume slider
 
 ### Security Tab (App Lock: PIN / password / biometric)
@@ -422,6 +422,8 @@ Sections in order:
 `HollowTextField` with search icon at top. Filters accepted friends by name (case-insensitive substring via `_resolvedName`).
 
 ### Sections (in order)
+Each section is headed by `_sectionHeaderSliver(title, count)`, a `SliverToBoxAdapter` around `HollowSectionHeader(title, count:, dense: true)`.
+
 1. **Requests** (if any pending) — incoming + outgoing with accept/reject/cancel buttons
 2. **Favourites** — starred friends pinned above online, ordered by `favouriteFriendsProvider` list order. Star icon on row.
 3. **Online** — sorted alphabetically by resolved name
@@ -597,7 +599,7 @@ Green bar (success color, 0.1 alpha background): dot + "In voice: #channelName" 
 Added to `_SystemTab` in `mobile_settings_tab.dart`:
 
 ### Voice & Audio Section
-- **Audio quality picker**: 3 pills (Voice/Music/Hi-Fi) with description label underneath. Reads/writes `audioQualityProvider`
+- **Audio quality picker**: `SettingsFieldLabel('Audio quality')` + a `Wrap` of 3 `HollowChip`s (Voice/Music/Hi-Fi) with description label underneath. Reads/writes `audioQualityProvider`
 - **Mic gain slider** (`_MicGainSlider`): 83 divisions, with a caption line. Reads/writes `micGainProvider` (linear multiplier, clamped 0.68–4.0, key `mic_gain_v2`; **default 1.0 = "50%"**). Display = `(gain / kMicGainDisplayUnit(2.0) * 100)%` → 34%–200%. With Voice Enhancement ON it's the chain's input trim (2.0 = unity); OFF = legacy flat gain. **Dims + disables + shows "Auto" while Dynamic mode is on.** Drives `Helper.setCaptureGain()`, live mid-call
 - **Voice Enhancement** (`_VoiceEnhanceToggle`): Switch for `voiceEnhanceProvider` (the native EQ+compressor+limiter chain, default ON) + a **Dynamic Mode** Switch (`voiceEnhanceDynamicProvider`, default ON — auto-level servo, "any microphone lands at the same natural loudness") + a **Strength** slider (`voiceEnhanceStrengthProvider`, 0–150%, default 30%, 30 divisions = compressor makeup). Strength dims/locks ("Auto") while Dynamic is on or enhancement is off
 - **Audio processing info**: Echo cancellation, noise suppression, AGC shown as "Auto" (always on)
@@ -653,6 +655,8 @@ Manual `_scale`, `_offsetX`, `_offsetY` state (no `InteractiveViewer`). On every
 - `crdt_api.getServerSetting(serverId:, key: 'retention_files'/'retention_messages')`
 
 ### Sections
+Each section box is titled `HollowSectionHeader(title, dense: true)`, no section icon.
+
 1. **Server Storage** — colored bar (green/yellow/red by fill %), used/total, vault mode label, member count. Full replication (<6) vs erasure coding (6+) with redundancy factor.
 2. **Your Storage** (6+ members) — pledge amount with edit button (HollowDialog), usage bar.
 3. **Retention Policy** — messages + files retention display. Admin can tap to edit (HollowDialog with radio-style options). Records `_since` timestamp for forward-only pruning.
@@ -681,7 +685,7 @@ Watches `mobileTabProvider` — returns `SizedBox.shrink()` when `activeTab != 2
 - Inner pill tabs: DMs | Channels (uses `myDataInnerTabProvider`, no Vault Files — deferred to Section 25)
 - Search field (uses `archiveSearchProvider`)
 - **DM list:** Avatar + name + message count + eye icon (hide/unhide). Hidden section with expandable `AnimatedSize`. Tap → push `MobileArchiveViewerRoute(peerId:)`. Long-press → bottom sheet (Export, Hide/Unhide).
-- **Channel list:** Grouped by server headers (uppercase). Each channel: # + name + count. Server headers have export icon. Tap → push `MobileArchiveViewerRoute(serverId:, channelId:)`. Long-press → export bottom sheet.
+- **Channel list:** Grouped by server headers (`HollowSectionHeader(serverName, dense: true)`, name as written, export icon as the `action`). Each channel: # + name + count. Tap → push `MobileArchiveViewerRoute(serverId:, channelId:)`. Long-press → export bottom sheet.
 - Selection providers set before push, cleared in `.then()`.
 
 ### _MobileImportedArchivesView (ConsumerStatefulWidget)
@@ -836,8 +840,8 @@ Latest 3 posts from `newsProvider`. Cards show title + date + a 4-line plain-tex
 `HollowButton.ghost` with icons: email (copies to clipboard), website (opens external browser), GitHub (opens `github.com/VitalikPro13/HOLLOW` externally). Uses `BrandIcons.github` for GitHub icon.
 
 ### Follow & Support Section
-Row header: "Follow ---shimmer--- Support" using `_MobileShimmerLine` (same shimmer as desktop `_AboutShimmerLine`).
-Brand icon row: YouTube, X, Twitch, Kick | shimmer divider | Patreon, Ko-Fi. `_MobileBrandIcon` widgets in bordered containers, tap opens external browser.
+Row header: "Follow" and "Support" (`label`, textSecondary) with a plain `HollowDivider` between them.
+Brand icon row: YouTube, X, Twitch, Kick | `HollowDivider` | Patreon, Ko-Fi. `_MobileBrandIcon` widgets in bordered containers, tap opens external browser.
 
 ### Legal Section
 `HollowButton.ghost` with icons: Privacy Policy, Terms of Use (open `_showLegalSheet` — `DraggableScrollableSheet` with `Markdown` widget from `flutter_markdown_plus`, styled `MarkdownStyleSheet` matching desktop), Open-Source Licenses (Flutter's built-in `showLicensePage`).

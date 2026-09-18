@@ -134,7 +134,6 @@ class _RecordingIndicatorState extends State<RecordingIndicator>
               color: recRed,
               fontSize: widget.fontSize,
               fontWeight: FontWeight.w700,
-              letterSpacing: 0.5,
               fontFeatures: const [FontFeature.tabularFigures()],
             ),
           ),

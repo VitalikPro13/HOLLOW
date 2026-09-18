@@ -276,8 +276,6 @@ class _VerifyContactBodyState extends ConsumerState<VerifyContactBody> {
             'Or paste what they read you',
             style: HollowTypography.caption.copyWith(
               color: hollow.textSecondary,
-              fontSize: 11,
-              letterSpacing: 0.5,
             ),
           ),
           const SizedBox(height: HollowSpacing.xs),
@@ -364,7 +362,6 @@ class _NumberBlock extends StatelessWidget {
                         style: HollowTypography.mono.copyWith(
                           color: hollow.textPrimary,
                           fontSize: 17,
-                          letterSpacing: 1.5,
                         ),
                       ),
                   ],

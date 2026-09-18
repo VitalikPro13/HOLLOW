@@ -949,12 +949,12 @@ class _CategoryRow extends StatelessWidget {
             const SizedBox(width: HollowSpacing.sm),
             Expanded(
               child: Text(
-                name.toUpperCase(),
-                style: HollowTypography.caption.copyWith(
-                  color: hollow.accent,
-                  fontWeight: FontWeight.w700,
-                  letterSpacing: 0.8,
+                name,
+                style: HollowTypography.label.copyWith(
+                  color: hollow.textPrimary,
+                  fontWeight: FontWeight.w600,
                 ),
+                overflow: TextOverflow.ellipsis,
               ),
             ),
             HollowTooltip(

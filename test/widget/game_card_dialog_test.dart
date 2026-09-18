@@ -98,21 +98,21 @@ void main() {
 
     // Center panel alive: title + About + the Metacritic tile.
     expect(find.text('Dark Souls III'), findsOneWidget);
-    expect(find.text('ABOUT'), findsOneWidget);
-    expect(find.text('METACRITIC'), findsOneWidget);
+    expect(find.text('About'), findsOneWidget);
+    expect(find.text('Metacritic'), findsOneWidget);
     expect(find.text('89'), findsOneWidget);
     // Right panel alive too.
-    expect(find.text('PLATFORMS'), findsOneWidget);
-    expect(find.text('CREDITS'), findsOneWidget);
+    expect(find.text('Platforms'), findsOneWidget);
+    expect(find.text('Credits'), findsOneWidget);
   });
 
   testWidgets('v10 details render strip, tags, series and reviews',
       (tester) async {
     await pumpCard(tester, v10Details);
 
-    expect(find.text('STEAM REVIEWS'), findsOneWidget);
+    expect(find.text('Steam reviews'), findsOneWidget);
     expect(find.text('Very Positive'), findsOneWidget);
-    expect(find.text('TIME TO BEAT'), findsOneWidget);
+    expect(find.text('Time to beat'), findsOneWidget);
     expect(find.text('~32h'), findsOneWidget);
     expect(find.textContaining('Dark Souls series'), findsOneWidget);
     // Tag chips: dedup means 'Adventure' appears exactly once.
@@ -124,9 +124,9 @@ void main() {
       (tester) async {
     await pumpCard(tester, legacyDetails);
 
-    expect(find.text('SYSTEM REQUIREMENTS'), findsOneWidget);
+    expect(find.text('System requirements'), findsOneWidget);
     expect(find.text('Minimum'), findsNothing);
-    await tester.tap(find.text('SYSTEM REQUIREMENTS'));
+    await tester.tap(find.text('System requirements'));
     await tester.pumpAndSettle();
     expect(find.text('Minimum'), findsOneWidget);
     expect(find.text('Recommended'), findsOneWidget);
@@ -134,7 +134,7 @@ void main() {
 
   testWidgets('light theme builds cleanly too', (tester) async {
     await pumpCard(tester, v10Details, brightness: Brightness.light);
-    expect(find.text('METACRITIC'), findsOneWidget);
-    expect(find.text('ABOUT'), findsOneWidget);
+    expect(find.text('Metacritic'), findsOneWidget);
+    expect(find.text('About'), findsOneWidget);
   });
 }

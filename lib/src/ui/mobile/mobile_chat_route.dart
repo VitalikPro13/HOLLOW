@@ -3195,17 +3195,14 @@ class _MobileChatHeader extends ConsumerWidget {
             ),
             Padding(
               padding: const EdgeInsets.all(HollowSpacing.md),
-              child: Row(
-                children: [
-                  Icon(LucideIcons.pin, size: 18, color: hollow.accent),
-                  const SizedBox(width: HollowSpacing.sm),
-                  Text(
-                    'Pinned Messages',
-                    style: HollowTypography.subheading.copyWith(
-                      color: hollow.textPrimary,
-                    ),
+              child: Align(
+                alignment: AlignmentDirectional.centerStart,
+                child: Text(
+                  'Pinned Messages',
+                  style: HollowTypography.subheading.copyWith(
+                    color: hollow.textPrimary,
                   ),
-                ],
+                ),
               ),
             ),
             if (pinnedMessages.isEmpty)

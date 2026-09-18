@@ -66,7 +66,7 @@ When `StartupRevealScope.interval()` returns non-null, each column is wrapped in
 
 7. **System status card (`HomeStatusCard`):** REPLACED the old Recovery Phrase card (2026-06-27). From `lib/src/ui/shell/system_status_banner.dart`, a `ConsumerWidget` reading `statusProvider`. Shows the calm "✓ All systems operational" green line when healthy (operational level), or the active notice (icon + colored headline + optional message + live countdown) for info/maintenance/warning/critical. The recovery phrase itself was NOT removed from the app — it's still reachable via the user bar, Settings → Security, and the first-launch prompt; it was only removed from the Home dashboard. See the "System Status Banner" section below for the full widget family.
 
-8. **`_SyncStatsCard` (Your Stats):** Full-width `hollow.surface` card directly below the recovery card (fills the former gap). A `ConsumerWidget` that reads `friendsProvider` (accepted count), `serverListProvider` (`.length`), `myDevicesProvider`, and `_dmMessageCountProvider`. Four `_StatRow`s: **Friends**, **Servers**, **DM messages** (from FFI `count_all_dm_messages` = `COUNT(*) FROM messages WHERE hidden_at IS NULL`), **Devices** (`N / M online`, value colored `success` when all siblings online else `warning`; plain "1" on a single-device install). Purpose: multi-device sync eyeball-comparison — open on both devices and compare. **Channel message counts are deliberately NOT shown** (lazy-paging makes them diverge per device even when synced). `_dmMessageCountProvider` is a `FutureProvider.autoDispose` that `ref.watch(lastDmMessageProvider)` to recompute on DM changes. Mobile twin: `mobile_settings_tab.dart:_MobileStatsCard` (after the About tile).
+8. **`_SyncStatsCard` (Your Stats):** Full-width `hollow.surface` card titled `HollowSectionHeader('Your Stats', dense: true)`, directly below the recovery card (fills the former gap). A `ConsumerWidget` that reads `friendsProvider` (accepted count), `serverListProvider` (`.length`), `myDevicesProvider`, and `_dmMessageCountProvider`. Four `_StatRow`s: **Friends**, **Servers**, **DM messages** (from FFI `count_all_dm_messages` = `COUNT(*) FROM messages WHERE hidden_at IS NULL`), **Devices** (`N / M online`, value colored `success` when all siblings online else `warning`; plain "1" on a single-device install). Purpose: multi-device sync eyeball-comparison — open on both devices and compare. **Channel message counts are deliberately NOT shown** (lazy-paging makes them diverge per device even when synced). `_dmMessageCountProvider` is a `FutureProvider.autoDispose` that `ref.watch(lastDmMessageProvider)` to recompute on DM changes. Mobile twin: `mobile_settings_tab.dart:_MobileStatsCard` (after the About tile).
 
 9. **Spacer** pushes peer ID to bottom.
 
@@ -90,7 +90,7 @@ When `StartupRevealScope.interval()` returns non-null, each column is wrapped in
 
 **Sort order:** Conversations sorted by `timestamp` descending (most recent first). The timestamp comes from the last message in `chatHistory[peerId]`; if no messages exist, it falls back to `DateTime(2000)`, placing message-less friends at the bottom.
 
-**Header:** Row with `LucideIcons.messageCircle` (18px) + "Recent Conversations" (`HollowTypography.subheading`, w600).
+**Header:** `HollowSectionHeader('Recent Conversations')` (subheading, no icon).
 
 **Empty state:** Centered column with large `LucideIcons.messageCircle` (40px, 20% alpha), "No conversations yet" body text, "Add a friend to start chatting" caption.
 
@@ -136,7 +136,7 @@ Fields: `peerId` (String), `lastMessage` (ChatMessage?), `timestamp` (DateTime),
 - `relayStatsProvider` — relay server metrics
 - `connectionStatusProvider` — per-peer connection stage details
 
-**Header:** Row with `LucideIcons.activity` (18px) + "Network" (`HollowTypography.subheading`, w600).
+**Header:** `HollowSectionHeader('Network')` (subheading, no icon).
 
 **Node status card:** Full-width container with `hollow.surface` background, `radiusMd` corners, `hollow.border` border. Driven by `overallConnectionProvider` (combines local node + REAL relay-WS state — NOT raw `nodeProvider.status`, which used to falsely show "Connected" with no internet). Contains:
 - `StatusDot` (8px): green + pulse only when `overall.isOnline` (relay actually connected); warning for offline/error; textSecondary while connecting
@@ -155,21 +155,19 @@ The same profile-header "Online/Offline" dot (in `_ProfileColumn`) also reads `o
 
 If no accepted friends exist, shows "No friends added" caption.
 
-**Relay Server section:** `_SectionLabel` "RELAY SERVER" followed by `_RelayStatsCard`.
+**Relay Server section:** `HollowSectionHeader('Relay Server', dense: true)` followed by `_RelayStatsCard`.
 
-**News section:** `_SectionLabel` "NEWS" followed by `_NewsPanel` inside `Flexible` > `ConstrainedBox(minHeight: 140, maxHeight: 280)`.
+**News section:** `HollowSectionHeader('News', dense: true)` followed by `_NewsPanel` inside `Flexible` > `ConstrainedBox(minHeight: 140, maxHeight: 280)`.
 
 **Why not a bare `Expanded` (2026-07-31).** The panel is meant to absorb this column's slack and scroll its posts INTERNALLY, and with a loose `Flexible` fit it still does whenever there is room. The two bounds only matter under the column's outer scroll view: `IntrinsicHeight` makes every flex child contribute its FULL intrinsic height, so an unbounded `Expanded` contributed both posts un-scrolled, inflated the column past the viewport, and handed the scrolling to the OUTER bar even on a tall window — the panel then never collapsed into its own scrollbar. `maxHeight` caps that intrinsic contribution (`RenderConstrainedBox` runs the child's intrinsic through its constraints); `minHeight` stops the panel being squeezed to nothing on a short column. Verified by measuring `maxScrollExtent` on every `Scrollable`: at 1280x800 exactly one scrolls (the news panel), at 967x581 the column adds its own and the panel still scrolls internally.
 
-**Online Users (bottom):** Row with `LucideIcons.users` (13px), "Online" text, `_ShimmerDivider` (fills center), and `relayStats.onlineUsers` count (12px, w600).
+**Online Users (bottom):** Row with `LucideIcons.users` (13px), "Online" text, a plain `HollowDivider` in an `Expanded` (fills center), and `relayStats.onlineUsers` count (12px, w600).
 
 ---
 
-## _SectionLabel — Reusable Section Header
+## Section headers
 
-`home_dashboard.dart:_SectionLabel` is a `StatelessWidget`. Renders uppercase label text in `HollowTypography.caption`, `hollow.textSecondary`, w600, letterSpacing 0.8, fontSize 10.
-
-Used for "FRIENDS", "RELAY SERVER", and "NEWS" section headers in `_NetworkColumn`.
+All group titles on the dashboard use the shared `HollowSectionHeader` (`lib/src/ui/components/hollow_section_header.dart`), written as-is in Title Case: "Recent Conversations" and "Network" at full size, "Friends", "Relay Server", "News" and "Your Stats" with `dense: true`. The header carries its own 8px bottom gap, so no `SizedBox` follows it.
 
 ---
 
@@ -204,7 +202,7 @@ Contains three elements:
 **Empty state:** Returns `SizedBox.shrink()` if `news.posts` is empty.
 
 **Layout:** Column containing:
-1. `_SectionLabel` "NEWS"
+1. `HollowSectionHeader('News', dense: true)`
 2. Expanded container with `hollow.surface` background, `radiusMd` corners, `hollow.border` border.
 
 **Inside the container (Column):**
@@ -273,16 +271,6 @@ Contains three elements:
 - `hasDetail = !operational && (message.isNotEmpty || link.isNotEmpty)`. When false the card returns a plain `Semantics` wrapper with NO chevron and NO focus ring — the healthy state has nothing to reveal, so it must not be an interactive control that expands into nothing.
 - A new `status.id` resets `_expanded` to false during build (same `_lastId` guard the banner uses).
 - Interactive path wraps in `Semantics(container: true, button: true, hint: 'Expand/Collapse notice')` → `HollowFocusRing` → `MouseRegion(click)` → `GestureDetector`, so it is keyboard-operable (a11y CI guards).
-
----
-
-## _ShimmerDivider — Animated Teal Sweep Divider
-
-`home_dashboard.dart:_ShimmerDivider` is a `StatelessWidget`. Renders a 1px horizontal divider with a looping shimmer effect.
-
-Uses `SharedTickers.instance.shimmer` (`ValueListenable<double>`) for animation, avoiding per-instance `AnimationController`. The shimmer position is computed as `value * 4.0 - 1.5`, creating a sweep from left to right.
-
-Gradient: `LinearGradient` from `hollow.border` through `hollow.accent` at 60% opacity back to `hollow.border`, positioned using the animated offset via `Alignment(pos - 0.5, 0)` to `Alignment(pos + 0.5, 0)`.
 
 ---
 

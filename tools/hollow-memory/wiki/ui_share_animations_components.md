@@ -449,7 +449,7 @@ seven steps to fill, then stops. That is a countdown, not motion.
 
 | Notifier | Cycle | Driven By | Used By |
 |----------|-------|-----------|---------|
-| `shimmer` | 4s linear | 30fps lane | `SelectionShimmer`, divider glows |
+| `shimmer` | 4s linear | 30fps lane | `SelectionShimmer` (selected rows) |
 | `typingDots` | 1.2s linear | 30fps lane | Typing indicator dots |
 | `ambient` | 45s linear | 30fps lane | `AmbientBackground`, mobile Chats header glow (reads it at 4.5x for a ~10s ping-pong sweep) |
 
@@ -798,6 +798,24 @@ File: `lib/src/ui/components/hollow_card.dart`
 **Build:** `Container` with specified padding, `radiusMd` corners, `hollow.border` border.
 
 
+## HollowSectionHeader
+
+File: `lib/src/ui/components/hollow_section_header.dart`
+
+`StatelessWidget`. THE title above a group of things, used app-wide (settings cards, dashboard, sidebars, dialogs, mobile subpages); there is no private section-label class anywhere.
+
+**Signature:** `HollowSectionHeader(title, {count, action, subtitle, dense})`.
+
+- Title in `HollowTypography.subheading` (16/600), or `label` (13/500) with `dense: true` for a sub-group; `textPrimary`, single line with ellipsis. Written as-is: Title Case for section/card titles, sentence case elsewhere, never `toUpperCase()` or `letterSpacing`.
+- `count` (String?): after the title in `monoSmall`, `textTertiary`, tabular figures ("12", "3 of 8").
+- `subtitle` (String?): one quiet `caption` line in `textSecondary` under the title.
+- `action` (Widget?): one trailing control, centred on the title and subtitle together.
+- No leading-icon parameter, by design.
+- Carries its own 8px (`HollowSpacing.sm`) bottom gap, so callers add no `SizedBox` after it.
+
+The label above a single settings input is `SettingsFieldLabel` (`settings_shared.dart`), not this.
+
+
 ## StatusDot
 
 File: `lib/src/ui/components/status_dot.dart`
@@ -984,12 +1002,12 @@ Top-level function. Creates `OverlayEntry` with `_ProfileCardOverlay`. Accepts `
 **Content (overlaps banner via `Transform.translate(0, -32)`):**
 - Avatar: 64px `HollowAvatar` with `animate: true`, bordered (3px surface color).
 - Names: Local nickname or server nickname shown as primary (bold, 15px). Profile display name as secondary (11px caption). Falls back to truncated peer ID.
-- Role badge: colored pill with capitalized role name. Colors: owner = warning, admin = purple (#A78BFA), moderator = warning/error blend, member = hidden.
+- Role badge: colored pill with the role name from `roleDisplayName()` (capitalised role id). Colors: owner = warning, admin = purple (#A78BFA), moderator = warning/error blend, member = hidden.
 - Labels: `Wrap` of colored pills from `List<LabelFfi>`. Color parsed from hex with `_parseLabelColor`.
 - Twitch badge: purple pill (#9146FF) with Twitch icon + username. Tappable to open `twitch.tv/{username}`.
 - Status: italic text if non-empty.
 - Divider.
-- About Me: section header "ABOUT ME" (9px, w700, 0.5 letter-spacing) + text (max 4 lines).
+- About Me: `HollowSectionHeader('About me', dense: true)` + text (max 4 lines).
 - Self actions: "Edit Profile" outline button opening `showUserSettingsDialog`.
 - Non-self actions:
   - "Set Nickname" / "Edit Nickname" ghost button opening `showLocalNicknameDialog`.

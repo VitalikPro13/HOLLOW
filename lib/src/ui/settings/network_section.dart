@@ -398,11 +398,11 @@ class _GifProxySettingsCardState extends ConsumerState<GifProxySettingsCard> {
                   'make no web requests at all.',
         ),
         const SizedBox(height: HollowSpacing.md),
-        const SettingsSectionLabel(label: 'Content rating'),
+        const SettingsFieldLabel(label: 'Content rating'),
         const SizedBox(height: HollowSpacing.xs),
         TriStateSegment<String>(
           value: ratings.contains(rating) ? rating : ratings.first,
-          options: [for (final r in ratings) (r, r.toUpperCase())],
+          options: [for (final r in ratings) (r, r.toUpperCase())], // design-ignore: rating acronyms (PG, R)
           onChanged: (r) => ref.read(gifRatingProvider.notifier).setRating(r),
         ),
         const SizedBox(height: HollowSpacing.xs),
@@ -442,7 +442,7 @@ class _GifProxySettingsCardState extends ConsumerState<GifProxySettingsCard> {
         ),
         if (_expanded) ...[
           const SizedBox(height: HollowSpacing.sm),
-          const SettingsSectionLabel(label: 'Your own KLIPY API key'),
+          const SettingsFieldLabel(label: 'Your own KLIPY API key'),
           const SizedBox(height: HollowSpacing.xs),
           _caption(
             hollow,
@@ -510,7 +510,7 @@ class _GifProxySettingsCardState extends ConsumerState<GifProxySettingsCard> {
           ],
           if (direct) ...[
             const SizedBox(height: HollowSpacing.md),
-            const SettingsSectionLabel(label: 'Allowed media hosts'),
+            const SettingsFieldLabel(label: 'Allowed media hosts'),
             const SizedBox(height: HollowSpacing.xs),
             _caption(
               hollow,
@@ -578,7 +578,7 @@ class _GifProxySettingsCardState extends ConsumerState<GifProxySettingsCard> {
                 ),
           ],
           const SizedBox(height: HollowSpacing.md),
-          const SettingsSectionLabel(label: 'Self-hosted proxy'),
+          const SettingsFieldLabel(label: 'Self-hosted proxy'),
           const SizedBox(height: HollowSpacing.xs),
           _caption(
             hollow,
@@ -942,7 +942,7 @@ class _LinkPreviewSettingsCardState
         ),
         if (_expanded) ...[
           const SizedBox(height: HollowSpacing.sm),
-          const SettingsSectionLabel(label: 'Social preview proxy'),
+          const SettingsFieldLabel(label: 'Social preview proxy'),
           const SizedBox(height: HollowSpacing.xs),
           _caption(
             hollow,

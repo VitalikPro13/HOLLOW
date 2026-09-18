@@ -12,6 +12,7 @@ import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_chip.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
+import 'package:hollow/src/ui/components/hollow_section_header.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/saved_messages_avatar.dart';
 import 'package:hollow/src/ui/dialogs/export_archive_dialog.dart';
@@ -349,11 +350,8 @@ class _HiddenHeader extends StatelessWidget {
           const SizedBox(width: HollowSpacing.xs),
           Text(
             'Hidden',
-            style: HollowTypography.caption.copyWith(
+            style: HollowTypography.label.copyWith(
               color: hollow.textSecondary,
-              fontWeight: FontWeight.w700,
-              fontSize: 10,
-              letterSpacing: 0.5,
             ),
           ),
           const SizedBox(width: 6),
@@ -432,25 +430,13 @@ class _ChannelList extends ConsumerWidget {
                   left: HollowSpacing.sm,
                   right: HollowSpacing.sm,
                   top: index == 0 ? 0 : HollowSpacing.md,
-                  bottom: HollowSpacing.xs,
                 ),
-                child: Row(
-                  children: [
-                    Expanded(
-                      child: Text(
-                        item.headerName!,
-                        style: HollowTypography.caption.copyWith(
-                          color: hollow.textSecondary,
-                          fontWeight: FontWeight.w700,
-                          fontSize: 10,
-                          letterSpacing: 0.5,
-                        ),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ),
-                    if (item.group != null)
-                      HollowPressable(
+                child: HollowSectionHeader(
+                  item.headerName!,
+                  dense: true,
+                  action: item.group == null
+                      ? null
+                      : HollowPressable(
                         onTap: () {
                           final g = item.group!;
                           final totalMsgCount = g.channels
@@ -478,7 +464,6 @@ class _ChannelList extends ConsumerWidget {
                         child: Icon(LucideIcons.fileOutput,
                             size: 12, color: hollow.accent),
                       ),
-                  ],
                 ),
               );
             }

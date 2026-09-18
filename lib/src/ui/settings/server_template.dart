@@ -15,6 +15,7 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
+import 'package:hollow/src/ui/components/hollow_section_header.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -613,7 +614,7 @@ Future<bool?> _showConfirmationDialog(
               const SizedBox(height: HollowSpacing.sm),
               Text(
                 'Removed channels will disappear from the sidebar, but their '
-                'messages are never deleted \u2014 they remain in everyone\u2019s '
+                'messages are never deleted. They remain in everyone\u2019s '
                 'local database.',
                 style: HollowTypography.caption
                     .copyWith(color: hollow.textSecondary),
@@ -623,8 +624,7 @@ Future<bool?> _showConfirmationDialog(
               if (diff.nameChange != null ||
                   diff.descriptionChange != null ||
                   diff.iconChanged) ...[
-                _sectionHeader(hollow, 'SETTINGS'),
-                const SizedBox(height: HollowSpacing.xs),
+                const HollowSectionHeader('Settings', dense: true),
                 if (diff.nameChange != null)
                   _changeRow(hollow, LucideIcons.type,
                       'Name \u2192 ${diff.nameChange}'),
@@ -638,8 +638,7 @@ Future<bool?> _showConfirmationDialog(
               ],
 
               if (diff.channelsToAdd.isNotEmpty) ...[
-                _sectionHeader(hollow, 'CHANNELS TO ADD'),
-                const SizedBox(height: HollowSpacing.xs),
+                const HollowSectionHeader('Channels to add', dense: true),
                 for (final ch in diff.channelsToAdd)
                   _changeRow(
                     hollow,
@@ -653,8 +652,7 @@ Future<bool?> _showConfirmationDialog(
               ],
 
               if (diff.channelsToRemove.isNotEmpty) ...[
-                _sectionHeader(hollow, 'CHANNELS TO REMOVE'),
-                const SizedBox(height: HollowSpacing.xs),
+                const HollowSectionHeader('Channels to remove', dense: true),
                 for (final ch in diff.channelsToRemove)
                   _changeRow(
                     hollow,
@@ -689,17 +687,6 @@ Future<bool?> _showConfirmationDialog(
         ],
       );
     },
-  );
-}
-
-Widget _sectionHeader(HollowTheme hollow, String text) {
-  return Text(
-    text,
-    style: HollowTypography.caption.copyWith(
-      color: hollow.textSecondary,
-      fontWeight: FontWeight.w700,
-      letterSpacing: 1.2,
-    ),
   );
 }
 

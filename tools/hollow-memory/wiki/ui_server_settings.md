@@ -79,7 +79,7 @@ Source: `lib/src/ui/settings/overview_tab.dart` (763 lines). `ConsumerStatefulWi
 
 ### Server Settings Section (admin+ only, gated by `canManageServer`)
 
-Entire section wrapped in `if (widget.canManageServer)`. Contains:
+Entire section wrapped in `if (widget.canManageServer)`, headed `HollowSectionHeader('Server Settings')`. Every section header on this tab is the shared `HollowSectionHeader`, written as-is in Title Case ("Server Settings", "Access", "Offline Catch-up", "Server Template", "Twitch Verification", "Your Identity"). Contains:
 
 **Server Icon:**
 - Displays `_stagedIcon ?? serverAvatarProvider[serverId]` as 48x48 `ClipRRect` image (gaplessPlayback), or a placeholder container with image icon; 14px spinner overlay while `_iconBusy`
@@ -104,14 +104,14 @@ Entire section wrapped in `if (widget.canManageServer)`. Contains:
 - `_saveDescription()`: calls `crdt_api.updateServerSetting(serverId, 'description', desc)`
 
 **Access (private + member cap):**
-- Section header "ACCESS".
+- Section header "Access".
 - **Private server** toggle (`HollowToggle`, `_isPrivate`) with subtitle "New members can't join via the link." When ON, the join handler rejects all new joiners.
 - **Max members** field (`HollowTextField`, `_maxMembersController`, digits-only, hint "Unlimited") + helper "Leave blank for no limit. Existing members are never removed."
 - ONE section-level **"Save Access Settings"** `HollowButton.filled` placed BELOW both controls (right-aligned, like "Save Twitch Settings") — NOT an inline save next to the input (that wrongly reads as "save this field").
 - `_saveAccessSettings()`: parses the field (0/empty = unlimited, stored as "0"). For a finite cap, fetches the LIVE member count via `crdt_api.getServerMembers().length` (not the possibly-stale `ServerInfo.memberCount`) and rejects with a toast if the cap is below the current count. Writes `is_private` and `max_members` via `crdt_api.updateServerSetting` (reuses `ServerSettingChanged` — no new CRDT op). Enforcement is on the Rust join handler; see `rust_sync_handler.md` / `swarm.rs ServerJoinRequest`.
 
 **Server Template:**
-- Section header "SERVER TEMPLATE" with description text
+- Section header "Server Template" with description text
 - "Export" button (`HollowButton.outline`) -> `exportServerTemplate(context, server)`
 - "Import" button (`HollowButton.outline`) -> `importServerTemplate(context, ref, server)`
 
@@ -122,7 +122,7 @@ Entire section wrapped in `if (widget.canManageServer)`. Contains:
 
 ### Twitch Verification Section (admin+ only, inside `canManageServer`)
 
-Section header "TWITCH VERIFICATION" with description "Gate join requests behind Twitch follow or subscription checks."
+Section header "Twitch Verification" with description "Gate join requests behind Twitch follow or subscription checks."
 
 **Enable toggle:**
 - Row with Twitch icon (SimpleIcons.twitch, purple #9146FF), label "Require Twitch Verification", `HollowToggle`
@@ -163,7 +163,7 @@ Section header "TWITCH VERIFICATION" with description "Gate join requests behind
 Always visible regardless of `canManageServer`.
 
 **Server Nickname:**
-- Section header "YOUR IDENTITY"
+- Section header "Your Identity"
 - Label "Server Nickname" with description "This nickname is only visible on this server. Leave empty to use your display name."
 - `HollowTextField` with `_nicknameController`, hint "Nickname (optional)", `maxLength: 32`, `onSubmitted` triggers save
 - "Save" `HollowButton.filled`, disabled while `_savingNickname`
@@ -259,7 +259,7 @@ Three sealed classes represent layout items:
 **`_CategoryRow`:** Accent-tinted container with:
 - Drag handle (gripVertical icon)
 - Folder icon in accent color
-- Category name in uppercase, accent color, bold, letter-spacing 0.8
+- Category name as the user typed it (no uppercase), `label` style, textPrimary, w600, ellipsis
 - ShieldCheck icon button -> **category bulk-apply** (issue #32): `_bulkApplyAccess(index, name)` forward-scans `_layout` from the category's INDEX (never its name — duplicates legal) to the next Category/Separator, skips public channels, opens `showCategoryBulkAccessDialog` (`category_bulk_access_dialog.dart` — per-dimension toggle cards + tier-or-Custom chips), then stamps each channel SEQUENTIALLY with per-channel optimistic+revert and a summary toast that never implies rollback. Posting skipped for voice channels. No Rust support — pure Dart over the per-channel setters.
 - Pencil icon button -> rename
 - Trash icon button -> delete
@@ -532,7 +532,7 @@ Storage keys: `notif:{serverId}` for server level, `notif:{serverId}:{channelId}
 
 ### Server-Wide Setting
 
-Section header "SERVER NOTIFICATIONS" with description "Default notification level for all channels in this server."
+`HollowSectionHeader('Server Notifications')` with description "Default notification level for all channels in this server."
 
 `_NotificationLevelSelector`: Row of three `_LevelChip` widgets:
 - "All Messages" (bell icon, accent color when selected)
@@ -545,7 +545,7 @@ On change: `notifNotifier.setServerLevel(serverId, level)`.
 
 ### Per-Channel Overrides
 
-Section header "CHANNEL OVERRIDES" with description "Override notification settings for specific channels."
+`HollowSectionHeader('Channel Overrides')` with description "Override notification settings for specific channels."
 
 For each channel in `channelListProvider`:
 - Row with hash icon, channel name (ellipsized), `ChannelOverrideDropdown`
@@ -678,9 +678,9 @@ Five phases:
 
 `HollowDialog` titled "Apply Template" showing:
 - "Apply '{name}' to this server?" header
-- Safety note: "Removed channels will disappear from the sidebar, but their messages are never deleted -- they remain in everyone's local database."
-- **SETTINGS section:** name change, description update, icon change (each with appropriate icon)
-- **CHANNELS TO ADD:** listed with hash/volume icon in accent color
-- **CHANNELS TO REMOVE:** listed with hash/volume icon in error color
+- Safety note: "Removed channels will disappear from the sidebar, but their messages are never deleted. They remain in everyone's local database."
+- **Settings** section (`HollowSectionHeader('Settings', dense: true)`): name change, description update, icon change (each with appropriate icon)
+- **Channels to add** (dense `HollowSectionHeader`): listed with hash/volume icon in accent color
+- **Channels to remove** (dense `HollowSectionHeader`): listed with hash/volume icon in error color
 - **Layout note:** if only ordering changed, shows "Channel ordering will be updated"
 - Cancel ghost button, "Apply Template" danger button (returns bool)

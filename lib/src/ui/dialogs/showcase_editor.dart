@@ -17,6 +17,7 @@ import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
+import 'package:hollow/src/ui/components/hollow_section_header.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -387,7 +388,7 @@ class _ShowcaseEditorDialogState extends ConsumerState<_ShowcaseEditorDialog> {
           ),
           const SizedBox(height: HollowSpacing.lg),
           _SideEditor(
-            label: 'LEFT BOARD',
+            label: 'Left board',
             blocks: _board.left,
             busy: _busy,
             onChanged: (blocks) =>
@@ -397,7 +398,7 @@ class _ShowcaseEditorDialogState extends ConsumerState<_ShowcaseEditorDialog> {
           ),
           const SizedBox(height: HollowSpacing.lg),
           _SideEditor(
-            label: 'RIGHT BOARD',
+            label: 'Right board',
             blocks: _board.right,
             busy: _busy,
             onChanged: (blocks) =>
@@ -456,28 +457,11 @@ class _SideEditor extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Row(
-          children: [
-            Text(
-              label,
-              style: HollowTypography.caption.copyWith(
-                color: hollow.textSecondary,
-                fontWeight: FontWeight.w700,
-                letterSpacing: 0.5,
-                fontSize: 10,
-              ),
-            ),
-            const SizedBox(width: HollowSpacing.xs),
-            Text(
-              '${blocks.length}/${ShowcaseBoard.maxBlocksPerSide}',
-              style: HollowTypography.caption.copyWith(
-                color: hollow.textSecondary.withValues(alpha: 0.6),
-                fontSize: 10,
-              ),
-            ),
-          ],
+        HollowSectionHeader(
+          label,
+          dense: true,
+          count: '${blocks.length}/${ShowcaseBoard.maxBlocksPerSide}',
         ),
-        const SizedBox(height: HollowSpacing.xs),
         if (blocks.isEmpty)
           Text(
             'Empty. This side isn\'t shown.',

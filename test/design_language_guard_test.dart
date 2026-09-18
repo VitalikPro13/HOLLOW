@@ -103,7 +103,7 @@ final _rules = <_Rule>[
         'not a literal',
     pattern: RegExp(r'\bfontSize\s*:'),
     excludeDirs: [_theme],
-    baseline: 744,
+    baseline: 703,
   ),
   _Rule(
     id: 'material-colors',
@@ -120,7 +120,7 @@ final _rules = <_Rule>[
         'HollowTheme',
     pattern: RegExp(r'\bColor\(\s*0x'),
     excludeDirs: [_theme],
-    baseline: 138,
+    baseline: 137,
   ),
   _Rule(
     id: 'radius-literal',
@@ -128,7 +128,7 @@ final _rules = <_Rule>[
     fix: 'use hollow.radiusXs / radiusMd / radiusLg / radiusXl',
     pattern: RegExp(r'BorderRadius\.circular\(\s*[0-9]'),
     excludeDirs: [_theme],
-    baseline: 153,
+    baseline: 149,
   ),
   _Rule(
     id: 'letter-spacing',
@@ -136,7 +136,7 @@ final _rules = <_Rule>[
     fix: 'hierarchy comes from weight and colour, not tracking',
     pattern: RegExp(r'\bletterSpacing\s*:'),
     excludeDirs: [_theme],
-    baseline: 57,
+    baseline: 0,
   ),
   _Rule(
     id: 'upper-case-label',
@@ -145,7 +145,7 @@ final _rules = <_Rule>[
         'generated-UI tell',
     pattern: RegExp(r'\.toUpperCase\(\)'),
     excludeDirs: [_theme],
-    baseline: 42,
+    baseline: 0,
   ),
   _Rule(
     id: 'raw-divider',
@@ -153,7 +153,7 @@ final _rules = <_Rule>[
     fix: 'use HollowDivider',
     pattern: RegExp(r'(?<![\w.])(Vertical)?Divider\('),
     excludeDirs: [_theme, _components],
-    baseline: 51,
+    baseline: 41,
   ),
   _Rule(
     id: 'local-label-class',
@@ -161,6 +161,15 @@ final _rules = <_Rule>[
     fix: 'clickable is HollowChip, static is HollowBadge; there is no third '
         'option',
     pattern: RegExp(r'^\s*class\s+\w*(Chip|Pill|Tag|Badge)\w*\b'),
+    excludeDirs: [_theme, _components],
+    baseline: 0,
+  ),
+  _Rule(
+    id: 'local-section-header',
+    what: 'a local section header / section label class outside components/',
+    fix: 'a group title is HollowSectionHeader; the label above one settings '
+        'field is SettingsFieldLabel',
+    pattern: RegExp(r'^\s*class\s+\w*Section(Label|Header|Title)\b'),
     excludeDirs: [_theme, _components],
     baseline: 0,
   ),
@@ -191,7 +200,7 @@ final _rules = <_Rule>[
     pattern:
         RegExp(r'EdgeInsets\.(all|symmetric|only|fromLTRB)\([^)]*\b\d'),
     excludeDirs: [_theme],
-    baseline: 236,
+    baseline: 233,
   ),
   _Rule(
     id: 'sized-box-gap',
@@ -200,7 +209,7 @@ final _rules = <_Rule>[
         'chips), 12 grouped, 16 separated, 24 sectioned',
     pattern: RegExp(r'SizedBox\(\s*(width|height)\s*:\s*\d'),
     excludeDirs: [_theme],
-    baseline: 182,
+    baseline: 178,
   ),
   _Rule(
     id: 'gradient',
@@ -209,7 +218,7 @@ final _rules = <_Rule>[
     pattern: RegExp(r'\b(Linear|Radial|Sweep)Gradient\b'),
     excludeDirs: [_theme],
     excludeFiles: ['annotation_overlay.dart'],
-    baseline: 23,
+    baseline: 21,
   ),
   _Rule(
     id: 'big-shadow',

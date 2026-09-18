@@ -7,12 +7,13 @@ import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
+import 'package:hollow/src/ui/components/hollow_divider.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
+import 'package:hollow/src/ui/components/hollow_section_header.dart';
 import 'package:hollow/src/ui/components/hollow_tooltip.dart';
 import 'package:hollow/src/ui/components/version_egg_tap_target.dart';
 import 'package:hollow/src/ui/settings/about_shared.dart';
-import 'package:hollow/src/ui/settings/settings_shared.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// About category of the desktop Settings dialog: app identity, contact,
@@ -87,8 +88,7 @@ class AboutTab extends ConsumerWidget {
           _aboutDivider(hollow),
           const SizedBox(height: HollowSpacing.lg),
 
-          _aboutSectionLabel('Contact', hollow),
-          const SizedBox(height: HollowSpacing.sm),
+          const HollowSectionHeader('Contact'),
           aboutLinkButton(
             onPressed: () => copySupportEmail(context),
             icon: LucideIcons.mail,
@@ -145,7 +145,7 @@ class AboutTab extends ConsumerWidget {
               ),
 
               const SizedBox(width: HollowSpacing.sm),
-              Expanded(child: ShimmerDividerLine(hollow: hollow)),
+              const Expanded(child: HollowDivider()),
               const SizedBox(width: HollowSpacing.sm),
 
               _BrandIcon(
@@ -168,8 +168,7 @@ class AboutTab extends ConsumerWidget {
           _aboutDivider(hollow),
           const SizedBox(height: HollowSpacing.lg),
 
-          _aboutSectionLabel('Legal', hollow),
-          const SizedBox(height: HollowSpacing.sm),
+          const HollowSectionHeader('Legal'),
           aboutLinkButton(
             onPressed: () => _showLegalDocument(
               context,
@@ -220,33 +219,19 @@ class AboutTab extends ConsumerWidget {
     );
   }
 
-  static Widget _aboutSectionLabel(String text, HollowTheme hollow) {
-    return Text(
-      text,
-      style: HollowTypography.label.copyWith(
-        color: hollow.textSecondary,
-        fontWeight: FontWeight.w600,
-        letterSpacing: 0.5,
-      ),
-    );
-  }
-
   static Widget _aboutDivider(HollowTheme hollow) {
     return Container(height: 1, color: hollow.border.withValues(alpha: 0.5));
   }
 
   static Widget _aboutShimmerLabel(
       String left, String right, HollowTheme hollow) {
-    final style = HollowTypography.label.copyWith(
-      color: hollow.textSecondary,
-      fontWeight: FontWeight.w600,
-      letterSpacing: 0.5,
-    );
+    final style =
+        HollowTypography.subheading.copyWith(color: hollow.textPrimary);
     return Row(
       children: [
         Text(left, style: style),
         const SizedBox(width: HollowSpacing.sm),
-        Expanded(child: ShimmerDividerLine(hollow: hollow)),
+        const Expanded(child: HollowDivider()),
         const SizedBox(width: HollowSpacing.sm),
         Text(right, style: style),
       ],

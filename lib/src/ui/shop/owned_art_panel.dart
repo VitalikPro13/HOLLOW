@@ -20,10 +20,10 @@ import 'package:hollow/src/ui/components/hollow_badge.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
+import 'package:hollow/src/ui/components/hollow_section_header.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/hollow_toggle.dart';
 import 'package:hollow/src/ui/mobile/mobile_page_route.dart';
-import 'package:hollow/src/ui/settings/settings_shared.dart';
 import 'package:hollow/src/ui/shop/hollowpack_import.dart';
 import 'package:hollow/src/ui/shop/shop_dashboard.dart';
 import 'package:hollow/src/ui/shop/redeem_code_dialog.dart';
@@ -79,40 +79,37 @@ class _OwnedArtPanelState extends ConsumerState<OwnedArtPanel> {
     final items = ref.watch(ownedArtProvider);
     final compact = widget.compact;
 
-    final header = Row(
-      children: [
-        Expanded(
-          child: compact
-              ? Text(
+    final importButton = HollowButton.outline(
+      onPressed: () => pickAndImportHollowpack(context, ref),
+      compact: true,
+      icon: const Icon(LucideIcons.packageOpen, size: 14),
+      child: const Text('Import a pack'),
+    );
+    final Widget header = compact
+        ? Row(
+            children: [
+              Expanded(
+                child: Text(
                   'Art you own',
                   style: HollowTypography.caption
                       .copyWith(color: hollow.textSecondary),
-                )
-              : const SettingsSectionLabel(label: 'ART YOU OWN'),
-        ),
-        HollowButton.outline(
-          onPressed: () => pickAndImportHollowpack(context, ref),
-          compact: true,
-          icon: const Icon(LucideIcons.packageOpen, size: 14),
-          child: const Text('Import a pack'),
-        ),
-      ],
-    );
+                ),
+              ),
+              importButton,
+            ],
+          )
+        : HollowSectionHeader(
+            'Art You Own',
+            subtitle: 'or drop a .hollowpack here',
+            action: importButton,
+          );
 
     final body = Column(
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         header,
-        if (!compact) ...[
-          const SizedBox(height: HollowSpacing.xs),
-          Text(
-            'or drop a .hollowpack here',
-            style: HollowTypography.caption
-                .copyWith(color: hollow.textTertiary, fontSize: 11),
-          ),
-        ],
-        const SizedBox(height: HollowSpacing.md),
+        const SizedBox(height: HollowSpacing.xs),
         if (items.isEmpty)
           _EmptyState(onOpenShop: _openShop)
         else
@@ -452,8 +449,7 @@ class _KeptCodesSection extends ConsumerWidget {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         const SizedBox(height: HollowSpacing.lg),
-        const SettingsSectionLabel(label: 'CODES KEPT FOR LATER'),
-        const SizedBox(height: HollowSpacing.xs),
+        const HollowSectionHeader('Codes kept for later', dense: true),
         Text(
           'Codes that arrived by a receipt link and are not redeemed yet. '
           'Redeem one to light its support mark and fetch the art; the '
@@ -661,8 +657,7 @@ class _SupportMarksSectionState extends ConsumerState<_SupportMarksSection> {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         const SizedBox(height: HollowSpacing.lg),
-        const SettingsSectionLabel(label: 'SUPPORT MARKS'),
-        const SizedBox(height: HollowSpacing.xs),
+        const HollowSectionHeader('Support marks', dense: true),
         Text(
           'Each mark proves you bought the art, without the shop knowing it '
           'was you. It shows on your profile card whether or not you wear '

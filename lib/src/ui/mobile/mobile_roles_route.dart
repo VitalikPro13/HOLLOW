@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/role_hierarchy.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
@@ -215,7 +216,7 @@ class _RoleSection extends StatelessWidget {
                 Icon(_roleIcon(role), size: 18, color: color),
                 const SizedBox(width: HollowSpacing.sm),
                 Text(
-                  role[0].toUpperCase() + role.substring(1),
+                  roleDisplayName(role),
                   style: HollowTypography.body.copyWith(
                     color: color, fontWeight: FontWeight.w600,
                   ),

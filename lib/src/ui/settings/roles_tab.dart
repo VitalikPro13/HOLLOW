@@ -1,5 +1,6 @@
 ﻿import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/role_hierarchy.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
@@ -108,7 +109,7 @@ class _RolesTabState extends ConsumerState<RolesTab> {
       if (mounted) {
         HollowToast.show(
           context,
-          '${role[0].toUpperCase()}${role.substring(1)} permissions reset to defaults',
+          '${roleDisplayName(role)} permissions reset to defaults',
           type: HollowToastType.success,
         );
       }
@@ -147,7 +148,7 @@ class _RolesTabState extends ConsumerState<RolesTab> {
   Widget _buildRoleSection(String role, HollowTheme hollow, bool canEdit) {
     final info = _roleColors[role]!;
     final perms = _perms[role] ?? _defaults[role] ?? 0;
-    final displayName = role[0].toUpperCase() + role.substring(1);
+    final displayName = roleDisplayName(role);
 
     return Container(
       padding: const EdgeInsets.all(HollowSpacing.lg),

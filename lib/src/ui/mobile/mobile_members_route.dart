@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/role_hierarchy.dart';
 import 'package:hollow/src/core/moderation_format.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart'
     show mutedMembersProvider;
@@ -384,7 +385,7 @@ class _MemberRow extends ConsumerWidget {
                       ),
                       maxLines: 1, overflow: TextOverflow.ellipsis),
                   Text(
-                    member.role[0].toUpperCase() + member.role.substring(1),
+                    roleDisplayName(member.role),
                     style: HollowTypography.caption.copyWith(
                       color: _roleColor(member.role, hollow),
                     ),
@@ -459,7 +460,7 @@ class _MemberRow extends ConsumerWidget {
                     Icon(LucideIcons.shield, size: 18,
                         color: _roleColor(newRole, hollow)),
                     const SizedBox(width: HollowSpacing.md),
-                    Text('Set ${newRole[0].toUpperCase()}${newRole.substring(1)}',
+                    Text('Set ${roleDisplayName(newRole)}',
                         style: HollowTypography.body.copyWith(color: hollow.textPrimary)),
                   ],
                 ),

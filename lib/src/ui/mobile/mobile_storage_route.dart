@@ -10,6 +10,7 @@ import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
+import 'package:hollow/src/ui/components/hollow_section_header.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/status_dot.dart';
@@ -119,8 +120,6 @@ class _MobileStorageRouteState extends ConsumerState<MobileStorageRoute> {
                     onPressed: () => Navigator.of(context).pop(),
                     icon: Icon(Icons.arrow_back, color: hollow.textPrimary),
                   ),
-                  Icon(LucideIcons.hardDrive, size: 18, color: hollow.accent),
-                  const SizedBox(width: HollowSpacing.sm),
                   Text('Storage', style: HollowTypography.subheading.copyWith(
                     color: hollow.textPrimary, fontWeight: FontWeight.w600,
                   )),
@@ -136,7 +135,6 @@ class _MobileStorageRouteState extends ConsumerState<MobileStorageRoute> {
                       children: [
                         _SectionCard(
                           hollow: hollow,
-                          icon: LucideIcons.server,
                           title: 'Server Storage',
                           child: _buildServerOverview(hollow, memberCount),
                         ),
@@ -146,7 +144,6 @@ class _MobileStorageRouteState extends ConsumerState<MobileStorageRoute> {
                         if (memberCount >= 6) ...[
                           _SectionCard(
                             hollow: hollow,
-                            icon: LucideIcons.user,
                             title: 'Your Storage',
                             child: _buildYourStorage(hollow),
                           ),
@@ -155,7 +152,6 @@ class _MobileStorageRouteState extends ConsumerState<MobileStorageRoute> {
 
                         _SectionCard(
                           hollow: hollow,
-                          icon: LucideIcons.clock,
                           title: 'Retention Policy',
                           child: _buildRetention(hollow, canEdit),
                         ),
@@ -164,7 +160,6 @@ class _MobileStorageRouteState extends ConsumerState<MobileStorageRoute> {
 
                         _SectionCard(
                           hollow: hollow,
-                          icon: LucideIcons.shield,
                           title: 'Vault Health',
                           child: _buildVaultHealth(hollow, vaultStatus, memberCount),
                         ),
@@ -173,7 +168,6 @@ class _MobileStorageRouteState extends ConsumerState<MobileStorageRoute> {
                           const SizedBox(height: HollowSpacing.md),
                           _SectionCard(
                             hollow: hollow,
-                            icon: LucideIcons.users,
                             title: 'Member Pledges',
                             child: _buildMemberPledges(hollow, memberCount),
                           ),
@@ -555,13 +549,11 @@ class _MobileStorageRouteState extends ConsumerState<MobileStorageRoute> {
 
 class _SectionCard extends StatelessWidget {
   final HollowTheme hollow;
-  final IconData icon;
   final String title;
   final Widget child;
 
   const _SectionCard({
     required this.hollow,
-    required this.icon,
     required this.title,
     required this.child,
   });
@@ -577,16 +569,8 @@ class _SectionCard extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(children: [
-            Icon(icon, size: 14, color: hollow.accent),
-            const SizedBox(width: HollowSpacing.sm),
-            Text(title, style: HollowTypography.caption.copyWith(
-              color: hollow.accent,
-              fontWeight: FontWeight.w600,
-              letterSpacing: 0.5,
-            )),
-          ]),
-          const SizedBox(height: HollowSpacing.md),
+          HollowSectionHeader(title, dense: true),
+          const SizedBox(height: HollowSpacing.xs),
           child,
         ],
       ),

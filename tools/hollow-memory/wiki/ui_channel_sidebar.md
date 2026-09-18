@@ -75,7 +75,7 @@ Each icon is wrapped in `HollowTooltip` > `HollowPressable` with `borderRadius: 
 
 The `_ServerContentState.build()` method calls `_buildLayoutItems()` to produce a `List<Widget>` of channel tiles, category headers, and separators. It then checks `hasCategories` (whether any `_CategoryHeader` was produced):
 
-- **No categories:** Shows a fallback "TEXT CHANNELS" uppercase label row with an optional `+` button (gated by `canManageChannels`), then a `Divider`, then the items `ListView`.
+- **No categories:** Shows a fallback `HollowSectionHeader('Text channels', dense: true)` whose `action` is the `+` "Create channel" button (gated by `canManageChannels`), then a `Divider`, then the items `ListView`.
 - **Has categories:** Skips the fallback header and goes straight to the `ListView`.
 
 If `items` is empty, shows a centered "No channels" text instead of the `ListView`.
@@ -115,7 +115,7 @@ Category collapsed state is stored in a **module-level** `Map<String, bool>` cal
 
 `file:_CategoryHeaderState` reads `_categoryCollapsedState[widget.name] ?? false` to determine the collapsed state. The widget renders a `HollowPressable` (subtle mode) containing:
 - An `AnimatedRotation` chevron: `LucideIcons.chevronDown` (10px). When collapsed, rotates -0.25 turns (90 degrees clockwise, pointing right). When expanded, rotation is 0.
-- The category name in uppercase, `HollowTypography.caption`, `FontWeight.w600`, `letterSpacing: 0.8`.
+- The category name exactly as the user typed it (no uppercase), `HollowTypography.label`, single line with ellipsis.
 
 Tapping toggles `_categoryCollapsedState[widget.name]` and calls both `setState()` (to rebuild the header's chevron) and `widget.onToggle?.call()` (to trigger `setState()` on `_ServerContentState`, which rebuilds the channel list and updates visibility).
 
@@ -273,11 +273,11 @@ Watches `friendsProvider` and splits friends into three lists:
 1. "Add Friend" button -- `HollowButton.outline` with `LucideIcons.userPlus`, full width (`expand: true`). Tapping calls `_showAddFriendDialog()`.
 2. Divider.
 3. Pending section (conditional, only if `hasPending`):
-   - "PENDING" uppercase label with count badge, flanked by divider lines.
+   - `HollowSectionHeader('Pending', dense: true, count: incoming + outgoing)`.
    - `_PendingRequestTile` for each incoming request (with accept/reject buttons).
    - `_PendingRequestTile` for each outgoing request (with clock icon, no action buttons).
    - Bottom divider.
-4. "FRIENDS" uppercase label with count badge, same flanked-divider pattern.
+4. `HollowSectionHeader('Friends', dense: true, count: accepted.length)`.
 5. Friends list (`Expanded`):
    - If empty and no pending: empty state with `LucideIcons.users` (48px, 30% opacity), "No friends yet" heading, "Add a friend by their peer ID" caption.
    - Otherwise: `ListView.builder` rendering `PeerCard` for each accepted friend. Each `PeerCard` receives: `peerId`, `isSelected`, `isEncrypted` (from peer info, defaults false), `isOnline` (presence in peers map), `lastMessage`, `formatTime`, `onTap`.
@@ -326,7 +326,7 @@ canManageChannels: selectedServer != null &&
     (ref.watch(myPermissionsProvider(selectedServer.serverId)).whenOrNull(
         data: (perms) => (perms & Permission.manageChannels) != 0) ?? false)
 ```
-The button only appears when the fallback "TEXT CHANNELS" header is shown (no categories in layout). When categories are present, there is no create channel button in the sidebar -- but since issue #61 the right-click menus cover that case (see below).
+The button only appears when the fallback "Text channels" header is shown (no categories in layout). When categories are present, there is no create channel button in the sidebar -- but since issue #61 the right-click menus cover that case (see below).
 
 ## Context Menus (issue #61)
 

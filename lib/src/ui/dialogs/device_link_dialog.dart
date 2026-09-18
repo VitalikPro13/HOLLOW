@@ -13,6 +13,7 @@ import 'package:hollow/src/ui/app.dart' show hollowNavigatorKey;
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_focus_ring.dart';
+import 'package:hollow/src/ui/components/hollow_section_header.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
@@ -294,7 +295,6 @@ class _DeviceLinkContentState extends ConsumerState<_DeviceLinkContent> {
               color: hollow.textPrimary,
               fontFamily: 'monospace',
               fontSize: 30,
-              letterSpacing: 2,
               fontWeight: FontWeight.w700,
             ),
           ),
@@ -348,7 +348,6 @@ class _DeviceLinkContentState extends ConsumerState<_DeviceLinkContent> {
           style: HollowTypography.heading.copyWith(
             color: hollow.textPrimary,
             fontFamily: 'monospace',
-            letterSpacing: 6,
             fontSize: 22,
           ),
         ),
@@ -392,10 +391,7 @@ class _DeviceLinkContentState extends ConsumerState<_DeviceLinkContent> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text('TRANSFER OPTIONS',
-            style: HollowTypography.caption.copyWith(
-                color: hollow.textSecondary, fontSize: 10, letterSpacing: 1)),
-        const SizedBox(height: HollowSpacing.sm),
+        const HollowSectionHeader('Transfer options', dense: true),
         _checkRow(hollow, 'Include downloaded files', _includeFiles,
             () => setState(() => _includeFiles = !_includeFiles)),
         const SizedBox(height: HollowSpacing.xs),
@@ -672,7 +668,7 @@ class UpperCaseTextFormatter extends TextInputFormatter {
   @override
   TextEditingValue formatEditUpdate(TextEditingValue oldValue, TextEditingValue newValue) {
     return TextEditingValue(
-      text: newValue.text.toUpperCase(),
+      text: newValue.text.toUpperCase(), // design-ignore: the typed link code, data
       selection: newValue.selection,
     );
   }

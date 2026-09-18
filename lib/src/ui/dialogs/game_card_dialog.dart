@@ -12,6 +12,7 @@ import 'package:hollow/src/ui/components/hollow_badge.dart';
 import 'package:hollow/src/ui/components/hollow_chip.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
+import 'package:hollow/src/ui/components/hollow_section_header.dart';
 import 'package:hollow/src/ui/components/platform_icons.dart';
 import 'package:hollow/src/ui/components/showcase_image_stats.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -423,8 +424,7 @@ class _CenterPanel extends StatelessWidget {
               ],
 
               if (details.description.isNotEmpty) ...[
-                const _SectionLabel('About'),
-                const SizedBox(height: HollowSpacing.xs),
+                const HollowSectionHeader('About', dense: true),
                 Text(
                   details.description,
                   style: HollowTypography.body.copyWith(
@@ -725,7 +725,7 @@ class _StatTile extends StatelessWidget {
               const SizedBox(width: 4),
               Flexible(
                 child: Text(
-                  label.toUpperCase(),
+                  label,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: HollowTypography.micro.copyWith(
@@ -767,26 +767,6 @@ class _StatTile extends StatelessWidget {
   }
 }
 
-class _SectionLabel extends StatelessWidget {
-  final String text;
-
-  const _SectionLabel(this.text);
-
-  @override
-  Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-    return Text(
-      text.toUpperCase(),
-      style: HollowTypography.caption.copyWith(
-        color: hollow.textTertiary,
-        fontWeight: FontWeight.w700,
-        letterSpacing: 0.8,
-        fontSize: 10,
-      ),
-    );
-  }
-}
-
 class _DetailsPanel extends StatelessWidget {
   final String name;
   final GameDetails details;
@@ -808,8 +788,7 @@ class _DetailsPanel extends StatelessWidget {
         children.add(const SizedBox(height: HollowSpacing.lg));
       }
       children
-        ..add(_SectionLabel(label))
-        ..add(const SizedBox(height: HollowSpacing.sm))
+        ..add(HollowSectionHeader(label, dense: true))
         ..add(body);
     }
 
@@ -1038,7 +1017,14 @@ class _SysReqSectionState extends State<_SysReqSection> {
           padding: const EdgeInsets.symmetric(vertical: 2),
           child: Row(
             children: [
-              const Expanded(child: _SectionLabel('System Requirements')),
+              // A header's bottom padding would sit inside this tap target.
+              Expanded(
+                child: Text(
+                  'System requirements',
+                  style: HollowTypography.label
+                      .copyWith(color: hollow.textPrimary),
+                ),
+              ),
               Icon(
                 _open ? LucideIcons.chevronUp : LucideIcons.chevronDown,
                 size: 13,

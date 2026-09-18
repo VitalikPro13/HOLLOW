@@ -176,7 +176,7 @@ class _ManageMemberDialogState extends ConsumerState<_ManageMemberDialog> {
             for (final role in roles)
               LabelTypeChip(
                 icon: _roleIcon(role),
-                text: role[0].toUpperCase() + role.substring(1),
+                text: roleDisplayName(role),
                 selected: role == member.role,
                 onTap: _busy || role == member.role
                     ? () {}
@@ -196,7 +196,7 @@ class _ManageMemberDialogState extends ConsumerState<_ManageMemberDialog> {
       };
 
   Future<void> _confirmRoleChange(String newRole, String name) async {
-    final roleName = newRole[0].toUpperCase() + newRole.substring(1);
+    final roleName = roleDisplayName(newRole);
     final confirmed = await showHollowDialog<bool>(
       context: context,
       builder: (ctx) {

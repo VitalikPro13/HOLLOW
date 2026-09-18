@@ -9,6 +9,7 @@ import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_chip.dart';
 import 'package:hollow/src/ui/components/overlay_anchor.dart';
 import 'package:hollow/src/ui/components/hollow_menu.dart';
+import 'package:hollow/src/ui/components/hollow_section_header.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Notifications tab in Server Settings: the server-wide default and the
@@ -39,22 +40,12 @@ class NotificationsTab extends ConsumerWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
-            'SERVER NOTIFICATIONS',
-            style: HollowTypography.caption.copyWith(
-              color: hollow.textSecondary,
-              fontWeight: FontWeight.w700,
-              letterSpacing: 0.5,
-              fontSize: 10,
-            ),
-          ),
-          const SizedBox(height: HollowSpacing.sm),
+          const HollowSectionHeader('Server Notifications'),
 
           Text(
             'Default notification level for all channels in this server.',
-            style: HollowTypography.body.copyWith(
+            style: HollowTypography.bodySmall.copyWith(
               color: hollow.textSecondary,
-              fontSize: 12,
             ),
           ),
           const SizedBox(height: HollowSpacing.md),
@@ -67,21 +58,11 @@ class NotificationsTab extends ConsumerWidget {
 
           const SizedBox(height: HollowSpacing.xxl),
 
-          Text(
-            'CHANNEL OVERRIDES',
-            style: HollowTypography.caption.copyWith(
-              color: hollow.textSecondary,
-              fontWeight: FontWeight.w700,
-              letterSpacing: 0.5,
-              fontSize: 10,
-            ),
-          ),
-          const SizedBox(height: HollowSpacing.xs),
+          const HollowSectionHeader('Channel Overrides'),
           Text(
             'Override notification settings for specific channels.',
-            style: HollowTypography.body.copyWith(
+            style: HollowTypography.bodySmall.copyWith(
               color: hollow.textSecondary,
-              fontSize: 12,
             ),
           ),
           const SizedBox(height: HollowSpacing.md),

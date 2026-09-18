@@ -269,7 +269,7 @@ Uses `HollowDialog` with title "Your Recovery Phrase".
 - KeyRound icon in 56px accent-tinted container
 - "License Key Required" heading
 - "Enter your beta access key to continue" subtitle
-- `HollowTextField` with autofocus, mono font, hint "HLLW-XXXX-XXXX-XXXX", letter-spacing 1.5
+- `HollowTextField` with autofocus, mono font, hint "HLLW-XXXX-XXXX-XXXX"
 - Error text (conditional)
 - "Activate" filled button (full width)
 
@@ -314,7 +314,7 @@ Uses `HollowDialog` with title "Your Recovery Phrase".
 - Before code received: spinner + "Starting Twitch authorization..."
 - After code received:
   - "Enter this code on Twitch:" text
-  - Large styled code display (24px, letter-spacing 4) in accent-bordered container
+  - Large styled code display (24px) in accent-bordered container
   - Tap to copy code (toast "Code copied!")
   - Spinner + "Waiting for authorization..."
 - Actions: Cancel + "Open Twitch" button (launches `_verificationUri` via `url_launcher`)
@@ -598,6 +598,8 @@ Uses `HollowPressable` wrapper. Shows check icon when selected.
 
 **Header:** HardDrive icon + "Storage Dashboard" + close button
 
+Every section box ("Server Storage", "Your Storage", "Retention Policy", "Vault Health", "Member Pledges") is titled with `HollowSectionHeader(title, dense: true)`, no section icon.
+
 **Adaptive sections based on member count:**
 
 **< 6 members (Full Replication):**
@@ -691,11 +693,11 @@ shieldCheck button is unchanged.
 - Text truncated to 200 chars / 3 lines
 
 **Info rows (`_InfoRow` widgets):**
-- Sender Peer ID (mono, copyable)
+- Sender peer ID (mono, copyable)
 - Timestamp (ISO 8601 + raw ms)
 - Message ID (conditional, mono, copyable)
-- Public Key Fingerprint (conditional, mono, copyable)
-- Ed25519 Signature (conditional, mono, copyable, truncated: first 24 + "..." + last 24 chars)
+- Public key fingerprint (conditional, mono, copyable)
+- Ed25519 signature (conditional, mono, copyable, truncated: first 24 + "..." + last 24 chars)
 
 **Actions:**
 - "Copy Proof" ghost button -- copies full proof JSON to clipboard
@@ -814,14 +816,15 @@ Values: `profile`, `system`, `security`, `updates`, `about`
 - Banner: `AnimatedGifImage` or gradient fallback (deterministic color from peer ID hash)
 - Avatar: `HollowAvatar` (56px) with 3px surface border, overlapping banner via `Transform.translate(offset: Offset(0, -28))`
 - Display name + status preview (live from controllers)
-- "ABOUT ME" section (conditional)
+- "About me" section (conditional)
 - Peer ID footer (last 8 chars, mono, tiny)
 - Below card: Avatar row (Change/Clear) + Banner row (Change/Clear) using `_ImageRow` widget
 
 **Right column: Edit fields**
-- DISPLAY NAME: `HollowTextField` (autofocus, maxLength 32)
-- STATUS: `HollowTextField` (maxLength 48)
-- ABOUT ME: `HollowTextField` (maxLines 3, maxLength 128)
+Each field sits under a `SettingsFieldLabel` (sentence case):
+- Display name: `HollowTextField` (autofocus, maxLength 32)
+- Status: `HollowTextField` (maxLength 48)
+- About me: `HollowTextField` (maxLines 3, maxLength 128)
 
 **Connections section:**
 - `_TwitchConnectionRow` -- shows Twitch connection status, connect/disconnect buttons
@@ -845,9 +848,9 @@ Values: `profile`, `system`, `security`, `updates`, `about`
 ### Security Tab (`_SecurityTab`)
 
 **Sections:**
-- RECOVERY PHRASE: loads mnemonic via `storage_api.getMnemonic()`, shows word grid (4 columns x 6 rows) when revealed, or "Hidden for security" when hidden. Reveal/Hide toggle + Copy button. Warning text. If no mnemonic stored, shows text field to enter 24 words.
+- Recovery Phrase: loads mnemonic via `storage_api.getMnemonic()`, shows word grid (4 columns x 6 rows) when revealed, or "Hidden for security" when hidden. Reveal/Hide toggle + Copy button. Warning text. If no mnemonic stored, shows text field to enter 24 words.
 - ACCOUNT BACKUP: description, "Include vault shard data" checkbox, "Include downloaded files" checkbox, "Export Backup" button -> passphrase dialog (with confirm) -> `storage_api.exportBackup()`
-- VERIFY A PROOF (`_VerifyProofSection`): paste JSON or import .json file, verify button calls `network_api.verifyMessageProof()` with full payload reconstruction and tamper detection. Shows VERIFIED/INVALID result with message text, sender, context, timestamp.
+- Verify a Proof (`_VerifyProofSection`): paste JSON or import .json file, verify button calls `network_api.verifyMessageProof()` with full payload reconstruction and tamper detection. Shows VERIFIED/INVALID result with message text, sender, context, timestamp.
 
 ### Updates Tab (`_UpdatesTab`)
 
@@ -867,7 +870,7 @@ Values: `profile`, `system`, `security`, `updates`, `about`
 **Layout:**
 - App logo (72px rounded) + "Hollow" / "Beta Version" / "by AnonListen"
 - Contact: feedback@anonlisten.com (copy) + anonlisten.com (launch)
-- Follow & Support: brand icons row (YouTube, X, TikTok, Twitch, Kick | shimmer divider | Patreon, Ko-Fi) -- each uses `_BrandIcon` or `_SvgBrandIcon` with hover scale animation + `HollowTooltip`
+- Follow & Support: brand icons row (YouTube, X, TikTok, Twitch, Kick | divider | Patreon, Ko-Fi) -- each uses `_BrandIcon` or `_SvgBrandIcon` with hover scale animation + `HollowTooltip`
 - Legal: Privacy Policy, Terms of Use (both render markdown from `legal/` assets in a sub-dialog), Open-Source Licenses (Flutter's `showLicensePage`)
 
 ### Key sub-widgets

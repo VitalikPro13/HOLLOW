@@ -8,6 +8,7 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
+import 'package:hollow/src/ui/components/hollow_section_header.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Updates category of the desktop Settings dialog: current version, update
@@ -293,15 +294,8 @@ class _UpdatesTabState extends ConsumerState<UpdatesTab> {
       HollowTheme hollow, UpdateState state, UpdateNotifier notifier) {
     return [
       const SizedBox(height: HollowSpacing.xl),
-      Text(
-        'Versions',
-        style: HollowTypography.label.copyWith(
-          color: hollow.textSecondary,
-          fontWeight: FontWeight.w600,
-          letterSpacing: 0.5,
-        ),
-      ),
-      const SizedBox(height: HollowSpacing.md),
+      const HollowSectionHeader('Versions'),
+      const SizedBox(height: HollowSpacing.xs),
       ...state.manifest!.versions.map((v) {
         final isCurrent = v.version == state.currentVersion;
         return Padding(

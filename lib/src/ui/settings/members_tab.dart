@@ -200,7 +200,7 @@ class _MemberRow extends ConsumerWidget {
                   Icon(info.icon, size: 12, color: info.color),
                   const SizedBox(width: HollowSpacing.xs),
                   Text(
-                    role[0].toUpperCase() + role.substring(1),
+                    roleDisplayName(role),
                     style: HollowTypography.caption.copyWith(
                       color: info.color,
                       fontWeight: FontWeight.w600,
@@ -252,7 +252,7 @@ class _MemberRow extends ConsumerWidget {
         for (final r in assignable)
           HollowMenuItem(
             icon: _roleInfo(r, HollowTheme.of(menuContext)).icon,
-            label: 'Make ${r[0].toUpperCase()}${r.substring(1)}',
+            label: 'Make ${roleDisplayName(r)}',
             onTap: () => showChangeRoleDialog(context, ref,
                 serverId: serverId,
                 peerId: peerId,

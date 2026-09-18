@@ -24,6 +24,7 @@ import 'package:hollow/src/ui/components/hollow_chip.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
+import 'package:hollow/src/ui/components/hollow_section_header.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/hollow_toggle.dart';
@@ -44,6 +45,7 @@ import 'package:hollow/src/ui/mobile/mobile_emotes_route.dart';
 import 'package:hollow/src/ui/mobile/mobile_labels_route.dart';
 import 'package:hollow/src/ui/mobile/mobile_twitch_settings_route.dart';
 import 'package:hollow/src/ui/settings/server_template.dart';
+import 'package:hollow/src/ui/settings/settings_shared.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:hollow/src/core/providers/relay_domain_provider.dart';
 import 'package:atlas_icons/atlas_icons.dart';
@@ -748,7 +750,7 @@ class _MobileServerSettingsRouteState
                                         fallback: Center(
                                           child: Text(
                                             server.name.isNotEmpty
-                                                ? server.name[0].toUpperCase()
+                                                ? server.name[0].toUpperCase() // design-ignore: avatar initial
                                                 : '?',
                                             style: HollowTypography.display
                                                 .copyWith(
@@ -791,8 +793,7 @@ class _MobileServerSettingsRouteState
 
                   // Server banner (issue #25): tap uploads, long-press clears.
                   if (canManage) ...[
-                    const _SectionDivider(label: 'Server Banner'),
-                    const SizedBox(height: HollowSpacing.sm),
+                    const HollowSectionHeader('Server Banner'),
                     Builder(builder: (_) {
                       final bannerEntry = ref
                           .watch(serverBannerProvider)[widget.serverId];
@@ -847,7 +848,7 @@ class _MobileServerSettingsRouteState
                   ],
 
                   if (canManage) ...[
-                    const _SectionDivider(label: 'Server Name'),
+                    const SettingsFieldLabel(label: 'Server name'),
                     const SizedBox(height: HollowSpacing.sm),
                     Row(
                       children: [
@@ -871,7 +872,7 @@ class _MobileServerSettingsRouteState
 
                   // Description (admin only)
                   if (canManage) ...[
-                    const _SectionDivider(label: 'Description'),
+                    const SettingsFieldLabel(label: 'Description'),
                     const SizedBox(height: HollowSpacing.sm),
                     HollowTextField(
                       controller: _descController,
@@ -894,8 +895,7 @@ class _MobileServerSettingsRouteState
 
                   // Private, NSFW and the member cap.
                   if (canManage) ...[
-                    const _SectionDivider(label: 'Access'),
-                    const SizedBox(height: HollowSpacing.sm),
+                    const HollowSectionHeader('Access'),
                     Row(
                       children: [
                         Expanded(
@@ -997,8 +997,7 @@ class _MobileServerSettingsRouteState
                     ),
                     const SizedBox(height: HollowSpacing.xl),
 
-                    const _SectionDivider(label: 'Offline Catch-Up'),
-                    const SizedBox(height: HollowSpacing.sm),
+                    const HollowSectionHeader('Offline Catch-up'),
                     Row(
                       children: [
                         Expanded(
@@ -1068,14 +1067,12 @@ class _MobileServerSettingsRouteState
                   ],
 
                   if (canManageChannels) ...[
-                    const _SectionDivider(label: 'Channels'),
-                    const SizedBox(height: HollowSpacing.sm),
+                    const HollowSectionHeader('Channels'),
                     _ChannelLayoutEditor(serverId: widget.serverId),
                     const SizedBox(height: HollowSpacing.xl),
                   ],
 
-                  const _SectionDivider(label: 'Management'),
-                  const SizedBox(height: HollowSpacing.sm),
+                  const HollowSectionHeader('Management'),
                   _NavRow(
                     icon: LucideIcons.users,
                     label: 'Members',
@@ -1151,13 +1148,11 @@ class _MobileServerSettingsRouteState
                   ),
                   const SizedBox(height: HollowSpacing.xl),
 
-                  const _SectionDivider(label: 'Notifications'),
-                  const SizedBox(height: HollowSpacing.sm),
+                  const HollowSectionHeader('Notifications'),
                   _NotificationSection(serverId: widget.serverId),
                   const SizedBox(height: HollowSpacing.xl),
 
-                  const _SectionDivider(label: 'Server ID'),
-                  const SizedBox(height: HollowSpacing.sm),
+                  const HollowSectionHeader('Server ID'),
                   Container(
                     padding: const EdgeInsets.all(HollowSpacing.md),
                     decoration: BoxDecoration(
@@ -1195,7 +1190,7 @@ class _MobileServerSettingsRouteState
                   ),
                   const SizedBox(height: HollowSpacing.xl),
 
-                  const _SectionDivider(label: 'Your Nickname'),
+                  const SettingsFieldLabel(label: 'Your nickname'),
                   const SizedBox(height: HollowSpacing.sm),
                   Row(
                     children: [
@@ -1216,8 +1211,7 @@ class _MobileServerSettingsRouteState
                   ),
                   if (canManage) ...[
                     const SizedBox(height: HollowSpacing.xl),
-                    const _SectionDivider(label: 'Server Template'),
-                    const SizedBox(height: HollowSpacing.sm),
+                    const HollowSectionHeader('Server Template'),
                     Text(
                       'Export your server structure as a template, or import one to reconfigure this server.',
                       style: HollowTypography.caption.copyWith(
@@ -1249,8 +1243,8 @@ class _MobileServerSettingsRouteState
                   ],
                   const SizedBox(height: HollowSpacing.xl + HollowSpacing.lg),
 
-                  const _SectionDivider(label: 'Danger Zone', danger: true),
-                  const SizedBox(height: HollowSpacing.md),
+                  const HollowSectionHeader('Danger Zone'),
+                  const SizedBox(height: HollowSpacing.xs),
                   if (isOwner)
                     HollowButton.danger(
                       onPressed: _confirmDelete,
@@ -1303,36 +1297,6 @@ class _NavRow extends StatelessWidget {
           Icon(LucideIcons.chevronRight, size: 16, color: hollow.textSecondary),
         ],
       ),
-    );
-  }
-}
-
-class _SectionDivider extends StatelessWidget {
-  final String label;
-  final bool danger;
-
-  const _SectionDivider({required this.label, this.danger = false});
-
-  @override
-  Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-    final color = danger ? hollow.error : hollow.textSecondary;
-    return Row(
-      children: [
-        Expanded(child: Divider(color: color.withValues(alpha: 0.3))),
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.md),
-          child: Text(
-            label,
-            style: HollowTypography.caption.copyWith(
-              color: color,
-              fontWeight: FontWeight.w600,
-              letterSpacing: 0.5,
-            ),
-          ),
-        ),
-        Expanded(child: Divider(color: color.withValues(alpha: 0.3))),
-      ],
     );
   }
 }

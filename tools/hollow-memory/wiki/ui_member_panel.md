@@ -19,32 +19,21 @@ Container styling: `hollow.surface` background, left `BorderSide` using `hollow.
 ### Providers Read
 - `selectedServerProvider` — determines server vs peer content mode
 
-## _SectionDivider — ASOT-Style Section Headers
+## _SectionDivider — Section Headers
 
-`_SectionDivider` is a `StatelessWidget` that renders section headers in the format: `Label ———— Count`. Used for Online, Offline, and role-grouped sections.
+`_SectionDivider` is a `StatelessWidget` that renders a section header row: optional chevron + `Label` + `Spacer` + count. Used for Online, Offline, role-grouped sections and the "Members N" header.
 
 ### Parameters
 - `label` (String) — section text (e.g., "Online", "Offline", "Owner", "Admin")
-- `count` (int) — member count shown at right end
-- `isOnline` (bool) — when true, the divider line has an animated glow sweep; when false, it is a static `hollow.border` line
-- `glowColor` (Color?) — optional override for the glow color; defaults to `hollow.accent`
-- `onToggle` (VoidCallback?) — non-null makes the section FOLDABLE (issue #54): the divider grows a chevron, becomes a `HollowPressable` row, and carries an "Expand/Collapse <label>, N members" label. Only the server member list passes it.
-- `collapsed` (bool) — which chevron to draw. The divider and its full count stay visible when folded; only the rows underneath go away.
+- `count` (int) — member count shown at the right end
+- `onToggle` (VoidCallback?) — non-null makes the section FOLDABLE (issue #54): the row grows a leading chevron (12px, `chevronRight` folded / `chevronDown` open), becomes a `HollowPressable(subtle: true)` row, and carries an "Expand/Collapse <label>, N members" label. Only the server member list passes it.
+- `collapsed` (bool) — which chevron to draw. The header and its full count stay visible when folded; only the rows underneath go away.
 
 ### Folding (issue #54)
-State lives in `collapsedMemberGroupsProvider`, keyed `serverId:label`, persisted and loaded from `HollowShell._bootstrap` like every other layout preference. `_serverMemberEntriesProvider` watches it and skips the member entries of a folded section while still emitting its divider — so the counts a user folds away stay honest. Per server, because "hide Offline" on a 200-member server says nothing about a 4-member one.
-
-### Glow Animation (Online Sections)
-Uses `SharedTickers.instance.shimmer` (a global `ValueNotifier<double>` running a 4-second cycle) via `ValueListenableBuilder`. No per-instance `AnimationController` is created.
-
-The animation logic:
-1. `shimmer` value (0..1) is converted to ping-pong (0->1->0) with `Curves.easeInOut`.
-2. Mapped to range -0.2..1.2 so the glow fully exits both edges.
-3. A `LinearGradient` with 3 stops creates a 0.15-width glow spot that sweeps left-to-right-to-left.
-4. A `BoxShadow` at 0.2 alpha adds subtle bloom beneath the glow.
+State lives in `collapsedMemberGroupsProvider`, keyed `serverId:label`, persisted and loaded from `HollowShell._bootstrap` like every other layout preference. `_serverMemberEntriesProvider` watches it and skips the member entries of a folded section while still emitting its header — so the counts a user folds away stay honest. Per server, because "hide Offline" on a 200-member server says nothing about a 4-member one.
 
 ### Typography
-`HollowTypography.caption` at 11px, `hollow.textSecondary` color, weight w600, letter-spacing 0.8.
+Label in `HollowTypography.label` with `hollow.textSecondary` (written as-is, no uppercase or tracking); count in `HollowTypography.monoSmall`, `hollow.textTertiary`, tabular figures.
 
 ## _SpinningRefreshIcon — Sync Activity Indicator
 
@@ -63,14 +52,7 @@ Used in two contexts:
 
 ## Role Color and Label Helpers
 
-Three private functions map role strings to visual properties:
-
-### `_roleGlowColor(String role, HollowTheme hollow)`
-Returns the glow color for role-grouped ASOT dividers:
-- `owner` -> `hollow.warning` (gold)
-- `admin` -> `Color(0xFFA78BFA)` (purple)
-- `moderator` -> `Color.lerp(hollow.warning, hollow.error, 0.5)` (orange)
-- `member` / default -> `hollow.accent` (teal)
+Two private functions map role strings to visual properties:
 
 ### `_roleDividerLabel(String role)`
 Returns the display label:
@@ -80,7 +62,13 @@ Returns the display label:
 - default -> "Members"
 
 ### `_roleLabelColor(String role, HollowTheme hollow)`
-Returns the color for role label text in member tiles. Same mapping as `_roleGlowColor` except the default/member case returns `hollow.textSecondary` instead of `hollow.accent`.
+Returns the color for role label text in member tiles:
+- `owner` -> `hollow.warning` (gold)
+- `admin` -> `Color(0xFFA78BFA)` (purple)
+- `moderator` -> `Color.lerp(hollow.warning, hollow.error, 0.5)` (orange)
+- `member` / default -> `hollow.textSecondary`
+
+The role text itself in `_ServerMemberTile` comes from the shared `roleDisplayName()` (`lib/src/core/role_hierarchy.dart`), which capitalises the role id.
 
 ## _ServerMemberContent — Server Member List
 
@@ -98,7 +86,7 @@ Returns the color for role label text in member tiles. Same mapping as `_roleGlo
 
 ### Layout Structure
 Top-level `Column`:
-1. **Header** (48px height) — bordered bottom, contains a `_SectionDivider` showing "Members N" (non-glowing). During loading shows "Members ...", on error shows "Members ?".
+1. **Header** (48px height) — bordered bottom, contains a `_SectionDivider` showing "Members N". During loading shows "Members ...", on error shows "Members ?".
 2. **Expanded member list** — `ListView.builder` for lazy rendering (Phase 6.25 optimization to prevent jank on first server entry).
 
 ### Online/Offline Split Logic
@@ -116,10 +104,10 @@ Members are partitioned based on connection status and invisible mode:
 Role ordering: `['owner', 'admin', 'moderator', 'member']`.
 
 Two rendering paths for online members:
-1. **All same role (all `member`):** Simple "Online N" divider with default accent glow, followed by flat member tiles.
-2. **Multiple roles present:** Uses `buildRoleGrouped()` which creates per-role sub-sections. Each role group gets its own `_SectionDivider` with a role-specific glow color and label (e.g., "Owner 1" with gold glow, "Admin 2" with purple glow).
+1. **All same role (all `member`):** Simple "Online N" header, followed by flat member tiles.
+2. **Multiple roles present:** Uses `buildRoleGrouped()` which creates per-role sub-sections. Each role group gets its own `_SectionDivider` with a role label (e.g., "Owner 1", "Admin 2").
 
-**Offline members** always get a single "Offline N" divider (no glow, static line), with no role sub-grouping.
+**Offline members** always get a single "Offline N" header, with no role sub-grouping.
 
 ### Empty/Error States
 - Empty members: centered "No members" text
@@ -139,7 +127,7 @@ Creates a filtered copy of the peers map by removing all peer IDs present in `in
 
 ### Layout
 - **Empty state:** centered "No peers online" text
-- **Non-empty:** `ListView.builder` with `peers.length + 1` items (first item is an "Online N" glowing `_SectionDivider`)
+- **Non-empty:** `ListView.builder` with `peers.length + 1` items (first item is an "Online N" `_SectionDivider`)
 
 ### Startup Animation
 Uses `StartupRevealScope.interval(context, 0.60, 0.80)` for parent animation. Each `_MemberTile` is wrapped in a `StaggeredListItem` that animates with a slide from `Offset(0.3, 0)` (slight right-to-left slide-in), staggered by index.

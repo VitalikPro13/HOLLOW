@@ -10,6 +10,7 @@ import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/chat/message_text_parser.dart';
 import 'package:hollow/src/ui/components/animated_gif_image.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
+import 'package:hollow/src/ui/components/hollow_section_header.dart';
 import 'package:hollow/src/ui/dialogs/game_card_dialog.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
@@ -59,15 +60,15 @@ Widget? buildShowcaseBlockCard(
         child: _TextBody(body: block.textBody),
       ),
     ShowcaseBlockType.nowPlaying => _BlockCard(
-        label: 'NOW PLAYING',
+        label: 'Now playing',
         child: _GameRow(block: block, assets: assets),
       ),
     ShowcaseBlockType.favoriteGame => _BlockCard(
-        label: 'FAVORITE GAME',
+        label: 'Favorite game',
         child: _FavoriteGameBody(block: block, assets: assets),
       ),
     ShowcaseBlockType.gameShelf => _BlockCard(
-        label: block.shelfLabel.isNotEmpty ? block.shelfLabel : 'GAME SHELF',
+        label: block.shelfLabel.isNotEmpty ? block.shelfLabel : 'Game shelf',
         child: _GameShelfBody(block: block, assets: assets),
       ),
     ShowcaseBlockType.artwork => _BlockCard(
@@ -78,7 +79,7 @@ Widget? buildShowcaseBlockCard(
   };
 }
 
-/// Shared card chrome: surface, border, optional small-caps label.
+/// Shared card chrome: surface, border, optional section header.
 class _BlockCard extends StatelessWidget {
   final String label;
   final Widget child;
@@ -99,16 +100,7 @@ class _BlockCard extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           if (label.isNotEmpty) ...[
-            Text(
-              label.toUpperCase(),
-              style: HollowTypography.caption.copyWith(
-                color: hollow.textSecondary,
-                fontWeight: FontWeight.w700,
-                letterSpacing: 0.5,
-                fontSize: 10,
-              ),
-            ),
-            const SizedBox(height: HollowSpacing.sm),
+            HollowSectionHeader(label, dense: true),
           ],
           child,
         ],

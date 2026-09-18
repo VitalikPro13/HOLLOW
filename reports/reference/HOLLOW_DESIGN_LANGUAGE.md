@@ -119,8 +119,8 @@ Rules:
 ### 3.4 Case and copy
 
 - **Sentence case everywhere.** Title Case only for card and section titles, permission names, doc titles and proper nouns.
-- **No `toUpperCase()` on a label, and no tracked caps.** The all-caps eyebrow label is the single most recognisable generated-UI tell, and Hollow has 38 of them. Hierarchy comes from weight and colour.
-- `letterSpacing:` is forbidden outside the theme. The one exception is the mono console voice, which may use short upper-case tags.
+- **No `toUpperCase()` on a label, and no tracked caps.** The all-caps eyebrow label is the single most recognisable generated-UI tell. Hierarchy comes from weight and colour. Guarded at 0 since sweep 3c: a `toUpperCase()` on data (avatar initials, a typed code, a hex fingerprint) carries a `design-ignore` reason.
+- `letterSpacing:` is forbidden outside the theme, guarded at 0. Mono codes and safety numbers read fine untracked.
 - No em dashes in any user-visible string. Never a colon in place of one: write the sentence naturally.
 - Anything longer than a label goes through the `sepia` skill before Vitalik reads it.
 
@@ -246,7 +246,7 @@ Consequences worth stating, because these are the observed inconsistencies:
 
 | Component | Replaces | Rule |
 |---|---|---|
-| `HollowSectionHeader` | 4 private helpers | Title in `subheading` or `label`, optional trailing action, optional count in mono. **No leading icon.** |
+| `HollowSectionHeader` | every private section label (guarded at 0) | Title in `subheading` (a page section, a `SettingsCard` title) or `label` via `dense` (a sub-group, a list group). Optional trailing action, optional count in mono. Carries its own 8 px bottom gap. **No leading icon.** The label above ONE settings field is `SettingsFieldLabel`, not a header. |
 | `HollowEmptyState` | 3 helpers and roughly 60 inline columns | One honest line about what is true now, one optional second line, at most one action. Optional glyph at 24. A slot for Holly, empty for now. |
 | `HollowDivider` | 111 inline `Divider(` | The hairline. Nothing else. No colour parameter. |
 | `HollowListRow` | ad hoc rows | Leading, title, subtitle, trailing. Hover on the whole row, no dead zone between rows. |

@@ -7,6 +7,7 @@ import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
+import 'package:hollow/src/ui/components/hollow_section_header.dart';
 import 'package:hollow/src/ui/dialogs/recovery_pool_dialog.dart';
 import 'package:hollow/src/ui/dialogs/shard_bundle_dialog.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -291,31 +292,15 @@ class _ServerVaultSectionState extends ConsumerState<_ServerVaultSection> {
         for (final cat in order)
           if (groups.containsKey(cat)) ...[
             Padding(
-              padding: const EdgeInsets.fromLTRB(
-                HollowSpacing.lg, HollowSpacing.sm, HollowSpacing.lg, HollowSpacing.xxs,
+              padding: const EdgeInsets.only(
+                left: HollowSpacing.lg,
+                top: HollowSpacing.sm,
+                right: HollowSpacing.lg,
               ),
-              child: Row(
-                children: [
-                  Icon(cat.icon, size: 14, color: hollow.textSecondary),
-                  const SizedBox(width: HollowSpacing.sm),
-                  Text(
-                    cat.label,
-                    style: HollowTypography.caption.copyWith(
-                      color: hollow.textSecondary,
-                      fontSize: 11,
-                      fontWeight: FontWeight.w600,
-                      letterSpacing: 0.5,
-                    ),
-                  ),
-                  const SizedBox(width: HollowSpacing.sm),
-                  Text(
-                    '(${groups[cat]!.length})',
-                    style: HollowTypography.caption.copyWith(
-                      color: hollow.textSecondary,
-                      fontSize: 11,
-                    ),
-                  ),
-                ],
+              child: HollowSectionHeader(
+                cat.label,
+                dense: true,
+                count: '${groups[cat]!.length}',
               ),
             ),
             for (final file in groups[cat]!)
@@ -339,15 +324,14 @@ class _ServerVaultSectionState extends ConsumerState<_ServerVaultSection> {
 }
 
 enum _FileCategory {
-  videos('Videos', LucideIcons.fileVideo),
-  audio('Audio', LucideIcons.fileAudio),
-  images('Images', LucideIcons.image),
-  documents('Documents', LucideIcons.fileText),
-  other('Other', LucideIcons.file);
+  videos('Videos'),
+  audio('Audio'),
+  images('Images'),
+  documents('Documents'),
+  other('Other');
 
   final String label;
-  final IconData icon;
-  const _FileCategory(this.label, this.icon);
+  const _FileCategory(this.label);
 }
 
 /// A single vault file row with shard status indicator.

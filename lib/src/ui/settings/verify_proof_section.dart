@@ -9,6 +9,7 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
+import 'package:hollow/src/ui/settings/settings_shared.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Verify a proof: paste or import a proof JSON and check it with the same
@@ -356,7 +357,7 @@ class _VerifyProofSectionState extends State<VerifyProofSection> {
     final statusColor = r.valid ? hollow.accent : hollow.error;
     final statusIcon =
         r.valid ? LucideIcons.shieldCheck : LucideIcons.shieldAlert;
-    final statusText = r.valid ? 'VERIFIED' : 'INVALID SIGNATURE';
+    final statusText = r.valid ? 'Verified' : 'Invalid signature';
 
     final timestamp = r.timestampMs != null && r.timestampMs! > 0
         ? DateTime.fromMillisecondsSinceEpoch(r.timestampMs!)
@@ -382,8 +383,7 @@ class _VerifyProofSectionState extends State<VerifyProofSection> {
                 statusText,
                 style: HollowTypography.label.copyWith(
                   color: statusColor,
-                  fontWeight: FontWeight.w700,
-                  letterSpacing: 0.5,
+                  fontWeight: FontWeight.w600,
                 ),
               ),
             ],
@@ -419,16 +419,8 @@ class _VerifyProofSectionState extends State<VerifyProofSection> {
 
   List<Widget> _messageBlock(HollowTheme hollow, _ProofResult r) {
     return [
-      Text(
-        'MESSAGE',
-        style: HollowTypography.caption.copyWith(
-          color: hollow.textSecondary,
-          fontWeight: FontWeight.w700,
-          letterSpacing: 0.5,
-          fontSize: 10,
-        ),
-      ),
-      const SizedBox(height: 2),
+      const SettingsFieldLabel(label: 'Message'),
+      const SizedBox(height: HollowSpacing.xs),
       Container(
         width: double.infinity,
         padding: const EdgeInsets.all(HollowSpacing.sm),
@@ -452,16 +444,8 @@ class _VerifyProofSectionState extends State<VerifyProofSection> {
 
   List<Widget> _senderBlock(HollowTheme hollow, _ProofResult r) {
     return [
-      Text(
-        'SENDER',
-        style: HollowTypography.caption.copyWith(
-          color: hollow.textSecondary,
-          fontWeight: FontWeight.w700,
-          letterSpacing: 0.5,
-          fontSize: 10,
-        ),
-      ),
-      const SizedBox(height: 2),
+      const SettingsFieldLabel(label: 'Sender'),
+      const SizedBox(height: HollowSpacing.xs),
       SelectableText(
         r.senderPeerId!,
         style: HollowTypography.mono.copyWith(
