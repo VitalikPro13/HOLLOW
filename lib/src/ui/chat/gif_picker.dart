@@ -17,6 +17,7 @@ import '../../theme/hollow_theme.dart';
 import '../../theme/hollow_typography.dart';
 import '../components/animated_gif_image.dart';
 import '../components/hollow_button.dart';
+import '../components/hollow_chip.dart';
 import '../components/hollow_pressable.dart';
 import '../components/hollow_text_field.dart';
 import '../components/hollow_toast.dart';
@@ -467,48 +468,27 @@ class _GifPickerBodyState extends ConsumerState<GifPickerBody> {
   Widget _tabRow(HollowTheme hollow) {
     // Scrollable so a larger-text setting cannot overflow the 360px panel.
     return EdgeScrollRow(
-      height: 34,
       semanticLabel: 'tabs',
       padding: const EdgeInsets.symmetric(
-          horizontal: HollowSpacing.sm, vertical: 5),
+          horizontal: HollowSpacing.sm, vertical: HollowSpacing.xs),
       children: [
-        _tabChip(hollow, GifPickerTab.popular, 'Popular'),
-        const SizedBox(width: 4),
-        _tabChip(hollow, GifPickerTab.favorites, 'Favourites'),
-        const SizedBox(width: 4),
-        _tabChip(hollow, GifPickerTab.recent, 'Recent'),
+        _tabItem(GifPickerTab.popular, 'Popular'),
+        const SizedBox(width: HollowSpacing.sm),
+        _tabItem(GifPickerTab.favorites, 'Favourites'),
+        const SizedBox(width: HollowSpacing.sm),
+        _tabItem(GifPickerTab.recent, 'Recent'),
       ],
     );
   }
 
-  Widget _tabChip(HollowTheme hollow, GifPickerTab tab, String label) {
-    // Searching is its own view, so nothing is selected while the field has
-    // text and tapping a tab is the way back out.
-    final selected = _tab == tab && _search.isEmpty;
-    return HollowPressable(
-      onTap: () => _selectTab(tab),
+  Widget _tabItem(GifPickerTab tab, String label) {
+    return HollowChip(
+      label: label,
+      // Searching is its own view, so nothing is selected while the field has
+      // text and tapping a tab is the way back out.
+      selected: _tab == tab && _search.isEmpty,
       semanticLabel: '$label GIFs tab',
-      borderRadius: BorderRadius.circular(hollow.radiusSm),
-      padding: EdgeInsets.zero,
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 10),
-        alignment: Alignment.center,
-        decoration: BoxDecoration(
-          color: selected ? hollow.accent.withValues(alpha: 0.15) : null,
-          borderRadius: BorderRadius.circular(hollow.radiusSm),
-          border: Border.all(
-            color:
-                selected ? hollow.accent.withValues(alpha: 0.4) : hollow.border,
-          ),
-        ),
-        child: Text(
-          label,
-          style: HollowTypography.caption.copyWith(
-            color: selected ? hollow.accentText : hollow.textSecondary,
-            fontWeight: selected ? FontWeight.w600 : FontWeight.normal,
-          ),
-        ),
-      ),
+      onTap: () => _selectTab(tab),
     );
   }
 
@@ -560,7 +540,7 @@ class _GifPickerBodyState extends ConsumerState<GifPickerBody> {
     final saved = library.favoritesIn(_collectionId);
     return Column(
       children: [
-        _listChips(hollow, library),
+        _listRow(hollow, library),
         Expanded(
           child: saved.isEmpty
               ? _emptyHint(
@@ -575,72 +555,51 @@ class _GifPickerBodyState extends ConsumerState<GifPickerBody> {
     );
   }
 
-  Widget _listChips(HollowTheme hollow, GifLibrary library) {
+  Widget _listRow(HollowTheme hollow, GifLibrary library) {
     if (_listEditId != null) return _listNameField(hollow);
-    // EdgeScrollRow, not a bare horizontal ListView: once the chips overflow
+    // EdgeScrollRow, not a bare horizontal ListView: once the lists overflow
     // the panel, a plain wheel mouse has no affordance and no gesture, so the
     // extra lists are unreachable.
-    return EdgeScrollRow(
-      height: 34,
-      semanticLabel: 'lists',
+    // The add button sits outside the scroller, so it never scrolls out of
+    // reach however many lists there are.
+    return Padding(
       padding: const EdgeInsets.symmetric(
-          horizontal: HollowSpacing.sm, vertical: 5),
-      children: [
-          _listChip(hollow, null, 'All'),
-          for (final c in library.collections) ...[
-            const SizedBox(width: 4),
-            _listChip(hollow, c.id, c.name),
-          ],
-          const SizedBox(width: 4),
-          HollowPressable(
-            onTap: () {
+          horizontal: HollowSpacing.sm, vertical: HollowSpacing.xs),
+      child: Row(
+        children: [
+          Expanded(
+            child: EdgeScrollRow(
+              semanticLabel: 'lists',
+              children: [
+                _list(null, 'All'),
+                for (final c in library.collections) ...[
+                  const SizedBox(width: HollowSpacing.sm),
+                  _list(c.id, c.name),
+                ],
+              ],
+            ),
+          ),
+          const SizedBox(width: HollowSpacing.xs),
+          HollowButton.ghost(
+            compact: true,
+            semanticLabel: 'New favourites list',
+            onPressed: () {
               _listNameController.text = '';
               setState(() => _listEditId = '');
             },
-            semanticLabel: 'New favourites list',
-            borderRadius: BorderRadius.circular(hollow.radiusSm),
-            padding: EdgeInsets.zero,
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 8),
-              alignment: Alignment.center,
-              decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(hollow.radiusSm),
-                border: Border.all(color: hollow.border),
-              ),
-              child: Icon(LucideIcons.plus,
-                  size: 12, color: hollow.textSecondary),
-            ),
+            child: const Icon(LucideIcons.plus),
           ),
-      ],
+        ],
+      ),
     );
   }
 
-  Widget _listChip(HollowTheme hollow, String? id, String name) {
-    final selected = _collectionId == id;
-    Widget chip = HollowPressable(
-      onTap: () => setState(() => _collectionId = id),
+  Widget _list(String? id, String name) {
+    final chip = HollowChip(
+      label: name,
+      selected: _collectionId == id,
       semanticLabel: 'Show $name favourites',
-      borderRadius: BorderRadius.circular(hollow.radiusSm),
-      padding: EdgeInsets.zero,
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 10),
-        alignment: Alignment.center,
-        decoration: BoxDecoration(
-          color: selected ? hollow.accent.withValues(alpha: 0.15) : null,
-          borderRadius: BorderRadius.circular(hollow.radiusSm),
-          border: Border.all(
-            color:
-                selected ? hollow.accent.withValues(alpha: 0.4) : hollow.border,
-          ),
-        ),
-        child: Text(
-          name,
-          style: HollowTypography.caption.copyWith(
-            color: selected ? hollow.accentText : hollow.textSecondary,
-            fontSize: 11,
-          ),
-        ),
-      ),
+      onTap: () => setState(() => _collectionId = id),
     );
     if (id == null) return chip;
     return GestureDetector(

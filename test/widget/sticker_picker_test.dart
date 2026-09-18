@@ -153,6 +153,8 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.byType(ChatAssetImage), findsNWidgets(2));
 
+    // The tab row scrolls, and the test font is wider than any real one.
+    await tester.ensureVisible(find.text('Recent'));
     await tester.tap(find.text('Recent'));
     await tester.pumpAndSettle();
     expect(find.textContaining('Stickers you send'), findsOneWidget);

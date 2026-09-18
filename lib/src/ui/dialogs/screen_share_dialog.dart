@@ -13,10 +13,10 @@ import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
-import 'package:hollow/src/ui/components/selector_pill.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_focus_ring.dart';
 import 'package:hollow/src/ui/components/hollow_toggle.dart';
+import 'package:hollow/src/ui/components/hollow_chip.dart';
 
 enum ScreenShareResolution {
   p360(640, 360, '360p'),
@@ -321,14 +321,14 @@ class _ScreenShareDialogState extends State<_ScreenShareDialog> {
                         ),
                       ),
                       const SizedBox(width: HollowSpacing.sm),
-                      _buildPill(
+                      _option(
                           'Smooth motion',
                           _profile == ScreenContentProfile.motion,
                           () => setState(() {
                                 _profile = ScreenContentProfile.motion;
                                 _fps = ScreenShareFps.fps60;
                               })),
-                      _buildPill(
+                      _option(
                           'Sharp text',
                           _profile == ScreenContentProfile.text,
                           () => setState(() {
@@ -349,7 +349,7 @@ class _ScreenShareDialogState extends State<_ScreenShareDialog> {
                       ),
                       const SizedBox(width: HollowSpacing.sm),
                       ..._availableResolutions.map((r) =>
-                          _buildPill(r.label, r == _resolution,
+                          _option(r.label, r == _resolution,
                               () => setState(() => _resolution = r))),
                     ],
                   ),
@@ -365,7 +365,7 @@ class _ScreenShareDialogState extends State<_ScreenShareDialog> {
                       ),
                       const SizedBox(width: HollowSpacing.sm),
                       ...ScreenShareFps.values.map((f) =>
-                          _buildPill(f.label, f == _fps,
+                          _option(f.label, f == _fps,
                               () => setState(() => _fps = f))),
                     ],
                   ),
@@ -572,12 +572,12 @@ class _ScreenShareDialogState extends State<_ScreenShareDialog> {
           const SizedBox(height: HollowSpacing.sm),
           Row(
             children: [
-              _buildPill(
+              _option(
                 'Same as last time',
                 !_portalFresh,
                 () => setState(() => _portalFresh = false),
               ),
-              _buildPill(
+              _option(
                 'Pick something new',
                 _portalFresh,
                 () => setState(() => _portalFresh = true),
@@ -702,15 +702,10 @@ class _ScreenShareDialogState extends State<_ScreenShareDialog> {
     );
   }
 
-  Widget _buildPill(String label, bool active, VoidCallback onTap) {
-    return SelectorPill(
-      label: label,
-      active: active,
-      onTap: onTap,
-      padding: const EdgeInsets.symmetric(
-        horizontal: HollowSpacing.sm,
-        vertical: HollowSpacing.xs,
-      ),
+  Widget _option(String label, bool active, VoidCallback onTap) {
+    return Padding(
+      padding: const EdgeInsets.only(right: HollowSpacing.sm),
+      child: HollowChip(label: label, selected: active, onTap: onTap),
     );
   }
 }

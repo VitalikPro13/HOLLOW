@@ -46,7 +46,7 @@ Ad-hoc meetings between people who share no server and no friendship. A host cre
 
 - `VcChatOverlay` (public, in `voice_channel_pane.dart`) packages the chevron toggle + `_OverlaySlider` + 360px `ChannelChatPane`. Conference audio-only view embeds it; video states use VoiceChannelPane's built-in overlay. NEVER a separate meeting-chat panel.
 - `channelChatProvider`: `sendMessage` branches on `conf:` → `conferenceSendChat` FFI + optimistic insert (id `conf-{self}-{lamportTs}`); `loadHistory` early-returns (RAM-only, no DB, no sync request); `clearServerCache('conf:x')` wipes it.
-- `ChannelChatPane` conf-gating (`_isConference`): attach/mic buttons hidden; member-panel + split-view header buttons hidden; onInfo/reactions/pins/edits/replies disabled (MLS authenticates — the Ed25519 proof dialog would read UNSIGNED); header shows a video icon + **"Ephemeral"** chip ("Meeting chat isn't stored…" tooltip).
+- `ChannelChatPane` conf-gating (`_isConference`): attach/mic buttons hidden; member-panel + split-view header buttons hidden; onInfo/reactions/pins/edits/replies disabled (MLS authenticates — the Ed25519 proof dialog would read Unsigned); header shows a video icon + **"Ephemeral"** chip ("Meeting chat isn't stored…" tooltip).
 
 ## Desktop UI (`lib/src/ui/shell/conference_dashboard.dart`)
 

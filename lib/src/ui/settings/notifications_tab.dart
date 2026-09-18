@@ -7,6 +7,8 @@ import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_chip.dart';
+import 'package:hollow/src/ui/components/overlay_anchor.dart';
+import 'package:hollow/src/ui/components/hollow_menu.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Notifications tab in Server Settings: the server-wide default and the
@@ -202,69 +204,28 @@ class ChannelOverrideDropdown extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-    final currentLabel =
-        _options.firstWhere((o) => o.$1 == value).$2;
-
-    return PopupMenuButton<ChannelNotificationLevel>(
-      onSelected: onChanged,
-      color: hollow.elevated,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(hollow.radiusMd),
-        side: BorderSide(color: hollow.border),
-      ),
-      offset: const Offset(0, 32),
-      itemBuilder: (context) => _options.map((option) {
-        final isActive = option.$1 == value;
-        return PopupMenuItem(
-          value: option.$1,
-          child: Row(
-            children: [
-              Icon(
-                option.$3,
-                size: 14,
-                color: isActive ? hollow.accent : hollow.textSecondary,
+    final current = _options.firstWhere((o) => o.$1 == value);
+    return Builder(
+      builder: (chipContext) => HollowChip(
+        label: current.$2,
+        trailingIcon: LucideIcons.chevronDown,
+        semanticLabel: 'Notifications for this channel, ${current.$2}',
+        onTap: () => showHollowMenu(
+          context: chipContext,
+          // The chip sits at the row's trailing edge, so the menu opens
+          // right-aligned under it rather than over the next panel.
+          alignEnd: true,
+          anchor: overlayAnchorOf(chipContext,
+              localOffset: Offset(chipContext.size?.width ?? 0,
+                  (chipContext.size?.height ?? 0) + HollowSpacing.xs)),
+          builder: (_, _) => [
+            for (final (level, label, icon) in _options)
+              HollowMenuItem(
+                icon: icon,
+                label: label,
+                isChecked: level == value,
+                onTap: () => onChanged(level),
               ),
-              const SizedBox(width: HollowSpacing.sm),
-              Text(
-                option.$2,
-                style: HollowTypography.body.copyWith(
-                  color: isActive ? hollow.accent : hollow.textPrimary,
-                  fontWeight:
-                      isActive ? FontWeight.w600 : FontWeight.w400,
-                  fontSize: 13,
-                ),
-              ),
-            ],
-          ),
-        );
-      }).toList(),
-      child: Container(
-        padding: const EdgeInsets.symmetric(
-          horizontal: HollowSpacing.sm + 2,
-          vertical: HollowSpacing.xs + 2,
-        ),
-        decoration: BoxDecoration(
-          color: hollow.surface,
-          borderRadius: BorderRadius.circular(hollow.radiusSm),
-          border: Border.all(color: hollow.border),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Text(
-              currentLabel,
-              style: HollowTypography.body.copyWith(
-                color: hollow.textPrimary,
-                fontSize: 12,
-              ),
-            ),
-            const SizedBox(width: HollowSpacing.xs),
-            Icon(
-              LucideIcons.chevronDown,
-              size: 12,
-              color: hollow.textSecondary,
-            ),
           ],
         ),
       ),

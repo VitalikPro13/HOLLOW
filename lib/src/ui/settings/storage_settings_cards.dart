@@ -10,7 +10,7 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
-import 'package:hollow/src/ui/components/selector_pill.dart';
+import 'package:hollow/src/ui/components/hollow_chip.dart';
 import 'package:hollow/src/ui/settings/settings_shared.dart';
 import 'package:hollow/src/ui/settings/storage_section.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -195,21 +195,18 @@ class _ImageQualitySelector extends ConsumerWidget {
           ),
         ),
         const SizedBox(height: HollowSpacing.sm),
-        Row(
-          children: ImageQuality.values
-              .map((q) => SelectorPill(
-                    label: q.label,
-                    active: q == current,
-                    animated: true,
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: HollowSpacing.md,
-                      vertical: HollowSpacing.xs + 2,
-                    ),
-                    onTap: () {
-                      ref.read(imageQualityProvider.notifier).setQuality(q);
-                    },
-                  ))
-              .toList(),
+        Wrap(
+          spacing: HollowSpacing.sm,
+          runSpacing: HollowSpacing.sm,
+          children: [
+            for (final q in ImageQuality.values)
+              HollowChip(
+                label: q.label,
+                selected: q == current,
+                onTap: () =>
+                    ref.read(imageQualityProvider.notifier).setQuality(q),
+              ),
+          ],
         ),
         const SizedBox(height: HollowSpacing.sm),
         Text(

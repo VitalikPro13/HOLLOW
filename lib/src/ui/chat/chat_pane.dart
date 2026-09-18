@@ -148,7 +148,7 @@ List<({String peerId, String type})> _dmActiveSources(
 
 /// The source-switcher pill shell, shared by the full-bleed screen-share pill
 /// and the inline call panel; only focus derivation and tap handling differ.
-Widget _dmSourcePill({
+Widget _dmSourcePill({ // design-ignore: floating call source switcher, not a label
   required HollowTheme hollow,
   required Map<String, storage_api.UserProfile> profiles,
   required List<({String peerId, String type})> sources,
@@ -231,7 +231,7 @@ Widget _dmSourcePill({
 }
 
 /// Screen-share quality/source label chip shown on the corner of share tiles.
-Widget _shareLabelChip(HollowTheme hollow, String label) {
+Widget _shareSourceLabel(HollowTheme hollow, String label) {
   return Container(
     padding: const EdgeInsets.symmetric(
       horizontal: HollowSpacing.sm,
@@ -526,7 +526,7 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
 
   /// Source switcher pill for the full-bleed screen share view: every tab is
   /// clickable and sets [focusedDmSourceProvider] to that source.
-  Widget _buildScreenShareSourcePill(
+  Widget _buildScreenShareSourcePill( // design-ignore: floating call source switcher, not a label
     HollowTheme hollow,
     CallState call,
     String localPeerId,
@@ -1696,7 +1696,7 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
 
   /// Scoped Consumer: the pill needs the FULL call state, so it is watched here
   /// rather than pane-wide.
-  Widget _buildSourcePillOverlay(HollowTheme hollow) {
+  Widget _buildSourcePillOverlay(HollowTheme hollow) { // design-ignore: floating call source switcher, not a label
     return Consumer(builder: (context, ref, _) {
       final fullCall = ref.watch(callProvider);
       if (_countActiveDmSources(fullCall) < 2) {
@@ -1775,7 +1775,7 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
     );
   }
 
-  Widget _buildControlsPillOverlay() {
+  Widget _buildControlsPillOverlay() { // design-ignore: floating call controls, not a label
     return Positioned(
       bottom: HollowSpacing.lg,
       left: 0,
@@ -2468,7 +2468,7 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
   }
 
   /// Unread pill, only for messages that arrived while scrolled up.
-  Widget _buildUnreadPillOverlay(List<ChatMessage> allMessages) {
+  Widget _buildUnreadPillOverlay(List<ChatMessage> allMessages) { // design-ignore: places the unread jump pill, not a label
     final unreadCount = ref.watch(
         unreadProvider.select((s) => s.dmUnreadCounts[widget.peerId] ?? 0));
     if (unreadCount <= 0 || !_showScrollPill) return const SizedBox.shrink();
@@ -3281,7 +3281,7 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
               ),
               if (call.screenShareLabel != null) ...[
                 const SizedBox(width: HollowSpacing.sm),
-                _shareLabelChip(hollow, call.screenShareLabel!),
+                _shareSourceLabel(hollow, call.screenShareLabel!),
               ],
               const SizedBox(width: HollowSpacing.md),
               HollowButton.danger(
@@ -3320,7 +3320,7 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
             ),
             if (call.screenShareLabel != null) ...[
               const SizedBox(height: HollowSpacing.sm),
-              _shareLabelChip(hollow, call.screenShareLabel!),
+              _shareSourceLabel(hollow, call.screenShareLabel!),
             ],
             const SizedBox(height: HollowSpacing.md),
             HollowButton.danger(
@@ -4170,7 +4170,7 @@ class _ScreenShareFullView extends ConsumerWidget {
               mainAxisSize: MainAxisSize.min,
               children: [
                 if (call.screenShareLabel != null)
-                  _shareLabelChip(hollow, call.screenShareLabel!),
+                  _shareSourceLabel(hollow, call.screenShareLabel!),
                 if (call.screenShareLabel != null)
                   const SizedBox(width: HollowSpacing.sm),
                 HollowButton.danger(
@@ -4617,7 +4617,7 @@ class _DmProfilePanel extends ConsumerWidget {
                     Container(height: 1, color: hollow.border),
                     const SizedBox(height: HollowSpacing.sm),
 
-                    _buildPeerIdChip(context, hollow),
+                    _buildPeerIdCopy(context, hollow),
                   ],
                 ),
               ),
@@ -4707,7 +4707,7 @@ class _DmProfilePanel extends ConsumerWidget {
 
   /// [login] is a VERIFIED Twitch account; there is no other source for this
   /// badge.
-  Widget _buildTwitchBadge(HollowTheme hollow, String login) {
+  Widget _buildTwitchBadge(HollowTheme hollow, String login) { // design-ignore: Twitch's brand purple, rendered only from a verified credential
     return GestureDetector(
       onTap: () => launchUrl(
         Uri.parse('https://twitch.tv/$login'),
@@ -4821,7 +4821,7 @@ class _DmProfilePanel extends ConsumerWidget {
   }
 
   /// Peer id, copied on tap.
-  Widget _buildPeerIdChip(BuildContext context, HollowTheme hollow) {
+  Widget _buildPeerIdCopy(BuildContext context, HollowTheme hollow) {
     return HollowPressable(
       onTap: () {
         Clipboard.setData(ClipboardData(text: peerId));
@@ -4841,16 +4841,13 @@ class _DmProfilePanel extends ConsumerWidget {
       child: Row(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          Icon(LucideIcons.copy, size: 10,
-              color: hollow.textSecondary.withValues(alpha: 0.5)),
+          Icon(LucideIcons.copy, size: 14, color: hollow.textTertiary),
           const SizedBox(width: HollowSpacing.xs),
           Flexible(
             child: Text(
               peerId,
-              style: HollowTypography.mono.copyWith(
-                color: hollow.textSecondary.withValues(alpha: 0.5),
-                fontSize: 8,
-              ),
+              style: HollowTypography.monoSmall
+                  .copyWith(color: hollow.textTertiary),
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
             ),

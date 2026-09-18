@@ -1513,7 +1513,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
                       () => _staged = reorderStaged(_staged, from, to)),
                 ),
               if (!widget.isDm && _slowModeReadyAt != null)
-                _buildSlowModePill(hollow),
+                _buildSlowModeNotice(hollow),
               _buildComposerOrBanner(hollow),
             ],
           ),
@@ -1712,7 +1712,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     if (index != -1) _scrollToMessage(index);
   }
 
-  Widget _buildUnreadPillOverlay() {
+  Widget _buildUnreadPillOverlay() { // design-ignore: places the unread jump pill, not a label
     final unreadCount = widget.isDm
         ? ref.watch(unreadProvider
             .select((s) => s.dmUnreadCounts[widget.peerId!] ?? 0))
@@ -1757,27 +1757,17 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
   }
 
   /// Slow-mode countdown pill.
-  Widget _buildSlowModePill(HollowTheme hollow) {
+  Widget _buildSlowModeNotice(HollowTheme hollow) {
+    final secs =
+        (_slowModeReadyAt!.difference(DateTime.now()).inSeconds + 1).clamp(1, 3600);
     return Container(
       padding: const EdgeInsets.symmetric(
         horizontal: HollowSpacing.md,
         vertical: HollowSpacing.xs,
       ),
       color: hollow.surface,
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(LucideIcons.timer, size: 12, color: hollow.warning),
-          const SizedBox(width: 4),
-          Text(
-            'Slow mode: ${(_slowModeReadyAt!.difference(DateTime.now()).inSeconds + 1).clamp(1, 3600)}s',
-            style: HollowTypography.caption.copyWith(
-              color: hollow.warning,
-              fontWeight: FontWeight.w600,
-            ),
-          ),
-        ],
-      ),
+      child: HollowBadge('Slow mode, ${secs}s',
+          kind: HollowBadgeKind.warning, icon: LucideIcons.timer),
     );
   }
 

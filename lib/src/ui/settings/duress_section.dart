@@ -15,7 +15,7 @@ import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/hollow_toggle.dart';
-import 'package:hollow/src/ui/components/selector_pill.dart';
+import 'package:hollow/src/ui/components/hollow_chip.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Wire values of the destroy scope. They are persisted and read by Rust, so
@@ -674,17 +674,14 @@ class _ScopePicker extends StatelessWidget {
         ),
         const SizedBox(height: HollowSpacing.sm),
         Wrap(
-          runSpacing: HollowSpacing.xs,
+          spacing: HollowSpacing.sm,
+          runSpacing: HollowSpacing.sm,
           children: [
             for (final (value, label) in choices)
-              SelectorPill(
+              HollowChip(
                 label: label,
-                active: scope == value,
+                selected: scope == value,
                 onTap: () => onScope(value),
-                padding: const EdgeInsets.symmetric(
-                  horizontal: HollowSpacing.sm,
-                  vertical: 6,
-                ),
               ),
           ],
         ),

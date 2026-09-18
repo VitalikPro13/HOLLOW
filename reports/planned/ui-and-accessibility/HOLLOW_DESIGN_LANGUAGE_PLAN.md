@@ -37,7 +37,14 @@ New tokens: `HollowTypography.micro` (10/500, absorbs 155 orphaned sites) and `m
   - Component additions: `HollowChip` gained `leading` (a non-IconData glyph such as a platform logo), `hint` (quiet text after the label) and `trailingIcon` (chevron for a menu, arrow for a link); `HollowBadge` gained `leading`. Tests in `design_primitives_test.dart`, variants on the design sheet.
   - Verified with before/after renders: desktop `scripts/probe_scenarios/design_sweep3_labels.json` (audio, notifications, shortcuts, devices, storage, server Channels + the open picker, server notifications); mobile `fleet/design_sweep3_mobile.json` (creates a throwaway server from New conversation, long-press, Server Settings, Channels + the open picker, Notifications), ~36 s on the mini at `.39`. On mobile, dismiss a menu with a `tap_at` outside it: `escape` does not close it in the simulator.
 
-Guard baselines moved: local-label-class **36 to 28 to 0**, font-size 824 to 809 to 791, edge-insets 266 to 257 to 248, radius 177 to 175 to 168, letter-spacing 66 to 64, sized-box-gap 202 to 192.
+- **Sweep 3b, the look-alikes the class rule could not see (session 2).** `SelectorPill` is deleted (screen share options, app lock, duress scope, image quality are `HollowChip` now). The builder functions: the emoji, GIF and sticker picker tabs, GIF lists and sticker packs are `HollowChip`; the channel slow-mode countdown and the message proof status are `HollowBadge` (proof now reads Unsigned / Verified / Invalid in sentence case, Verified as success); the bulk-access modes are chips. The last three Material `PopupMenuButton`s (per-channel notification override, storage cleanup, auto-download override) open `showHollowMenu`. Not labels, kept with a `design-ignore` reason: the unread-pill and call-source overlays, the Twitch chip (brand purple). Two new guard rules at 0: `local-label-builder` and `material-popup-menu`.
+  - `showHollowMenu` gained `alignEnd`: the anchor becomes the menu's top-right corner, for a trigger at the trailing edge of its panel (without it the override menu opened across the member panel).
+  - The picker "+" (new GIF list, new sticker pack) sits OUTSIDE the scrolling row now, pinned at the trailing edge: at label size the lists overflow the 360px picker sooner, and the add action must never scroll out of reach.
+  - Found on the old code: the storage cleanup menu's "Clear unused emotes & GIFs" row overflowed by 3.3px. Gone with the new menu.
+  - Scenario `scripts/probe_scenarios/design_sweep3b_lookalikes.json`. A picker is an overlay host that Escape does not close; the scenario closes each by tapping its own button.
+  - **Open for Vitalik:** chip density inside the 360px pickers. At the one chip size, a user with several GIF lists sees two or three before the scroll arrows, where the old 11px pills fit four. A denser chip variant would break "one size"; the alternative is accepting the scroll.
+
+Guard baselines moved: local-label-class **36 to 28 to 0**, font-size 824 to 809 to 791 to 785, edge-insets 266 to 257 to 248 to 236, radius 177 to 175 to 168, letter-spacing 66 to 64 to 63, sized-box-gap 202 to 192 to 182.
 
 ### Four bugs the work surfaced, all fixed
 
@@ -54,11 +61,37 @@ Every sweep: probe screenshots **before**, change, probe screenshots **after**, 
 
 ### Where to pick up next
 
-1. **Sweep 3b: the label look-alikes the class rule cannot see.** `SelectorPill` lives in `components/` but is a third chip (5 uses, `radiusSm`, weight change on select): fold it into `HollowChip`. The per-channel "Default" override dropdown in server notifications (desktop and mobile) and the mobile "Media only" toggle pill are inline chips; the remaining Material `PopupMenuButton`s anywhere in `lib/src/ui` should move to `showHollowMenu` the way the access pickers did. The 23 `_xChip` builder FUNCTIONS from section 1 were never covered by the class rule either.
-2. **Sweep 4: the 111 `Divider(` sites** onto `HollowDivider`. Mechanical and low risk.
-3. **Sweep 5: the ~60 inline empty states** onto `HollowEmptyState`.
-4. **Then the open decisions** in section 9 of the rule set, which need Vitalik and a render. The two biggest: **ghost buttons being accent-coloured** (244 of them, so the accent is on nearly every button in the app) and **the action inside a list row, ghost or outline** (recurs on the owned-art panel, devices, member cards).
-5. **Then the screen work**, phases 2 onward below. The Shop card still letterboxes non-square kinds (banners `BoxFit.contain` in a square slot), which needs a layout decision, not a guess.
+**Order is decisions first, sweeps second** (Vitalik, 2026-09-18). The sweeps are verified against the final look, not today's.
+
+1. **The decision sheet.** Render each verdict in the table below on real screens (desktop and mobile, dark and light), Vitalik confirms by eye, then apply them in `lib/src/theme/` (and the fonts, the button variants, the picker list dropdown, the Ambient opt-in). Where a verdict needs a value (the five surface shades, the grey ghost tones), show two or three candidates side by side and let him pick.
+2. **Sweep 3c: section headers and eyebrow caps.** `HollowSectionHeader` has 0 uses; 8 private `_SectionLabel`-style classes plus inline headers, and 32 `toUpperCase()` eyebrow labels (the DEVICES / USAGE / CACHE LIMITS caps in Settings). The most visible remaining change.
+3. **Sweep 4: the 105 `Divider(` sites** onto `HollowDivider`. Mechanical and low risk.
+4. **Sweep 5: the ~60 inline empty states** onto `HollowEmptyState`.
+5. **Sweeps 6 to 9:** `showHollowSheet()` + one Hollow spinner (new primitives, then their sweeps), remaining Material `Switch` / `Slider`, the dialog pass (28 files), the filled-button audit.
+6. **Then the screen work**, phases 2 onward below, with the Shop's per-kind card shapes (verdict 9) and the compact message mode (verdict 8) inside it.
+
+### Vitalik's verdicts on the open decisions (2026-09-18, end of session 2)
+
+Taken in conversation from recommendations, before any render. **Next session starts here:** build a decision sheet (side by side on REAL screens, extending `integration_test/probe/design_gallery.dart` or a probe scenario) that shows each verdict applied, Vitalik confirms by eye, then the theme files change and the sweeps run against the final look. Decisions first, sweeps second.
+
+| # | Question | Verdict |
+|---|---|---|
+| 1 | Ghost buttons are accent-coloured (240 of them) | **Grey.** Ghost = `textSecondary`, `textPrimary` on hover. The accent is kept for the one filled primary, selected chips, links and focus. Vitalik: "absolutely grey, this is actually a bad issue". |
+| 2 | Typeface | **Onest** (UI sans, variable, Cyrillic) + **Geist Mono** (the console voice, shared with the website). IBM Plex Sans rendered beside it as the comparison. Bundle the variable TTFs, rewrite `hollow_typography.dart`. |
+| 3 | The action inside a list row | A row that exists FOR one action (Wear frame, Unlink, a member card's action) gets a **compact outline** button; secondary row actions stay ghost icons. |
+| 4 | Surface ladder | **Five levels**, chrome (dock, sidebars, title bar) one step DARKER than the canvas so content is the brightest thing. Vitalik singles this out as what most needs upgrading for polish. |
+| 5 | Ambient animated background | **Flat by default**, the animation an opt-in in Appearance, dimmer and slower. |
+| 6 | `HollowCard` fill + hairline | **Fill only** (background step). Check the light theme on the sheet: a hairline may be needed there where the fill is too faint. |
+| 7 | Type density | **Keep the UI at today's sizes** (it reads well at the small default window). **Message text 14 by default** (still scaled by `ChatTextScale`). **Remove every 8 and 9 px site**; nothing under `micro` 10. |
+| 8 | Compact message display | **Yes, opt-in** (Discord's Default vs Compact, no avatars), in Appearance or Accessibility. After the chat screen work, not before. |
+| 9 | Shop card for non-square art | **Each kind at its own shape**: banners a full-width row at 2.5:1, avatars / frames / stickers square tiles. |
+| 10 | Light theme | **Same pass as dark, at the same time.** |
+| 11 | `display` at 700 | **600.** Three weights: 400 / 500 / 600. |
+| 12 | `HollowButton.danger` label in `Colors.white` | **A token** (`textOnAccent` or an on-error token). |
+| 13 | The 6 px radius stop | **Drop it.** Buttons and inputs stay at 8; what used 6 moves to 8 (controls) or 4 (chips, badges). |
+| 14 | 360 px picker density (from sweep 3b) | Fixed tabs stay chips. **User-created GIF lists and sticker packs become ONE dropdown chip** ("All lists", chevron) opening `showHollowMenu` with the lists checked and "New list" / "New pack" at the bottom. Scales to any count, no scroll arrows. Vitalik: "actually better". |
+
+Remaining sweeps after the decisions land (about seven, then the screen phases): 3c section headers + the 32 tracked-caps eyebrow labels; dividers (105); empty states (~60); two new primitives, `showHollowSheet()` (27 hand-styled mobile sheets) and one Hollow spinner (126 raw `CircularProgressIndicator`); remaining Material `Switch` / `Slider`; the dialog pass (28 files); the filled-button audit (151 against ~one per screen).
 
 ### Decisions already taken, do not relitigate
 

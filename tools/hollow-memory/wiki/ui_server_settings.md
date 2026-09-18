@@ -548,15 +548,15 @@ On change: `notifNotifier.setServerLevel(serverId, level)`.
 Section header "CHANNEL OVERRIDES" with description "Override notification settings for specific channels."
 
 For each channel in `channelListProvider`:
-- Row with hash icon, channel name (ellipsized), `_ChannelOverrideDropdown`
+- Row with hash icon, channel name (ellipsized), `ChannelOverrideDropdown`
 
-**`_ChannelOverrideDropdown`:** `PopupMenuButton<ChannelNotificationLevel>` with 4 options (still Material; design sweep 3b moves it to `showHollowMenu`):
+**`ChannelOverrideDropdown`** (`notifications_tab.dart`, shared with user settings): a `HollowChip` with a chevron opening `showHollowMenu` (`alignEnd: true`, right-aligned under the chip), 4 options with a check on the current one:
 - Default (settings icon) -- uses `ChannelNotificationLevel.inherit`
 - All (bell icon) -- `ChannelNotificationLevel.all`
 - Mentions (atSign icon) -- `ChannelNotificationLevel.mentions`
 - Nothing (bellOff icon) -- `ChannelNotificationLevel.nothing`
 
-Display: surface container with border showing current label + chevron down. Active item highlighted in accent color.
+The chip shows the current level's label.
 
 On change: `notifNotifier.setChannelOverride(serverId, channelId, level)`.
 

@@ -15,6 +15,7 @@ import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/attachment_image.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:hollow/src/ui/components/hollow_badge.dart';
 
 /// Data needed to display and export a message's cryptographic proof.
 class MessageProofData {
@@ -283,40 +284,17 @@ class _MessageProofDialogContentState
     );
   }
 
-  Widget _buildBadge(HollowTheme hollow, bool hasSig) {
-    final String label;
-    final Color color;
-    if (!hasSig) {
-      label = 'UNSIGNED';
-      color = hollow.textSecondary;
-    } else if (_verified == null) {
+  Widget _buildStatus(bool hasSig) {
+    final verified = _verified;
+    if (hasSig && verified == null) {
       return const SizedBox.shrink(key: ValueKey('pending'));
-    } else if (_verified!) {
-      label = 'VERIFIED';
-      color = hollow.accent;
-    } else {
-      label = 'INVALID';
-      color = hollow.error;
     }
-    return Container(
-      key: ValueKey(label),
-      padding: const EdgeInsets.symmetric(
-        horizontal: HollowSpacing.sm,
-        vertical: 2,
-      ),
-      decoration: BoxDecoration(
-        color: color.withValues(alpha: 0.12),
-        borderRadius: BorderRadius.circular(hollow.radiusSm),
-      ),
-      child: Text(
-        label,
-        style: HollowTypography.caption.copyWith(
-          color: color,
-          fontWeight: FontWeight.w600,
-          letterSpacing: 0.5,
-        ),
-      ),
-    );
+    final (label, kind) = !hasSig
+        ? ('Unsigned', HollowBadgeKind.neutral)
+        : verified!
+            ? ('Verified', HollowBadgeKind.success)
+            : ('Invalid', HollowBadgeKind.error);
+    return HollowBadge(label, key: ValueKey(label), kind: kind);
   }
 
   @override
@@ -398,7 +376,7 @@ class _MessageProofDialogContentState
                       AnimatedSwitcher(
                         duration: const Duration(milliseconds: 300),
                         transitionBuilder: (child, anim) => FadeTransition(opacity: anim, child: child),
-                        child: _buildBadge(hollow, hasSig),
+                        child: _buildStatus(hasSig),
                       ),
                     ],
                   )),

@@ -18,6 +18,7 @@ import '../../theme/hollow_spacing.dart';
 import '../../theme/hollow_theme.dart';
 import '../../theme/hollow_typography.dart';
 import '../components/hollow_button.dart';
+import '../components/hollow_chip.dart';
 import '../components/hollow_dialog.dart';
 import '../components/hollow_pressable.dart';
 import '../components/popup_animator.dart';
@@ -476,15 +477,15 @@ class _EmojiPickerBodyState extends ConsumerState<EmojiPickerBody> {
           child: EdgeScrollRow(
             semanticLabel: 'tabs',
             children: [
-              _tabChip(_PickerTab.emoji, 'Emoji'),
-              const SizedBox(width: 4),
+              _tabItem(_PickerTab.emoji, 'Emoji'),
+              const SizedBox(width: HollowSpacing.sm),
               if (widget.serverId != null) ...[
-                _tabChip(_PickerTab.server, 'Server'),
-                const SizedBox(width: 4),
+                _tabItem(_PickerTab.server, 'Server'),
+                const SizedBox(width: HollowSpacing.sm),
               ],
-              _tabChip(_PickerTab.mine, 'Mine'),
-              const SizedBox(width: 4),
-              _tabChip(_PickerTab.ffz, 'FFZ'),
+              _tabItem(_PickerTab.mine, 'Mine'),
+              const SizedBox(width: HollowSpacing.sm),
+              _tabItem(_PickerTab.ffz, 'FFZ'),
             ],
           ),
         ),
@@ -494,37 +495,16 @@ class _EmojiPickerBodyState extends ConsumerState<EmojiPickerBody> {
     );
   }
 
-  Widget _tabChip(_PickerTab tab, String label) {
-    final hollow = HollowTheme.of(context);
-    final selected = _tab == tab;
-    return HollowPressable(
+  Widget _tabItem(_PickerTab tab, String label) {
+    return HollowChip(
+      label: label,
+      selected: _tab == tab,
+      semanticLabel: '$label emotes tab',
       onTap: () {
         if (_tab == tab) return;
         setState(() => _tab = tab);
         if (tab == _PickerTab.ffz && _ffzResults == null) _runFfzSearch();
       },
-      semanticLabel: '$label emotes tab',
-      borderRadius: BorderRadius.circular(hollow.radiusSm),
-      padding: EdgeInsets.zero,
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-        decoration: BoxDecoration(
-          color: selected ? hollow.accent.withValues(alpha: 0.15) : null,
-          borderRadius: BorderRadius.circular(hollow.radiusSm),
-          border: Border.all(
-            color: selected
-                ? hollow.accent.withValues(alpha: 0.4)
-                : hollow.border,
-          ),
-        ),
-        child: Text(
-          label,
-          style: HollowTypography.caption.copyWith(
-            color: selected ? hollow.accentText : hollow.textSecondary,
-            fontWeight: selected ? FontWeight.w600 : FontWeight.normal,
-          ),
-        ),
-      ),
     );
   }
 

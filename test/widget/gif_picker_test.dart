@@ -333,6 +333,8 @@ void main() {
     // "All" plus the new-list button are there even when empty.
     expect(find.text('All'), findsOneWidget);
 
+    // The tab row scrolls, and the test font is wider than any real one.
+    await tester.ensureVisible(find.text('Recent'));
     await tester.tap(find.text('Recent'));
     await tester.pump();
     expect(find.textContaining('Nothing here yet'), findsOneWidget);

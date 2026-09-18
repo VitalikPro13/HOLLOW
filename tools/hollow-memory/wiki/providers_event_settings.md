@@ -85,7 +85,7 @@ The entire body is wrapped in `try-catch` to prevent unhandled exceptions from k
 - System notification: If not viewing and not muted, calls `systemNotificationProvider.notifier.notifyDm(fromPeerId, text, replyToMid)` through `_albumNotifications` (`AlbumNotificationGate`, `lib/src/core/album_notification_gate.dart`): a lone message fires at once; an album's first item is held 1.5 s so the whole album fires ONE notification (the caption if any item carries one, else `albumPreviewText` once every item's file is known, e.g. "4 photos", else "N files"), and later items of an album that already fired are swallowed. Keyed per conversation + album id.
 
 **`NetworkEvent_MessageSent`** (toPeer, messageId, timestamp, signature, publicKey)
-- `chatProvider.notifier.hydrateSignature(toPeer, messageId, timestamp.toInt(), signature, publicKey)` -- Hydrates the optimistic in-memory entry with Rust's signed timestamp and signature/publicKey so Message Proof shows VERIFIED on fresh sends. Critical because Dart's `DateTime.now()` can differ from Rust's `SystemTime::now()` by a few ms.
+- `chatProvider.notifier.hydrateSignature(toPeer, messageId, timestamp.toInt(), signature, publicKey)` -- Hydrates the optimistic in-memory entry with Rust's signed timestamp and signature/publicKey so Message Proof shows Verified on fresh sends. Critical because Dart's `DateTime.now()` can differ from Rust's `SystemTime::now()` by a few ms.
 
 **`NetworkEvent_MessageSendFailed`** (toPeer, error)
 - `chatProvider.notifier.addSendFailure(toPeer, error)`

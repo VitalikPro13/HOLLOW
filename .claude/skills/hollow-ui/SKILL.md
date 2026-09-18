@@ -131,7 +131,8 @@ words, not components.
   Slots: `icon` or `leading` (a logo), `hint` (quiet text after the label),
   `trailingIcon` (chevron = opens a menu, arrow = leaves the app). A chip that
   opens a menu uses `showHollowMenu`, never `PopupMenuButton`
-  (`settings/channel_access_pickers.dart`). Key combos are `HollowKeyCombo`.
+  (`settings/channel_access_pickers.dart`); at a trailing edge pass
+  `alignEnd: true`. Key combos are `HollowKeyCombo`.
 
 If it is clickable it is a chip. If it is not, it is a badge. There is no third
 option and no local variant.

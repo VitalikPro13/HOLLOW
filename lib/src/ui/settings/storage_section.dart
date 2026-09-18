@@ -14,6 +14,9 @@ import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
+import 'package:hollow/src/ui/components/overlay_anchor.dart';
+import 'package:hollow/src/ui/components/hollow_tooltip.dart';
+import 'package:hollow/src/ui/components/hollow_menu.dart';
 
 /// Shared Storage Manager widgets for the desktop dialog and the mobile
 /// settings tab. Layout only: both read the same providers.
@@ -287,100 +290,91 @@ class _CleanupMenu extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final hollow = HollowTheme.of(context);
     final actions = ref.read(storageActionsProvider);
     final enabled = downloads > 0 || cache > 0 || assets > 0 || gifCache > 0;
 
-    return PopupMenuButton<String>(
-      enabled: enabled,
-      tooltip: 'Clean up',
-      icon: Icon(LucideIcons.ellipsis,
-          size: 18,
-          color: enabled ? hollow.textSecondary : hollow.border,
-          semanticLabel: 'Cleanup options'),
-      color: hollow.elevated,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(hollow.radiusMd),
-        side: BorderSide(color: hollow.border),
-      ),
-      onSelected: (value) async {
-        switch (value) {
-          case 'downloads':
-            final ok = await _confirm(
-              context,
-              'Clear all downloaded files?',
-              'Deletes every downloaded file from disk. Messages stay, and '
-                  'files can be downloaded again from peers later.',
-            );
-            if (ok) await actions.clearAllFileBytes();
-          case 'cache':
-            final ok = await _confirm(
-              context,
-              'Clear vault cache?',
-              'Deletes cached vault file/video playback data. This is pure cache '
-                  'and re-downloads on demand.',
-            );
-            if (ok) await actions.clearVaultCache();
-          case 'assets':
-            final ok = await _confirm(
-              context,
-              'Clear unused emotes & GIFs?',
-              'Deletes cached emote, sticker and GIF images that are not part '
-                  'of your personal set or any of your servers. They re-download '
-                  'from peers on demand.',
-            );
-            if (ok) await actions.clearUnreferencedAssets();
-          case 'gif_cache':
-            // A pure thumbnail cache, so nothing is lost and nothing is asked.
-            await actions.clearGifThumbCache();
-        }
-      },
-      itemBuilder: (ctx) => [
-        PopupMenuItem(
-          value: 'downloads',
-          enabled: downloads > 0,
-          child: _menuRow(hollow, LucideIcons.download,
-              'Clear all downloads', formatBytes(downloads)),
-        ),
-        PopupMenuItem(
-          value: 'cache',
-          enabled: cache > 0,
-          child: _menuRow(hollow, LucideIcons.hardDrive,
-              'Clear vault cache', formatBytes(cache)),
-        ),
-        PopupMenuItem(
-          value: 'assets',
-          enabled: assets > 0,
-          child: _menuRow(hollow, LucideIcons.smile,
-              'Clear unused emotes & GIFs', formatBytes(assets)),
-        ),
-        PopupMenuItem(
-          value: 'gif_cache',
-          enabled: gifCache > 0,
-          child: _menuRow(hollow, LucideIcons.search,
-              'Clear GIF search cache', formatBytes(gifCache)),
-        ),
-      ],
-    );
-  }
+    Future<void> clear(
+        String title, String body, Future<void> Function() run) async {
+      if (await _confirm(context, title, body)) await run();
+    }
 
-  Widget _menuRow(
-      HollowTheme hollow, IconData icon, String label, String trailing) {
-    return Row(
-      children: [
-        Icon(icon, size: 15, color: hollow.textSecondary),
-        const SizedBox(width: HollowSpacing.sm),
-        Text(label,
-            style:
-                HollowTypography.body.copyWith(color: hollow.textPrimary)),
-        const SizedBox(width: HollowSpacing.md),
-        Text(trailing,
-            style: HollowTypography.caption
-                .copyWith(color: hollow.textSecondary)),
-      ],
+    return HollowTooltip(
+      message: 'Clean up',
+      child: Builder(
+        builder: (buttonContext) => HollowButton.ghost(
+          compact: true,
+          semanticLabel: 'Cleanup options',
+          onPressed: !enabled
+              ? null
+              : () => showHollowMenu(
+                    context: buttonContext,
+                    anchor: _below(buttonContext),
+                    alignEnd: true,
+                    builder: (_, _) => [
+                      HollowMenuItem(
+                        icon: LucideIcons.download,
+                        label: 'Clear all downloads',
+                        trailing: formatBytes(downloads),
+                        enabled: downloads > 0,
+                        onTap: () => clear(
+                          'Clear all downloaded files?',
+                          'Deletes every downloaded file from disk. Messages '
+                              'stay, and files can be downloaded again from '
+                              'peers later.',
+                          actions.clearAllFileBytes,
+                        ),
+                      ),
+                      HollowMenuItem(
+                        icon: LucideIcons.hardDrive,
+                        label: 'Clear vault cache',
+                        trailing: formatBytes(cache),
+                        enabled: cache > 0,
+                        onTap: () => clear(
+                          'Clear vault cache?',
+                          'Deletes cached vault file/video playback data. This '
+                              'is pure cache and re-downloads on demand.',
+                          actions.clearVaultCache,
+                        ),
+                      ),
+                      HollowMenuItem(
+                        icon: LucideIcons.smile,
+                        label: 'Clear unused emotes & GIFs',
+                        trailing: formatBytes(assets),
+                        enabled: assets > 0,
+                        onTap: () => clear(
+                          'Clear unused emotes & GIFs?',
+                          'Deletes cached emote, sticker and GIF images that '
+                              'are not part of your personal set or any of '
+                              'your servers. They re-download from peers on '
+                              'demand.',
+                          actions.clearUnreferencedAssets,
+                        ),
+                      ),
+                      // A pure thumbnail cache, so nothing is lost and nothing
+                      // is asked.
+                      HollowMenuItem(
+                        icon: LucideIcons.search,
+                        label: 'Clear GIF search cache',
+                        trailing: formatBytes(gifCache),
+                        enabled: gifCache > 0,
+                        onTap: actions.clearGifThumbCache,
+                      ),
+                    ],
+                  ),
+          child: const Icon(LucideIcons.ellipsis),
+        ),
+      ),
     );
   }
 }
+
+/// Under the trigger's trailing edge: both storage menus hang off buttons at
+/// the right of their row, so they open right-aligned (pair with `alignEnd`).
+Offset _below(BuildContext context) => overlayAnchorOf(
+      context,
+      localOffset: Offset(context.size?.width ?? 0,
+          (context.size?.height ?? 0) + HollowSpacing.xs),
+    );
 
 class _ContextRow extends ConsumerStatefulWidget {
   const _ContextRow({required this.usage});
@@ -506,61 +500,39 @@ class _AutoDownloadOverrideButton extends ConsumerWidget {
     final hollow = HollowTheme.of(context);
     final override = (ref.watch(autoDownloadOverridesProvider).valueOrNull ??
         const {})[contextKey];
-    final icon = override == false
-        ? LucideIcons.cloudOff
-        : LucideIcons.download;
-    final color = override == null ? hollow.textSecondary : hollow.accent;
+    final notifier = ref.read(autoDownloadOverridesProvider.notifier);
 
-    return PopupMenuButton<String>(
-      tooltip: 'Auto-download',
-      icon: Icon(icon,
-          size: 16,
-          color: color,
-          semanticLabel: 'Auto-download settings for $conversationLabel'),
-      color: hollow.elevated,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(hollow.radiusMd),
-        side: BorderSide(color: hollow.border),
-      ),
-      onSelected: (value) {
-        final notifier = ref.read(autoDownloadOverridesProvider.notifier);
-        switch (value) {
-          case 'default':
-            notifier.setOverride(contextKey, null);
-          case 'on':
-            notifier.setOverride(contextKey, true);
-          case 'off':
-            notifier.setOverride(contextKey, false);
-        }
-      },
-      itemBuilder: (ctx) => [
-        _item(hollow, 'default', 'Auto-download: Default',
-            selected: override == null),
-        _item(hollow, 'on', 'Auto-download: Always on',
-            selected: override == true),
-        _item(hollow, 'off', 'Auto-download: Off',
-            selected: override == false),
-      ],
-    );
-  }
+    HollowMenuItem item(String label, bool? value) => HollowMenuItem(
+          label: label,
+          isChecked: override == value,
+          onTap: () => notifier.setOverride(contextKey, value),
+        );
 
-  PopupMenuItem<String> _item(HollowTheme hollow, String value, String label,
-      {required bool selected}) {
-    return PopupMenuItem(
-      value: value,
-      child: Row(
-        children: [
-          SizedBox(
-            width: 20,
-            child: selected
-                ? Icon(LucideIcons.check, size: 14, color: hollow.accent)
-                : null,
+    return HollowTooltip(
+      message: 'Auto-download',
+      child: Builder(
+        builder: (buttonContext) => HollowPressable(
+          semanticLabel: 'Auto-download settings for $conversationLabel',
+          borderRadius: BorderRadius.circular(hollow.radiusMd),
+          padding: const EdgeInsets.all(HollowSpacing.xs),
+          onTap: () => showHollowMenu(
+            context: buttonContext,
+            anchor: _below(buttonContext),
+                    alignEnd: true,
+            builder: (_, _) => [
+              const HollowMenuSection('Auto-download'),
+              item('Default', null),
+              item('Always on', true),
+              item('Off', false),
+            ],
           ),
-          Text(label,
-              style: HollowTypography.body.copyWith(
-                color: selected ? hollow.textPrimary : hollow.textSecondary,
-              )),
-        ],
+          child: Icon(
+            override == false ? LucideIcons.cloudOff : LucideIcons.download,
+            size: 16,
+            // An override is a choice the user made, so it shows in the accent.
+            color: override == null ? hollow.textSecondary : hollow.accentText,
+          ),
+        ),
       ),
     );
   }

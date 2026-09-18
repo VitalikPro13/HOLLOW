@@ -8,10 +8,10 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
-import 'package:hollow/src/ui/components/hollow_focus_ring.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/hollow_toggle.dart';
 import 'package:hollow/src/ui/settings/access_label_picker.dart';
+import 'package:hollow/src/ui/components/hollow_chip.dart';
 
 /// What the category bulk-access dialog resolved to. `visLabels`/`postLabels`
 /// non-empty means Custom (label-gated) mode for that dimension.
@@ -338,11 +338,10 @@ class _CategoryBulkAccessDialogState extends State<_CategoryBulkAccessDialog> {
                   ('moderator', 'Mod+'),
                   ('admin', 'Admin+'),
                 ])
-                  _modeChip(hollow, text,
+                  _mode(text,
                       selected: labels.isEmpty && mode == value,
                       onTap: () => onMode(value)),
-                _modeChip(
-                  hollow,
+                _mode(
                   labels.isEmpty ? 'Custom…' : '${labels.length} labels',
                   selected: labels.isNotEmpty,
                   onTap: onCustom,
@@ -355,33 +354,8 @@ class _CategoryBulkAccessDialogState extends State<_CategoryBulkAccessDialog> {
     );
   }
 
-  Widget _modeChip(HollowTheme hollow, String text,
+  Widget _mode(String text,
       {required bool selected, required VoidCallback onTap}) {
-    return HollowFocusRing(
-      enabled: true,
-      onActivate: onTap,
-      borderRadius: BorderRadius.circular(hollow.radiusMd),
-      child: GestureDetector(
-        onTap: onTap,
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-          decoration: BoxDecoration(
-            color: selected
-                ? hollow.accent.withValues(alpha: 0.15)
-                : hollow.elevated,
-            borderRadius: BorderRadius.circular(hollow.radiusMd),
-            border:
-                Border.all(color: selected ? hollow.accent : hollow.border),
-          ),
-          child: Text(
-            text,
-            style: HollowTypography.bodySmall.copyWith(
-              color: selected ? hollow.accentText : hollow.textPrimary,
-              fontWeight: selected ? FontWeight.w600 : FontWeight.w400,
-            ),
-          ),
-        ),
-      ),
-    );
+    return HollowChip(label: text, selected: selected, onTap: onTap);
   }
 }

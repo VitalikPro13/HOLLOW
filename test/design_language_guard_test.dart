@@ -103,7 +103,7 @@ final _rules = <_Rule>[
         'not a literal',
     pattern: RegExp(r'\bfontSize\s*:'),
     excludeDirs: [_theme],
-    baseline: 791,
+    baseline: 785,
   ),
   _Rule(
     id: 'material-colors',
@@ -136,7 +136,7 @@ final _rules = <_Rule>[
     fix: 'hierarchy comes from weight and colour, not tracking',
     pattern: RegExp(r'\bletterSpacing\s*:'),
     excludeDirs: [_theme],
-    baseline: 64,
+    baseline: 63,
   ),
   _Rule(
     id: 'upper-case-label',
@@ -165,6 +165,25 @@ final _rules = <_Rule>[
     baseline: 0,
   ),
   _Rule(
+    id: 'local-label-builder',
+    what: 'a _xChip / _xPill / _xTag / _xBadge builder function outside '
+        'components/',
+    fix: 'the same rule as a class: call HollowChip or HollowBadge instead '
+        'of building a local one',
+    pattern: RegExp(r'Widget\s+_\w*(Chip|Pill|Tag|Badge)\w*\('),
+    excludeDirs: [_theme, _components],
+    baseline: 0,
+  ),
+  _Rule(
+    id: 'material-popup-menu',
+    what: 'a Material PopupMenuButton',
+    fix: 'open showHollowMenu from the trigger; a chip that opens a menu is '
+        'settings/channel_access_pickers.dart',
+    pattern: RegExp(r'\bPopupMenu(Button|Item)\b'),
+    excludeDirs: [_theme],
+    baseline: 0,
+  ),
+  _Rule(
     id: 'edge-insets-literal',
     what: 'numeric EdgeInsets outside the theme',
     fix: 'use HollowSpacing; inside a control 4 to 8, inside a container 12 '
@@ -172,7 +191,7 @@ final _rules = <_Rule>[
     pattern:
         RegExp(r'EdgeInsets\.(all|symmetric|only|fromLTRB)\([^)]*\b\d'),
     excludeDirs: [_theme],
-    baseline: 248,
+    baseline: 236,
   ),
   _Rule(
     id: 'sized-box-gap',
@@ -181,7 +200,7 @@ final _rules = <_Rule>[
         'chips), 12 grouped, 16 separated, 24 sectioned',
     pattern: RegExp(r'SizedBox\(\s*(width|height)\s*:\s*\d'),
     excludeDirs: [_theme],
-    baseline: 192,
+    baseline: 182,
   ),
   _Rule(
     id: 'gradient',

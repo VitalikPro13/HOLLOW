@@ -2602,7 +2602,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
   }
 
   /// Unread pill, only for messages that arrived while scrolled up.
-  Widget _buildUnreadPillOverlay(List<ChannelChatMessage> allMessages) {
+  Widget _buildUnreadPillOverlay(List<ChannelChatMessage> allMessages) { // design-ignore: places the unread jump pill, not a label
     final unreadCount = ref.watch(unreadProvider.select((s) =>
         s.channelUnreadCounts['${widget.serverId}:${widget.channelId}'] ?? 0));
     if (unreadCount <= 0 || !_showScrollPill) return const SizedBox.shrink();
@@ -2793,7 +2793,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
         composerEmojiButton(hollow, onOpen: _openComposerEmojiPicker),
         const SizedBox(width: HollowSpacing.sm),
         if (_slowModeReadyAt != null) ...[
-          _buildSlowModePill(hollow),
+          _buildSlowModeCountdown(),
           const SizedBox(width: HollowSpacing.xs),
         ],
         HollowPressable(
@@ -2826,28 +2826,11 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
     setState(() => _isRecordingVoice = true);
   }
 
-  Widget _buildSlowModePill(HollowTheme hollow) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
-      decoration: BoxDecoration(
-        color: hollow.warning.withValues(alpha: 0.15),
-        borderRadius: BorderRadius.circular(hollow.radiusSm),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(LucideIcons.timer, size: 12, color: hollow.warning),
-          const SizedBox(width: 3),
-          Text(
-            '${(_slowModeReadyAt!.difference(DateTime.now()).inSeconds + 1).clamp(1, 3600)}s',
-            style: HollowTypography.caption.copyWith(
-              color: hollow.warning,
-              fontWeight: FontWeight.w600,
-            ),
-          ),
-        ],
-      ),
-    );
+  Widget _buildSlowModeCountdown() {
+    final secs =
+        (_slowModeReadyAt!.difference(DateTime.now()).inSeconds + 1).clamp(1, 3600);
+    return HollowBadge('${secs}s',
+        kind: HollowBadgeKind.warning, icon: LucideIcons.timer);
   }
 
   KeyEventResult _handleComposerKey(KeyEvent event) {

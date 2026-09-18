@@ -21,6 +21,7 @@ import '../../theme/hollow_typography.dart';
 import '../components/animated_gif_image.dart';
 import '../components/edge_scroll_row.dart';
 import '../components/hollow_button.dart';
+import '../components/hollow_chip.dart';
 import '../components/hollow_pressable.dart';
 import '../components/hollow_text_field.dart';
 import '../components/hollow_toast.dart';
@@ -538,10 +539,10 @@ class _StickerPickerBodyState extends ConsumerState<StickerPickerBody> {
           child: EdgeScrollRow(
             children: [
               if (widget.serverId != null)
-                _tabChip(hollow, StickerPickerTab.server, 'Server'),
-              _tabChip(hollow, StickerPickerTab.mine, 'Mine'),
-              _tabChip(hollow, StickerPickerTab.klipy, 'KLIPY'),
-              _tabChip(hollow, StickerPickerTab.recent, 'Recent'),
+                _tabItem(StickerPickerTab.server, 'Server'),
+              _tabItem(StickerPickerTab.mine, 'Mine'),
+              _tabItem(StickerPickerTab.klipy, 'KLIPY'),
+              _tabItem(StickerPickerTab.recent, 'Recent'),
             ],
           ),
         ),
@@ -561,33 +562,14 @@ class _StickerPickerBodyState extends ConsumerState<StickerPickerBody> {
         ),
       );
 
-  Widget _tabChip(HollowTheme hollow, StickerPickerTab tab, String label) {
-    final selected = _tab == tab;
+  Widget _tabItem(StickerPickerTab tab, String label) {
     return Padding(
-      padding: const EdgeInsets.only(right: 4),
-      child: HollowPressable(
-        onTap: () => _selectTab(tab),
+      padding: const EdgeInsets.only(right: HollowSpacing.sm),
+      child: HollowChip(
+        label: label,
+        selected: _tab == tab,
         semanticLabel: '$label stickers tab',
-        borderRadius: BorderRadius.circular(hollow.radiusSm),
-        padding: EdgeInsets.zero,
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-          decoration: BoxDecoration(
-            color: selected ? hollow.accent.withValues(alpha: 0.15) : null,
-            borderRadius: BorderRadius.circular(hollow.radiusSm),
-            border: Border.all(
-              color:
-                  selected ? hollow.accent.withValues(alpha: 0.4) : hollow.border,
-            ),
-          ),
-          child: Text(
-            label,
-            style: HollowTypography.caption.copyWith(
-              color: selected ? hollow.accentText : hollow.textSecondary,
-              fontWeight: selected ? FontWeight.w600 : FontWeight.normal,
-            ),
-          ),
-        ),
+        onTap: () => _selectTab(tab),
       ),
     );
   }
@@ -677,15 +659,21 @@ class _StickerPickerBodyState extends ConsumerState<StickerPickerBody> {
           Padding(
             padding: const EdgeInsets.fromLTRB(
                 HollowSpacing.sm, HollowSpacing.xs, HollowSpacing.sm, 0),
-            child: EdgeScrollRow(
-              height: 26,
-              semanticLabel: 'sticker packs',
+            // The add button sits outside the scroller, so it never scrolls
+            // out of reach however many packs there are.
+            child: Row(
               children: [
-                _packChip(hollow, null, 'All', filter),
-                for (final p in packs)
-                  _packChip(hollow, p, p.isEmpty ? 'Ungrouped' : p, filter),
-                const SizedBox(width: 4),
-                _newPackChip(hollow),
+                Expanded(
+                  child: EdgeScrollRow(
+                    semanticLabel: 'sticker packs',
+                    children: [
+                      _pack(null, 'All', filter),
+                      for (final p in packs)
+                        _pack(p, p.isEmpty ? 'Ungrouped' : p, filter),
+                    ],
+                  ),
+                ),
+                _newPackButton(),
               ],
             ),
           ),
@@ -753,42 +741,18 @@ class _StickerPickerBodyState extends ConsumerState<StickerPickerBody> {
     );
   }
 
-  Widget _packChip(
-      HollowTheme hollow, String? pack, String label, String? filter) {
-    final selected = filter == pack;
+  Widget _pack(String? pack, String label, String? filter) {
+    final menu = pack != null && pack.isNotEmpty;
     return Padding(
-      padding: const EdgeInsets.only(right: 4),
+      padding: const EdgeInsets.only(right: HollowSpacing.sm),
       child: GestureDetector(
-        onSecondaryTapDown: pack == null || pack.isEmpty
-            ? null
-            : (d) => _packMenu(pack, d.globalPosition),
-        onLongPressStart: pack == null || pack.isEmpty
-            ? null
-            : (d) => _packMenu(pack, d.globalPosition),
-        child: HollowPressable(
-          onTap: () => setState(() => _packFilter = pack),
+        onSecondaryTapDown: menu ? (d) => _packMenu(pack, d.globalPosition) : null,
+        onLongPressStart: menu ? (d) => _packMenu(pack, d.globalPosition) : null,
+        child: HollowChip(
+          label: label,
+          selected: filter == pack,
           semanticLabel: 'Show $label',
-          borderRadius: BorderRadius.circular(hollow.radiusSm),
-          padding: EdgeInsets.zero,
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-            decoration: BoxDecoration(
-              color: selected ? hollow.accent.withValues(alpha: 0.15) : null,
-              borderRadius: BorderRadius.circular(hollow.radiusSm),
-              border: Border.all(
-                color: selected
-                    ? hollow.accent.withValues(alpha: 0.4)
-                    : hollow.border,
-              ),
-            ),
-            child: Text(
-              label,
-              style: HollowTypography.caption.copyWith(
-                fontSize: 11,
-                color: selected ? hollow.accentText : hollow.textSecondary,
-              ),
-            ),
-          ),
+          onTap: () => setState(() => _packFilter = pack),
         ),
       ),
     );
@@ -797,24 +761,15 @@ class _StickerPickerBodyState extends ConsumerState<StickerPickerBody> {
   /// The "+" chip. A pack is a COLUMN on the sticker rows, so an empty one has
   /// nowhere to exist in the database and lives in [stickerPacksProvider] until
   /// a sticker lands in it.
-  Widget _newPackChip(HollowTheme hollow) {
-    return HollowPressable(
-      onTap: () {
+  Widget _newPackButton() {
+    return HollowButton.ghost(
+      compact: true,
+      semanticLabel: 'New sticker pack',
+      onPressed: () {
         _packNameController.text = '';
         setState(() => _renamingPack = _kNewPackSentinel);
       },
-      semanticLabel: 'New sticker pack',
-      borderRadius: BorderRadius.circular(hollow.radiusSm),
-      padding: EdgeInsets.zero,
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-        alignment: Alignment.center,
-        decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(hollow.radiusSm),
-          border: Border.all(color: hollow.border),
-        ),
-        child: Icon(LucideIcons.plus, size: 12, color: hollow.textSecondary),
-      ),
+      child: const Icon(LucideIcons.plus),
     );
   }
 
@@ -1413,7 +1368,7 @@ class _StickerCellState extends ConsumerState<_StickerCell> {
                 Positioned(
                   right: 0,
                   top: 0,
-                  child: _saveBadge(hollow),
+                  child: _saveButton(hollow),
                 ),
               if (widget.picking)
                 Container(
@@ -1437,7 +1392,7 @@ class _StickerCellState extends ConsumerState<_StickerCell> {
   /// Touch has no hover, so the badge is always up on a phone.
   bool get _touch => Platform.isAndroid || Platform.isIOS;
 
-  Widget _saveBadge(HollowTheme hollow) {
+  Widget _saveButton(HollowTheme hollow) {
     return HollowPressable(
       onTap: widget.onSave,
       semanticLabel: 'Save this sticker to my stickers',

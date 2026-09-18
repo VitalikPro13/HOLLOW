@@ -6,7 +6,7 @@ import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
-import 'package:hollow/src/ui/components/selector_pill.dart';
+import 'package:hollow/src/ui/components/hollow_chip.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Desktop app lock card: how long until the window locks itself, and a way to
@@ -60,19 +60,16 @@ class AppLockCard extends ConsumerWidget {
         ),
         const SizedBox(height: HollowSpacing.sm),
         Wrap(
-          runSpacing: HollowSpacing.xs,
+          spacing: HollowSpacing.sm,
+          runSpacing: HollowSpacing.sm,
           children: [
             for (final choice in kLockAfterChoices)
-              SelectorPill(
+              HollowChip(
                 label: labelFor(choice),
-                active: minutes == choice,
+                selected: minutes == choice,
                 onTap: () => ref
                     .read(lockAfterMinutesProvider.notifier)
                     .setMinutes(choice),
-                padding: const EdgeInsets.symmetric(
-                  horizontal: HollowSpacing.sm,
-                  vertical: 6,
-                ),
               ),
           ],
         ),

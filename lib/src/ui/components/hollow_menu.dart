@@ -221,12 +221,17 @@ typedef HollowMenuBuilder = List<HollowMenuEntry> Function(
 ///
 /// [builder] re-runs whenever anything it watches changes, so rows must read
 /// live state through its `ref` rather than closing over a snapshot.
+///
+/// [alignEnd] makes [anchor] the menu's top-RIGHT corner, for a trigger that
+/// sits at the trailing edge of its panel and would otherwise open over the
+/// panel beside it.
 Future<void> showHollowMenu({
   required BuildContext context,
   required Offset anchor,
   required HollowMenuBuilder builder,
   double minWidth = _kMenuMinWidth,
   double maxWidth = _kMenuMaxWidth,
+  bool alignEnd = false,
 }) {
   return showGeneralDialog<void>(
     context: context,
@@ -240,6 +245,7 @@ Future<void> showHollowMenu({
     // frame, and the host owns the drill-in state.
     pageBuilder: (_, _, _) => _HollowMenuHost(
       anchor: anchor,
+      alignEnd: alignEnd,
       entriesBuilder: builder,
       minWidth: minWidth,
       maxWidth: maxWidth,
@@ -255,7 +261,7 @@ Future<void> showHollowMenu({
         child: ScaleTransition(
           scale: Tween<double>(begin: 0.96, end: 1.0).animate(curved),
           // The menu grows out of the click point, not the screen centre.
-          alignment: Alignment.topLeft,
+          alignment: alignEnd ? Alignment.topRight : Alignment.topLeft,
           child: child,
         ),
       );
@@ -265,12 +271,14 @@ Future<void> showHollowMenu({
 
 class _HollowMenuHost extends StatefulWidget {
   final Offset anchor;
+  final bool alignEnd;
   final HollowMenuBuilder entriesBuilder;
   final double minWidth;
   final double maxWidth;
 
   const _HollowMenuHost({
     required this.anchor,
+    required this.alignEnd,
     required this.entriesBuilder,
     required this.minWidth,
     required this.maxWidth,
@@ -344,7 +352,7 @@ class _HollowMenuHostState extends State<_HollowMenuHost> {
     return HollowMenuScope(
       dismiss: _dismiss,
       child: CustomSingleChildLayout(
-        delegate: _MenuLayoutDelegate(widget.anchor),
+        delegate: _MenuLayoutDelegate(widget.anchor, alignEnd: widget.alignEnd),
         child: ConstrainedBox(
           constraints: BoxConstraints(
             minWidth: widget.minWidth,
@@ -582,9 +590,10 @@ class _MenuRow extends StatelessWidget {
 /// edges using the child's MEASURED size rather than an estimate.
 class _MenuLayoutDelegate extends SingleChildLayoutDelegate {
   final Offset anchor;
+  final bool alignEnd;
   static const double _margin = 8;
 
-  const _MenuLayoutDelegate(this.anchor);
+  const _MenuLayoutDelegate(this.anchor, {this.alignEnd = false});
 
   @override
   BoxConstraints getConstraintsForChild(BoxConstraints constraints) {
@@ -598,8 +607,8 @@ class _MenuLayoutDelegate extends SingleChildLayoutDelegate {
   Offset getPositionForChild(Size size, Size childSize) {
     // Down-right of the cursor, flipped when that would overflow and clamped so
     // the menu is never partly off screen.
-    var x = anchor.dx;
-    if (x + childSize.width > size.width - _margin) {
+    var x = alignEnd ? anchor.dx - childSize.width : anchor.dx;
+    if (!alignEnd && x + childSize.width > size.width - _margin) {
       x = anchor.dx - childSize.width;
     }
     var y = anchor.dy;
@@ -614,5 +623,5 @@ class _MenuLayoutDelegate extends SingleChildLayoutDelegate {
 
   @override
   bool shouldRelayout(_MenuLayoutDelegate oldDelegate) =>
-      oldDelegate.anchor != anchor;
+      oldDelegate.anchor != anchor || oldDelegate.alignEnd != alignEnd;
 }
