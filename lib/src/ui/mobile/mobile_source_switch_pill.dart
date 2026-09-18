@@ -14,7 +14,7 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 ///
 /// Local SCREEN shares are never offered here, because the phone cannot preview
 /// its own share without an infinite mirror; callers exclude it from [sources].
-class MobileSourceSwitchPill extends ConsumerWidget {
+class MobileSourceSwitchPill extends ConsumerWidget { // design-ignore: floating share control, not a label
   /// Active sources in display order: screens first, then cameras.
   final List<({String peerId, String type})> sources;
   final String? focusedPeerId;

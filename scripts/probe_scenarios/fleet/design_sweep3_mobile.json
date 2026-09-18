@@ -1,0 +1,43 @@
+{
+  "_": [
+    "The mobile half of design sweep 3: the server settings route, whose access,",
+    "slow-mode and notification-level pills became the shared HollowChip pickers.",
+    "",
+    "One peer creates a throwaway server, opens its settings from the long-press",
+    "sheet, and shoots the Channels and Notifications sections. Run it on the",
+    "unswept commit first, then with the sweep applied, and stack the pairs.",
+    "",
+    "run (on the Mac mini): pwsh scripts/fleet.ps1 -Scenario design_sweep3_mobile -Peers a"
+  ],
+  "peers": ["a"],
+  "steps": [
+    { "peer": "a", "op": "tap", "target": "semantics:New conversation", "index": 0 },
+    { "peer": "a", "op": "wait", "ms": 1000 },
+    { "peer": "a", "op": "enter_text", "target": "hint:Server name", "value": "sweep3" },
+    { "peer": "a", "op": "tap", "target": "text:Create", "index": 0 },
+    { "peer": "a", "op": "wait_for", "target": "text:sweep3", "timeout_ms": 30000 },
+    { "peer": "a", "op": "wait", "ms": 1500 },
+
+    { "peer": "a", "op": "long_press", "target": "text:sweep3", "index": 0 },
+    { "peer": "a", "op": "wait", "ms": 1000 },
+    { "peer": "a", "op": "tap", "target": "text:Server Settings", "index": 0 },
+    { "peer": "a", "op": "wait", "ms": 2000 },
+    { "peer": "a", "op": "shot", "name": "mobile-s3-01-server-settings" },
+
+    { "peer": "a", "op": "log", "message": "down to Channels: the access and slow-mode pickers" },
+    { "peer": "a", "op": "scroll", "target": "text:Server Name", "index": 0, "dy": -900, "soft": true },
+    { "peer": "a", "op": "wait", "ms": 1000 },
+    { "peer": "a", "op": "shot", "name": "mobile-s3-02-channels" },
+
+    { "peer": "a", "op": "tap", "target": "semantics:Who can see this channel, All", "index": 0, "soft": true },
+    { "peer": "a", "op": "wait", "ms": 800 },
+    { "peer": "a", "op": "shot", "name": "mobile-s3-03-access-menu", "soft": true },
+    { "peer": "a", "op": "tap_at", "x": 200, "y": 820, "soft": true },
+    { "peer": "a", "op": "wait", "ms": 600 },
+
+    { "peer": "a", "op": "log", "message": "further down to Notifications: the three level chips" },
+    { "peer": "a", "op": "scroll", "target": "text:Management", "index": 0, "dy": -500, "soft": true },
+    { "peer": "a", "op": "wait", "ms": 1000 },
+    { "peer": "a", "op": "shot", "name": "mobile-s3-04-notifications" }
+  ]
+}

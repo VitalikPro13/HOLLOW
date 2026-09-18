@@ -50,6 +50,7 @@ import 'package:hollow/src/ui/chat/gif_picker.dart';
 import 'package:hollow/src/ui/chat/sticker_picker.dart';
 import 'package:hollow/src/ui/chat/emote_composer.dart';
 import 'package:hollow/src/ui/chat/emote_image.dart';
+import 'package:hollow/src/ui/components/hollow_badge.dart';
 import 'package:hollow/src/core/providers/emote_provider.dart';
 import 'package:hollow/src/ui/chat/chat_pane_shared.dart';
 import 'package:hollow/src/ui/chat/message_action_bar.dart';
@@ -1705,7 +1706,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
           if (ref.watch(serverIsNsfwProvider(widget.serverId)).valueOrNull ??
               false) ...[
             const SizedBox(width: HollowSpacing.sm),
-            const _NsfwBadge(),
+            const HollowBadge('NSFW', kind: HollowBadgeKind.error),
           ],
           if (showStatus) ...[
             const SizedBox(width: HollowSpacing.md),
@@ -2894,32 +2895,6 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
           .clamp(0, _mentionCandidates.length - 1);
     });
     _showMentionOverlay();
-  }
-}
-
-/// Small "NSFW" pill shown beside the channel name for NSFW-flagged servers.
-class _NsfwBadge extends StatelessWidget {
-  const _NsfwBadge();
-
-  @override
-  Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-      decoration: BoxDecoration(
-        color: hollow.error.withValues(alpha: 0.15),
-        borderRadius: BorderRadius.circular(hollow.radiusSm),
-      ),
-      child: Text(
-        'NSFW',
-        style: HollowTypography.caption.copyWith(
-          color: hollow.error,
-          fontWeight: FontWeight.w700,
-          fontSize: 10,
-          letterSpacing: 0.5,
-        ),
-      ),
-    );
   }
 }
 

@@ -9,6 +9,7 @@ import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_chip.dart';
 import 'package:hollow/src/ui/components/hollow_divider.dart';
 import 'package:hollow/src/ui/components/hollow_empty_state.dart';
+import 'package:hollow/src/ui/components/hollow_key_combo.dart';
 import 'package:hollow/src/ui/components/hollow_list_row.dart';
 import 'package:hollow/src/ui/components/hollow_section_header.dart';
 import 'package:hollow/src/ui/components/hollow_skeleton.dart';
@@ -112,8 +113,24 @@ class _GalleryPane extends StatelessWidget {
                       onTap: () {}),
                   HollowChip(
                       label: 'Removable', onTap: () {}, onRemove: () {}),
+                  HollowChip(
+                      label: 'RNNoise',
+                      hint: 'light, instant',
+                      selected: true,
+                      onTap: () {}),
+                  HollowChip(
+                      label: 'Mod+',
+                      icon: LucideIcons.eye,
+                      trailingIcon: LucideIcons.chevronDown,
+                      onTap: () {}),
+                  HollowChip(
+                      label: 'Steam',
+                      trailingIcon: LucideIcons.arrowUpRight,
+                      onTap: () {}),
                 ],
               ),
+              const SizedBox(height: HollowSpacing.sm),
+              const HollowKeyCombo('Ctrl + Shift + M'),
               const SizedBox(height: HollowSpacing.sm),
               Text(
                 'expand: true, for a row of equal-width sub-tabs',

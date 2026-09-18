@@ -22,6 +22,7 @@ Distributed, encrypted Discord alternative: no central servers, members host it.
 ```bash
 flutter run -d windows
 flutter build windows
+# build_hooks error? scripts/flutter_win.ps1 <args>
 flutter test test/
 cd rust/hollow_core && cargo check  # + clippy
 

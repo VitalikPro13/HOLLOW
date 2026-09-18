@@ -184,7 +184,7 @@ class MobileSpeakingAvatar extends ConsumerWidget {
 }
 
 /// Small status badge pinned to an avatar corner (muted / deafened).
-class _AvatarBadge extends StatelessWidget {
+class _AvatarBadge extends StatelessWidget { // design-ignore: an icon mark on an avatar corner, not a label
   final IconData icon;
   final HollowTheme hollow;
   final double radius;

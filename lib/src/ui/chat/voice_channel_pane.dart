@@ -1346,7 +1346,7 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
   }
 }
 
-class _VoiceControlsPill extends ConsumerStatefulWidget {
+class _VoiceControlsPill extends ConsumerStatefulWidget { // design-ignore: floating call control bar, not a label
   final String serverId;
   final String channelId;
   final VoidCallback onHoverEnter;
@@ -1364,7 +1364,7 @@ class _VoiceControlsPill extends ConsumerStatefulWidget {
       _VoiceControlsPillState();
 }
 
-class _VoiceControlsPillState extends ConsumerState<_VoiceControlsPill> {
+class _VoiceControlsPillState extends ConsumerState<_VoiceControlsPill> { // design-ignore: floating call control bar, not a label
   Timer? _durationTimer;
   Duration _duration = Duration.zero;
 

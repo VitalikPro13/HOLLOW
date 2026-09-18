@@ -8,6 +8,8 @@ import 'package:hollow/src/theme/contrast.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
+import 'package:hollow/src/ui/components/hollow_badge.dart';
+import 'package:hollow/src/ui/components/hollow_chip.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/platform_icons.dart';
@@ -438,47 +440,15 @@ class _CenterPanel extends StatelessWidget {
               if (_tags.isNotEmpty) ...[
                 const SizedBox(height: HollowSpacing.md),
                 Wrap(
-                  spacing: HollowSpacing.xs + 2,
-                  runSpacing: HollowSpacing.xs + 2,
-                  children: [
-                    for (final t in _tags) _TagChip(label: t, accent: accent),
-                  ],
+                  spacing: HollowSpacing.sm,
+                  runSpacing: HollowSpacing.sm,
+                  children: [for (final t in _tags) HollowBadge(t)],
                 ),
               ],
             ],
           ),
         ),
       ],
-    );
-  }
-}
-
-/// A small descriptive tag, washed with the game's own colour while the text
-/// stays a theme token.
-class _TagChip extends StatelessWidget {
-  final String label;
-  final Color accent;
-
-  const _TagChip({required this.label, required this.accent});
-
-  @override
-  Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3.5),
-      decoration: BoxDecoration(
-        color: accent.withValues(alpha: 0.08),
-        borderRadius: BorderRadius.circular(999),
-        border: Border.all(color: accent.withValues(alpha: 0.22)),
-      ),
-      child: Text(
-        label,
-        style: HollowTypography.caption.copyWith(
-          color: hollow.textSecondary,
-          fontSize: 10.5,
-          fontWeight: FontWeight.w600,
-        ),
-      ),
     );
   }
 }
@@ -850,11 +820,11 @@ class _DetailsPanel extends StatelessWidget {
       section(
         'Platforms',
         Wrap(
-          spacing: HollowSpacing.xs + 2,
-          runSpacing: HollowSpacing.xs + 2,
+          spacing: HollowSpacing.sm,
+          runSpacing: HollowSpacing.sm,
           children: [
             for (final p in details.platforms)
-              _PlatformChip(
+              _PlatformEntry(
                 slug: p,
                 gameName: name,
                 storeUrl: _storeUrl(p, details.stores),
@@ -957,14 +927,14 @@ String? _storeUrl(String slug, Map<String, String> stores) => switch (slug) {
       _ => null,
     };
 
-/// A platform chip, tappable when a store URL was baked. Opening the browser is
-/// a user action, never a display-time fetch.
-class _PlatformChip extends StatelessWidget {
+/// A platform, tappable when a store URL was baked. Opening the browser is a
+/// user action, never a display-time fetch.
+class _PlatformEntry extends StatelessWidget {
   final String slug;
   final String gameName;
   final String? storeUrl;
 
-  const _PlatformChip({
+  const _PlatformEntry({
     required this.slug,
     required this.gameName,
     required this.storeUrl,
@@ -973,53 +943,30 @@ class _PlatformChip extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
-    final tappable = storeUrl != null && storeUrl!.isNotEmpty;
-
-    final chip = Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
-      decoration: BoxDecoration(
-        color: hollow.surface.withValues(alpha: 0.6),
-        borderRadius: BorderRadius.circular(999),
-        border: Border.all(color: hollow.border),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          PlatformIcon(slug: slug, size: 12, color: hollow.textSecondary),
-          const SizedBox(width: 5),
-          Text(
-            platformLabel(slug),
-            style: HollowTypography.caption.copyWith(
-              color: hollow.textSecondary,
-              fontSize: 10.5,
-              fontWeight: FontWeight.w600,
-            ),
-          ),
-          if (tappable) ...[
-            const SizedBox(width: 4),
-            Icon(
-              LucideIcons.arrowUpRight,
-              size: 10,
-              color: hollow.textTertiary,
-            ),
-          ],
-        ],
-      ),
-    );
-
-    if (!tappable) return chip;
-    return HollowPressable(
+    final url = storeUrl;
+    if (url == null || url.isEmpty) {
+      return HollowBadge(
+        platformLabel(slug),
+        leading: PlatformIcon(
+            slug: slug, size: _glyphSize, color: hollow.textSecondary),
+      );
+    }
+    return HollowChip(
+      label: platformLabel(slug),
+      leading:
+          PlatformIcon(slug: slug, size: _glyphSize, color: hollow.textSecondary),
+      trailingIcon: LucideIcons.arrowUpRight,
+      semanticLabel: 'Open $gameName store page for ${platformLabel(slug)}',
       onTap: () async {
-        final uri = Uri.tryParse(storeUrl!);
+        final uri = Uri.tryParse(url);
         if (uri == null) return;
         await launchUrl(uri, mode: LaunchMode.externalApplication);
       },
-      semanticLabel: 'Open $gameName store page for ${platformLabel(slug)}',
-      borderRadius: BorderRadius.circular(999),
-      child: chip,
     );
   }
 }
+
+const double _glyphSize = 14;
 
 /// Label left, value right, both on one baseline.
 class _FactRow extends StatelessWidget {

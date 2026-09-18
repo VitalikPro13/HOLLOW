@@ -103,7 +103,7 @@ final _rules = <_Rule>[
         'not a literal',
     pattern: RegExp(r'\bfontSize\s*:'),
     excludeDirs: [_theme],
-    baseline: 809,
+    baseline: 791,
   ),
   _Rule(
     id: 'material-colors',
@@ -128,7 +128,7 @@ final _rules = <_Rule>[
     fix: 'use hollow.radiusXs / radiusSm / radiusMd / radiusLg / radiusXl',
     pattern: RegExp(r'BorderRadius\.circular\(\s*[0-9]'),
     excludeDirs: [_theme],
-    baseline: 175,
+    baseline: 168,
   ),
   _Rule(
     id: 'letter-spacing',
@@ -136,7 +136,7 @@ final _rules = <_Rule>[
     fix: 'hierarchy comes from weight and colour, not tracking',
     pattern: RegExp(r'\bletterSpacing\s*:'),
     excludeDirs: [_theme],
-    baseline: 66,
+    baseline: 64,
   ),
   _Rule(
     id: 'upper-case-label',
@@ -162,7 +162,7 @@ final _rules = <_Rule>[
         'option',
     pattern: RegExp(r'^\s*class\s+\w*(Chip|Pill|Tag|Badge)\w*\b'),
     excludeDirs: [_theme, _components],
-    baseline: 28,
+    baseline: 0,
   ),
   _Rule(
     id: 'edge-insets-literal',
@@ -172,7 +172,7 @@ final _rules = <_Rule>[
     pattern:
         RegExp(r'EdgeInsets\.(all|symmetric|only|fromLTRB)\([^)]*\b\d'),
     excludeDirs: [_theme],
-    baseline: 257,
+    baseline: 248,
   ),
   _Rule(
     id: 'sized-box-gap',
@@ -181,7 +181,7 @@ final _rules = <_Rule>[
         'chips), 12 grouped, 16 separated, 24 sectioned',
     pattern: RegExp(r'SizedBox\(\s*(width|height)\s*:\s*\d'),
     excludeDirs: [_theme],
-    baseline: 202,
+    baseline: 192,
   ),
   _Rule(
     id: 'gradient',

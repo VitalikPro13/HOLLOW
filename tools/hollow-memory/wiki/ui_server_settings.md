@@ -204,7 +204,7 @@ Three sealed classes represent layout items:
 
 **Auto-sync:** In `build()`, if `channels.isNotEmpty && effective.length != _layout.length` (channels created/deleted externally), schedules a post-frame callback that updates both `_layout` and `_savedLayout`, then auto-saves the layout JSON via `crdt_api.updateChannelLayout()`. The `channels.isNotEmpty` guard prevents layout corruption when `channelListProvider` is cleared during server deselection (switching to Home tab) while the settings panel is still mounted.
 
-**Channel property controls:** Each `_ChannelRow` has `onVisibilityChanged`, `onPostingChanged`, `onPublicToggled` callbacks. These use optimistic UI updates via `channelListProvider.updateChannel()` BEFORE calling the FFI. The visibility/posting chips are `_AccessChip` dropdowns. The public toggle is a globe icon (accent when public).
+**Channel property controls:** Each `_ChannelRow` has `onVisibilityChanged`, `onPostingChanged`, `onPublicToggled` callbacks. These use optimistic UI updates via `channelListProvider.updateChannel()` BEFORE calling the FFI. The visibility/posting chips are `ChannelAccessPicker`s (chip + `showHollowMenu`). The public toggle is a globe icon (accent when public).
 
 ### Actions
 
@@ -274,28 +274,26 @@ Row contains:
   - Channel icon (hash for text, volume2 for voice)
   - Channel name
   - **Public toggle** (globe icon) -- `HollowPressable` toggle button. When `is_public` is true: accent-tinted globe icon with filled background. When false: neutral globe icon. Tap calls `crdt_api.setChannelPublic(serverId, channelId, !isPublic)` with **optimistic update** via `channelListProvider.updateChannel()` BEFORE the FFI call. Only shown for text channels. Public channels send messages as Ed25519-signed plaintext (not MLS-encrypted).
-  - **Visibility `_AccessChip`** (eye icon) -- `PopupMenuButton` over `'everyone'` / `'moderator'` / `'admin'` / `'Custom…'` (issue #32 — opens `showAccessLabelPicker`, access labels only)
-  - **Posting `_AccessChip`** (messageSquare icon) -- same options
+  - **Visibility `ChannelAccessPicker`** (eye icon, `settings/channel_access_pickers.dart`, shared with mobile) -- a `HollowChip` with a chevron that opens `showHollowMenu` over Everyone / Mod+ / Admin+ / Custom… (check on the current value; Custom = issue #32, opens `showAccessLabelPicker`, access labels only)
+  - **Posting `ChannelAccessPicker`** (messageSquare icon) -- same options
   - **Temporary access** (userPlus icon, `if (!isPublic)`, in the RIGHT action cluster after the globe) -- opens `showChannelGrantsDialog` (`channel_grants_dialog.dart`): active grants with `…peerid · remaining` captions + revoke, and a `MemberSearchPicker` → duration flow (`kGrantDurationOptions` 15m/1h/24h/Until revoked)
   - Every icon/chip in the row is wrapped in a `HollowTooltip`
-  - **Slow-mode `_SlowModeChip`** (timer icon, text channels only) -- `PopupMenuButton<int>` over `kSlowModeOptions` (Off/5s/10s/30s/1m/5m/15m/1h). Warning-tinted when active; labels via `slowModeDurationLabel()` from `lib/src/core/moderation_format.dart`. Optimistic update then `crdt_api.setChannelSlowMode()`. Moderator+ are exempt from the limit.
+  - **Slow-mode `SlowModePicker`** (timer icon, text channels only, same file) -- `HollowChip` reading "Slow mode" / "Slow 30s", opens `showHollowMenu` over `kSlowModeOptions` (Off/5s/10s/30s/1m/5m/15m/1h, defined in `channel_access_pickers.dart`); labels via `slowModeDurationLabel()` from `lib/src/core/moderation_format.dart`. Optimistic update then `crdt_api.setChannelSlowMode()`. Moderator+ are exempt from the limit.
   - **Media-only toggle** (image icon, text channels only) -- `HollowPressable`, accent when on. Optimistic update then `crdt_api.setChannelMediaOnly()`. Media-only channels accept only images/GIFs/videos (captions allowed); the chat input filters the file picker to `kMediaOnlyExtensions` and blocks text-only sends + voice recordings with a toast.
   - Rename button (pencil icon)
   - Delete button (trash icon, red)
 
-**`_AccessChip`:** Compact dropdown showing current level label:
-- `'everyone'` -> "All" (neutral styling)
-- `'moderator'` -> "Mod+" (warning color background)
-- `'admin'` -> "Admin+" (warning color background)
-- Label gate active (`gateLabels` non-empty) -> shows the label NAME (1 label) or "N labels" with a shieldCheck glyph, warning styling; the menu highlights Custom
+**`ChannelAccessPicker`:** chip label shows the current level:
+- `'everyone'` -> "All", `'moderator'` -> "Mod+", `'admin'` -> "Admin+" (no warning tint since design sweep 3; the label says it)
+- Label gate active (`gateLabels` non-empty) -> the label NAME (1 label) or "N labels" with a shieldCheck glyph, chip capped at 120px and ellipsized; the menu checks Custom
 - On select: applies **optimistic update** via `channelListProvider.updateChannel()` BEFORE calling `crdt_api.setChannelVisibility()` or `crdt_api.setChannelPosting()` -- CRDT operations. The optimistic update is needed because CrdtStore is fire-and-forget via mpsc, so the DB write may not be flushed when `ServerUpdated` fires (causing stale reads without the optimistic path).
-- Picking a plain tier on a label-gated channel shows a confirm ("Remove label requirement?") then clears the gate (optimistic mirrors the Rust handler's clearing op); picking Custom opens the label multi-select and mirrors the Rust Admin+ tier stamp optimistically. Mobile parity: `_MobileAccessChip` + the long-press sheet's 4th "Custom…" option + a `Temporary Access` action row.
+- Picking a plain tier on a label-gated channel shows a confirm ("Remove label requirement?") then clears the gate (optimistic mirrors the Rust handler's clearing op); picking Custom opens the label multi-select and mirrors the Rust Admin+ tier stamp optimistically. Mobile parity: the same `ChannelAccessPicker` + the long-press sheet's 4th "Custom…" option + a `Temporary Access` action row.
 
 **Save/Discard bar:** Only shown when `_dirty`. Two buttons:
 - "Discard" (`HollowButton.ghost`) -- sets `_loaded = false`, calls `_loadLayout()` to reload from DB
 - "Save Layout" (`HollowButton.filled`) -- calls `_save()`
 
-**`_ChannelTypeChip`:** `AnimatedContainer` with accent border when selected, surface background otherwise. Used in the channel creation dialog.
+**Channel type (creation dialog):** two `HollowChip`s, Text and Voice, 8px apart.
 
 ## MembersTab -- Member Management
 
@@ -552,7 +550,7 @@ Section header "CHANNEL OVERRIDES" with description "Override notification setti
 For each channel in `channelListProvider`:
 - Row with hash icon, channel name (ellipsized), `_ChannelOverrideDropdown`
 
-**`_ChannelOverrideDropdown`:** `PopupMenuButton<ChannelNotificationLevel>` with 4 options:
+**`_ChannelOverrideDropdown`:** `PopupMenuButton<ChannelNotificationLevel>` with 4 options (still Material; design sweep 3b moves it to `showHollowMenu`):
 - Default (settings icon) -- uses `ChannelNotificationLevel.inherit`
 - All (bell icon) -- `ChannelNotificationLevel.all`
 - Mentions (atSign icon) -- `ChannelNotificationLevel.mentions`

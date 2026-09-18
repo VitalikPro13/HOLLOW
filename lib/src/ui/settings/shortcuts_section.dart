@@ -6,6 +6,7 @@ import 'package:hollow/src/core/services/hotkeys/hotkey_binding.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
+import 'package:hollow/src/ui/components/hollow_key_combo.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/hollow_tooltip.dart';
@@ -274,63 +275,9 @@ class _FixedRow extends StatelessWidget {
               ),
             ),
           ),
-          _KeyBadge(shortcut: shortcut),
+          HollowKeyCombo(shortcut),
         ],
       ),
-    );
-  }
-}
-
-/// Styled keyboard shortcut badge, e.g. "Shift + Enter".
-class _KeyBadge extends StatelessWidget {
-  final String shortcut;
-
-  const _KeyBadge({required this.shortcut});
-
-  @override
-  Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-
-    final keys = shortcut.split(' + ');
-
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        for (int i = 0; i < keys.length; i++) ...[
-          if (i > 0)
-            Padding(
-              padding:
-                  const EdgeInsets.symmetric(horizontal: HollowSpacing.xxs),
-              child: Text(
-                '+',
-                style: HollowTypography.caption.copyWith(
-                  color: hollow.textSecondary.withValues(alpha: 0.4),
-                  fontSize: 9,
-                ),
-              ),
-            ),
-          Container(
-            padding: const EdgeInsets.symmetric(
-              horizontal: HollowSpacing.xs + 2,
-              vertical: HollowSpacing.xxs,
-            ),
-            decoration: BoxDecoration(
-              color: hollow.surface,
-              borderRadius: BorderRadius.circular(hollow.radiusSm - 2),
-              border: Border.all(
-                color: hollow.border,
-              ),
-            ),
-            child: Text(
-              keys[i],
-              style: HollowTypography.mono.copyWith(
-                color: hollow.textSecondary,
-                fontSize: 10,
-              ),
-            ),
-          ),
-        ],
-      ],
     );
   }
 }

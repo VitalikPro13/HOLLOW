@@ -1382,7 +1382,7 @@ class _AddFriendTabState extends ConsumerState<_AddFriendTab> {
 }
 
 /// Single friend chip in the horizontal bar.
-class _FriendChip extends StatelessWidget {
+class _FriendChip extends StatelessWidget { // design-ignore: an avatar tab in the friends bar, not a label
   final String peerId;
   final String name;
   final bool isOnline;

@@ -16,7 +16,6 @@ import 'package:hollow/src/ui/chat/file_attachment_widget.dart';
 import 'package:hollow/src/ui/chat/sticker_pack_card.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
-import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/media/media_item.dart';
 
 /// One file of an album, with the message it belongs to.
@@ -161,7 +160,7 @@ class AlbumBubble extends StatelessWidget {
                     : HollowSpacing.xs),
             child: _cell(f, null),
           ),
-        _DownloadAllChip(items: items),
+        _DownloadAllButton(items: items),
       ],
     );
   }
@@ -279,10 +278,10 @@ class _MoreOverlay extends StatelessWidget {
 
 /// Offers one tap for every item the auto-download gate held back, once two
 /// or more are waiting.
-class _DownloadAllChip extends ConsumerWidget {
+class _DownloadAllButton extends ConsumerWidget {
   final List<AlbumItem> items;
 
-  const _DownloadAllChip({required this.items});
+  const _DownloadAllButton({required this.items});
 
   List<FileAttachment> _waiting(Map<String, FileTransferState> transfers) => [
         for (final i in items)
@@ -300,31 +299,18 @@ class _DownloadAllChip extends ConsumerWidget {
         ref.watch(fileTransferProvider.select((s) => _waiting(s).length));
     if (count < 2) return const SizedBox.shrink();
 
-    final hollow = HollowTheme.of(context);
     return Padding(
       padding: const EdgeInsets.only(top: HollowSpacing.xs),
-      child: HollowPressable(
+      child: HollowButton.ghost(
+        compact: true,
         semanticLabel: 'Download all $count files',
-        onTap: () {
+        icon: const Icon(LucideIcons.download),
+        onPressed: () {
           for (final a in _waiting(ref.read(fileTransferProvider))) {
             unawaited(startManualAttachmentDownload(context, ref, a));
           }
         },
-        borderRadius: BorderRadius.circular(hollow.radiusLg),
-        padding: const EdgeInsets.symmetric(
-            horizontal: HollowSpacing.sm, vertical: HollowSpacing.xs),
-        child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(LucideIcons.download, size: 14, color: hollow.textSecondary),
-              const SizedBox(width: HollowSpacing.xs),
-              Text(
-                'Download all ($count)',
-                style: HollowTypography.caption
-                    .copyWith(color: hollow.textSecondary),
-              ),
-            ],
-        ),
+        child: Text('Download all ($count)'),
       ),
     );
   }

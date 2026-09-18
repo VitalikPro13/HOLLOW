@@ -8,7 +8,6 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/models/channel_info.dart';
 import 'package:hollow/src/core/models/channel_layout.dart';
-import 'package:hollow/src/core/moderation_format.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/notification_provider.dart';
@@ -21,6 +20,7 @@ import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
+import 'package:hollow/src/ui/components/hollow_chip.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
@@ -31,6 +31,7 @@ import 'package:hollow/src/core/brand_icons.dart';
 import 'package:hollow/src/ui/dialogs/create_channel_dialog.dart';
 import 'package:hollow/src/ui/settings/access_label_picker.dart';
 import 'package:hollow/src/ui/settings/category_bulk_access_dialog.dart';
+import 'package:hollow/src/ui/settings/channel_access_pickers.dart';
 import 'package:hollow/src/ui/settings/channel_grants_dialog.dart';
 import 'package:hollow/src/ui/mobile/mobile_image_crop_route.dart';
 import 'package:hollow/src/ui/mobile/mobile_page_route.dart';
@@ -1365,31 +1366,32 @@ class _NotificationSection extends ConsumerWidget {
         Row(
           children: [
             Expanded(
-              child: _NotifLevelPill(
+              child: HollowChip(
+                expand: true,
                 icon: LucideIcons.bell,
                 label: 'All',
-                isSelected: serverLevel == NotificationLevel.all,
+                selected: serverLevel == NotificationLevel.all,
                 onTap: () => notifNotifier.setServerLevel(serverId, NotificationLevel.all),
               ),
             ),
-            const SizedBox(width: HollowSpacing.xs),
+            const SizedBox(width: HollowSpacing.sm),
             Expanded(
-              child: _NotifLevelPill(
+              child: HollowChip(
+                expand: true,
                 icon: LucideIcons.atSign,
                 label: 'Mentions',
-                isSelected: serverLevel == NotificationLevel.mentions,
+                selected: serverLevel == NotificationLevel.mentions,
                 onTap: () => notifNotifier.setServerLevel(serverId, NotificationLevel.mentions),
-                activeColor: hollow.warning,
               ),
             ),
-            const SizedBox(width: HollowSpacing.xs),
+            const SizedBox(width: HollowSpacing.sm),
             Expanded(
-              child: _NotifLevelPill(
+              child: HollowChip(
+                expand: true,
                 icon: LucideIcons.bellOff,
                 label: 'Nothing',
-                isSelected: serverLevel == NotificationLevel.nothing,
+                selected: serverLevel == NotificationLevel.nothing,
                 onTap: () => notifNotifier.setServerLevel(serverId, NotificationLevel.nothing),
-                activeColor: hollow.error,
               ),
             ),
           ],
@@ -1491,58 +1493,6 @@ class _NotificationSection extends ConsumerWidget {
                 ),
               ),
             const SizedBox(height: HollowSpacing.md),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _NotifLevelPill extends StatelessWidget {
-  final IconData icon;
-  final String label;
-  final bool isSelected;
-  final VoidCallback onTap;
-  final Color? activeColor;
-
-  const _NotifLevelPill({
-    required this.icon,
-    required this.label,
-    required this.isSelected,
-    required this.onTap,
-    this.activeColor,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-    final color = activeColor ?? hollow.accent;
-    return GestureDetector(
-      onTap: onTap,
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 150),
-        padding: const EdgeInsets.symmetric(
-          horizontal: HollowSpacing.sm, vertical: HollowSpacing.sm),
-        decoration: BoxDecoration(
-          color: isSelected ? color.withValues(alpha: 0.15) : hollow.surface,
-          borderRadius: BorderRadius.circular(hollow.radiusMd),
-          border: Border.all(color: isSelected ? color : hollow.border),
-        ),
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(icon, size: 14,
-                color: isSelected ? color : hollow.textSecondary),
-            const SizedBox(width: HollowSpacing.xs),
-            Flexible(
-              child: Text(label,
-                  style: HollowTypography.body.copyWith(
-                    color: isSelected ? color : hollow.textSecondary,
-                    fontSize: 12,
-                    fontWeight: isSelected ? FontWeight.w600 : FontWeight.w400),
-                  maxLines: 1, overflow: TextOverflow.ellipsis),
-            ),
           ],
         ),
       ),
@@ -2496,7 +2446,8 @@ class _ChannelLayoutEditorState extends ConsumerState<_ChannelLayoutEditor> {
                 padding: const EdgeInsets.only(left: 28),
                 child: Row(
                   children: [
-                    _MobileAccessChip(
+                    ChannelAccessPicker(
+                      semanticLabel: 'Who can see this channel',
                       icon: LucideIcons.eye,
                       value: ch?.visibility ?? 'everyone',
                       gateLabels: ch?.visibilityLabels ?? const [],
@@ -2511,7 +2462,8 @@ class _ChannelLayoutEditorState extends ConsumerState<_ChannelLayoutEditor> {
                     ),
                     if (!isVoice) ...[
                       const SizedBox(width: HollowSpacing.sm),
-                      _MobileAccessChip(
+                      ChannelAccessPicker(
+                        semanticLabel: 'Who can post',
                         icon: LucideIcons.messageSquare,
                         value: ch?.posting ?? 'everyone',
                         gateLabels: ch?.postingLabels ?? const [],
@@ -2551,7 +2503,7 @@ class _ChannelLayoutEditorState extends ConsumerState<_ChannelLayoutEditor> {
                 padding: const EdgeInsets.only(left: 28),
                 child: Row(
                   children: [
-                    _MobileSlowModeChip(
+                    SlowModePicker(
                       seconds: ch?.slowModeSecs ?? 0,
                       onChanged: (s) => _setChannelSlowMode(item.channelId, s),
                     ),
@@ -2628,185 +2580,6 @@ class _ChannelLayoutEditorState extends ConsumerState<_ChannelLayoutEditor> {
             child: Icon(LucideIcons.x, size: 16, color: hollow.textSecondary),
           ),
         ],
-      ),
-    );
-  }
-}
-
-/// Compact popup chip for channel visibility or posting access. Restricted
-/// values render in the warning colour.
-class _MobileSlowModeChip extends StatelessWidget {
-  final int seconds;
-  final Future<void> Function(int) onChanged;
-
-  const _MobileSlowModeChip({required this.seconds, required this.onChanged});
-
-  static const _options = [0, 5, 10, 30, 60, 300, 900, 3600];
-
-  @override
-  Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-    final active = seconds > 0;
-
-    return PopupMenuButton<int>(
-      tooltip: '',
-      padding: EdgeInsets.zero,
-      constraints: const BoxConstraints(),
-      color: hollow.elevated,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(hollow.radiusMd),
-        side: BorderSide(color: hollow.border),
-      ),
-      onSelected: onChanged,
-      itemBuilder: (_) => [
-        for (final s in _options)
-          PopupMenuItem(
-            value: s,
-            child: Text(
-              s == 0 ? 'Off' : slowModeDurationLabel(s),
-              style: HollowTypography.body.copyWith(
-                color: s == seconds ? hollow.accent : hollow.textPrimary,
-                fontWeight: s == seconds ? FontWeight.w600 : FontWeight.w400,
-              ),
-            ),
-          ),
-      ],
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-        decoration: BoxDecoration(
-          color: active
-              ? hollow.warning.withValues(alpha: 0.15)
-              : hollow.border.withValues(alpha: 0.3),
-          borderRadius: BorderRadius.circular(hollow.radiusSm),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(LucideIcons.timer,
-                size: 12,
-                color: active ? hollow.warning : hollow.textSecondary),
-            const SizedBox(width: 4),
-            Text(
-              active ? 'Slow ${slowModeDurationLabel(seconds)}' : 'Slow mode',
-              style: HollowTypography.caption.copyWith(
-                fontSize: 11,
-                color: active ? hollow.warning : hollow.textSecondary,
-                fontWeight: FontWeight.w500,
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _MobileAccessChip extends StatelessWidget {
-  final IconData icon;
-  final String value;
-  final List<String> gateLabels;
-  final List<crdt_api.LabelFfi> allLabels;
-  final Future<void> Function(String) onChanged;
-  final VoidCallback onCustomPressed;
-
-  const _MobileAccessChip({
-    required this.icon,
-    required this.value,
-    required this.onChanged,
-    required this.onCustomPressed,
-    this.gateLabels = const [],
-    this.allLabels = const [],
-  });
-
-  bool get _gated => gateLabels.isNotEmpty;
-
-  String get _label {
-    if (_gated) {
-      if (gateLabels.length == 1) {
-        final match =
-            allLabels.where((l) => l.labelId == gateLabels.first).firstOrNull;
-        return match?.name ?? '1 label';
-      }
-      return '${gateLabels.length} labels';
-    }
-    return switch (value) {
-      'moderator' => 'Mod+',
-      'admin' => 'Admin+',
-      _ => 'All',
-    };
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-    final isRestricted = _gated || value != 'everyone';
-
-    return PopupMenuButton<String>(
-      tooltip: '',
-      padding: EdgeInsets.zero,
-      constraints: const BoxConstraints(),
-      color: hollow.elevated,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(hollow.radiusMd),
-        side: BorderSide(color: hollow.border),
-      ),
-      onSelected: (v) {
-        if (v == 'custom') {
-          onCustomPressed();
-        } else {
-          onChanged(v);
-        }
-      },
-      itemBuilder: (_) => [
-        _item('everyone', 'Everyone', hollow),
-        _item('moderator', 'Mod+', hollow),
-        _item('admin', 'Admin+', hollow),
-        _item('custom', 'Custom…', hollow),
-      ],
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-        decoration: BoxDecoration(
-          color: isRestricted
-              ? hollow.warning.withValues(alpha: 0.15)
-              : hollow.border.withValues(alpha: 0.3),
-          borderRadius: BorderRadius.circular(hollow.radiusSm),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(_gated ? LucideIcons.shieldCheck : icon,
-                size: 12,
-                color: isRestricted ? hollow.warning : hollow.textSecondary),
-            const SizedBox(width: 4),
-            ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 100),
-              child: Text(
-                _label,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: HollowTypography.caption.copyWith(
-                  fontSize: 11,
-                  color: isRestricted ? hollow.warning : hollow.textSecondary,
-                  fontWeight: FontWeight.w500,
-                ),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  PopupMenuItem<String> _item(String val, String label, HollowTheme hollow) {
-    final selected = val == 'custom' ? _gated : (!_gated && val == value);
-    return PopupMenuItem(
-      value: val,
-      child: Text(
-        label,
-        style: HollowTypography.body.copyWith(
-          color: selected ? hollow.accent : hollow.textPrimary,
-          fontWeight: selected ? FontWeight.w600 : FontWeight.w400,
-        ),
       ),
     );
   }

@@ -6,6 +6,7 @@ import 'package:hollow/src/core/services/hotkeys/hotkey_binding.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
+import 'package:hollow/src/ui/components/hollow_key_combo.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 
 /// Press-to-set keybind field (issue #38). Tap arms capture and the next
@@ -115,61 +116,9 @@ class _KeybindCaptureFieldState extends ConsumerState<KeybindCaptureField> {
                     fontSize: 11,
                   ),
                 )
-              : _BindingBadges(
-                  display: binding?.display() ?? 'Not set',
-                ),
+              : HollowKeyCombo(binding?.display() ?? 'Not set'),
         ),
       ),
-    );
-  }
-}
-
-/// Key badges in the Shortcuts page style.
-class _BindingBadges extends StatelessWidget {
-  final String display;
-
-  const _BindingBadges({required this.display});
-
-  @override
-  Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-    final keys = display.split(' + ');
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        for (int i = 0; i < keys.length; i++) ...[
-          if (i > 0)
-            Padding(
-              padding:
-                  const EdgeInsets.symmetric(horizontal: HollowSpacing.xxs),
-              child: Text(
-                '+',
-                style: HollowTypography.caption.copyWith(
-                  color: hollow.textSecondary.withValues(alpha: 0.4),
-                  fontSize: 9,
-                ),
-              ),
-            ),
-          Container(
-            padding: const EdgeInsets.symmetric(
-              horizontal: HollowSpacing.xs + 2,
-              vertical: HollowSpacing.xxs,
-            ),
-            decoration: BoxDecoration(
-              color: hollow.surface,
-              borderRadius: BorderRadius.circular(hollow.radiusSm - 2),
-              border: Border.all(color: hollow.border),
-            ),
-            child: Text(
-              keys[i],
-              style: HollowTypography.mono.copyWith(
-                color: hollow.textSecondary,
-                fontSize: 10,
-              ),
-            ),
-          ),
-        ],
-      ],
     );
   }
 }

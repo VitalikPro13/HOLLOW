@@ -15,7 +15,7 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Floating pill shown while in a voice channel on mobile; its body taps back
 /// to the voice route.
-class MobileVoiceChannelPill extends ConsumerStatefulWidget {
+class MobileVoiceChannelPill extends ConsumerStatefulWidget { // design-ignore: floating voice bar, not a label
   const MobileVoiceChannelPill({super.key});
 
   @override
@@ -23,7 +23,7 @@ class MobileVoiceChannelPill extends ConsumerStatefulWidget {
       _MobileVoiceChannelPillState();
 }
 
-class _MobileVoiceChannelPillState
+class _MobileVoiceChannelPillState // design-ignore: floating voice bar, not a label
     extends ConsumerState<MobileVoiceChannelPill> {
   Timer? _durationTimer;
   Duration _duration = Duration.zero;

@@ -50,6 +50,7 @@ import 'package:hollow/src/ui/chat/emote_image.dart';
 import 'package:hollow/src/core/providers/emote_provider.dart';
 import 'package:hollow/src/ui/components/connection_progress.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
+import 'package:hollow/src/ui/components/hollow_badge.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
@@ -3052,7 +3053,7 @@ class _MobileChatHeader extends ConsumerWidget {
                   (ref.watch(serverIsNsfwProvider(serverId!)).valueOrNull ??
                       false)) ...[
                 const SizedBox(width: HollowSpacing.sm),
-                const _MobileNsfwBadge(),
+                const HollowBadge('NSFW', kind: HollowBadgeKind.error),
               ],
             ],
           ),
@@ -3292,32 +3293,6 @@ class _MobileChatHeader extends ConsumerWidget {
               ),
             const SizedBox(height: HollowSpacing.sm),
           ],
-        ),
-      ),
-    );
-  }
-}
-
-/// Small "NSFW" pill for the mobile channel header.
-class _MobileNsfwBadge extends StatelessWidget {
-  const _MobileNsfwBadge();
-
-  @override
-  Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-      decoration: BoxDecoration(
-        color: hollow.error.withValues(alpha: 0.15),
-        borderRadius: BorderRadius.circular(hollow.radiusSm),
-      ),
-      child: Text(
-        'NSFW',
-        style: HollowTypography.caption.copyWith(
-          color: hollow.error,
-          fontWeight: FontWeight.w700,
-          fontSize: 9,
-          letterSpacing: 0.5,
         ),
       ),
     );

@@ -14,6 +14,7 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
+import 'package:hollow/src/ui/components/hollow_chip.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/status_dot.dart';
@@ -336,17 +337,17 @@ class _PushDeliveryCardState extends ConsumerState<_PushDeliveryCard> {
               spacing: HollowSpacing.sm,
               runSpacing: HollowSpacing.sm,
               children: [
-                NotificationChoiceChip(
+                HollowChip(
                   label: 'Google',
                   icon: LucideIcons.cloud,
-                  isSelected: selected == _google,
+                  selected: selected == _google,
                   onTap: () => _choose(_google),
                 ),
                 for (final d in _distributors)
-                  NotificationChoiceChip(
+                  HollowChip(
                     label: distributorLabel(d),
                     icon: LucideIcons.radioTower,
-                    isSelected: selected == d,
+                    selected: selected == d,
                     onTap: () => _choose(d),
                   ),
               ],

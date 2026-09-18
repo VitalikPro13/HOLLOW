@@ -1,6 +1,6 @@
 # Hollow design language and the grand redesign
 
-**Status:** IN PROGRESS, session 1 of N done 2026-09-18. Direction agreed 2026-09-14, research the same day.
+**Status:** IN PROGRESS, sessions 1 and 2 done 2026-09-18. Direction agreed 2026-09-14, research the same day.
 
 **Read this section first in a new session.** It is the handoff: what exists, what it changed, and the next thing to pick up. Everything below section 0 is the original plan, kept for its research digest and its screen-by-screen program; where it and this section disagree, this section is right.
 
@@ -26,7 +26,18 @@ New tokens: `HollowTypography.micro` (10/500, absorbs 155 orphaned sites) and `m
 - **Sweep 1, sub-tab pills.** Five classes doing one job into `HollowChip`: `_SubTabPill` (byte-identical in `shell/archive_dashboard.dart` and `share/share_dashboard.dart`), `_TabPill` (`archive/archive_conversation_list.dart`), `_SubTabPill` + `_InnerTabPill` (`mobile/tabs/mobile_archive_tab.dart`). They had 2 radii plus a 20px pill, 3 paddings, 2 type sizes, and the mobile one used a SOLID accent fill for mere selection.
 - **Sweep 2, the Shop.** `_FilterPill` into `HollowChip`; `_ShopChip` and `_KindChip` into `HollowBadge`; the header row (ghost + outline + outline + a bare `HollowPressable` at 4px gaps) to four ghost actions at 8px; and the listing card rebuilt so the art fills it (a hard `size: 96` in a ~228px cell became a `LayoutBuilder`-measured ~212px), the card keeping a background step and dropping its hairline, badges grouped at the trailing edge.
 
-Guard baselines moved: local-label-class **36 to 28**, font-size 824 to 809, edge-insets 266 to 257, radius 177 to 175.
+- **Sweep 3, every remaining label class (session 2).** local-label-class is now **0**, so the rule is a hard ban from here on. What each became:
+  - Static facts into `HollowBadge`: `_NsfwBadge` + `_MobileNsfwBadge` (error kind), `DeviceBadge` (accent), the game card's `_TagChip` (neutral; it lost its wash of the game's colour) and `_PlatformChip` when it has no store link.
+  - Choices into `HollowChip`: `_ChannelTypeChip`, `_EngineChip` (label + `hint`), `NotificationChoiceChip` + mobile `_NotifLevelPill` (their warning and error tints for Mentions and Nothing are gone, since selection is the accent everywhere), and `_PlatformChip` when it has a store link.
+  - `_AccessChip`, `_SlowModeChip` and their mobile twins were Material `PopupMenuButton`s at 10px. They became ONE shared pair, `settings/channel_access_pickers.dart` (`ChannelAccessPicker`, `SlowModePicker`): a `HollowChip` with a chevron that opens `showHollowMenu` with check marks, used by desktop and mobile. The restricted warning tint is gone; the label (Mod+, Admin+, a label name) says it. Slow mode reads "Slow mode" / "Slow 30s" on both platforms now.
+  - `_KeyBadge` + `_BindingBadges` (byte-identical) into a new `components/hollow_key_combo.dart`, one mono `HollowBadge` per key.
+  - `_DownloadAllChip` was an action, so it became a compact ghost `HollowButton`.
+  - `_LegendChip` was a chart legend key, renamed `_LegendEntry` and tokenized.
+  - Not labels, kept with a `// design-ignore:` reason on the class line: the floating call and voice bars (`_VoiceControlsPill`, `MobileActiveCallPill`, `MobileVoiceChannelPill`, `MobileSourceSwitchPill` and their State classes), `UnreadJumpPill` (the sanctioned pill), `_AvatarBadge` (a mute mark on an avatar corner), the video bubble's `_Badge` (a scrim over video) and `_FriendChip` (an avatar tab in the friends bar).
+  - Component additions: `HollowChip` gained `leading` (a non-IconData glyph such as a platform logo), `hint` (quiet text after the label) and `trailingIcon` (chevron for a menu, arrow for a link); `HollowBadge` gained `leading`. Tests in `design_primitives_test.dart`, variants on the design sheet.
+  - Verified with before/after renders: desktop `scripts/probe_scenarios/design_sweep3_labels.json` (audio, notifications, shortcuts, devices, storage, server Channels + the open picker, server notifications); mobile `fleet/design_sweep3_mobile.json` (creates a throwaway server from New conversation, long-press, Server Settings, Channels + the open picker, Notifications), ~36 s on the mini at `.39`. On mobile, dismiss a menu with a `tap_at` outside it: `escape` does not close it in the simulator.
+
+Guard baselines moved: local-label-class **36 to 28 to 0**, font-size 824 to 809 to 791, edge-insets 266 to 257 to 248, radius 177 to 175 to 168, letter-spacing 66 to 64, sized-box-gap 202 to 192.
 
 ### Four bugs the work surfaced, all fixed
 
@@ -43,7 +54,7 @@ Every sweep: probe screenshots **before**, change, probe screenshots **after**, 
 
 ### Where to pick up next
 
-1. **Sweep 3: the remaining 28 label classes.** Biggest clusters are settings (`_ChannelTypeChip`, `_AccessChip`, `_SlowModeChip`, `_EngineChip`, `_LegendChip`, `NotificationChoiceChip`, `DeviceBadge`, `_KeyBadge`, `_BindingBadges`) and chat (`_NsfwBadge` x2, `UnreadJumpPill`, `_VoiceControlsPill`). Same recipe: clickable is `HollowChip`, static is `HollowBadge`, before/after renders, lower the baselines in the same commit.
+1. **Sweep 3b: the label look-alikes the class rule cannot see.** `SelectorPill` lives in `components/` but is a third chip (5 uses, `radiusSm`, weight change on select): fold it into `HollowChip`. The per-channel "Default" override dropdown in server notifications (desktop and mobile) and the mobile "Media only" toggle pill are inline chips; the remaining Material `PopupMenuButton`s anywhere in `lib/src/ui` should move to `showHollowMenu` the way the access pickers did. The 23 `_xChip` builder FUNCTIONS from section 1 were never covered by the class rule either.
 2. **Sweep 4: the 111 `Divider(` sites** onto `HollowDivider`. Mechanical and low risk.
 3. **Sweep 5: the ~60 inline empty states** onto `HollowEmptyState`.
 4. **Then the open decisions** in section 9 of the rule set, which need Vitalik and a render. The two biggest: **ghost buttons being accent-coloured** (244 of them, so the accent is on nearly every button in the app) and **the action inside a list row, ghost or outline** (recurs on the owned-art panel, devices, member cards).

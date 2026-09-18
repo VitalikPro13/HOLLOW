@@ -19,9 +19,8 @@ import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
-import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
-import 'package:hollow/src/ui/components/hollow_focus_ring.dart';
+import 'package:hollow/src/ui/components/hollow_chip.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/dialogs/ringtone_clip_editor_dialog.dart';
 import 'package:hollow/src/ui/settings/keybind_capture_field.dart';
@@ -147,19 +146,19 @@ class _VoiceInputSettingsState extends ConsumerState<_VoiceInputSettings> {
               ),
             ),
             const SizedBox(width: HollowSpacing.md),
-            _EngineChip(
+            HollowChip(
               label: 'Voice activity',
               hint: 'always on',
-              isSelected: !isPtt,
+              selected: !isPtt,
               onTap: () => ref
                   .read(voiceInputModeProvider.notifier)
                   .setMode(kVoiceInputActivity),
             ),
-            const SizedBox(width: HollowSpacing.xs),
-            _EngineChip(
+            const SizedBox(width: HollowSpacing.sm),
+            HollowChip(
               label: 'Push to talk',
               hint: 'hold a key',
-              isSelected: isPtt,
+              selected: isPtt,
               onTap: () => ref
                   .read(voiceInputModeProvider.notifier)
                   .setMode(kVoiceInputPtt),
@@ -1264,19 +1263,19 @@ class _AudioDeviceSettingsState extends ConsumerState<_AudioDeviceSettings> {
             ),
           ),
           const SizedBox(width: HollowSpacing.md),
-          _EngineChip(
+          HollowChip(
             label: 'RNNoise',
             hint: 'light, instant',
-            isSelected: engine == kNoiseSuppressEngineRnnoise,
+            selected: engine == kNoiseSuppressEngineRnnoise,
             onTap: () => ref
                 .read(noiseSuppressEngineProvider.notifier)
                 .setEngine(kNoiseSuppressEngineRnnoise),
           ),
-          const SizedBox(width: HollowSpacing.xs),
-          _EngineChip(
+          const SizedBox(width: HollowSpacing.sm),
+          HollowChip(
             label: 'DeepFilterNet3',
             hint: 'stronger, heavy',
-            isSelected: engine == kNoiseSuppressEngineDfn3,
+            selected: engine == kNoiseSuppressEngineDfn3,
             onTap: () => ref
                 .read(noiseSuppressEngineProvider.notifier)
                 .setEngine(kNoiseSuppressEngineDfn3),
@@ -1646,71 +1645,6 @@ class _AudioDeviceSettingsState extends ConsumerState<_AudioDeviceSettings> {
           ),
         ),
       ],
-    );
-  }
-}
-
-/// Selection chip for the AI-NS engine picker: selection is a chip fill, never
-/// a filled button.
-class _EngineChip extends StatelessWidget {
-  final String label;
-  final String hint;
-  final bool isSelected;
-  final VoidCallback onTap;
-
-  const _EngineChip({
-    required this.label,
-    required this.hint,
-    required this.isSelected,
-    required this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-    return HollowFocusRing(
-      enabled: true,
-      onActivate: onTap,
-      borderRadius: BorderRadius.circular(hollow.radiusSm),
-      child: GestureDetector(
-        onTap: onTap,
-        child: AnimatedContainer(
-          duration: HollowDurations.fast,
-          padding: const EdgeInsets.symmetric(
-            horizontal: HollowSpacing.sm,
-            vertical: 3,
-          ),
-          decoration: BoxDecoration(
-            color: isSelected ? hollow.accentMuted : hollow.surface,
-            borderRadius: BorderRadius.circular(hollow.radiusSm),
-            border: Border.all(
-              color: isSelected ? hollow.accent : hollow.border,
-            ),
-          ),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text(
-                label,
-                style: HollowTypography.caption.copyWith(
-                  color:
-                      isSelected ? hollow.accentText : hollow.textSecondary,
-                  fontWeight:
-                      isSelected ? FontWeight.w600 : FontWeight.w400,
-                ),
-              ),
-              const SizedBox(width: HollowSpacing.xs),
-              Text(
-                hint,
-                style: HollowTypography.caption.copyWith(
-                  color: hollow.textTertiary,
-                  fontSize: 10,
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
     );
   }
 }

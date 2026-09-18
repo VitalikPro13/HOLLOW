@@ -22,11 +22,16 @@ class HollowBadge extends StatelessWidget {
   /// Only when it carries meaning the word does not. Rendered at 14.
   final IconData? icon;
 
+  /// A glyph that is not an [IconData], such as a platform logo. Sized by the
+  /// caller at 14; wins over [icon].
+  final Widget? leading;
+
   const HollowBadge(
     this.label, {
     super.key,
     this.kind = HollowBadgeKind.neutral,
     this.icon,
+    this.leading,
   });
 
   @override
@@ -54,8 +59,8 @@ class HollowBadge extends StatelessWidget {
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          if (icon != null) ...[
-            Icon(icon, size: _iconSize, color: foreground),
+          if (leading != null || icon != null) ...[
+            leading ?? Icon(icon, size: _iconSize, color: foreground),
             const SizedBox(width: HollowSpacing.xs),
           ],
           Text(label, style: style),

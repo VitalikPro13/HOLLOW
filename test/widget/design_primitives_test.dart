@@ -8,6 +8,7 @@ import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_chip.dart';
 import 'package:hollow/src/ui/components/hollow_divider.dart';
 import 'package:hollow/src/ui/components/hollow_empty_state.dart';
+import 'package:hollow/src/ui/components/hollow_key_combo.dart';
 import 'package:hollow/src/ui/components/hollow_list_row.dart';
 import 'package:hollow/src/ui/components/hollow_section_header.dart';
 import 'package:hollow/src/ui/components/hollow_skeleton.dart';
@@ -212,6 +213,51 @@ void main() {
       await tester.tap(find.byType(Icon));
       expect(removes, 1);
       expect(taps, 0);
+    });
+ 
+    testWidgets('the hint and trailing icon sit quieter than the label',
+        (tester) async {
+      final hollow = await _pump(
+        tester,
+        HollowChip(
+          label: 'RNNoise',
+          hint: 'light, instant',
+          trailingIcon: Icons.expand_more,
+          onTap: () {},
+        ),
+      );
+
+      final hint = tester.widget<Text>(find.text('light, instant'));
+      expect(hint.style!.color, hollow.textTertiary);
+      final trailing = tester.widget<Icon>(find.byIcon(Icons.expand_more));
+      expect(trailing.color, hollow.textTertiary);
+    });
+
+    testWidgets('a leading widget takes the icon slot', (tester) async {
+      await _pump(
+        tester,
+        HollowChip(
+          label: 'Linux',
+          icon: Icons.star,
+          leading: const SizedBox(key: Key('glyph'), width: 14, height: 14),
+          onTap: () {},
+        ),
+      );
+
+      expect(find.byKey(const Key('glyph')), findsOneWidget);
+      expect(find.byIcon(Icons.star), findsNothing);
+    });
+  });
+
+  group('HollowKeyCombo', () {
+    testWidgets('one mono badge per key', (tester) async {
+      await _pump(tester, const HollowKeyCombo('Ctrl + Shift + M'));
+
+      expect(find.byType(HollowBadge), findsNWidgets(3));
+      for (final b in tester.widgetList<HollowBadge>(find.byType(HollowBadge))) {
+        expect(b.kind, HollowBadgeKind.mono);
+      }
+      expect(find.text('+'), findsNWidgets(2));
     });
   });
 

@@ -148,7 +148,7 @@ class _SummaryHeader extends ConsumerWidget {
           spacing: HollowSpacing.md,
           runSpacing: HollowSpacing.xs,
           children: [
-            for (final s in segments) _LegendChip(segment: s),
+            for (final s in segments) _LegendEntry(segment: s),
           ],
         ),
         const SizedBox(height: HollowSpacing.sm),
@@ -238,8 +238,9 @@ class _UsageBar extends StatelessWidget {
   }
 }
 
-class _LegendChip extends StatelessWidget {
-  const _LegendChip({required this.segment});
+/// One key of the usage bar: swatch, category, size.
+class _LegendEntry extends StatelessWidget {
+  const _LegendEntry({required this.segment});
   final _UsageSegment segment;
 
   @override
@@ -249,23 +250,23 @@ class _LegendChip extends StatelessWidget {
       mainAxisSize: MainAxisSize.min,
       children: [
         Container(
-          width: 8,
-          height: 8,
+          width: HollowSpacing.sm,
+          height: HollowSpacing.sm,
           decoration: BoxDecoration(
             color: segment.color,
-            borderRadius: BorderRadius.circular(2),
+            borderRadius: BorderRadius.circular(hollow.radiusXs / 2),
           ),
         ),
-        const SizedBox(width: 6),
+        const SizedBox(width: HollowSpacing.xs),
         Text(segment.label,
             style: HollowTypography.caption
-                .copyWith(color: hollow.textSecondary, fontSize: 11)),
-        const SizedBox(width: 4),
+                .copyWith(color: hollow.textSecondary)),
+        const SizedBox(width: HollowSpacing.xs),
         Text(formatBytes(segment.bytes),
             style: HollowTypography.caption.copyWith(
                 color: hollow.textPrimary,
-                fontSize: 11,
-                fontWeight: FontWeight.w600)),
+                fontWeight: FontWeight.w600,
+                fontFeatures: const [FontFeature.tabularFigures()])),
       ],
     );
   }

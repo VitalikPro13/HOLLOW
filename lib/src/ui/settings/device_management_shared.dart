@@ -5,6 +5,7 @@ import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
+import 'package:hollow/src/ui/components/hollow_badge.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
@@ -203,32 +204,6 @@ Future<void> resetDeviceListsFlow(BuildContext context) async {
   }
 }
 
-/// The "This device" badge.
-class DeviceBadge extends StatelessWidget {
-  final String text;
-  final Color color;
-  const DeviceBadge({super.key, required this.text, required this.color});
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
-      decoration: BoxDecoration(
-        color: color.withValues(alpha: 0.15),
-        borderRadius: BorderRadius.circular(4),
-      ),
-      child: Text(
-        text,
-        style: HollowTypography.caption.copyWith(
-          color: color,
-          fontSize: 9,
-          fontWeight: FontWeight.w700,
-        ),
-      ),
-    );
-  }
-}
-
 /// Row shell for a device entry, with the surface-specific action buttons
 /// appended at the end.
 class DeviceRowShell extends StatelessWidget {
@@ -276,7 +251,8 @@ class DeviceRowShell extends StatelessWidget {
                     ),
                     if (device.isThisDevice) ...[
                       const SizedBox(width: HollowSpacing.xs),
-                      DeviceBadge(text: 'This device', color: hollow.accent),
+                      const HollowBadge('This device',
+                          kind: HollowBadgeKind.accent),
                     ],
                   ],
                 ),

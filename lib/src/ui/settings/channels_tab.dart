@@ -2,22 +2,21 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/models/channel_info.dart';
 import 'package:hollow/src/core/models/channel_layout.dart';
-import 'package:hollow/src/core/moderation_format.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
-import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
+import 'package:hollow/src/ui/components/hollow_chip.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
-import 'package:hollow/src/ui/components/hollow_focus_ring.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/hollow_tooltip.dart';
 import 'package:hollow/src/ui/settings/access_label_picker.dart';
 import 'package:hollow/src/ui/settings/category_bulk_access_dialog.dart';
+import 'package:hollow/src/ui/settings/channel_access_pickers.dart';
 import 'package:hollow/src/ui/settings/channel_grants_dialog.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -151,17 +150,17 @@ class _ChannelsTabState extends ConsumerState<ChannelsTab> {
               children: [
                 Row(
                   children: [
-                    _ChannelTypeChip(
+                    HollowChip(
                       icon: LucideIcons.hash,
                       label: 'Text',
-                      isSelected: !isVoice,
+                      selected: !isVoice,
                       onTap: () => setDialogState(() => isVoice = false),
                     ),
                     const SizedBox(width: HollowSpacing.sm),
-                    _ChannelTypeChip(
+                    HollowChip(
                       icon: LucideIcons.volume2,
                       label: 'Voice',
-                      isSelected: isVoice,
+                      selected: isVoice,
                       onTap: () => setDialogState(() => isVoice = true),
                     ),
                   ],
@@ -1118,7 +1117,8 @@ class _ChannelRow extends StatelessWidget {
                   ),
                   HollowTooltip(
                     message: 'Who can see this channel',
-                    child: _AccessChip(
+                    child: ChannelAccessPicker(
+                      semanticLabel: 'Who can see this channel',
                       icon: LucideIcons.eye,
                       value: visibility,
                       gateLabels: visibilityLabels,
@@ -1130,10 +1130,11 @@ class _ChannelRow extends StatelessWidget {
                   // Posting is text-only: Rust consults it for messages and
                   // files, never for a voice join (#71).
                   if (!isVoice) ...[
-                    const SizedBox(width: 4),
+                    const SizedBox(width: HollowSpacing.sm),
                     HollowTooltip(
                       message: 'Who can post',
-                      child: _AccessChip(
+                      child: ChannelAccessPicker(
+                        semanticLabel: 'Who can post',
                         icon: LucideIcons.messageSquare,
                         value: posting,
                         gateLabels: postingLabels,
@@ -1142,10 +1143,10 @@ class _ChannelRow extends StatelessWidget {
                         onCustomPressed: onPostingLabelsPressed,
                       ),
                     ),
-                    const SizedBox(width: 4),
+                    const SizedBox(width: HollowSpacing.sm),
                     HollowTooltip(
                       message: 'Minimum delay between each member\'s messages',
-                      child: _SlowModeChip(
+                      child: SlowModePicker(
                         seconds: slowModeSecs,
                         onChanged: onSlowModeChanged,
                       ),
@@ -1326,241 +1327,4 @@ class _TreeConnectorPainter extends CustomPainter {
   @override
   bool shouldRepaint(_TreeConnectorPainter oldDelegate) =>
       color != oldDelegate.color || isLast != oldDelegate.isLast;
-}
-
-class _ChannelTypeChip extends StatelessWidget {
-  final IconData icon;
-  final String label;
-  final bool isSelected;
-  final VoidCallback onTap;
-
-  const _ChannelTypeChip({
-    required this.icon,
-    required this.label,
-    required this.isSelected,
-    required this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-    return HollowFocusRing(
-      enabled: true,
-      onActivate: onTap,
-      borderRadius: BorderRadius.circular(hollow.radiusSm),
-      child: GestureDetector(
-        onTap: onTap,
-        child: AnimatedContainer(
-          duration: HollowDurations.fast,
-          padding: const EdgeInsets.symmetric(
-            horizontal: HollowSpacing.md,
-            vertical: HollowSpacing.xs,
-          ),
-          decoration: BoxDecoration(
-            color: isSelected ? hollow.accentMuted : hollow.surface,
-            borderRadius: BorderRadius.circular(hollow.radiusSm),
-            border: Border.all(
-              color: isSelected ? hollow.accent : hollow.border,
-            ),
-          ),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(icon, size: 14,
-                  color: isSelected ? hollow.accent : hollow.textSecondary),
-              const SizedBox(width: HollowSpacing.xs),
-              Text(
-                label,
-                style: HollowTypography.caption.copyWith(
-                  color: isSelected ? hollow.accent : hollow.textSecondary,
-                  fontWeight: isSelected ? FontWeight.w600 : FontWeight.w400,
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-/// Compact dropdown chip for channel visibility or posting mode. A live label
-/// gate shows the label name or a count and highlights Custom in the menu.
-class _AccessChip extends StatelessWidget {
-  final IconData icon;
-  final String value;
-  final List<String> gateLabels;
-  final List<crdt_api.LabelFfi> allLabels;
-  final Future<void> Function(String) onChanged;
-  final VoidCallback onCustomPressed;
-
-  const _AccessChip({
-    required this.icon,
-    required this.value,
-    required this.gateLabels,
-    required this.allLabels,
-    required this.onChanged,
-    required this.onCustomPressed,
-  });
-
-  bool get _gated => gateLabels.isNotEmpty;
-
-  String get _label {
-    if (_gated) {
-      if (gateLabels.length == 1) {
-        final match = allLabels
-            .where((l) => l.labelId == gateLabels.first)
-            .firstOrNull;
-        return match?.name ?? '1 label';
-      }
-      return '${gateLabels.length} labels';
-    }
-    return switch (value) {
-      'moderator' => 'Mod+',
-      'admin' => 'Admin+',
-      _ => 'All',
-    };
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-    final isRestricted = _gated || value != 'everyone';
-
-    return PopupMenuButton<String>(
-      tooltip: '',
-      padding: EdgeInsets.zero,
-      constraints: const BoxConstraints(),
-      color: hollow.elevated,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(hollow.radiusMd),
-        side: BorderSide(color: hollow.border),
-      ),
-      onSelected: (v) {
-        if (v == 'custom') {
-          onCustomPressed();
-        } else {
-          onChanged(v);
-        }
-      },
-      itemBuilder: (_) => [
-        _accessItem('everyone', 'Everyone', hollow),
-        _accessItem('moderator', 'Mod+', hollow),
-        _accessItem('admin', 'Admin+', hollow),
-        _accessItem('custom', 'Custom…', hollow),
-      ],
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-        decoration: BoxDecoration(
-          color: isRestricted
-              ? hollow.warning.withValues(alpha: 0.15)
-              : hollow.border.withValues(alpha: 0.3),
-          borderRadius: BorderRadius.circular(4),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(_gated ? LucideIcons.shieldCheck : icon, size: 10,
-                color: isRestricted ? hollow.warning : hollow.textSecondary),
-            const SizedBox(width: 3),
-            // Label names are free-form user content, so cap the chip width.
-            ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 90),
-              child: Text(
-                _label,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(
-                  fontSize: 10,
-                  color: isRestricted ? hollow.warning : hollow.textSecondary,
-                  fontWeight: FontWeight.w500,
-                ),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  PopupMenuItem<String> _accessItem(
-      String val, String label, HollowTheme hollow) {
-    final selected = val == 'custom' ? _gated : (!_gated && val == value);
-    return PopupMenuItem(
-      value: val,
-      child: Text(
-        label,
-        style: HollowTypography.body.copyWith(
-          color: selected ? hollow.accent : hollow.textPrimary,
-          fontWeight: selected ? FontWeight.w600 : FontWeight.w400,
-        ),
-      ),
-    );
-  }
-}
-
-/// The slow-mode duration options offered in channel settings.
-const kSlowModeOptions = [0, 5, 10, 30, 60, 300, 900, 3600];
-
-class _SlowModeChip extends StatelessWidget {
-  final int seconds;
-  final Future<void> Function(int) onChanged;
-
-  const _SlowModeChip({required this.seconds, required this.onChanged});
-
-  @override
-  Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-    final active = seconds > 0;
-
-    return PopupMenuButton<int>(
-      tooltip: '',
-      padding: EdgeInsets.zero,
-      constraints: const BoxConstraints(),
-      color: hollow.elevated,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(hollow.radiusMd),
-        side: BorderSide(color: hollow.border),
-      ),
-      onSelected: onChanged,
-      itemBuilder: (_) => [
-        for (final s in kSlowModeOptions)
-          PopupMenuItem(
-            value: s,
-            child: Text(
-              s == 0 ? 'Off' : slowModeDurationLabel(s),
-              style: HollowTypography.body.copyWith(
-                color: s == seconds ? hollow.accent : hollow.textPrimary,
-                fontWeight: s == seconds ? FontWeight.w600 : FontWeight.w400,
-              ),
-            ),
-          ),
-      ],
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-        decoration: BoxDecoration(
-          color: active
-              ? hollow.warning.withValues(alpha: 0.15)
-              : hollow.border.withValues(alpha: 0.3),
-          borderRadius: BorderRadius.circular(4),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(LucideIcons.timer, size: 10,
-                color: active ? hollow.warning : hollow.textSecondary),
-            const SizedBox(width: 3),
-            Text(
-              slowModeDurationLabel(seconds),
-              style: TextStyle(
-                fontSize: 10,
-                color: active ? hollow.warning : hollow.textSecondary,
-                fontWeight: FontWeight.w500,
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
 }

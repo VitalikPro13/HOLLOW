@@ -1164,7 +1164,7 @@ class _VideoBackdrop extends StatelessWidget {
   }
 }
 
-class _Badge extends StatelessWidget {
+class _Badge extends StatelessWidget { // design-ignore: a scrim label over video, not a theme surface
   final String text;
   final HollowTheme hollow;
 

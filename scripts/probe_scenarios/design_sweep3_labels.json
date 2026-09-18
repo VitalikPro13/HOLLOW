@@ -1,0 +1,51 @@
+[
+  {"op": "log", "message": "Design sweep 3: every screen whose local chip, pill or badge class moved onto HollowChip / HollowBadge. Run once before and once after, then stack the pairs."},
+
+  {"op": "tap", "target": "semantics:Settings"},
+  {"op": "wait", "ms": 1500},
+
+  {"op": "tap", "target": "text:Audio & Video", "soft": true},
+  {"op": "wait", "ms": 1200},
+  {"op": "shot", "name": "s3-01-audio"},
+  {"op": "scroll", "target": "text:Input mode", "dy": -200, "soft": true},
+  {"op": "wait", "ms": 600},
+  {"op": "shot", "name": "s3-02-audio-input-mode", "soft": true},
+
+  {"op": "tap", "target": "text:Notifications", "soft": true},
+  {"op": "wait", "ms": 1200},
+  {"op": "shot", "name": "s3-03-notifications"},
+
+  {"op": "tap", "target": "text:Shortcuts", "soft": true},
+  {"op": "wait", "ms": 1200},
+  {"op": "shot", "name": "s3-04-shortcuts"},
+
+  {"op": "tap", "target": "text:Devices", "soft": true},
+  {"op": "wait", "ms": 1500},
+  {"op": "shot", "name": "s3-05-devices"},
+
+  {"op": "tap", "target": "text:Files & Storage", "soft": true},
+  {"op": "wait", "ms": 1500},
+  {"op": "shot", "name": "s3-06-storage"},
+
+  {"op": "key", "value": "escape"},
+  {"op": "wait", "ms": 800},
+
+  {"op": "open_server", "name": "${SERVER}"},
+  {"op": "tap", "target": "semantics:Server settings", "soft": true},
+  {"op": "wait", "ms": 1500},
+  {"op": "tap", "target": "text:Channels", "soft": true},
+  {"op": "wait", "ms": 1500},
+  {"op": "shot", "name": "s3-07-channels-tab", "soft": true},
+  {"op": "dump", "name": "s3-07-channels-tab", "soft": true},
+
+  {"op": "log", "message": "open the first visibility picker (after) / popup (before)"},
+  {"op": "tap", "target": "tooltip:Who can see this channel", "soft": true},
+  {"op": "wait", "ms": 800},
+  {"op": "shot", "name": "s3-08-access-menu", "soft": true},
+  {"op": "key", "value": "escape", "soft": true},
+  {"op": "wait", "ms": 600},
+
+  {"op": "tap", "target": "text:Notifications", "soft": true},
+  {"op": "wait", "ms": 1200},
+  {"op": "shot", "name": "s3-09-server-notifications", "soft": true}
+]

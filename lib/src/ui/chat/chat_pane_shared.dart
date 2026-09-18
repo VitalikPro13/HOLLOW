@@ -1322,7 +1322,7 @@ class ChatOverlayToggleButton extends StatelessWidget {
 }
 
 /// Floating pill that appears when scrolled away from the bottom.
-class UnreadJumpPill extends StatelessWidget {
+class UnreadJumpPill extends StatelessWidget { // design-ignore: the unread jump pill, the one sanctioned pill shape
   final int count;
   final VoidCallback onTap;
   const UnreadJumpPill({super.key, required this.count, required this.onTap});

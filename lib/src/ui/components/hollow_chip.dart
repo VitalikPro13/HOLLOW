@@ -21,6 +21,18 @@ class HollowChip extends StatelessWidget {
   /// Only when it carries meaning the word does not. Rendered at 14.
   final IconData? icon;
 
+  /// A glyph that is not an [IconData], such as a platform logo. Sized by the
+  /// caller at 14; wins over [icon].
+  final Widget? leading;
+
+  /// Quieter text after the label, for the one fact that tells two choices
+  /// apart ("light, instant" beside an engine name).
+  final String? hint;
+
+  /// What a tap does beyond selecting: a chevron for a chip that opens a menu,
+  /// an arrow for one that leaves the app.
+  final IconData? trailingIcon;
+
   /// Turns the chip into a removable one. The X is part of the chip, so the
   /// whole control stays one screen-reader stop.
   final VoidCallback? onRemove;
@@ -40,6 +52,9 @@ class HollowChip extends StatelessWidget {
     required this.onTap,
     this.selected = false,
     this.icon,
+    this.leading,
+    this.hint,
+    this.trailingIcon,
     this.onRemove,
     this.expand = false,
     this.semanticLabel,
@@ -76,8 +91,8 @@ class HollowChip extends StatelessWidget {
         mainAxisAlignment:
             expand ? MainAxisAlignment.center : MainAxisAlignment.start,
         children: [
-          if (icon != null) ...[
-            Icon(icon, size: _iconSize, color: foreground),
+          if (leading != null || icon != null) ...[
+            leading ?? Icon(icon, size: _iconSize, color: foreground),
             const SizedBox(width: HollowSpacing.xs),
           ],
           // Flexible with an ellipsis, always: a row of equal-width sub-tabs
@@ -91,6 +106,19 @@ class HollowChip extends StatelessWidget {
               overflow: TextOverflow.ellipsis,
             ),
           ),
+          if (hint != null) ...[
+            const SizedBox(width: HollowSpacing.xs),
+            Text(
+              hint!,
+              style: HollowTypography.caption
+                  .copyWith(color: hollow.textTertiary),
+              maxLines: 1,
+            ),
+          ],
+          if (trailingIcon != null) ...[
+            const SizedBox(width: HollowSpacing.xs),
+            Icon(trailingIcon, size: _iconSize, color: hollow.textTertiary),
+          ],
           if (onRemove != null) ...[
             const SizedBox(width: HollowSpacing.xs),
             // The chip merges its descendants into one screen-reader stop, so

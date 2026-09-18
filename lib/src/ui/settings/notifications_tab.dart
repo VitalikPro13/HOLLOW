@@ -6,7 +6,7 @@ import 'package:hollow/src/core/providers/notification_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
-import 'package:hollow/src/ui/components/hollow_focus_ring.dart';
+import 'package:hollow/src/ui/components/hollow_chip.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Notifications tab in Server Settings: the server-wide default and the
@@ -154,106 +154,29 @@ class NotificationLevelSelector extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-
     return Row(
       children: [
-        NotificationChoiceChip(
+        HollowChip(
           label: 'All messages',
           icon: LucideIcons.bell,
-          isSelected: value == NotificationLevel.all,
+          selected: value == NotificationLevel.all,
           onTap: () => onChanged(NotificationLevel.all),
         ),
         const SizedBox(width: HollowSpacing.sm),
-        NotificationChoiceChip(
+        HollowChip(
           label: 'Mentions only',
           icon: LucideIcons.atSign,
-          isSelected: value == NotificationLevel.mentions,
+          selected: value == NotificationLevel.mentions,
           onTap: () => onChanged(NotificationLevel.mentions),
-          activeColor: hollow.warning,
         ),
         const SizedBox(width: HollowSpacing.sm),
-        NotificationChoiceChip(
+        HollowChip(
           label: 'Nothing',
           icon: LucideIcons.bellOff,
-          isSelected: value == NotificationLevel.nothing,
+          selected: value == NotificationLevel.nothing,
           onTap: () => onChanged(NotificationLevel.nothing),
-          activeColor: hollow.error,
         ),
       ],
-    );
-  }
-}
-
-/// One selectable choice in a notification setting.
-class NotificationChoiceChip extends StatelessWidget {
-  final String label;
-  final IconData icon;
-  final bool isSelected;
-  final VoidCallback onTap;
-
-  final Color? activeColor;
-
-  const NotificationChoiceChip({
-    super.key,
-    required this.label,
-    required this.icon,
-    required this.isSelected,
-    required this.onTap,
-    this.activeColor,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-    final color = activeColor ?? hollow.accent;
-
-    return HollowFocusRing(
-      enabled: true,
-      onActivate: onTap,
-      borderRadius: BorderRadius.circular(hollow.radiusMd),
-      child: GestureDetector(
-        onTap: onTap,
-        child: MouseRegion(
-          cursor: SystemMouseCursors.click,
-          child: AnimatedContainer(
-            duration: const Duration(milliseconds: 150),
-            padding: const EdgeInsets.symmetric(
-              horizontal: HollowSpacing.md,
-              vertical: HollowSpacing.sm,
-            ),
-            decoration: BoxDecoration(
-              color: isSelected
-                  ? color.withValues(alpha: 0.15)
-                  : hollow.surface,
-              borderRadius: BorderRadius.circular(hollow.radiusMd),
-              border: Border.all(
-                color: isSelected ? color : hollow.border,
-              ),
-            ),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Icon(
-                  icon,
-                  size: 14,
-                  color: isSelected ? color : hollow.textSecondary,
-                ),
-                const SizedBox(width: HollowSpacing.xs),
-                Text(
-                  label,
-                  style: HollowTypography.body.copyWith(
-                    color: isSelected ? color : hollow.textSecondary,
-                    fontSize: 12,
-                    fontWeight:
-                        isSelected ? FontWeight.w600 : FontWeight.w400,
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
     );
   }
 }

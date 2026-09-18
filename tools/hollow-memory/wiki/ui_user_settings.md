@@ -256,10 +256,10 @@ Two sub-sections of `_ShortcutRow` widgets:
 | Spoiler | Ctrl + Shift + S |
 
 ### _ShortcutRow
-Stateless. Label on left (12px body, textSecondary), `_KeyBadge` on right.
+Stateless. Label on left (12px body, textSecondary), `HollowKeyCombo` on right.
 
-### _KeyBadge
-Splits shortcut string on " + ", renders each key as a styled box (surface background, border, mono text 10px) with "+" separators between them.
+### HollowKeyCombo
+`components/hollow_key_combo.dart`, shared with `keybind_capture_field.dart`: splits the display string on " + " and renders one mono `HollowBadge` per key with `textTertiary` "+" separators.
 
 ---
 

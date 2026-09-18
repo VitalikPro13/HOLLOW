@@ -15,7 +15,7 @@ import 'package:hollow/src/ui/components/status_dot.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Floating pill shown during an active 1:1 call on mobile.
-class MobileActiveCallPill extends ConsumerStatefulWidget {
+class MobileActiveCallPill extends ConsumerStatefulWidget { // design-ignore: floating call bar, not a label
   const MobileActiveCallPill({super.key});
 
   @override
@@ -23,7 +23,7 @@ class MobileActiveCallPill extends ConsumerStatefulWidget {
       _MobileActiveCallPillState();
 }
 
-class _MobileActiveCallPillState extends ConsumerState<MobileActiveCallPill> {
+class _MobileActiveCallPillState extends ConsumerState<MobileActiveCallPill> { // design-ignore: floating call bar, not a label
   Timer? _durationTimer;
   Duration _duration = Duration.zero;
   Offset _dragOffset = Offset.zero;

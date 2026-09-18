@@ -128,6 +128,10 @@ words, not components.
   filled button**, and selection never changes the type's weight (that reflows
   the row under the pointer). Radius xs, type `label`, one size. For a row of
   equal-width sub-tabs pass `expand: true` inside an `Expanded`.
+  Slots: `icon` or `leading` (a logo), `hint` (quiet text after the label),
+  `trailingIcon` (chevron = opens a menu, arrow = leaves the app). A chip that
+  opens a menu uses `showHollowMenu`, never `PopupMenuButton`
+  (`settings/channel_access_pickers.dart`). Key combos are `HollowKeyCombo`.
 
 If it is clickable it is a chip. If it is not, it is a badge. There is no third
 option and no local variant.
