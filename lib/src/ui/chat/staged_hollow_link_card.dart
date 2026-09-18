@@ -159,7 +159,7 @@ class _StagedHollowLinkCardState extends ConsumerState<StagedHollowLinkCard> {
             height: 48,
             decoration: BoxDecoration(
               color: hollow.elevated,
-              borderRadius: BorderRadius.circular(6),
+              borderRadius: BorderRadius.circular(hollow.radiusMd),
             ),
             child: Icon(icon,
                 color: _shareValid ? hollow.accent : hollow.error, size: 20),

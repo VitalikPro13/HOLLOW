@@ -23,7 +23,7 @@ void showMobileChannelActions({
   final hollow = HollowTheme.of(context);
   showModalBottomSheet(
     context: context,
-    backgroundColor: hollow.surface,
+    backgroundColor: hollow.overlay,
     isScrollControlled: true,
     shape: RoundedRectangleBorder(
       borderRadius: BorderRadius.vertical(top: Radius.circular(hollow.radiusXl)),
@@ -239,7 +239,7 @@ class _ChannelActionsSheetState extends State<_ChannelActionsSheet> {
                 constraints: const BoxConstraints(maxWidth: 360),
                 padding: const EdgeInsets.all(HollowSpacing.xl),
                 decoration: BoxDecoration(
-                  color: hollow.elevated,
+                  color: hollow.overlay,
                   borderRadius: BorderRadius.circular(hollow.radiusLg),
                   border: Border.all(color: hollow.border),
                 ),

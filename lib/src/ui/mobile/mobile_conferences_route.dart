@@ -112,7 +112,7 @@ class _MobileConferencesRouteState
           HollowPressable(
             semanticLabel: 'Back',
             onTap: () => Navigator.of(context).pop(),
-            borderRadius: BorderRadius.circular(hollow.radiusSm),
+            borderRadius: BorderRadius.circular(hollow.radiusMd),
             padding: const EdgeInsets.all(HollowSpacing.xs),
             child: Icon(LucideIcons.arrowLeft,
                 size: 22, color: hollow.textPrimary),
@@ -130,7 +130,7 @@ class _MobileConferencesRouteState
             child: HollowPressable(
               semanticLabel: 'Join a meeting',
               onTap: () => showJoinConferenceDialog(context),
-              borderRadius: BorderRadius.circular(hollow.radiusSm),
+              borderRadius: BorderRadius.circular(hollow.radiusMd),
               padding: const EdgeInsets.all(HollowSpacing.xs),
               child:
                   Icon(LucideIcons.logIn, size: 22, color: hollow.accent),
@@ -140,7 +140,7 @@ class _MobileConferencesRouteState
           HollowPressable(
             semanticLabel: 'Create room',
             onTap: () => showConferenceRoomFormDialog(context),
-            borderRadius: BorderRadius.circular(hollow.radiusSm),
+            borderRadius: BorderRadius.circular(hollow.radiusMd),
             padding: const EdgeInsets.all(HollowSpacing.xs),
             child: Icon(LucideIcons.plus, size: 22, color: hollow.accent),
           ),
@@ -244,7 +244,7 @@ class _MobileConferencesRouteState
                   HollowToast.show(context, 'Invite link copied',
                       type: HollowToastType.success);
                 },
-                borderRadius: BorderRadius.circular(hollow.radiusSm),
+                borderRadius: BorderRadius.circular(hollow.radiusMd),
                 padding: const EdgeInsets.all(HollowSpacing.xs),
                 child: Icon(LucideIcons.link,
                     size: 18, color: hollow.textSecondary),
@@ -253,7 +253,7 @@ class _MobileConferencesRouteState
                 semanticLabel: 'Edit room ${room.name}',
                 onTap: () =>
                     showConferenceRoomFormDialog(context, room: room),
-                borderRadius: BorderRadius.circular(hollow.radiusSm),
+                borderRadius: BorderRadius.circular(hollow.radiusMd),
                 padding: const EdgeInsets.all(HollowSpacing.xs),
                 child: Icon(LucideIcons.pencil,
                     size: 18, color: hollow.textSecondary),
@@ -261,7 +261,7 @@ class _MobileConferencesRouteState
               HollowPressable(
                 semanticLabel: 'Delete room ${room.name}',
                 onTap: () => _confirmDelete(room),
-                borderRadius: BorderRadius.circular(hollow.radiusSm),
+                borderRadius: BorderRadius.circular(hollow.radiusMd),
                 padding: const EdgeInsets.all(HollowSpacing.xs),
                 child: Icon(LucideIcons.trash2,
                     size: 18, color: hollow.textSecondary),

@@ -41,7 +41,7 @@ Future<String?> askPassphraseDialog(BuildContext context, String title,
             width: 360,
             padding: const EdgeInsets.all(HollowSpacing.xl),
             decoration: BoxDecoration(
-              color: hollow.elevated,
+              color: hollow.overlay,
               borderRadius: BorderRadius.circular(hollow.radiusLg),
               border: Border.all(color: hollow.accent.withValues(alpha: 0.15)),
             ),
@@ -679,7 +679,7 @@ class _SecurityTabState extends ConsumerState<SecurityTab> {
             hintText: 'Enter 24-word recovery phrase',
             isDense: true,
             style: HollowTypography.body.copyWith(color: hollow.textPrimary, fontSize: 12),
-            borderRadius: hollow.radiusSm,
+            borderRadius: hollow.radiusMd,
             onSubmitted: _onMnemonicSubmitted,
           ),
         ),
@@ -693,7 +693,7 @@ class _SecurityTabState extends ConsumerState<SecurityTab> {
         width: double.infinity,
         padding: const EdgeInsets.all(HollowSpacing.md),
         decoration: BoxDecoration(
-          color: hollow.background,
+          color: hollow.elevated,
           borderRadius: BorderRadius.circular(hollow.radiusMd),
           border: Border.all(
             color: _revealed

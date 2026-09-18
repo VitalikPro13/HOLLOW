@@ -32,7 +32,7 @@ void showBrowsePublicDialog(BuildContext context, WidgetRef ref) {
               width: 420,
               padding: const EdgeInsets.all(HollowSpacing.xl),
               decoration: BoxDecoration(
-                color: hollow.surface,
+                color: hollow.overlay,
                 borderRadius: BorderRadius.circular(hollow.radiusXl),
                 border: Border.all(color: hollow.border),
               ),

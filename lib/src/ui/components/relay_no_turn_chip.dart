@@ -23,7 +23,7 @@ class RelayNoTurnChip extends StatelessWidget {
         ),
         decoration: BoxDecoration(
           color: hollow.warning.withValues(alpha: 0.15),
-          borderRadius: BorderRadius.circular(compact ? 4 : hollow.radiusSm),
+          borderRadius: BorderRadius.circular(compact ? 4 : hollow.radiusXs),
         ),
         child: Text(
           'No TURN server',

@@ -45,7 +45,7 @@ Future<void> showMobileAudioRouteSheet(
   final hollow = HollowTheme.of(context);
   return showModalBottomSheet<void>(
     context: context,
-    backgroundColor: hollow.surface,
+    backgroundColor: hollow.overlay,
     isScrollControlled: true,
     shape: RoundedRectangleBorder(
       borderRadius:
@@ -175,7 +175,7 @@ class _RouteRow extends StatelessWidget {
       // a real colour: lerping from `Colors.transparent` goes via black.
       backgroundColor: selected
           ? hollow.accent.withValues(alpha: 0.12)
-          : hollow.surface,
+          : hollow.overlay,
       padding: const EdgeInsets.symmetric(
           horizontal: HollowSpacing.md, vertical: HollowSpacing.md),
       child: Row(

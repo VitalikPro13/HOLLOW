@@ -13,11 +13,16 @@ final List<String>? kEmojiFontFallback =
         ? const ['NotoColorEmoji']
         : null;
 
-/// Hollow typography scale, on each platform's own system font stack. Every
-/// style defaults to textPrimary; override with copyWith.
+/// Hollow typography: Onest for the interface, Geist Mono for the console
+/// voice (ids, hashes, versions), both bundled variable fonts so the app reads
+/// the same on every OS. Every style defaults to textPrimary; override the
+/// colour with copyWith, never the size.
 abstract final class HollowTypography {
+  static const sansFamily = 'Onest';
+  static const monoFamily = 'GeistMono';
+
   static final _base = TextStyle(
-    fontFamily: null, // System default (Segoe UI on Windows, SF Pro on macOS, etc.)
+    fontFamily: sansFamily,
     fontFamilyFallback: kEmojiFontFallback,
     color: HollowColors.textPrimary,
     height: 1.4,
@@ -26,7 +31,7 @@ abstract final class HollowTypography {
 
   static final display = _base.copyWith(
     fontSize: 28,
-    fontWeight: FontWeight.w700,
+    fontWeight: FontWeight.w600,
     height: 1.2,
   );
 
@@ -65,7 +70,7 @@ abstract final class HollowTypography {
 
   /// The smallest role there is: badge text, counters, the tightest chrome.
   /// Below this the text fails the legibility floor, so there is no role for
-  /// 9 or 8 and the sites still using them are on the design-language ratchet.
+  /// 9 or 8.
   static final micro = _base.copyWith(
     fontSize: 10,
     fontWeight: FontWeight.w500,
@@ -75,16 +80,14 @@ abstract final class HollowTypography {
   static final mono = _base.copyWith(
     fontSize: 13,
     fontWeight: FontWeight.w400,
-    fontFamily: 'Consolas', // Falls back to monospace on other platforms
-    letterSpacing: 0.5,
+    fontFamily: monoFamily,
   );
 
   /// The console voice in metadata: ids and hashes beside a timestamp.
   static final monoSmall = _base.copyWith(
     fontSize: 11,
     fontWeight: FontWeight.w400,
-    fontFamily: 'Consolas',
-    letterSpacing: 0.5,
+    fontFamily: monoFamily,
     color: HollowColors.textSecondary,
   );
 }

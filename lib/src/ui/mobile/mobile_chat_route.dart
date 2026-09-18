@@ -591,7 +591,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
       margin: const EdgeInsets.fromLTRB(
           HollowSpacing.sm, 0, HollowSpacing.sm, HollowSpacing.xs),
       decoration: BoxDecoration(
-        color: hollow.elevated,
+        color: hollow.overlay,
         borderRadius: BorderRadius.circular(hollow.radiusMd),
         border: Border.all(color: hollow.border),
         boxShadow: [
@@ -703,7 +703,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
       margin: const EdgeInsets.fromLTRB(
           HollowSpacing.sm, 0, HollowSpacing.sm, HollowSpacing.xs),
       decoration: BoxDecoration(
-        color: hollow.elevated,
+        color: hollow.overlay,
         borderRadius: BorderRadius.circular(hollow.radiusMd),
         border: Border.all(color: hollow.border),
         boxShadow: [
@@ -1053,7 +1053,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     final hollow = HollowTheme.of(context);
     showModalBottomSheet<void>(
       context: context,
-      backgroundColor: hollow.surface,
+      backgroundColor: hollow.overlay,
       isScrollControlled: true,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(hollow.radiusLg)),
@@ -1082,7 +1082,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     final hollow = HollowTheme.of(context);
     showModalBottomSheet<void>(
       context: context,
-      backgroundColor: hollow.surface,
+      backgroundColor: hollow.overlay,
       isScrollControlled: true,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(hollow.radiusLg)),
@@ -1146,7 +1146,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     final hollow = HollowTheme.of(context);
     showModalBottomSheet<void>(
       context: context,
-      backgroundColor: hollow.surface,
+      backgroundColor: hollow.overlay,
       isScrollControlled: true,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(hollow.radiusLg)),
@@ -1201,7 +1201,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
 
     showModalBottomSheet<void>(
       context: context,
-      backgroundColor: hollow.surface,
+      backgroundColor: hollow.overlay,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(hollow.radiusLg)),
       ),
@@ -2695,7 +2695,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
               prefixIcon: Icon(LucideIcons.search,
                   size: 16, color: hollow.textSecondary),
               filled: true,
-              fillColor: hollow.background,
+              fillColor: hollow.elevated,
               isDense: true,
               contentPadding: const EdgeInsets.symmetric(
                 horizontal: HollowSpacing.md,
@@ -2749,7 +2749,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
                         });
                         if (idx != -1) _scrollToMessage(idx);
                       },
-                      borderRadius: BorderRadius.circular(hollow.radiusSm),
+                      borderRadius: BorderRadius.circular(hollow.radiusMd),
                       padding: const EdgeInsets.symmetric(
                         horizontal: HollowSpacing.sm,
                         vertical: HollowSpacing.xs,
@@ -2828,7 +2828,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
           Container(
             decoration: BoxDecoration(
               border: Border.all(color: hollow.accent),
-              borderRadius: BorderRadius.circular(hollow.radiusSm),
+              borderRadius: BorderRadius.circular(hollow.radiusMd),
               color: hollow.elevated,
             ),
             child: TextField(
@@ -2881,7 +2881,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
                   ),
                   decoration: BoxDecoration(
                     color: hollow.accent,
-                    borderRadius: BorderRadius.circular(hollow.radiusSm),
+                    borderRadius: BorderRadius.circular(hollow.radiusMd),
                   ),
                   child: Text('Save',
                       style: HollowTypography.caption.copyWith(
@@ -2945,7 +2945,7 @@ class _MobileChatHeader extends ConsumerWidget {
           HollowPressable(
             onTap: () => Navigator.of(context).pop(),
             semanticLabel: 'Back',
-            borderRadius: BorderRadius.circular(hollow.radiusSm),
+            borderRadius: BorderRadius.circular(hollow.radiusMd),
             padding: const EdgeInsets.all(HollowSpacing.sm),
             child: Icon(LucideIcons.arrowLeft, size: 22, color: hollow.textPrimary),
           ),
@@ -3019,7 +3019,7 @@ class _MobileChatHeader extends ConsumerWidget {
 
     return HollowPressable(
       onTap: isDm ? () => _showProfileSheet(context, ref, peerId!) : null,
-      borderRadius: BorderRadius.circular(hollow.radiusSm),
+      borderRadius: BorderRadius.circular(hollow.radiusMd),
       padding: const EdgeInsets.symmetric(vertical: HollowSpacing.xs),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -3100,7 +3100,7 @@ class _MobileChatHeader extends ConsumerWidget {
         HollowPressable(
           onTap: () => showMobileMemberPanel(context, serverId!),
           semanticLabel: 'Members',
-          borderRadius: BorderRadius.circular(hollow.radiusSm),
+          borderRadius: BorderRadius.circular(hollow.radiusMd),
           padding: const EdgeInsets.all(HollowSpacing.sm),
           child: Icon(LucideIcons.users, size: 20, color: hollow.textSecondary),
         ),
@@ -3110,7 +3110,7 @@ class _MobileChatHeader extends ConsumerWidget {
         HollowPressable(
           onTap: onSearchToggle,
           semanticLabel: 'Search messages',
-          borderRadius: BorderRadius.circular(hollow.radiusSm),
+          borderRadius: BorderRadius.circular(hollow.radiusMd),
           padding: const EdgeInsets.all(HollowSpacing.sm),
           child: Icon(
             LucideIcons.search,
@@ -3129,7 +3129,7 @@ class _MobileChatHeader extends ConsumerWidget {
       onTap: () => _showPinnedMessagesSheet(
           context, ref, serverId!, channelId!, pinnedIds),
       semanticLabel: 'Pinned messages',
-      borderRadius: BorderRadius.circular(hollow.radiusSm),
+      borderRadius: BorderRadius.circular(hollow.radiusMd),
       padding: const EdgeInsets.all(HollowSpacing.sm),
       child: Row(
         mainAxisSize: MainAxisSize.min,
@@ -3173,7 +3173,7 @@ class _MobileChatHeader extends ConsumerWidget {
 
     showModalBottomSheet(
       context: context,
-      backgroundColor: hollow.surface,
+      backgroundColor: hollow.overlay,
       shape: RoundedRectangleBorder(
         borderRadius:
             BorderRadius.vertical(top: Radius.circular(hollow.radiusXl)),
@@ -3392,7 +3392,7 @@ class _MobileInputBar extends StatelessWidget {
                   hintText: 'Type a message...',
                   hintStyle: HollowTypography.body.copyWith(color: hollow.textSecondary),
                   filled: true,
-                  fillColor: hollow.background,
+                  fillColor: hollow.elevated,
                   isDense: true,
                   contentPadding: const EdgeInsets.symmetric(
                     horizontal: HollowSpacing.md,
@@ -3470,7 +3470,7 @@ class _DmMuteButton extends ConsumerWidget {
         );
       },
       semanticLabel: enabled ? 'Mute notifications' : 'Unmute notifications',
-      borderRadius: BorderRadius.circular(hollow.radiusSm),
+      borderRadius: BorderRadius.circular(hollow.radiusMd),
       padding: const EdgeInsets.all(HollowSpacing.sm),
       child: Icon(
         enabled ? LucideIcons.bell : LucideIcons.bellOff,
@@ -3559,7 +3559,7 @@ class _DmCallButtons extends ConsumerWidget {
                       )
                   : null,
           semanticLabel: 'Voice call',
-          borderRadius: BorderRadius.circular(hollow.radiusSm),
+          borderRadius: BorderRadius.circular(hollow.radiusMd),
           padding: const EdgeInsets.all(HollowSpacing.sm),
           child: Icon(
             isCallWithThisPeer ? LucideIcons.phoneCall : LucideIcons.phone,
@@ -3576,7 +3576,7 @@ class _DmCallButtons extends ConsumerWidget {
               ? () => startAndOpen(withVideo: true)
               : null,
           semanticLabel: 'Video call',
-          borderRadius: BorderRadius.circular(hollow.radiusSm),
+          borderRadius: BorderRadius.circular(hollow.radiusMd),
           padding: const EdgeInsets.all(HollowSpacing.sm),
           child: Icon(
             LucideIcons.video,

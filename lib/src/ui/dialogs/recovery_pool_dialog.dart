@@ -102,8 +102,8 @@ class _InitiateDialogState extends ConsumerState<_InitiateDialog> {
             Container(
               padding: const EdgeInsets.all(HollowSpacing.md),
               decoration: BoxDecoration(
-                color: hollow.surface,
-                borderRadius: BorderRadius.circular(hollow.radiusSm),
+                color: hollow.elevated,
+                borderRadius: BorderRadius.circular(hollow.radiusMd),
                 border: Border.all(color: hollow.border),
               ),
               child: Row(

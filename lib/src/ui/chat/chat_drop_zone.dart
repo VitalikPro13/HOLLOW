@@ -72,7 +72,7 @@ class _ChatDropZoneState extends State<ChatDropZone> {
                         vertical: HollowSpacing.lg,
                       ),
                       decoration: BoxDecoration(
-                        color: hollow.surface,
+                        color: hollow.overlay,
                         borderRadius:
                             BorderRadius.circular(hollow.radiusLg),
                         border: Border.all(

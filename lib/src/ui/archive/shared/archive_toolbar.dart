@@ -121,7 +121,7 @@ class ArchiveToolbar extends StatelessWidget {
             HollowPressable(
               onTap: onJumpToDate,
               semanticLabel: 'Jump to date',
-              borderRadius: BorderRadius.circular(hollow.radiusSm),
+              borderRadius: BorderRadius.circular(hollow.radiusMd),
               padding: const EdgeInsets.all(6),
               child: Icon(LucideIcons.calendar,
                   size: 16, color: hollow.textSecondary),
@@ -132,7 +132,7 @@ class ArchiveToolbar extends StatelessWidget {
             HollowPressable(
               onTap: onToggleSearch,
               semanticLabel: 'Search messages',
-              borderRadius: BorderRadius.circular(hollow.radiusSm),
+              borderRadius: BorderRadius.circular(hollow.radiusMd),
               padding: const EdgeInsets.all(6),
               child: Icon(LucideIcons.search,
                   size: 16,
@@ -146,7 +146,7 @@ class ArchiveToolbar extends StatelessWidget {
             HollowPressable(
               onTap: onExport,
               semanticLabel: 'Export conversation',
-              borderRadius: BorderRadius.circular(hollow.radiusSm),
+              borderRadius: BorderRadius.circular(hollow.radiusMd),
               padding: const EdgeInsets.all(6),
               child: Icon(LucideIcons.fileOutput,
                   size: 16, color: hollow.accent),
@@ -158,7 +158,7 @@ class ArchiveToolbar extends StatelessWidget {
                 const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
             decoration: BoxDecoration(
               color: hollow.elevated,
-              borderRadius: BorderRadius.circular(hollow.radiusSm),
+              borderRadius: BorderRadius.circular(hollow.radiusXs),
             ),
             child: Text(
               'read-only',
@@ -218,7 +218,7 @@ class ArchiveMobileToolbar extends StatelessWidget {
           HollowPressable(
             onTap: onBack,
             semanticLabel: 'Back',
-            borderRadius: BorderRadius.circular(hollow.radiusSm),
+            borderRadius: BorderRadius.circular(hollow.radiusMd),
             padding: const EdgeInsets.all(8),
             child: Icon(LucideIcons.chevronLeft,
                 size: 20, color: hollow.textPrimary),
@@ -267,7 +267,7 @@ class ArchiveMobileToolbar extends StatelessWidget {
             HollowPressable(
               onTap: onFilter,
               semanticLabel: 'Filter by sender',
-              borderRadius: BorderRadius.circular(hollow.radiusSm),
+              borderRadius: BorderRadius.circular(hollow.radiusMd),
               padding: const EdgeInsets.all(6),
               child: Icon(LucideIcons.filter,
                   size: 16,
@@ -279,7 +279,7 @@ class ArchiveMobileToolbar extends StatelessWidget {
             HollowPressable(
               onTap: onJumpToDate,
               semanticLabel: 'Jump to date',
-              borderRadius: BorderRadius.circular(hollow.radiusSm),
+              borderRadius: BorderRadius.circular(hollow.radiusMd),
               padding: const EdgeInsets.all(6),
               child: Icon(LucideIcons.calendar,
                   size: 16, color: hollow.textSecondary),
@@ -288,7 +288,7 @@ class ArchiveMobileToolbar extends StatelessWidget {
             HollowPressable(
               onTap: onToggleSearch,
               semanticLabel: 'Search messages',
-              borderRadius: BorderRadius.circular(hollow.radiusSm),
+              borderRadius: BorderRadius.circular(hollow.radiusMd),
               padding: const EdgeInsets.all(6),
               child: Icon(LucideIcons.search,
                   size: 16,
@@ -300,7 +300,7 @@ class ArchiveMobileToolbar extends StatelessWidget {
             HollowPressable(
               onTap: onExport,
               semanticLabel: 'Export conversation',
-              borderRadius: BorderRadius.circular(hollow.radiusSm),
+              borderRadius: BorderRadius.circular(hollow.radiusMd),
               padding: const EdgeInsets.all(6),
               child: Icon(LucideIcons.fileOutput,
                   size: 16, color: hollow.accent),
@@ -311,13 +311,12 @@ class ArchiveMobileToolbar extends StatelessWidget {
                 const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
             decoration: BoxDecoration(
               color: hollow.elevated,
-              borderRadius: BorderRadius.circular(hollow.radiusSm),
+              borderRadius: BorderRadius.circular(hollow.radiusXs),
             ),
             child: Text(
               'read-only',
-              style: HollowTypography.caption.copyWith(
+              style: HollowTypography.micro.copyWith(
                 color: hollow.textSecondary,
-                fontSize: 9,
               ),
             ),
           ),

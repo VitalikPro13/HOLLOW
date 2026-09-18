@@ -69,7 +69,7 @@ class _ConnectingContent extends StatelessWidget {
           constraints: const BoxConstraints(maxWidth: 320),
           padding: const EdgeInsets.all(HollowSpacing.xl),
           decoration: BoxDecoration(
-            color: hollow.elevated.withValues(alpha: 0.97),
+            color: hollow.overlay,
             borderRadius: BorderRadius.circular(hollow.radiusLg),
             border: Border.all(color: hollow.accent.withValues(alpha: 0.15)),
           ),
@@ -206,7 +206,7 @@ class _DeviceLinkContentState extends ConsumerState<_DeviceLinkContent> {
             color: Colors.transparent,
             child: Container(
               decoration: BoxDecoration(
-                color: hollow.elevated.withValues(alpha: 0.97),
+                color: hollow.overlay,
                 borderRadius: radius,
                 border: Border.all(color: hollow.accent.withValues(alpha: 0.15)),
                 boxShadow: [
@@ -284,7 +284,7 @@ class _DeviceLinkContentState extends ConsumerState<_DeviceLinkContent> {
           padding: const EdgeInsets.symmetric(
               horizontal: HollowSpacing.lg, vertical: HollowSpacing.md),
           decoration: BoxDecoration(
-            color: hollow.surface.withValues(alpha: 0.6),
+            color: hollow.elevated,
             borderRadius: BorderRadius.circular(hollow.radiusMd),
             border: Border.all(color: hollow.accent.withValues(alpha: 0.25)),
           ),
@@ -415,7 +415,7 @@ class _DeviceLinkContentState extends ConsumerState<_DeviceLinkContent> {
     return HollowFocusRing(
       enabled: true,
       onActivate: onTap,
-      borderRadius: BorderRadius.circular(hollow.radiusSm),
+      borderRadius: BorderRadius.circular(hollow.radiusMd),
       child: GestureDetector(
         onTap: onTap,
         behavior: HitTestBehavior.opaque,

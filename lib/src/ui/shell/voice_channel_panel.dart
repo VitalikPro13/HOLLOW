@@ -130,7 +130,7 @@ class VoiceChannelPanel extends ConsumerWidget {
                     semanticLabel: vcState.isMuted ? 'Unmute' : 'Mute',
                     onTap: () =>
                         ref.read(voiceChannelProvider.notifier).toggleMute(),
-                    borderRadius: BorderRadius.circular(hollow.radiusSm),
+                    borderRadius: BorderRadius.circular(hollow.radiusMd),
                     padding: const EdgeInsets.all(HollowSpacing.sm),
                     child: Icon(mic.icon, size: 18, color: mic.color),
                   ),
@@ -143,7 +143,7 @@ class VoiceChannelPanel extends ConsumerWidget {
                   semanticLabel: vcState.isDeafened ? 'Undeafen' : 'Deafen',
                   onTap: () =>
                       ref.read(voiceChannelProvider.notifier).toggleDeafen(),
-                  borderRadius: BorderRadius.circular(hollow.radiusSm),
+                  borderRadius: BorderRadius.circular(hollow.radiusMd),
                   padding: const EdgeInsets.all(HollowSpacing.sm),
                   child: Icon(
                     LucideIcons.headphones,
@@ -163,7 +163,7 @@ class VoiceChannelPanel extends ConsumerWidget {
                       : 'Turn on camera',
                   onTap: () =>
                       ref.read(voiceChannelProvider.notifier).toggleCamera(),
-                  borderRadius: BorderRadius.circular(hollow.radiusSm),
+                  borderRadius: BorderRadius.circular(hollow.radiusMd),
                   padding: const EdgeInsets.all(HollowSpacing.sm),
                   child: Icon(
                     vcState.isCameraOn ? LucideIcons.video : LucideIcons.videoOff,
@@ -185,7 +185,7 @@ class VoiceChannelPanel extends ConsumerWidget {
                         ? 'Stop sharing'
                         : 'Share screen',
                     onTap: () => _handleScreenShareToggle(context, ref, vcState),
-                    borderRadius: BorderRadius.circular(hollow.radiusSm),
+                    borderRadius: BorderRadius.circular(hollow.radiusMd),
                     padding: const EdgeInsets.all(HollowSpacing.sm),
                     child: Icon(
                       LucideIcons.monitor,
@@ -204,7 +204,7 @@ class VoiceChannelPanel extends ConsumerWidget {
                   semanticLabel: 'Disconnect',
                   onTap: () =>
                       ref.read(voiceChannelProvider.notifier).leaveChannel(),
-                  borderRadius: BorderRadius.circular(hollow.radiusSm),
+                  borderRadius: BorderRadius.circular(hollow.radiusMd),
                   padding: const EdgeInsets.all(HollowSpacing.sm),
                   child: Icon(
                     LucideIcons.phoneOff,

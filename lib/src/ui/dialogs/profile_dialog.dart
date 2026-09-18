@@ -77,7 +77,7 @@ class ProfileDialog extends ConsumerWidget {
 
   /// The shared panel/card surface decoration.
   BoxDecoration _surface(HollowTheme hollow) => BoxDecoration(
-        color: hollow.elevated.withValues(alpha: 0.92),
+        color: hollow.overlay,
         borderRadius: BorderRadius.circular(hollow.radiusLg),
         border: Border.all(color: hollow.accent.withValues(alpha: 0.15)),
         boxShadow: [

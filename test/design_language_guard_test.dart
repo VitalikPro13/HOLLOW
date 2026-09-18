@@ -103,7 +103,7 @@ final _rules = <_Rule>[
         'not a literal',
     pattern: RegExp(r'\bfontSize\s*:'),
     excludeDirs: [_theme],
-    baseline: 785,
+    baseline: 744,
   ),
   _Rule(
     id: 'material-colors',
@@ -111,7 +111,7 @@ final _rules = <_Rule>[
     fix: 'use hollow.<token>; Colors.transparent is the only allowed one',
     pattern: RegExp(r'\bColors\.(?!transparent\b)\w+'),
     excludeDirs: [_theme],
-    baseline: 235,
+    baseline: 234,
   ),
   _Rule(
     id: 'color-literal',
@@ -125,10 +125,10 @@ final _rules = <_Rule>[
   _Rule(
     id: 'radius-literal',
     what: 'BorderRadius.circular(<number>) outside the theme',
-    fix: 'use hollow.radiusXs / radiusSm / radiusMd / radiusLg / radiusXl',
+    fix: 'use hollow.radiusXs / radiusMd / radiusLg / radiusXl',
     pattern: RegExp(r'BorderRadius\.circular\(\s*[0-9]'),
     excludeDirs: [_theme],
-    baseline: 168,
+    baseline: 153,
   ),
   _Rule(
     id: 'letter-spacing',
@@ -136,7 +136,7 @@ final _rules = <_Rule>[
     fix: 'hierarchy comes from weight and colour, not tracking',
     pattern: RegExp(r'\bletterSpacing\s*:'),
     excludeDirs: [_theme],
-    baseline: 63,
+    baseline: 57,
   ),
   _Rule(
     id: 'upper-case-label',

@@ -35,7 +35,7 @@ void showMobileMessageActions({
   final hollow = HollowTheme.of(context);
   showModalBottomSheet(
     context: context,
-    backgroundColor: hollow.surface,
+    backgroundColor: hollow.overlay,
     // The emoji grid and long action lists exceed the default sheet cap on
     // short phones.
     isScrollControlled: true,
@@ -378,7 +378,7 @@ class _MessagePreview extends StatelessWidget {
         padding: const EdgeInsets.all(HollowSpacing.sm),
         decoration: BoxDecoration(
           color: hollow.elevated,
-          borderRadius: BorderRadius.circular(hollow.radiusSm),
+          borderRadius: BorderRadius.circular(hollow.radiusMd),
           border: Border.all(color: hollow.border),
         ),
         child: Column(
@@ -449,7 +449,7 @@ class _QuickReactionsRow extends StatelessWidget {
                 alignment: Alignment.center,
                 decoration: BoxDecoration(
                   color: hollow.elevated,
-                  borderRadius: BorderRadius.circular(hollow.radiusSm),
+                  borderRadius: BorderRadius.circular(hollow.radiusMd),
                 ),
                 child: Text(kQuickReactionEmojis[i], style: const TextStyle(fontSize: 22)),
               ),
@@ -463,7 +463,7 @@ class _QuickReactionsRow extends StatelessWidget {
               alignment: Alignment.center,
               decoration: BoxDecoration(
                 color: hollow.elevated,
-                borderRadius: BorderRadius.circular(hollow.radiusSm),
+                borderRadius: BorderRadius.circular(hollow.radiusMd),
               ),
               child: Icon(LucideIcons.plus, size: 18, color: hollow.textSecondary),
             ),
@@ -512,7 +512,7 @@ class _ActionRow extends StatelessWidget {
                 size: 18,
                 color: c,
                 // The sheet's own surface, so the slash cuts the glyph cleanly.
-                backgroundColor: hollow.surface,
+                backgroundColor: hollow.overlay,
               )
             else
               Icon(icon, size: 18, color: c),

@@ -94,7 +94,7 @@ class _BottomBarState extends ConsumerState<BottomBar> {
     return Container(
       height: 59,
       decoration: BoxDecoration(
-        color: hollow.opaqueBackground,
+        color: hollow.opaqueSurface,
         border: Border(
           top: BorderSide(color: hollow.border),
         ),
@@ -317,7 +317,7 @@ class _BottomBarState extends ConsumerState<BottomBar> {
                           ? setShellTab(ref.read, null)
                           : _openGuestPanel(ref),
                       borderRadius:
-                          BorderRadius.circular(hollow.radiusSm),
+                          BorderRadius.circular(hollow.radiusMd),
                       padding: const EdgeInsets.all(HollowSpacing.xs),
                       child: Icon(
                         LucideIcons.globe,
@@ -339,7 +339,7 @@ class _BottomBarState extends ConsumerState<BottomBar> {
                         ? setShellTab(ref.read, null)
                         : _openShare(ref),
                     borderRadius:
-                        BorderRadius.circular(hollow.radiusSm),
+                        BorderRadius.circular(hollow.radiusMd),
                     padding: const EdgeInsets.all(HollowSpacing.xs),
                     child: Icon(
                       LucideIcons.share2,
@@ -358,7 +358,7 @@ class _BottomBarState extends ConsumerState<BottomBar> {
                         ? setShellTab(ref.read, null)
                         : _openArchive(ref),
                     borderRadius:
-                        BorderRadius.circular(hollow.radiusSm),
+                        BorderRadius.circular(hollow.radiusMd),
                     padding: const EdgeInsets.all(HollowSpacing.xs),
                     child: Icon(
                       LucideIcons.archive,
@@ -376,7 +376,7 @@ class _BottomBarState extends ConsumerState<BottomBar> {
                     semanticLabel: 'Settings',
                     onTap: () => showUserSettingsDialog(context, openSystemTab: true),
                     borderRadius:
-                        BorderRadius.circular(hollow.radiusSm),
+                        BorderRadius.circular(hollow.radiusMd),
                     padding: const EdgeInsets.all(HollowSpacing.xs),
                     child: Icon(
                       LucideIcons.settings,
@@ -393,7 +393,7 @@ class _BottomBarState extends ConsumerState<BottomBar> {
                       onTap: () => showMnemonicDialog(
                           context, identity.mnemonic!),
                       borderRadius:
-                          BorderRadius.circular(hollow.radiusSm),
+                          BorderRadius.circular(hollow.radiusMd),
                       padding: const EdgeInsets.all(HollowSpacing.sm),
                       child: Icon(
                         LucideIcons.keyRound,
@@ -964,7 +964,7 @@ class _BottomServerIconState extends State<_BottomServerIcon> {
                         color: hollow.error,
                         borderRadius: BorderRadius.circular(7),
                         border: Border.all(
-                          color: hollow.background,
+                          color: hollow.surface,
                           width: 2,
                         ),
                       ),
@@ -973,10 +973,9 @@ class _BottomServerIconState extends State<_BottomServerIcon> {
                         widget.unreadCount > 99
                             ? '99+'
                             : '${widget.unreadCount}',
-                        style: const TextStyle(
+                        style: HollowTypography.micro.copyWith(
                           color: Colors.white,
-                          fontSize: 8,
-                          fontWeight: FontWeight.w700,
+                          fontWeight: FontWeight.w600,
                           height: 1,
                         ),
                       ),

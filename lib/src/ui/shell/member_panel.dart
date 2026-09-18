@@ -268,7 +268,7 @@ class _SectionDivider extends StatelessWidget {
           ? 'Expand $label, $count members'
           : 'Collapse $label, $count members',
       onTap: onToggle,
-      borderRadius: BorderRadius.circular(hollow.radiusSm),
+      borderRadius: BorderRadius.circular(hollow.radiusMd),
       padding: EdgeInsets.zero,
       child: row,
     );
@@ -691,7 +691,7 @@ class _ServerMemberTile extends ConsumerWidget {
         ),
         child: HollowPressable(
           subtle: true,
-          borderRadius: BorderRadius.circular(hollow.radiusSm),
+          borderRadius: BorderRadius.circular(hollow.radiusMd),
           onTap: () {
             final box = context.findRenderObject() as RenderBox?;
             if (box == null) return;
@@ -780,9 +780,8 @@ class _ServerMemberTile extends ConsumerWidget {
                           const SizedBox(width: 3),
                           Text(
                             verifiedTwitch,
-                            style: HollowTypography.caption.copyWith(
+                            style: HollowTypography.micro.copyWith(
                               color: const Color(0xFF9146FF),
-                              fontSize: 9,
                             ),
                           ),
                         ],
@@ -828,7 +827,7 @@ class _MemberTile extends ConsumerWidget {
       ),
       child: HollowPressable(
         subtle: true,
-        borderRadius: BorderRadius.circular(hollow.radiusSm),
+        borderRadius: BorderRadius.circular(hollow.radiusMd),
         onTap: () {
           final box = context.findRenderObject() as RenderBox?;
           if (box == null) return;

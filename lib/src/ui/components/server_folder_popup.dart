@@ -337,7 +337,7 @@ class _FolderPopupOverlayState extends ConsumerState<_FolderPopupOverlay>
                   child: Container(
                     width: cardWidth,
                     decoration: BoxDecoration(
-                      color: hollow.surface,
+                      color: hollow.overlay,
                       borderRadius:
                           BorderRadius.circular(hollow.radiusLg),
                       border: Border.all(color: hollow.border),
@@ -379,7 +379,7 @@ class _FolderPopupOverlayState extends ConsumerState<_FolderPopupOverlay>
                                 },
                                 subtle: true,
                                 
-                                borderRadius: BorderRadius.circular(6),
+                                borderRadius: BorderRadius.circular(hollow.radiusMd),
                                 padding: const EdgeInsets.all(6),
                                 semanticLabel: 'Rename folder',
                                 child: Icon(
@@ -522,10 +522,9 @@ class _FolderServerItem extends StatelessWidget {
                       ),
                       child: Text(
                         unreadCount > 99 ? '99+' : '$unreadCount',
-                        style: const TextStyle(
+                        style: HollowTypography.micro.copyWith(
                           color: Colors.white,
-                          fontSize: 9,
-                          fontWeight: FontWeight.w700,
+                          fontWeight: FontWeight.w600,
                         ),
                       ),
                     ),
@@ -543,7 +542,7 @@ class _FolderServerItem extends StatelessWidget {
                         width: 16,
                         height: 16,
                         decoration: BoxDecoration(
-                          color: hollow.surface,
+                          color: hollow.overlay,
                           shape: BoxShape.circle,
                           border: Border.all(color: hollow.border, width: 1),
                         ),
@@ -560,9 +559,8 @@ class _FolderServerItem extends StatelessWidget {
             const SizedBox(height: 3),
             Text(
               name.isNotEmpty ? name : 'Server',
-              style: HollowTypography.caption.copyWith(
+              style: HollowTypography.micro.copyWith(
                 color: hollow.textSecondary,
-                fontSize: 9,
               ),
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
@@ -632,7 +630,7 @@ class _FolderRenameDialogState extends ConsumerState<_FolderRenameDialog> {
           width: 280,
           padding: const EdgeInsets.all(HollowSpacing.xl),
           decoration: BoxDecoration(
-            color: hollow.surface,
+            color: hollow.overlay,
             borderRadius: BorderRadius.circular(hollow.radiusLg),
             border: Border.all(color: hollow.border),
           ),

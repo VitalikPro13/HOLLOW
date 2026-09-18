@@ -98,9 +98,8 @@ class RecoveryPoolDashboard extends ConsumerWidget {
             Container(
               padding: const EdgeInsets.all(HollowSpacing.md),
               decoration: BoxDecoration(
-                color: hollow.surface,
-                borderRadius: BorderRadius.circular(hollow.radiusSm),
-                border: Border.all(color: hollow.border),
+                color: hollow.elevated,
+                borderRadius: BorderRadius.circular(hollow.radiusMd),
               ),
               child: Row(
                 children: [
@@ -191,9 +190,8 @@ class RecoveryPoolDashboard extends ConsumerWidget {
                     vertical: HollowSpacing.sm,
                   ),
                   decoration: BoxDecoration(
-                    color: hollow.surface,
-                    borderRadius: BorderRadius.circular(hollow.radiusSm),
-                    border: Border.all(color: hollow.border),
+                    color: hollow.elevated,
+                    borderRadius: BorderRadius.circular(hollow.radiusMd),
                   ),
                   child: Row(
                     children: [
@@ -241,7 +239,7 @@ class RecoveryPoolDashboard extends ConsumerWidget {
                   ),
                   decoration: BoxDecoration(
                     color: const Color(0xFF4CAF50).withValues(alpha: 0.08),
-                    borderRadius: BorderRadius.circular(hollow.radiusSm),
+                    borderRadius: BorderRadius.circular(hollow.radiusMd),
                     border: Border.all(
                       color: const Color(0xFF4CAF50).withValues(alpha: 0.2),
                     ),
@@ -380,7 +378,7 @@ class _StatCard extends StatelessWidget {
         padding: const EdgeInsets.all(HollowSpacing.md),
         decoration: BoxDecoration(
           color: color.withValues(alpha: 0.08),
-          borderRadius: BorderRadius.circular(hollow.radiusSm),
+          borderRadius: BorderRadius.circular(hollow.radiusMd),
         ),
         child: Column(
           children: [

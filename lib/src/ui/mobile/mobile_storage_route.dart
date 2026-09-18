@@ -387,7 +387,7 @@ class _MobileStorageRouteState extends ConsumerState<MobileStorageRoute> {
               for (final (value, label) in _retentionOptions)
                 HollowPressable(
                   onTap: () => Navigator.pop(ctx, value),
-                  borderRadius: BorderRadius.circular(hollow.radiusSm),
+                  borderRadius: BorderRadius.circular(hollow.radiusMd),
                   padding: const EdgeInsets.symmetric(
                     horizontal: HollowSpacing.md, vertical: HollowSpacing.sm,
                   ),
@@ -571,9 +571,8 @@ class _SectionCard extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.all(HollowSpacing.md),
       decoration: BoxDecoration(
-        color: hollow.surface,
+        color: hollow.elevated,
         borderRadius: BorderRadius.circular(hollow.radiusMd),
-        border: Border.all(color: hollow.border),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,

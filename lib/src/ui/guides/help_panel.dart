@@ -201,7 +201,7 @@ class _HelpResourceCenterState extends ConsumerState<HelpResourceCenter> {
                         onTap: widget.onClose,
                         semanticLabel: 'Close',
                         borderRadius:
-                            BorderRadius.circular(hollow.radiusSm),
+                            BorderRadius.circular(hollow.radiusMd),
                         padding: const EdgeInsets.all(HollowSpacing.xs),
                         child: Icon(LucideIcons.x,
                             size: 18, color: hollow.textSecondary),
@@ -288,7 +288,7 @@ class _HelpError extends ConsumerWidget {
             const SizedBox(height: HollowSpacing.sm),
             HollowPressable(
               onTap: () => ref.invalidate(helpManifestProvider),
-              borderRadius: BorderRadius.circular(hollow.radiusSm),
+              borderRadius: BorderRadius.circular(hollow.radiusMd),
               padding: const EdgeInsets.symmetric(
                 horizontal: HollowSpacing.md,
                 vertical: HollowSpacing.xs,
@@ -484,7 +484,7 @@ class HelpLessonView extends StatelessWidget {
               HollowPressable(
                 onTap: onBack,
                 semanticLabel: 'Back',
-                borderRadius: BorderRadius.circular(hollow.radiusSm),
+                borderRadius: BorderRadius.circular(hollow.radiusMd),
                 padding: const EdgeInsets.all(HollowSpacing.xs),
                 child: Icon(LucideIcons.arrowLeft,
                     size: 18, color: hollow.textSecondary),
@@ -545,7 +545,7 @@ class _InlineImage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
-    final radius = BorderRadius.circular(hollow.radiusSm);
+    final radius = BorderRadius.circular(hollow.radiusMd);
     return Align(
       alignment: Alignment.centerLeft,
       child: ClipRRect(

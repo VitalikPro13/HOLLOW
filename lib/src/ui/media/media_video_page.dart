@@ -213,7 +213,7 @@ class _MediaVideoPageState extends State<MediaVideoPage> {
                   onTap: () => unawaited(_open()),
                   semanticLabel: 'Play video',
                   borderRadius: BorderRadius.circular(32),
-                  backgroundColor: hollow.elevated.withValues(alpha: 0.85),
+                  backgroundColor: hollow.overlay.withValues(alpha: 0.85),
                   padding: const EdgeInsets.all(HollowSpacing.md),
                   child: Icon(LucideIcons.play,
                       color: hollow.textPrimary, size: 28),

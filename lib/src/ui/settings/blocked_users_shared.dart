@@ -50,9 +50,8 @@ class BlockedUserRow extends ConsumerWidget {
         vertical: HollowSpacing.sm,
       ),
       decoration: BoxDecoration(
-        color: hollow.surface,
+        color: hollow.elevated,
         borderRadius: BorderRadius.circular(hollow.radiusMd),
-        border: Border.all(color: hollow.border),
       ),
       child: Row(
         children: [

@@ -155,7 +155,7 @@ void showCreateServerDialog(BuildContext context) {
               child: Container(
                 padding: const EdgeInsets.all(HollowSpacing.lg),
                 decoration: BoxDecoration(
-                  color: hollow.elevated.withValues(alpha: 0.92),
+                  color: hollow.overlay,
                   borderRadius: BorderRadius.circular(hollow.radiusLg),
                   border: Border.all(
                     color: hollow.accent.withValues(alpha: 0.15),
@@ -174,7 +174,7 @@ void showCreateServerDialog(BuildContext context) {
                       alignment: Alignment.centerRight,
                       child: HollowPressable(
                         onTap: () => Navigator.of(dialogContext).pop(),
-                        borderRadius: BorderRadius.circular(hollow.radiusSm),
+                        borderRadius: BorderRadius.circular(hollow.radiusMd),
                         padding: const EdgeInsets.all(HollowSpacing.xs),
                         semanticLabel: 'Close',
                         child: Icon(LucideIcons.x,

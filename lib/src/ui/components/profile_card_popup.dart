@@ -268,7 +268,7 @@ class _ProfileCardOverlayState extends ConsumerState<_ProfileCardOverlay>
                 child: Container(
                   width: cardWidth,
                   decoration: BoxDecoration(
-                    color: hollow.surface.withValues(alpha: 0.96),
+                    color: hollow.overlay,
                     borderRadius: BorderRadius.circular(hollow.radiusLg),
                     border: Border.all(
                       color: hollow.accent.withValues(alpha: 0.15),

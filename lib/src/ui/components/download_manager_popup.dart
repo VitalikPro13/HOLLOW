@@ -148,7 +148,7 @@ class _DownloadManagerOverlayState
                   width: cardWidth,
                   constraints: const BoxConstraints(maxHeight: maxHeight),
                   decoration: BoxDecoration(
-                    color: hollow.surface.withValues(alpha: 0.96),
+                    color: hollow.overlay,
                     borderRadius: BorderRadius.circular(hollow.radiusLg),
                     border: Border.all(
                       color: hollow.accent.withValues(alpha: 0.15),
@@ -195,7 +195,7 @@ class _DownloadManagerOverlayState
                                   ref.read(downloadManagerStateProvider.notifier).clearAll();
                                 },
                                 borderRadius:
-                                    BorderRadius.circular(hollow.radiusSm),
+                                    BorderRadius.circular(hollow.radiusMd),
                                 padding: const EdgeInsets.symmetric(
                                   horizontal: HollowSpacing.sm,
                                   vertical: HollowSpacing.xxs,
@@ -372,7 +372,7 @@ if ($p) {
 
     return HollowPressable(
       onTap: () => _revealInFolder(context),
-      borderRadius: BorderRadius.circular(hollow.radiusSm),
+      borderRadius: BorderRadius.circular(hollow.radiusMd),
       padding: const EdgeInsets.symmetric(
         horizontal: HollowSpacing.md,
         vertical: HollowSpacing.sm,
@@ -381,7 +381,7 @@ if ($p) {
         crossAxisAlignment: CrossAxisAlignment.center,
         children: [
           ClipRRect(
-            borderRadius: BorderRadius.circular(hollow.radiusSm),
+            borderRadius: BorderRadius.circular(hollow.radiusMd),
             child: SizedBox(
               width: 40,
               height: 40,
@@ -430,9 +430,8 @@ if ($p) {
                 if (entry.savedPath != null)
                   Text(
                     entry.savedPath!,
-                    style: HollowTypography.mono.copyWith(
+                    style: HollowTypography.monoSmall.copyWith(
                       color: hollow.textSecondary.withValues(alpha: 0.7),
-                      fontSize: 9,
                     ),
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
@@ -495,7 +494,7 @@ class _ShareDownloadTile extends StatelessWidget {
               height: 40,
               decoration: BoxDecoration(
                 color: hollow.success.withValues(alpha: 0.12),
-                borderRadius: BorderRadius.circular(hollow.radiusSm),
+                borderRadius: BorderRadius.circular(hollow.radiusMd),
               ),
               alignment: Alignment.center,
               child: Icon(LucideIcons.check, size: 16, color: hollow.success),
@@ -521,9 +520,8 @@ class _ShareDownloadTile extends StatelessWidget {
                   ),
                   Text(
                     '${(progress * 100).round()}%',
-                    style: HollowTypography.caption.copyWith(
+                    style: HollowTypography.micro.copyWith(
                       color: hollow.textSecondary,
-                      fontSize: 8,
                       fontWeight: FontWeight.w600,
                     ),
                   ),
@@ -593,7 +591,7 @@ class _RebalanceTile extends StatelessWidget {
             height: 40,
             decoration: BoxDecoration(
               color: accentColor.withValues(alpha: 0.12),
-              borderRadius: BorderRadius.circular(hollow.radiusSm),
+              borderRadius: BorderRadius.circular(hollow.radiusMd),
             ),
             alignment: Alignment.center,
             child: Icon(

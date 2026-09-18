@@ -132,9 +132,9 @@ class _HollowTooltipState extends State<HollowTooltip>
                         vertical: HollowSpacing.xs + 2,
                       ),
                       decoration: BoxDecoration(
-                        color: hollow.elevated,
+                        color: hollow.overlay,
                         borderRadius:
-                            BorderRadius.circular(hollow.radiusSm),
+                            BorderRadius.circular(hollow.radiusMd),
                         border: Border.all(color: hollow.border),
                       ),
                       child: Text(

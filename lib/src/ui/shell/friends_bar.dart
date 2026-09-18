@@ -79,7 +79,7 @@ class FriendsBar extends ConsumerWidget {
                 child: HollowPressable(
                   semanticLabel: 'Add friend',
                   onTap: () => _showAddFriendDialog(context, ref, hollow),
-                  borderRadius: BorderRadius.circular(hollow.radiusSm),
+                  borderRadius: BorderRadius.circular(hollow.radiusMd),
                   padding: const EdgeInsets.symmetric(
                     horizontal: HollowSpacing.sm,
                     vertical: HollowSpacing.xs,
@@ -96,20 +96,22 @@ class FriendsBar extends ConsumerWidget {
                   right: 0,
                   top: 0,
                   child: Container(
-                    width: 14,
+                    constraints: const BoxConstraints(minWidth: 14),
                     height: 14,
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: HollowSpacing.xxs),
                     decoration: BoxDecoration(
                       color: hollow.error,
-                      shape: BoxShape.circle,
+                      borderRadius: BorderRadius.circular(HollowRadius.pill),
                       border: Border.all(color: hollow.surface, width: 2),
                     ),
                     alignment: Alignment.center,
                     child: Text(
                       '$pendingCount',
-                      style: const TextStyle(
+                      style: HollowTypography.micro.copyWith(
                         color: Colors.white,
-                        fontSize: 8,
-                        fontWeight: FontWeight.w700,
+                        fontWeight: FontWeight.w600,
+                        height: 1,
                       ),
                     ),
                   ),
@@ -192,7 +194,7 @@ class FriendsBar extends ConsumerWidget {
                   onTap: () => shopOpen
                       ? setShellTab(ref.read, null)
                       : openShopTab(ref.read),
-                  borderRadius: BorderRadius.circular(hollow.radiusSm),
+                  borderRadius: BorderRadius.circular(hollow.radiusMd),
                   padding: const EdgeInsets.symmetric(
                     horizontal: HollowSpacing.sm,
                     vertical: HollowSpacing.xs,
@@ -222,7 +224,7 @@ class FriendsBar extends ConsumerWidget {
                 onTap: savedId == null
                     ? null
                     : () => _toggleSavedMessages(ref, savedId),
-                borderRadius: BorderRadius.circular(hollow.radiusSm),
+                borderRadius: BorderRadius.circular(hollow.radiusMd),
                 padding: const EdgeInsets.symmetric(
                   horizontal: HollowSpacing.sm,
                   vertical: HollowSpacing.xs,
@@ -248,7 +250,7 @@ class FriendsBar extends ConsumerWidget {
                 onTap: () => conferencesOpen
                     ? setShellTab(ref.read, null)
                     : ref.read(conferenceProvider.notifier).openTab(),
-                borderRadius: BorderRadius.circular(hollow.radiusSm),
+                borderRadius: BorderRadius.circular(hollow.radiusMd),
                 padding: const EdgeInsets.symmetric(
                   horizontal: HollowSpacing.sm,
                   vertical: HollowSpacing.xs,
@@ -274,7 +276,7 @@ class FriendsBar extends ConsumerWidget {
                 onTap: () => ref
                     .read(helpPanelOpenProvider.notifier)
                     .state = !helpOpen,
-                borderRadius: BorderRadius.circular(hollow.radiusSm),
+                borderRadius: BorderRadius.circular(hollow.radiusMd),
                 padding: const EdgeInsets.symmetric(
                   horizontal: HollowSpacing.sm,
                   vertical: HollowSpacing.xs,
@@ -406,7 +408,7 @@ class _FriendsManagerState extends ConsumerState<_FriendsManager> {
         height: 480,
         clipBehavior: Clip.antiAlias,
         decoration: BoxDecoration(
-          color: hollow.background,
+          color: hollow.overlay,
           borderRadius: BorderRadius.circular(hollow.radiusLg),
           border: Border.all(color: hollow.border),
           boxShadow: [
@@ -446,7 +448,7 @@ class _FriendsManagerState extends ConsumerState<_FriendsManager> {
                     semanticLabel: 'Close',
                     onTap: () => Navigator.pop(context),
                     borderRadius:
-                        BorderRadius.circular(hollow.radiusSm),
+                        BorderRadius.circular(hollow.radiusMd),
                     padding: const EdgeInsets.all(HollowSpacing.xs),
                     child: Icon(LucideIcons.x, size: 18,
                         color: hollow.textSecondary),
@@ -572,7 +574,7 @@ class _TabButton extends StatelessWidget {
 
     return HollowPressable(
       onTap: onTap,
-      borderRadius: BorderRadius.circular(hollow.radiusSm),
+      borderRadius: BorderRadius.circular(hollow.radiusMd),
       padding: const EdgeInsets.symmetric(
         horizontal: HollowSpacing.sm + 2,
         vertical: HollowSpacing.xs,
@@ -742,7 +744,7 @@ class _FriendsListTab extends ConsumerWidget {
                           .read(favouriteFriendsProvider.notifier)
                           .toggle(friend.peerId),
                       borderRadius:
-                          BorderRadius.circular(hollow.radiusSm),
+                          BorderRadius.circular(hollow.radiusMd),
                       padding: const EdgeInsets.all(HollowSpacing.xs),
                       child: Icon(
                         isFav ? LucideIcons.star : LucideIcons.star,
@@ -792,7 +794,7 @@ class _FriendsListTab extends ConsumerWidget {
                       if (shownInSplit) splitView.closeSplit();
                     },
                     borderRadius:
-                        BorderRadius.circular(hollow.radiusSm),
+                        BorderRadius.circular(hollow.radiusMd),
                     padding: const EdgeInsets.all(HollowSpacing.xs),
                     child: Icon(LucideIcons.userMinus, size: 16,
                         color: hollow.error),
@@ -927,7 +929,7 @@ class _FavouritesReorderTab extends ConsumerWidget {
                         .read(favouriteFriendsProvider.notifier)
                         .remove(peerId),
                     borderRadius:
-                        BorderRadius.circular(hollow.radiusSm),
+                        BorderRadius.circular(hollow.radiusMd),
                     padding: const EdgeInsets.all(HollowSpacing.xs),
                     child: Icon(LucideIcons.x, size: 14,
                         color: hollow.textSecondary),
@@ -1145,7 +1147,7 @@ class _RequestsTabState extends ConsumerState<_RequestsTab> {
                               .acceptRequest(req.peerId),
                           'Could not accept request'),
                       borderRadius:
-                          BorderRadius.circular(hollow.radiusSm),
+                          BorderRadius.circular(hollow.radiusMd),
                       padding:
                           const EdgeInsets.all(HollowSpacing.xs),
                       child: Icon(LucideIcons.check,
@@ -1162,7 +1164,7 @@ class _RequestsTabState extends ConsumerState<_RequestsTab> {
                               .rejectRequest(req.peerId),
                           'Could not decline request'),
                       borderRadius:
-                          BorderRadius.circular(hollow.radiusSm),
+                          BorderRadius.circular(hollow.radiusMd),
                       padding:
                           const EdgeInsets.all(HollowSpacing.xs),
                       child: Icon(LucideIcons.x,
@@ -1180,7 +1182,7 @@ class _RequestsTabState extends ConsumerState<_RequestsTab> {
                               .rejectRequest(req.peerId),
                           'Could not cancel request'),
                       borderRadius:
-                          BorderRadius.circular(hollow.radiusSm),
+                          BorderRadius.circular(hollow.radiusMd),
                       padding:
                           const EdgeInsets.all(HollowSpacing.xs),
                       child: Icon(LucideIcons.x,
@@ -1424,7 +1426,7 @@ class _FriendChip extends StatelessWidget { // design-ignore: an avatar tab in t
         message: name,
         child: HollowPressable(
           onTap: onTap,
-          borderRadius: BorderRadius.circular(hollow.radiusSm),
+          borderRadius: BorderRadius.circular(hollow.radiusMd),
           hoverColor: hollow.elevated,
           backgroundColor:
               isSelected ? hollow.accent.withValues(alpha: 0.15) : null,
@@ -1475,10 +1477,9 @@ class _FriendChip extends StatelessWidget { // design-ignore: an avatar tab in t
                         alignment: Alignment.center,
                         child: Text(
                           unreadCount > 99 ? '99+' : '$unreadCount',
-                          style: const TextStyle(
+                          style: HollowTypography.micro.copyWith(
                             color: Colors.white,
-                            fontSize: 9,
-                            fontWeight: FontWeight.w700,
+                            fontWeight: FontWeight.w600,
                             height: 1,
                           ),
                         ),

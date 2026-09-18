@@ -512,7 +512,7 @@ class _MobileServerSettingsRouteState
                 constraints: const BoxConstraints(maxWidth: 360),
                 padding: const EdgeInsets.all(HollowSpacing.xl),
                 decoration: BoxDecoration(
-                  color: hollow.elevated,
+                  color: hollow.overlay,
                   borderRadius: BorderRadius.circular(hollow.radiusLg),
                   border: Border.all(color: hollow.border),
                 ),
@@ -589,7 +589,7 @@ class _MobileServerSettingsRouteState
                 constraints: const BoxConstraints(maxWidth: 360),
                 padding: const EdgeInsets.all(HollowSpacing.xl),
                 decoration: BoxDecoration(
-                  color: hollow.elevated,
+                  color: hollow.overlay,
                   borderRadius: BorderRadius.circular(hollow.radiusLg),
                   border: Border.all(color: hollow.border),
                 ),
@@ -1185,7 +1185,7 @@ class _MobileServerSettingsRouteState
                           },
                           semanticLabel: 'Copy server ID',
                           borderRadius:
-                              BorderRadius.circular(hollow.radiusSm),
+                              BorderRadius.circular(hollow.radiusMd),
                           padding: const EdgeInsets.all(HollowSpacing.xs),
                           child: Icon(LucideIcons.copy,
                               size: 16, color: hollow.textSecondary),
@@ -1437,7 +1437,7 @@ class _NotificationSection extends ConsumerWidget {
 
     showModalBottomSheet(
       context: context,
-      backgroundColor: hollow.surface,
+      backgroundColor: hollow.overlay,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(hollow.radiusLg)),
       ),
@@ -1541,8 +1541,8 @@ class _ChannelNotifRow extends StatelessWidget {
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
               decoration: BoxDecoration(
-                color: hollow.surface,
-                borderRadius: BorderRadius.circular(hollow.radiusSm),
+                color: hollow.elevated,
+                borderRadius: BorderRadius.circular(hollow.radiusMd),
                 border: Border.all(color: hollow.border),
               ),
               child: Row(
@@ -1670,7 +1670,7 @@ class _ChannelLayoutEditorState extends ConsumerState<_ChannelLayoutEditor> {
                 constraints: const BoxConstraints(maxWidth: 360),
                 padding: const EdgeInsets.all(HollowSpacing.xl),
                 decoration: BoxDecoration(
-                  color: hollow.elevated,
+                  color: hollow.overlay,
                   borderRadius: BorderRadius.circular(hollow.radiusLg),
                   border: Border.all(color: hollow.border),
                 ),
@@ -1741,7 +1741,7 @@ class _ChannelLayoutEditorState extends ConsumerState<_ChannelLayoutEditor> {
                 constraints: const BoxConstraints(maxWidth: 360),
                 padding: const EdgeInsets.all(HollowSpacing.xl),
                 decoration: BoxDecoration(
-                  color: hollow.elevated,
+                  color: hollow.overlay,
                   borderRadius: BorderRadius.circular(hollow.radiusLg),
                   border: Border.all(color: hollow.border),
                 ),
@@ -2076,7 +2076,7 @@ class _ChannelLayoutEditorState extends ConsumerState<_ChannelLayoutEditor> {
                 constraints: const BoxConstraints(maxWidth: 360),
                 padding: const EdgeInsets.all(HollowSpacing.xl),
                 decoration: BoxDecoration(
-                  color: hollow.elevated,
+                  color: hollow.overlay,
                   borderRadius: BorderRadius.circular(hollow.radiusLg),
                   border: Border.all(color: hollow.border),
                 ),
@@ -2136,7 +2136,7 @@ class _ChannelLayoutEditorState extends ConsumerState<_ChannelLayoutEditor> {
                 constraints: const BoxConstraints(maxWidth: 360),
                 padding: const EdgeInsets.all(HollowSpacing.xl),
                 decoration: BoxDecoration(
-                  color: hollow.elevated,
+                  color: hollow.overlay,
                   borderRadius: BorderRadius.circular(hollow.radiusLg),
                   border: Border.all(color: hollow.border),
                 ),
@@ -2319,7 +2319,7 @@ class _ChannelLayoutEditorState extends ConsumerState<_ChannelLayoutEditor> {
         ),
         decoration: BoxDecoration(
           color: hollow.accentMuted,
-          borderRadius: BorderRadius.circular(hollow.radiusSm),
+          borderRadius: BorderRadius.circular(hollow.radiusMd),
         ),
         child: Row(
           children: [
@@ -2378,7 +2378,7 @@ class _ChannelLayoutEditorState extends ConsumerState<_ChannelLayoutEditor> {
         ),
         decoration: BoxDecoration(
           color: hollow.elevated,
-          borderRadius: BorderRadius.circular(hollow.radiusSm),
+          borderRadius: BorderRadius.circular(hollow.radiusMd),
         ),
         child: Column(
           children: [
@@ -2486,7 +2486,7 @@ class _ChannelLayoutEditorState extends ConsumerState<_ChannelLayoutEditor> {
                         channelName: ch?.name ?? item.channelId,
                       ),
                       semanticLabel: 'Manage temporary access for channel',
-                      borderRadius: BorderRadius.circular(hollow.radiusSm),
+                      borderRadius: BorderRadius.circular(hollow.radiusMd),
                       padding: const EdgeInsets.all(HollowSpacing.xs),
                       child: Icon(LucideIcons.userPlus,
                           size: 14, color: hollow.textSecondary),
@@ -2514,7 +2514,7 @@ class _ChannelLayoutEditorState extends ConsumerState<_ChannelLayoutEditor> {
                       semanticLabel: (ch?.mediaOnly ?? false)
                           ? 'Allow all message types, currently media-only'
                           : 'Make channel media-only, currently allows all messages',
-                      borderRadius: BorderRadius.circular(hollow.radiusSm),
+                      borderRadius: BorderRadius.circular(hollow.radiusMd),
                       child: Container(
                         padding: const EdgeInsets.symmetric(
                             horizontal: 8, vertical: 4),
@@ -2522,7 +2522,7 @@ class _ChannelLayoutEditorState extends ConsumerState<_ChannelLayoutEditor> {
                           color: (ch?.mediaOnly ?? false)
                               ? hollow.accent.withValues(alpha: 0.15)
                               : hollow.border.withValues(alpha: 0.3),
-                          borderRadius: BorderRadius.circular(hollow.radiusSm),
+                          borderRadius: BorderRadius.circular(hollow.radiusMd),
                         ),
                         child: Row(
                           mainAxisSize: MainAxisSize.min,

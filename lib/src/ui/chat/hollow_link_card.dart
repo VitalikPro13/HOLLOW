@@ -141,7 +141,7 @@ class _ShareLinkCard extends ConsumerWidget {
               ),
               decoration: BoxDecoration(
                 color: hollow.success.withValues(alpha: 0.15),
-                borderRadius: BorderRadius.circular(hollow.radiusSm),
+                borderRadius: BorderRadius.circular(hollow.radiusXs),
               ),
               child: Text(
                 'In shares',
@@ -233,7 +233,7 @@ class _ServerInviteCard extends ConsumerWidget {
               ),
               decoration: BoxDecoration(
                 color: hollow.success.withValues(alpha: 0.15),
-                borderRadius: BorderRadius.circular(hollow.radiusSm),
+                borderRadius: BorderRadius.circular(hollow.radiusXs),
               ),
               child: Text(
                 'Joined',

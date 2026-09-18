@@ -73,7 +73,7 @@ class _StepChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final radius = BorderRadius.circular(hollow.radiusSm);
+    final radius = BorderRadius.circular(hollow.radiusXs);
     return HollowPressable(
       onTap: onTap,
       borderRadius: radius,

@@ -245,7 +245,7 @@ class _DmRow extends ConsumerWidget {
       padding: const EdgeInsets.only(bottom: 2),
       child: HollowPressable(
         onTap: onTap,
-        borderRadius: BorderRadius.circular(hollow.radiusSm),
+        borderRadius: BorderRadius.circular(hollow.radiusMd),
         backgroundColor:
             isSelected ? hollow.accent.withValues(alpha: 0.12) : null,
         padding: const EdgeInsets.symmetric(
@@ -282,7 +282,7 @@ class _DmRow extends ConsumerWidget {
               semanticLabel: isHidden
                   ? 'Show conversation'
                   : 'Hide conversation',
-              borderRadius: BorderRadius.circular(hollow.radiusSm),
+              borderRadius: BorderRadius.circular(hollow.radiusMd),
               padding: const EdgeInsets.all(4),
               child: Icon(
                 isHidden ? LucideIcons.eye : LucideIcons.eyeOff,
@@ -329,7 +329,7 @@ class _HiddenHeader extends StatelessWidget {
     final hollow = HollowTheme.of(context);
     return HollowPressable(
       onTap: onTap,
-      borderRadius: BorderRadius.circular(hollow.radiusSm),
+      borderRadius: BorderRadius.circular(hollow.radiusMd),
       padding: const EdgeInsets.symmetric(
         horizontal: HollowSpacing.sm,
         vertical: HollowSpacing.xs,
@@ -473,7 +473,7 @@ class _ChannelList extends ConsumerWidget {
                         },
                         semanticLabel: 'Export conversation',
                         borderRadius:
-                            BorderRadius.circular(hollow.radiusSm),
+                            BorderRadius.circular(hollow.radiusMd),
                         padding: const EdgeInsets.all(3),
                         child: Icon(LucideIcons.fileOutput,
                             size: 12, color: hollow.accent),
@@ -495,7 +495,7 @@ class _ChannelList extends ConsumerWidget {
                       key;
                   ref.read(archiveSelectedDmProvider.notifier).state = null;
                 },
-                borderRadius: BorderRadius.circular(hollow.radiusSm),
+                borderRadius: BorderRadius.circular(hollow.radiusMd),
                 // ONE box: the selection fill on the pressable itself, so
                 // hover and selection share the same rect.
                 backgroundColor: isSelected

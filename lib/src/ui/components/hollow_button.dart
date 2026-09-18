@@ -149,14 +149,14 @@ class _HollowButtonState extends State<HollowButton>
         fg = hollow.textOnAccent;
         hoverBg = hollow.accentHover;
       case HollowButtonVariant.ghost:
-        // The hover colour at zero alpha, NOT Colors.transparent: that is
-        // transparent BLACK, and the lerp flashes dark on hover and unhover.
-        bg = hollow.accentMuted.withValues(alpha: 0.0);
-        // accentText, not the raw accent: the accent is a FILL colour and is
-        // 2.33:1 on the light theme's white, so a ghost label drawn in it
-        // failed contrast on every light-theme screen.
-        fg = hollow.accentText;
-        hoverBg = hollow.accentMuted;
+        // Grey, not accent: the accent means THE primary action, and ghost is
+        // everything that is not. The hover fill fades from its own RGB at
+        // zero alpha, never Colors.transparent (that lerps through black).
+        fg = _hovering && isInteractive
+            ? hollow.textPrimary
+            : hollow.textSecondary;
+        hoverBg = hollow.textPrimary.withValues(alpha: 0.06);
+        bg = hoverBg.withValues(alpha: 0.0);
       case HollowButtonVariant.outline:
         final tint = widget.danger ? hollow.error : hollow.accent;
         bg = tint.withValues(alpha: 0.0);
@@ -170,7 +170,7 @@ class _HollowButtonState extends State<HollowButton>
         );
       case HollowButtonVariant.danger:
         bg = hollow.error;
-        fg = Colors.white;
+        fg = hollow.textOnError;
         hoverBg = hollow.error.withValues(alpha: 0.85);
     }
 

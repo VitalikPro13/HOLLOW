@@ -63,7 +63,7 @@ class AwaitingSetupBadge extends StatelessWidget {
         decoration: BoxDecoration(
           color: hollow.elevated,
           shape: BoxShape.circle,
-          border: Border.all(color: hollow.background, width: 2),
+          border: Border.all(color: hollow.surface, width: 2),
         ),
         alignment: Alignment.center,
         child: Icon(LucideIcons.clock, size: 10, color: hollow.textSecondary),
@@ -125,7 +125,7 @@ void showPendingJoinSheet({
   final hollow = HollowTheme.of(context);
   showModalBottomSheet<void>(
     context: context,
-    backgroundColor: hollow.surface,
+    backgroundColor: hollow.overlay,
     shape: RoundedRectangleBorder(
       borderRadius:
           BorderRadius.vertical(top: Radius.circular(hollow.radiusLg)),

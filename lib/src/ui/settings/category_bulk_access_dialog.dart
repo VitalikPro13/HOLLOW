@@ -289,9 +289,8 @@ class _CategoryBulkAccessDialogState extends State<_CategoryBulkAccessDialog> {
       width: double.infinity,
       padding: const EdgeInsets.all(HollowSpacing.lg),
       decoration: BoxDecoration(
-        color: hollow.surface.withValues(alpha: 0.4),
+        color: hollow.elevated,
         borderRadius: BorderRadius.circular(hollow.radiusMd),
-        border: Border.all(color: hollow.border),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,

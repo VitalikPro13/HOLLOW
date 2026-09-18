@@ -128,11 +128,9 @@ class HollowDialog extends StatelessWidget {
             child: Container(
               padding: const EdgeInsets.all(HollowSpacing.xl),
               decoration: BoxDecoration(
-                color: hollow.elevated.withValues(alpha: 0.92),
+                color: hollow.overlay,
                 borderRadius: radius,
-                border: Border.all(
-                  color: hollow.accent.withValues(alpha: 0.15),
-                ),
+                border: Border.all(color: hollow.border),
                 boxShadow: [
                   BoxShadow(
                     color: Colors.black.withValues(alpha: 0.2),

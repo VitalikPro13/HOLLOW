@@ -299,7 +299,7 @@ class _MobileInChatBannerState extends ConsumerState<MobileInChatBanner>
                   vertical: HollowSpacing.sm,
                 ),
                 decoration: BoxDecoration(
-                  color: hollow.elevated.withValues(alpha: 0.98),
+                  color: hollow.overlay,
                   borderRadius: BorderRadius.circular(hollow.radiusMd),
                   border:
                       Border.all(color: hollow.accent.withValues(alpha: 0.25)),

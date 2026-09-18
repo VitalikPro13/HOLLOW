@@ -109,7 +109,7 @@ class _MobileActiveCallPillState extends ConsumerState<MobileActiveCallPill> { /
                 horizontal: HollowSpacing.md,
               ),
               decoration: BoxDecoration(
-                color: hollow.elevated,
+                color: hollow.overlay,
                 borderRadius: BorderRadius.circular(24),
                 border: Border.all(
                   color: (linkHealth.health == LinkHealth.healthy
@@ -178,7 +178,7 @@ class _MobileActiveCallPillState extends ConsumerState<MobileActiveCallPill> { /
                     semanticLabel: call.isMuted ? 'Unmute' : 'Mute',
                     onTap: () =>
                         ref.read(callProvider.notifier).toggleMute(),
-                    borderRadius: BorderRadius.circular(hollow.radiusSm),
+                    borderRadius: BorderRadius.circular(hollow.radiusMd),
                     padding: const EdgeInsets.all(HollowSpacing.xs),
                     child: Icon(
                       call.isMuted ? LucideIcons.micOff : LucideIcons.mic,
@@ -196,7 +196,7 @@ class _MobileActiveCallPillState extends ConsumerState<MobileActiveCallPill> { /
                         ? () =>
                               ref.read(callProvider.notifier).toggleVideo()
                         : null,
-                    borderRadius: BorderRadius.circular(hollow.radiusSm),
+                    borderRadius: BorderRadius.circular(hollow.radiusMd),
                     padding: const EdgeInsets.all(HollowSpacing.xs),
                     child: Icon(
                       call.isVideoEnabled
@@ -213,7 +213,7 @@ class _MobileActiveCallPillState extends ConsumerState<MobileActiveCallPill> { /
                     semanticLabel: 'End call',
                     onTap: () =>
                         ref.read(callProvider.notifier).endCall(),
-                    borderRadius: BorderRadius.circular(hollow.radiusSm),
+                    borderRadius: BorderRadius.circular(hollow.radiusMd),
                     padding: const EdgeInsets.all(HollowSpacing.xs),
                     child: Icon(
                       LucideIcons.phoneOff,

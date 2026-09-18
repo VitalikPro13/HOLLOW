@@ -52,8 +52,8 @@ class ShareQualityChip extends StatelessWidget {
         vertical: HollowSpacing.xs,
       ),
       decoration: BoxDecoration(
-        color: hollow.surface.withValues(alpha: 0.85),
-        borderRadius: BorderRadius.circular(hollow.radiusSm),
+        color: hollow.overlay.withValues(alpha: 0.85),
+        borderRadius: BorderRadius.circular(hollow.radiusXs),
         border: Border.all(color: hollow.border),
       ),
       child: Text(

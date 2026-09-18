@@ -963,7 +963,7 @@ class _CategoryRow extends StatelessWidget {
                 onTap: onBulkAccess,
                 semanticLabel:
                     'Apply access settings to all channels in category',
-                borderRadius: BorderRadius.circular(hollow.radiusSm),
+                borderRadius: BorderRadius.circular(hollow.radiusMd),
                 padding: const EdgeInsets.all(HollowSpacing.xs),
                 child: Icon(LucideIcons.shieldCheck,
                     size: 14, color: hollow.textSecondary),
@@ -975,7 +975,7 @@ class _CategoryRow extends StatelessWidget {
               child: HollowPressable(
                 onTap: onRename,
                 semanticLabel: 'Rename category',
-                borderRadius: BorderRadius.circular(hollow.radiusSm),
+                borderRadius: BorderRadius.circular(hollow.radiusMd),
                 padding: const EdgeInsets.all(HollowSpacing.xs),
                 child: Icon(LucideIcons.pencil,
                     size: 14, color: hollow.textSecondary),
@@ -987,7 +987,7 @@ class _CategoryRow extends StatelessWidget {
               child: HollowPressable(
                 onTap: onDelete,
                 semanticLabel: 'Delete category',
-                borderRadius: BorderRadius.circular(hollow.radiusSm),
+                borderRadius: BorderRadius.circular(hollow.radiusMd),
                 padding: const EdgeInsets.all(HollowSpacing.xs),
                 child:
                     Icon(LucideIcons.trash2, size: 14, color: hollow.error),
@@ -1161,7 +1161,7 @@ class _ChannelRow extends StatelessWidget {
                         semanticLabel: mediaOnly
                             ? 'Allow all message types, currently media-only'
                             : 'Make channel media-only, currently allows all messages',
-                        borderRadius: BorderRadius.circular(hollow.radiusSm),
+                        borderRadius: BorderRadius.circular(hollow.radiusMd),
                         padding: const EdgeInsets.all(HollowSpacing.xs),
                         child: Icon(
                           LucideIcons.image,
@@ -1184,7 +1184,7 @@ class _ChannelRow extends StatelessWidget {
                         semanticLabel: isPublic
                             ? 'Make channel private, currently public'
                             : 'Make channel public, currently private',
-                        borderRadius: BorderRadius.circular(hollow.radiusSm),
+                        borderRadius: BorderRadius.circular(hollow.radiusMd),
                         padding: const EdgeInsets.all(HollowSpacing.xs),
                         child: Icon(
                           LucideIcons.globe,
@@ -1201,7 +1201,7 @@ class _ChannelRow extends StatelessWidget {
                       child: HollowPressable(
                         onTap: onManageGrants,
                         semanticLabel: 'Manage temporary access for channel',
-                        borderRadius: BorderRadius.circular(hollow.radiusSm),
+                        borderRadius: BorderRadius.circular(hollow.radiusMd),
                         padding: const EdgeInsets.all(HollowSpacing.xs),
                         child: Icon(LucideIcons.userPlus,
                             size: 14, color: hollow.textSecondary),
@@ -1214,7 +1214,7 @@ class _ChannelRow extends StatelessWidget {
                     child: HollowPressable(
                       onTap: onRename,
                       semanticLabel: 'Rename channel',
-                      borderRadius: BorderRadius.circular(hollow.radiusSm),
+                      borderRadius: BorderRadius.circular(hollow.radiusMd),
                       padding: const EdgeInsets.all(HollowSpacing.xs),
                       child: Icon(LucideIcons.pencil,
                           size: 14, color: hollow.textSecondary),
@@ -1226,7 +1226,7 @@ class _ChannelRow extends StatelessWidget {
                     child: HollowPressable(
                       onTap: onDelete,
                       semanticLabel: 'Delete channel',
-                      borderRadius: BorderRadius.circular(hollow.radiusSm),
+                      borderRadius: BorderRadius.circular(hollow.radiusMd),
                       padding: const EdgeInsets.all(HollowSpacing.xs),
                       child: Icon(LucideIcons.trash2,
                           size: 14, color: hollow.error),
@@ -1285,7 +1285,7 @@ class _SeparatorRow extends StatelessWidget {
             child: HollowPressable(
               onTap: onDelete,
               semanticLabel: 'Delete separator',
-              borderRadius: BorderRadius.circular(hollow.radiusSm),
+              borderRadius: BorderRadius.circular(hollow.radiusMd),
               padding: const EdgeInsets.all(HollowSpacing.xs),
               child: Icon(LucideIcons.x, size: 12, color: hollow.textSecondary),
             ),

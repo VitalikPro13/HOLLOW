@@ -1,5 +1,4 @@
 import 'package:flutter/material.dart';
-import 'hollow_colors.dart';
 import 'hollow_spacing.dart';
 import 'hollow_theme.dart';
 import 'hollow_typography.dart';
@@ -13,6 +12,7 @@ abstract final class HollowThemeData {
 
     return ThemeData(
       brightness: Brightness.dark,
+      fontFamily: HollowTypography.sansFamily,
       scaffoldBackgroundColor: hollow.background,
       canvasColor: hollow.surface,
 
@@ -24,7 +24,7 @@ abstract final class HollowThemeData {
         surface: hollow.surface,
         onSurface: hollow.textPrimary,
         error: hollow.error,
-        onError: HollowColors.textPrimary,
+        onError: hollow.textOnError,
       ),
 
       textTheme: TextTheme(
@@ -122,7 +122,7 @@ abstract final class HollowThemeData {
       ),
 
       dialogTheme: DialogThemeData(
-        backgroundColor: hollow.elevated,
+        backgroundColor: hollow.overlay,
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(HollowRadius.lg),
         ),
@@ -131,7 +131,7 @@ abstract final class HollowThemeData {
       ),
 
       snackBarTheme: SnackBarThemeData(
-        backgroundColor: hollow.elevated,
+        backgroundColor: hollow.overlay,
         contentTextStyle: HollowTypography.body,
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(HollowRadius.md),
@@ -141,8 +141,8 @@ abstract final class HollowThemeData {
 
       tooltipTheme: TooltipThemeData(
         decoration: BoxDecoration(
-          color: hollow.elevated,
-          borderRadius: BorderRadius.circular(HollowRadius.sm),
+          color: hollow.overlay,
+          borderRadius: BorderRadius.circular(HollowRadius.md),
           border: Border.all(color: hollow.border),
         ),
         textStyle: HollowTypography.bodySmall.copyWith(
@@ -154,7 +154,7 @@ abstract final class HollowThemeData {
         thumbColor: WidgetStatePropertyAll(
           hollow.textSecondary.withValues(alpha: 0.3),
         ),
-        radius: const Radius.circular(HollowRadius.sm),
+        radius: const Radius.circular(HollowRadius.xs),
         thickness: const WidgetStatePropertyAll(6),
       ),
 
@@ -169,6 +169,7 @@ abstract final class HollowThemeData {
 
     return ThemeData(
       brightness: Brightness.light,
+      fontFamily: HollowTypography.sansFamily,
       scaffoldBackgroundColor: hollow.background,
       canvasColor: hollow.surface,
 
@@ -180,7 +181,7 @@ abstract final class HollowThemeData {
         surface: hollow.surface,
         onSurface: hollow.textPrimary,
         error: hollow.error,
-        onError: HollowColors.textPrimaryLight,
+        onError: hollow.textOnError,
       ),
 
       textTheme: TextTheme(
@@ -283,7 +284,7 @@ abstract final class HollowThemeData {
       ),
 
       dialogTheme: DialogThemeData(
-        backgroundColor: hollow.elevated,
+        backgroundColor: hollow.overlay,
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(HollowRadius.lg),
         ),
@@ -294,7 +295,7 @@ abstract final class HollowThemeData {
       ),
 
       snackBarTheme: SnackBarThemeData(
-        backgroundColor: hollow.elevated,
+        backgroundColor: hollow.overlay,
         contentTextStyle:
             HollowTypography.body.copyWith(color: hollow.textPrimary),
         shape: RoundedRectangleBorder(
@@ -305,8 +306,8 @@ abstract final class HollowThemeData {
 
       tooltipTheme: TooltipThemeData(
         decoration: BoxDecoration(
-          color: hollow.elevated,
-          borderRadius: BorderRadius.circular(HollowRadius.sm),
+          color: hollow.overlay,
+          borderRadius: BorderRadius.circular(HollowRadius.md),
           border: Border.all(color: hollow.border),
         ),
         textStyle: HollowTypography.bodySmall.copyWith(
@@ -318,7 +319,7 @@ abstract final class HollowThemeData {
         thumbColor: WidgetStatePropertyAll(
           hollow.textSecondary.withValues(alpha: 0.3),
         ),
-        radius: const Radius.circular(HollowRadius.sm),
+        radius: const Radius.circular(HollowRadius.xs),
         thickness: const WidgetStatePropertyAll(6),
       ),
 

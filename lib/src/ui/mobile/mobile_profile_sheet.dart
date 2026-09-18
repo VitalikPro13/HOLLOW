@@ -50,7 +50,7 @@ void showMobileProfileSheet(
   final hollow = HollowTheme.of(context);
   showModalBottomSheet(
     context: context,
-    backgroundColor: hollow.surface,
+    backgroundColor: hollow.overlay,
     isScrollControlled: true,
     shape: RoundedRectangleBorder(
       borderRadius: BorderRadius.vertical(top: Radius.circular(hollow.radiusXl)),
@@ -185,7 +185,7 @@ class MobileProfileSheet extends ConsumerWidget {
               Container(
                 decoration: BoxDecoration(
                   borderRadius: BorderRadius.circular(hollow.radiusMd),
-                  border: Border.all(color: hollow.surface, width: 3),
+                  border: Border.all(color: hollow.overlay, width: 3),
                 ),
                 child: HollowAvatar(peerId: peerId, size: 72, semanticLabel: name),
               ),
@@ -233,7 +233,7 @@ class MobileProfileSheet extends ConsumerWidget {
                   ),
                   decoration: BoxDecoration(
                     color: _roleColor(role!, hollow).withValues(alpha: 0.15),
-                    borderRadius: BorderRadius.circular(hollow.radiusSm),
+                    borderRadius: BorderRadius.circular(hollow.radiusXs),
                   ),
                   child: Text(
                     role![0].toUpperCase() + role!.substring(1),
@@ -262,7 +262,7 @@ class MobileProfileSheet extends ConsumerWidget {
                         ),
                         decoration: BoxDecoration(
                           color: color.withValues(alpha: 0.15),
-                          borderRadius: BorderRadius.circular(hollow.radiusSm),
+                          borderRadius: BorderRadius.circular(hollow.radiusXs),
                           border: Border.all(color: color.withValues(alpha: 0.3)),
                         ),
                         child: Text(
@@ -285,7 +285,7 @@ class MobileProfileSheet extends ConsumerWidget {
                     Uri.parse('https://twitch.tv/$verifiedTwitch'),
                     mode: LaunchMode.externalApplication,
                   ),
-                  borderRadius: BorderRadius.circular(hollow.radiusSm),
+                  borderRadius: BorderRadius.circular(hollow.radiusMd),
                   child: Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
@@ -494,7 +494,7 @@ class MobileProfileSheet extends ConsumerWidget {
                     HollowToast.show(context, 'Peer ID copied',
                         type: HollowToastType.success);
                   },
-                  borderRadius: BorderRadius.circular(hollow.radiusSm),
+                  borderRadius: BorderRadius.circular(hollow.radiusMd),
                   padding: const EdgeInsets.symmetric(vertical: HollowSpacing.sm),
                   child: Row(
                     mainAxisAlignment: MainAxisAlignment.center,

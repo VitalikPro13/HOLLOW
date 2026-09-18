@@ -3,6 +3,9 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:hollow/src/theme/contrast.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 
+List<Color> _surfaces(HollowTheme t) =>
+    [t.background, t.surface, t.elevated, t.overlay, t.hover];
+
 /// Dev-time WCAG guard: fails CI if a core token pairing regresses below
 /// threshold. Body text wants 4.5:1; large/UI elements want 3:1.
 void main() {
@@ -18,7 +21,7 @@ void main() {
   group('dark theme contrast', () {
     final t = HollowTheme.dark();
     test('text on surfaces clears body threshold', () {
-      for (final bg in [t.background, t.surface, t.elevated]) {
+      for (final bg in _surfaces(t)) {
         expectRatio('textPrimary', t.textPrimary, bg, bodyMin);
         expectRatio('textSecondary', t.textSecondary, bg, bodyMin);
         expectRatio('textTertiary', t.textTertiary, bg, bodyMin);
@@ -35,7 +38,7 @@ void main() {
   group('light theme contrast', () {
     final t = HollowTheme.light();
     test('text on surfaces clears body threshold', () {
-      for (final bg in [t.background, t.surface, t.elevated]) {
+      for (final bg in _surfaces(t)) {
         expectRatio('textPrimary', t.textPrimary, bg, bodyMin);
         expectRatio('textSecondary', t.textSecondary, bg, bodyMin);
         expectRatio('textTertiary', t.textTertiary, bg, bodyMin);
@@ -49,14 +52,21 @@ void main() {
     });
   });
 
+  test('chrome sits below the canvas on dark, so content is the brightest',
+      () {
+    final t = HollowTheme.dark();
+    expect(Contrast.relativeLuminance(t.surface),
+        lessThan(Contrast.relativeLuminance(t.background)));
+  });
+
   group('ghost and outline button labels', () {
-    // These two variants draw their label in the accent, and they are almost
-    // every button in the app. Drawn in the RAW accent the label was 2.33:1 on
+    // Outline draws its label in the accent (ghost is grey now), so these
+    // stay the accent's worst cases. Drawn in the RAW accent the label was 2.33:1 on
     // the light theme's white; accentText is the contrast-corrected token and
     // is what they must keep using, on every custom hue as well.
     test('clear body threshold on both themes and every hue', () {
       for (final t in [HollowTheme.dark(), HollowTheme.light()]) {
-        for (final bg in [t.background, t.surface, t.elevated]) {
+        for (final bg in _surfaces(t)) {
           expectRatio('ghost label', t.accentText, bg, bodyMin);
         }
       }

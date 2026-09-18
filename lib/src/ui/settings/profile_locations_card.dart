@@ -425,7 +425,7 @@ class _ProfileLocationsCardState extends State<ProfileLocationsCard> {
         vertical: HollowSpacing.sm,
       ),
       decoration: BoxDecoration(
-        color: hollow.surface.withValues(alpha: 0.4),
+        color: hollow.elevated,
         borderRadius: BorderRadius.circular(hollow.radiusMd),
         border: Border.all(color: active ? hollow.accent : hollow.border),
       ),
@@ -457,16 +457,14 @@ class _ProfileLocationsCardState extends State<ProfileLocationsCard> {
                         padding: const EdgeInsets.symmetric(
                             horizontal: HollowSpacing.xs, vertical: 1),
                         decoration: BoxDecoration(
-                          borderRadius: BorderRadius.circular(hollow.radiusSm),
+                          borderRadius: BorderRadius.circular(hollow.radiusXs),
                           border: Border.all(color: hollow.accent),
                         ),
                         child: Text(
                           'ACTIVE',
-                          style: HollowTypography.caption.copyWith(
+                          style: HollowTypography.micro.copyWith(
                             color: hollow.accentText,
-                            fontWeight: FontWeight.w700,
-                            fontSize: 8,
-                            letterSpacing: 0.5,
+                            fontWeight: FontWeight.w600,
                           ),
                         ),
                       ),
@@ -475,9 +473,8 @@ class _ProfileLocationsCardState extends State<ProfileLocationsCard> {
                 ),
                 Text(
                   row.path,
-                  style: HollowTypography.mono.copyWith(
+                  style: HollowTypography.monoSmall.copyWith(
                     color: hollow.textSecondary,
-                    fontSize: 9,
                   ),
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
@@ -485,9 +482,8 @@ class _ProfileLocationsCardState extends State<ProfileLocationsCard> {
                 if (!exists)
                   Text(
                     'Not created yet. Switching starts a new identity here',
-                    style: HollowTypography.caption.copyWith(
+                    style: HollowTypography.micro.copyWith(
                       color: hollow.textSecondary,
-                      fontSize: 9,
                     ),
                   ),
               ],

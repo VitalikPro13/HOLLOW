@@ -676,11 +676,9 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
             child: Container(
               clipBehavior: Clip.antiAlias,
               decoration: BoxDecoration(
-                color: hollow.elevated.withValues(alpha: 0.96),
+                color: hollow.overlay,
                 borderRadius: radius,
-                border: Border.all(
-                  color: hollow.accent.withValues(alpha: 0.15),
-                ),
+                border: Border.all(color: hollow.border),
                 boxShadow: [
                   BoxShadow(
                     color: Colors.black.withValues(alpha: 0.2),
@@ -701,9 +699,13 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
                   Container(width: 1, color: hollow.border),
 
                   // Own traversal group, so Tab stays WITHIN the active pane
-                  // instead of leaking back into the category rail.
+                  // instead of leaking back into the category rail. The pane
+                  // sits on the canvas, as content does in the app, so its
+                  // cards read as raised rather than sunk into the dialog.
                   Expanded(
-                    child: FocusTraversalGroup(
+                    child: ColoredBox(
+                      color: hollow.background,
+                      child: FocusTraversalGroup(
                       policy: ReadingOrderTraversalPolicy(),
                       child: Stack(
                         children: [
@@ -725,6 +727,7 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
                         ],
                       ),
                     ),
+                    ),
                   ),
                 ],
               ),
@@ -739,7 +742,7 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
       _SettingsCategory activeForContent) {
     return Container(
       width: 188,
-      color: hollow.surface.withValues(alpha: 0.4),
+      color: hollow.surface,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
@@ -771,7 +774,7 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
               isDense: true,
               prefixIcon:
                   Icon(LucideIcons.search, size: 14, color: hollow.textSecondary),
-              borderRadius: hollow.radiusSm,
+              borderRadius: hollow.radiusMd,
               onChanged: (v) =>
                   setState(() => _searchQuery = v.trim()),
             ),
@@ -909,8 +912,8 @@ class _TabItem extends StatelessWidget {
     return HollowPressable(
       onTap: onTap,
       subtle: true,
-      borderRadius: BorderRadius.circular(hollow.radiusSm),
-      hoverColor: hollow.surface,
+      borderRadius: BorderRadius.circular(hollow.radiusMd),
+      hoverColor: hollow.elevated,
       padding: const EdgeInsets.symmetric(
         horizontal: HollowSpacing.md,
         vertical: HollowSpacing.sm + 2,

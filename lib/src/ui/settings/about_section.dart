@@ -277,7 +277,7 @@ void _showLegalDocument(
             width: 640,
             height: 520,
             decoration: BoxDecoration(
-              color: hollow.surface,
+              color: hollow.overlay,
               borderRadius: BorderRadius.circular(16),
               border: Border.all(color: hollow.border),
             ),
@@ -368,7 +368,7 @@ class _BrandHoverBoxState extends State<_BrandHoverBox> {
               color: _hovering
                   ? hollow.elevated
                   : hollow.elevated.withValues(alpha: 0.0),
-              borderRadius: BorderRadius.circular(hollow.radiusSm),
+              borderRadius: BorderRadius.circular(hollow.radiusMd),
             ),
             child: AnimatedScale(
               scale: _hovering ? 1.15 : 1.0,

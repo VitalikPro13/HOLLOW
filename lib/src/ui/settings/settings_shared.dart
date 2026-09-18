@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/accent_color_provider.dart';
 import 'package:hollow/src/core/providers/display_scale_provider.dart';
 import 'package:hollow/src/core/providers/layout_prefs_provider.dart';
+import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/core/shared_tickers.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
@@ -51,9 +52,8 @@ class SettingsCard extends StatelessWidget {
       width: double.infinity,
       padding: const EdgeInsets.all(HollowSpacing.lg),
       decoration: BoxDecoration(
-        color: hollow.surface.withValues(alpha: 0.4),
+        color: hollow.elevated,
         borderRadius: BorderRadius.circular(hollow.radiusLg),
-        border: Border.all(color: hollow.border),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -183,7 +183,7 @@ class TriStateSegment<T> extends StatelessWidget {
             Expanded(
               child: HollowPressable(
                 onTap: () => onChanged(opt),
-                borderRadius: BorderRadius.circular(6),
+                borderRadius: BorderRadius.circular(hollow.radiusXs),
                 child: AnimatedContainer(
                   duration: HollowDurations.fast,
                   alignment: Alignment.center,
@@ -191,7 +191,7 @@ class TriStateSegment<T> extends StatelessWidget {
                       const EdgeInsets.symmetric(vertical: HollowSpacing.sm),
                   decoration: BoxDecoration(
                     color: opt == value ? hollow.accent : Colors.transparent,
-                    borderRadius: BorderRadius.circular(6),
+                    borderRadius: BorderRadius.circular(hollow.radiusXs),
                   ),
                   child: Text(
                     label,
@@ -294,11 +294,11 @@ class SettingsLabeledSlider extends StatelessWidget {
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
               Text(minLabel,
-                  style: HollowTypography.caption
-                      .copyWith(color: hollow.textSecondary, fontSize: 9)),
+                  style: HollowTypography.micro
+                      .copyWith(color: hollow.textSecondary)),
               Text(maxLabel,
-                  style: HollowTypography.caption
-                      .copyWith(color: hollow.textSecondary, fontSize: 9)),
+                  style: HollowTypography.micro
+                      .copyWith(color: hollow.textSecondary)),
             ],
           ),
         ),
@@ -562,7 +562,7 @@ class _ScaleSliderBlock extends StatelessWidget {
               HollowPressable(
                 semanticLabel: 'Reset $title',
                 onTap: onReset,
-                borderRadius: BorderRadius.circular(hollow.radiusSm),
+                borderRadius: BorderRadius.circular(hollow.radiusMd),
                 padding: const EdgeInsets.all(HollowSpacing.xxs + 2),
                 child: Icon(LucideIcons.rotateCcw,
                     size: 14, color: hollow.textSecondary),
@@ -598,11 +598,11 @@ class _ScaleSliderBlock extends StatelessWidget {
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
               Text(scalePercentLabel(min),
-                  style: HollowTypography.caption
-                      .copyWith(color: hollow.textSecondary, fontSize: 9)),
+                  style: HollowTypography.micro
+                      .copyWith(color: hollow.textSecondary)),
               Text(scalePercentLabel(max),
-                  style: HollowTypography.caption
-                      .copyWith(color: hollow.textSecondary, fontSize: 9)),
+                  style: HollowTypography.micro
+                      .copyWith(color: hollow.textSecondary)),
             ],
           ),
         ),
@@ -714,6 +714,26 @@ class AccentHueSliderRow extends StatelessWidget {
           onChanged: onChanged,
         ),
       ),
+    );
+  }
+}
+
+/// The Ambient opt-in, shared by the desktop and mobile Appearance pages.
+class AmbientBackgroundToggle extends ConsumerWidget {
+  const AmbientBackgroundToggle({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final on = ref.watch(ambientBackgroundProvider).valueOrNull ?? false;
+    return SettingsToggleRow(
+      icon: LucideIcons.sparkles,
+      label: 'Ambient background',
+      subtitle: 'Slow drifting light behind your chats',
+      value: on,
+      onChanged: (v) => ref
+          .read(ambientBackgroundProvider.notifier)
+          .setEnabled(v)
+          .catchError((_) {}),
     );
   }
 }

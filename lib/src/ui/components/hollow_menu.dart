@@ -364,7 +364,7 @@ class _HollowMenuHostState extends State<_HollowMenuHost> {
             type: MaterialType.transparency,
             child: Container(
               decoration: BoxDecoration(
-                color: hollow.elevated,
+                color: hollow.overlay,
                 borderRadius: BorderRadius.circular(hollow.radiusMd),
                 border: Border.all(color: hollow.border),
                 boxShadow: [
@@ -491,7 +491,7 @@ class _MenuBackRow extends StatelessWidget {
         HollowPressable(
           onTap: onTap,
           subtle: true,
-          hoverColor: hollow.surface,
+          hoverColor: hollow.hover,
           padding: const EdgeInsets.symmetric(
             horizontal: HollowSpacing.sm + 2,
             vertical: HollowSpacing.sm,
@@ -537,11 +537,10 @@ class _MenuRow extends StatelessWidget {
       onTap: enabled ? onActivate : null,
       disabled: !enabled,
       subtle: true,
-      // Rows sit on `elevated`, so hover has to move AWAY from it or it reads
-      // as dead; never animate from Colors.transparent here.
+      // Never animate from Colors.transparent here.
       hoverColor: item.isDanger
           ? hollow.error.withValues(alpha: 0.12)
-          : hollow.surface,
+          : hollow.hover,
       padding: const EdgeInsets.symmetric(
         horizontal: HollowSpacing.sm + 2,
         vertical: HollowSpacing.sm,

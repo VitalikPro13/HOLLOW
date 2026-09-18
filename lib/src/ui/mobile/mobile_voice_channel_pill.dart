@@ -123,7 +123,7 @@ class _MobileVoiceChannelPillState // design-ignore: floating voice bar, not a l
                   horizontal: HollowSpacing.md,
                 ),
                 decoration: BoxDecoration(
-                  color: hollow.elevated,
+                  color: hollow.overlay,
                   borderRadius: BorderRadius.circular(24),
                   border: Border.all(
                     color: hollow.success.withValues(alpha: 0.3),
@@ -166,7 +166,7 @@ class _MobileVoiceChannelPillState // design-ignore: floating voice bar, not a l
                     HollowPressable(
                       semanticLabel: vcState.isMuted ? 'Unmute' : 'Mute',
                       onTap: () => vcNotifier.toggleMute(),
-                      borderRadius: BorderRadius.circular(hollow.radiusSm),
+                      borderRadius: BorderRadius.circular(hollow.radiusMd),
                       padding: const EdgeInsets.all(HollowSpacing.xs),
                       child: Icon(
                         vcState.isMuted ? LucideIcons.micOff : LucideIcons.mic,
@@ -180,7 +180,7 @@ class _MobileVoiceChannelPillState // design-ignore: floating voice bar, not a l
                     HollowPressable(
                       semanticLabel: vcState.isDeafened ? 'Undeafen' : 'Deafen',
                       onTap: () => vcNotifier.toggleDeafen(),
-                      borderRadius: BorderRadius.circular(hollow.radiusSm),
+                      borderRadius: BorderRadius.circular(hollow.radiusMd),
                       padding: const EdgeInsets.all(HollowSpacing.xs),
                       child: Icon(
                         LucideIcons.headphones,
@@ -194,7 +194,7 @@ class _MobileVoiceChannelPillState // design-ignore: floating voice bar, not a l
                     HollowPressable(
                       semanticLabel: 'Leave call',
                       onTap: () => vcNotifier.leaveChannel(),
-                      borderRadius: BorderRadius.circular(hollow.radiusSm),
+                      borderRadius: BorderRadius.circular(hollow.radiusMd),
                       padding: const EdgeInsets.all(HollowSpacing.xs),
                       child: Icon(
                         LucideIcons.phoneOff,

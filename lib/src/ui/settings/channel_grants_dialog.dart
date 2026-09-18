@@ -171,7 +171,7 @@ class _ChannelGrantsDialogState extends ConsumerState<_ChannelGrantsDialog> {
                         semanticLabel:
                             'Revoke access for ${nameFor(g.peerId)}',
                         onTap: _busy ? null : () => _revoke(g.peerId),
-                        borderRadius: BorderRadius.circular(hollow.radiusSm),
+                        borderRadius: BorderRadius.circular(hollow.radiusMd),
                         padding: const EdgeInsets.all(HollowSpacing.xs),
                         child:
                             Icon(LucideIcons.x, size: 14, color: hollow.error),

@@ -134,7 +134,7 @@ class _GifPickerOverlay extends StatelessWidget {
                 width: pickerWidth,
                 height: pickerHeight,
                 decoration: BoxDecoration(
-                  color: hollow.surface,
+                  color: hollow.overlay,
                   borderRadius: BorderRadius.circular(hollow.radiusMd),
                   border: Border.all(color: hollow.border),
                   boxShadow: [
@@ -645,14 +645,14 @@ class _GifPickerBodyState extends ConsumerState<GifPickerBody> {
           HollowPressable(
             onTap: commit,
             semanticLabel: creating ? 'Create list' : 'Rename list',
-            borderRadius: BorderRadius.circular(hollow.radiusSm),
+            borderRadius: BorderRadius.circular(hollow.radiusMd),
             padding: const EdgeInsets.all(6),
             child: Icon(LucideIcons.check, size: 14, color: hollow.accentText),
           ),
           HollowPressable(
             onTap: () => setState(() => _listEditId = null),
             semanticLabel: 'Cancel',
-            borderRadius: BorderRadius.circular(hollow.radiusSm),
+            borderRadius: BorderRadius.circular(hollow.radiusMd),
             padding: const EdgeInsets.all(6),
             child: Icon(LucideIcons.x, size: 14, color: hollow.textSecondary),
           ),
@@ -907,7 +907,7 @@ void showGifMenu(
             child: Container(
               width: menuWidth,
               decoration: BoxDecoration(
-                color: hollow.surface,
+                color: hollow.overlay,
                 borderRadius: BorderRadius.circular(hollow.radiusMd),
                 border: Border.all(color: hollow.border),
                 boxShadow: [
@@ -945,7 +945,7 @@ void showGifMenu(
                             },
                             semanticLabel: item.label,
                             borderRadius:
-                                BorderRadius.circular(hollow.radiusSm),
+                                BorderRadius.circular(hollow.radiusMd),
                             padding: const EdgeInsets.symmetric(
                                 horizontal: 8, vertical: 6),
                             child: Row(
@@ -1112,10 +1112,10 @@ class _GifCellState extends ConsumerState<_GifCell> {
         child: HollowPressable(
           onTap: widget.enabled ? widget.onTap : null,
           semanticLabel: title.isEmpty ? 'Insert GIF' : 'Insert GIF $title',
-          borderRadius: BorderRadius.circular(hollow.radiusSm),
+          borderRadius: BorderRadius.circular(hollow.radiusMd),
           padding: EdgeInsets.zero,
           child: ClipRRect(
-            borderRadius: BorderRadius.circular(hollow.radiusSm),
+            borderRadius: BorderRadius.circular(hollow.radiusMd),
             child: SizedBox(
               width: widget.width,
               height: widget.height,

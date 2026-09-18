@@ -190,9 +190,8 @@ class _ExportArchiveDialogContentState
           Container(
             padding: const EdgeInsets.all(HollowSpacing.md),
             decoration: BoxDecoration(
-              color: hollow.surface,
-              borderRadius: BorderRadius.circular(hollow.radiusSm),
-              border: Border.all(color: hollow.border),
+              color: hollow.elevated,
+              borderRadius: BorderRadius.circular(hollow.radiusMd),
             ),
             child: Row(
               children: [
@@ -326,7 +325,7 @@ class _FileModeOption extends StatelessWidget {
 
     return HollowPressable(
       onTap: onTap,
-      borderRadius: BorderRadius.circular(hollow.radiusSm),
+      borderRadius: BorderRadius.circular(hollow.radiusMd),
       padding: EdgeInsets.zero,
       child: Container(
         padding: const EdgeInsets.symmetric(
@@ -337,7 +336,7 @@ class _FileModeOption extends StatelessWidget {
           color: isSelected
               ? hollow.accent.withValues(alpha: 0.1)
               : Colors.transparent,
-          borderRadius: BorderRadius.circular(hollow.radiusSm),
+          borderRadius: BorderRadius.circular(hollow.radiusMd),
           border: Border.all(
             color: isSelected
                 ? hollow.accent.withValues(alpha: 0.4)

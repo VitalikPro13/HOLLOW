@@ -164,7 +164,7 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
                       borderRadius:
                           BorderRadius.circular(HollowRadius.pill),
                       backgroundColor:
-                          hollow.surface.withValues(alpha: 0.9),
+                          hollow.overlay.withValues(alpha: 0.9),
                       padding: const EdgeInsets.symmetric(
                         horizontal: HollowSpacing.sm,
                         vertical: HollowSpacing.xs,
@@ -247,7 +247,7 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
                   child: Container(
                     width: 360,
                     decoration: BoxDecoration(
-                      color: hollow.surface.withValues(alpha: 0.88),
+                      color: hollow.overlay.withValues(alpha: 0.88),
                       border: Border(
                         left: BorderSide(
                           color: hollow.border.withValues(alpha: 0.5),
@@ -339,7 +339,7 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
         margin: const EdgeInsets.all(2),
         decoration: BoxDecoration(
           color: hollow.elevated,
-          borderRadius: BorderRadius.circular(hollow.radiusSm),
+          borderRadius: BorderRadius.circular(hollow.radiusMd),
           border: isSpeaking
               ? Border.all(color: hollow.accent, width: 2)
               : null,
@@ -622,7 +622,7 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
                   child: Container(
                     width: 360,
                     decoration: BoxDecoration(
-                      color: hollow.surface.withValues(alpha: 0.88),
+                      color: hollow.overlay.withValues(alpha: 0.88),
                       border: Border(
                         left: BorderSide(
                           color: hollow.border.withValues(alpha: 0.5),
@@ -723,8 +723,8 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
                       vertical: HollowSpacing.xs,
                     ),
                     decoration: BoxDecoration(
-                      color: hollow.surface.withValues(alpha: 0.85),
-                      borderRadius: BorderRadius.circular(hollow.radiusSm),
+                      color: hollow.overlay.withValues(alpha: 0.85),
+                      borderRadius: BorderRadius.circular(hollow.radiusXs),
                       border: Border.all(color: hollow.border),
                     ),
                     child: Text(
@@ -1002,7 +1002,7 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
         margin: const EdgeInsets.all(2),
         decoration: BoxDecoration(
           color: hollow.elevated,
-          borderRadius: BorderRadius.circular(hollow.radiusSm),
+          borderRadius: BorderRadius.circular(hollow.radiusMd),
         ),
         clipBehavior: Clip.antiAlias,
         child: Center(
@@ -1045,7 +1045,7 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
         margin: const EdgeInsets.all(2),
         decoration: BoxDecoration(
           color: hollow.elevated,
-          borderRadius: BorderRadius.circular(hollow.radiusSm),
+          borderRadius: BorderRadius.circular(hollow.radiusMd),
         ),
         clipBehavior: Clip.antiAlias,
         child: Stack(
@@ -1114,7 +1114,7 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
                   onTap: src.isLocal
                       ? () => notifier.stopScreenShare()
                       : () => notifier.stopWatchingScreenShare(src.peerId),
-                  borderRadius: BorderRadius.circular(hollow.radiusSm),
+                  borderRadius: BorderRadius.circular(hollow.radiusMd),
                   padding: const EdgeInsets.all(4),
                   semanticLabel: src.isLocal
                       ? 'Stop sharing your screen'
@@ -1192,9 +1192,8 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
                   ),
                   child: Text(
                     'Your share',
-                    style: HollowTypography.caption.copyWith(
+                    style: HollowTypography.micro.copyWith(
                       color: Colors.white,
-                      fontSize: 9,
                     ),
                   ),
                 ),
@@ -1225,7 +1224,7 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
             vertical: HollowSpacing.xs,
           ),
           decoration: BoxDecoration(
-            color: hollow.surface.withValues(alpha: 0.9),
+            color: hollow.overlay.withValues(alpha: 0.9),
             borderRadius: BorderRadius.circular(HollowRadius.pill),
             border:
                 Border.all(color: hollow.border.withValues(alpha: 0.5)),
@@ -1265,7 +1264,7 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
                         ? 'Watch screen share from $name'
                         : null,
                     borderRadius:
-                        BorderRadius.circular(hollow.radiusSm),
+                        BorderRadius.circular(hollow.radiusMd),
                     backgroundColor: isFocused ? hollow.accentMuted : null,
                     padding: const EdgeInsets.symmetric(
                       horizontal: HollowSpacing.sm,
@@ -1325,7 +1324,7 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
                   semanticLabel: vcState.isGridView
                       ? 'Exit grid view'
                       : 'Show all sources in a grid',
-                  borderRadius: BorderRadius.circular(hollow.radiusSm),
+                  borderRadius: BorderRadius.circular(hollow.radiusMd),
                   backgroundColor:
                       vcState.isGridView ? hollow.accentMuted : null,
                   padding: const EdgeInsets.all(HollowSpacing.xs),
@@ -1429,7 +1428,7 @@ class _VoiceControlsPillState extends ConsumerState<_VoiceControlsPill> { // des
           vertical: HollowSpacing.sm,
         ),
         decoration: BoxDecoration(
-          color: hollow.surface.withValues(alpha: 0.9),
+          color: hollow.overlay.withValues(alpha: 0.9),
           borderRadius: BorderRadius.circular(HollowRadius.pill),
           border: Border.all(color: hollow.border.withValues(alpha: 0.5)),
           boxShadow: [
@@ -1466,7 +1465,7 @@ class _VoiceControlsPillState extends ConsumerState<_VoiceControlsPill> { // des
                   semanticLabel: vcState.isMuted ? 'Unmute' : 'Mute',
                   onTap: () =>
                       ref.read(voiceChannelProvider.notifier).toggleMute(),
-                  borderRadius: BorderRadius.circular(hollow.radiusSm),
+                  borderRadius: BorderRadius.circular(hollow.radiusMd),
                   padding: const EdgeInsets.all(HollowSpacing.xs),
                   child: Icon(mic.icon, size: 16, color: mic.color),
                 ),
@@ -1479,7 +1478,7 @@ class _VoiceControlsPillState extends ConsumerState<_VoiceControlsPill> { // des
                 semanticLabel: vcState.isDeafened ? 'Undeafen' : 'Deafen',
                 onTap: () =>
                     ref.read(voiceChannelProvider.notifier).toggleDeafen(),
-                borderRadius: BorderRadius.circular(hollow.radiusSm),
+                borderRadius: BorderRadius.circular(hollow.radiusMd),
                 padding: const EdgeInsets.all(HollowSpacing.xs),
                 child: Icon(
                   LucideIcons.headphones,
@@ -1499,7 +1498,7 @@ class _VoiceControlsPillState extends ConsumerState<_VoiceControlsPill> { // des
                     : 'Turn on camera',
                 onTap: () =>
                     ref.read(voiceChannelProvider.notifier).toggleCamera(),
-                borderRadius: BorderRadius.circular(hollow.radiusSm),
+                borderRadius: BorderRadius.circular(hollow.radiusMd),
                 padding: const EdgeInsets.all(HollowSpacing.xs),
                 child: Icon(
                   vcState.isCameraOn ? LucideIcons.video : LucideIcons.videoOff,
@@ -1520,7 +1519,7 @@ class _VoiceControlsPillState extends ConsumerState<_VoiceControlsPill> { // des
                       ? 'Stop sharing'
                       : 'Share screen',
                   onTap: () => _handleScreenShareToggle(vcState),
-                  borderRadius: BorderRadius.circular(hollow.radiusSm),
+                  borderRadius: BorderRadius.circular(hollow.radiusMd),
                   padding: const EdgeInsets.all(HollowSpacing.xs),
                   child: Icon(
                     LucideIcons.monitor,
@@ -1543,7 +1542,7 @@ class _VoiceControlsPillState extends ConsumerState<_VoiceControlsPill> { // des
                 semanticLabel: 'Disconnect',
                 onTap: () =>
                     ref.read(voiceChannelProvider.notifier).leaveChannel(),
-                borderRadius: BorderRadius.circular(hollow.radiusSm),
+                borderRadius: BorderRadius.circular(hollow.radiusMd),
                 padding: const EdgeInsets.all(HollowSpacing.xs),
                 child: Icon(LucideIcons.phoneOff,
                     size: 16, color: hollow.error),
@@ -1598,7 +1597,7 @@ class _VcChatOverlayState extends State<VcChatOverlay> {
               width: 24,
               height: 48,
               decoration: BoxDecoration(
-                color: hollow.surface.withValues(alpha: 0.88),
+                color: hollow.overlay.withValues(alpha: 0.88),
                 borderRadius: const BorderRadius.horizontal(
                   left: Radius.circular(8),
                 ),
@@ -1629,7 +1628,7 @@ class _VcChatOverlayState extends State<VcChatOverlay> {
           child: Container(
             width: 360,
             decoration: BoxDecoration(
-              color: hollow.surface.withValues(alpha: 0.88),
+              color: hollow.overlay.withValues(alpha: 0.88),
               border: Border(
                 left: BorderSide(
                   color: hollow.border.withValues(alpha: 0.5),
@@ -1754,7 +1753,7 @@ class _UnwatchedShareBanner extends ConsumerWidget {
     return Container(
       constraints: const BoxConstraints(maxWidth: 420),
       decoration: BoxDecoration(
-        color: hollow.surface,
+        color: hollow.overlay,
         borderRadius: BorderRadius.circular(hollow.radiusMd),
         border: Border.all(color: hollow.border),
         boxShadow: [
@@ -1820,7 +1819,7 @@ class _UnwatchedShareBanner extends ConsumerWidget {
                       message: 'Dismiss',
                       child: HollowPressable(
                         onTap: () => onDismiss(peerId),
-                        borderRadius: BorderRadius.circular(hollow.radiusSm),
+                        borderRadius: BorderRadius.circular(hollow.radiusMd),
                         padding: const EdgeInsets.all(4),
                         semanticLabel: 'Dismiss share notification',
                         child: Icon(LucideIcons.x,

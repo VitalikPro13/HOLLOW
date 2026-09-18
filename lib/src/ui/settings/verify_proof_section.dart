@@ -257,7 +257,7 @@ class _VerifyProofSectionState extends State<VerifyProofSection> {
           width: double.infinity,
           height: 120,
           decoration: BoxDecoration(
-            color: hollow.background,
+            color: hollow.elevated,
             borderRadius: BorderRadius.circular(hollow.radiusMd),
             border: Border.all(color: hollow.border),
           ),
@@ -433,8 +433,8 @@ class _VerifyProofSectionState extends State<VerifyProofSection> {
         width: double.infinity,
         padding: const EdgeInsets.all(HollowSpacing.sm),
         decoration: BoxDecoration(
-          color: hollow.surface.withValues(alpha: 0.5),
-          borderRadius: BorderRadius.circular(hollow.radiusSm),
+          color: hollow.elevated,
+          borderRadius: BorderRadius.circular(hollow.radiusMd),
         ),
         child: Text(
           r.text!.length > 300 ? '${r.text!.substring(0, 300)}...' : r.text!,

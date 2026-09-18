@@ -62,7 +62,7 @@ class LinkHealthChip extends StatelessWidget {
           decoration: BoxDecoration(
             // withValues, never a lerp from transparent, which goes via black.
             color: color.withValues(alpha: 0.14),
-            borderRadius: BorderRadius.circular(hollow.radiusSm),
+            borderRadius: BorderRadius.circular(hollow.radiusXs),
           ),
           child: Row(
             mainAxisSize: MainAxisSize.min,

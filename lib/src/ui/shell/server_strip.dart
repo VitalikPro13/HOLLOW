@@ -23,6 +23,7 @@ import 'package:hollow/src/core/providers/pending_join_provider.dart';
 import 'package:hollow/src/core/providers/unread_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
+import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/ui/components/hollow_focus_ring.dart';
 import 'package:hollow/src/ui/components/hollow_menu.dart';
@@ -270,8 +271,8 @@ class _ServerStripState extends ConsumerState<ServerStrip> {
           begin: Alignment.topCenter,
           end: Alignment.bottomCenter,
           colors: [
-            hollow.opaqueBackground,
-            Color.lerp(hollow.opaqueBackground, hollow.accent, 0.08)!,
+            hollow.opaqueSurface,
+            Color.lerp(hollow.opaqueSurface, hollow.accent, 0.08)!,
           ],
         ),
         border: Border(
@@ -842,7 +843,7 @@ class _ServerIconWithIndicatorState
                         color: hollow.error,
                         borderRadius: BorderRadius.circular(8),
                         border: Border.all(
-                          color: hollow.background,
+                          color: hollow.surface,
                           width: 2,
                         ),
                       ),
@@ -851,10 +852,9 @@ class _ServerIconWithIndicatorState
                         widget.mentionCount > 0
                             ? (widget.mentionCount > 99 ? '@99+' : '@${widget.mentionCount}')
                             : (widget.unreadCount > 99 ? '99+' : '${widget.unreadCount}'),
-                        style: const TextStyle(
+                        style: HollowTypography.micro.copyWith(
                           color: Colors.white,
-                          fontSize: 9,
-                          fontWeight: FontWeight.w700,
+                          fontWeight: FontWeight.w600,
                           height: 1,
                         ),
                       ),

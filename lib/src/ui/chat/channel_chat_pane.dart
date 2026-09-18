@@ -413,7 +413,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
     showDialog(
       context: context,
       builder: (ctx) => Dialog(
-        backgroundColor: hollow.elevated,
+        backgroundColor: hollow.overlay,
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(hollow.radiusLg),
           side: BorderSide(color: hollow.border),
@@ -558,7 +558,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
           attachment.diskPath != null &&
           File(attachment.diskPath!).existsSync()) {
         return ClipRRect(
-          borderRadius: BorderRadius.circular(hollow.radiusSm),
+          borderRadius: BorderRadius.circular(hollow.radiusMd),
           child: gifAwareImage(attachment.diskPath!, height: 80),
         );
       }
@@ -754,7 +754,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
           child: Container(
             constraints: const BoxConstraints(maxHeight: 220),
             decoration: BoxDecoration(
-              color: hollow.elevated,
+              color: hollow.overlay,
               borderRadius: BorderRadius.circular(hollow.radiusMd),
               border: Border.all(color: hollow.border),
               boxShadow: [
@@ -776,7 +776,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
                   final selected = i == _mentionSelectedIndex;
                   return HollowPressable(
                     onTap: () => _acceptMention(c),
-                    borderRadius: BorderRadius.circular(hollow.radiusSm),
+                    borderRadius: BorderRadius.circular(hollow.radiusMd),
                     backgroundColor: selected
                         ? hollow.accent.withValues(alpha: 0.15)
                         : null,
@@ -1691,7 +1691,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
                 ),
                 decoration: BoxDecoration(
                   color: hollow.accent.withValues(alpha: 0.12),
-                  borderRadius: BorderRadius.circular(hollow.radiusSm),
+                  borderRadius: BorderRadius.circular(hollow.radiusXs),
                 ),
                 child: Text(
                   'Ephemeral',
@@ -1728,7 +1728,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
                 semanticLabel: 'Toggle member panel',
                 onTap: () => ref.read(memberPanelProvider.notifier).state =
                     !ref.read(memberPanelProvider),
-                borderRadius: BorderRadius.circular(hollow.radiusSm),
+                borderRadius: BorderRadius.circular(hollow.radiusMd),
                 padding: const EdgeInsets.all(HollowSpacing.xs),
                 child: Icon(
                   LucideIcons.users,
@@ -1764,7 +1764,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
       child: HollowPressable(
         semanticLabel: label,
         onTap: () => _showPinnedMessages(context, hollow, pinnedIds),
-        borderRadius: BorderRadius.circular(hollow.radiusSm),
+        borderRadius: BorderRadius.circular(hollow.radiusMd),
         padding: const EdgeInsets.all(HollowSpacing.xs),
         child: Row(
           mainAxisSize: MainAxisSize.min,
@@ -1798,7 +1798,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
             });
           }
         },
-        borderRadius: BorderRadius.circular(hollow.radiusSm),
+        borderRadius: BorderRadius.circular(hollow.radiusMd),
         padding: const EdgeInsets.all(HollowSpacing.xs),
         child: Icon(
           LucideIcons.search,
@@ -1819,7 +1819,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
       child: HollowPressable(
         semanticLabel: label,
         onTap: _handleSplitToggle,
-        borderRadius: BorderRadius.circular(hollow.radiusSm),
+        borderRadius: BorderRadius.circular(hollow.radiusMd),
         padding: const EdgeInsets.all(HollowSpacing.xs),
         child: Icon(
           LucideIcons.columns,
@@ -1892,7 +1892,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
       child: HollowPressable(
         subtle: true,
         onTap: () => _jumpToSearchResult(msg),
-        borderRadius: BorderRadius.circular(hollow.radiusSm),
+        borderRadius: BorderRadius.circular(hollow.radiusMd),
         hoverColor: hollow.elevated,
         padding: const EdgeInsets.symmetric(
           horizontal: HollowSpacing.sm,
@@ -3029,7 +3029,7 @@ class _SyncIndicatorState extends ConsumerState<_SyncIndicator> {
           HollowPressable(
             semanticLabel: 'Retry sync',
             onTap: _retry,
-            borderRadius: BorderRadius.circular(hollow.radiusSm),
+            borderRadius: BorderRadius.circular(hollow.radiusMd),
             padding: const EdgeInsets.all(2),
             child: Icon(
               LucideIcons.refreshCw,

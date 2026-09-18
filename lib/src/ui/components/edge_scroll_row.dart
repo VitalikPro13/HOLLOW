@@ -228,7 +228,7 @@ class _EdgeScrollRowState extends State<EdgeScrollRow> {
       semanticLabel: left
           ? 'Scroll ${widget.semanticLabel} left'
           : 'Scroll ${widget.semanticLabel} right',
-      borderRadius: BorderRadius.circular(hollow.radiusSm),
+      borderRadius: BorderRadius.circular(hollow.radiusMd),
       padding: EdgeInsets.zero,
       child: SizedBox(
         width: 20,

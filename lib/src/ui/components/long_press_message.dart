@@ -37,7 +37,7 @@ class _LongPressMessageState extends State<LongPressMessage> {
         curve: Curves.easeOut,
         decoration: BoxDecoration(
           color: _pressing ? hollow.accent.withValues(alpha: 0.08) : null,
-          borderRadius: BorderRadius.circular(hollow.radiusSm),
+          borderRadius: BorderRadius.circular(hollow.radiusMd),
         ),
         child: widget.child,
       ),

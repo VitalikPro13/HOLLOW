@@ -1483,8 +1483,8 @@ class _AudioDeviceSettingsState extends ConsumerState<_AudioDeviceSettings> {
               vertical: HollowSpacing.xs + 2,
             ),
             decoration: BoxDecoration(
-              color: hollow.surface,
-              borderRadius: BorderRadius.circular(hollow.radiusSm),
+              color: hollow.elevated,
+              borderRadius: BorderRadius.circular(hollow.radiusMd),
               border: Border.all(color: hollow.border),
             ),
             child: Text(
@@ -1624,14 +1624,14 @@ class _AudioDeviceSettingsState extends ConsumerState<_AudioDeviceSettings> {
             padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.sm),
             decoration: BoxDecoration(
               color: hollow.elevated,
-              borderRadius: BorderRadius.circular(hollow.radiusSm),
+              borderRadius: BorderRadius.circular(hollow.radiusMd),
               border: Border.all(color: hollow.border),
             ),
             child: DropdownButtonHideUnderline(
               child: DropdownButton<String?>(
                 value: selectedValue,
                 isExpanded: true,
-                dropdownColor: hollow.elevated,
+                dropdownColor: hollow.overlay,
                 style: HollowTypography.caption.copyWith(
                   color: hollow.textPrimary,
                   fontSize: 12,

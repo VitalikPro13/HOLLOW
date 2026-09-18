@@ -491,7 +491,7 @@ class _ServerNotificationRowState
       onTap: () => setState(() => _expanded = !_expanded),
       semanticLabel:
           _expanded ? 'Hide channel overrides' : 'Show channel overrides',
-      borderRadius: BorderRadius.circular(hollow.radiusSm),
+      borderRadius: BorderRadius.circular(hollow.radiusMd),
       padding: const EdgeInsets.all(HollowSpacing.xs),
       child: Icon(
         _expanded ? LucideIcons.chevronUp : LucideIcons.chevronDown,

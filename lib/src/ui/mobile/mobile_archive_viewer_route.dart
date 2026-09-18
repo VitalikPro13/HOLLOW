@@ -420,7 +420,7 @@ class _MobileArchiveViewerRouteState
         data: ThemeData.dark().copyWith(
           colorScheme: ColorScheme.dark(
             primary: hollow.accent,
-            surface: hollow.surface,
+            surface: hollow.overlay,
           ),
         ),
         child: child!,

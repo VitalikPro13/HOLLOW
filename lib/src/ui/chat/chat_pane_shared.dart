@@ -334,14 +334,12 @@ class UnreadDivider extends StatelessWidget {
                     color: hollow.error,
                     borderRadius: BorderRadius.circular(7),
                   ),
-                  child: const Text(
+                  child: Text(
                     'New',
-                    style: TextStyle(
+                    style: HollowTypography.micro.copyWith(
                       color: Colors.white,
-                      fontSize: 9,
-                      fontWeight: FontWeight.w700,
+                      fontWeight: FontWeight.w600,
                       height: 1,
-                      letterSpacing: 0.3,
                     ),
                   ),
                 ),
@@ -1222,11 +1220,9 @@ Widget composerGifButton(HollowTheme hollow,
         ),
         child: Text(
           'GIF',
-          style: HollowTypography.caption.copyWith(
+          style: HollowTypography.micro.copyWith(
             color: hollow.textSecondary,
-            fontSize: 9,
-            fontWeight: FontWeight.w800,
-            letterSpacing: 0.5,
+            fontWeight: FontWeight.w600,
             height: 1.0,
           ),
         ),
@@ -1292,7 +1288,7 @@ class ChatOverlayToggleButton extends StatelessWidget {
               width: 24,
               height: 48,
               decoration: BoxDecoration(
-                color: hollow.surface.withValues(alpha: 0.88),
+                color: hollow.overlay.withValues(alpha: 0.88),
                 borderRadius: const BorderRadius.horizontal(
                   left: Radius.circular(8),
                 ),

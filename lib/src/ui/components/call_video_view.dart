@@ -57,7 +57,7 @@ class _CallVideoViewState extends ConsumerState<CallVideoView> {
           width: 320,
           height: 240,
           decoration: BoxDecoration(
-            color: hollow.elevated,
+            color: hollow.overlay,
             borderRadius: BorderRadius.circular(hollow.radiusLg),
             border: Border.all(color: hollow.border),
             boxShadow: [
@@ -85,7 +85,7 @@ class _CallVideoViewState extends ConsumerState<CallVideoView> {
                 else
                   Positioned.fill(
                     child: Container(
-                      color: hollow.elevated,
+                      color: hollow.overlay,
                       child: Center(
                         child: Column(
                           mainAxisSize: MainAxisSize.min,
@@ -139,7 +139,7 @@ class _CallVideoViewState extends ConsumerState<CallVideoView> {
                           horizontal: 6, vertical: 3),
                       decoration: BoxDecoration(
                         color: Colors.black.withValues(alpha: 0.55),
-                        borderRadius: BorderRadius.circular(6),
+                        borderRadius: BorderRadius.circular(hollow.radiusXs),
                       ),
                       child: const RecordingIndicator(),
                     ),

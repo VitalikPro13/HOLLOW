@@ -158,7 +158,7 @@ class _Cover extends StatelessWidget {
         height: height,
         decoration: BoxDecoration(
           color: hollow.elevated,
-          borderRadius: BorderRadius.circular(hollow.radiusSm),
+          borderRadius: BorderRadius.circular(hollow.radiusMd),
           border: Border.all(color: hollow.border),
         ),
         child: Icon(
@@ -169,7 +169,7 @@ class _Cover extends StatelessWidget {
       );
     }
     return ClipRRect(
-      borderRadius: BorderRadius.circular(hollow.radiusSm),
+      borderRadius: BorderRadius.circular(hollow.radiusMd),
       child: Image.memory(
         bytes!,
         width: width,
@@ -209,7 +209,7 @@ Widget _tappableGame(
   return HollowPressable(
     onTap: () => _openGameCard(context, block, assets),
     semanticLabel: 'View ${block.gameName} details',
-    borderRadius: BorderRadius.circular(hollow.radiusSm),
+    borderRadius: BorderRadius.circular(hollow.radiusMd),
     child: child,
   );
 }
@@ -345,7 +345,7 @@ class _GameShelfBody extends StatelessWidget {
               assets: assets,
             ),
             semanticLabel: 'View ${(game['name'] as String?) ?? 'game'} details',
-            borderRadius: BorderRadius.circular(hollow.radiusSm),
+            borderRadius: BorderRadius.circular(hollow.radiusMd),
             padding: const EdgeInsets.all(2),
             child: SizedBox(
               width: 68,
@@ -359,9 +359,8 @@ class _GameShelfBody extends StatelessWidget {
                   Text(
                     (game['name'] as String?) ?? '',
                     textAlign: TextAlign.center,
-                    style: HollowTypography.caption.copyWith(
+                    style: HollowTypography.micro.copyWith(
                       color: hollow.textSecondary,
-                      fontSize: 9,
                       height: 1.2,
                     ),
                     maxLines: 2,
@@ -395,7 +394,7 @@ class _ArtworkBody extends StatelessWidget {
             height: 120,
             decoration: BoxDecoration(
               color: hollow.elevated,
-              borderRadius: BorderRadius.circular(hollow.radiusSm),
+              borderRadius: BorderRadius.circular(hollow.radiusMd),
               border: Border.all(color: hollow.border),
             ),
             child: Icon(
@@ -406,7 +405,7 @@ class _ArtworkBody extends StatelessWidget {
           )
         else
           ClipRRect(
-            borderRadius: BorderRadius.circular(hollow.radiusSm),
+            borderRadius: BorderRadius.circular(hollow.radiusMd),
             child: AnimatedGifImage(
               bytes: bytes,
               width: double.infinity,

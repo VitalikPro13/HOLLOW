@@ -100,7 +100,7 @@ class _LicenseKeyContentState extends State<_LicenseKeyContent> {
             color: Colors.transparent,
             child: Container(
               decoration: BoxDecoration(
-                color: hollow.elevated.withValues(alpha: 0.95),
+                color: hollow.overlay,
                 borderRadius: radius,
                 border: Border.all(
                   color: hollow.accent.withValues(alpha: 0.15),

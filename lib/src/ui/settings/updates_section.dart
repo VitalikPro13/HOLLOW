@@ -157,7 +157,7 @@ class _UpdatesTabState extends ConsumerState<UpdatesTab> {
       Container(
         padding: const EdgeInsets.all(16),
         decoration: BoxDecoration(
-          color: hollow.surface,
+          color: hollow.elevated,
           borderRadius: BorderRadius.circular(12),
           border: Border.all(
               color: hollow.accent.withValues(alpha: 0.2)),
@@ -372,7 +372,7 @@ class _VersionCard extends StatelessWidget {
       decoration: BoxDecoration(
         color: isCurrent
             ? hollow.accent.withValues(alpha: 0.06)
-            : hollow.surface,
+            : hollow.elevated,
         borderRadius: BorderRadius.circular(12),
         border: Border.all(
           color: isCurrent

@@ -214,7 +214,7 @@ class ArchiveFilterButton extends StatelessWidget {
         }
       },
       semanticLabel: 'Filter by sender',
-      borderRadius: BorderRadius.circular(hollow.radiusSm),
+      borderRadius: BorderRadius.circular(hollow.radiusMd),
       padding: const EdgeInsets.all(6),
       child: Icon(
         LucideIcons.filter,
@@ -255,8 +255,8 @@ class ArchiveFilterDialog extends StatelessWidget {
             width: 240,
             constraints: const BoxConstraints(maxHeight: 360),
             decoration: BoxDecoration(
-              color: hollow.elevated,
-              borderRadius: BorderRadius.circular(hollow.radiusSm),
+              color: hollow.overlay,
+              borderRadius: BorderRadius.circular(hollow.radiusMd),
               border: Border.all(color: hollow.border),
               boxShadow: [
                 BoxShadow(
@@ -291,7 +291,7 @@ void showArchiveFilterSheet(
   final hollow = HollowTheme.of(context);
   showModalBottomSheet(
     context: context,
-    backgroundColor: hollow.surface,
+    backgroundColor: hollow.overlay,
     shape: RoundedRectangleBorder(
       borderRadius:
           BorderRadius.vertical(top: Radius.circular(hollow.radiusXl)),

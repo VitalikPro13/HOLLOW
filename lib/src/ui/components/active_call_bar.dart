@@ -139,7 +139,7 @@ class _ActiveCallBarState extends ConsumerState<ActiveCallBar> {
                   horizontal: HollowSpacing.md,
                 ),
                 decoration: BoxDecoration(
-                  color: hollow.elevated,
+                  color: hollow.overlay,
                   borderRadius: BorderRadius.circular(hollow.radiusLg),
                   border: Border.all(
                     // The bar's edge is read first, and a confident green
@@ -223,7 +223,7 @@ class _ActiveCallBarState extends ConsumerState<ActiveCallBar> {
                           onTap: () =>
                               ref.read(callProvider.notifier).toggleMute(),
                           borderRadius:
-                              BorderRadius.circular(hollow.radiusSm),
+                              BorderRadius.circular(hollow.radiusMd),
                           padding: const EdgeInsets.all(HollowSpacing.xs),
                           child:
                               Icon(mic.icon, size: 18, color: mic.color),
@@ -243,7 +243,7 @@ class _ActiveCallBarState extends ConsumerState<ActiveCallBar> {
                             ? () =>
                                   ref.read(callProvider.notifier).toggleVideo()
                             : null,
-                        borderRadius: BorderRadius.circular(hollow.radiusSm),
+                        borderRadius: BorderRadius.circular(hollow.radiusMd),
                         padding: const EdgeInsets.all(HollowSpacing.xs),
                         child: Icon(
                           call.isVideoEnabled
@@ -273,7 +273,7 @@ class _ActiveCallBarState extends ConsumerState<ActiveCallBar> {
                                     .read(callProvider.notifier)
                                     .stopScreenShare()
                               : null,
-                          borderRadius: BorderRadius.circular(hollow.radiusSm),
+                          borderRadius: BorderRadius.circular(hollow.radiusMd),
                           padding: const EdgeInsets.all(HollowSpacing.xs),
                           child: Icon(
                             call.isScreenSharing
@@ -313,7 +313,7 @@ class _ActiveCallBarState extends ConsumerState<ActiveCallBar> {
                               notifier.startRecording();
                             }
                           },
-                          borderRadius: BorderRadius.circular(hollow.radiusSm),
+                          borderRadius: BorderRadius.circular(hollow.radiusMd),
                           padding: const EdgeInsets.all(HollowSpacing.xs),
                           child: Icon(
                             rec.isMyRecording
@@ -333,7 +333,7 @@ class _ActiveCallBarState extends ConsumerState<ActiveCallBar> {
                       child: HollowPressable(
                         semanticLabel: 'End call',
                         onTap: () => ref.read(callProvider.notifier).endCall(),
-                        borderRadius: BorderRadius.circular(hollow.radiusSm),
+                        borderRadius: BorderRadius.circular(hollow.radiusMd),
                         padding: const EdgeInsets.all(HollowSpacing.xs),
                         child: Icon(
                           LucideIcons.phoneOff,

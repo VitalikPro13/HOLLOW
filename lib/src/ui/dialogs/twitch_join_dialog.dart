@@ -415,7 +415,7 @@ class _TwitchJoinDialogState extends State<_TwitchJoinDialog> {
           height: 28,
           decoration: BoxDecoration(
             color: hollow.accent.withValues(alpha: 0.1),
-            borderRadius: BorderRadius.circular(hollow.radiusSm),
+            borderRadius: BorderRadius.circular(hollow.radiusMd),
           ),
           alignment: Alignment.center,
           child: Icon(icon, size: 14, color: hollow.accent),

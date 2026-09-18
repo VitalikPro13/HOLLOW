@@ -110,7 +110,7 @@ class _GameCardDialogState extends State<_GameCardDialog> {
   /// The profile dialog's card recipe, with the border tinted toward the game's
   /// own colour once probed.
   BoxDecoration _surface(HollowTheme hollow) => BoxDecoration(
-        color: hollow.elevated.withValues(alpha: 0.92),
+        color: hollow.overlay,
         borderRadius: BorderRadius.circular(hollow.radiusLg),
         border: Border.all(
           color: (_gameAccent ?? hollow.accent).withValues(alpha: 0.18),
@@ -519,7 +519,7 @@ class _Hero extends StatelessWidget {
                 stops: const [0.55, 1.0],
                 colors: [
                   Colors.transparent,
-                  hollow.elevated.withValues(alpha: 0.65),
+                  hollow.overlay.withValues(alpha: 0.65),
                 ],
               ),
             ),
@@ -631,7 +631,7 @@ class _StatStrip extends StatelessWidget {
         value: '$mc',
         valueColor: Contrast.ensureContrast(
           _scoreBandColor(mc),
-          hollow.elevated,
+          hollow.overlay,
           targetRatio: 4.5,
         ),
         sub: 'critic score',
@@ -728,11 +728,9 @@ class _StatTile extends StatelessWidget {
                   label.toUpperCase(),
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: HollowTypography.caption.copyWith(
+                  style: HollowTypography.micro.copyWith(
                     color: hollow.textTertiary,
-                    fontWeight: FontWeight.w700,
-                    letterSpacing: 0.6,
-                    fontSize: 8.5,
+                    fontWeight: FontWeight.w600,
                   ),
                 ),
               ),
@@ -759,9 +757,8 @@ class _StatTile extends StatelessWidget {
             sub,
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
-            style: HollowTypography.caption.copyWith(
+            style: HollowTypography.micro.copyWith(
               color: hollow.textTertiary,
-              fontSize: 9.5,
             ),
           ),
         ],
@@ -896,9 +893,8 @@ class _DetailsPanel extends StatelessWidget {
         if (details.copyright.isNotEmpty) ...[
           Text(
             details.copyright,
-            style: HollowTypography.caption.copyWith(
+            style: HollowTypography.micro.copyWith(
               color: hollow.textTertiary,
-              fontSize: 9.5,
               height: 1.4,
             ),
           ),
@@ -906,9 +902,8 @@ class _DetailsPanel extends StatelessWidget {
         ],
         Text(
           'Game data from IGDB & Steam',
-          style: HollowTypography.caption.copyWith(
+          style: HollowTypography.micro.copyWith(
             color: hollow.textTertiary.withValues(alpha: 0.7),
-            fontSize: 9.5,
           ),
         ),
       ],
@@ -1039,7 +1034,7 @@ class _SysReqSectionState extends State<_SysReqSection> {
           onTap: () => setState(() => _open = !_open),
           semanticLabel:
               '${_open ? 'Hide' : 'Show'} system requirements',
-          borderRadius: BorderRadius.circular(hollow.radiusSm),
+          borderRadius: BorderRadius.circular(hollow.radiusMd),
           padding: const EdgeInsets.symmetric(vertical: 2),
           child: Row(
             children: [
@@ -1107,9 +1102,8 @@ class _RequirementsState extends State<_Requirements> {
           width: double.infinity,
           padding: const EdgeInsets.all(HollowSpacing.sm + 2),
           decoration: BoxDecoration(
-            color: hollow.surface.withValues(alpha: 0.5),
-            borderRadius: BorderRadius.circular(hollow.radiusSm),
-            border: Border.all(color: hollow.border),
+            color: hollow.elevated,
+            borderRadius: BorderRadius.circular(hollow.radiusMd),
           ),
           child: Text(
             body,
@@ -1202,7 +1196,7 @@ class _CompanyRow extends StatelessWidget {
           );
         }
 
-        final panelDark = Contrast.relativeLuminance(hollow.elevated) < 0.5;
+        final panelDark = Contrast.relativeLuminance(hollow.overlay) < 0.5;
         final needsPlate = panelDark
             ? stats.avgLuminance < 0.35 // dark colorful mark on dark panel
             : stats.avgLuminance > 0.75; // pale colorful mark on light panel
@@ -1262,9 +1256,8 @@ class _CompanyRow extends StatelessWidget {
               ),
               Text(
                 company.roleLabel,
-                style: HollowTypography.caption.copyWith(
+                style: HollowTypography.micro.copyWith(
                   color: hollow.textTertiary,
-                  fontSize: 9.5,
                 ),
               ),
             ],
@@ -1305,7 +1298,7 @@ class _LinkButton extends StatelessWidget {
         await launchUrl(uri, mode: LaunchMode.externalApplication);
       },
       semanticLabel: 'Open $company on $kind',
-      borderRadius: BorderRadius.circular(hollow.radiusSm),
+      borderRadius: BorderRadius.circular(hollow.radiusMd),
       padding: const EdgeInsets.all(HollowSpacing.xs),
       child: Icon(_linkIcon(kind), size: 14, color: hollow.textSecondary),
     );

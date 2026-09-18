@@ -203,7 +203,7 @@ class _SystemStatusBannerState extends ConsumerState<SystemStatusBanner> {
             enabled: true,
             onActivate: () =>
                 ref.read(statusProvider.notifier).dismissCurrent(),
-            borderRadius: BorderRadius.circular(hollow.radiusSm),
+            borderRadius: BorderRadius.circular(hollow.radiusMd),
             child: GestureDetector(
               // Absorbed so dismissing does not also toggle expansion.
               behavior: HitTestBehavior.opaque,
@@ -236,7 +236,7 @@ class _SystemStatusBannerState extends ConsumerState<SystemStatusBanner> {
         ? HollowFocusRing(
             enabled: true,
             onActivate: () => _openLink(status.link),
-            borderRadius: BorderRadius.circular(hollow.radiusSm),
+            borderRadius: BorderRadius.circular(hollow.radiusMd),
             child: GestureDetector(
               behavior: HitTestBehavior.opaque,
               onTap: () => _openLink(status.link),
@@ -496,7 +496,7 @@ class _HomeStatusCardState extends ConsumerState<HomeStatusCard> {
         vertical: HollowSpacing.sm,
       ),
       decoration: BoxDecoration(
-        color: operational ? hollow.surface : hollow.noticeSurface(color, alpha: 0.10),
+        color: operational ? hollow.elevated : hollow.noticeSurface(color, alpha: 0.10),
         borderRadius: BorderRadius.circular(hollow.radiusMd),
         border: Border.all(
           color: operational ? hollow.border : color.withValues(alpha: 0.35),
@@ -560,7 +560,7 @@ class _HomeStatusCardState extends ConsumerState<HomeStatusCard> {
                   HollowFocusRing(
                     enabled: true,
                     onActivate: () => _openLink(status.link),
-                    borderRadius: BorderRadius.circular(hollow.radiusSm),
+                    borderRadius: BorderRadius.circular(hollow.radiusMd),
                     child: GestureDetector(
                       // Absorbed so following the link does not also collapse
                       // the card out from under the user.

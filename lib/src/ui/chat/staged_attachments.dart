@@ -233,8 +233,8 @@ class StagedAttachmentStrip extends StatelessWidget {
                         child: HollowPressable(
                           semanticLabel: 'Remove ${item.name}',
                           onTap: () => onRemove(i),
-                          backgroundColor: hollow.background.withValues(alpha: 0.8),
-                          borderRadius: BorderRadius.circular(hollow.radiusSm),
+                          backgroundColor: hollow.overlay.withValues(alpha: 0.8),
+                          borderRadius: BorderRadius.circular(hollow.radiusMd),
                           padding: const EdgeInsets.all(2),
                           child: Icon(LucideIcons.x,
                               size: 12, color: hollow.textPrimary),
@@ -260,7 +260,7 @@ class StagedAttachmentStrip extends StatelessWidget {
   Widget _thumb(HollowTheme hollow, StagedAttachment item, double size) {
     if (item.isImage) {
       return ClipRRect(
-        borderRadius: BorderRadius.circular(6),
+        borderRadius: BorderRadius.circular(hollow.radiusMd),
         child: gifAwareImage(item.path, width: size, height: size),
       );
     }
@@ -269,7 +269,7 @@ class StagedAttachmentStrip extends StatelessWidget {
       height: size,
       decoration: BoxDecoration(
         color: hollow.elevated,
-        borderRadius: BorderRadius.circular(6),
+        borderRadius: BorderRadius.circular(hollow.radiusMd),
       ),
       child: Icon(item.isVideo ? LucideIcons.video : LucideIcons.file,
           color: hollow.textSecondary, size: 20),

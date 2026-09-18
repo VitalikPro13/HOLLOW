@@ -192,7 +192,7 @@ class _MemberRow extends ConsumerWidget {
               ),
               decoration: BoxDecoration(
                 color: info.color.withValues(alpha: 0.15),
-                borderRadius: BorderRadius.circular(HollowRadius.sm),
+                borderRadius: BorderRadius.circular(hollow.radiusXs),
               ),
               child: Row(
                 mainAxisSize: MainAxisSize.min,
@@ -221,7 +221,7 @@ class _MemberRow extends ConsumerWidget {
                   message: 'Member actions',
                   child: HollowPressable(
                     semanticLabel: 'Member actions',
-                    borderRadius: BorderRadius.circular(hollow.radiusSm),
+                    borderRadius: BorderRadius.circular(hollow.radiusMd),
                     padding: const EdgeInsets.all(HollowSpacing.xs),
                     onTap: () => _showActions(buttonContext, ref),
                     child: Icon(
@@ -350,7 +350,7 @@ class _MutedMembersSectionState extends ConsumerState<_MutedMembersSection> {
           onTap: () => setState(() => _expanded = !_expanded),
           subtle: true,
           semanticButton: false,
-          borderRadius: BorderRadius.circular(hollow.radiusSm),
+          borderRadius: BorderRadius.circular(hollow.radiusMd),
           padding: const EdgeInsets.symmetric(vertical: HollowSpacing.xs),
           child: Row(
             children: [
@@ -487,7 +487,7 @@ class _BannedMembersSectionState extends ConsumerState<_BannedMembersSection> {
           onTap: () => setState(() => _expanded = !_expanded),
           subtle: true,
           semanticButton: false,
-          borderRadius: BorderRadius.circular(hollow.radiusSm),
+          borderRadius: BorderRadius.circular(hollow.radiusMd),
           padding: const EdgeInsets.symmetric(vertical: HollowSpacing.xs),
           child: Row(
             children: [

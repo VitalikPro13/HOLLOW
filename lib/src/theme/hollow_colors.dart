@@ -5,9 +5,7 @@ import 'dart:ui';
 /// Teal reads as calm and shelter, and is distinct from Discord's purple,
 /// Signal's blue and WhatsApp's green.
 abstract final class HollowColors {
-  static const background = Color(0xFF0D0F14);
-  static const surface = Color(0xFF14161C);
-  static const elevated = Color(0xFF1A1D25);
+  // Surfaces live in surface_ladder.dart: five levels per theme.
 
   static const accent = Color(0xFF00BFA6);
   static const accentHover = Color(0xFF00D9BB);
@@ -20,6 +18,7 @@ abstract final class HollowColors {
   // (~2:1). It still reads as quieter because brighter text sits next to it.
   static const textTertiary = Color(0xFF808690);
   static const textOnAccent = Color(0xFF0D0F14);
+  static const textOnError = Color(0xFFFFFFFF);
 
   static const border = Color(0x14FFFFFF); // ~8% white
 
@@ -27,18 +26,11 @@ abstract final class HollowColors {
   static const success = Color(0xFF10B981);
   static const warning = Color(0xFFFBBF24);
 
-  static const backgroundLight = Color(0xFFFFFFFF);
-  static const surfaceLight = Color(0xFFF5F6F8);
-  static const elevatedLight = Color(0xFFE9EBED);
-
   static const accentMutedLight = Color(0x1A00BFA6); // ~10% teal on white
 
   // Foreground use on light surfaces (text, icons, links): the shared teal is
   // 2.33:1 on white and fails. Fills keep the raw accent.
-  //
-  // HollowTheme darkens this further against `elevatedLight`, because that is
-  // the DIMMEST surface accent text sits on and so the worst case: 5.32:1 on
-  // white is only 4.45:1 on a panel, and ghost buttons live on panels.
+  // HollowTheme darkens it further until it clears every light surface.
   static const accentTextLight = Color(0xFF00796B); // 5.32:1 on white
 
   static const textPrimaryLight = Color(0xFF1A1C1E);

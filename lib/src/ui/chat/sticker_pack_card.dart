@@ -180,9 +180,8 @@ class _StickerPackCardState extends ConsumerState<StickerPackCard> {
       constraints: const BoxConstraints(maxWidth: 280),
       clipBehavior: Clip.antiAlias,
       decoration: BoxDecoration(
-        color: hollow.surface,
-        borderRadius: BorderRadius.circular(hollow.radiusSm),
-        border: Border.all(color: hollow.border),
+        color: hollow.elevated,
+        borderRadius: BorderRadius.circular(hollow.radiusMd),
       ),
       child: Padding(
         padding: const EdgeInsets.all(HollowSpacing.md),

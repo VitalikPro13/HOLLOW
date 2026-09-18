@@ -275,7 +275,7 @@ class _ImportedFilePreview extends ConsumerWidget {
           height: height,
           decoration: BoxDecoration(
             color: hollow.elevated,
-            borderRadius: BorderRadius.circular(hollow.radiusSm),
+            borderRadius: BorderRadius.circular(hollow.radiusMd),
           ),
           alignment: Alignment.center,
           child: child,
@@ -296,7 +296,7 @@ class _ImportedFilePreview extends ConsumerWidget {
     if (bytes == null || bytes.isEmpty) return box(null);
     if (isBanner) {
       return ClipRRect(
-        borderRadius: BorderRadius.circular(hollow.radiusSm),
+        borderRadius: BorderRadius.circular(hollow.radiusMd),
         child: SizedBox(
           width: width,
           height: height,

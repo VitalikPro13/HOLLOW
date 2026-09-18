@@ -391,7 +391,7 @@ class _ShopCard extends ConsumerWidget {
           // A background step, not a step AND a hairline: the art fills the
           // tile, so the boundary is never in doubt and an outline on top of it
           // only makes the wall read as a grid of boxes.
-          color: hollow.surface,
+          color: hollow.elevated,
           borderRadius: BorderRadius.circular(hollow.radiusLg),
         ),
         clipBehavior: Clip.antiAlias,

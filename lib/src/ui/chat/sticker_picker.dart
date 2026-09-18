@@ -197,7 +197,7 @@ class _StickerPickerOverlay extends StatelessWidget {
                 width: pickerWidth,
                 height: pickerHeight,
                 decoration: BoxDecoration(
-                  color: hollow.surface,
+                  color: hollow.overlay,
                   borderRadius: BorderRadius.circular(hollow.radiusMd),
                   border: Border.all(color: hollow.border),
                   boxShadow: [
@@ -557,8 +557,7 @@ class _StickerPickerBodyState extends ConsumerState<StickerPickerBody> {
         padding: const EdgeInsets.symmetric(vertical: 4),
         child: Text(
           'Powered by KLIPY',
-          style: HollowTypography.caption
-              .copyWith(color: hollow.textTertiary, fontSize: 9),
+          style: HollowTypography.micro.copyWith(color: hollow.textTertiary),
         ),
       );
 
@@ -838,14 +837,14 @@ class _StickerPickerBodyState extends ConsumerState<StickerPickerBody> {
           HollowPressable(
             onTap: submit,
             semanticLabel: 'Save pack name',
-            borderRadius: BorderRadius.circular(hollow.radiusSm),
+            borderRadius: BorderRadius.circular(hollow.radiusMd),
             padding: const EdgeInsets.all(4),
             child: Icon(LucideIcons.check, size: 15, color: hollow.accentText),
           ),
           HollowPressable(
             onTap: () => setState(() => _renamingPack = null),
             semanticLabel: 'Cancel rename',
-            borderRadius: BorderRadius.circular(hollow.radiusSm),
+            borderRadius: BorderRadius.circular(hollow.radiusMd),
             padding: const EdgeInsets.all(4),
             child: Icon(LucideIcons.x, size: 15, color: hollow.textSecondary),
           ),
@@ -1356,7 +1355,7 @@ class _StickerCellState extends ConsumerState<_StickerCell> {
         child: HollowPressable(
           onTap: widget.enabled ? widget.onTap : null,
           semanticLabel: semantic,
-          borderRadius: BorderRadius.circular(hollow.radiusSm),
+          borderRadius: BorderRadius.circular(hollow.radiusMd),
           padding: const EdgeInsets.all(2),
           child: Stack(
             fit: StackFit.expand,
@@ -1396,7 +1395,7 @@ class _StickerCellState extends ConsumerState<_StickerCell> {
     return HollowPressable(
       onTap: widget.onSave,
       semanticLabel: 'Save this sticker to my stickers',
-      borderRadius: BorderRadius.circular(hollow.radiusSm),
+      borderRadius: BorderRadius.circular(hollow.radiusMd),
       padding: const EdgeInsets.all(3),
       // Never animates from transparent (feedback_hover_state_patterns).
       backgroundColor: Colors.black.withValues(alpha: 0.55),
@@ -1440,7 +1439,7 @@ class _StickerCellState extends ConsumerState<_StickerCell> {
     return DecoratedBox(
       decoration: BoxDecoration(
         color: hollow.elevated,
-        borderRadius: BorderRadius.circular(hollow.radiusSm),
+        borderRadius: BorderRadius.circular(hollow.radiusMd),
       ),
     );
   }

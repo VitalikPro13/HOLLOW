@@ -345,9 +345,8 @@ class _NumberBlock extends StatelessWidget {
         vertical: HollowSpacing.md,
       ),
       decoration: BoxDecoration(
-        color: hollow.surface,
+        color: hollow.elevated,
         borderRadius: BorderRadius.circular(hollow.radiusMd),
-        border: Border.all(color: hollow.border),
       ),
       child: SelectionArea(
         child: Column(

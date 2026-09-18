@@ -176,7 +176,7 @@ class _StorageDashboardContentState
                 const Spacer(),
                 HollowPressable(
                   onTap: () => Navigator.of(context).pop(),
-                  borderRadius: BorderRadius.circular(hollow.radiusSm),
+                  borderRadius: BorderRadius.circular(hollow.radiusMd),
                   padding: const EdgeInsets.all(HollowSpacing.xs),
                   semanticLabel: 'Close',
                   child: Icon(
@@ -405,7 +405,7 @@ class _StorageDashboardContentState
     final result = await showDialog<int>(
       context: context,
       builder: (ctx) => AlertDialog(
-        backgroundColor: hollow.elevated,
+        backgroundColor: hollow.overlay,
         title: Text('Set Storage Pledge', style: TextStyle(color: hollow.textPrimary, fontSize: 16)),
         content: TextField(
           controller: controller,
@@ -553,7 +553,7 @@ class _StorageDashboardContentState
     final result = await showDialog<String>(
       context: context,
       builder: (ctx) => SimpleDialog(
-        backgroundColor: hollow.elevated,
+        backgroundColor: hollow.overlay,
         title: Text(
           key == 'retention_files' ? 'File Retention' : key == 'retention_messages' ? 'Message Retention' : 'Voice Retention',
           style: TextStyle(color: hollow.textPrimary, fontSize: 16),

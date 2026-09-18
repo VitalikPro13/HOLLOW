@@ -269,7 +269,7 @@ class _GuestChatPaneState extends ConsumerState<GuestChatPane> {
                       type: HollowToastType.info);
                 },
                 semanticLabel: 'Retry',
-                borderRadius: BorderRadius.circular(hollow.radiusSm),
+                borderRadius: BorderRadius.circular(hollow.radiusMd),
                 padding: const EdgeInsets.all(4),
                 child:
                     Icon(LucideIcons.refreshCw, size: 15, color: hollow.textSecondary),
@@ -284,7 +284,7 @@ class _GuestChatPaneState extends ConsumerState<GuestChatPane> {
                   }
                 }),
                 semanticLabel: 'Search messages',
-                borderRadius: BorderRadius.circular(hollow.radiusSm),
+                borderRadius: BorderRadius.circular(hollow.radiusMd),
                 padding: const EdgeInsets.all(4),
                 child: Icon(
                   LucideIcons.search,

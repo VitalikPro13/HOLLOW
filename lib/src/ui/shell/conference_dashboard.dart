@@ -255,7 +255,6 @@ class _RoomCard extends ConsumerWidget {
       decoration: BoxDecoration(
         color: hollow.elevated,
         borderRadius: BorderRadius.circular(hollow.radiusMd),
-        border: Border.all(color: hollow.border),
       ),
       child: Row(
         children: [
@@ -264,7 +263,7 @@ class _RoomCard extends ConsumerWidget {
             height: 40,
             decoration: BoxDecoration(
               color: hollow.accent.withValues(alpha: 0.12),
-              borderRadius: BorderRadius.circular(hollow.radiusSm),
+              borderRadius: BorderRadius.circular(hollow.radiusMd),
             ),
             child: Icon(LucideIcons.video, size: 20, color: hollow.accent),
           ),
@@ -325,7 +324,7 @@ class _RoomCard extends ConsumerWidget {
             child: HollowPressable(
               semanticLabel: 'Edit room ${room.name}',
               onTap: () => showConferenceRoomFormDialog(context, room: room),
-              borderRadius: BorderRadius.circular(hollow.radiusSm),
+              borderRadius: BorderRadius.circular(hollow.radiusMd),
               padding: const EdgeInsets.all(HollowSpacing.xs),
               child: Icon(LucideIcons.pencil,
                   size: 16, color: hollow.textSecondary),
@@ -336,7 +335,7 @@ class _RoomCard extends ConsumerWidget {
             child: HollowPressable(
               semanticLabel: 'Delete room ${room.name}',
               onTap: () => _confirmDelete(context, ref),
-              borderRadius: BorderRadius.circular(hollow.radiusSm),
+              borderRadius: BorderRadius.circular(hollow.radiusMd),
               padding: const EdgeInsets.all(HollowSpacing.xs),
               child: Icon(LucideIcons.trash2,
                   size: 16, color: hollow.textSecondary),
@@ -355,7 +354,7 @@ class _RoomCard extends ConsumerWidget {
       ),
       decoration: BoxDecoration(
         color: hollow.accent.withValues(alpha: 0.10),
-        borderRadius: BorderRadius.circular(hollow.radiusSm),
+        borderRadius: BorderRadius.circular(hollow.radiusXs),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
@@ -1046,7 +1045,7 @@ class _ManageDrawerState extends ConsumerState<_ManageDrawer>
           child: Container(
             width: 300,
             decoration: BoxDecoration(
-              color: hollow.surface.withValues(alpha: 0.88),
+              color: hollow.overlay.withValues(alpha: 0.88),
               border: Border(
                 right: BorderSide(color: hollow.border.withValues(alpha: 0.5)),
               ),
@@ -1063,7 +1062,7 @@ class _ManageDrawerState extends ConsumerState<_ManageDrawer>
               width: 24,
               height: 48,
               decoration: BoxDecoration(
-                color: hollow.surface.withValues(alpha: 0.88),
+                color: hollow.overlay.withValues(alpha: 0.88),
                 borderRadius: const BorderRadius.horizontal(
                   right: Radius.circular(8),
                 ),
@@ -1098,10 +1097,9 @@ class _ManageDrawerState extends ConsumerState<_ManageDrawer>
                         ),
                         child: Text(
                           '$pending',
-                          style: HollowTypography.caption.copyWith(
+                          style: HollowTypography.micro.copyWith(
                             color: hollow.background,
-                            fontSize: 9,
-                            fontWeight: FontWeight.w700,
+                            fontWeight: FontWeight.w600,
                           ),
                         ),
                       ),
@@ -1277,13 +1275,12 @@ class _WaitingRow extends ConsumerWidget {
                         decoration: BoxDecoration(
                           color: hollow.success.withValues(alpha: 0.15),
                           borderRadius:
-                              BorderRadius.circular(hollow.radiusSm),
+                              BorderRadius.circular(hollow.radiusXs),
                         ),
                         child: Text(
                           'Friend',
-                          style: HollowTypography.caption.copyWith(
+                          style: HollowTypography.micro.copyWith(
                             color: hollow.success,
-                            fontSize: 9,
                             fontWeight: FontWeight.w600,
                           ),
                         ),
@@ -1307,7 +1304,7 @@ class _WaitingRow extends ConsumerWidget {
               semanticLabel: 'Decline join request',
               onTap: () =>
                   ref.read(conferenceProvider.notifier).deny(entry.peerId),
-              borderRadius: BorderRadius.circular(hollow.radiusSm),
+              borderRadius: BorderRadius.circular(hollow.radiusMd),
               padding: const EdgeInsets.all(HollowSpacing.xs),
               child: Icon(LucideIcons.x, size: 16, color: hollow.error),
             ),
@@ -1318,7 +1315,7 @@ class _WaitingRow extends ConsumerWidget {
               semanticLabel: 'Admit to meeting',
               onTap: () =>
                   ref.read(conferenceProvider.notifier).admit(entry.peerId),
-              borderRadius: BorderRadius.circular(hollow.radiusSm),
+              borderRadius: BorderRadius.circular(hollow.radiusMd),
               padding: const EdgeInsets.all(HollowSpacing.xs),
               child:
                   Icon(LucideIcons.check, size: 16, color: hollow.accent),
@@ -1384,7 +1381,7 @@ class _ParticipantRow extends ConsumerWidget {
               child: HollowPressable(
                 semanticLabel: 'Remove from meeting',
                 onTap: () => _confirmKick(context, ref, name),
-                borderRadius: BorderRadius.circular(hollow.radiusSm),
+                borderRadius: BorderRadius.circular(hollow.radiusMd),
                 padding: const EdgeInsets.all(HollowSpacing.xs),
                 child: Icon(LucideIcons.userMinus,
                     size: 15, color: hollow.textSecondary),
@@ -1592,7 +1589,7 @@ class _ParticipantTile extends ConsumerWidget {
                   child: Container(
                     padding: const EdgeInsets.all(3),
                     decoration: BoxDecoration(
-                      color: hollow.surface,
+                      color: hollow.elevated,
                       shape: BoxShape.circle,
                       border: Border.all(color: hollow.border),
                     ),

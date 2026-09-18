@@ -86,7 +86,7 @@ class _MobileChatsTabState extends ConsumerState<MobileChatsTab> {
     final hollow = HollowTheme.of(context);
     showModalBottomSheet<void>(
       context: context,
-      backgroundColor: hollow.surface,
+      backgroundColor: hollow.overlay,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(hollow.radiusLg)),
       ),
@@ -104,7 +104,7 @@ class _MobileChatsTabState extends ConsumerState<MobileChatsTab> {
     final hollow = HollowTheme.of(context);
     showModalBottomSheet<void>(
       context: context,
-      backgroundColor: hollow.surface,
+      backgroundColor: hollow.overlay,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(hollow.radiusLg)),
       ),
@@ -470,7 +470,7 @@ class _MobileChatsTabState extends ConsumerState<MobileChatsTab> {
                       ),
                     );
                   },
-                  borderRadius: BorderRadius.circular(hollow.radiusSm),
+                  borderRadius: BorderRadius.circular(hollow.radiusMd),
                   padding: const EdgeInsets.all(HollowSpacing.xs),
                   child: Icon(
                     LucideIcons.video,
@@ -1652,7 +1652,7 @@ class _NewConversationDialogState
             constraints: const BoxConstraints(maxWidth: 400),
             padding: const EdgeInsets.all(HollowSpacing.xl),
             decoration: BoxDecoration(
-              color: hollow.elevated.withValues(alpha: 0.95),
+              color: hollow.overlay,
               borderRadius: BorderRadius.circular(hollow.radiusLg),
               border: Border.all(
                 color: hollow.accent.withValues(alpha: 0.15),
@@ -1682,7 +1682,7 @@ class _NewConversationDialogState
                         onTap: () => Navigator.of(context).pop(),
                         semanticLabel: 'Close',
                         borderRadius:
-                            BorderRadius.circular(hollow.radiusSm),
+                            BorderRadius.circular(hollow.radiusMd),
                         padding: const EdgeInsets.all(HollowSpacing.xs),
                         child: Icon(LucideIcons.x,
                             size: 18, color: hollow.textSecondary),
@@ -1788,7 +1788,7 @@ class _InputRow extends StatelessWidget {
               hintText: hint,
               hintStyle: hintStyle,
               filled: true,
-              fillColor: hollow.surface,
+              fillColor: hollow.elevated,
               isDense: true,
               contentPadding: const EdgeInsets.symmetric(
                 horizontal: HollowSpacing.md,
@@ -1935,7 +1935,7 @@ class _ServerContextSheet extends ConsumerWidget {
                 constraints: const BoxConstraints(maxWidth: 360),
                 padding: const EdgeInsets.all(HollowSpacing.xl),
                 decoration: BoxDecoration(
-                  color: hollow.elevated,
+                  color: hollow.overlay,
                   borderRadius: BorderRadius.circular(hollow.radiusLg),
                   border: Border.all(color: hollow.border),
                 ),

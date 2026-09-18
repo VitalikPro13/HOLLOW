@@ -179,7 +179,7 @@ class _ShopItemDialogState extends ConsumerState<_ShopItemDialog> {
               child: HollowPressable(
                 onTap: _openArtist,
                 semanticButton: false,
-                borderRadius: BorderRadius.circular(hollow.radiusSm),
+                borderRadius: BorderRadius.circular(hollow.radiusMd),
                 padding: EdgeInsets.zero,
                 child: Text(
                   'by ${listing.artist.displayName}',

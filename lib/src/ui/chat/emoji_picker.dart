@@ -202,7 +202,7 @@ void _showEmoteContextMenu(
             child: Container(
               width: menuWidth,
               decoration: BoxDecoration(
-                color: hollow.surface,
+                color: hollow.overlay,
                 borderRadius: BorderRadius.circular(hollow.radiusMd),
                 border: Border.all(color: hollow.border),
                 boxShadow: [
@@ -234,7 +234,7 @@ void _showEmoteContextMenu(
                         dismiss();
                         onAction();
                       },
-                      borderRadius: BorderRadius.circular(hollow.radiusSm),
+                      borderRadius: BorderRadius.circular(hollow.radiusMd),
                       padding: const EdgeInsets.symmetric(
                           horizontal: 8, vertical: 6),
                       child: Row(
@@ -331,7 +331,7 @@ class _EmojiPickerOverlay extends StatelessWidget {
                 width: pickerWidth,
                 height: pickerHeight,
                 decoration: BoxDecoration(
-                  color: hollow.surface,
+                  color: hollow.overlay,
                   borderRadius: BorderRadius.circular(hollow.radiusMd),
                   border: Border.all(color: hollow.border),
                   boxShadow: [
@@ -590,7 +590,7 @@ class _EmojiPickerBodyState extends ConsumerState<EmojiPickerBody> {
           child: HollowPressable(
             onTap: _uploadPersonalEmote,
             semanticLabel: 'Upload a personal emote image',
-            borderRadius: BorderRadius.circular(hollow.radiusSm),
+            borderRadius: BorderRadius.circular(hollow.radiusMd),
             padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
             child: Row(
               mainAxisSize: MainAxisSize.min,
@@ -675,7 +675,7 @@ class _EmojiPickerBodyState extends ConsumerState<EmojiPickerBody> {
               return HollowPressable(
                 onTap: () => _importFfz(e),
                 semanticLabel: 'Use FFZ emote ${e.name}',
-                borderRadius: BorderRadius.circular(hollow.radiusSm),
+                borderRadius: BorderRadius.circular(hollow.radiusMd),
                 padding: const EdgeInsets.all(4),
                 child: HollowTooltip(
                   message: '${e.name} · by ${e.owner}',
@@ -760,7 +760,7 @@ class _EmojiPickerBodyState extends ConsumerState<EmojiPickerBody> {
       onTap: () =>
           _select(emotes_api.emoteToken(name: name, hash: hash)),
       semanticLabel: 'Emote $name',
-      borderRadius: BorderRadius.circular(hollow.radiusSm),
+      borderRadius: BorderRadius.circular(hollow.radiusMd),
       padding: const EdgeInsets.all(4),
       child: HollowTooltip(
         message: ':$name:',
@@ -963,7 +963,7 @@ class _EmojiCell extends StatelessWidget {
     final cell = HollowPressable(
       onTap: () => onSelect(emoji.char),
       semanticLabel: emoji.name.isEmpty ? 'Emoji ${emoji.char}' : emoji.name,
-      borderRadius: BorderRadius.circular(hollow.radiusSm),
+      borderRadius: BorderRadius.circular(hollow.radiusMd),
       padding: const EdgeInsets.all(3),
       child: Center(
         child: emote != null

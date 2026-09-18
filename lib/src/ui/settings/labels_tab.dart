@@ -369,7 +369,7 @@ class _LabelsTabState extends ConsumerState<LabelsTab> {
                         child: HollowPressable(
                           semanticLabel: 'Assign to members',
                           onTap: () => _showAssignDialog(label),
-                          borderRadius: BorderRadius.circular(hollow.radiusSm),
+                          borderRadius: BorderRadius.circular(hollow.radiusMd),
                           padding: const EdgeInsets.all(HollowSpacing.xs),
                           child: Icon(LucideIcons.userPlus, size: 14,
                               color: hollow.textSecondary),
@@ -381,7 +381,7 @@ class _LabelsTabState extends ConsumerState<LabelsTab> {
                         child: HollowPressable(
                           semanticLabel: 'Edit label',
                           onTap: () => _showLabelDialog(existing: label),
-                          borderRadius: BorderRadius.circular(hollow.radiusSm),
+                          borderRadius: BorderRadius.circular(hollow.radiusMd),
                           padding: const EdgeInsets.all(HollowSpacing.xs),
                           child: Icon(LucideIcons.pencil, size: 14,
                               color: hollow.textSecondary),
@@ -393,7 +393,7 @@ class _LabelsTabState extends ConsumerState<LabelsTab> {
                         child: HollowPressable(
                           semanticLabel: 'Delete label',
                           onTap: () => _deleteLabel(label.labelId),
-                          borderRadius: BorderRadius.circular(hollow.radiusSm),
+                          borderRadius: BorderRadius.circular(hollow.radiusMd),
                           padding: const EdgeInsets.all(HollowSpacing.xs),
                           child: Icon(LucideIcons.trash2, size: 14,
                               color: hollow.error),
@@ -529,9 +529,8 @@ class _AssignDialogState extends ConsumerState<_AssignDialog> {
             width: double.infinity,
             padding: const EdgeInsets.all(HollowSpacing.lg),
             decoration: BoxDecoration(
-              color: hollow.surface.withValues(alpha: 0.4),
+              color: hollow.elevated,
               borderRadius: BorderRadius.circular(hollow.radiusMd),
-              border: Border.all(color: hollow.border),
             ),
             child: membersAsync.when(
               data: (members) => MemberSearchPicker(

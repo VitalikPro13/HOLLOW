@@ -92,7 +92,7 @@ class UserBar extends ConsumerWidget {
       constraints: const BoxConstraints(minHeight: 52),
       padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.sm + 2),
       decoration: BoxDecoration(
-        color: hollow.opaqueBackground,
+        color: hollow.opaqueSurface,
         border: Border(
           top: BorderSide(color: hollow.border),
         ),
@@ -117,7 +117,7 @@ class UserBar extends ConsumerWidget {
             child: HollowTooltip(
               message: localPeerId ?? 'Loading...',
               child: HollowPressable(
-                borderRadius: BorderRadius.circular(hollow.radiusSm),
+                borderRadius: BorderRadius.circular(hollow.radiusMd),
                 onTap: () {
                   if (localPeerId != null) {
                     // The card's bottom edge sits just above the user bar,
@@ -196,7 +196,7 @@ class UserBar extends ConsumerWidget {
             child: HollowPressable(
               semanticLabel: 'Settings',
               onTap: () => showUserSettingsDialog(context),
-              borderRadius: BorderRadius.circular(hollow.radiusSm),
+              borderRadius: BorderRadius.circular(hollow.radiusMd),
               padding: const EdgeInsets.all(HollowSpacing.xs),
               child: Icon(
                 LucideIcons.settings,
@@ -213,7 +213,7 @@ class UserBar extends ConsumerWidget {
                 semanticLabel: 'Recovery phrase',
                 onTap: () =>
                     showMnemonicDialog(context, identity.mnemonic!),
-                borderRadius: BorderRadius.circular(hollow.radiusSm),
+                borderRadius: BorderRadius.circular(hollow.radiusMd),
                 padding: const EdgeInsets.all(HollowSpacing.xs),
                 child: Icon(LucideIcons.keyRound, size: 16, color: hollow.textSecondary),
               ),

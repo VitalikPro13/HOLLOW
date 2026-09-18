@@ -2,6 +2,8 @@ import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 
+import '../theme/hollow_spacing.dart';
+
 /// Pre-compiles GPU shaders used by Hollow's UI before the first frame.
 ///
 /// Skia compiles a shader the first time it meets a draw operation, at 20-200ms
@@ -111,7 +113,7 @@ class HollowShaderWarmUp extends ShaderWarmUp {
         ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 24),
     );
     canvas.drawRRect(
-      RRect.fromRectAndRadius(rect.deflate(40), const Radius.circular(6)),
+      RRect.fromRectAndRadius(rect.deflate(40), const Radius.circular(HollowRadius.md)),
       Paint()
         ..color = const Color(0x3300BFA6)
         ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 8),

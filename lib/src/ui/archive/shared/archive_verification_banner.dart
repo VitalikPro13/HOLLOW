@@ -130,7 +130,7 @@ class ArchiveChannelSelector extends StatelessWidget {
             child: Center(
               child: HollowPressable(
                 onTap: () => onChannelSelected(ch.channelId),
-                borderRadius: BorderRadius.circular(hollow.radiusSm),
+                borderRadius: BorderRadius.circular(hollow.radiusXs),
                 padding:
                     const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
                 child: Container(
@@ -138,7 +138,7 @@ class ArchiveChannelSelector extends StatelessWidget {
                     color: isActive
                         ? hollow.accent.withValues(alpha: 0.15)
                         : Colors.transparent,
-                    borderRadius: BorderRadius.circular(hollow.radiusSm),
+                    borderRadius: BorderRadius.circular(hollow.radiusXs),
                     border: Border.all(
                       color: isActive
                           ? hollow.accent.withValues(alpha: 0.3)

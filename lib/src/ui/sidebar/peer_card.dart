@@ -74,7 +74,7 @@ class PeerCard extends ConsumerWidget {
                     bottom: 0,
                     child: Container(
                       decoration: BoxDecoration(
-                        color: hollow.background,
+                        color: hollow.surface,
                         shape: BoxShape.circle,
                       ),
                       padding: const EdgeInsets.all(1.5),

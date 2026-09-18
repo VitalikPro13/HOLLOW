@@ -221,7 +221,7 @@ class _UsageBar extends StatelessWidget {
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
     return ClipRRect(
-      borderRadius: BorderRadius.circular(hollow.radiusSm),
+      borderRadius: BorderRadius.circular(hollow.radiusXs),
       child: SizedBox(
         height: 8,
         child: total <= 0
@@ -415,7 +415,7 @@ class _ContextRowState extends ConsumerState<_ContextRow> {
         width: 30,
         height: 30,
         decoration: BoxDecoration(
-          color: hollow.surface,
+          color: hollow.elevated,
           borderRadius: BorderRadius.circular(hollow.radiusMd),
           border: Border.all(color: hollow.border),
         ),
@@ -436,8 +436,8 @@ class _ContextRowState extends ConsumerState<_ContextRow> {
           // Zero-alpha rest colour, not `Colors.transparent`: that is
           // transparent BLACK, and the lerp flashes dark on hover.
           color: _hovered
-              ? hollow.surface
-              : hollow.surface.withValues(alpha: 0.0),
+              ? hollow.hover
+              : hollow.hover.withValues(alpha: 0.0),
           borderRadius: BorderRadius.circular(hollow.radiusMd),
         ),
         child: Row(
@@ -561,7 +561,7 @@ class _RowTrashButton extends StatelessWidget {
     return HollowPressable(
       onTap: handleTap,
       semanticLabel: 'Delete files',
-      borderRadius: BorderRadius.circular(hollow.radiusSm),
+      borderRadius: BorderRadius.circular(hollow.radiusMd),
       padding: const EdgeInsets.all(6),
       child: Icon(LucideIcons.trash2, size: 16, color: hollow.error),
     );

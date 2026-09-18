@@ -224,7 +224,7 @@ class _ScreenShareDialogState extends State<_ScreenShareDialog> {
             child: Container(
               padding: const EdgeInsets.all(HollowSpacing.xl),
               decoration: BoxDecoration(
-                color: hollow.elevated.withValues(alpha: 0.95),
+                color: hollow.overlay,
                 borderRadius: radius,
                 border: Border.all(
                     color: hollow.accent.withValues(alpha: 0.15)),
@@ -531,9 +531,8 @@ class _ScreenShareDialogState extends State<_ScreenShareDialog> {
         Container(
           padding: const EdgeInsets.all(HollowSpacing.md),
           decoration: BoxDecoration(
-            color: hollow.surface,
-            borderRadius: BorderRadius.circular(hollow.radiusSm),
-            border: Border.all(color: hollow.border),
+            color: hollow.elevated,
+            borderRadius: BorderRadius.circular(hollow.radiusMd),
           ),
           child: Row(
             children: [
@@ -604,7 +603,7 @@ class _ScreenShareDialogState extends State<_ScreenShareDialog> {
     return HollowFocusRing(
       enabled: true,
       onActivate: onTap,
-      borderRadius: BorderRadius.circular(hollow.radiusSm),
+      borderRadius: BorderRadius.circular(hollow.radiusMd),
       child: GestureDetector(
         onTap: onTap,
         child: Container(
@@ -616,7 +615,7 @@ class _ScreenShareDialogState extends State<_ScreenShareDialog> {
             color: active
                 ? hollow.accent.withValues(alpha: 0.15)
                 : Colors.transparent,
-            borderRadius: BorderRadius.circular(hollow.radiusSm),
+            borderRadius: BorderRadius.circular(hollow.radiusMd),
             border: active
                 ? Border.all(color: hollow.accent.withValues(alpha: 0.3))
                 : null,
@@ -641,13 +640,13 @@ class _ScreenShareDialogState extends State<_ScreenShareDialog> {
     return HollowFocusRing(
       enabled: true,
       onActivate: () => setState(() => _selectedSourceId = source.id),
-      borderRadius: BorderRadius.circular(hollow.radiusSm),
+      borderRadius: BorderRadius.circular(hollow.radiusMd),
       child: GestureDetector(
         onTap: () => setState(() => _selectedSourceId = source.id),
         child: Container(
           decoration: BoxDecoration(
-            color: hollow.surface,
-            borderRadius: BorderRadius.circular(hollow.radiusSm),
+            color: hollow.elevated,
+            borderRadius: BorderRadius.circular(hollow.radiusMd),
             border: Border.all(
               color: isSelected
                   ? hollow.accent

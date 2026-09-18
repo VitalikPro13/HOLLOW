@@ -164,7 +164,7 @@ class NetworkSettingsView extends ConsumerWidget {
           decoration: BoxDecoration(
             color: isSelected
                 ? hollow.accent.withValues(alpha: 0.08)
-                : hollow.surface.withValues(alpha: 0.5),
+                : hollow.elevated,
             borderRadius: BorderRadius.circular(hollow.radiusMd),
             border: Border.all(
               color: isSelected
@@ -212,7 +212,7 @@ class NetworkSettingsView extends ConsumerWidget {
                   ),
                   decoration: BoxDecoration(
                     color: hollow.accent.withValues(alpha: 0.15),
-                    borderRadius: BorderRadius.circular(hollow.radiusSm),
+                    borderRadius: BorderRadius.circular(hollow.radiusXs),
                   ),
                   child: Text(
                     'Official',

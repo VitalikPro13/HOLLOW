@@ -38,7 +38,7 @@ void showInviteDialog(
             Container(
               padding: const EdgeInsets.all(HollowSpacing.md),
               decoration: BoxDecoration(
-                color: hollow.background,
+                color: hollow.elevated,
                 borderRadius: BorderRadius.circular(hollow.radiusMd),
                 border: Border.all(
                   color: hollow.accent.withValues(alpha: 0.3),
@@ -64,7 +64,7 @@ void showInviteDialog(
                       );
                     },
                     borderRadius:
-                        BorderRadius.circular(hollow.radiusSm),
+                        BorderRadius.circular(hollow.radiusMd),
                     padding: const EdgeInsets.all(HollowSpacing.xs),
                     semanticLabel: 'Copy invite link',
                     child: Icon(LucideIcons.copy,

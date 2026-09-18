@@ -143,7 +143,7 @@ class _MobileCallScreenState extends ConsumerState<MobileCallScreen> {
                         .watchRemoteScreenShare(),
                     semanticLabel: 'Watch screen share',
                     borderRadius: BorderRadius.circular(HollowRadius.pill),
-                    backgroundColor: hollow.surface,
+                    backgroundColor: hollow.elevated,
                     padding: const EdgeInsets.symmetric(
                       horizontal: HollowSpacing.md,
                       vertical: HollowSpacing.xs,
@@ -193,7 +193,7 @@ class _MobileCallScreenState extends ConsumerState<MobileCallScreen> {
           HollowPressable(
             onTap: () => Navigator.of(context).pop(),
             semanticLabel: 'Minimize',
-            borderRadius: BorderRadius.circular(hollow.radiusSm),
+            borderRadius: BorderRadius.circular(hollow.radiusMd),
             padding: const EdgeInsets.all(HollowSpacing.sm),
             child: Icon(LucideIcons.chevronDown,
                 size: 24, color: hollow.textPrimary),
@@ -237,7 +237,7 @@ class _MobileCallScreenState extends ConsumerState<MobileCallScreen> {
               onTap: () => ref
                   .read(callProvider.notifier)
                   .stopWatchingRemoteScreenShare(),
-              borderRadius: BorderRadius.circular(hollow.radiusSm),
+              borderRadius: BorderRadius.circular(hollow.radiusMd),
               padding: const EdgeInsets.all(HollowSpacing.sm),
               child: Icon(LucideIcons.eyeOff,
                   size: 22, color: hollow.textPrimary),

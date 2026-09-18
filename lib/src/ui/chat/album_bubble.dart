@@ -262,7 +262,7 @@ class _MoreOverlay extends StatelessWidget {
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
     return ClipRRect(
-      borderRadius: BorderRadius.circular(hollow.radiusSm),
+      borderRadius: BorderRadius.circular(hollow.radiusMd),
       child: ColoredBox(
         color: Colors.black.withValues(alpha: 0.55),
         child: Center(

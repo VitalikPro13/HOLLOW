@@ -136,7 +136,7 @@ class _GuestServerSidebarState extends ConsumerState<GuestServerSidebar> {
                     }
                   }),
                   semanticLabel: 'Add channel',
-                  borderRadius: BorderRadius.circular(hollow.radiusSm),
+                  borderRadius: BorderRadius.circular(hollow.radiusMd),
                   padding: const EdgeInsets.all(4),
                   child: Icon(
                     _showAddField ? LucideIcons.x : LucideIcons.plus,
@@ -378,7 +378,7 @@ class _GuestServerSection extends ConsumerWidget {
               child: Row(
                 children: [
                   ClipRRect(
-                    borderRadius: BorderRadius.circular(6),
+                    borderRadius: BorderRadius.circular(hollow.radiusMd),
                     child: avatarBytes != null
                         ? Image.memory(
                             avatarBytes is Uint8List
@@ -428,7 +428,7 @@ class _GuestServerSection extends ConsumerWidget {
                     HollowPressable(
                       onTap: onRefresh,
                       semanticLabel: 'Refresh',
-                      borderRadius: BorderRadius.circular(hollow.radiusSm),
+                      borderRadius: BorderRadius.circular(hollow.radiusMd),
                       padding: const EdgeInsets.all(2),
                       child: Icon(
                         LucideIcons.refreshCw,

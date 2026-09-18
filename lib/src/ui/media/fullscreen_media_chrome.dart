@@ -152,7 +152,7 @@ class MediaChromeButton extends StatelessWidget {
       onTap: onTap,
       semanticLabel: label,
       borderRadius: BorderRadius.circular(hollow.radiusMd),
-      backgroundColor: hollow.elevated.withValues(alpha: 0.8),
+      backgroundColor: hollow.overlay.withValues(alpha: 0.8),
       padding: const EdgeInsets.all(HollowSpacing.sm),
       child: Icon(icon, color: hollow.textPrimary, size: 20),
     );

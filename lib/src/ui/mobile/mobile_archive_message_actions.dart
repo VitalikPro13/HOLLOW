@@ -18,7 +18,7 @@ void showMobileArchiveMessageActions({
   final hollow = HollowTheme.of(context);
   showModalBottomSheet(
     context: context,
-    backgroundColor: hollow.surface,
+    backgroundColor: hollow.overlay,
     shape: RoundedRectangleBorder(
       borderRadius:
           BorderRadius.vertical(top: Radius.circular(hollow.radiusXl)),
@@ -156,7 +156,7 @@ class _ArchiveActionsSheetState extends State<_ArchiveActionsSheet>
               padding: const EdgeInsets.all(HollowSpacing.sm),
               decoration: BoxDecoration(
                 color: hollow.elevated,
-                borderRadius: BorderRadius.circular(hollow.radiusSm),
+                borderRadius: BorderRadius.circular(hollow.radiusMd),
                 border: Border.all(color: hollow.border),
               ),
               child: Column(

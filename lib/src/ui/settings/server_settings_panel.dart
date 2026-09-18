@@ -175,7 +175,7 @@ class _ServerSettingsPanelState extends ConsumerState<ServerSettingsPanel> {
                       ref.read(serverSettingsOpenProvider.notifier).state = false;
                     }
                   },
-                  borderRadius: BorderRadius.circular(hollow.radiusSm),
+                  borderRadius: BorderRadius.circular(hollow.radiusMd),
                   padding: const EdgeInsets.all(HollowSpacing.xs),
                   child: Icon(LucideIcons.x, size: 18, color: hollow.textSecondary),
                 ),
@@ -230,7 +230,7 @@ class _ServerSettingsPanelState extends ConsumerState<ServerSettingsPanel> {
                         false;
                   }
                 },
-                borderRadius: BorderRadius.circular(hollow.radiusSm),
+                borderRadius: BorderRadius.circular(hollow.radiusMd),
                 padding: const EdgeInsets.all(HollowSpacing.xs),
                 child: Icon(LucideIcons.x,
                     size: 18, color: hollow.textSecondary),
@@ -321,7 +321,7 @@ class _TabButton extends StatelessWidget {
     return HollowPressable(
       onTap: onTap,
       subtle: true,
-      borderRadius: BorderRadius.circular(hollow.radiusSm),
+      borderRadius: BorderRadius.circular(hollow.radiusMd),
       padding: const EdgeInsets.symmetric(
         horizontal: HollowSpacing.md,
         vertical: HollowSpacing.sm,

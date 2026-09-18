@@ -340,7 +340,7 @@ class _LinkPreviewCardState extends ConsumerState<LinkPreviewCard> {
           ),
           child: Center(
             child: ClipRRect(
-              borderRadius: BorderRadius.circular(hollow.radiusSm),
+              borderRadius: BorderRadius.circular(hollow.radiusMd),
               child: SizedBox(width: width, child: media),
             ),
           ),
@@ -476,7 +476,7 @@ class _LinkPreviewCardState extends ConsumerState<LinkPreviewCard> {
     final bytes = _thumbBytes();
     if (bytes == null) return const SizedBox.shrink();
     return ClipRRect(
-      borderRadius: BorderRadius.circular(hollow.radiusSm),
+      borderRadius: BorderRadius.circular(hollow.radiusMd),
       child: Image.memory(
         bytes,
         width: 80,

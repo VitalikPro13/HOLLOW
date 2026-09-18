@@ -324,7 +324,7 @@ class _ImportShardsDialogState extends State<_ImportShardsDialog> {
             padding: const EdgeInsets.all(HollowSpacing.md),
             decoration: BoxDecoration(
               color: const Color(0xFF4CAF50).withValues(alpha: 0.08),
-              borderRadius: BorderRadius.circular(hollow.radiusSm),
+              borderRadius: BorderRadius.circular(hollow.radiusMd),
             ),
             child: Row(
               children: [

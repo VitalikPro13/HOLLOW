@@ -713,7 +713,7 @@ class MessageText extends StatelessWidget {
       padding: const EdgeInsets.all(8),
       decoration: BoxDecoration(
         color: hollow.background,
-        borderRadius: BorderRadius.circular(6),
+        borderRadius: BorderRadius.circular(hollow.radiusMd),
         border: Border.all(color: hollow.border),
       ),
       child: Text(

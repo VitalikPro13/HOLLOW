@@ -419,7 +419,7 @@ class _StepButton extends StatelessWidget {
   Widget build(BuildContext context) {
     return HollowPressable(
       onTap: onTap,
-      borderRadius: BorderRadius.circular(hollow.radiusSm),
+      borderRadius: BorderRadius.circular(hollow.radiusMd),
       padding: const EdgeInsets.all(6),
       semanticLabel: label,
       child: Icon(icon, size: 16, color: hollow.textSecondary),

@@ -412,7 +412,7 @@ class ChannelSidebar extends StatelessWidget {
                     showInviteDialog(
                         context, link, selectedServer!.serverId);
                   },
-                  borderRadius: BorderRadius.circular(hollow.radiusSm),
+                  borderRadius: BorderRadius.circular(hollow.radiusMd),
                   padding: const EdgeInsets.all(HollowSpacing.xs),
                   child: Icon(
                     LucideIcons.userPlus,
@@ -428,7 +428,7 @@ class ChannelSidebar extends StatelessWidget {
                 semanticLabel: 'Storage',
                 onTap: () => showStorageDashboardDialog(
                     context, selectedServer!.serverId),
-                borderRadius: BorderRadius.circular(hollow.radiusSm),
+                borderRadius: BorderRadius.circular(hollow.radiusMd),
                 padding: const EdgeInsets.all(HollowSpacing.xs),
                 child: Icon(
                   LucideIcons.hardDrive,
@@ -442,7 +442,7 @@ class ChannelSidebar extends StatelessWidget {
               child: HollowPressable(
                 semanticLabel: 'Server settings',
                 onTap: onOpenSettings,
-                borderRadius: BorderRadius.circular(hollow.radiusSm),
+                borderRadius: BorderRadius.circular(hollow.radiusMd),
                 padding: const EdgeInsets.all(HollowSpacing.xs),
                 child: Icon(
                   LucideIcons.settings,
@@ -603,7 +603,7 @@ class _ServerContentState extends State<_ServerContent> {
                   HollowPressable(
                     semanticLabel: 'Create channel',
                     onTap: w.onCreateChannel,
-                    borderRadius: BorderRadius.circular(w.hollow.radiusSm),
+                    borderRadius: BorderRadius.circular(w.hollow.radiusMd),
                     padding: const EdgeInsets.all(HollowSpacing.xs),
                     child: Icon(LucideIcons.plus,
                         size: 14, color: w.hollow.textSecondary),
@@ -1157,14 +1157,14 @@ class _PendingRequestTile extends ConsumerWidget {
               HollowPressable(
                 semanticLabel: 'Accept friend request',
                 onTap: onAccept,
-                borderRadius: BorderRadius.circular(hollow.radiusSm),
+                borderRadius: BorderRadius.circular(hollow.radiusMd),
                 padding: const EdgeInsets.all(HollowSpacing.xs),
                 child: Icon(LucideIcons.check, size: 16, color: hollow.success),
               ),
               HollowPressable(
                 semanticLabel: 'Reject friend request',
                 onTap: onReject,
-                borderRadius: BorderRadius.circular(hollow.radiusSm),
+                borderRadius: BorderRadius.circular(hollow.radiusMd),
                 padding: const EdgeInsets.all(HollowSpacing.xs),
                 child: Icon(LucideIcons.x, size: 16, color: hollow.error),
               ),

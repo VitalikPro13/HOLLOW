@@ -1,6 +1,6 @@
 # Hollow design language and the grand redesign
 
-**Status:** IN PROGRESS, sessions 1 and 2 done 2026-09-18. Direction agreed 2026-09-14, research the same day.
+**Status:** IN PROGRESS, sessions 1 to 3 done 2026-09-18 (decisions picked and applied). Direction agreed 2026-09-14, research the same day.
 
 **Read this section first in a new session.** It is the handoff: what exists, what it changed, and the next thing to pick up. Everything below section 0 is the original plan, kept for its research digest and its screen-by-screen program; where it and this section disagree, this section is right.
 
@@ -69,6 +69,30 @@ Every sweep: probe screenshots **before**, change, probe screenshots **after**, 
 4. **Sweep 5: the ~60 inline empty states** onto `HollowEmptyState`.
 5. **Sweeps 6 to 9:** `showHollowSheet()` + one Hollow spinner (new primitives, then their sweeps), remaining Material `Switch` / `Slider`, the dialog pass (28 files), the filled-button audit.
 6. **Then the screen work**, phases 2 onward below, with the Shop's per-kind card shapes (verdict 9) and the compact message mode (verdict 8) inside it.
+
+### Session 3 (2026-09-18): decisions rendered, picked and applied
+
+**Picked by Vitalik from the rendered decision sheet:** dark ladder A (`dark-lifted`), light ladder L1 (`light-crisp`), ghost grey at rest (`textSecondary`), Onest confirmed over IBM Plex Sans, cards fill only in both themes. The candidates are deleted; the values are plain tokens.
+
+Applied (uncommitted at the time of writing; 1041 tests green, analyze clean):
+
+- **Five surface levels** (`lib/src/theme/surface_ladder.dart`): `surface` chrome `0B0C10`, `background` canvas `111318`, `elevated` raised `181A20`, new `overlay` `1E2127`, new `hover` `262930` (light: `F1F2F4` / `FFFFFF` / `F5F6F8` / `FFFFFF` / `EBEDF0`). Every foreground token validated against all five (`Contrast.ensureContrastOnAll`).
+- **Surface role sweep, every site in `lib/src/ui`** (three partition agents, ~240 token changes, ~45 hairlines removed): chrome = persistent frame only (title bar and dock moved from `background`), cards and inputs `elevated`, everything floating `overlay` and opaque (the 0.92 to 0.97 dialog glass alphas are gone), rows inside an overlay hover to `hover`. Settings now has a chrome rail, a canvas content pane and raised cards. `noticeSurface()` blends onto `elevated`. Composer and chat header strips were judged chrome.
+- **Onest + Geist Mono** bundled as static instances (400/500/600, 400/500) cut with `fontTools.varLib.instancer`; `display` 600; mono lost its tracking.
+- **Ghost grey**, **danger label `textOnError`**, **`HollowCard` fill only**, dialog accent border gone.
+- **Ambient** is an Appearance opt-in (`ambientBackgroundProvider`, desktop + mobile, `AmbientBackgroundToggle` in settings_shared), off by default and under reduce motion.
+- **No 8 or 9 px text**: 41 sites onto `micro` / `monoSmall`; the friends-bar request badge became a 14 px pill that grows.
+- **The 6 px radius is deleted**: 407 sites moved (controls to 8, chips/badges/progress to 4), `radiusSm` and `HollowRadius.sm` removed. Nested radius takes the smaller stop.
+- **Message text** was already `body` 14: nothing to do.
+- Rule set, skill and guard updated (baselines: font-size 744, letter-spacing 57, radius-literal 153, material-colors 234).
+- Probe: `{"op":"theme","value":"light"}` flips the theme in place; `scripts/probe_scenarios/design_surfaces.json` shoots home, channel, menu, Shop, three Settings pages in both themes. Mobile verified on the mini with `fleet/design_sweep_mobile`.
+
+Findings worth keeping:
+
+1. **Skia on Windows draws light-on-dark text ~1.4 px heavier than dark-on-light** (measured stems at 600: 3.7 px against 2.3 px). Weights are correct; light reads a step thinner. If Vitalik wants it heavier, the light roles go one weight up, never a size.
+2. Seen for later sweeps: Appearance's Dock / Classic segmented control selects with a SOLID accent fill; the selected channel row in light shows a right-edge gradient; the mobile Settings rows are icon-in-a-tinted-box (a tell); `game_card_dialog` has a gradient from `Colors.transparent`; `edge_scroll_row` edge fades are hard-wired to `surface`.
+
+**Next:** verdict 14 (user GIF lists and sticker packs as ONE dropdown chip in the pickers), verdict 3 on the named sites (Wear, Unlink, the member card action), then sweep 3c.
 
 ### Vitalik's verdicts on the open decisions (2026-09-18, end of session 2)
 

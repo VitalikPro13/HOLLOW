@@ -392,7 +392,7 @@ class _ManageMemberDialogState extends ConsumerState<_ManageMemberDialog> {
           HollowPressable(
             semanticLabel: 'Revoke access to ${channel.name}',
             onTap: _busy ? null : () => _revoke(channel),
-            borderRadius: BorderRadius.circular(hollow.radiusSm),
+            borderRadius: BorderRadius.circular(hollow.radiusMd),
             padding: const EdgeInsets.all(HollowSpacing.xs),
             child: Icon(LucideIcons.x, size: 14, color: hollow.error),
           )

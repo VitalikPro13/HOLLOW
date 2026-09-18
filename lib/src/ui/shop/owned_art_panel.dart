@@ -148,7 +148,7 @@ class _OwnedArtPanelState extends ConsumerState<OwnedArtPanel> {
                       vertical: HollowSpacing.lg,
                     ),
                     decoration: BoxDecoration(
-                      color: hollow.surface,
+                      color: hollow.overlay,
                       borderRadius: BorderRadius.circular(hollow.radiusLg),
                       border: Border.all(color: hollow.accent, width: 2),
                     ),
@@ -272,9 +272,8 @@ class _OwnedItemRowState extends ConsumerState<_OwnedItemRow> {
     return Container(
       padding: const EdgeInsets.all(HollowSpacing.sm),
       decoration: BoxDecoration(
-        color: hollow.surface.withValues(alpha: 0.4),
+        color: hollow.elevated,
         borderRadius: BorderRadius.circular(hollow.radiusMd),
-        border: Border.all(color: hollow.border),
       ),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -308,7 +307,7 @@ class _OwnedItemRowState extends ConsumerState<_OwnedItemRow> {
                     child: HollowPressable(
                       onTap: _openArtist,
                       semanticButton: false,
-                      borderRadius: BorderRadius.circular(hollow.radiusSm),
+                      borderRadius: BorderRadius.circular(hollow.radiusMd),
                       padding: EdgeInsets.zero,
                       child: Text(
                         'by ${item.artistName}',
@@ -423,7 +422,7 @@ class _OwnedThumb extends ConsumerWidget {
         child: AspectRatio(
           aspectRatio: 2.5,
           child: ClipRRect(
-            borderRadius: BorderRadius.circular(hollow.radiusSm),
+            borderRadius: BorderRadius.circular(hollow.radiusMd),
             child: AnimatedGifImage(
               bytes: bytes,
               fit: BoxFit.cover,
@@ -551,7 +550,7 @@ class _KeptCodeRowState extends ConsumerState<_KeptCodeRow> {
         HollowPressable(
           semanticLabel: _revealed ? 'Hide code' : 'Reveal code',
           onTap: () => setState(() => _revealed = !_revealed),
-          borderRadius: BorderRadius.circular(hollow.radiusSm),
+          borderRadius: BorderRadius.circular(hollow.radiusMd),
           padding: const EdgeInsets.all(HollowSpacing.xs),
           child: Icon(
             _revealed ? LucideIcons.eyeOff : LucideIcons.eye,
@@ -569,14 +568,14 @@ class _KeptCodeRowState extends ConsumerState<_KeptCodeRow> {
         HollowPressable(
           semanticLabel: 'Copy code',
           onTap: () => _copy(context),
-          borderRadius: BorderRadius.circular(hollow.radiusSm),
+          borderRadius: BorderRadius.circular(hollow.radiusMd),
           padding: const EdgeInsets.all(HollowSpacing.xs),
           child: Icon(LucideIcons.copy, size: 14, color: hollow.textSecondary),
         ),
         HollowPressable(
           semanticLabel: 'Forget code',
           onTap: () => _forget(context, ref),
-          borderRadius: BorderRadius.circular(hollow.radiusSm),
+          borderRadius: BorderRadius.circular(hollow.radiusMd),
           padding: const EdgeInsets.all(HollowSpacing.xs),
           child: Icon(LucideIcons.trash2, size: 14, color: hollow.textSecondary),
         ),

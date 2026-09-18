@@ -129,7 +129,7 @@ class _WelcomeContentState extends State<_WelcomeContent> {
         final hollow = HollowTheme.of(ctx);
         final controller = TextEditingController();
         return AlertDialog(
-          backgroundColor: hollow.surface,
+          backgroundColor: hollow.overlay,
           title: Text('Enter Backup Passphrase', style: HollowTypography.heading.copyWith(color: hollow.textPrimary)),
           content: TextField(
             controller: controller,
@@ -202,7 +202,7 @@ class _WelcomeContentState extends State<_WelcomeContent> {
             color: Colors.transparent,
             child: Container(
               decoration: BoxDecoration(
-                color: hollow.elevated.withValues(alpha: 0.95),
+                color: hollow.overlay,
                 borderRadius: radius,
                 border: Border.all(
                   color: hollow.accent.withValues(alpha: 0.15),
@@ -289,9 +289,8 @@ class _WelcomeContentState extends State<_WelcomeContent> {
               const SizedBox(height: 2),
               Text(
                 _currentRoot,
-                style: HollowTypography.mono.copyWith(
+                style: HollowTypography.monoSmall.copyWith(
                   color: hollow.textTertiary,
-                  fontSize: 9,
                 ),
                 textAlign: TextAlign.center,
                 maxLines: 1,
@@ -358,7 +357,7 @@ class _WelcomeContentState extends State<_WelcomeContent> {
         HollowFocusRing(
           enabled: true,
           onActivate: () => setState(() => _showAdvanced = !_showAdvanced),
-          borderRadius: BorderRadius.circular(hollow.radiusSm),
+          borderRadius: BorderRadius.circular(hollow.radiusMd),
           child: GestureDetector(
             onTap: () => setState(() => _showAdvanced = !_showAdvanced),
             child: Row(
@@ -413,7 +412,7 @@ class _WelcomeContentState extends State<_WelcomeContent> {
         HollowFocusRing(
           enabled: true,
           onActivate: () => setState(() => _showProfiles = !_showProfiles),
-          borderRadius: BorderRadius.circular(hollow.radiusSm),
+          borderRadius: BorderRadius.circular(hollow.radiusMd),
           child: GestureDetector(
             onTap: () => setState(() => _showProfiles = !_showProfiles),
             child: Row(
@@ -503,9 +502,8 @@ class _WelcomeContentState extends State<_WelcomeContent> {
                 ),
                 Text(
                   row.path,
-                  style: HollowTypography.mono.copyWith(
+                  style: HollowTypography.monoSmall.copyWith(
                     color: hollow.textSecondary,
-                    fontSize: 9,
                   ),
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
@@ -583,7 +581,7 @@ class _OptionCardState extends State<_OptionCard> {
                   height: 40,
                   decoration: BoxDecoration(
                     color: hollow.accent.withValues(alpha: 0.1),
-                    borderRadius: BorderRadius.circular(hollow.radiusSm),
+                    borderRadius: BorderRadius.circular(hollow.radiusMd),
                   ),
                   child: Icon(
                     widget.icon,

@@ -195,7 +195,7 @@ class _EmoteRow extends StatelessWidget {
           horizontal: HollowSpacing.md, vertical: HollowSpacing.sm),
       decoration: BoxDecoration(
         color: hollow.elevated,
-        borderRadius: BorderRadius.circular(hollow.radiusSm),
+        borderRadius: BorderRadius.circular(hollow.radiusMd),
         border: Border.all(color: hollow.border),
       ),
       child: Row(
@@ -224,7 +224,7 @@ class _EmoteRow extends StatelessWidget {
             HollowPressable(
               semanticLabel: 'Remove emote ${emote.name}',
               onTap: onRemove,
-              borderRadius: BorderRadius.circular(hollow.radiusSm),
+              borderRadius: BorderRadius.circular(hollow.radiusMd),
               padding: const EdgeInsets.all(HollowSpacing.sm),
               child: Icon(LucideIcons.trash2, size: 18, color: hollow.error),
             ),

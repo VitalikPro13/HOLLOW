@@ -61,7 +61,7 @@ class WindowTitleBar extends StatelessWidget {
 
     return Container(
       height: 32,
-      color: hollow.opaqueBackground,
+      color: hollow.opaqueSurface,
       child: Stack(
         children: [
           // Underneath everything, so the whole bar moves the window; the
@@ -132,7 +132,7 @@ class WindowTitleBar extends StatelessWidget {
 
     return Container(
       height: 32,
-      color: hollow.opaqueBackground,
+      color: hollow.opaqueSurface,
       child: Row(
         children: [
           branding,
@@ -165,7 +165,7 @@ class ZoomIndicator extends ConsumerWidget {
         semanticLabel:
             'Interface scale ${scalePercentLabel(scale)}, reset to 100%',
         onTap: () => ref.read(uiScaleProvider.notifier).reset(),
-        borderRadius: BorderRadius.circular(hollow.radiusSm),
+        borderRadius: BorderRadius.circular(hollow.radiusMd),
         padding: const EdgeInsets.symmetric(
           horizontal: HollowSpacing.xs + 2,
           vertical: 2,

@@ -36,7 +36,7 @@ times for chips alone. Do not invent a 47th. Reach for the component.
 
 | Role | Size / weight | Use |
 |---|---|---|
-| `display` | 28 / 700 | Welcome, largest empty states. Rare. |
+| `display` | 28 / 600 | Welcome, largest empty states. Rare. |
 | `heading` | 20 / 600 | Screen title |
 | `subheading` | 16 / 600 | Section title |
 | `body` | 14 / 400 | Message text, prose, dialog body |
@@ -47,6 +47,8 @@ times for chips alone. Do not invent a 47th. Reach for the component.
 | `mono` | 13 / 400 | Console voice: ids, hashes, versions |
 | `monoSmall` | 11 / 400 | Console voice in metadata |
 
+- The faces are **Onest** (interface) and **Geist Mono** (the console voice),
+  bundled static at 400 / 500 / 600. Never set `fontFamily:` at a call site.
 - `copyWith(color:)` and `copyWith(fontWeight:)` are fine. `copyWith(fontSize:)`
   is not.
 - Nothing below 10. No half steps. Weights 400 / 500 / 600.
@@ -62,9 +64,14 @@ times for chips alone. Do not invent a 47th. Reach for the component.
 `hollow.<token>` from `HollowTheme.of(context)`. **`Colors.*` (except
 `Colors.transparent`) and `Color(0x...)` are forbidden outside the theme.**
 
-- Surfaces: `background` is the content canvas, `surface` is chrome (dock,
-  sidebars, title bar), `elevated` is raised (inputs, menus, dialogs, cards,
-  hover). One hairline, `border`.
+- Surfaces, five levels, dimmest to brightest on dark:
+  `surface` = **chrome** (title bar, dock, header, sidebars, member panel:
+  full bleed, below the canvas), `background` = **canvas** (the content),
+  `elevated` = **raised** (cards, settings cards, inputs, tiles, hover on the
+  canvas), `overlay` = **floating** (menus, pickers, dialogs, sheets, toasts,
+  tooltips, popovers; opaque, never glass), `hover` = a row's hover INSIDE an
+  overlay. One hairline, `border`. **A card on `surface` is a bug**: it reads
+  as a hole below the canvas.
 - Text: `textPrimary`, `textSecondary`, `textTertiary` (faded metadata). Three
   tiers, no fourth. **Never fade text with an alpha:** pick a tier.
 - Accent: `accentText` for accent text and icons, raw `accent` for fills only.
@@ -95,11 +102,12 @@ Padding: inside a control 4 to 8, inside a container 12 to 16, around a section
 
 ## Radius
 
-`hollow.radiusXs` 4 / `radiusSm` 6 / `radiusMd` 8 / `radiusLg` 12 /
-`radiusXl` 16, plus `HollowRadius.pill`.
+`hollow.radiusXs` 4 / `radiusMd` 8 / `radiusLg` 12 / `radiusXl` 16, plus
+`HollowRadius.pill`. There is no 6. A radius nested inside another takes the
+smaller stop.
 **`BorderRadius.circular(<number>)` is forbidden outside the theme.**
 
-- xs: badges, chips, keycaps. sm: toggles and other small controls. md:
+- xs: badges, chips, keycaps. md:
   buttons, inputs, menus, popovers, tooltips, hoverable rows. lg: cards,
   dialogs, panels. xl: sheets and mobile dialogs.
 - `pill` is for avatars, status dots and the unread jump pill. **A primary
@@ -145,9 +153,12 @@ option and no local variant.
 |---|---|---|
 | `filled` | The one primary action of a region | At most one per visible region, rarely more than one per screen |
 | `outline` | A secondary alternative beside that primary | At most two, and only when a `filled` is present |
-| `ghost` | Everything else: toolbars, icon buttons, Cancel, actions in rows and cards | No limit |
+| `ghost` | Everything else: toolbars, icon buttons, Cancel, secondary actions in rows and cards. **Grey**, never accent | No limit |
 | `danger` | The final destructive confirmation only | A cautionary action is `outline` with `danger: true` |
 
+- **A row that exists FOR one action** (wear, unlink, a member card's
+  action) carries it as a compact `outline`; its other actions stay ghost
+  icons.
 - **An action row with no primary is all ghost.** A toolbar never mixes outline
   and ghost. A button is outlined only because it stands next to a filled one.
 - Buttons in a row are `sm` 8 apart. Always.
@@ -166,7 +177,7 @@ action) · `HollowDivider` (the hairline, nothing else) · `HollowListRow`
 
 **Cards:** only for a repeatable self-contained unit (a listing, a device, a
 news item). A settings group is not a card. A section is not a card. Cards do
-not nest. A background step **or** a hairline, never both, never either plus a
+not nest. A background step (`elevated`) only: no hairline, no
 shadow. No coloured strip on the edge; status is a dot or a word. Anything
 repeated more than three times is a list of `HollowListRow`, not a grid of
 cards, unless the item **is** the art (the Shop, a gallery), where the art is
@@ -197,8 +208,9 @@ Already-settled surfaces: `showHollowDialog()`, `showHollowMenu` via
 
 Shadows only on things that float above the app (menus, popovers, dialogs,
 toasts), `blurRadius` at most 12. Never on a card or a row, never as a
-substitute for a surface step. **No gradients**, no glass, no blur, no glow, no
-animated ambient decoration.
+substitute for a surface step. **No gradients**, no glass, no blur, no glow. The
+ambient background is an Appearance opt-in, off by default and under reduce
+motion; never add another.
 
 ---
 

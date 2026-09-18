@@ -111,7 +111,7 @@ class _ServerVaultSectionState extends ConsumerState<_ServerVaultSection> {
       children: [
         HollowPressable(
           onTap: () => setState(() => _expanded = !expanded),
-          borderRadius: BorderRadius.circular(hollow.radiusSm),
+          borderRadius: BorderRadius.circular(hollow.radiusMd),
           padding: const EdgeInsets.symmetric(
             horizontal: HollowSpacing.md,
             vertical: HollowSpacing.sm,
@@ -383,9 +383,8 @@ class _VaultFileRow extends StatelessWidget {
       child: Container(
         padding: const EdgeInsets.all(HollowSpacing.md),
         decoration: BoxDecoration(
-          color: hollow.surface,
-          borderRadius: BorderRadius.circular(hollow.radiusSm),
-          border: Border.all(color: hollow.border),
+          color: hollow.elevated,
+          borderRadius: BorderRadius.circular(hollow.radiusMd),
         ),
         child: Row(
           children: [
@@ -448,7 +447,7 @@ class _VaultFileRow extends StatelessWidget {
               ),
               decoration: BoxDecoration(
                 color: badgeBg,
-                borderRadius: BorderRadius.circular(hollow.radiusSm),
+                borderRadius: BorderRadius.circular(hollow.radiusXs),
               ),
               child: Text(
                 shardText,
@@ -514,8 +513,8 @@ class _ActionButton extends StatelessWidget {
   Widget build(BuildContext context) {
     return HollowPressable(
       onTap: onTap,
-      borderRadius: BorderRadius.circular(hollow.radiusSm),
-      backgroundColor: hollow.surface,
+      borderRadius: BorderRadius.circular(hollow.radiusMd),
+      backgroundColor: hollow.elevated,
       padding: const EdgeInsets.symmetric(
         horizontal: HollowSpacing.md,
         vertical: HollowSpacing.sm,

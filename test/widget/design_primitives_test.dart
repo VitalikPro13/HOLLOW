@@ -280,22 +280,36 @@ void main() {
       final iconTheme = IconTheme.of(
         tester.element(find.byIcon(Icons.refresh)),
       );
-      expect(iconTheme.color, hollow.accentText);
+      expect(iconTheme.color, hollow.textSecondary);
     });
 
-    testWidgets('ghost and outline labels use accentText, never raw accent',
+    testWidgets('ghost is grey; outline uses accentText, never raw accent',
         (tester) async {
-      for (final button in [
-        HollowButton.ghost(onPressed: () {}, child: const Text('Cancel')),
-        HollowButton.outline(onPressed: () {}, child: const Text('Cancel')),
-      ]) {
-        final hollow = await _pump(tester, button, light: true);
-        final style = DefaultTextStyle.of(
-          tester.element(find.text('Cancel')),
-        ).style;
-        expect(style.color, hollow.accentText);
-        expect(style.color, isNot(hollow.accent));
-      }
+      // The accent means THE primary action, so ghost (everything else) is
+      // grey. Outline stands beside a primary and keeps the accent, drawn in
+      // the contrast-corrected accentText.
+      var hollow = await _pump(tester,
+          HollowButton.ghost(onPressed: () {}, child: const Text('Cancel')),
+          light: true);
+      var style =
+          DefaultTextStyle.of(tester.element(find.text('Cancel'))).style;
+      expect(style.color, hollow.textSecondary);
+
+      hollow = await _pump(tester,
+          HollowButton.outline(onPressed: () {}, child: const Text('Cancel')),
+          light: true);
+      style = DefaultTextStyle.of(tester.element(find.text('Cancel'))).style;
+      expect(style.color, hollow.accentText);
+      expect(style.color, isNot(hollow.accent));
+    });
+
+    testWidgets('danger labels its fill with the on-error token',
+        (tester) async {
+      final hollow = await _pump(tester,
+          HollowButton.danger(onPressed: () {}, child: const Text('Delete')));
+      final style =
+          DefaultTextStyle.of(tester.element(find.text('Delete'))).style;
+      expect(style.color, hollow.textOnError);
     });
   });
 

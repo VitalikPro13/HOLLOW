@@ -360,7 +360,7 @@ class EmoteAutocomplete {
           color: Colors.transparent,
           child: Container(
             decoration: BoxDecoration(
-              color: hollow.surface,
+              color: hollow.overlay,
               borderRadius: BorderRadius.circular(hollow.radiusMd),
               border: Border.all(color: hollow.border),
               boxShadow: [
@@ -381,7 +381,7 @@ class EmoteAutocomplete {
                 final selected = i == _selected;
                 return HollowPressable(
                   onTap: () => _accept(c),
-                  borderRadius: BorderRadius.circular(hollow.radiusSm),
+                  borderRadius: BorderRadius.circular(hollow.radiusMd),
                   backgroundColor: selected
                       ? hollow.accent.withValues(alpha: 0.12)
                       : null,

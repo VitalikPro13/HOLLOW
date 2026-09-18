@@ -47,7 +47,7 @@ class MobileSourceSwitchPill extends ConsumerWidget { // design-ignore: floating
         vertical: HollowSpacing.xs,
       ),
       decoration: BoxDecoration(
-        color: hollow.surface.withValues(alpha: 0.9),
+        color: hollow.overlay.withValues(alpha: 0.9),
         borderRadius: BorderRadius.circular(HollowRadius.pill),
         border: Border.all(color: hollow.border.withValues(alpha: 0.5)),
       ),
@@ -75,7 +75,7 @@ class MobileSourceSwitchPill extends ConsumerWidget { // design-ignore: floating
                 semanticLabel: isUnwatched
                     ? 'Watch screen share from ${source.peerId == localPeerId ? 'you' : name}'
                     : '${isScreen ? 'Screen' : 'Camera'}: ${source.peerId == localPeerId ? 'You' : name}',
-                borderRadius: BorderRadius.circular(hollow.radiusSm),
+                borderRadius: BorderRadius.circular(hollow.radiusMd),
                 backgroundColor: isFocused ? hollow.accentMuted : null,
                 padding: const EdgeInsets.symmetric(
                   horizontal: HollowSpacing.sm,

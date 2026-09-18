@@ -53,20 +53,22 @@ The token files are `lib/src/theme/`. **Nothing outside that directory may defin
 
 ### 3.1 Surfaces
 
-Today, dark: `background` `0xFF0D0F14`, `surface` `0xFF14161C`, `elevated` `0xFF1A1D25`, one hairline `border` at 8 percent white. Light mirrors all four.
+Five colour-only levels per theme, in `lib/src/theme/surface_ladder.dart`, plus one hairline `border` at 8 percent. Chosen by eye on 2026-09-18.
 
-Assigned meaning, which is the part that was missing:
+| Token | Level | Dark | Light | Carries |
+|---|---|---|---|---|
+| `surface` | chrome | `0B0C10` | `F1F2F4` | The persistent frame: title bar, dock, friends header, server strip, sidebars, member panel, home side columns, the Settings rail. Full bleed, no radius. **One step below the canvas**, so content is the brightest thing on screen. |
+| `background` | canvas | `111318` | `FFFFFF` | The content: chat, the main pane of any screen. |
+| `elevated` | raised | `181A20` | `F5F6F8` | Cards, boxed sections, settings cards, inputs, tiles, and the hover fill of a control on the canvas. |
+| `overlay` | floating | `1E2127` | `FFFFFF` | Everything above the app: menus, popovers, pickers, dialogs, sheets, toasts, tooltips, hover cards. Opaque, never glass. |
+| `hover` | state | `262930` | `EBEDF0` | The hover fill of a row inside an `overlay`. |
+| `border` | | 8% white | 8% black | The one hairline. One weight, one colour, no second border token. |
 
-| Token | Carries |
-|---|---|
-| `background` | The content canvas: chat, the main pane of any screen. The brightest thing a person reads. |
-| `surface` | Chrome: dock, sidebars, title bar, panel backgrounds. |
-| `elevated` | Raised things: inputs, menus, popovers, dialogs, a card that earned a card, message hover. |
-| `border` | The one hairline. One weight, one colour, no second border token. |
+A card painted `surface` is a bug: with chrome below the canvas it reads as a hole. `opaqueSurface` and `opaqueBackground` are the same tokens at full alpha, for bars that stay solid over a wallpaper.
 
-**Shadows.** Only on things that float above the app (menus, popovers, dialogs, toasts) and small: `blurRadius` at most 12. A shadow is never a substitute for a surface step, and never appears on a card or a row.
+**Shadows.** Only on `overlay` things and small: `blurRadius` at most 12. A shadow is never a substitute for a surface step, and never appears on a card or a row.
 
-**Open decision (phase 0):** the plan proposes five colour-only levels with `chrome` one step darker than `background`, so content becomes the brightest surface as principle 1 asks. That is a real visual change and waits for a render. Until then the four above are the truth.
+**Ambient background.** Flat by default. The drifting blobs are an opt-in in Appearance (`ambientBackgroundProvider`) and stay off under reduce motion.
 
 ### 3.2 Text
 
@@ -77,18 +79,25 @@ Exactly three tiers, plus the accent pair. There is no fourth tier and no ad hoc
 | `textPrimary` | Body and headings. Off-white, never pure white. |
 | `textSecondary` | Supporting text, inactive labels. |
 | `textTertiary` | Faded metadata: timestamps, "(edited)", counters. Guarded at 4.5:1. |
-| `accentText` | The accent as a foreground. The only accent text colour there is. Raw `accent` is for fills. Computed against `elevated`, the dimmest surface it can sit on, so it clears 4.5:1 on every surface and not only on the canvas. |
+| `accentText` | The accent as a foreground. The only accent text colour there is. Raw `accent` is for fills. |
 | `textOnAccent` | Text on an accent fill. |
+| `textOnError` | Text on a solid error fill (the danger button). |
+
+Every foreground token is validated against **all five** surfaces (`Contrast.ensureContrastOnAll`), because text on a hovered row or inside a menu sits on the worst of them. `test/contrast_test.dart` loops all five.
 
 Fading text with `withOpacity` or `withValues(alpha:)` is forbidden. It was how `textTertiary` used to fail contrast at roughly 2:1. Pick a tier.
 
 ### 3.3 Type
 
-One role per size. Sizes are pinned to what the app already renders, so adopting the roles changes nothing on screen. Changing the scale is a separate, deliberate decision made later in one file.
+**Onest** for the interface and **Geist Mono** for the console voice, bundled as static instances (`assets/fonts/`, 400/500/600 and 400/500), so the app reads the same on every OS and no weight is ever synthesised. ThemeData carries the family, so a raw `TextStyle` inherits it.
+
+One role per size. Sizes are pinned to what the app already renders. The UI stays at today's sizes; message text defaults to 14 (still scaled by `ChatTextScale`).
+
+Skia on Windows draws light text on a dark ground about 1.4 px heavier than dark text on light (measured stems at 600: 3.7 px against 2.3 px). The weights are right; the light theme simply reads a step thinner. If that needs correcting, the light roles go one weight up, never a size.
 
 | Role | Size | Weight | Use |
 |---|---|---|---|
-| `display` | 28 | 700 | Welcome, the largest empty states. Rare. |
+| `display` | 28 | 600 | Welcome, the largest empty states. Rare. |
 | `heading` | 20 | 600 | Screen title. |
 | `subheading` | 16 | 600 | Section title. |
 | `body` | 14 | 400 | Message text, prose, dialog body. |
@@ -101,9 +110,9 @@ One role per size. Sizes are pinned to what the app already renders, so adopting
 
 Rules:
 
-- **`fontSize:` is forbidden outside `lib/src/theme/`.** A size that has no role is not a new literal, it is a conversation. Below 10 there is no role on purpose: 9 and 8 fail the legibility floor and their existing sites are on the ratchet to be removed.
+- **`fontSize:` is forbidden outside `lib/src/theme/`.** A size that has no role is not a new literal, it is a conversation. Below 10 there is no role on purpose: 9 and 8 fail the legibility floor, and every site using them is removed (decided).
 - Weight and colour may be adjusted with `copyWith(fontWeight:)` and `copyWith(color:)`. Size may not.
-- Weights are 400, 500 and 600. (`display` at 700 is inherited and is an open item; do not add new 700s.)
+- Weights are 400, 500 and 600. Nothing else ships.
 - No half steps, ever. There is no 12.5.
 - **Tabular numerals** wherever a number changes in place: timestamps, counts, sizes, stats, durations.
 
@@ -134,12 +143,11 @@ Padding: inside a control 4 to 8, inside a container 12 to 16, above and below a
 
 ### 3.6 Radius
 
-`hollow.radiusSm` 6, `radiusMd` 8, `radiusLg` 12, `radiusXl` 16, plus `radiusXs` 4 (new) and `HollowRadius.pill` 999.
+`hollow.radiusXs` 4, `radiusMd` 8, `radiusLg` 12, `radiusXl` 16, and `HollowRadius.pill` 999. There is no 6: it was removed on 2026-09-18, every control moving to 8 and every chip, badge or keycap to 4. A radius nested inside another is the smaller stop (a segment inside a segmented control is 4 inside 8).
 
 | Stop | Applies to |
 |---|---|
 | `radiusXs` 4 | Badges, chips, keycaps, the smallest controls. |
-| `radiusSm` 6 | Toggles and the small controls that are not chips. |
 | `radiusMd` 8 | Buttons, inputs, menus, popovers, tooltips, list rows with a hover fill. |
 | `radiusLg` 12 | Cards, dialogs, panels. |
 | `radiusXl` 16 | Sheets and mobile dialogs. |
@@ -223,12 +231,13 @@ A chip's label is always `Flexible` and ellipsizes. A row of equal-width sub-tab
 |---|---|---|
 | `filled` | **The one primary action of a region.** | At most one per visible region, and rarely more than one per screen. |
 | `outline` | A secondary alternative standing beside that primary. | At most two, and only when a `filled` is present. |
-| `ghost` | Everything else: toolbars, icon buttons, Cancel, actions inside rows and cards. | No limit. |
+| `ghost` | Everything else: toolbars, icon buttons, Cancel, secondary actions inside rows and cards. **Grey**: `textSecondary`, `textPrimary` on hover, a neutral hover fill. The accent is for the primary, selected chips, links and focus. | No limit. |
 | `danger` | The final destructive confirmation. | Nothing else. A cautionary action is `outline` with `danger: true`. |
 
 Consequences worth stating, because these are the observed inconsistencies:
 
 - **An action row with no primary is all ghost.** A toolbar does not mix outline and ghost. Whether a button is outlined is never a per-site decision: it is outlined only when it stands next to a filled primary.
+- **A row that exists FOR one action** (wear a frame, unlink a device, a member card's action) carries it as a compact `outline`; the row's other actions stay ghost icons.
 - Buttons in a row are `sm` 8 apart. Always.
 - While a request runs the button shows **loading, not disabled**, and the success toast fires after the await.
 - An icon-only button carries a tooltip and a `semanticLabel`.
@@ -244,7 +253,7 @@ Consequences worth stating, because these are the observed inconsistencies:
 | `HollowSkeleton` | none | Keeps the final geometry. Used only for 2 to 10 second loads. |
 | `HollowCard` | itself | Only for a repeatable self-contained unit: a listing, a device, a news item. A settings group is not a card. A section is not a card. |
 
-**Cards.** A card has a background step **or** a hairline, never both, and never either plus a shadow. `HollowCard` today does both (an `elevated` fill and a `border`), the one place this document and the code knowingly disagree; see decision 7. Cards do not nest. A coloured strip on a card edge is forbidden; status is a dot or a word. Anything repeated more than three times is a list of `HollowListRow`, not a grid of cards, unless the item **is** the art (the Shop, a gallery), in which case the art is the card: full bleed, title and price beneath it.
+**Cards.** A card is a background step (`elevated`) and nothing else: no hairline, no shadow, in both themes. Cards do not nest. A coloured strip on a card edge is forbidden; status is a dot or a word. Anything repeated more than three times is a list of `HollowListRow`, not a grid of cards, unless the item **is** the art (the Shop, a gallery), in which case the art is the card: full bleed, title and price beneath it.
 
 ### 4.4 Surfaces that already have one law
 
@@ -307,18 +316,23 @@ An exemption is `// design-ignore: <reason>` on the offending line. It is for a 
 
 ---
 
-## 9. Open decisions
+## 9. Decisions
 
-Each waits for a render Vitalik can flip, not for a paragraph.
+Taken by Vitalik on 2026-09-18, from recommendations and then from the rendered decision sheet. The rest of this document already reflects them.
 
-1. The typeface pair. The app ships no face today, so it renders differently on every OS. Cyrillic coverage is a hard filter. Candidates in the plan, section 2.4.
-2. The five-level surface ladder, and whether chrome sits darker than canvas (recommended).
-3. The ambient animated background: opt-in and dimmer with a flat default (recommended), or kept as the default.
-4. The type scale density bump (body 13 to 14, floor at 11). One file, once the roles are in place.
-5. A message display mode, cozy versus compact, as the third axis beside `UiScale` and `ChatTextScale`.
-6. `display` at weight 700, against the 400/500/600 rule.
-7. `HollowCard` draws a background step **and** a hairline, against 4.3. Dropping one moves every card in the app, so it wants a render.
-8. **Ghost and outline buttons are accent-coloured.** With 244 ghost uses the accent lands on nearly every button in the app, which reads against principle 3, one colour one meaning. The alternative is `textSecondary` for ghost, keeping the accent for the primary and for outline. Large and visible, so it is the first thing to put in front of a render. The contrast half of this was not a choice and is already fixed: both variants drew their label in the raw `accent`, 2.33:1 on the light theme, and now use `accentText`.
-9. `HollowButton.danger` draws its label in `Colors.white` rather than a token.
-10. Buttons and inputs sit at `radiusMd` 8, which leaves `radiusSm` 6 doing almost nothing. Either buttons drop to 6 (505 of them move) or the 6 stop goes. Pinned to today's 8 until a render decides.
-11. **The action inside a list row: ghost or outline?** 4.2 says ghost, because the row is not the region's primary. But a dense list of rows that each own one action (the Shop's "Wear frame", a device's "Unlink", a member card's action) reads as flat text when every one of them is ghost. This recurs on at least four screens, so it wants one decision rather than a per-screen guess. The owned-art panel is the render to look at.
+| # | Decision | State |
+|---|---|---|
+| 1 | Ghost buttons grey | Applied |
+| 2 | Onest + Geist Mono | Applied |
+| 3 | Compact outline for a row's one action | Rule written; applied screen by screen |
+| 4 | Five surface levels, chrome below the canvas (ladder A / L1) | Applied, with the role sweep across every site |
+| 5 | Ambient background flat by default, opt-in in Appearance | Applied |
+| 6 | Cards fill only, both themes | Applied |
+| 7 | UI sizes unchanged, message text 14, no 8 or 9 px anywhere | Applied (message text was already `body` 14) |
+| 8 | Compact message display, opt-in | After the chat screen work |
+| 9 | Shop cards at each kind's own shape | With the Shop screen work |
+| 10 | Light theme in the same pass as dark | Standing rule |
+| 11 | `display` at 600 | Applied |
+| 12 | Danger label is a token (`textOnError`) | Applied |
+| 13 | The 6 px radius stop goes | Applied; the token is deleted |
+| 14 | User GIF lists and sticker packs as one dropdown chip in the pickers | Pending |

@@ -222,7 +222,7 @@ class _MobileFriendsTabState extends ConsumerState<MobileFriendsTab> {
     final hollow = HollowTheme.of(context);
     showModalBottomSheet(
       context: context,
-      backgroundColor: hollow.surface,
+      backgroundColor: hollow.overlay,
       isScrollControlled: true,
       shape: RoundedRectangleBorder(
         borderRadius:
@@ -374,7 +374,7 @@ class _FriendRow extends ConsumerWidget {
 
     showModalBottomSheet(
       context: context,
-      backgroundColor: hollow.surface,
+      backgroundColor: hollow.overlay,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(hollow.radiusXl)),
       ),
@@ -656,7 +656,7 @@ class _PendingRow extends ConsumerWidget {
                 }
               },
               semanticLabel: 'Accept friend request',
-              borderRadius: BorderRadius.circular(hollow.radiusSm),
+              borderRadius: BorderRadius.circular(hollow.radiusMd),
               padding: const EdgeInsets.all(HollowSpacing.sm),
               child: Icon(LucideIcons.check, size: 20, color: hollow.success),
             ),
@@ -673,7 +673,7 @@ class _PendingRow extends ConsumerWidget {
                 }
               },
               semanticLabel: 'Decline friend request',
-              borderRadius: BorderRadius.circular(hollow.radiusSm),
+              borderRadius: BorderRadius.circular(hollow.radiusMd),
               padding: const EdgeInsets.all(HollowSpacing.sm),
               child: Icon(LucideIcons.x, size: 20, color: hollow.error),
             ),
@@ -690,7 +690,7 @@ class _PendingRow extends ConsumerWidget {
                 }
               },
               semanticLabel: 'Cancel friend request',
-              borderRadius: BorderRadius.circular(hollow.radiusSm),
+              borderRadius: BorderRadius.circular(hollow.radiusMd),
               padding: const EdgeInsets.all(HollowSpacing.sm),
               child: Icon(LucideIcons.x, size: 18, color: hollow.textSecondary),
             ),
@@ -850,7 +850,7 @@ class _AddFriendSheetState extends ConsumerState<_AddFriendSheet> {
                   width: double.infinity,
                   padding: const EdgeInsets.all(HollowSpacing.md),
                   decoration: BoxDecoration(
-                    color: hollow.elevated.withValues(alpha: 0.6),
+                    color: hollow.elevated,
                     borderRadius: BorderRadius.circular(hollow.radiusLg),
                     border: Border.all(
                         color: hollow.border.withValues(alpha: 0.6)),

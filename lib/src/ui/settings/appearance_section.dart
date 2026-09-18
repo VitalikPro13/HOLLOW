@@ -52,7 +52,11 @@ class AppearanceSettingsView extends ConsumerWidget {
       ),
       SettingsCard(
         title: 'Background',
-        children: [_BackgroundPicker(hollow: hollow)],
+        children: [
+          _BackgroundPicker(hollow: hollow),
+          const SizedBox(height: HollowSpacing.md),
+          const AmbientBackgroundToggle(),
+        ],
       ),
       SettingsCard(
         title: 'Layout',

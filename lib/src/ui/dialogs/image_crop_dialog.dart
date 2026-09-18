@@ -235,7 +235,7 @@ class _ImageCropDialogState extends State<_ImageCropDialog> {
         child: Container(
           width: max(_displayW, 300) + HollowSpacing.xl * 2,
           decoration: BoxDecoration(
-            color: hollow.surface,
+            color: hollow.overlay,
             borderRadius: BorderRadius.circular(hollow.radiusLg),
             border: Border.all(color: hollow.border),
           ),

@@ -123,7 +123,7 @@ class _ProfileCardBodyState extends ConsumerState<ProfileCardBody> {
     final avatarOverhang = _compact ? 30.0 : 48.0;
     final hPad = _compact ? HollowSpacing.md : HollowSpacing.lg;
     // The avatar ring must read as a cutout of the HOST surface.
-    final ringColor = _compact ? hollow.surface : hollow.elevated;
+    final ringColor = _compact ? hollow.overlay : hollow.overlay;
 
     final chips = _buildChips(hollow);
     final twitchChip = _twitchChip();
@@ -372,7 +372,7 @@ class _ProfileCardBodyState extends ConsumerState<ProfileCardBody> {
                 Center(
                   child: HollowPressable(
                     onTap: widget.onExpand,
-                    borderRadius: BorderRadius.circular(hollow.radiusSm),
+                    borderRadius: BorderRadius.circular(hollow.radiusMd),
                     padding: const EdgeInsets.symmetric(
                       horizontal: HollowSpacing.sm,
                       vertical: HollowSpacing.xxs,
@@ -685,11 +685,11 @@ class _ProfileCardBodyState extends ConsumerState<ProfileCardBody> {
         child: HollowPressable(
           semanticLabel: tooltip,
           onTap: onTap,
-          borderRadius: BorderRadius.circular(hollow.radiusSm),
+          borderRadius: BorderRadius.circular(hollow.radiusMd),
           child: Container(
             height: _compact ? 30.0 : 34.0,
             decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(hollow.radiusSm),
+              borderRadius: BorderRadius.circular(hollow.radiusMd),
               border: Border.all(color: hollow.border),
             ),
             alignment: Alignment.center,
@@ -777,7 +777,7 @@ class _ProfileChip extends StatelessWidget {
       ),
       decoration: BoxDecoration(
         color: color.withValues(alpha: 0.15),
-        borderRadius: BorderRadius.circular(hollow.radiusSm),
+        borderRadius: BorderRadius.circular(hollow.radiusXs),
         border: Border.all(color: color.withValues(alpha: 0.25)),
       ),
       child: Row(
@@ -1046,7 +1046,7 @@ class _LocalNicknameDialogState extends ConsumerState<_LocalNicknameDialog> {
           width: 300,
           padding: const EdgeInsets.all(HollowSpacing.xl),
           decoration: BoxDecoration(
-            color: hollow.surface,
+            color: hollow.overlay,
             borderRadius: BorderRadius.circular(hollow.radiusLg),
             border: Border.all(color: hollow.border),
           ),

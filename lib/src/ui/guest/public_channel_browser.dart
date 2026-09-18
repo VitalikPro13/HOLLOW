@@ -67,7 +67,7 @@ class PublicChannelBrowser extends ConsumerWidget {
                   ),
                   decoration: BoxDecoration(
                     color: hollow.accent.withValues(alpha: 0.18),
-                    borderRadius: BorderRadius.circular(hollow.radiusSm),
+                    borderRadius: BorderRadius.circular(hollow.radiusXs),
                   ),
                   child: Text(
                     serverMode.label,

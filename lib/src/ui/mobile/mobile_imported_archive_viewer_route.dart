@@ -134,7 +134,7 @@ class _MobileImportedArchiveViewerRouteState
           HollowPressable(
             onTap: () => Navigator.pop(context),
             semanticLabel: 'Back',
-            borderRadius: BorderRadius.circular(hollow.radiusSm),
+            borderRadius: BorderRadius.circular(hollow.radiusMd),
             padding: const EdgeInsets.all(8),
             child: Icon(LucideIcons.chevronLeft,
                 size: 20, color: hollow.textPrimary),
@@ -442,7 +442,7 @@ class _MobileImportedArchiveViewerRouteState
         data: ThemeData.dark().copyWith(
           colorScheme: ColorScheme.dark(
             primary: hollow.accent,
-            surface: hollow.surface,
+            surface: hollow.overlay,
           ),
         ),
         child: child!,

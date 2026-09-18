@@ -380,7 +380,7 @@ class _VideoMessageBubbleState extends ConsumerState<VideoMessageBubble> {
       onVisibilityChanged: _onVisibilityChanged,
       child: RepaintBoundary(
         child: ClipRRect(
-          borderRadius: BorderRadius.circular(hollow.radiusSm),
+          borderRadius: BorderRadius.circular(hollow.radiusMd),
           child: SizedBox(
             width: size.width,
             height: size.height,
@@ -502,7 +502,7 @@ class _VideoMessageBubbleState extends ConsumerState<VideoMessageBubble> {
     return HollowFocusRing(
       enabled: tapAction != null,
       onActivate: tapAction,
-      borderRadius: BorderRadius.circular(hollow.radiusSm),
+      borderRadius: BorderRadius.circular(hollow.radiusMd),
       child: MouseRegion(
       cursor: tapAction != null ? SystemMouseCursors.click : MouseCursor.defer,
       child: GestureDetector(
@@ -1091,7 +1091,7 @@ class _KeepAndSeedButtonState extends ConsumerState<_KeepAndSeedButton> {
           color: seeding
               ? widget.hollow.accent.withValues(alpha: 0.8)
               : Colors.black.withValues(alpha: 0.65),
-          borderRadius: BorderRadius.circular(widget.hollow.radiusSm),
+          borderRadius: BorderRadius.circular(widget.hollow.radiusXs),
         ),
         child: Row(
           mainAxisSize: MainAxisSize.min,
@@ -1179,7 +1179,7 @@ class _Badge extends StatelessWidget { // design-ignore: a scrim label over vide
       ),
       decoration: BoxDecoration(
         color: Colors.black.withValues(alpha: 0.65),
-        borderRadius: BorderRadius.circular(hollow.radiusSm),
+        borderRadius: BorderRadius.circular(hollow.radiusXs),
       ),
       child: Text(
         text,

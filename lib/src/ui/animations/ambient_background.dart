@@ -4,6 +4,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/background_provider.dart';
 import 'package:hollow/src/core/shared_tickers.dart';
+import 'package:hollow/src/core/providers/settings_provider.dart';
+import 'package:hollow/src/ui/animations/hollow_curves.dart';
 
 /// Very slow-drifting ambient background for the chat area.
 ///
@@ -28,7 +30,12 @@ class AmbientBackground extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final hasCustomBg = ref.watch(backgroundProvider).hasBackground;
 
-    if (hasCustomBg) return child;
+    final enabled = ref.watch(ambientBackgroundProvider).valueOrNull ?? false;
+
+    // Decorative motion, so reduce motion turns it off too.
+    if (hasCustomBg || !enabled || HollowDurations.animationsDisabled) {
+      return child;
+    }
 
     // The blobs and the content are SEPARATE layers on purpose. One boundary
     // around both spares the rebuild but not the raster: a repaint inside a

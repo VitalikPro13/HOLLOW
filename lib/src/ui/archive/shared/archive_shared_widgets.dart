@@ -95,7 +95,7 @@ class ArchiveSearchBarState extends State<ArchiveSearchBar> {
           HollowPressable(
             onTap: widget.onPrev,
             semanticLabel: 'Previous match',
-            borderRadius: BorderRadius.circular(hollow.radiusSm),
+            borderRadius: BorderRadius.circular(hollow.radiusMd),
             padding: const EdgeInsets.all(4),
             child: Icon(LucideIcons.chevronUp,
                 size: 14,
@@ -106,7 +106,7 @@ class ArchiveSearchBarState extends State<ArchiveSearchBar> {
           HollowPressable(
             onTap: widget.onNext,
             semanticLabel: 'Next match',
-            borderRadius: BorderRadius.circular(hollow.radiusSm),
+            borderRadius: BorderRadius.circular(hollow.radiusMd),
             padding: const EdgeInsets.all(4),
             child: Icon(LucideIcons.chevronDown,
                 size: 14,
@@ -118,7 +118,7 @@ class ArchiveSearchBarState extends State<ArchiveSearchBar> {
           HollowPressable(
             onTap: widget.onClose,
             semanticLabel: 'Close search',
-            borderRadius: BorderRadius.circular(hollow.radiusSm),
+            borderRadius: BorderRadius.circular(hollow.radiusMd),
             padding: const EdgeInsets.all(4),
             child: Icon(LucideIcons.x,
                 size: 14, color: hollow.textSecondary),
@@ -275,10 +275,8 @@ class _EditHistoryIndicatorState extends State<EditHistoryIndicator> {
                   child: Container(
                     padding: const EdgeInsets.all(HollowSpacing.sm),
                     decoration: BoxDecoration(
-                      color: hollow.surface,
-                      borderRadius: BorderRadius.circular(hollow.radiusSm),
-                      border: Border.all(
-                          color: hollow.border.withValues(alpha: 0.5)),
+                      color: hollow.elevated,
+                      borderRadius: BorderRadius.circular(hollow.radiusMd),
                     ),
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,

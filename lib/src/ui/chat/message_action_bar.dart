@@ -708,8 +708,8 @@ class _ActionBarContent extends StatelessWidget {
   Widget build(BuildContext context) {
     return Container(
       decoration: BoxDecoration(
-        color: hollow.elevated,
-        borderRadius: BorderRadius.circular(hollow.radiusSm),
+        color: hollow.overlay,
+        borderRadius: BorderRadius.circular(hollow.radiusMd),
         border: Border.all(color: hollow.border),
         boxShadow: [
           BoxShadow(
@@ -733,7 +733,7 @@ class _ActionBarContent extends StatelessWidget {
             HollowPressable(
               onTap: onCopy,
               semanticLabel: 'Copy',
-              borderRadius: BorderRadius.circular(hollow.radiusSm),
+              borderRadius: BorderRadius.circular(hollow.radiusMd),
               padding: const EdgeInsets.all(6),
               child: Icon(
                 LucideIcons.copy,
@@ -745,7 +745,7 @@ class _ActionBarContent extends StatelessWidget {
             HollowPressable(
               onTap: onCopyImage,
               semanticLabel: 'Copy image',
-              borderRadius: BorderRadius.circular(hollow.radiusSm),
+              borderRadius: BorderRadius.circular(hollow.radiusMd),
               padding: const EdgeInsets.all(6),
               child: Icon(
                 LucideIcons.image,
@@ -759,7 +759,7 @@ class _ActionBarContent extends StatelessWidget {
             HollowPressable(
               onTap: onReply,
               semanticLabel: 'Reply',
-              borderRadius: BorderRadius.circular(hollow.radiusSm),
+              borderRadius: BorderRadius.circular(hollow.radiusMd),
               padding: const EdgeInsets.all(6),
               child: Icon(
                 LucideIcons.reply,
@@ -771,7 +771,7 @@ class _ActionBarContent extends StatelessWidget {
             HollowPressable(
               onTap: onInfo,
               semanticLabel: 'View message proof',
-              borderRadius: BorderRadius.circular(hollow.radiusSm),
+              borderRadius: BorderRadius.circular(hollow.radiusMd),
               padding: const EdgeInsets.all(6),
               child: Icon(
                 LucideIcons.shieldCheck,
@@ -783,7 +783,7 @@ class _ActionBarContent extends StatelessWidget {
             HollowPressable(
               onTap: onPin,
               semanticLabel: 'Pin message',
-              borderRadius: BorderRadius.circular(hollow.radiusSm),
+              borderRadius: BorderRadius.circular(hollow.radiusMd),
               padding: const EdgeInsets.all(6),
               child: Icon(
                 LucideIcons.pin,
@@ -795,7 +795,7 @@ class _ActionBarContent extends StatelessWidget {
             HollowPressable(
               onTap: onEdit,
               semanticLabel: 'Edit message',
-              borderRadius: BorderRadius.circular(hollow.radiusSm),
+              borderRadius: BorderRadius.circular(hollow.radiusMd),
               padding: const EdgeInsets.all(6),
               child: Icon(
                 LucideIcons.pencil,
@@ -807,7 +807,7 @@ class _ActionBarContent extends StatelessWidget {
             HollowPressable(
               onTap: onDelete,
               semanticLabel: 'Delete message',
-              borderRadius: BorderRadius.circular(hollow.radiusSm),
+              borderRadius: BorderRadius.circular(hollow.radiusMd),
               padding: const EdgeInsets.all(6),
               child: Icon(
                 LucideIcons.trash2,
@@ -855,7 +855,7 @@ class _FileActionButton extends StatelessWidget {
       child: HollowPressable(
         onTap: onTap,
         semanticLabel: label,
-        borderRadius: BorderRadius.circular(hollow.radiusSm),
+        borderRadius: BorderRadius.circular(hollow.radiusMd),
         padding: const EdgeInsets.all(6),
         child: stop
             ? SlashedIcon(
@@ -863,7 +863,7 @@ class _FileActionButton extends StatelessWidget {
                 size: 14,
                 color: hollow.accent,
                 // The bar's own surface, so the slash cuts the glyph.
-                backgroundColor: hollow.elevated,
+                backgroundColor: hollow.overlay,
               )
             : Icon(
                 LucideIcons.download,
@@ -887,7 +887,7 @@ class _MoreButton extends StatelessWidget {
   Widget build(BuildContext context) {
     return HollowPressable(
       semanticLabel: 'More message actions',
-      borderRadius: BorderRadius.circular(hollow.radiusSm),
+      borderRadius: BorderRadius.circular(hollow.radiusMd),
       padding: const EdgeInsets.all(6),
       onTap: () {
         final box = context.findRenderObject() as RenderBox?;
@@ -928,7 +928,7 @@ class _QuickReactionStrip extends StatelessWidget {
               onSelect(kQuickReactionEmojis[i]);
             },
             semanticLabel: 'React ${kQuickReactionEmojis[i]}',
-            borderRadius: BorderRadius.circular(hollow.radiusSm),
+            borderRadius: BorderRadius.circular(hollow.radiusMd),
             child: Container(
               width: 32,
               height: 32,
@@ -961,7 +961,7 @@ class _EmojiButton extends StatelessWidget {
         onReaction(overlayAnchorOf(context));
       },
       semanticLabel: 'Add reaction',
-      borderRadius: BorderRadius.circular(hollow.radiusSm),
+      borderRadius: BorderRadius.circular(hollow.radiusMd),
       padding: const EdgeInsets.all(6),
       child: Icon(
         LucideIcons.smile,

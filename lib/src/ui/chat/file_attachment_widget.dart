@@ -179,9 +179,8 @@ class FileAttachmentWidget extends ConsumerWidget {
       constraints: const BoxConstraints(maxWidth: 280),
       clipBehavior: Clip.antiAlias,
       decoration: BoxDecoration(
-        color: hollow.surface,
+        color: hollow.elevated,
         borderRadius: BorderRadius.circular(HollowSpacing.sm),
-        border: Border.all(color: hollow.border),
       ),
       child: Padding(
         padding: const EdgeInsets.all(HollowSpacing.md),
@@ -231,9 +230,8 @@ class FileAttachmentWidget extends ConsumerWidget {
         constraints: const BoxConstraints(maxWidth: 280),
         clipBehavior: Clip.antiAlias,
         decoration: BoxDecoration(
-          color: hollow.surface,
+          color: hollow.elevated,
           borderRadius: BorderRadius.circular(HollowSpacing.sm),
-          border: Border.all(color: hollow.border),
         ),
         child: Padding(
           padding: const EdgeInsets.all(HollowSpacing.md),
@@ -330,7 +328,7 @@ class FileAttachmentWidget extends ConsumerWidget {
       return HollowFocusRing(
         enabled: true,
         onActivate: open,
-        borderRadius: BorderRadius.circular(hollow.radiusSm),
+        borderRadius: BorderRadius.circular(hollow.radiusMd),
         child: GestureDetector(
           onTap: open,
           child: MouseRegion(
@@ -343,7 +341,7 @@ class FileAttachmentWidget extends ConsumerWidget {
                       maxHeight: maxHeight,
                     ),
               child: ClipRRect(
-                borderRadius: BorderRadius.circular(hollow.radiusSm),
+                borderRadius: BorderRadius.circular(hollow.radiusMd),
                 child: AttachmentImage(
                   path: diskPath,
                   animated: isGif,
@@ -385,9 +383,8 @@ class FileAttachmentWidget extends ConsumerWidget {
           height: height,
           clipBehavior: Clip.antiAlias,
           decoration: BoxDecoration(
-            color: hollow.surface,
-            borderRadius: BorderRadius.circular(hollow.radiusSm),
-            border: Border.all(color: hollow.border),
+            color: hollow.elevated,
+            borderRadius: BorderRadius.circular(hollow.radiusMd),
           ),
           child: thumbBytes == null
               ? child
@@ -492,7 +489,7 @@ class FileAttachmentWidget extends ConsumerWidget {
       return HollowPressable(
         onTap: onDownload,
         semanticLabel: 'Download ${attachment.fileName}',
-        borderRadius: BorderRadius.circular(hollow.radiusSm),
+        borderRadius: BorderRadius.circular(hollow.radiusMd),
         child: body,
       );
     }
@@ -576,9 +573,8 @@ class FileAttachmentWidget extends ConsumerWidget {
       constraints: const BoxConstraints(maxWidth: 280),
       clipBehavior: Clip.antiAlias,
       decoration: BoxDecoration(
-        color: hollow.surface,
-        borderRadius: BorderRadius.circular(hollow.radiusSm),
-        border: Border.all(color: hollow.border),
+        color: hollow.elevated,
+        borderRadius: BorderRadius.circular(hollow.radiusMd),
       ),
       child: Column(
         mainAxisSize: MainAxisSize.min,
@@ -637,7 +633,7 @@ class FileAttachmentWidget extends ConsumerWidget {
                   HollowPressable(
                     onTap: onDownload,
                     semanticLabel: 'Download ${attachment.fileName}',
-                    borderRadius: BorderRadius.circular(hollow.radiusSm),
+                    borderRadius: BorderRadius.circular(hollow.radiusMd),
                     padding: const EdgeInsets.all(HollowSpacing.xs),
                     child: Icon(LucideIcons.download,
                         size: 18, color: hollow.textPrimary),

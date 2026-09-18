@@ -561,7 +561,7 @@ class _HollowShellState extends ConsumerState<HollowShell>
               width: (screenWidth - HollowSpacing.lg * 2).clamp(0.0, 420.0),
               padding: const EdgeInsets.all(HollowSpacing.xl),
               decoration: BoxDecoration(
-                color: hollow.elevated,
+                color: hollow.overlay,
                 borderRadius: BorderRadius.circular(hollow.radiusLg),
                 border: Border.all(color: hollow.error.withValues(alpha: 0.3)),
               ),
@@ -689,7 +689,7 @@ class _HollowShellState extends ConsumerState<HollowShell>
                   width: (screenWidth - HollowSpacing.lg * 2).clamp(0.0, 380.0),
                   padding: const EdgeInsets.all(HollowSpacing.xl),
                   decoration: BoxDecoration(
-                    color: hollow.elevated,
+                    color: hollow.overlay,
                     borderRadius: BorderRadius.circular(hollow.radiusLg),
                     border: Border.all(color: hollow.accent.withValues(alpha: 0.15)),
                   ),
@@ -752,7 +752,7 @@ class _HollowShellState extends ConsumerState<HollowShell>
                                   onTap: () =>
                                       Navigator.of(ctx).pop('__biometric__'),
                                   borderRadius:
-                                      BorderRadius.circular(hollow.radiusSm),
+                                      BorderRadius.circular(hollow.radiusMd),
                                   padding:
                                       const EdgeInsets.all(HollowSpacing.sm),
                                   child: Icon(LucideIcons.fingerprint,
@@ -839,7 +839,7 @@ class _HollowShellState extends ConsumerState<HollowShell>
               width: (screenWidth - HollowSpacing.lg * 2).clamp(0.0, 420.0),
               padding: const EdgeInsets.all(HollowSpacing.xl),
               decoration: BoxDecoration(
-                color: hollow.elevated,
+                color: hollow.overlay,
                 borderRadius: BorderRadius.circular(hollow.radiusLg),
                 border: Border.all(color: hollow.accent.withValues(alpha: 0.15)),
               ),
@@ -1628,7 +1628,7 @@ class _HollowShellState extends ConsumerState<HollowShell>
                   onTap: () => ref
                       .read(memberPanelProvider.notifier)
                       .state = !ref.read(memberPanelProvider),
-                  borderRadius: BorderRadius.circular(hollow.radiusSm),
+                  borderRadius: BorderRadius.circular(hollow.radiusMd),
                   padding: const EdgeInsets.all(HollowSpacing.xs),
                   child: Icon(LucideIcons.users,
                       size: 20, color: hollow.textSecondary),
@@ -2217,7 +2217,7 @@ class _HollowShellState extends ConsumerState<HollowShell>
                                         : selectedChannelId ??
                                             selectedPeerId ??
                                             'empty'),
-                                    color: settingsOpen ? hollow.surface : hollow.background,
+                                    color: hollow.background,
                                     child: settingsOpen &&
                                             selectedServer != null
                                         ? ServerSettingsPanel(
@@ -2934,7 +2934,7 @@ void _showServerSettingsDialog(BuildContext context, ServerInfo server) {
               height: 600,
               clipBehavior: Clip.antiAlias,
               decoration: BoxDecoration(
-                color: HollowTheme.of(context).background,
+                color: HollowTheme.of(context).overlay,
                 borderRadius: BorderRadius.circular(
                   HollowTheme.of(context).radiusLg,
                 ),

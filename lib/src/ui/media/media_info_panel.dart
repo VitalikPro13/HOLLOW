@@ -76,7 +76,7 @@ class MediaInfoPanel extends ConsumerWidget {
                 HollowPressable(
                   onTap: onClose,
                   semanticLabel: 'Close details',
-                  borderRadius: BorderRadius.circular(hollow.radiusSm),
+                  borderRadius: BorderRadius.circular(hollow.radiusMd),
                   padding: const EdgeInsets.all(HollowSpacing.xxs),
                   child: Icon(LucideIcons.x,
                       size: 16, color: hollow.textSecondary),
@@ -198,7 +198,7 @@ class _HashRow extends StatelessWidget {
                     }
                   },
                   semanticLabel: 'Copy content hash',
-                  borderRadius: BorderRadius.circular(hollow.radiusSm),
+                  borderRadius: BorderRadius.circular(hollow.radiusMd),
                   padding: const EdgeInsets.all(HollowSpacing.xxs),
                   child: Icon(LucideIcons.copy,
                       size: 14, color: hollow.textSecondary),

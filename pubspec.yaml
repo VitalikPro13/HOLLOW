@@ -195,6 +195,23 @@ flutter:
   #         weight: 700
   #
   fonts:
+    # The interface face and the console voice (OFL, licences beside them).
+    # Static instances cut from the variable files, one per weight role
+    # (400/500/600), so no weight is ever synthesised.
+    - family: Onest
+      fonts:
+        - asset: assets/fonts/Onest-400.ttf
+          weight: 400
+        - asset: assets/fonts/Onest-500.ttf
+          weight: 500
+        - asset: assets/fonts/Onest-600.ttf
+          weight: 600
+    - family: GeistMono
+      fonts:
+        - asset: assets/fonts/GeistMono-400.ttf
+          weight: 400
+        - asset: assets/fonts/GeistMono-500.ttf
+          weight: 500
     - family: SimpleIcons
       fonts:
         - asset: assets/fonts/SimpleIcons.ttf

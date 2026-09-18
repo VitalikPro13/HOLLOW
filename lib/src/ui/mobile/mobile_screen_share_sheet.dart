@@ -23,7 +23,7 @@ Future<MobileScreenShareChoice?> showMobileScreenShareSheet(
   final hollow = HollowTheme.of(context);
   return showModalBottomSheet<MobileScreenShareChoice>(
     context: context,
-    backgroundColor: hollow.surface,
+    backgroundColor: hollow.overlay,
     isScrollControlled: true,
     shape: RoundedRectangleBorder(
       borderRadius:

@@ -89,7 +89,7 @@ class _KeybindCaptureFieldState extends ConsumerState<KeybindCaptureField> {
       child: HollowPressable(
         onTap: _capturing ? _disarm : _arm,
         semanticLabel: widget.semanticLabel,
-        borderRadius: BorderRadius.circular(hollow.radiusSm),
+        borderRadius: BorderRadius.circular(hollow.radiusMd),
         padding: const EdgeInsets.symmetric(
           horizontal: HollowSpacing.sm,
           vertical: HollowSpacing.xs,
@@ -101,7 +101,7 @@ class _KeybindCaptureFieldState extends ConsumerState<KeybindCaptureField> {
             vertical: 2,
           ),
           decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(hollow.radiusSm),
+            borderRadius: BorderRadius.circular(hollow.radiusMd),
             // Never lerp from transparent, which goes via black: idle shows the
             // normal field border instead.
             border: Border.all(

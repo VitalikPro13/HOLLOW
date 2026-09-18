@@ -136,7 +136,7 @@ class _ArchiveDmViewer extends ConsumerWidget {
                         data: ThemeData.dark().copyWith(
                           colorScheme: ColorScheme.dark(
                             primary: hollow.accent,
-                            surface: hollow.surface,
+                            surface: hollow.overlay,
                           ),
                         ),
                         child: child!,
@@ -425,7 +425,7 @@ class _ArchiveChannelViewer extends ConsumerWidget {
                         data: ThemeData.dark().copyWith(
                           colorScheme: ColorScheme.dark(
                             primary: hollow.accent,
-                            surface: hollow.surface,
+                            surface: hollow.overlay,
                           ),
                         ),
                         child: child!,

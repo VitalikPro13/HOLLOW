@@ -233,7 +233,7 @@ class _NotificationCardWidgetState
               width: 320,
               constraints: const BoxConstraints(maxHeight: 260),
               decoration: BoxDecoration(
-                color: hollow.elevated.withValues(alpha: 0.95),
+                color: hollow.overlay,
                 borderRadius: BorderRadius.circular(hollow.radiusMd),
                 border: Border.all(
                   color: hollow.accent.withValues(alpha: 0.2),
@@ -279,7 +279,7 @@ class _NotificationCardWidgetState
                         HollowPressable(
                           onTap: _dismiss,
                           borderRadius:
-                              BorderRadius.circular(hollow.radiusSm),
+                              BorderRadius.circular(hollow.radiusMd),
                           padding:
                               const EdgeInsets.all(HollowSpacing.xxs),
                           semanticLabel: 'Dismiss notification',

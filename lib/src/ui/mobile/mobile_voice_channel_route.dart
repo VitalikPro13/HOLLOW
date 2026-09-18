@@ -179,7 +179,7 @@ class _MobileVoiceChannelRouteState
           HollowPressable(
             semanticLabel: 'Minimize',
             onTap: () => Navigator.of(context).pop(),
-            borderRadius: BorderRadius.circular(hollow.radiusSm),
+            borderRadius: BorderRadius.circular(hollow.radiusMd),
             padding: const EdgeInsets.all(HollowSpacing.xs),
             child: Icon(LucideIcons.chevronDown,
                 size: 24, color: hollow.textPrimary),
@@ -215,7 +215,7 @@ class _MobileVoiceChannelRouteState
               onTap: () => ref
                   .read(voiceChannelProvider.notifier)
                   .stopWatchingScreenShare(watchedSharerId),
-              borderRadius: BorderRadius.circular(hollow.radiusSm),
+              borderRadius: BorderRadius.circular(hollow.radiusMd),
               padding: const EdgeInsets.all(HollowSpacing.sm),
               child: Icon(LucideIcons.eyeOff,
                   size: 22, color: hollow.textPrimary),
@@ -306,7 +306,7 @@ class _MobileVoiceChannelRouteState
                     .watchScreenShare(peerId),
                 semanticLabel: 'Watch screen share from $name',
                 borderRadius: BorderRadius.circular(HollowRadius.pill),
-                backgroundColor: hollow.surface,
+                backgroundColor: hollow.elevated,
                 padding: const EdgeInsets.symmetric(
                   horizontal: HollowSpacing.md,
                   vertical: HollowSpacing.xs,
@@ -548,7 +548,7 @@ class _MobileVoiceChannelRouteState
                                     .RTCVideoViewObjectFitCover,
                               ),
                             )
-                          : Container(color: hollow.surface),
+                          : Container(color: hollow.elevated),
                       // Self reads the local flag, never the participant set;
                       // see [vcLocalSpeakingProvider].
                       Consumer(builder: (context, ref, _) {

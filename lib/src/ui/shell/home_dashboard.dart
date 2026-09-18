@@ -331,7 +331,7 @@ class _ProfileColumn extends ConsumerWidget {
                 Uri.parse('https://twitch.tv/$verifiedTwitch'),
                 mode: LaunchMode.externalApplication,
               ),
-              borderRadius: BorderRadius.circular(6),
+              borderRadius: BorderRadius.circular(hollow.radiusXs),
               child: GestureDetector(
                 onTap: () => launchUrl(
                   Uri.parse('https://twitch.tv/$verifiedTwitch'),
@@ -342,7 +342,7 @@ class _ProfileColumn extends ConsumerWidget {
                       horizontal: HollowSpacing.sm, vertical: 2),
                   decoration: BoxDecoration(
                     color: const Color(0xFF9146FF).withValues(alpha: 0.15),
-                    borderRadius: BorderRadius.circular(6),
+                    borderRadius: BorderRadius.circular(hollow.radiusXs),
                   ),
                   child: Row(
                     mainAxisSize: MainAxisSize.min,
@@ -428,7 +428,7 @@ class _ProfileColumn extends ConsumerWidget {
                 duration: const Duration(seconds: 1),
               );
             },
-            borderRadius: BorderRadius.circular(hollow.radiusSm),
+            borderRadius: BorderRadius.circular(hollow.radiusMd),
             hoverColor: hollow.elevated,
             padding: const EdgeInsets.symmetric(
               horizontal: HollowSpacing.sm,
@@ -444,9 +444,8 @@ class _ProfileColumn extends ConsumerWidget {
                   localPeerId.length > 16
                       ? '${localPeerId.substring(0, 8)}...${localPeerId.substring(localPeerId.length - 6)}'
                       : localPeerId,
-                  style: HollowTypography.mono.copyWith(
+                  style: HollowTypography.monoSmall.copyWith(
                     color: hollow.textSecondary,
-                    fontSize: 9,
                   ),
                 ),
               ],
@@ -483,9 +482,8 @@ class _SyncStatsCard extends ConsumerWidget {
       width: double.infinity,
       padding: const EdgeInsets.all(HollowSpacing.sm + 2),
       decoration: BoxDecoration(
-        color: hollow.surface,
+        color: hollow.elevated,
         borderRadius: BorderRadius.circular(hollow.radiusMd),
-        border: Border.all(color: hollow.border),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -982,9 +980,8 @@ class _NetworkColumn extends ConsumerWidget {
           width: double.infinity,
           padding: const EdgeInsets.all(HollowSpacing.sm + 2),
           decoration: BoxDecoration(
-            color: hollow.surface,
+            color: hollow.elevated,
             borderRadius: BorderRadius.circular(hollow.radiusMd),
-            border: Border.all(color: hollow.border),
           ),
           child: Row(
             children: [
@@ -1189,9 +1186,8 @@ class _NewsPanel extends ConsumerWidget {
             width: double.infinity,
             padding: const EdgeInsets.all(HollowSpacing.sm + 2),
             decoration: BoxDecoration(
-              color: hollow.surface,
+              color: hollow.elevated,
               borderRadius: BorderRadius.circular(hollow.radiusMd),
-              border: Border.all(color: hollow.border),
             ),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -1230,9 +1226,8 @@ class _NewsPanel extends ConsumerWidget {
                       children: [
                         Text(
                           'Installed',
-                          style: HollowTypography.caption.copyWith(
+                          style: HollowTypography.micro.copyWith(
                             color: hollow.textSecondary,
-                            fontSize: 9,
                           ),
                         ),
                         const SizedBox(height: 2),
@@ -1244,7 +1239,7 @@ class _NewsPanel extends ConsumerWidget {
                           decoration: BoxDecoration(
                             color: hollow.textSecondary.withValues(alpha: 0.1),
                             borderRadius:
-                                BorderRadius.circular(hollow.radiusSm),
+                                BorderRadius.circular(hollow.radiusXs),
                             border: Border.all(
                               color:
                                   hollow.textSecondary.withValues(alpha: 0.25),
@@ -1280,7 +1275,7 @@ class _NewsPanel extends ConsumerWidget {
                           context,
                           openUpdatesTab: true,
                         ),
-                        borderRadius: BorderRadius.circular(hollow.radiusSm),
+                        borderRadius: BorderRadius.circular(hollow.radiusMd),
                         child: GestureDetector(
                         onTap: () => showUserSettingsDialog(
                           context,
@@ -1293,9 +1288,8 @@ class _NewsPanel extends ConsumerWidget {
                             children: [
                               Text(
                                 'Latest',
-                                style: HollowTypography.caption.copyWith(
+                                style: HollowTypography.micro.copyWith(
                                   color: hollow.accent,
-                                  fontSize: 9,
                                   fontWeight: FontWeight.w600,
                                 ),
                               ),
@@ -1309,7 +1303,7 @@ class _NewsPanel extends ConsumerWidget {
                                   color:
                                       hollow.accent.withValues(alpha: 0.2),
                                   borderRadius: BorderRadius.circular(
-                                      hollow.radiusSm),
+                                      hollow.radiusXs),
                                   border: Border.all(
                                     color:
                                         hollow.accent.withValues(alpha: 0.4),
@@ -1350,7 +1344,7 @@ class _NewsPanel extends ConsumerWidget {
                           );
                         }
                       },
-                      borderRadius: BorderRadius.circular(hollow.radiusSm),
+                      borderRadius: BorderRadius.circular(hollow.radiusMd),
                       child: GestureDetector(
                       onTap: () async {
                         final results = await Future.wait([
@@ -1554,9 +1548,8 @@ class _RelayStatsCardState extends ConsumerState<_RelayStatsCard> {
       width: double.infinity,
       padding: const EdgeInsets.all(HollowSpacing.sm + 2),
       decoration: BoxDecoration(
-        color: hollow.surface,
+        color: hollow.elevated,
         borderRadius: BorderRadius.circular(hollow.radiusMd),
-        border: Border.all(color: hollow.border),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -1629,9 +1622,8 @@ class _ConnectionRow extends StatelessWidget {
           vertical: HollowSpacing.xs + 2,
         ),
         decoration: BoxDecoration(
-          color: hollow.surface,
-          borderRadius: BorderRadius.circular(hollow.radiusSm),
-          border: Border.all(color: hollow.border),
+          color: hollow.elevated,
+          borderRadius: BorderRadius.circular(hollow.radiusMd),
         ),
         child: Row(
           children: [

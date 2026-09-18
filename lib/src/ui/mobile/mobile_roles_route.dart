@@ -197,7 +197,7 @@ class _RoleSection extends StatelessWidget {
 
     return Container(
       decoration: BoxDecoration(
-        color: hollow.surface,
+        color: hollow.elevated,
         borderRadius: BorderRadius.circular(hollow.radiusMd),
         border: Border.all(color: color.withValues(alpha: 0.3)),
       ),
@@ -224,7 +224,7 @@ class _RoleSection extends StatelessWidget {
                 if (canEdit)
                   HollowPressable(
                     onTap: onReset,
-                    borderRadius: BorderRadius.circular(hollow.radiusSm),
+                    borderRadius: BorderRadius.circular(hollow.radiusMd),
                     padding: const EdgeInsets.all(HollowSpacing.xs),
                     child: Text('Reset', style: HollowTypography.caption.copyWith(
                       color: hollow.textSecondary,

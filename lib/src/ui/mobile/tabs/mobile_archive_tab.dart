@@ -355,7 +355,7 @@ class _MobileDmList extends ConsumerWidget {
         : displayNameFor(profiles, entry.peerId);
     showModalBottomSheet(
       context: context,
-      backgroundColor: hollow.surface,
+      backgroundColor: hollow.overlay,
       shape: RoundedRectangleBorder(
         borderRadius:
             BorderRadius.vertical(top: Radius.circular(hollow.radiusXl)),
@@ -480,7 +480,7 @@ class _MobileDmRow extends ConsumerWidget {
         onLongPress: onLongPress,
         child: HollowPressable(
           onTap: onTap,
-          borderRadius: BorderRadius.circular(hollow.radiusSm),
+          borderRadius: BorderRadius.circular(hollow.radiusMd),
           padding: const EdgeInsets.symmetric(
             horizontal: HollowSpacing.sm,
             vertical: HollowSpacing.sm,
@@ -507,7 +507,7 @@ class _MobileDmRow extends ConsumerWidget {
                 onTap: onToggleHidden,
                 semanticLabel: isHidden ? 'Show conversation' : 'Hide conversation',
                 borderRadius:
-                    BorderRadius.circular(hollow.radiusSm),
+                    BorderRadius.circular(hollow.radiusMd),
                 padding: const EdgeInsets.all(4),
                 child: Icon(
                   isHidden ? LucideIcons.eye : LucideIcons.eyeOff,
@@ -555,7 +555,7 @@ class _HiddenHeader extends StatelessWidget {
     final hollow = HollowTheme.of(context);
     return HollowPressable(
       onTap: onTap,
-      borderRadius: BorderRadius.circular(hollow.radiusSm),
+      borderRadius: BorderRadius.circular(hollow.radiusMd),
       padding: const EdgeInsets.symmetric(
         horizontal: HollowSpacing.sm,
         vertical: HollowSpacing.xs,
@@ -715,7 +715,7 @@ class _MobileChannelList extends ConsumerWidget {
                         },
                         semanticLabel: 'Export conversation',
                         borderRadius:
-                            BorderRadius.circular(hollow.radiusSm),
+                            BorderRadius.circular(hollow.radiusMd),
                         padding: const EdgeInsets.all(4),
                         child: Icon(LucideIcons.fileOutput,
                             size: 14, color: hollow.accent),
@@ -762,7 +762,7 @@ class _MobileChannelList extends ConsumerWidget {
     final hollow = HollowTheme.of(context);
     showModalBottomSheet(
       context: context,
-      backgroundColor: hollow.surface,
+      backgroundColor: hollow.overlay,
       shape: RoundedRectangleBorder(
         borderRadius:
             BorderRadius.vertical(top: Radius.circular(hollow.radiusXl)),
@@ -826,7 +826,7 @@ class _MobileChannelList extends ConsumerWidget {
     final hollow = HollowTheme.of(context);
     showModalBottomSheet(
       context: context,
-      backgroundColor: hollow.surface,
+      backgroundColor: hollow.overlay,
       shape: RoundedRectangleBorder(
         borderRadius:
             BorderRadius.vertical(top: Radius.circular(hollow.radiusXl)),
@@ -912,7 +912,7 @@ class _MobileChannelRow extends StatelessWidget {
         onLongPress: onLongPress,
         child: HollowPressable(
           onTap: onTap,
-          borderRadius: BorderRadius.circular(hollow.radiusSm),
+          borderRadius: BorderRadius.circular(hollow.radiusMd),
           padding: const EdgeInsets.symmetric(
             horizontal: HollowSpacing.sm,
             vertical: HollowSpacing.sm,
@@ -1021,14 +1021,14 @@ class _MobileVaultFilesView extends ConsumerWidget {
           ),
           child: HollowPressable(
             onTap: () => showJoinRecoveryPoolDialog(context),
-            borderRadius: BorderRadius.circular(hollow.radiusSm),
+            borderRadius: BorderRadius.circular(hollow.radiusMd),
             padding: EdgeInsets.zero,
             child: Container(
               width: double.infinity,
               padding: const EdgeInsets.symmetric(vertical: 10),
               decoration: BoxDecoration(
                 color: hollow.accent.withValues(alpha: 0.12),
-                borderRadius: BorderRadius.circular(hollow.radiusSm),
+                borderRadius: BorderRadius.circular(hollow.radiusMd),
                 border: Border.all(
                     color: hollow.accent.withValues(alpha: 0.3)),
               ),
@@ -1101,7 +1101,7 @@ class _VaultServerSectionState extends ConsumerState<_VaultServerSection> {
           onLongPress: statusAsync.hasValue && statusAsync.value!.isNotEmpty
               ? () => _showVaultActionsSheet(context, statusAsync.value!)
               : null,
-          borderRadius: BorderRadius.circular(hollow.radiusSm),
+          borderRadius: BorderRadius.circular(hollow.radiusMd),
           padding: const EdgeInsets.symmetric(
             horizontal: HollowSpacing.sm,
             vertical: HollowSpacing.sm,
@@ -1216,7 +1216,7 @@ class _VaultServerSectionState extends ConsumerState<_VaultServerSection> {
 
     showModalBottomSheet(
       context: context,
-      backgroundColor: hollow.surface,
+      backgroundColor: hollow.overlay,
       shape: RoundedRectangleBorder(
         borderRadius:
             BorderRadius.vertical(top: Radius.circular(hollow.radiusXl)),
@@ -1355,9 +1355,8 @@ class _VaultFileRow extends StatelessWidget {
       child: Container(
         padding: const EdgeInsets.all(HollowSpacing.sm),
         decoration: BoxDecoration(
-          color: hollow.surface,
-          borderRadius: BorderRadius.circular(hollow.radiusSm),
-          border: Border.all(color: hollow.border),
+          color: hollow.elevated,
+          borderRadius: BorderRadius.circular(hollow.radiusMd),
         ),
         child: Row(
           children: [
@@ -1405,7 +1404,7 @@ class _VaultFileRow extends StatelessWidget {
                   horizontal: 6, vertical: 2),
               decoration: BoxDecoration(
                 color: badgeBg,
-                borderRadius: BorderRadius.circular(hollow.radiusSm),
+                borderRadius: BorderRadius.circular(hollow.radiusXs),
               ),
               child: Text(shardText,
                   style: HollowTypography.caption.copyWith(
@@ -1503,7 +1502,7 @@ class _MobileImportedArchivesViewState
           padding: const EdgeInsets.all(HollowSpacing.md),
           child: HollowPressable(
             onTap: _loading ? null : _pickArchive,
-            borderRadius: BorderRadius.circular(hollow.radiusSm),
+            borderRadius: BorderRadius.circular(hollow.radiusMd),
             padding: EdgeInsets.zero,
             child: Container(
               width: double.infinity,
@@ -1511,7 +1510,7 @@ class _MobileImportedArchivesViewState
               decoration: BoxDecoration(
                 color: hollow.accent.withValues(alpha: 0.12),
                 borderRadius:
-                    BorderRadius.circular(hollow.radiusSm),
+                    BorderRadius.circular(hollow.radiusMd),
                 border: Border.all(
                     color: hollow.accent.withValues(alpha: 0.3)),
               ),
@@ -1615,7 +1614,7 @@ class _MobileImportedArchivesViewState
     final fileName = path.split(Platform.pathSeparator).last;
     showModalBottomSheet(
       context: context,
-      backgroundColor: hollow.surface,
+      backgroundColor: hollow.overlay,
       shape: RoundedRectangleBorder(
         borderRadius:
             BorderRadius.vertical(top: Radius.circular(hollow.radiusXl)),
@@ -1704,7 +1703,7 @@ class _MobileArchiveEntryCard extends ConsumerWidget {
         onLongPress: onLongPress,
         child: HollowPressable(
           onTap: onTap,
-          borderRadius: BorderRadius.circular(hollow.radiusSm),
+          borderRadius: BorderRadius.circular(hollow.radiusMd),
           padding: const EdgeInsets.symmetric(
             horizontal: HollowSpacing.sm,
             vertical: HollowSpacing.sm,

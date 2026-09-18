@@ -107,7 +107,7 @@ class SupportMarksChip extends ConsumerWidget {
           ),
           decoration: BoxDecoration(
             color: color.withValues(alpha: 0.12),
-            borderRadius: BorderRadius.circular(hollow.radiusSm),
+            borderRadius: BorderRadius.circular(hollow.radiusXs),
             border: Border.all(color: color.withValues(alpha: 0.25)),
           ),
           child: Row(

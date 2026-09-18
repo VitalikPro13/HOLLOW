@@ -23,7 +23,7 @@ void showMobileMemberPanel(BuildContext context, String serverId) {
   final hollow = HollowTheme.of(context);
   showModalBottomSheet(
     context: context,
-    backgroundColor: hollow.surface,
+    backgroundColor: hollow.overlay,
     isScrollControlled: true,
     shape: RoundedRectangleBorder(
       borderRadius: BorderRadius.vertical(top: Radius.circular(hollow.radiusXl)),
@@ -313,7 +313,7 @@ class _MemberTile extends ConsumerWidget {
                     right: 0, bottom: 0,
                     child: Container(
                       decoration: BoxDecoration(
-                        color: hollow.surface, shape: BoxShape.circle,
+                        color: hollow.overlay, shape: BoxShape.circle,
                       ),
                       padding: const EdgeInsets.all(1),
                       child: StatusDot(

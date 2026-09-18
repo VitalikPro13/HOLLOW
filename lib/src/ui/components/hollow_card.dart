@@ -1,7 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 
-/// An elevated surface container using Hollow's design system.
+/// A repeatable, self-contained unit (a listing, a device, a news item),
+/// set apart by a background step alone: no hairline, no shadow.
 class HollowCard extends StatelessWidget {
   final Widget child;
   final EdgeInsetsGeometry? padding;
@@ -23,7 +24,6 @@ class HollowCard extends StatelessWidget {
       decoration: BoxDecoration(
         color: color ?? hollow.elevated,
         borderRadius: BorderRadius.circular(hollow.radiusMd),
-        border: Border.all(color: hollow.border),
       ),
       child: child,
     );

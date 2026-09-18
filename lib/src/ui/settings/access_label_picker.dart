@@ -82,9 +82,8 @@ class _AccessLabelPickerDialogState
               width: double.infinity,
               padding: const EdgeInsets.all(HollowSpacing.lg),
               decoration: BoxDecoration(
-                color: hollow.surface.withValues(alpha: 0.4),
+                color: hollow.elevated,
                 borderRadius: BorderRadius.circular(hollow.radiusMd),
-                border: Border.all(color: hollow.border),
               ),
               child: Row(
                 children: [
@@ -110,9 +109,8 @@ class _AccessLabelPickerDialogState
               width: double.infinity,
               padding: const EdgeInsets.all(HollowSpacing.lg),
               decoration: BoxDecoration(
-                color: hollow.surface.withValues(alpha: 0.4),
+                color: hollow.elevated,
                 borderRadius: BorderRadius.circular(hollow.radiusMd),
-                border: Border.all(color: hollow.border),
               ),
               child: Wrap(
                 spacing: HollowSpacing.sm,

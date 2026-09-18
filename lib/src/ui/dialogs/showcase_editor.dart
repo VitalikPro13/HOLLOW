@@ -625,7 +625,7 @@ class _BlockRow extends StatelessWidget {
             HollowPressable(
               onTap: onEdit,
               semanticLabel: 'Edit block',
-              borderRadius: BorderRadius.circular(hollow.radiusSm),
+              borderRadius: BorderRadius.circular(hollow.radiusMd),
               padding: const EdgeInsets.all(HollowSpacing.xs),
               child: Icon(LucideIcons.pencil,
                   size: 13, color: hollow.textSecondary),
@@ -633,7 +633,7 @@ class _BlockRow extends StatelessWidget {
           HollowPressable(
             onTap: onRemove,
             semanticLabel: 'Remove block',
-            borderRadius: BorderRadius.circular(hollow.radiusSm),
+            borderRadius: BorderRadius.circular(hollow.radiusMd),
             padding: const EdgeInsets.all(HollowSpacing.xs),
             child:
                 Icon(LucideIcons.x, size: 13, color: hollow.textSecondary),
@@ -997,7 +997,7 @@ class _GamePickerDialogState extends State<_GamePickerDialog> {
                   final game = _results[index];
                   return HollowPressable(
                     onTap: () => _pick(game),
-                    borderRadius: BorderRadius.circular(hollow.radiusSm),
+                    borderRadius: BorderRadius.circular(hollow.radiusMd),
                     padding: const EdgeInsets.symmetric(
                       horizontal: HollowSpacing.sm,
                       vertical: HollowSpacing.xs,
@@ -1007,7 +1007,7 @@ class _GamePickerDialogState extends State<_GamePickerDialog> {
                         // Authoring-time thumbnail, from OUR CDN only.
                         ClipRRect(
                           borderRadius:
-                              BorderRadius.circular(hollow.radiusSm),
+                              BorderRadius.circular(hollow.radiusMd),
                           child: game.coverUrl != null
                               ? Image.network(
                                   game.coverUrl!,
@@ -1040,14 +1040,13 @@ class _GamePickerDialogState extends State<_GamePickerDialog> {
                               color: hollow.textSecondary
                                   .withValues(alpha: 0.12),
                               borderRadius:
-                                  BorderRadius.circular(hollow.radiusSm),
+                                  BorderRadius.circular(hollow.radiusXs),
                             ),
                             child: Text(
                               game.gameType!,
-                              style: HollowTypography.caption.copyWith(
+                              style: HollowTypography.micro.copyWith(
                                 color: hollow.textSecondary,
                                 fontWeight: FontWeight.w600,
-                                fontSize: 9,
                               ),
                             ),
                           ),
@@ -1071,9 +1070,8 @@ class _GamePickerDialogState extends State<_GamePickerDialog> {
           const SizedBox(height: HollowSpacing.xs),
           Text(
             'Game data from IGDB',
-            style: HollowTypography.caption.copyWith(
+            style: HollowTypography.micro.copyWith(
               color: hollow.textSecondary.withValues(alpha: 0.5),
-              fontSize: 9,
             ),
           ),
         ],
@@ -1246,7 +1244,7 @@ class _ShelfEditorDialogState extends State<_ShelfEditorDialog> {
                   HollowPressable(
                     onTap: () => setState(() => _games.removeAt(i)),
                     semanticLabel: 'Remove game',
-                    borderRadius: BorderRadius.circular(hollow.radiusSm),
+                    borderRadius: BorderRadius.circular(hollow.radiusMd),
                     padding: const EdgeInsets.all(HollowSpacing.xs),
                     child: Icon(LucideIcons.x,
                         size: 13, color: hollow.textSecondary),

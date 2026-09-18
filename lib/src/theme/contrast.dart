@@ -65,4 +65,19 @@ abstract final class Contrast {
     }
     return best;
   }
+
+  /// [ensureContrast] against every surface in [backgrounds], so the result
+  /// holds on the worst of them. They must all sit on the same side of mid
+  /// grey, which a theme's surface ladder does.
+  static Color ensureContrastOnAll(
+    Color foreground,
+    List<Color> backgrounds, {
+    double targetRatio = 3.0,
+  }) {
+    var fg = foreground;
+    for (final bg in backgrounds) {
+      fg = ensureContrast(fg, bg, targetRatio: targetRatio);
+    }
+    return fg;
+  }
 }

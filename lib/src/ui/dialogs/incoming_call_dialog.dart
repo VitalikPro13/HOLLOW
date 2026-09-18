@@ -183,7 +183,7 @@ class _IncomingCallOverlayState extends ConsumerState<IncomingCallOverlay>
               width: 320,
               padding: const EdgeInsets.all(HollowSpacing.lg),
               decoration: BoxDecoration(
-                color: hollow.elevated,
+                color: hollow.overlay,
                 borderRadius: BorderRadius.circular(hollow.radiusLg),
                 border: Border.all(color: hollow.border),
                 boxShadow: [

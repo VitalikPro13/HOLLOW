@@ -133,7 +133,7 @@ class _TypeOption extends StatelessWidget {
             vertical: HollowSpacing.sm,
           ),
           decoration: BoxDecoration(
-            color: isSelected ? hollow.accentMuted : hollow.surface,
+            color: isSelected ? hollow.accentMuted : hollow.elevated,
             borderRadius: BorderRadius.circular(hollow.radiusMd),
             border: Border.all(
               color: isSelected ? hollow.accent : hollow.border,

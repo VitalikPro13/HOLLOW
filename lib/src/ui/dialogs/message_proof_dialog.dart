@@ -326,7 +326,7 @@ class _MessageProofDialogContentState
               padding: EdgeInsets.all(
                   isCompact ? HollowSpacing.lg : HollowSpacing.xl),
               decoration: BoxDecoration(
-                color: hollow.elevated.withValues(alpha: 0.92),
+                color: hollow.overlay,
                 borderRadius: BorderRadius.circular(hollow.radiusLg),
                 border: Border.all(
                   color: hollow.accent.withValues(alpha: 0.15),
@@ -557,9 +557,8 @@ class _MessagePreview extends StatelessWidget {
       width: double.infinity,
       padding: const EdgeInsets.all(HollowSpacing.md),
       decoration: BoxDecoration(
-        color: hollow.surface.withValues(alpha: 0.5),
+        color: hollow.elevated,
         borderRadius: BorderRadius.circular(hollow.radiusMd),
-        border: Border.all(color: hollow.border.withValues(alpha: 0.5)),
       ),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -599,7 +598,7 @@ class _MessagePreview extends StatelessWidget {
                 const SizedBox(height: 2),
                 if (hasMedia && (isImage || isVideo)) ...[
                   ClipRRect(
-                    borderRadius: BorderRadius.circular(hollow.radiusSm),
+                    borderRadius: BorderRadius.circular(hollow.radiusMd),
                     child: SizedBox(
                       width: 48,
                       height: 48,
@@ -607,7 +606,7 @@ class _MessagePreview extends StatelessWidget {
                         path: file.diskPath!,
                         fit: BoxFit.cover,
                         errorWidget: Container(
-                          color: hollow.surface,
+                          color: hollow.elevated,
                           child: Icon(
                             isVideo ? LucideIcons.film : LucideIcons.image,
                             size: 20,

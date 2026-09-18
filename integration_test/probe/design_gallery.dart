@@ -6,6 +6,7 @@ import 'package:hollow/src/theme/hollow_theme_data.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_badge.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
+import 'package:hollow/src/ui/components/hollow_card.dart';
 import 'package:hollow/src/ui/components/hollow_chip.dart';
 import 'package:hollow/src/ui/components/hollow_divider.dart';
 import 'package:hollow/src/ui/components/hollow_empty_state.dart';
@@ -78,6 +79,120 @@ class _GalleryPane extends StatelessWidget {
                 caption,
                 style:
                     HollowTypography.heading.copyWith(color: hollow.textPrimary),
+              ),
+              const SizedBox(height: HollowSpacing.xl),
+
+              Row(
+                children: [
+                  for (final w in [
+                    FontWeight.w400,
+                    FontWeight.w500,
+                    FontWeight.w600,
+                  ]) ...[
+                    Text('Weight ${w.value}',
+                        style: HollowTypography.subheading.copyWith(
+                            color: hollow.textPrimary, fontWeight: w)),
+                    const SizedBox(width: HollowSpacing.md),
+                  ],
+                ],
+              ),
+              const SizedBox(height: HollowSpacing.lg),
+              const HollowSectionHeader('Surface ladder'),
+              Row(
+                children: [
+                  for (final (name, color) in [
+                    ('chrome', hollow.surface),
+                    ('canvas', hollow.background),
+                    ('raised', hollow.elevated),
+                    ('overlay', hollow.overlay),
+                    ('hover', hollow.hover),
+                  ])
+                    Expanded(
+                      child: Container(
+                        height: 56,
+                        color: color,
+                        alignment: Alignment.bottomLeft,
+                        padding: const EdgeInsets.all(HollowSpacing.xs),
+                        child: Text(name,
+                            style: HollowTypography.monoSmall
+                                .copyWith(color: hollow.textSecondary)),
+                      ),
+                    ),
+                ],
+              ),
+              const SizedBox(height: HollowSpacing.xl),
+
+              const HollowSectionHeader('A message'),
+              _MessageSample(),
+              const SizedBox(height: HollowSpacing.xl),
+
+              const HollowSectionHeader('A row that exists for one action'),
+              HollowListRow(
+                title: 'Aurora frame',
+                subtitle: 'Animated, from the Starter pack',
+                leading: _Dot(color: hollow.accent),
+                trailing: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    HollowButton.ghost(
+                      compact: true,
+                      semanticLabel: 'More',
+                      onPressed: () {},
+                      child: const Icon(LucideIcons.ellipsis),
+                    ),
+                    const SizedBox(width: HollowSpacing.sm),
+                    HollowButton.outline(
+                      compact: true,
+                      onPressed: () {},
+                      child: const Text('Wear'),
+                    ),
+                  ],
+                ),
+                onTap: () {},
+              ),
+              const SizedBox(height: HollowSpacing.xl),
+
+              const HollowSectionHeader('Card: fill only, then fill + hairline'),
+              Row(
+                children: [
+                  Expanded(
+                    child: HollowCard(
+                      child: Text('Fill only',
+                          style: HollowTypography.label
+                              .copyWith(color: hollow.textPrimary)),
+                    ),
+                  ),
+                  const SizedBox(width: HollowSpacing.sm),
+                  Expanded(
+                    child: Container(
+                      padding: const EdgeInsets.all(HollowSpacing.lg),
+                      decoration: BoxDecoration(
+                        color: hollow.elevated,
+                        borderRadius: BorderRadius.circular(hollow.radiusMd),
+                        border: Border.all(color: hollow.border),
+                      ),
+                      child: Text('Fill + hairline',
+                          style: HollowTypography.label
+                              .copyWith(color: hollow.textPrimary)),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: HollowSpacing.xl),
+
+              const HollowSectionHeader('Picker tabs, lists as one dropdown'),
+              Wrap(
+                spacing: HollowSpacing.sm,
+                runSpacing: HollowSpacing.sm,
+                children: [
+                  HollowChip(label: 'Emoji', onTap: () {}),
+                  HollowChip(label: 'GIFs', selected: true, onTap: () {}),
+                  HollowChip(label: 'Stickers', onTap: () {}),
+                  HollowChip(
+                      label: 'All lists',
+                      trailingIcon: LucideIcons.chevronDown,
+                      onTap: () {}),
+                ],
               ),
               const SizedBox(height: HollowSpacing.xl),
 
@@ -275,7 +390,7 @@ class _GalleryPane extends StatelessWidget {
               const SizedBox(height: HollowSpacing.xl),
 
               const HollowSectionHeader('Type roles'),
-              _TypeRow('display 28/700', HollowTypography.display),
+              _TypeRow('display 28/600', HollowTypography.display),
               _TypeRow('heading 20/600', HollowTypography.heading),
               _TypeRow('subheading 16/600', HollowTypography.subheading),
               _TypeRow('body 14/400', HollowTypography.body),
@@ -285,6 +400,15 @@ class _GalleryPane extends StatelessWidget {
               _TypeRow('micro 10/500', HollowTypography.micro),
               _TypeRow('mono 13/400', HollowTypography.mono),
               _TypeRow('monoSmall 11/400', HollowTypography.monoSmall),
+              const SizedBox(height: HollowSpacing.sm),
+              _TypeRow('Кириллица: Съешь же ещё этих мягких булок',
+                  HollowTypography.body),
+              _TypeRow('Weights 400, 500, 600 · 0123456789',
+                  HollowTypography.body),
+              _TypeRow('Medium 500 label', HollowTypography.label),
+              _TypeRow('Semibold 600 heading', HollowTypography.subheading),
+              _TypeRow('a1b2 c3d4 e5f6 · 1.14.2 · relay.anonlisten.com',
+                  HollowTypography.mono),
               const SizedBox(height: HollowSpacing.xxl),
             ],
           ),
@@ -321,6 +445,51 @@ class _Dot extends StatelessWidget {
       width: 8,
       height: 8,
       decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+    );
+  }
+}
+
+class _MessageSample extends StatelessWidget {
+  @override
+  Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Container(
+          width: 36,
+          height: 36,
+          decoration: BoxDecoration(
+            color: hollow.accentMuted,
+            shape: BoxShape.circle,
+          ),
+        ),
+        const SizedBox(width: HollowSpacing.md),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Text('Dr Faust',
+                      style: HollowTypography.label
+                          .copyWith(color: hollow.textPrimary)),
+                  const SizedBox(width: HollowSpacing.sm),
+                  Text('14:02',
+                      style: HollowTypography.monoSmall
+                          .copyWith(color: hollow.textTertiary)),
+                ],
+              ),
+              const SizedBox(height: HollowSpacing.xxs),
+              Text(
+                'Pushed the relay fix. Can you try joining the server again '
+                'and tell me if the invite still hangs?',
+                style: HollowTypography.body.copyWith(color: hollow.textPrimary),
+              ),
+            ],
+          ),
+        ),
+      ],
     );
   }
 }

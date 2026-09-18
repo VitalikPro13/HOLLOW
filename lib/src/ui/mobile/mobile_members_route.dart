@@ -409,7 +409,7 @@ class _MemberRow extends ConsumerWidget {
               HollowPressable(
                 onTap: () => _showActions(context, ref),
                 semanticLabel: 'Member options',
-                borderRadius: BorderRadius.circular(hollow.radiusSm),
+                borderRadius: BorderRadius.circular(hollow.radiusMd),
                 padding: const EdgeInsets.all(HollowSpacing.sm),
                 child: Icon(LucideIcons.moreVertical, size: 16, color: hollow.textSecondary),
               ),
@@ -425,7 +425,7 @@ class _MemberRow extends ConsumerWidget {
 
     showModalBottomSheet(
       context: context,
-      backgroundColor: hollow.surface,
+      backgroundColor: hollow.overlay,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(hollow.radiusXl)),
       ),
@@ -526,7 +526,7 @@ class _MemberRow extends ConsumerWidget {
 
     showModalBottomSheet(
       context: context,
-      backgroundColor: hollow.surface,
+      backgroundColor: hollow.overlay,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(hollow.radiusXl)),
       ),

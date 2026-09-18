@@ -346,14 +346,14 @@ class _SelfAssignSection extends StatelessWidget {
                   }
                 }
               },
-              borderRadius: BorderRadius.circular(hollow.radiusSm),
+              borderRadius: BorderRadius.circular(hollow.radiusXs),
               child: Container(
                 padding: const EdgeInsets.symmetric(
                   horizontal: HollowSpacing.md, vertical: HollowSpacing.xs,
                 ),
                 decoration: BoxDecoration(
                   color: isAssigned ? color.withValues(alpha: 0.2) : Colors.transparent,
-                  borderRadius: BorderRadius.circular(hollow.radiusSm),
+                  borderRadius: BorderRadius.circular(hollow.radiusXs),
                   border: Border.all(
                     color: isAssigned ? color : color.withValues(alpha: 0.3),
                   ),
@@ -418,9 +418,8 @@ class _ManageSection extends ConsumerWidget {
             margin: const EdgeInsets.only(bottom: HollowSpacing.sm),
             padding: const EdgeInsets.all(HollowSpacing.md),
             decoration: BoxDecoration(
-              color: hollow.surface,
+              color: hollow.elevated,
               borderRadius: BorderRadius.circular(hollow.radiusMd),
-              border: Border.all(color: hollow.border),
             ),
             child: Row(
               children: [
@@ -445,7 +444,7 @@ class _ManageSection extends ConsumerWidget {
                 HollowPressable(
                   onTap: () => _showAssignDialog(context, ref, label),
                   semanticLabel: 'Assign label to members',
-                  borderRadius: BorderRadius.circular(hollow.radiusSm),
+                  borderRadius: BorderRadius.circular(hollow.radiusMd),
                   padding: const EdgeInsets.all(HollowSpacing.xs),
                   child: Icon(LucideIcons.userPlus, size: 16, color: hollow.textSecondary),
                 ),
@@ -453,7 +452,7 @@ class _ManageSection extends ConsumerWidget {
                 HollowPressable(
                   onTap: () => onEdit(label),
                   semanticLabel: 'Edit label',
-                  borderRadius: BorderRadius.circular(hollow.radiusSm),
+                  borderRadius: BorderRadius.circular(hollow.radiusMd),
                   padding: const EdgeInsets.all(HollowSpacing.xs),
                   child: Icon(LucideIcons.pencil, size: 16, color: hollow.textSecondary),
                 ),
@@ -461,7 +460,7 @@ class _ManageSection extends ConsumerWidget {
                 HollowPressable(
                   onTap: () => _deleteLabel(context, label),
                   semanticLabel: 'Delete label',
-                  borderRadius: BorderRadius.circular(hollow.radiusSm),
+                  borderRadius: BorderRadius.circular(hollow.radiusMd),
                   padding: const EdgeInsets.all(HollowSpacing.xs),
                   child: Icon(LucideIcons.trash2, size: 16, color: hollow.error),
                 ),

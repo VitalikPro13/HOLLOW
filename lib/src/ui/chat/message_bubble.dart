@@ -143,7 +143,7 @@ class MessageBubble extends ConsumerWidget {
             ? HollowFocusRing(
                 enabled: onReplyTap != null,
                 onActivate: onReplyTap,
-                borderRadius: BorderRadius.circular(hollow.radiusSm),
+                borderRadius: BorderRadius.circular(hollow.radiusMd),
                 child: MouseRegion(
                   cursor: SystemMouseCursors.click,
                   child: GestureDetector(

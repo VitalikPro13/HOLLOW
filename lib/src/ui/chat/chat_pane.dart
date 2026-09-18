@@ -165,7 +165,7 @@ Widget _dmSourcePill({ // design-ignore: floating call source switcher, not a la
       vertical: HollowSpacing.xs,
     ),
     decoration: BoxDecoration(
-      color: hollow.surface.withValues(alpha: 0.9),
+      color: hollow.overlay.withValues(alpha: 0.9),
       borderRadius: BorderRadius.circular(HollowRadius.pill),
       border: Border.all(color: hollow.border.withValues(alpha: 0.5)),
     ),
@@ -185,7 +185,7 @@ Widget _dmSourcePill({ // design-ignore: floating call source switcher, not a la
               semanticLabel: isUnwatched
                   ? 'Watch screen share from $name'
                   : null,
-              borderRadius: BorderRadius.circular(hollow.radiusSm),
+              borderRadius: BorderRadius.circular(hollow.radiusMd),
               backgroundColor: isFocused ? hollow.accentMuted : null,
               padding: const EdgeInsets.symmetric(
                 horizontal: HollowSpacing.sm,
@@ -238,8 +238,8 @@ Widget _shareSourceLabel(HollowTheme hollow, String label) {
       vertical: HollowSpacing.xs,
     ),
     decoration: BoxDecoration(
-      color: hollow.surface.withValues(alpha: 0.85),
-      borderRadius: BorderRadius.circular(hollow.radiusSm),
+      color: hollow.overlay.withValues(alpha: 0.85),
+      borderRadius: BorderRadius.circular(hollow.radiusXs),
       border: Border.all(color: hollow.border),
     ),
     child: Text(
@@ -289,7 +289,7 @@ Widget _muteCallButton(WidgetRef ref, HollowTheme hollow, CallState call,
     child: HollowPressable(
       semanticLabel: call.isMuted ? 'Unmute' : 'Mute',
       onTap: () => ref.read(callProvider.notifier).toggleMute(),
-      borderRadius: BorderRadius.circular(hollow.radiusSm),
+      borderRadius: BorderRadius.circular(hollow.radiusMd),
       padding: padding,
       child: Icon(mic.icon, size: iconSize, color: mic.color),
     ),
@@ -306,7 +306,7 @@ Widget _cameraCallButton(WidgetRef ref, HollowTheme hollow, CallState call,
       onTap: call.status == CallStatus.active
           ? () => ref.read(callProvider.notifier).toggleVideo()
           : null,
-      borderRadius: BorderRadius.circular(hollow.radiusSm),
+      borderRadius: BorderRadius.circular(hollow.radiusMd),
       padding: padding,
       child: Icon(
         call.isVideoEnabled ? LucideIcons.video : LucideIcons.videoOff,
@@ -328,7 +328,7 @@ Widget _screenShareCallButton(
       onTap: call.status == CallStatus.active
           ? () => _toggleScreenShare(context, ref, call)
           : null,
-      borderRadius: BorderRadius.circular(hollow.radiusSm),
+      borderRadius: BorderRadius.circular(hollow.radiusMd),
       padding: padding,
       child: Icon(
         call.isScreenSharing ? LucideIcons.monitorOff : LucideIcons.monitor,
@@ -346,7 +346,7 @@ Widget _endCallButton(WidgetRef ref, HollowTheme hollow,
     child: HollowPressable(
       semanticLabel: 'End call',
       onTap: () => ref.read(callProvider.notifier).endCall(),
-      borderRadius: BorderRadius.circular(hollow.radiusSm),
+      borderRadius: BorderRadius.circular(hollow.radiusMd),
       padding: const EdgeInsets.symmetric(
         horizontal: HollowSpacing.sm,
         vertical: HollowSpacing.xs,
@@ -355,7 +355,7 @@ Widget _endCallButton(WidgetRef ref, HollowTheme hollow,
         padding: innerPadding,
         decoration: BoxDecoration(
           color: hollow.error.withValues(alpha: 0.15),
-          borderRadius: BorderRadius.circular(hollow.radiusSm),
+          borderRadius: BorderRadius.circular(hollow.radiusMd),
         ),
         child: Icon(
           LucideIcons.phoneOff,
@@ -577,7 +577,7 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
                 semanticLabel: gridOn
                     ? 'Exit grid view'
                     : 'Show all sources in a grid',
-                borderRadius: BorderRadius.circular(hollow.radiusSm),
+                borderRadius: BorderRadius.circular(hollow.radiusMd),
                 backgroundColor: gridOn ? hollow.accentMuted : null,
                 padding: const EdgeInsets.all(HollowSpacing.xs),
                 child: Icon(
@@ -1297,7 +1297,7 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
             });
           }
         },
-        borderRadius: BorderRadius.circular(hollow.radiusSm),
+        borderRadius: BorderRadius.circular(hollow.radiusMd),
         padding: const EdgeInsets.all(HollowSpacing.xs),
         child: Icon(
           LucideIcons.search,
@@ -1368,7 +1368,7 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
       child: HollowPressable(
         subtle: true,
         onTap: () => _jumpToSearchResult(msg),
-        borderRadius: BorderRadius.circular(hollow.radiusSm),
+        borderRadius: BorderRadius.circular(hollow.radiusMd),
         hoverColor: hollow.elevated,
         padding: const EdgeInsets.symmetric(
           horizontal: HollowSpacing.sm,
@@ -1557,7 +1557,7 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
         onTap: isOnline && !isInCall
             ? () => _startDmCall(withVideo: false)
             : null,
-        borderRadius: BorderRadius.circular(hollow.radiusSm),
+        borderRadius: BorderRadius.circular(hollow.radiusMd),
         padding: const EdgeInsets.all(HollowSpacing.xs),
         child: Icon(
           isCallWithThisPeer ? LucideIcons.phoneCall : LucideIcons.phone,
@@ -1584,7 +1584,7 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
         onTap: isOnline && !isInCall
             ? () => _startDmCall(withVideo: true)
             : null,
-        borderRadius: BorderRadius.circular(hollow.radiusSm),
+        borderRadius: BorderRadius.circular(hollow.radiusMd),
         padding: const EdgeInsets.all(HollowSpacing.xs),
         child: Icon(
           LucideIcons.video,
@@ -1606,7 +1606,7 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
         onTap: () {
           ref.read(dmProfilePanelProvider.notifier).state = !showProfilePanel;
         },
-        borderRadius: BorderRadius.circular(hollow.radiusSm),
+        borderRadius: BorderRadius.circular(hollow.radiusMd),
         padding: const EdgeInsets.all(HollowSpacing.xs),
         child: Icon(LucideIcons.user,
             size: 16,
@@ -1631,7 +1631,7 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
               .read(notificationSettingsProvider.notifier)
               .setDmEnabled(widget.peerId, !current);
         },
-        borderRadius: BorderRadius.circular(hollow.radiusSm),
+        borderRadius: BorderRadius.circular(hollow.radiusMd),
         padding: const EdgeInsets.all(HollowSpacing.xs),
         child: Icon(
           dmNotifEnabled ? LucideIcons.bell : LucideIcons.bellOff,
@@ -1652,7 +1652,7 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
       child: HollowPressable(
         semanticLabel: label,
         onTap: () => _handleSplitToggle(ref),
-        borderRadius: BorderRadius.circular(hollow.radiusSm),
+        borderRadius: BorderRadius.circular(hollow.radiusMd),
         padding: const EdgeInsets.all(HollowSpacing.xs),
         child: Icon(
           LucideIcons.columns,
@@ -1757,7 +1757,7 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
             child: Container(
               width: 360,
               decoration: BoxDecoration(
-                color: hollow.surface.withValues(alpha: 0.88),
+                color: hollow.overlay.withValues(alpha: 0.88),
                 border: Border(
                   left: BorderSide(
                     color: hollow.border.withValues(alpha: 0.5),
@@ -3023,12 +3023,12 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
               margin: const EdgeInsets.only(left: 4, top: 4, bottom: 4, right: 2),
               decoration: BoxDecoration(
                 color: hollow.elevated,
-                borderRadius: BorderRadius.circular(hollow.radiusSm),
+                borderRadius: BorderRadius.circular(hollow.radiusMd),
               ),
               clipBehavior: Clip.antiAlias,
               child: _speakingWrapped(
                 local: true,
-                radius: BorderRadius.circular(hollow.radiusSm),
+                radius: BorderRadius.circular(hollow.radiusMd),
                 child: hasLocalVideo && localRenderer != null
                     ? RepaintBoundary(
                         child: RTCVideoView(
@@ -3070,12 +3070,12 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
               margin: const EdgeInsets.only(left: 2, top: 4, bottom: 4, right: 4),
               decoration: BoxDecoration(
                 color: hollow.elevated,
-                borderRadius: BorderRadius.circular(hollow.radiusSm),
+                borderRadius: BorderRadius.circular(hollow.radiusMd),
               ),
               clipBehavior: Clip.antiAlias,
               child: _speakingWrapped(
                 local: false,
-                radius: BorderRadius.circular(hollow.radiusSm),
+                radius: BorderRadius.circular(hollow.radiusMd),
                 child: hasRemoteVideo && remoteRenderer != null
                     ? RepaintBoundary(
                         child: RTCVideoView(
@@ -3387,7 +3387,7 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
           padding: const EdgeInsets.all(2),
           decoration: BoxDecoration(
             color: hollow.error,
-            borderRadius: BorderRadius.circular(hollow.radiusSm),
+            borderRadius: BorderRadius.circular(hollow.radiusXs),
             border: Border.all(color: hollow.background, width: 1.5),
           ),
           child: Icon(icon, size: 10, color: Colors.white),
@@ -3463,7 +3463,7 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
         onTap: call.status == CallStatus.active
             ? () => ref.read(callProvider.notifier).toggleDeafen()
             : null,
-        borderRadius: BorderRadius.circular(hollow.radiusSm),
+        borderRadius: BorderRadius.circular(hollow.radiusMd),
         padding: padding,
         child: Icon(
           LucideIcons.headphones,
@@ -3492,7 +3492,7 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
             notifier.startRecording();
           }
         },
-        borderRadius: BorderRadius.circular(hollow.radiusSm),
+        borderRadius: BorderRadius.circular(hollow.radiusMd),
         padding: padding,
         child: Icon(
           rec.isMyRecording ? LucideIcons.stopCircle : LucideIcons.circle,
@@ -3684,7 +3684,7 @@ class _ScreenShareFullView extends ConsumerWidget {
       decoration: BoxDecoration(
         color: hollow.elevated,
         borderRadius: call.isScreenSharing
-            ? BorderRadius.circular(hollow.radiusSm)
+            ? BorderRadius.circular(hollow.radiusMd)
             : BorderRadius.zero,
       ),
       clipBehavior: Clip.antiAlias,
@@ -3734,7 +3734,7 @@ class _ScreenShareFullView extends ConsumerWidget {
       margin: const EdgeInsets.all(2),
       decoration: BoxDecoration(
         color: hollow.elevated,
-        borderRadius: BorderRadius.circular(hollow.radiusSm),
+        borderRadius: BorderRadius.circular(hollow.radiusMd),
       ),
       clipBehavior: Clip.antiAlias,
       child: Stack(
@@ -3833,7 +3833,7 @@ class _ScreenShareFullView extends ConsumerWidget {
           margin: const EdgeInsets.all(2),
           decoration: BoxDecoration(
             color: hollow.elevated,
-            borderRadius: BorderRadius.circular(hollow.radiusSm),
+            borderRadius: BorderRadius.circular(hollow.radiusMd),
           ),
           clipBehavior: Clip.antiAlias,
           child: Stack(
@@ -3899,7 +3899,7 @@ class _ScreenShareFullView extends ConsumerWidget {
           margin: const EdgeInsets.all(2),
           decoration: BoxDecoration(
             color: hollow.elevated,
-            borderRadius: BorderRadius.circular(hollow.radiusSm),
+            borderRadius: BorderRadius.circular(hollow.radiusMd),
           ),
           clipBehavior: Clip.antiAlias,
           child: Center(
@@ -4329,7 +4329,7 @@ class _ScreenShareControlsOverlayState
         vertical: HollowSpacing.sm,
       ),
       decoration: BoxDecoration(
-        color: hollow.surface.withValues(alpha: 0.9),
+        color: hollow.overlay.withValues(alpha: 0.9),
         borderRadius: BorderRadius.circular(HollowRadius.pill),
         border: Border.all(
           color: hollow.border.withValues(alpha: 0.5),
@@ -4720,7 +4720,7 @@ class _DmProfilePanel extends ConsumerWidget {
         ),
         decoration: BoxDecoration(
           color: const Color(0xFF9146FF).withValues(alpha: 0.12),
-          borderRadius: BorderRadius.circular(hollow.radiusSm),
+          borderRadius: BorderRadius.circular(hollow.radiusXs),
         ),
         child: Row(
           mainAxisSize: MainAxisSize.min,
@@ -4833,7 +4833,7 @@ class _DmProfilePanel extends ConsumerWidget {
         );
       },
       subtle: true,
-      borderRadius: BorderRadius.circular(hollow.radiusSm),
+      borderRadius: BorderRadius.circular(hollow.radiusMd),
       padding: const EdgeInsets.symmetric(
         horizontal: HollowSpacing.sm,
         vertical: HollowSpacing.xs,

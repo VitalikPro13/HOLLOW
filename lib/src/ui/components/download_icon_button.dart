@@ -32,7 +32,7 @@ class DownloadIconButton extends ConsumerWidget {
             anchorBottom: true,
           );
         },
-        borderRadius: BorderRadius.circular(hollow.radiusSm),
+        borderRadius: BorderRadius.circular(hollow.radiusMd),
         padding: const EdgeInsets.all(HollowSpacing.xs),
         semanticLabel: 'Downloads',
         child: Stack(

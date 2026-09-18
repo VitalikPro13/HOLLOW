@@ -980,7 +980,7 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
                     final selected = _catchupDays == days;
                     return HollowPressable(
                       onTap: selected ? null : () => _setRelayCatchup(days),
-                      borderRadius: BorderRadius.circular(hollow.radiusSm),
+                      borderRadius: BorderRadius.circular(hollow.radiusMd),
                       backgroundColor: selected ? hollow.accentMuted : null,
                       padding: const EdgeInsets.symmetric(
                         horizontal: HollowSpacing.md,

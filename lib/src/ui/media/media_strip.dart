@@ -146,14 +146,14 @@ class _MediaThumb extends StatelessWidget {
     return HollowPressable(
       onTap: onTap,
       semanticLabel: item.attachment.fileName,
-      borderRadius: BorderRadius.circular(hollow.radiusSm),
+      borderRadius: BorderRadius.circular(hollow.radiusMd),
       child: Container(
         width: _kThumbSize,
         height: _kThumbSize,
         clipBehavior: Clip.antiAlias,
         decoration: BoxDecoration(
           color: Colors.black.withValues(alpha: 0.4),
-          borderRadius: BorderRadius.circular(hollow.radiusSm),
+          borderRadius: BorderRadius.circular(hollow.radiusMd),
           border: Border.all(
             color: selected ? hollow.accent : Colors.white.withValues(alpha: 0.1),
             width: selected ? 2 : 1,

@@ -121,9 +121,8 @@ class MobileSettingsTab extends ConsumerWidget {
           child: Container(
             padding: const EdgeInsets.all(HollowSpacing.md),
             decoration: BoxDecoration(
-              color: hollow.surface,
+              color: hollow.elevated,
               borderRadius: BorderRadius.circular(hollow.radiusLg),
-              border: Border.all(color: hollow.border),
             ),
             child: Row(
               children: [
@@ -371,9 +370,8 @@ class _MobileRelayCard extends ConsumerWidget {
       width: double.infinity,
       padding: const EdgeInsets.all(HollowSpacing.md),
       decoration: BoxDecoration(
-        color: hollow.surface,
+        color: hollow.elevated,
         borderRadius: BorderRadius.circular(hollow.radiusMd),
-        border: Border.all(color: hollow.border),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -437,9 +435,8 @@ class _MobileStatsCard extends ConsumerWidget {
       width: double.infinity,
       padding: const EdgeInsets.all(HollowSpacing.md),
       decoration: BoxDecoration(
-        color: hollow.surface,
+        color: hollow.elevated,
         borderRadius: BorderRadius.circular(hollow.radiusMd),
-        border: Border.all(color: hollow.border),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -629,9 +626,8 @@ class _SettingsNavTile extends StatelessWidget {
       child: Container(
         padding: const EdgeInsets.all(HollowSpacing.md),
         decoration: BoxDecoration(
-          color: hollow.surface,
+          color: hollow.elevated,
           borderRadius: BorderRadius.circular(hollow.radiusLg),
-          border: Border.all(color: hollow.border),
         ),
         child: Row(
           children: [
@@ -993,9 +989,8 @@ class _ProfileTabState extends ConsumerState<_ProfileTab> {
       children: [
         Container(
           decoration: BoxDecoration(
-            color: hollow.surface,
+            color: hollow.elevated,
             borderRadius: BorderRadius.circular(hollow.radiusMd),
-            border: Border.all(color: hollow.border),
           ),
           clipBehavior: Clip.antiAlias,
           child: Column(
@@ -1078,7 +1073,7 @@ class _ProfileTabState extends ConsumerState<_ProfileTab> {
                             Container(
                               decoration: BoxDecoration(
                                 borderRadius: BorderRadius.circular(hollow.radiusMd + 2),
-                                border: Border.all(color: hollow.surface, width: 3),
+                                border: Border.all(color: hollow.elevated, width: 3),
                               ),
                               // One widget for both states, so the frame
                               // preview survives picking a new avatar.
@@ -1136,11 +1131,9 @@ class _ProfileTabState extends ConsumerState<_ProfileTab> {
 
                       if (previewAbout.isNotEmpty) ...[
                         const SizedBox(height: HollowSpacing.sm),
-                        Text('ABOUT ME', style: HollowTypography.caption.copyWith(
+                        Text('ABOUT ME', style: HollowTypography.micro.copyWith(
                           color: hollow.textSecondary,
-                          fontWeight: FontWeight.w700,
-                          letterSpacing: 0.5,
-                          fontSize: 9,
+                          fontWeight: FontWeight.w600,
                         )),
                         const SizedBox(height: 2),
                         Text(
@@ -1158,9 +1151,8 @@ class _ProfileTabState extends ConsumerState<_ProfileTab> {
                         const SizedBox(height: HollowSpacing.sm),
                         Text(
                           '${peerId.substring(0, 8)}...${peerId.substring(peerId.length - 8)}',
-                          style: HollowTypography.mono.copyWith(
+                          style: HollowTypography.monoSmall.copyWith(
                             color: hollow.textSecondary.withValues(alpha: 0.4),
-                            fontSize: 9,
                           ),
                         ),
                         const SizedBox(height: HollowSpacing.xs),
@@ -1356,9 +1348,8 @@ class _TwitchRowState extends ConsumerState<_TwitchRow> {
     return Container(
       padding: const EdgeInsets.all(HollowSpacing.md),
       decoration: BoxDecoration(
-        color: hollow.surface,
+        color: hollow.elevated,
         borderRadius: BorderRadius.circular(hollow.radiusMd),
-        border: Border.all(color: hollow.border),
       ),
       child: Row(
         children: [
@@ -1471,9 +1462,8 @@ class _NetworkTabState extends ConsumerState<_NetworkTab> {
             width: double.infinity,
             padding: const EdgeInsets.all(HollowSpacing.md),
             decoration: BoxDecoration(
-              color: hollow.surface,
+              color: hollow.elevated,
               borderRadius: BorderRadius.circular(hollow.radiusMd),
-              border: Border.all(color: hollow.border),
             ),
             child: Row(
               children: [
@@ -1546,7 +1536,7 @@ class _NetworkTabState extends ConsumerState<_NetworkTab> {
               decoration: BoxDecoration(
                 color: _selectedRelay == domain
                     ? hollow.accentMuted
-                    : hollow.surface,
+                    : hollow.elevated,
                 borderRadius: BorderRadius.circular(hollow.radiusMd),
                 border: Border.all(
                   color: _selectedRelay == domain
@@ -1590,9 +1580,8 @@ class _NetworkTabState extends ConsumerState<_NetworkTab> {
                                   borderRadius: BorderRadius.circular(4),
                                 ),
                                 child: Text('Official',
-                                    style: HollowTypography.caption.copyWith(
+                                    style: HollowTypography.micro.copyWith(
                                       color: hollow.accent,
-                                      fontSize: 9,
                                       fontWeight: FontWeight.w600,
                                     )),
                               ),
@@ -1625,7 +1614,7 @@ class _NetworkTabState extends ConsumerState<_NetworkTab> {
                         }
                       },
                       semanticLabel: 'Remove relay',
-                      borderRadius: BorderRadius.circular(hollow.radiusSm),
+                      borderRadius: BorderRadius.circular(hollow.radiusMd),
                       padding: const EdgeInsets.all(HollowSpacing.xs),
                       child: Icon(LucideIcons.x, size: 14, color: hollow.textSecondary),
                     ),
@@ -1735,6 +1724,8 @@ class _AppearanceTab extends StatelessWidget {
         _SectionLabel(label: 'Background'),
         SizedBox(height: HollowSpacing.sm),
         _BackgroundSection(),
+        SizedBox(height: HollowSpacing.md),
+        AmbientBackgroundToggle(),
         SizedBox(height: HollowSpacing.xl),
         _SectionLabel(label: 'Layout'),
         SizedBox(height: HollowSpacing.sm),
@@ -2188,7 +2179,7 @@ class _AccentHueSection extends ConsumerWidget {
                   width: 36,
                   height: 36,
                   decoration: BoxDecoration(
-                    borderRadius: BorderRadius.circular(6),
+                    borderRadius: BorderRadius.circular(hollow.radiusMd),
                     border: Border.all(
                       color: hollow.textSecondary.withValues(alpha: 0.4),
                     ),
@@ -2226,7 +2217,7 @@ class _MobileColorSwatch extends StatelessWidget {
         height: 36,
         decoration: BoxDecoration(
           color: accentFromHue(hue),
-          borderRadius: BorderRadius.circular(6),
+          borderRadius: BorderRadius.circular(HollowTheme.of(context).radiusMd),
           border: Border.all(
             color: isSelected
                 ? Colors.white
@@ -2620,7 +2611,7 @@ class _ImageQualityPicker extends ConsumerWidget {
               child: HollowPressable(
                 onTap: () => ref.read(imageQualityProvider.notifier).setQuality(q),
                 borderRadius: BorderRadius.circular(20),
-                backgroundColor: isSelected ? hollow.accent : hollow.surface,
+                backgroundColor: isSelected ? hollow.accent : hollow.elevated,
                 padding: const EdgeInsets.symmetric(
                   horizontal: HollowSpacing.md, vertical: HollowSpacing.sm,
                 ),
@@ -2870,7 +2861,7 @@ class _AudioQualityPicker extends ConsumerWidget {
                     .setPreset(preset),
                 borderRadius: BorderRadius.circular(20),
                 backgroundColor:
-                    isSelected ? hollow.accent : hollow.surface,
+                    isSelected ? hollow.accent : hollow.elevated,
                 padding: const EdgeInsets.symmetric(
                   horizontal: HollowSpacing.md,
                   vertical: HollowSpacing.sm,
@@ -3207,7 +3198,7 @@ class _RingtonePicker extends ConsumerWidget {
             onTap: () =>
                 ref.read(ringtonePathProvider.notifier).setPath(null),
             semanticLabel: 'Remove ringtone',
-            borderRadius: BorderRadius.circular(hollow.radiusSm),
+            borderRadius: BorderRadius.circular(hollow.radiusMd),
             padding: const EdgeInsets.all(HollowSpacing.xs),
             child:
                 Icon(LucideIcons.x, size: 16, color: hollow.textSecondary),
@@ -3358,9 +3349,8 @@ class _SecurityTabState extends ConsumerState<_SecurityTab> {
         Container(
           padding: const EdgeInsets.all(HollowSpacing.md),
           decoration: BoxDecoration(
-            color: hollow.surface,
+            color: hollow.elevated,
             borderRadius: BorderRadius.circular(hollow.radiusMd),
-            border: Border.all(color: hollow.border),
           ),
           child: const _AlwaysRelayCallsRow(),
         ),
@@ -3372,9 +3362,8 @@ class _SecurityTabState extends ConsumerState<_SecurityTab> {
         Container(
           padding: const EdgeInsets.all(HollowSpacing.md),
           decoration: BoxDecoration(
-            color: hollow.surface,
+            color: hollow.elevated,
             borderRadius: BorderRadius.circular(hollow.radiusMd),
-            border: Border.all(color: hollow.border),
           ),
           child: Row(
             children: [
@@ -3424,9 +3413,8 @@ class _SecurityTabState extends ConsumerState<_SecurityTab> {
           Container(
             padding: const EdgeInsets.all(HollowSpacing.md),
             decoration: BoxDecoration(
-              color: hollow.surface,
+              color: hollow.elevated,
               borderRadius: BorderRadius.circular(hollow.radiusMd),
-              border: Border.all(color: hollow.border),
             ),
             child: Row(
               children: [
@@ -3469,9 +3457,8 @@ class _SecurityTabState extends ConsumerState<_SecurityTab> {
           Container(
             padding: const EdgeInsets.all(HollowSpacing.md),
             decoration: BoxDecoration(
-              color: hollow.surface,
+              color: hollow.elevated,
               borderRadius: BorderRadius.circular(hollow.radiusMd),
-              border: Border.all(color: hollow.border),
             ),
             child: Row(
               children: [
@@ -3511,9 +3498,8 @@ class _SecurityTabState extends ConsumerState<_SecurityTab> {
         Container(
           padding: const EdgeInsets.all(HollowSpacing.md),
           decoration: BoxDecoration(
-            color: hollow.surface,
+            color: hollow.elevated,
             borderRadius: BorderRadius.circular(hollow.radiusMd),
-            border: Border.all(color: hollow.border),
           ),
           // Both platforms re-unlock a RUNNING app now: a phone's App Lock
           // and, on a narrow desktop window, the desktop one.
@@ -3537,7 +3523,7 @@ class _SecurityTabState extends ConsumerState<_SecurityTab> {
         Container(
           padding: const EdgeInsets.all(HollowSpacing.md),
           decoration: BoxDecoration(
-            color: hollow.surface,
+            color: hollow.elevated,
             borderRadius: BorderRadius.circular(hollow.radiusMd),
             border: Border.all(color: hollow.error.withValues(alpha: 0.35)),
           ),
@@ -3639,7 +3625,7 @@ class _SecurityTabState extends ConsumerState<_SecurityTab> {
     final hollow = HollowTheme.of(context);
     return showModalBottomSheet<String>(
       context: context,
-      backgroundColor: hollow.surface,
+      backgroundColor: hollow.overlay,
       shape: RoundedRectangleBorder(
         borderRadius:
             BorderRadius.vertical(top: Radius.circular(hollow.radiusXl)),
@@ -4198,9 +4184,8 @@ class _AboutTab extends ConsumerWidget {
         Container(
           padding: const EdgeInsets.all(HollowSpacing.md),
           decoration: BoxDecoration(
-            color: hollow.surface,
+            color: hollow.elevated,
             borderRadius: BorderRadius.circular(hollow.radiusMd),
-            border: Border.all(color: hollow.border),
           ),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
@@ -4274,9 +4259,8 @@ class _AboutTab extends ConsumerWidget {
               child: Container(
                 padding: const EdgeInsets.all(HollowSpacing.md),
                 decoration: BoxDecoration(
-                  color: hollow.surface,
+                  color: hollow.elevated,
                   borderRadius: BorderRadius.circular(hollow.radiusMd),
-                  border: Border.all(color: hollow.border),
                 ),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -4427,7 +4411,7 @@ class _AboutTab extends ConsumerWidget {
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
-      backgroundColor: hollow.surface,
+      backgroundColor: hollow.overlay,
       shape: RoundedRectangleBorder(
         borderRadius:
             BorderRadius.vertical(top: Radius.circular(hollow.radiusXl)),
@@ -4486,7 +4470,7 @@ class _AboutTab extends ConsumerWidget {
               constraints: const BoxConstraints(maxWidth: 400, maxHeight: 500),
               padding: const EdgeInsets.all(HollowSpacing.lg),
               decoration: BoxDecoration(
-                color: hollow.elevated,
+                color: hollow.overlay,
                 borderRadius: BorderRadius.circular(hollow.radiusLg),
                 border: Border.all(color: hollow.border),
               ),
@@ -4504,7 +4488,7 @@ class _AboutTab extends ConsumerWidget {
                       HollowPressable(
                         onTap: () => Navigator.pop(context),
                         semanticLabel: 'Close',
-                        borderRadius: BorderRadius.circular(hollow.radiusSm),
+                        borderRadius: BorderRadius.circular(hollow.radiusMd),
                         padding: const EdgeInsets.all(HollowSpacing.xs),
                         child: Icon(LucideIcons.x, size: 18,
                             color: hollow.textSecondary),
@@ -4796,7 +4780,7 @@ class _MobileBrandIcon extends StatelessWidget {
         padding: const EdgeInsets.all(10),
         decoration: BoxDecoration(
           color: hollow.elevated,
-          borderRadius: BorderRadius.circular(hollow.radiusSm),
+          borderRadius: BorderRadius.circular(hollow.radiusMd),
           border: Border.all(color: hollow.border),
         ),
         child: Icon(icon, size: 20, color: color),

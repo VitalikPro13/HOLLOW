@@ -36,7 +36,7 @@ class ShareVolumeButton extends ConsumerWidget {
       child: HollowPressable(
         semanticLabel: 'Share volume',
         onTap: () => _open(context),
-        borderRadius: BorderRadius.circular(hollow.radiusSm),
+        borderRadius: BorderRadius.circular(hollow.radiusMd),
         padding: padding,
         child: Icon(
           LucideIcons.volume2,
@@ -98,8 +98,8 @@ class ShareVolumeButton extends ConsumerWidget {
               bottom: bottom,
               width: panelW,
               child: Material(
-                color: hollow.elevated,
-                borderRadius: BorderRadius.circular(hollow.radiusSm),
+                color: hollow.overlay,
+                borderRadius: BorderRadius.circular(hollow.radiusMd),
                 elevation: 4,
                 child: const Padding(
                   padding: EdgeInsets.symmetric(
@@ -125,7 +125,7 @@ Future<void> showShareVolumeSheet(BuildContext context) {
   final hollow = HollowTheme.of(context);
   return showModalBottomSheet<void>(
     context: context,
-    backgroundColor: hollow.surface,
+    backgroundColor: hollow.overlay,
     shape: RoundedRectangleBorder(
       borderRadius:
           BorderRadius.vertical(top: Radius.circular(hollow.radiusXl)),

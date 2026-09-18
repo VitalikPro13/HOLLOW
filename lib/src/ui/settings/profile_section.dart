@@ -169,9 +169,8 @@ class ProfileSection extends ConsumerWidget {
   Widget _buildPreviewCard(HollowTheme hollow, WidgetRef ref) {
     return Container(
       decoration: BoxDecoration(
-        color: hollow.surface,
+        color: hollow.elevated,
         borderRadius: BorderRadius.circular(hollow.radiusMd),
-        border: Border.all(color: hollow.border),
       ),
       clipBehavior: Clip.antiAlias,
       child: Column(
@@ -266,7 +265,7 @@ class ProfileSection extends ConsumerWidget {
               decoration: BoxDecoration(
                 borderRadius: BorderRadius.circular(hollow.radiusMd + 2),
                 border: Border.all(
-                  color: hollow.surface,
+                  color: hollow.elevated,
                   width: 3,
                 ),
               ),
@@ -323,11 +322,9 @@ class ProfileSection extends ConsumerWidget {
           const SizedBox(height: HollowSpacing.sm),
           Text(
             'ABOUT ME',
-            style: HollowTypography.caption.copyWith(
+            style: HollowTypography.micro.copyWith(
               color: hollow.textSecondary,
-              fontWeight: FontWeight.w700,
-              letterSpacing: 0.5,
-              fontSize: 9,
+              fontWeight: FontWeight.w600,
             ),
           ),
           const SizedBox(height: HollowSpacing.xxs),
@@ -357,9 +354,8 @@ class ProfileSection extends ConsumerWidget {
               localPeerId.length > 16
                   ? localPeerId.substring(localPeerId.length - 8)
                   : localPeerId,
-              style: HollowTypography.mono.copyWith(
+              style: HollowTypography.monoSmall.copyWith(
                 color: hollow.textSecondary.withValues(alpha: 0.35),
-                fontSize: 8,
               ),
             ),
           ],

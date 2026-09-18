@@ -13,6 +13,8 @@ import 'package:hollow/src/core/providers/channel_provider.dart'
     show selectedChannelProvider;
 import 'package:hollow/src/core/providers/server_provider.dart'
     show selectedServerProvider;
+import 'package:hollow/src/core/providers/theme_provider.dart'
+    show themeModeProvider;
 import 'package:hollow/src/core/services/attachment_export.dart'
     show exportAttachmentTo;
 import 'package:hollow/src/core/services/image_pick.dart';
@@ -337,6 +339,18 @@ class ProbeRunner {
         'quit',
       }.contains(op);
 
+  /// Flips light / dark in place, so both themes are shot on the same app
+  /// state: `{"op":"theme","value":"light"}`.
+  Future<String> _theme(Map<String, dynamic> step) async {
+    final c = container;
+    if (c == null) throw _ProbeFailure('theme needs the provider container');
+    final light = step['value'] == 'light';
+    c.read(themeModeProvider.notifier).state =
+        light ? ThemeMode.light : ThemeMode.dark;
+    await settle(frames: step['frames'] as int? ?? 20);
+    return 'theme ${light ? 'light' : 'dark'}';
+  }
+
   Future<String> _dispatch(
       String op, Map<String, dynamic> step, Map<String, dynamic> extra) async {
     switch (op) {
@@ -434,6 +448,9 @@ class ProbeRunner {
 
       case 'view':
         return _view(step);
+
+      case 'theme':
+        return _theme(step);
 
       case 'wait':
       case 'pump':

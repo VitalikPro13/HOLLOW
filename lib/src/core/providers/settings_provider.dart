@@ -106,6 +106,29 @@ class ReduceTransparencyNotifier extends AsyncNotifier<bool> {
   }
 }
 
+/// The slow animated blobs behind the chat and the home screen. Off by
+/// default: the flat canvas is the design, the motion an opt-in. Persisted as
+/// `ambient_background`.
+final ambientBackgroundProvider =
+    AsyncNotifierProvider<AmbientBackgroundNotifier, bool>(
+        AmbientBackgroundNotifier.new);
+
+class AmbientBackgroundNotifier extends AsyncNotifier<bool> {
+  @override
+  Future<bool> build() async {
+    final val = await storage_api.loadSetting(key: 'ambient_background');
+    return val == 'true';
+  }
+
+  Future<void> setEnabled(bool value) async {
+    state = AsyncData(value);
+    await storage_api.saveSetting(
+      key: 'ambient_background',
+      value: value.toString(),
+    );
+  }
+}
+
 /// Preferred audio input device ID. Null/empty = system default.
 final audioInputDeviceProvider =
     AsyncNotifierProvider<AudioInputDeviceNotifier, String?>(

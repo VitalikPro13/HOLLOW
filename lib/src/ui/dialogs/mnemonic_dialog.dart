@@ -33,7 +33,7 @@ void showMnemonicDialog(BuildContext context, String mnemonic) {
             Container(
               padding: const EdgeInsets.all(HollowSpacing.md),
               decoration: BoxDecoration(
-                color: hollow.background,
+                color: hollow.elevated,
                 borderRadius: BorderRadius.circular(hollow.radiusMd),
                 border:
                     Border.all(color: hollow.warning.withValues(alpha: 0.4)),

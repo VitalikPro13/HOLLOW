@@ -86,7 +86,7 @@ class StagedLinkPreviewCard extends StatelessWidget {
       try {
         final bytes = base64Decode(p.thumbWebpB64!);
         return ClipRRect(
-          borderRadius: BorderRadius.circular(6),
+          borderRadius: BorderRadius.circular(hollow.radiusMd),
           child: Image.memory(
             bytes,
             width: 48,
@@ -103,7 +103,7 @@ class StagedLinkPreviewCard extends StatelessWidget {
       height: 48,
       decoration: BoxDecoration(
         color: hollow.elevated,
-        borderRadius: BorderRadius.circular(6),
+        borderRadius: BorderRadius.circular(hollow.radiusMd),
       ),
       child: loading
           ? Center(

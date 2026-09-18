@@ -313,7 +313,7 @@ class _FrameChoice extends StatelessWidget {
                         decoration: BoxDecoration(
                           color: hollow.accent,
                           shape: BoxShape.circle,
-                          border: Border.all(color: hollow.surface, width: 1.5),
+                          border: Border.all(color: hollow.overlay, width: 1.5),
                         ),
                         child: Icon(
                           LucideIcons.check,

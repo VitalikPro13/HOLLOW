@@ -230,7 +230,7 @@ class _EditableRow extends StatelessWidget {
               child: HollowPressable(
                 onTap: onReset,
                 semanticLabel: 'Reset $label shortcut to default',
-                borderRadius: BorderRadius.circular(hollow.radiusSm),
+                borderRadius: BorderRadius.circular(hollow.radiusMd),
                 padding: const EdgeInsets.all(HollowSpacing.xxs),
                 child: Icon(
                   LucideIcons.rotateCcw,

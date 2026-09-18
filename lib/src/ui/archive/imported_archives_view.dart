@@ -130,14 +130,14 @@ class _ImportedArchiveListState extends ConsumerState<_ImportedArchiveList> {
           padding: const EdgeInsets.all(HollowSpacing.md),
           child: HollowPressable(
             onTap: _loading ? null : _pickArchive,
-            borderRadius: BorderRadius.circular(hollow.radiusSm),
+            borderRadius: BorderRadius.circular(hollow.radiusMd),
             padding: EdgeInsets.zero,
             child: Container(
               width: double.infinity,
               padding: const EdgeInsets.symmetric(vertical: 10),
               decoration: BoxDecoration(
                 color: hollow.accent.withValues(alpha: 0.12),
-                borderRadius: BorderRadius.circular(hollow.radiusSm),
+                borderRadius: BorderRadius.circular(hollow.radiusMd),
                 border: Border.all(
                     color: hollow.accent.withValues(alpha: 0.3)),
               ),
@@ -235,7 +235,7 @@ class _ImportedArchiveListState extends ConsumerState<_ImportedArchiveList> {
                         child: Container(
                           padding: const EdgeInsets.all(HollowSpacing.xl),
                           decoration: BoxDecoration(
-                            color: hollow.surface,
+                            color: hollow.overlay,
                             borderRadius: BorderRadius.circular(
                                 hollow.radiusLg),
                             border: Border.all(
@@ -296,7 +296,7 @@ class _ArchiveEntryCard extends ConsumerWidget {
         onTap: () {
           ref.read(selectedImportedArchiveProvider.notifier).state = path;
         },
-        borderRadius: BorderRadius.circular(hollow.radiusSm),
+        borderRadius: BorderRadius.circular(hollow.radiusMd),
         // The selection fill lives ON the pressable so it covers the same
         // rounded rect the hover highlight paints; an inner Container is inset
         // by the pressable's padding and reads as a mismatched outline.
@@ -628,7 +628,7 @@ class _ArchivePovViewerState extends ConsumerState<_ArchivePovViewer> {
                       data: ThemeData.dark().copyWith(
                         colorScheme: ColorScheme.dark(
                           primary: hollow.accent,
-                          surface: hollow.surface,
+                          surface: hollow.overlay,
                         ),
                       ),
                       child: child!,

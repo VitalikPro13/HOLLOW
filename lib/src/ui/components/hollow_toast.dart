@@ -173,7 +173,7 @@ class _HollowToastWidgetState extends State<_HollowToastWidget>
                   vertical: HollowSpacing.md,
                 ),
                 decoration: BoxDecoration(
-                  color: hollow.elevated,
+                  color: hollow.overlay,
                   borderRadius: BorderRadius.circular(hollow.radiusMd),
                   border: Border.all(color: hollow.border),
                 ),
