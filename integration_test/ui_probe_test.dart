@@ -16,6 +16,7 @@ import 'package:integration_test/integration_test.dart';
 import 'package:hollow/src/core/services/video_backend.dart';
 import 'package:window_manager/window_manager.dart';
 
+import 'probe/design_gallery.dart';
 import 'probe/probe_env.dart';
 import 'probe/probe_runner.dart';
 
@@ -210,13 +211,23 @@ void main() {
     // find.bySemanticsLabel needs the semantics tree built, and semantics is
     // the only text identity a server icon has.
     semanticsHandle = tester.ensureSemantics();
+    // UI_PROBE_WIDGET swaps the app for a standalone page. The design gallery
+    // uses it to render every design-language primitive in one shot without a
+    // data directory, an identity or a relay, so a token change can be judged
+    // by eye in seconds.
+    final widgetName = probeEnv['UI_PROBE_WIDGET'] ?? '';
     await tester.pumpWidget(
       RepaintBoundary(
         key: shotKey,
-        child: UncontrolledProviderScope(
-          container: container,
-          child: const HollowApp(),
-        ),
+        child: widgetName == 'design-gallery'
+            ? const MaterialApp(
+                debugShowCheckedModeBanner: false,
+                home: DesignGallery(),
+              )
+            : UncontrolledProviderScope(
+                container: container,
+                child: const HollowApp(),
+              ),
       ),
     );
     // Identity unlock, DB open and the first channel load all happen here.

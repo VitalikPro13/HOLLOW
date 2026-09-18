@@ -63,10 +63,28 @@ abstract final class HollowTypography {
     color: HollowColors.textSecondary,
   );
 
+  /// The smallest role there is: badge text, counters, the tightest chrome.
+  /// Below this the text fails the legibility floor, so there is no role for
+  /// 9 or 8 and the sites still using them are on the design-language ratchet.
+  static final micro = _base.copyWith(
+    fontSize: 10,
+    fontWeight: FontWeight.w500,
+    color: HollowColors.textSecondary,
+  );
+
   static final mono = _base.copyWith(
     fontSize: 13,
     fontWeight: FontWeight.w400,
     fontFamily: 'Consolas', // Falls back to monospace on other platforms
     letterSpacing: 0.5,
+  );
+
+  /// The console voice in metadata: ids and hashes beside a timestamp.
+  static final monoSmall = _base.copyWith(
+    fontSize: 11,
+    fontWeight: FontWeight.w400,
+    fontFamily: 'Consolas',
+    letterSpacing: 0.5,
+    color: HollowColors.textSecondary,
   );
 }

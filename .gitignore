@@ -152,8 +152,11 @@ drafts/
 # YouTube video assets
 yt_videos/
 
-# Claude Code
-.claude/
+# Claude Code: local settings and worktrees stay out, but repo skills ship, so
+# every agent on every machine gets the same rules.
+.claude/*
+!.claude/skills/
+.claude/skills/*/.*
 
 # Forked flutter_webrtc third_party: ignore downloads/staging, but TRACK the
 # vendored Hollow-custom libwebrtc build (patched binaries + headers must ship

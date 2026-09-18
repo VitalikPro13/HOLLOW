@@ -20,6 +20,10 @@ class HollowPressable extends StatefulWidget {
   final Color? hoverColor;
   final Color? backgroundColor;
   final EdgeInsetsGeometry? padding;
+
+  /// Outline drawn with the fill, so it scales and fades with the press
+  /// instead of sitting outside the animation as a wrapping Container would.
+  final BoxBorder? border;
   final bool disabled;
   final bool subtle;
 
@@ -40,6 +44,7 @@ class HollowPressable extends StatefulWidget {
     this.hoverColor,
     this.backgroundColor,
     this.padding,
+    this.border,
     this.disabled = false,
     this.subtle = false,
     this.semanticLabel,
@@ -148,6 +153,7 @@ class _HollowPressableState extends State<HollowPressable>
             : (widget.backgroundColor ??
                   effectiveHoverColor.withValues(alpha: 0.0)),
         borderRadius: widget.borderRadius,
+        border: widget.border,
         // No hover glow: a blurred halo paints OUTSIDE the control's bounds,
         // and hover must never read bigger than the outline.
       ),

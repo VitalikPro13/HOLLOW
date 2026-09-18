@@ -47,6 +47,9 @@ param(
     [string]$Server = 'test3',
     [string]$SourceData = "$env:APPDATA\Hollow",
     [string]$ProbeData = "$env:TEMP\hollow_ui_probe_data",
+    # Pump a standalone page instead of the app. 'design-gallery' renders every
+    # design-language primitive, dark beside light, with no data dir needed.
+    [string]$Widget = '',
     # Re-mirror the data copy even if it already exists.
     [switch]$Fresh,
     # Skip the mirror entirely and reuse whatever the copy already holds.
@@ -78,6 +81,7 @@ $env:UI_PROBE_SERVER = $Server
 $env:SERVER = $Server
 $env:UI_PROBE_MODE = if ($Live) { 'live' } else { 'script' }
 $env:UI_PROBE_IDLE_MINUTES = "$IdleMinutes"
+$env:UI_PROBE_WIDGET = $Widget
 
 $what = 'boot + map'
 if ($Live) { $what = 'live' }

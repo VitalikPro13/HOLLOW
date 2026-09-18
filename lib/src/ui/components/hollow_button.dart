@@ -152,12 +152,15 @@ class _HollowButtonState extends State<HollowButton>
         // The hover colour at zero alpha, NOT Colors.transparent: that is
         // transparent BLACK, and the lerp flashes dark on hover and unhover.
         bg = hollow.accentMuted.withValues(alpha: 0.0);
-        fg = hollow.accent;
+        // accentText, not the raw accent: the accent is a FILL colour and is
+        // 2.33:1 on the light theme's white, so a ghost label drawn in it
+        // failed contrast on every light-theme screen.
+        fg = hollow.accentText;
         hoverBg = hollow.accentMuted;
       case HollowButtonVariant.outline:
         final tint = widget.danger ? hollow.error : hollow.accent;
         bg = tint.withValues(alpha: 0.0);
-        fg = tint;
+        fg = widget.danger ? hollow.error : hollow.accentText;
         hoverBg =
             widget.danger ? hollow.error.withValues(alpha: 0.12) : hollow.accentMuted;
         border = Border.all(
@@ -197,9 +200,15 @@ class _HollowButtonState extends State<HollowButton>
           ),
           const SizedBox(width: HollowSpacing.sm),
         ],
-        DefaultTextStyle(
-          style: HollowTypography.label.copyWith(color: fg, height: 1.0),
-          child: widget.child,
+        // IconTheme as well as the text style: an icon-only button passes its
+        // glyph as the CHILD, not the icon slot, and without this it renders in
+        // the ambient icon colour rather than the variant's foreground.
+        IconTheme(
+          data: IconThemeData(color: fg, size: iconGlyph),
+          child: DefaultTextStyle(
+            style: HollowTypography.label.copyWith(color: fg, height: 1.0),
+            child: widget.child,
+          ),
         ),
       ],
     );

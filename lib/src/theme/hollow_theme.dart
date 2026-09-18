@@ -30,6 +30,8 @@ class HollowTheme extends ThemeExtension<HollowTheme> {
   final Color error;
   final Color success;
   final Color warning;
+  /// Badges, chips, keycaps: the smallest stop.
+  final double radiusXs;
   final double radiusSm;
   final double radiusMd;
   final double radiusLg;
@@ -52,6 +54,7 @@ class HollowTheme extends ThemeExtension<HollowTheme> {
     required this.error,
     required this.success,
     required this.warning,
+    required this.radiusXs,
     required this.radiusSm,
     required this.radiusMd,
     required this.radiusLg,
@@ -66,10 +69,10 @@ class HollowTheme extends ThemeExtension<HollowTheme> {
         accentHover: HollowColors.accentHover,
         accentMuted: HollowColors.accentMuted,
         accentText: Contrast.ensureContrast(
-            HollowColors.accent, HollowColors.background,
+            HollowColors.accent, HollowColors.elevated,
             targetRatio: 4.5),
         focusRing: Contrast.ensureContrast(
-            HollowColors.accent, HollowColors.background,
+            HollowColors.accent, HollowColors.elevated,
             targetRatio: 3.0),
         textPrimary: HollowColors.textPrimary,
         textSecondary: HollowColors.textSecondary,
@@ -79,23 +82,28 @@ class HollowTheme extends ThemeExtension<HollowTheme> {
         error: HollowColors.error,
         success: HollowColors.success,
         warning: HollowColors.warning,
+        radiusXs: HollowRadius.xs,
         radiusSm: HollowRadius.sm,
         radiusMd: HollowRadius.md,
         radiusLg: HollowRadius.lg,
         radiusXl: HollowRadius.xl,
       );
 
-  factory HollowTheme.light() => const HollowTheme(
+  factory HollowTheme.light() => HollowTheme(
         background: HollowColors.backgroundLight,
         surface: HollowColors.surfaceLight,
         elevated: HollowColors.elevatedLight,
         accent: HollowColors.accent,
         accentHover: HollowColors.accentHover,
         accentMuted: HollowColors.accentMutedLight,
-        accentText: HollowColors.accentTextLight,
+        accentText: Contrast.ensureContrast(
+            HollowColors.accentTextLight, HollowColors.elevatedLight,
+            targetRatio: 4.5),
         // The accent is ~2.3:1 on white, too light to ring against it, so the
         // legible foreground variant carries the focus ring here.
-        focusRing: HollowColors.accentTextLight,
+        focusRing: Contrast.ensureContrast(
+            HollowColors.accentTextLight, HollowColors.elevatedLight,
+            targetRatio: 3.0),
         textPrimary: HollowColors.textPrimaryLight,
         textSecondary: HollowColors.textSecondaryLight,
         textTertiary: HollowColors.textTertiaryLight,
@@ -104,6 +112,7 @@ class HollowTheme extends ThemeExtension<HollowTheme> {
         error: HollowColors.errorLight,
         success: HollowColors.successLight,
         warning: HollowColors.warningLight,
+        radiusXs: HollowRadius.xs,
         radiusSm: HollowRadius.sm,
         radiusMd: HollowRadius.md,
         radiusLg: HollowRadius.lg,
@@ -118,10 +127,10 @@ class HollowTheme extends ThemeExtension<HollowTheme> {
         accentHover: accentHoverFromHue(hue),
         accentMuted: accentMutedFromHue(hue),
         accentText: Contrast.ensureContrast(
-            accentFromHue(hue), HollowColors.background,
+            accentFromHue(hue), HollowColors.elevated,
             targetRatio: 4.5),
         focusRing: Contrast.ensureContrast(
-            accentFromHue(hue), HollowColors.background,
+            accentFromHue(hue), HollowColors.elevated,
             targetRatio: 3.0),
         textPrimary: HollowColors.textPrimary,
         textSecondary: HollowColors.textSecondary,
@@ -131,6 +140,7 @@ class HollowTheme extends ThemeExtension<HollowTheme> {
         error: HollowColors.error,
         success: HollowColors.success,
         warning: HollowColors.warning,
+        radiusXs: HollowRadius.xs,
         radiusSm: HollowRadius.sm,
         radiusMd: HollowRadius.md,
         radiusLg: HollowRadius.lg,
@@ -145,10 +155,10 @@ class HollowTheme extends ThemeExtension<HollowTheme> {
         accentHover: accentHoverFromHue(hue),
         accentMuted: accentMutedLightFromHue(hue),
         accentText: Contrast.ensureContrast(
-            accentFromHue(hue), HollowColors.backgroundLight,
+            accentFromHue(hue), HollowColors.elevatedLight,
             targetRatio: 4.5),
         focusRing: Contrast.ensureContrast(
-            accentFromHue(hue), HollowColors.backgroundLight,
+            accentFromHue(hue), HollowColors.elevatedLight,
             targetRatio: 3.0),
         textPrimary: HollowColors.textPrimaryLight,
         textSecondary: HollowColors.textSecondaryLight,
@@ -158,6 +168,7 @@ class HollowTheme extends ThemeExtension<HollowTheme> {
         error: HollowColors.errorLight,
         success: HollowColors.successLight,
         warning: HollowColors.warningLight,
+        radiusXs: HollowRadius.xs,
         radiusSm: HollowRadius.sm,
         radiusMd: HollowRadius.md,
         radiusLg: HollowRadius.lg,
@@ -207,6 +218,7 @@ class HollowTheme extends ThemeExtension<HollowTheme> {
     Color? error,
     Color? success,
     Color? warning,
+    double? radiusXs,
     double? radiusSm,
     double? radiusMd,
     double? radiusLg,
@@ -229,6 +241,7 @@ class HollowTheme extends ThemeExtension<HollowTheme> {
       error: error ?? this.error,
       success: success ?? this.success,
       warning: warning ?? this.warning,
+      radiusXs: radiusXs ?? this.radiusXs,
       radiusSm: radiusSm ?? this.radiusSm,
       radiusMd: radiusMd ?? this.radiusMd,
       radiusLg: radiusLg ?? this.radiusLg,
@@ -256,6 +269,7 @@ class HollowTheme extends ThemeExtension<HollowTheme> {
       error: Color.lerp(error, other.error, t)!,
       success: Color.lerp(success, other.success, t)!,
       warning: Color.lerp(warning, other.warning, t)!,
+      radiusXs: radiusXs + (other.radiusXs - radiusXs) * t,
       radiusSm: radiusSm + (other.radiusSm - radiusSm) * t,
       radiusMd: radiusMd + (other.radiusMd - radiusMd) * t,
       radiusLg: radiusLg + (other.radiusLg - radiusLg) * t,

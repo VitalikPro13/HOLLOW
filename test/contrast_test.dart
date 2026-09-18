@@ -49,6 +49,34 @@ void main() {
     });
   });
 
+  group('ghost and outline button labels', () {
+    // These two variants draw their label in the accent, and they are almost
+    // every button in the app. Drawn in the RAW accent the label was 2.33:1 on
+    // the light theme's white; accentText is the contrast-corrected token and
+    // is what they must keep using, on every custom hue as well.
+    test('clear body threshold on both themes and every hue', () {
+      for (final t in [HollowTheme.dark(), HollowTheme.light()]) {
+        for (final bg in [t.background, t.surface, t.elevated]) {
+          expectRatio('ghost label', t.accentText, bg, bodyMin);
+        }
+      }
+      for (final hue in [0.0, 60.0, 120.0, 200.0, 240.0, 270.0, 300.0, 330.0]) {
+        expectRatio('ghost label dark@$hue', HollowTheme.darkWithHue(hue).accentText,
+            HollowTheme.darkWithHue(hue).background, bodyMin);
+        expectRatio('ghost label light@$hue',
+            HollowTheme.lightWithHue(hue).accentText,
+            HollowTheme.lightWithHue(hue).background, bodyMin);
+      }
+    });
+
+    test('the raw accent is a fill and is NOT safe as a light-theme label', () {
+      // The bug this guards: if someone "simplifies" accentText back to accent,
+      // this is the number they would be shipping.
+      final t = HollowTheme.light();
+      expect(Contrast.ratio(t.accent, t.background), lessThan(bodyMin));
+    });
+  });
+
   group('custom accent hues stay legible as foreground', () {
     // Worst offenders are low-luminance hues (deep blue ~240, purple ~270,
     // red ~0). ensureContrast must lift/lower them to clear threshold.

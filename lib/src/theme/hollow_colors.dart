@@ -35,6 +35,10 @@ abstract final class HollowColors {
 
   // Foreground use on light surfaces (text, icons, links): the shared teal is
   // 2.33:1 on white and fails. Fills keep the raw accent.
+  //
+  // HollowTheme darkens this further against `elevatedLight`, because that is
+  // the DIMMEST surface accent text sits on and so the worst case: 5.32:1 on
+  // white is only 4.45:1 on a panel, and ghost buttons live on panels.
   static const accentTextLight = Color(0xFF00796B); // 5.32:1 on white
 
   static const textPrimaryLight = Color(0xFF1A1C1E);
