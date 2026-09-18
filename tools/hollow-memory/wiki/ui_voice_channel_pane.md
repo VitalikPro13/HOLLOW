@@ -81,7 +81,7 @@ Adaptive grid based on number of camera peers `n`:
 
 ### Video Tile (_buildVideoTile)
 
-Each tile is a `GestureDetector` (tap to focus/fullscreen, disabled for single-tile view). Contains a `Container` with 2px margin, `hollow.elevated` background, `radiusSm` border radius, anti-alias clipping.
+Each tile is a `GestureDetector` (tap to focus/fullscreen, disabled for single-tile view). Contains a `Container` with 2px margin, `hollow.elevated` background, `radiusMd` border radius, anti-alias clipping.
 
 **Speaking indicator**: `ref.watch(vcSpeakingProvider.select((s) => s.contains(peerId)))` (2026-07: speaking moved OUT of VoiceChannelState into `speaking_provider.dart` so a VAD flip rebuilds only the tiles whose bit changed). If speaking, the tile gets a 2px accent-color border.
 

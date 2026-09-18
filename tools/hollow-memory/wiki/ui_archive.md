@@ -71,7 +71,7 @@ Left panel of "My Data." Contains inner tab pills (DMs / Channels / Vault Files)
    - `vaultFiles` -> `_VaultFilesPlaceholder`
 
 ### _TabPill (StatelessWidget)
-Inner tab toggle. Same visual pattern as `_SubTabPill` but uses `radiusSm`, `HollowTypography.caption` at 12px, and center-aligned text.
+Inner tab toggle. Same visual pattern as `_SubTabPill` but uses `radiusMd`, `HollowTypography.caption` at 12px, and center-aligned text.
 
 ### _DmList (ConsumerStatefulWidget)
 Scrollable list of DM conversations with hidden/visible partitioning.

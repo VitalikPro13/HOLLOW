@@ -330,8 +330,8 @@ void main() {
     await tester.tap(find.text('Favourites'));
     await tester.pump();
     expect(find.textContaining('No favourites yet'), findsOneWidget);
-    // "All" plus the new-list button are there even when empty.
-    expect(find.text('All'), findsOneWidget);
+    // The list dropdown is there even when empty.
+    expect(find.text('All lists'), findsOneWidget);
 
     // The tab row scrolls, and the test font is wider than any real one.
     await tester.ensureVisible(find.text('Recent'));
@@ -386,7 +386,9 @@ void main() {
 
     // Create a list inline (a dialog route would render BEHIND the picker's
     // raw OverlayEntry, so the field lives in the panel).
-    await tester.tap(find.bySemanticsLabel('New favourites list'));
+    await tester.tap(find.text('All lists'));
+    await tester.pump();
+    await tester.tap(find.text('New list'));
     await tester.pump();
     await tester.enterText(find.byType(TextField).last, 'Reactions');
     await tester.tap(find.bySemanticsLabel('Create list'));

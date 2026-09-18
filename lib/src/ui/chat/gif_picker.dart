@@ -557,55 +557,55 @@ class _GifPickerBodyState extends ConsumerState<GifPickerBody> {
 
   Widget _listRow(HollowTheme hollow, GifLibrary library) {
     if (_listEditId != null) return _listNameField(hollow);
-    // EdgeScrollRow, not a bare horizontal ListView: once the lists overflow
-    // the panel, a plain wheel mouse has no affordance and no gesture, so the
-    // extra lists are unreachable.
-    // The add button sits outside the scroller, so it never scrolls out of
-    // reach however many lists there are.
+    final current = library.collections
+        .where((c) => c.id == _collectionId)
+        .firstOrNull;
+    final label = current?.name ?? 'All lists';
     return Padding(
       padding: const EdgeInsets.symmetric(
           horizontal: HollowSpacing.sm, vertical: HollowSpacing.xs),
-      child: Row(
-        children: [
-          Expanded(
-            child: EdgeScrollRow(
-              semanticLabel: 'lists',
-              children: [
-                _list(null, 'All'),
-                for (final c in library.collections) ...[
-                  const SizedBox(width: HollowSpacing.sm),
-                  _list(c.id, c.name),
-                ],
-              ],
-            ),
-          ),
-          const SizedBox(width: HollowSpacing.xs),
-          HollowButton.ghost(
-            compact: true,
-            semanticLabel: 'New favourites list',
-            onPressed: () {
-              _listNameController.text = '';
-              setState(() => _listEditId = '');
-            },
-            child: const Icon(LucideIcons.plus),
-          ),
-        ],
+      child: Align(
+        alignment: Alignment.centerLeft,
+        child: PickerListDropdown(
+          label: label,
+          semanticLabel: 'Favourites list: $label',
+          onOpen: (at) => _openListPicker(library, at),
+          onOptions: current == null
+              ? null
+              : (at) => _showListMenu(current.id, current.name, at),
+        ),
       ),
     );
   }
 
-  Widget _list(String? id, String name) {
-    final chip = HollowChip(
-      label: name,
-      selected: _collectionId == id,
-      semanticLabel: 'Show $name favourites',
-      onTap: () => setState(() => _collectionId = id),
-    );
-    if (id == null) return chip;
-    return GestureDetector(
-      onSecondaryTapDown: (d) => _showListMenu(id, name, d.globalPosition),
-      onLongPressStart: (d) => _showListMenu(id, name, d.globalPosition),
-      child: chip,
+  void _openListPicker(GifLibrary library, Offset at) {
+    showGifMenu(
+      context,
+      at,
+      header: 'Favourites lists',
+      items: [
+        GifMenuItem(
+          icon: LucideIcons.star,
+          label: 'All lists',
+          checked: _collectionId == null,
+          onTap: () => setState(() => _collectionId = null),
+        ),
+        for (final c in library.collections)
+          GifMenuItem(
+            icon: LucideIcons.list,
+            label: c.name,
+            checked: _collectionId == c.id,
+            onTap: () => setState(() => _collectionId = c.id),
+          ),
+        GifMenuItem(
+          icon: LucideIcons.plus,
+          label: 'New list',
+          onTap: () {
+            _listNameController.text = '';
+            setState(() => _listEditId = '');
+          },
+        ),
+      ],
     );
   }
 
@@ -852,6 +852,9 @@ class GifMenuItem {
   final IconData icon;
   final String label;
   final bool danger;
+
+  /// Marks the current choice in a menu that picks one of several.
+  final bool checked;
   final VoidCallback onTap;
 
   const GifMenuItem({
@@ -859,7 +862,52 @@ class GifMenuItem {
     required this.label,
     required this.onTap,
     this.danger = false,
+    this.checked = false,
   });
+}
+
+/// The one chip that stands for a picker's user-made lists (GIF lists,
+/// sticker packs): a row of chips stops fitting the 360 px panel after two or
+/// three, and a dropdown scales to any count.
+class PickerListDropdown extends StatelessWidget {
+  final String label;
+  final String semanticLabel;
+
+  /// Called with the chip's bottom-left corner in window coordinates.
+  final ValueChanged<Offset> onOpen;
+
+  /// Right-click or long-press: actions on the list currently shown.
+  final ValueChanged<Offset>? onOptions;
+
+  const PickerListDropdown({
+    super.key,
+    required this.label,
+    required this.semanticLabel,
+    required this.onOpen,
+    this.onOptions,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    Offset anchor() {
+      final box = context.findRenderObject() as RenderBox;
+      return box.localToGlobal(box.size.bottomLeft(Offset.zero));
+    }
+
+    final options = onOptions;
+    return GestureDetector(
+      onSecondaryTapDown:
+          options == null ? null : (d) => options(d.globalPosition),
+      onLongPressStart:
+          options == null ? null : (d) => options(d.globalPosition),
+      child: HollowChip(
+        label: label,
+        trailingIcon: LucideIcons.chevronDown,
+        semanticLabel: semanticLabel,
+        onTap: () => onOpen(anchor()),
+      ),
+    );
+  }
 }
 
 void showGifMenu(
@@ -944,6 +992,7 @@ void showGifMenu(
                               item.onTap();
                             },
                             semanticLabel: item.label,
+                            hoverColor: hollow.hover,
                             borderRadius:
                                 BorderRadius.circular(hollow.radiusMd),
                             padding: const EdgeInsets.symmetric(
@@ -968,6 +1017,9 @@ void showGifMenu(
                                     ),
                                   ),
                                 ),
+                                if (item.checked)
+                                  Icon(LucideIcons.check,
+                                      size: 14, color: hollow.accentText),
                               ],
                             ),
                           ),

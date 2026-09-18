@@ -324,7 +324,7 @@ Taken by Vitalik on 2026-09-18, from recommendations and then from the rendered 
 |---|---|---|
 | 1 | Ghost buttons grey | Applied |
 | 2 | Onest + Geist Mono | Applied |
-| 3 | Compact outline for a row's one action | Rule written; applied screen by screen |
+| 3 | Compact outline for a row's one action | Applied where it exists today (owned art Wear and Redeem, blocked users Unblock); new rows follow the rule |
 | 4 | Five surface levels, chrome below the canvas (ladder A / L1) | Applied, with the role sweep across every site |
 | 5 | Ambient background flat by default, opt-in in Appearance | Applied |
 | 6 | Cards fill only, both themes | Applied |
@@ -335,4 +335,4 @@ Taken by Vitalik on 2026-09-18, from recommendations and then from the rendered 
 | 11 | `display` at 600 | Applied |
 | 12 | Danger label is a token (`textOnError`) | Applied |
 | 13 | The 6 px radius stop goes | Applied; the token is deleted |
-| 14 | User GIF lists and sticker packs as one dropdown chip in the pickers | Pending |
+| 14 | User GIF lists and sticker packs as one dropdown chip in the pickers | Applied (`PickerListDropdown` in `gif_picker.dart`; right-click or long-press on it acts on the list shown) |

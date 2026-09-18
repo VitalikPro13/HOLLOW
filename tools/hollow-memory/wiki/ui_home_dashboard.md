@@ -292,7 +292,7 @@ Gradient: `LinearGradient` from `hollow.border` through `hollow.accent` at 60% o
 
 **Props:** `hollow`, `peerId`, `name`, `status` (stage label string), `statusColor`, `showSpinner` (bool), `avatarBytes`.
 
-**Layout:** Container with `hollow.surface` background, `radiusSm` corners, `hollow.border` border. Row containing:
+**Layout:** Container with `hollow.surface` background, `radiusMd` corners, `hollow.border` border. Row containing:
 - `HollowAvatar(peerId, size: 20)`
 - Name text (11px caption, single line ellipsis)
 - Spinner (conditional): 10x10 `CircularProgressIndicator` with 1.5 stroke width in `statusColor`
@@ -422,7 +422,7 @@ Used for "Encrypted" (success green, `LucideIcons.shieldCheck`) and "Offline" (t
 
 **Props:** `label`, `count` (nullable int), `isActive`, `showBadge` (default false), `icon` (nullable IconData), `onTap`.
 
-**Rendering:** `HollowPressable` with `radiusSm` corners. Row containing:
+**Rendering:** `HollowPressable` with `radiusMd` corners. Row containing:
 - Optional icon (13px, accent if active, textSecondary if not)
 - Label text (12px caption, accent + w600 if active, textSecondary + w400 if not)
 - Optional count badge: pill container with count text. Background: `hollow.error` if `showBadge` is true, otherwise 15% alpha of active color. Text color: white if `showBadge`, otherwise active color. 10px, w600.

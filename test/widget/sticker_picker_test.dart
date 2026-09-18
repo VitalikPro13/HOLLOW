@@ -217,7 +217,7 @@ void main() {
     expect(find.byType(ChatAssetImage), findsOneWidget);
   });
 
-  testWidgets('pack chips filter the vault and survive an empty pack',
+  testWidgets('the pack dropdown filters the vault and survives an empty pack',
       (tester) async {
     await _pump(tester, mine: [
       _mine(1, pack: 'autumn'),
@@ -228,14 +228,12 @@ void main() {
     await tester.pump();
     expect(find.byType(ChatAssetImage), findsNWidgets(3));
 
-    await tester.tap(find.text('autumn'));
-    await tester.pump();
+    await _choosePack(tester, from: 'All packs', to: 'autumn');
     expect(find.byType(ChatAssetImage), findsNWidgets(2));
     // The upload button names where the upload lands.
     expect(find.textContaining('autumn'), findsWidgets);
 
-    await tester.tap(find.text('All'));
-    await tester.pump();
+    await _choosePack(tester, from: 'autumn', to: 'All packs');
     expect(find.byType(ChatAssetImage), findsNWidgets(3));
   });
 
@@ -255,7 +253,7 @@ void main() {
 
   // ── Pack creation and management (issue #36) ────────────────────────
 
-  testWidgets('a created pack gets a chip before it holds anything',
+  testWidgets('a created pack is offered before it holds anything',
       (tester) async {
     // The whole point of declared packs: a pack is a COLUMN on the rows, so
     // an empty one has nowhere to live in the database and would vanish the
@@ -263,15 +261,17 @@ void main() {
     final container = await _pump(tester, mine: [_mine(1)]);
     await tester.tap(find.text('Mine'));
     await tester.pump();
+    await tester.tap(find.text('All packs'));
+    await tester.pump();
     expect(find.text('winter'), findsNothing);
+    await tester.tapAt(Offset.zero);
+    await tester.pump();
 
     container.read(stickerPacksProvider.notifier).declare('winter');
     await tester.pump();
-    expect(find.text('winter'), findsOneWidget);
 
     // Selecting it shows the empty-pack hint, not "no matches".
-    await tester.tap(find.text('winter'));
-    await tester.pump();
+    await _choosePack(tester, from: 'All packs', to: 'winter');
     expect(find.byType(ChatAssetImage), findsNothing);
     expect(find.textContaining('This pack is empty'), findsOneWidget);
   });
@@ -291,11 +291,9 @@ void main() {
     expect(find.byType(ChatAssetImage), findsNWidgets(2));
 
     // …and still appears under each pack it belongs to.
-    await tester.tap(find.text('autumn'));
-    await tester.pump();
+    await _choosePack(tester, from: 'All packs', to: 'autumn');
     expect(find.byType(ChatAssetImage), findsOneWidget);
-    await tester.tap(find.text('winter'));
-    await tester.pump();
+    await _choosePack(tester, from: 'autumn', to: 'winter');
     expect(find.byType(ChatAssetImage), findsOneWidget);
   });
 
@@ -304,6 +302,8 @@ void main() {
     await _pump(tester, mine: [_mine(1, pack: 'autumn')]);
     await tester.tap(find.text('Mine'));
     await tester.pump();
+    await _choosePack(tester, from: 'All packs', to: 'autumn');
+    // Long-pressing the dropdown chip acts on the pack it shows.
     await tester.longPress(find.text('autumn'));
     await tester.pumpAndSettle();
     expect(find.text('Share to this chat'), findsNothing,
@@ -335,12 +335,10 @@ void main() {
     expect(find.text('Add to pack'), findsOneWidget, reason: 'menu header');
     expect(find.text('New pack…'), findsOneWidget);
 
-    // The chip row stays visible behind the menu, so a pack the menu OFFERS
-    // is found twice (chip + menu entry) and one it withholds only once.
     // 'autumn' is where this sticker already lives, so it must not be offered.
-    expect(find.text('winter'), findsNWidgets(2));
-    expect(find.text('spring'), findsNWidgets(2));
-    expect(find.text('autumn'), findsOneWidget,
+    expect(find.text('winter'), findsOneWidget);
+    expect(find.text('spring'), findsOneWidget);
+    expect(find.text('autumn'), findsNothing,
         reason: 'the pack it is already in is not offered again');
   });
 
@@ -383,4 +381,13 @@ void main() {
       expect(container.read(stickerPacksProvider), ['winter']);
     });
   });
+}
+
+/// Opens the pack dropdown (showing [from]) and picks [to] from its menu.
+Future<void> _choosePack(WidgetTester tester,
+    {required String from, required String to}) async {
+  await tester.tap(find.text(from));
+  await tester.pump();
+  await tester.tap(find.text(to).last);
+  await tester.pump();
 }

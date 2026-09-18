@@ -61,14 +61,13 @@ Every sweep: probe screenshots **before**, change, probe screenshots **after**, 
 
 ### Where to pick up next
 
-**Order is decisions first, sweeps second** (Vitalik, 2026-09-18). The sweeps are verified against the final look, not today's.
+**The decisions are done** (session 3, all 14 applied, pushed). **Next session starts at sweep 3c.** Vitalik loved the result ("freaking awesome ... actually looks so much better").
 
-1. **The decision sheet.** Render each verdict in the table below on real screens (desktop and mobile, dark and light), Vitalik confirms by eye, then apply them in `lib/src/theme/` (and the fonts, the button variants, the picker list dropdown, the Ambient opt-in). Where a verdict needs a value (the five surface shades, the grey ghost tones), show two or three candidates side by side and let him pick.
-2. **Sweep 3c: section headers and eyebrow caps.** `HollowSectionHeader` has 0 uses; 8 private `_SectionLabel`-style classes plus inline headers, and 32 `toUpperCase()` eyebrow labels (the DEVICES / USAGE / CACHE LIMITS caps in Settings). The most visible remaining change.
-3. **Sweep 4: the 105 `Divider(` sites** onto `HollowDivider`. Mechanical and low risk.
-4. **Sweep 5: the ~60 inline empty states** onto `HollowEmptyState`.
-5. **Sweeps 6 to 9:** `showHollowSheet()` + one Hollow spinner (new primitives, then their sweeps), remaining Material `Switch` / `Slider`, the dialog pass (28 files), the filled-button audit.
-6. **Then the screen work**, phases 2 onward below, with the Shop's per-kind card shapes (verdict 9) and the compact message mode (verdict 8) inside it.
+1. **Sweep 3c: section headers and eyebrow caps. START HERE.** `HollowSectionHeader` has 0 uses; 8 private `_SectionLabel`-style classes (`SettingsSectionLabel` in settings_shared among them) plus inline headers, and the tracked-caps eyebrow labels (guard `upper-case-label` baseline 42: THEME / BACKGROUND / YOUR DEVICES / MAINTENANCE / ART YOU OWN / RELAY SERVER / NEWS / YOUR STATS). Mostly Settings, desktop and mobile. While in Settings: the Appearance Dock / Classic segmented control selects with a SOLID accent fill (selection is a chip state, never a fill). Verify with `design_surfaces.json` before/after plus the mobile fleet scenario; the Settings pages are the bulk of it.
+2. **Sweep 4: the `Divider(` sites** onto `HollowDivider` (guard `raw-divider` baseline 51). Mechanical and low risk.
+3. **Sweep 5: the ~60 inline empty states** onto `HollowEmptyState`.
+4. **Sweeps 6 to 9:** `showHollowSheet()` + one Hollow spinner (new primitives, then their sweeps), remaining Material `Switch` / `Slider`, the dialog pass (28 files), the filled-button audit.
+5. **Then the screen work**, phases 2 onward below, with the Shop's per-kind card shapes (verdict 9) and the compact message mode (verdict 8) inside it.
 
 ### Session 3 (2026-09-18): decisions rendered, picked and applied
 
@@ -92,7 +91,10 @@ Findings worth keeping:
 1. **Skia on Windows draws light-on-dark text ~1.4 px heavier than dark-on-light** (measured stems at 600: 3.7 px against 2.3 px). Weights are correct; light reads a step thinner. If Vitalik wants it heavier, the light roles go one weight up, never a size.
 2. Seen for later sweeps: Appearance's Dock / Classic segmented control selects with a SOLID accent fill; the selected channel row in light shows a right-edge gradient; the mobile Settings rows are icon-in-a-tinted-box (a tell); `game_card_dialog` has a gradient from `Colors.transparent`; `edge_scroll_row` edge fades are hard-wired to `surface`.
 
-**Next:** verdict 14 (user GIF lists and sticker packs as ONE dropdown chip in the pickers), verdict 3 on the named sites (Wear, Unlink, the member card action), then sweep 3c.
+- **Verdict 14 applied:** the GIF favourites lists and the sticker packs are ONE `PickerListDropdown` chip each (the current list's name plus a chevron). It opens `showGifMenu` (never `showHollowMenu`: the pickers are raw overlay hosts, #76) with every list, the current one checked, and "New list" / "New pack" last; right-click or long-press on the chip opens the old rename/delete/share menu for the list it shows. `GifMenuItem` gained `checked`, and its rows hover to `hollow.hover`. Scenario `design_picker_lists.json`.
+- **Verdict 3 applied** where it exists today: owned art's Wear and Redeem were already compact outline; blocked users' Unblock moved to it. Device rows (three icon actions) and verified contacts (two actions) stay ghost by the rule.
+
+**Next session:** sweep 3c (section headers and the ~40 tracked-caps eyebrow labels, mostly Settings), then dividers, empty states, `showHollowSheet()` + one spinner, Material Switch/Slider, the dialog pass (28 files), the filled-button audit. The Dock / Classic segmented control's solid accent selection belongs to the 3c pass over Settings.
 
 ### Vitalik's verdicts on the open decisions (2026-09-18, end of session 2)
 

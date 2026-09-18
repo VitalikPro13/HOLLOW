@@ -230,7 +230,7 @@ When downloading or not-yet-complete with progress > 0: a 3px `LinearProgressInd
 
 ### Container Styling
 
-`maxWidth: 280`, clipped with `Clip.antiAlias`, surface background, `radiusSm` corners, border.
+`maxWidth: 280`, clipped with `Clip.antiAlias`, surface background, `radiusMd` corners, border.
 
 ### _PlayButton Widget
 
@@ -441,7 +441,7 @@ Watches `fileTransferProvider.select((s) => s[attachment.fileId])` for live down
 ### Expired Card
 
 `_buildExpiredCard(hollow)`:
-- `maxWidth: 280`, surface background, border, `radiusSm` corners.
+- `maxWidth: 280`, surface background, border, `radiusMd` corners.
 - Row: `clock` icon (24px, secondary) + Column: fileName (secondary 13px, ellipsized) + "File expired . {formattedSize}" (italic caption).
 
 ### Manual Download (issue #41)
@@ -462,7 +462,7 @@ Toasts: info on request, error on failure.
 `_buildImagePreview(...)`:
 - Max dimensions: 300x250.
 - Aspect-ratio-preserving size calculation from `attachment.width`/`attachment.height`.
-- **Complete with file on disk (2026-09-14):** tap opens the media viewer. `open()` calls `openMediaViewer(context, _mediaItem().withDiskPath(diskPath))` (`lib/src/ui/media/media_viewer_route.dart`), where `_mediaItem()` builds a `MediaItem` from `attachment` plus the widget's `messageId`/`senderId`/`timestampMs`/`isMine`. `.withDiskPath(diskPath)` matters because the stored row may not carry a disk path yet, so the bubble opens on the path it just resolved. Wrapped in `HollowFocusRing` + `GestureDetector` + `MouseRegion(cursor: click)` around a `ConstrainedBox` > `ClipRRect(radiusSm)` > `AttachmentImage`.
+- **Complete with file on disk (2026-09-14):** tap opens the media viewer. `open()` calls `openMediaViewer(context, _mediaItem().withDiskPath(diskPath))` (`lib/src/ui/media/media_viewer_route.dart`), where `_mediaItem()` builds a `MediaItem` from `attachment` plus the widget's `messageId`/`senderId`/`timestampMs`/`isMine`. `.withDiskPath(diskPath)` matters because the stored row may not carry a disk path yet, so the bubble opens on the path it just resolved. Wrapped in `HollowFocusRing` + `GestureDetector` + `MouseRegion(cursor: click)` around a `ConstrainedBox` > `ClipRRect(radiusMd)` > `AttachmentImage`.
 - **Downloading:** Placeholder with `CircularProgressIndicator` (40px, determinate if progress > 0), status text below.
 - **Partial progress (not downloading):** Placeholder with 80px `LinearProgressIndicator` and percentage text.
 - **Idle / not downloaded (issue #41):** PRESSABLE placeholder — sized box with a circular download button (44px, `download` icon), plus a media-type icon (`image`/`video`, 12px) next to formattedSize. Tap = `_startManualDownload`. Falls back to the static icon-only box when no download hook (error-builder path).
@@ -474,7 +474,7 @@ Toasts: info on request, error on failure.
 ### Generic File Card
 
 `_buildFileCard(...)`:
-- `maxWidth: 280`, surface background, border, `radiusSm` corners.
+- `maxWidth: 280`, surface background, border, `radiusMd` corners.
 - Row: file-type icon (28px, accent) + Column: fileName (body 13px w500, ellipsized) + status text (caption 11px, secondary) + trailing download icon button (18px `HollowPressable`) when not complete/downloading (issue #41).
 - Status text priority: vault phase > downloading with bytes > downloading > `"{formattedSize} · .{ext}"` (extension repeated because the name column ellipsizes).
 - 3px `LinearProgressIndicator` at bottom when downloading or partial progress.

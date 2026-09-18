@@ -304,7 +304,7 @@ File: `lib/src/ui/animations/ambient_background.dart`
 - `opacity` — defaults to 0.04 (very subtle).
 - `child` — content rendered beneath blobs.
 
-**Background check:** Watches `backgroundProvider.hasBackground`. If a custom background image is set, skips blobs entirely and returns `child` directly.
+**Opt-in (2026-09-18):** the blobs are OFF by default. They render only when `ambientBackgroundProvider` is on (Settings > Appearance > Background, "Ambient background", `AmbientBackgroundToggle` in settings_shared, desktop and mobile, persisted as `ambient_background`), no custom background image is set, and reduce motion is off. Otherwise it returns `child` directly, and no listener attaches to `SharedTickers.ambient`.
 
 **Animation:** Uses `SharedTickers.instance.ambient` (`GatedNotifier`, **30fps**, 45-second cycle). It briefly ran on a 1fps lane on the reasoning that one step moves a blob less than the blur on its own edge — true of the blob's AVERAGE speed, false through the middle of a sine's travel across the widest surface in the app, where it reads as a stutter. See memory `feedback_ticker_is_a_frame_request`. The `ValueListenableBuilder` computes figure-8 positions:
 - Blob 1: `x1 = 0.5 + 0.25 * sin(t)`, `y1 = 0.5 + 0.15 * sin(2t)`.
@@ -666,7 +666,7 @@ File: `lib/src/ui/components/hollow_tooltip.dart`
 - The old code estimated `message.length * 7.0` wide and a flat 28px tall and compared them to `MediaQuery.size`. On desktop that is the WINDOW, while the overlay is 32px shorter (title bar), so a bottom-dock tooltip "fit" below its button and rendered off the bottom edge. Both halves are fixed: this delegate, and `UiScale` publishing the slot as `MediaQuery.size`.
 - Every call site uses the default `preferBelow: true`; dock tooltips reach the flip-above path.
 
-**Visual:** `hollow.elevated` background, `radiusSm` corners, `hollow.border` border. Text in `HollowTypography.caption`, `hollow.textPrimary`.
+**Visual:** `hollow.elevated` background, `radiusMd` corners, `hollow.border` border. Text in `HollowTypography.caption`, `hollow.textPrimary`.
 
 
 ## HollowToast

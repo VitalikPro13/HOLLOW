@@ -82,7 +82,7 @@ class BlockedUserRow extends ConsumerWidget {
             ),
           ),
           const SizedBox(width: HollowSpacing.sm),
-          HollowButton.ghost(
+          HollowButton.outline(
             compact: true,
             onPressed: () async {
               try {

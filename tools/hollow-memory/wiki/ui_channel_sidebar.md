@@ -67,7 +67,7 @@ Inside either shape is a `Row` containing:
    - **Storage** -- `LucideIcons.hardDrive` (16px). Tapping calls `showStorageDashboardDialog(context, serverId)`.
    - **Server settings** -- `LucideIcons.settings` (16px). Tapping calls `onOpenSettings`.
 
-Each icon is wrapped in `HollowTooltip` > `HollowPressable` with `borderRadius: hollow.radiusSm` and `padding: HollowSpacing.xs`. Icon color is `hollow.textSecondary`.
+Each icon is wrapped in `HollowTooltip` > `HollowPressable` with `borderRadius: hollow.radiusMd` and `padding: HollowSpacing.xs`. Icon color is `hollow.textSecondary`.
 
 ## _ServerContent -- Channel List Display
 
@@ -236,7 +236,7 @@ For remote peers (`isRemote`), `GestureDetector.onSecondaryTapUp` calls `_showVo
 `file:_VoiceParticipantRow._showVolumePopup()` creates a raw `OverlayEntry` positioned at the right-click location. It includes:
 
 1. A full-screen tap-away barrier (`GestureDetector` with `HitTestBehavior.opaque`).
-2. A `Material` card at the click position with `hollow.elevated` background, `hollow.radiusSm` border radius, elevation 4.
+2. A `Material` card at the click position with `hollow.elevated` background, `hollow.radiusMd` border radius, elevation 4.
 3. Inside: a `StatefulBuilder` containing a `Row` with:
    - Volume icon (`LucideIcons.volume2`, 12px).
    - `Slider` (width 110, height 24) ranging 0.0 to 2.0 (200% max volume). Custom `SliderThemeData` with accent colors, 2px track height, 4px thumb radius, 8px overlay radius.

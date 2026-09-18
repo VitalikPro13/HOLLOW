@@ -27,7 +27,7 @@ import '../components/hollow_text_field.dart';
 import '../components/hollow_toast.dart';
 import '../components/popup_animator.dart';
 import 'emote_image.dart';
-import 'gif_picker.dart' show GifMenuItem, showGifMenu;
+import 'gif_picker.dart' show GifMenuItem, PickerListDropdown, showGifMenu;
 import 'sticker_pack_card.dart' show kStickerPackExtension;
 import 'package:hollow/src/ui/components/overlay_hosts.dart';
 
@@ -658,22 +658,16 @@ class _StickerPickerBodyState extends ConsumerState<StickerPickerBody> {
           Padding(
             padding: const EdgeInsets.fromLTRB(
                 HollowSpacing.sm, HollowSpacing.xs, HollowSpacing.sm, 0),
-            // The add button sits outside the scroller, so it never scrolls
-            // out of reach however many packs there are.
-            child: Row(
-              children: [
-                Expanded(
-                  child: EdgeScrollRow(
-                    semanticLabel: 'sticker packs',
-                    children: [
-                      _pack(null, 'All', filter),
-                      for (final p in packs)
-                        _pack(p, p.isEmpty ? 'Ungrouped' : p, filter),
-                    ],
-                  ),
-                ),
-                _newPackButton(),
-              ],
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: PickerListDropdown(
+                label: _packLabel(filter),
+                semanticLabel: 'Sticker pack: ${_packLabel(filter)}',
+                onOpen: (at) => _openPackPicker(packs, filter, at),
+                onOptions: filter == null || filter.isEmpty
+                    ? null
+                    : (at) => _packMenu(filter, at),
+              ),
             ),
           ),
         Expanded(
@@ -740,35 +734,43 @@ class _StickerPickerBodyState extends ConsumerState<StickerPickerBody> {
     );
   }
 
-  Widget _pack(String? pack, String label, String? filter) {
-    final menu = pack != null && pack.isNotEmpty;
-    return Padding(
-      padding: const EdgeInsets.only(right: HollowSpacing.sm),
-      child: GestureDetector(
-        onSecondaryTapDown: menu ? (d) => _packMenu(pack, d.globalPosition) : null,
-        onLongPressStart: menu ? (d) => _packMenu(pack, d.globalPosition) : null,
-        child: HollowChip(
-          label: label,
-          selected: filter == pack,
-          semanticLabel: 'Show $label',
-          onTap: () => setState(() => _packFilter = pack),
-        ),
-      ),
-    );
-  }
+  String _packLabel(String? pack) => pack == null
+      ? 'All packs'
+      : pack.isEmpty
+          ? 'Ungrouped'
+          : pack;
 
-  /// The "+" chip. A pack is a COLUMN on the sticker rows, so an empty one has
-  /// nowhere to exist in the database and lives in [stickerPacksProvider] until
-  /// a sticker lands in it.
-  Widget _newPackButton() {
-    return HollowButton.ghost(
-      compact: true,
-      semanticLabel: 'New sticker pack',
-      onPressed: () {
-        _packNameController.text = '';
-        setState(() => _renamingPack = _kNewPackSentinel);
-      },
-      child: const Icon(LucideIcons.plus),
+  /// "New pack" names a pack that does not exist yet: a pack is a COLUMN on
+  /// the sticker rows, so an empty one lives in [stickerPacksProvider] until a
+  /// sticker lands in it.
+  void _openPackPicker(List<String> packs, String? filter, Offset at) {
+    showGifMenu(
+      context,
+      at,
+      header: 'Sticker packs',
+      items: [
+        GifMenuItem(
+          icon: LucideIcons.layers,
+          label: 'All packs',
+          checked: filter == null,
+          onTap: () => setState(() => _packFilter = null),
+        ),
+        for (final p in packs)
+          GifMenuItem(
+            icon: LucideIcons.package,
+            label: _packLabel(p),
+            checked: filter == p,
+            onTap: () => setState(() => _packFilter = p),
+          ),
+        GifMenuItem(
+          icon: LucideIcons.plus,
+          label: 'New pack',
+          onTap: () {
+            _packNameController.text = '';
+            setState(() => _renamingPack = _kNewPackSentinel);
+          },
+        ),
+      ],
     );
   }
 
