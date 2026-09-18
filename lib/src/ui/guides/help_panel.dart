@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import 'package:hollow/src/ui/components/hollow_divider.dart';
 import 'package:hollow/src/core/providers/help_manifest_provider.dart';
 import 'package:hollow/src/core/providers/help_panel_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
@@ -227,7 +228,7 @@ class _HelpResourceCenterState extends ConsumerState<HelpResourceCenter> {
                 ),
               ),
 
-              Divider(color: hollow.border, height: 1),
+              const HollowDivider(),
 
               Expanded(
                 child: searching
@@ -502,7 +503,7 @@ class HelpLessonView extends StatelessWidget {
             ],
           ),
         ),
-        Divider(color: hollow.border, height: 1),
+        const HollowDivider(),
 
         Expanded(
           child: ListView.separated(

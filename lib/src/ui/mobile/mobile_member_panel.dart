@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/ui/components/hollow_divider.dart';
 import 'package:hollow/src/core/role_hierarchy.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
@@ -98,7 +99,7 @@ class _MemberPanelContent extends ConsumerWidget {
           child: HollowSectionHeader('Members'),
         ),
 
-        Divider(height: 1, color: hollow.border),
+        const HollowDivider(),
 
         Expanded(
           child: membersAsync.when(

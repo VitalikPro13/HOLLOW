@@ -3,6 +3,7 @@ import 'dart:io' show Platform;
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+import 'package:hollow/src/ui/components/hollow_divider.dart';
 import 'package:hollow/src/ui/components/edge_scroll_row.dart';
 import 'package:hollow/src/ui/components/overlay_anchor.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -226,7 +227,7 @@ void _showEmoteContextMenu(
                           .copyWith(color: hollow.textTertiary),
                     ),
                   ),
-                  Divider(height: 1, color: hollow.border),
+                  const HollowDivider(),
                   Padding(
                     padding: const EdgeInsets.all(4),
                     child: HollowPressable(
@@ -489,7 +490,7 @@ class _EmojiPickerBodyState extends ConsumerState<EmojiPickerBody> {
             ],
           ),
         ),
-        Divider(height: 1, color: hollow.border),
+        const HollowDivider(),
         Expanded(child: _buildTabContent(hollow)),
       ],
     );

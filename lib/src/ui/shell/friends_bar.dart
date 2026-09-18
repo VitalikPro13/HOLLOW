@@ -1,5 +1,6 @@
 ﻿import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/ui/components/hollow_divider.dart';
 import 'package:hollow/src/core/providers/conference_provider.dart';
 import 'package:hollow/src/core/providers/dm_navigation.dart';
 import 'package:hollow/src/core/providers/shell_tab.dart';
@@ -1256,7 +1257,7 @@ class _AddFriendTabState extends ConsumerState<_AddFriendTab> {
             ],
           ),
           const SizedBox(height: HollowSpacing.xl),
-          Divider(color: hollow.border, height: 1),
+          const HollowDivider(),
           const SizedBox(height: HollowSpacing.lg),
           Text(
             'Your temporary nickname',

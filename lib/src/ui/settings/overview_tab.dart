@@ -4,6 +4,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/ui/components/hollow_divider.dart';
 import 'package:hollow/src/core/models/server_info.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/server_avatar_anim_provider.dart';
@@ -798,7 +799,7 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
             ),
           ),
           const SizedBox(height: HollowSpacing.xl),
-          Divider(color: hollow.border),
+          const HollowDivider(),
           const SizedBox(height: HollowSpacing.xl),
 
           const HollowSectionHeader('Access'),
@@ -903,7 +904,7 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
             ),
           ),
           const SizedBox(height: HollowSpacing.xl),
-          Divider(color: hollow.border),
+          const HollowDivider(),
           const SizedBox(height: HollowSpacing.xl),
 
           const HollowSectionHeader('Offline Catch-up'),
@@ -984,7 +985,7 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
             ),
           ],
           const SizedBox(height: HollowSpacing.xl),
-          Divider(color: hollow.border),
+          const HollowDivider(),
           const SizedBox(height: HollowSpacing.xl),
 
           const HollowSectionHeader('Server Template'),
@@ -1059,7 +1060,7 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
           ),
 
           const SizedBox(height: HollowSpacing.xl),
-          Divider(color: hollow.border),
+          const HollowDivider(),
           const SizedBox(height: HollowSpacing.xl),
 
           const HollowSectionHeader('Twitch Verification'),
@@ -1249,7 +1250,7 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
           ],
 
           const SizedBox(height: HollowSpacing.xl),
-          Divider(color: hollow.border),
+          const HollowDivider(),
           const SizedBox(height: HollowSpacing.xl),
         ],
 

@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/ui/components/hollow_divider.dart';
 import 'package:hollow/src/core/message_preview.dart';
 import 'package:hollow/src/core/models/chat_message.dart';
 import 'package:hollow/src/ui/chat/hollow_link_utils.dart';
@@ -1868,7 +1869,7 @@ class _ServerContextSheet extends ConsumerWidget {
             },
           ),
           const SizedBox(height: HollowSpacing.sm),
-          Divider(color: hollow.border, height: 1, indent: HollowSpacing.lg, endIndent: HollowSpacing.lg),
+          const HollowDivider(indent: HollowSpacing.lg, endIndent: HollowSpacing.lg),
           const SizedBox(height: HollowSpacing.sm),
           _SheetAction(
             icon: isOwner ? LucideIcons.trash2 : LucideIcons.logOut,

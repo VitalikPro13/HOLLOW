@@ -1,6 +1,6 @@
 # Hollow design language and the grand redesign
 
-**Status:** IN PROGRESS, sessions 1 to 4 done 2026-09-18 (decisions applied, sweep 3c done). Direction agreed 2026-09-14, research the same day.
+**Status:** IN PROGRESS, sessions 1 to 4 done 2026-09-18 (decisions applied, sweeps 3c and 4 done). Direction agreed 2026-09-14, research the same day.
 
 **Read this section first in a new session.** It is the handoff: what exists, what it changed, and the next thing to pick up. Everything below section 0 is the original plan, kept for its research digest and its screen-by-screen program; where it and this section disagree, this section is right.
 
@@ -52,11 +52,15 @@ New tokens: `HollowTypography.micro` (10/500, absorbs 155 orphaned sites) and `m
   - One-offs: role capitalisation (14 copies) is `roleDisplayName()` in `core/role_hierarchy.dart`; server initials (3 copies) are `initialsFromName()` in `core/name_initials.dart`; the remaining `toUpperCase()` calls are data with a `design-ignore` reason.
   - Bug found by the probe: Settings > Security asserted on open in debug builds (`ref.invalidate` inside `initState`); the invalidate now runs past the first await.
   - Scenarios `design_sweep3c_headers.json` (desktop, 17 screens) and `fleet/design_sweep3c_mobile.json` (mini, 8 shots).
-  - **Follow-ups the same session (Vitalik's review):** the shimmer is gone. `member_panel._SectionDivider` draws label and count with no line (the collapsible chevron stays), and `ShimmerDividerLine` is deleted: its uses (home "Online", About's "Follow ~ Support", mobile Settings) are a plain `HollowDivider`. `HollowSectionHeader` gained `subtitle` (one quiet line, the action centres on both lines), which closed the gap under "Art You Own" and carries the Profiles description. Profile rows lost their hairline: the active row's 1 px accent border fell on a fractional pixel under UiScale and drew its right edge at half strength; the Active badge and accent icon mark it now.
+  - **Follow-ups the same session (Vitalik's review):** the shimmer is gone. `member_panel._SectionDivider` keeps a static `HollowDivider` between label and count so the count is anchored (Vitalik), with no sweep or glow (the collapsible chevron stays), and `ShimmerDividerLine` is deleted: its uses (home "Online", About's "Follow ~ Support", mobile Settings) are a plain `HollowDivider`. `HollowSectionHeader` gained `subtitle` (one quiet line, the action centres on both lines), which closed the gap under "Art You Own" and carries the Profiles description. Profile rows lost their hairline: the active row's 1 px accent border fell on a fractional pixel under UiScale and drew its right edge at half strength; the Active badge and accent icon mark it now.
   - **Decided:** section titles stay Title Case, as the rules allow (Vitalik, "follow the rules").
   - **Left for later:** home's "Online" stat row keeps its icon; `HollowSectionHeader` has no danger tone, so mobile server settings' Danger Zone header is neutral; `selection_shimmer.dart` (selected channel and peer rows) is the next gradient to go, in the gradient pass.
 
-Guard baselines moved: local-label-class **36 to 28 to 0**, upper-case-label 42 to 0, letter-spacing 57 to 0, raw-divider 51 to 41, font-size 744 to 703, gradient 23 to 21, font-size 824 to 809 to 791 to 785, edge-insets 266 to 257 to 248 to 236, radius 177 to 175 to 168, letter-spacing 66 to 64 to 63, sized-box-gap 202 to 192 to 182.
+- **Sweep 4, dividers (session 4).** `raw-divider` 41 to **0**, a hard ban now. Every inline `Divider(` / `VerticalDivider(` in `lib/src/ui` is `HollowDivider` / `HollowVerticalDivider`, and `about_section._aboutDivider` (a half-alpha border) is gone. Mobile Settings' two section rules were `textSecondary` at 50%, a louder line than anywhere else; they are the one hairline now. Verified pixel-identical on every desktop screen of `design_sweep4_dividers.json` except live stats and a scroll thumb.
+  - **Trap:** the theme's `DividerThemeData(space: 1)` makes a bare `Divider(color: ...)` 1 px tall, NOT Material's 16. A first pass wrapped those sites in 8 px of padding and the Overview tab grew 16 px per divider; the diff against the before shots caught it.
+  - Kept, not hairlines: the annotation toolbar's `_Divider` (exempt overlay), `hollow_shell._SplitDivider` (a drag handle), `UnreadDivider`, `HollowMenuDivider`.
+
+Guard baselines moved: local-label-class **36 to 28 to 0**, upper-case-label 42 to 0, letter-spacing 57 to 0, raw-divider 51 to 41 to 0, font-size 744 to 703, gradient 23 to 21, font-size 824 to 809 to 791 to 785, edge-insets 266 to 257 to 248 to 236, radius 177 to 175 to 168, letter-spacing 66 to 64 to 63, sized-box-gap 202 to 192 to 182.
 
 ### Four bugs the work surfaced, all fixed
 
@@ -73,11 +77,11 @@ Every sweep: probe screenshots **before**, change, probe screenshots **after**, 
 
 ### Where to pick up next
 
-**Sweeps 3 to 3c are done** (session 4). **Next session starts at sweep 4.**
+**Sweeps 3 to 4 are done** (session 4). **Next session starts at sweep 5.**
 
 1. ~~Sweep 3c~~ done, see above.
-2. **Sweep 4: the `Divider(` sites** onto `HollowDivider` (guard `raw-divider` baseline 41). Mechanical and low risk. START HERE.
-3. **Sweep 5: the ~60 inline empty states** onto `HollowEmptyState`.
+2. ~~Sweep 4, dividers~~ done, see above.
+3. **Sweep 5: the ~60 inline empty states** onto `HollowEmptyState`. START HERE.
 4. **Sweeps 6 to 9:** `showHollowSheet()` + one Hollow spinner (new primitives, then their sweeps), remaining Material `Switch` / `Slider`, the dialog pass (28 files), the filled-button audit.
 5. **Then the screen work**, phases 2 onward below, with the Shop's per-kind card shapes (verdict 9) and the compact message mode (verdict 8) inside it.
 

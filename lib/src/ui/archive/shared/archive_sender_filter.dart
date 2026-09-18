@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:hollow/src/ui/components/hollow_divider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
@@ -130,7 +131,7 @@ class _SenderFilterListState extends State<_SenderFilterList> {
             ],
           ),
         ),
-        Divider(height: 1, color: hollow.border),
+        const HollowDivider(),
         widget.wrapList(
           ListView.builder(
             padding: const EdgeInsets.symmetric(vertical: HollowSpacing.xs),

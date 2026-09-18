@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:hollow/src/ui/components/hollow_divider.dart';
 import 'package:hollow/src/ui/components/overlay_anchor.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -543,7 +544,10 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
       return Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Divider(color: hollow.border, height: HollowSpacing.sm),
+          const Padding(
+            padding: EdgeInsets.symmetric(vertical: HollowSpacing.xs),
+            child: HollowDivider(),
+          ),
           msgWidget,
         ],
       );

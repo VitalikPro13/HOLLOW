@@ -382,12 +382,12 @@ class _ProfileColumn extends ConsumerWidget {
         ],
 
         if (aboutMe.isNotEmpty) ...[
-          Padding(
-            padding: const EdgeInsets.symmetric(
+          const Padding(
+            padding: EdgeInsets.symmetric(
               vertical: HollowSpacing.md,
               horizontal: HollowSpacing.lg,
             ),
-            child: Divider(height: 1, color: hollow.border),
+            child: HollowDivider(),
           ),
           Text(
             '\u201C$aboutMe\u201D',
@@ -400,12 +400,12 @@ class _ProfileColumn extends ConsumerWidget {
             maxLines: 4,
             overflow: TextOverflow.ellipsis,
           ),
-          Padding(
-            padding: const EdgeInsets.symmetric(
+          const Padding(
+            padding: EdgeInsets.symmetric(
               vertical: HollowSpacing.md,
               horizontal: HollowSpacing.lg,
             ),
-            child: Divider(height: 1, color: hollow.border),
+            child: HollowDivider(),
           ),
         ] else
           const SizedBox(height: HollowSpacing.lg),

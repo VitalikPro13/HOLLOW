@@ -1,5 +1,6 @@
 import 'dart:math' as math;
 
+import 'package:hollow/src/ui/components/hollow_divider.dart';
 import 'package:hollow/src/ui/chat/hollow_link_utils.dart';
 
 import 'package:flutter/material.dart';
@@ -532,12 +533,12 @@ class _ServerContentState extends State<_ServerContent> {
           ));
         case SeparatorItem():
           currentCategory = null;
-          widgets.add(Padding(
-            padding: const EdgeInsets.symmetric(
+          widgets.add(const Padding(
+            padding: EdgeInsets.symmetric(
               horizontal: HollowSpacing.lg,
               vertical: HollowSpacing.sm,
             ),
-            child: Divider(height: 1, color: w.hollow.border),
+            child: HollowDivider(),
           ));
         case ChannelItem(:final channelId):
           // Normalisation already dropped ids with no channel, so a miss means
@@ -605,7 +606,7 @@ class _ServerContentState extends State<_ServerContent> {
                   : null,
             ),
           ),
-        if (!hasCategories) Divider(height: 1, color: w.hollow.border),
+        if (!hasCategories) const HollowDivider(),
         Expanded(
           // Right-click on empty sidebar space opens the server-level menu
           // (issue #61). Opaque so the area below the last channel is a hit
@@ -837,7 +838,7 @@ class _HomeContent extends ConsumerWidget {
           ),
         ),
 
-        Divider(height: 1, color: hollow.border),
+        const HollowDivider(),
 
         // Saved messages is a DM with your own master identity, opened through
         // the same flow as a friend.
@@ -901,7 +902,7 @@ class _HomeContent extends ConsumerWidget {
               peerId: req.peerId,
               direction: 'outgoing',
             ),
-          Divider(height: 1, color: hollow.border),
+          const HollowDivider(),
         ],
 
         Padding(

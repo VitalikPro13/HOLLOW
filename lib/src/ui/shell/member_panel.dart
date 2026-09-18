@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:hollow/src/core/role_hierarchy.dart';
+import 'package:hollow/src/ui/components/hollow_divider.dart';
 import 'package:hollow/src/ui/components/overlay_anchor.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
@@ -155,8 +156,7 @@ class _MemberListEntry {
     );
 }
 
-/// A role group's header in the member list: label, then the count at the
-/// trailing edge.
+/// A role group's header in the member list: label, a hairline, the count.
 class _SectionDivider extends StatelessWidget {
   final String label;
   final int count;
@@ -198,7 +198,9 @@ class _SectionDivider extends StatelessWidget {
           ],
           Text(label, style: textStyle),
           const SizedBox(width: HollowSpacing.sm),
-          const Spacer(),
+          const SizedBox(width: HollowSpacing.sm),
+          const Expanded(child: HollowDivider()),
+          const SizedBox(width: HollowSpacing.sm),
           Text(
             '$count',
             style: HollowTypography.monoSmall.copyWith(

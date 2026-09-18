@@ -24,6 +24,7 @@ import '../components/hollow_toast.dart';
 import '../components/edge_scroll_row.dart';
 import '../components/overlay_anchor.dart';
 import '../components/popup_animator.dart';
+import 'package:hollow/src/ui/components/hollow_divider.dart';
 import 'package:hollow/src/ui/components/overlay_hosts.dart';
 
 /// The GIF picker (issue #26): Popular, Favourites and Recent plus search
@@ -451,7 +452,7 @@ class _GifPickerBodyState extends ConsumerState<GifPickerBody> {
         // The tabs stay PUT while searching and only lose their selected
         // state: a row that vanishes as you type hides where you came from.
         _tabRow(hollow),
-        Divider(height: 1, color: hollow.border),
+        const HollowDivider(),
         Expanded(child: _content(hollow)),
         Padding(
           padding: const EdgeInsets.symmetric(vertical: 6),
@@ -978,7 +979,7 @@ void showGifMenu(
                           .copyWith(color: hollow.textTertiary),
                     ),
                   ),
-                  Divider(height: 1, color: hollow.border),
+                  const HollowDivider(),
                   Padding(
                     padding: const EdgeInsets.all(4),
                     child: Column(

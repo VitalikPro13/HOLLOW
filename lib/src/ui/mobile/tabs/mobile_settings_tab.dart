@@ -160,10 +160,7 @@ class MobileSettingsTab extends ConsumerWidget {
           ),
         ),
         const SizedBox(height: HollowSpacing.lg),
-        Divider(
-          color: hollow.textSecondary.withValues(alpha: 0.50),
-          height: 1,
-        ),
+        const HollowDivider(),
         const SizedBox(height: HollowSpacing.lg),
 
         _SettingsNavTile(
@@ -289,10 +286,7 @@ class MobileSettingsTab extends ConsumerWidget {
         ),
 
         const SizedBox(height: HollowSpacing.lg),
-        Divider(
-          color: hollow.textSecondary.withValues(alpha: 0.50),
-          height: 1,
-        ),
+        const HollowDivider(),
         const SizedBox(height: HollowSpacing.lg),
 
         // Mobile's pull surface for status; the mobile banner only pushes
@@ -596,7 +590,7 @@ class _SettingsSubPage extends StatelessWidget {
                 ],
               ),
             ),
-            Divider(color: hollow.border, height: 1),
+            const HollowDivider(),
             Expanded(child: child),
           ],
         ),
@@ -4378,7 +4372,7 @@ class _AboutTab extends ConsumerWidget {
                 ),
               ),
             ),
-            Divider(color: hollow.border, height: 1),
+            const HollowDivider(),
             Expanded(
               child: legalMarkdownView(
                 hollow,

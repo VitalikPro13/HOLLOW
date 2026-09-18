@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/ui/components/hollow_divider.dart';
 import 'package:hollow/src/core/providers/favourite_friends_provider.dart';
 import 'package:hollow/src/core/providers/friends_provider.dart';
 import 'package:hollow/src/core/providers/local_nickname_provider.dart';
@@ -367,7 +368,7 @@ class _FriendRow extends ConsumerWidget {
               color: hollow.textPrimary, fontWeight: FontWeight.w600,
             )),
             const SizedBox(height: HollowSpacing.md),
-            Divider(height: 1, color: hollow.border),
+            const HollowDivider(),
 
             _ActionRow(
               icon: LucideIcons.messageCircle,
@@ -417,7 +418,7 @@ class _FriendRow extends ConsumerWidget {
               },
             ),
 
-            Divider(height: 1, color: hollow.border),
+            const HollowDivider(),
 
             _ActionRow(
               icon: LucideIcons.userMinus,

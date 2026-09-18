@@ -1,5 +1,6 @@
 import 'dart:io';
 
+import 'package:hollow/src/ui/components/hollow_divider.dart';
 import 'package:hollow/src/ui/chat/hollow_link_utils.dart';
 
 import 'package:file_picker/file_picker.dart';
@@ -2535,7 +2536,7 @@ class _ChannelLayoutEditorState extends ConsumerState<_ChannelLayoutEditor> {
                 size: 20, color: hollow.textSecondary),
           ),
           const SizedBox(width: HollowSpacing.sm),
-          Expanded(child: Divider(color: hollow.border)),
+          const Expanded(child: HollowDivider()),
           const SizedBox(width: HollowSpacing.sm),
           HollowPressable(
             onTap: () => setState(() => _layout.removeAt(index)),

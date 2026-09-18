@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/ui/components/hollow_divider.dart';
 import 'package:hollow/src/core/providers/emote_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/sticker_provider.dart';
@@ -129,7 +130,7 @@ class EmotesTab extends ConsumerWidget {
                 onRemove: () => _removeEmote(context, ref, e.name),
               )),
         const SizedBox(height: HollowSpacing.xl),
-        Divider(height: 1, color: hollow.border),
+        const HollowDivider(),
         const SizedBox(height: HollowSpacing.lg),
         ServerStickersSection(serverId: serverId, canManage: canManage),
       ],

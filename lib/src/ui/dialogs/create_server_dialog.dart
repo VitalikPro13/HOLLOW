@@ -1,5 +1,6 @@
 ﻿import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/ui/components/hollow_divider.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:hollow/src/ui/app.dart' show hollowNavigatorKey;
 import 'package:hollow/src/theme/hollow_spacing.dart';
@@ -121,10 +122,10 @@ void showCreateServerDialog(BuildContext context) {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 joinSection,
-                Padding(
+                const Padding(
                   padding:
-                      const EdgeInsets.symmetric(vertical: HollowSpacing.lg),
-                  child: Divider(color: hollow.border, height: 1),
+                      EdgeInsets.symmetric(vertical: HollowSpacing.lg),
+                  child: HollowDivider(),
                 ),
                 createSection,
               ],
@@ -133,12 +134,12 @@ void showCreateServerDialog(BuildContext context) {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Expanded(child: joinSection),
-                Padding(
+                const Padding(
                   padding:
-                      const EdgeInsets.symmetric(horizontal: HollowSpacing.lg),
+                      EdgeInsets.symmetric(horizontal: HollowSpacing.lg),
                   child: SizedBox(
                     height: 180,
-                    child: VerticalDivider(color: hollow.border, width: 1),
+                    child: HollowVerticalDivider(),
                   ),
                 ),
                 Expanded(child: createSection),

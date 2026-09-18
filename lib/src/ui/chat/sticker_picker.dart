@@ -29,6 +29,7 @@ import '../components/popup_animator.dart';
 import 'emote_image.dart';
 import 'gif_picker.dart' show GifMenuItem, PickerListDropdown, showGifMenu;
 import 'sticker_pack_card.dart' show kStickerPackExtension;
+import 'package:hollow/src/ui/components/hollow_divider.dart';
 import 'package:hollow/src/ui/components/overlay_hosts.dart';
 
 /// Picks an image file and processes it at STICKER bounds (≤512px, ≤512 KB,
@@ -546,7 +547,7 @@ class _StickerPickerBodyState extends ConsumerState<StickerPickerBody> {
             ],
           ),
         ),
-        Divider(height: 1, color: hollow.border),
+        const HollowDivider(),
         Expanded(child: _content(hollow)),
         if (_networkView) _poweredBy(hollow),
       ],

@@ -21,7 +21,7 @@ Container styling: `hollow.surface` background, left `BorderSide` using `hollow.
 
 ## _SectionDivider — Section Headers
 
-`_SectionDivider` is a `StatelessWidget` that renders a section header row: optional chevron + `Label` + `Spacer` + count. Used for Online, Offline, role-grouped sections and the "Members N" header.
+`_SectionDivider` is a `StatelessWidget` that renders a section header row: optional chevron + `Label` + a static `HollowDivider` hairline (Expanded) + count. Used for Online, Offline, role-grouped sections and the "Members N" header.
 
 ### Parameters
 - `label` (String) — section text (e.g., "Online", "Offline", "Owner", "Admin")

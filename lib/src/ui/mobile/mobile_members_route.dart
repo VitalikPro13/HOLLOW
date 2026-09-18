@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/ui/components/hollow_divider.dart';
 import 'package:hollow/src/core/role_hierarchy.dart';
 import 'package:hollow/src/core/moderation_format.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart'
@@ -446,7 +447,7 @@ class _MemberRow extends ConsumerWidget {
                   color: hollow.textPrimary, fontWeight: FontWeight.w600,
                 )),
             const SizedBox(height: HollowSpacing.md),
-            Divider(height: 1, color: hollow.border),
+            const HollowDivider(),
 
             for (final newRole in assignable)
               HollowPressable(
@@ -466,7 +467,7 @@ class _MemberRow extends ConsumerWidget {
                 ),
               ),
 
-            if (assignable.isNotEmpty) Divider(height: 1, color: hollow.border),
+            if (assignable.isNotEmpty) const HollowDivider(),
 
             if (canKick)
               HollowPressable(
@@ -550,7 +551,7 @@ class _MemberRow extends ConsumerWidget {
             Text('They won\'t be able to send messages in this server',
                 style: HollowTypography.caption.copyWith(color: hollow.textSecondary)),
             const SizedBox(height: HollowSpacing.md),
-            Divider(height: 1, color: hollow.border),
+            const HollowDivider(),
             for (final (label, secs) in kMuteDurationOptions)
               HollowPressable(
                 onTap: () => _mute(context, ref, secs, label),

@@ -153,7 +153,7 @@ final _rules = <_Rule>[
     fix: 'use HollowDivider',
     pattern: RegExp(r'(?<![\w.])(Vertical)?Divider\('),
     excludeDirs: [_theme, _components],
-    baseline: 41,
+    baseline: 0,
   ),
   _Rule(
     id: 'local-label-class',

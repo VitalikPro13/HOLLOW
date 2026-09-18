@@ -248,7 +248,7 @@ Consequences worth stating, because these are the observed inconsistencies:
 |---|---|---|
 | `HollowSectionHeader` | every private section label (guarded at 0) | Title in `subheading` (a page section, a `SettingsCard` title) or `label` via `dense` (a sub-group, a list group). Optional trailing action, optional count in mono. Carries its own 8 px bottom gap. **No leading icon.** The label above ONE settings field is `SettingsFieldLabel`, not a header. |
 | `HollowEmptyState` | 3 helpers and roughly 60 inline columns | One honest line about what is true now, one optional second line, at most one action. Optional glyph at 24. A slot for Holly, empty for now. |
-| `HollowDivider` | 111 inline `Divider(` | The hairline. Nothing else. No colour parameter. |
+| `HollowDivider` | every inline `Divider(` (guarded at 0) | The hairline. Nothing else. No colour parameter. |
 | `HollowListRow` | ad hoc rows | Leading, title, subtitle, trailing. Hover on the whole row, no dead zone between rows. |
 | `HollowSkeleton` | none | Keeps the final geometry. Used only for 2 to 10 second loads. |
 | `HollowCard` | itself | Only for a repeatable self-contained unit: a listing, a device, a news item. A settings group is not a card. A section is not a card. |

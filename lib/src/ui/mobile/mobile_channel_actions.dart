@@ -1,4 +1,5 @@
 ﻿import 'package:flutter/material.dart';
+import 'package:hollow/src/ui/components/hollow_divider.dart';
 import 'package:hollow/src/core/models/channel_info.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
@@ -179,12 +180,7 @@ class _ChannelActionsSheetState extends State<_ChannelActionsSheet> {
               },
             ),
           const SizedBox(height: HollowSpacing.sm),
-          Divider(
-            height: 1,
-            color: hollow.border,
-            indent: HollowSpacing.lg,
-            endIndent: HollowSpacing.lg,
-          ),
+          const HollowDivider(indent: HollowSpacing.lg, endIndent: HollowSpacing.lg),
           const SizedBox(height: HollowSpacing.sm),
           _ActionRow(
             icon: LucideIcons.trash2,

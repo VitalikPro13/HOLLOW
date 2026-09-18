@@ -85,7 +85,7 @@ class AboutTab extends ConsumerWidget {
           ),
 
           const SizedBox(height: HollowSpacing.md),
-          _aboutDivider(hollow),
+          const HollowDivider(),
           const SizedBox(height: HollowSpacing.lg),
 
           const HollowSectionHeader('Contact'),
@@ -102,7 +102,7 @@ class AboutTab extends ConsumerWidget {
           ),
 
           const SizedBox(height: HollowSpacing.lg),
-          _aboutDivider(hollow),
+          const HollowDivider(),
           const SizedBox(height: HollowSpacing.lg),
 
           _aboutShimmerLabel('Follow', 'Support', hollow),
@@ -165,7 +165,7 @@ class AboutTab extends ConsumerWidget {
           ),
 
           const SizedBox(height: HollowSpacing.lg),
-          _aboutDivider(hollow),
+          const HollowDivider(),
           const SizedBox(height: HollowSpacing.lg),
 
           const HollowSectionHeader('Legal'),
@@ -217,10 +217,6 @@ class AboutTab extends ConsumerWidget {
         ],
       ),
     );
-  }
-
-  static Widget _aboutDivider(HollowTheme hollow) {
-    return Container(height: 1, color: hollow.border.withValues(alpha: 0.5));
   }
 
   static Widget _aboutShimmerLabel(

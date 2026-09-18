@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/ui/components/hollow_divider.dart';
 import 'package:hollow/src/core/models/channel_info.dart';
 import 'package:hollow/src/core/models/channel_layout.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
@@ -616,7 +617,7 @@ class _ChannelsTabState extends ConsumerState<ChannelsTab> {
           ),
         ),
 
-        Divider(height: 1, color: hollow.border),
+        const HollowDivider(),
 
         Expanded(
           child: _layout.isEmpty

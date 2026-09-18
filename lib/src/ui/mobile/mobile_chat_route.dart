@@ -5,6 +5,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/ui/components/hollow_divider.dart';
 import 'package:hollow/src/core/message_preview.dart';
 import 'package:hollow/src/core/reduce_motion.dart';
 import 'package:hollow/src/core/services/channel_topic_service.dart';
@@ -3220,7 +3221,7 @@ class _MobileChatHeader extends ConsumerWidget {
                   shrinkWrap: true,
                   itemCount: pinnedMessages.length,
                   separatorBuilder: (_, _) =>
-                      Divider(color: hollow.border, height: 1),
+                      const HollowDivider(),
                   itemBuilder: (_, index) {
                     final msg = pinnedMessages[index]!;
                     // Collapse device to master so a pinned row shows the
