@@ -11,6 +11,7 @@ import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/hollow_spinner.dart';
+import 'package:hollow/src/ui/components/hollow_toggle.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import '../components/follow_days_steps.dart';
 
@@ -321,12 +322,10 @@ class _ToggleRow extends StatelessWidget {
             ],
           ),
         ),
-        Switch(
+        HollowToggle(
+          semanticLabel: label,
           value: value,
           onChanged: onChanged,
-          activeTrackColor: hollow.accent,
-          activeThumbColor: Colors.white,
-          inactiveTrackColor: hollow.border,
         ),
       ],
     );

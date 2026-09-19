@@ -15,6 +15,7 @@ import 'package:hollow/src/ui/components/overlay_anchor.dart';
 import 'package:hollow/src/ui/components/overlay_hosts.dart';
 import 'package:hollow/src/ui/media/media_zoom_math.dart';
 import 'package:hollow/src/ui/components/hollow_spinner.dart';
+import 'package:hollow/src/ui/components/hollow_slider.dart';
 
 /// One control of the viewer's bars, and the same row of the overflow menu.
 @immutable
@@ -384,25 +385,13 @@ class _MediaVideoControlsState extends State<MediaVideoControls> {
               Semantics(
                 label: 'Seek',
                 container: true,
-                child: SliderTheme(
-                  data: SliderTheme.of(context).copyWith(
-                    trackHeight: 3,
-                    thumbShape:
-                        const RoundSliderThumbShape(enabledThumbRadius: 6),
-                    overlayShape:
-                        const RoundSliderOverlayShape(overlayRadius: 12),
-                    activeTrackColor: hollow.accent,
-                    inactiveTrackColor: Colors.white24,
-                    thumbColor: hollow.accent,
-                    overlayColor: hollow.accent.withValues(alpha: 0.2),
-                  ),
-                  child: Slider(
-                    min: 0,
-                    max: durationMs.toDouble().clamp(1, double.infinity),
-                    value: position.clamp(0, durationMs).toDouble(),
-                    onChanged: (v) => widget.controller
+                child: HollowSlider(
+                  onMedia: true,
+                  min: 0,
+                  max: durationMs.toDouble().clamp(1, double.infinity),
+                  value: position.clamp(0, durationMs).toDouble(),
+                  onChanged: (v) => widget.controller
                         .seekTo(Duration(milliseconds: v.toInt())),
-                  ),
                 ),
               ),
               if (_hoverTime != null)
@@ -561,20 +550,11 @@ class _VerticalVolumePopoverState extends State<VerticalVolumePopover> {
                 container: true,
                 child: RotatedBox(
                   quarterTurns: 3,
-                  child: SliderTheme(
-                    data: SliderTheme.of(context).copyWith(
-                      trackHeight: 3,
-                      thumbShape:
-                          const RoundSliderThumbShape(enabledThumbRadius: 5),
-                      overlayShape: SliderComponentShape.noOverlay,
-                      activeTrackColor: hollow.accent,
-                      inactiveTrackColor: Colors.white24,
-                      thumbColor: hollow.accent,
-                    ),
-                    child: Slider(
-                      value: value.volume.clamp(0.0, 1.0),
-                      onChanged: _setVolume,
-                    ),
+                  child: HollowSlider(
+                    onMedia: true,
+                    halo: false,
+                    value: value.volume.clamp(0.0, 1.0),
+                    onChanged: _setVolume,
                   ),
                 ),
               ),

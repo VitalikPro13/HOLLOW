@@ -180,7 +180,9 @@ action; a pane takes the default, a list inside a card or section takes
 `HollowSkeleton` (2 to 10 second loads, keeps the final geometry) · `HollowSpinner`
 (small 14 in a row or button, medium 20 in a card, large 32 for a pane; quiet
 `textSecondary`, never the accent) · `showHollowSheet()` (the only bottom sheet:
-overlay, `radiusXl`, one `HollowSheetHandle`) · `HollowCard`.
+overlay, `radiusXl`, one `HollowSheetHandle`) · `HollowSlider` (the only
+slider; `onMedia: true` over video) · `HollowToggle` (the only switch, with a
+`semanticLabel`; it grows its own 48 px hit area on touch) · `HollowCard`.
 
 **Cards:** only for a repeatable self-contained unit (a listing, a device, a
 news item). A settings group is not a card. A section is not a card. Cards do
@@ -245,7 +247,7 @@ motion; never add another.
 `Divider(` outside components · a Chip/Pill/Tag/Badge class outside components ·
 numeric `EdgeInsets` and `SizedBox` gaps · gradients · `BoxShadow` blur above 12
 · raw `Material(` outside components · `CircularProgressIndicator(` ·
-`showModalBottomSheet`.
+`showModalBottomSheet` · Material `Slider` / `Switch` / `Checkbox` / `Radio`.
 
 Exemption is `// design-ignore: <reason>` on the offending line, for a genuine
 one-off (a brand asset's exact colour, a platform-mandated metric). Not for "I

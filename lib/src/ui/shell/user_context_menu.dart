@@ -32,6 +32,7 @@ import 'package:hollow/src/ui/dialogs/report_user_dialog.dart';
 import 'package:hollow/src/ui/dialogs/verify_contact_dialog.dart';
 import 'package:hollow/src/ui/settings/manage_member_dialog.dart';
 import 'package:hollow/src/ui/settings/moderation_dialogs.dart';
+import 'package:hollow/src/ui/components/hollow_slider.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// The right-click menu for a person (issue #61).
@@ -487,27 +488,16 @@ class _PeerVolumeRowState extends ConsumerState<_PeerVolumeRow> {
           const SizedBox(width: HollowSpacing.xs),
           Icon(LucideIcons.volume2, size: 14, color: hollow.textSecondary),
           Expanded(
-            child: SliderTheme(
-              data: SliderThemeData(
-                activeTrackColor: hollow.accent,
-                inactiveTrackColor: hollow.border,
-                thumbColor: hollow.accent,
-                overlayColor: hollow.accent.withValues(alpha: 0.08),
-                trackHeight: 2,
-                thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 5),
-                overlayShape: const RoundSliderOverlayShape(overlayRadius: 10),
-              ),
-              child: Slider(
-                value: _volume,
-                min: 0.0,
-                max: 2.0,
-                onChanged: (v) {
+            child: HollowSlider(
+              value: _volume,
+              min: 0.0,
+              max: 2.0,
+              onChanged: (v) {
                   setState(() => _volume = v);
                   ref
                       .read(voiceChannelProvider.notifier)
                       .setPeerVolume(widget.peerId, v);
                 },
-              ),
             ),
           ),
           SizedBox(

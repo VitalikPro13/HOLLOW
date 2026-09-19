@@ -25,6 +25,7 @@ import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/dialogs/ringtone_clip_editor_dialog.dart';
 import 'package:hollow/src/ui/settings/keybind_capture_field.dart';
 import 'package:hollow/src/ui/settings/settings_shared.dart';
+import 'package:hollow/src/ui/components/hollow_slider.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:record/record.dart' as rec;
 import 'package:win32audio/win32audio.dart' as win32audio;
@@ -77,17 +78,6 @@ class _VoiceInputSettingsState extends ConsumerState<_VoiceInputSettings> {
     });
   }
 
-  SliderThemeData _slimSliderTheme(HollowTheme hollow) {
-    return SliderThemeData(
-      activeTrackColor: hollow.accent,
-      inactiveTrackColor: hollow.border,
-      thumbColor: hollow.accent,
-      overlayColor: hollow.accent.withValues(alpha: 0.08),
-      trackHeight: 2,
-      thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 5),
-      overlayShape: const RoundSliderOverlayShape(overlayRadius: 10),
-    );
-  }
 
   Widget _keybindRow(
     HollowTheme hollow, {
@@ -197,17 +187,14 @@ class _VoiceInputSettingsState extends ConsumerState<_VoiceInputSettings> {
                     ),
                     const SizedBox(width: HollowSpacing.md),
                     Expanded(
-                      child: SliderTheme(
-                        data: _slimSliderTheme(hollow),
-                        child: Slider(
-                          value: releaseMs.toDouble().clamp(0, 1000),
-                          min: 0,
-                          max: 1000,
-                          divisions: 20,
-                          onChanged: (v) => ref
+                      child: HollowSlider(
+                        value: releaseMs.toDouble().clamp(0, 1000),
+                        min: 0,
+                        max: 1000,
+                        divisions: 20,
+                        onChanged: (v) => ref
                               .read(pttReleaseDelayProvider.notifier)
                               .setDelay(v.round()),
-                        ),
                       ),
                     ),
                     SizedBox(
@@ -990,27 +977,17 @@ class _AudioDeviceSettingsState extends ConsumerState<_AudioDeviceSettings> {
           ),
           const SizedBox(width: HollowSpacing.sm),
           Expanded(
-            child: SliderTheme(
-              data: SliderThemeData(
-                activeTrackColor: hollow.accent,
-                inactiveTrackColor: hollow.border,
-                thumbColor: hollow.accent,
-                overlayColor: hollow.accent.withValues(alpha: 0.1),
-                trackHeight: 3,
-                thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 6),
-              ),
-              child: Slider(
-                value: value,
-                onChanged: enabled
+            child: HollowSlider(
+              value: value,
+              onChanged: enabled
                     ? (v) =>
                         ref.read(soundEffectsVolumeProvider.notifier).setVolume(v)
                     : null,
-                // Preview on release only; a sound per drag frame is a
+              // Preview on release only; a sound per drag frame is a
                 // machine-gun.
                 onChangeEnd: enabled
                     ? (_) => SoundService.instance.play(HollowSound.joinVoice)
                     : null,
-              ),
             ),
           ),
           SizedBox(
@@ -1137,18 +1114,6 @@ class _AudioDeviceSettingsState extends ConsumerState<_AudioDeviceSettings> {
     );
   }
 
-  /// Slim slider theme shared by the gain + strength sliders.
-  SliderThemeData _slimSliderTheme(HollowTheme hollow) {
-    return SliderThemeData(
-      activeTrackColor: hollow.accent,
-      inactiveTrackColor: hollow.border,
-      thumbColor: hollow.accent,
-      overlayColor: hollow.accent.withValues(alpha: 0.08),
-      trackHeight: 2,
-      thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 5),
-      overlayShape: const RoundSliderOverlayShape(overlayRadius: 10),
-    );
-  }
 
   Widget _buildMicGainSlider(HollowTheme hollow) {
     final gain = ref.watch(micGainProvider).valueOrNull ?? kMicGainDefault;
@@ -1172,17 +1137,14 @@ class _AudioDeviceSettingsState extends ConsumerState<_AudioDeviceSettings> {
             ),
             const SizedBox(width: HollowSpacing.md),
             Expanded(
-              child: SliderTheme(
-                data: _slimSliderTheme(hollow),
-                child: Slider(
-                  value: gain.clamp(kMicGainMin, kMicGainMax),
-                  min: kMicGainMin,
-                  max: kMicGainMax,
-                  divisions: 83,
-                  onChanged: locked
+              child: HollowSlider(
+                value: gain.clamp(kMicGainMin, kMicGainMax),
+                min: kMicGainMin,
+                max: kMicGainMax,
+                divisions: 83,
+                onChanged: locked
                       ? null
                       : (v) => ref.read(micGainProvider.notifier).setGain(v),
-                ),
               ),
             ),
             SizedBox(
@@ -1331,20 +1293,17 @@ class _AudioDeviceSettingsState extends ConsumerState<_AudioDeviceSettings> {
             ),
             const SizedBox(width: HollowSpacing.md),
             Expanded(
-              child: SliderTheme(
-                data: _slimSliderTheme(hollow),
-                child: Slider(
-                  value:
+              child: HollowSlider(
+                value:
                       strength.clamp(kEnhanceStrengthMin, kEnhanceStrengthMax),
-                  min: kEnhanceStrengthMin,
-                  max: kEnhanceStrengthMax,
-                  divisions: 30,
-                  onChanged: locked
+                min: kEnhanceStrengthMin,
+                max: kEnhanceStrengthMax,
+                divisions: 30,
+                onChanged: locked
                       ? null
                       : (v) => ref
                           .read(voiceEnhanceStrengthProvider.notifier)
                           .setStrength(v),
-                ),
               ),
             ),
             SizedBox(
@@ -1541,24 +1500,14 @@ class _AudioDeviceSettingsState extends ConsumerState<_AudioDeviceSettings> {
         ),
         const SizedBox(width: HollowSpacing.sm),
         Expanded(
-          child: SliderTheme(
-            data: SliderThemeData(
-              activeTrackColor: hollow.accent,
-              inactiveTrackColor: hollow.border,
-              thumbColor: hollow.accent,
-              overlayColor: hollow.accent.withValues(alpha: 0.1),
-              trackHeight: 3,
-              thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 6),
-            ),
-            child: Slider(
-              value: ref.watch(ringtoneVolumeProvider).valueOrNull ?? 0.5,
-              onChangeStart: (v) => _startRingtonePreview(v),
-              onChanged: (v) {
+          child: HollowSlider(
+            value: ref.watch(ringtoneVolumeProvider).valueOrNull ?? 0.5,
+            onChangeStart: (v) => _startRingtonePreview(v),
+            onChanged: (v) {
                 ref.read(ringtoneVolumeProvider.notifier).setVolume(v);
                 _ringtonePreview?.setVolume(v);
               },
-              onChangeEnd: (_) => _stopRingtonePreview(),
-            ),
+            onChangeEnd: (_) => _stopRingtonePreview(),
           ),
         ),
         SizedBox(

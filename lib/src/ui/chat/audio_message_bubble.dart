@@ -22,6 +22,7 @@ import 'package:hollow/src/ui/chat/file_card_status.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/hollow_spinner.dart';
+import 'package:hollow/src/ui/components/hollow_slider.dart';
 
 /// Renders an audio attachment inline in a message bubble.
 ///
@@ -542,24 +543,11 @@ class _AudioMessageBubbleState extends ConsumerState<AudioMessageBubble> {
               // text above and below.
               SizedBox(
                 height: 20,
-                child: SliderTheme(
-                  data: SliderTheme.of(context).copyWith(
-                    trackHeight: 3,
-                    thumbShape:
-                        const RoundSliderThumbShape(enabledThumbRadius: 5),
-                    overlayShape:
-                        const RoundSliderOverlayShape(overlayRadius: 10),
-                    activeTrackColor: hollow.accent,
-                    inactiveTrackColor: hollow.border,
-                    thumbColor: hollow.accent,
-                    overlayColor: hollow.accent.withValues(alpha: 0.2),
-                  ),
-                  child: Slider(
-                    min: 0,
-                    max: durationMs.clamp(1, double.infinity),
-                    value: positionMs,
-                    onChanged: _onSeek,
-                  ),
+                child: HollowSlider(
+                  min: 0,
+                  max: durationMs.clamp(1, double.infinity),
+                  value: positionMs,
+                  onChanged: _onSeek,
                 ),
               ),
               Row(

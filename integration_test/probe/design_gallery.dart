@@ -15,7 +15,9 @@ import 'package:hollow/src/ui/components/hollow_list_row.dart';
 import 'package:hollow/src/ui/components/hollow_section_header.dart';
 import 'package:hollow/src/ui/components/hollow_sheet.dart';
 import 'package:hollow/src/ui/components/hollow_skeleton.dart';
+import 'package:hollow/src/ui/components/hollow_slider.dart';
 import 'package:hollow/src/ui/components/hollow_spinner.dart';
+import 'package:hollow/src/ui/components/hollow_toggle.dart';
 
 /// Every design-language primitive in every state, dark beside light, in one
 /// screenshot.
@@ -401,6 +403,26 @@ class _GalleryPane extends StatelessWidget {
                   HollowSpinner.large(),
                   SizedBox(width: HollowSpacing.lg),
                   HollowSpinner.medium(value: 0.65),
+                ],
+              ),
+              const SizedBox(height: HollowSpacing.xl),
+
+              const HollowSectionHeader('Slider and toggle'),
+              Row(
+                children: [
+                  Expanded(child: HollowSlider(value: 0.6, onChanged: (_) {})),
+                  const SizedBox(width: HollowSpacing.lg),
+                  const Expanded(
+                      child: HollowSlider(value: 0.3, onChanged: null)),
+                  const SizedBox(width: HollowSpacing.lg),
+                  HollowToggle(
+                      value: true, semanticLabel: 'On', onChanged: (_) {}),
+                  const SizedBox(width: HollowSpacing.sm),
+                  HollowToggle(
+                      value: false, semanticLabel: 'Off', onChanged: (_) {}),
+                  const SizedBox(width: HollowSpacing.sm),
+                  const HollowToggle(
+                      value: true, semanticLabel: 'Disabled', onChanged: null),
                 ],
               ),
               const SizedBox(height: HollowSpacing.xl),

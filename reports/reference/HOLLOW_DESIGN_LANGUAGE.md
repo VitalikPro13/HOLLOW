@@ -252,6 +252,8 @@ Consequences worth stating, because these are the observed inconsistencies:
 | `HollowListRow` | ad hoc rows | Leading, title, subtitle, trailing. Hover on the whole row, no dead zone between rows. |
 | `HollowSkeleton` | none | Keeps the final geometry. Used only for 2 to 10 second loads. |
 | `HollowSpinner` | 127 raw `CircularProgressIndicator`s at six sizes (guarded) | Three sizes on the icon ramp: small 14 (a row, a button), medium 20 (a card or section), large 32 (a pane). `textSecondary` by default: a spinner reports a state, it is not an action, so it never takes the accent. Optional `value` for a determinate ring. |
+| `HollowSlider` | about 30 Material `Slider`s under 8 hand-rolled themes (guarded) | One geometry (3 px track, 6 px thumb, 12 px press halo), the accent fill, `border` for the rest, no tick marks, the drag label on the `overlay` surface. `onMedia: true` over video or a scrim; `halo: false` in a tight box; `activeColor` only when the value IS a picked colour (the annotation pen). The hue picker keeps its own rainbow track with a `design-ignore`. |
+| `HollowToggle` | 13 Material `Switch`es on mobile (guarded, with `Checkbox` and `Radio`) | The one on/off control, 36 x 20 on every platform. On a touch platform the hit area grows to 48 x 48 while the painted switch stays put. Always pass `semanticLabel` (the row's title). A choice among a few options is a row of `HollowChip`, never radios. |
 | `showHollowSheet()` + `HollowSheetHandle` | 29 hand-styled `showModalBottomSheet`s, each drawing its own handle (guarded) | `overlay` surface, `radiusXl` on the top corners, one handle with 8 px above and below. `scrollControlled` for tall content; a `DraggableScrollableSheet` passes `handle: false` and places the handle itself. |
 | `HollowCard` | itself | Only for a repeatable self-contained unit: a listing, a device, a news item. A settings group is not a card. A section is not a card. |
 
@@ -301,6 +303,7 @@ Guarded by `test/design_language_guard_test.dart`. Each rule carries a **baselin
 | 10 | `LinearGradient` / `RadialGradient` / `SweepGradient` | outside the theme's ambient background and the annotation overlay |
 | 11 | `BoxShadow` with `blurRadius` above 12 | anywhere |
 | 12 | Raw `Material(` | outside `components/` and the documented overlay hosts |
+| 13 | Material `Slider` / `RangeSlider`; Material or Cupertino `Switch` / `Checkbox` / `Radio` | outside `hollow_slider.dart` |
 
 Already law and unchanged: purpose labels on icon-only controls, `HollowFocusRing`, `showHollowMenu`, `setShellTab`, the hover rules, `Colors.transparent` never animated, the `accentText` and `textTertiary` contrast checks, `reversedChatList()`, one mutation path per state.
 

@@ -9,6 +9,7 @@ import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/hollow_spinner.dart';
+import 'package:hollow/src/ui/components/hollow_toggle.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 class MobileRolesRoute extends ConsumerStatefulWidget {
@@ -286,16 +287,10 @@ class _PermissionRow extends StatelessWidget {
               color: hollow.textPrimary,
             )),
           ),
-          AnimatedOpacity(
-            opacity: canEdit ? 1.0 : 0.4,
-            duration: const Duration(milliseconds: 200),
-            child: Switch(
-              value: enabled,
-              onChanged: canEdit ? (_) => onToggle() : null,
-              activeTrackColor: hollow.accent,
-              activeThumbColor: Colors.white,
-              inactiveTrackColor: hollow.border,
-            ),
+          HollowToggle(
+            semanticLabel: label,
+            value: enabled,
+            onChanged: canEdit ? (_) => onToggle() : null,
           ),
         ],
       ),

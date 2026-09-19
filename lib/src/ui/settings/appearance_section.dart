@@ -18,6 +18,7 @@ import 'package:hollow/src/ui/dialogs/image_crop_dialog.dart';
 import 'package:hollow/src/ui/settings/settings_shared.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:hollow/src/core/providers/layout_prefs_provider.dart';
+import 'package:hollow/src/ui/components/hollow_slider.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Appearance category of the desktop Settings dialog. Everything here
@@ -107,15 +108,6 @@ class AppearanceSettingsView extends ConsumerWidget {
               ref.read(layoutModeProvider.notifier).setMode(m);
             },
           ),
-          const SizedBox(height: HollowSpacing.md),
-          SettingsToggleRow(
-            icon: LucideIcons.eyeOff,
-            label: 'Appear invisible',
-            subtitle: 'Show as offline to other users',
-            value: invisible,
-            onChanged: (v) =>
-                ref.read(invisibleModeProvider.notifier).setInvisible(v),
-          ),
           if (isDesktop) ...[
             const SizedBox(height: HollowSpacing.md),
             SettingsToggleRow(
@@ -143,6 +135,19 @@ class AppearanceSettingsView extends ConsumerWidget {
                       : ProfileCardStyle.compact),
             ),
           ],
+        ],
+      ),
+      SettingsCard(
+        title: 'Presence',
+        children: [
+          SettingsToggleRow(
+            icon: LucideIcons.eyeOff,
+            label: 'Appear invisible',
+            subtitle: 'Show as offline to other users',
+            value: invisible,
+            onChanged: (v) =>
+                ref.read(invisibleModeProvider.notifier).setInvisible(v),
+          ),
         ],
       ),
     ]);
@@ -223,26 +228,13 @@ class _BackgroundPicker extends ConsumerWidget {
               Expanded(
                 child: SizedBox(
                   height: 20,
-                  child: SliderTheme(
-                    data: SliderThemeData(
-                      trackHeight: 4,
-                      thumbShape: const RoundSliderThumbShape(
-                        enabledThumbRadius: 7,
-                      ),
-                      thumbColor: Colors.white,
-                      activeTrackColor:
-                          accentFromHue(ref.watch(accentHueProvider)),
-                      inactiveTrackColor: hollow.border,
-                      overlayShape: SliderComponentShape.noOverlay,
-                    ),
-                    child: Slider(
-                      value: bg.panelOpacity,
-                      min: 0.4,
-                      max: 1.0,
-                      onChanged: (value) {
+                  child: HollowSlider(
+                    value: bg.panelOpacity,
+                    min: 0.4,
+                    max: 1.0,
+                    onChanged: (value) {
                         ref.read(backgroundProvider.notifier).setOpacity(value);
                       },
-                    ),
                   ),
                 ),
               ),

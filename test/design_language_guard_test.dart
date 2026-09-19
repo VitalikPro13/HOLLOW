@@ -111,7 +111,7 @@ final _rules = <_Rule>[
     fix: 'use hollow.<token>; Colors.transparent is the only allowed one',
     pattern: RegExp(r'\bColors\.(?!transparent\b)\w+'),
     excludeDirs: [_theme],
-    baseline: 223,
+    baseline: 207,
   ),
   _Rule(
     id: 'color-literal',
@@ -120,7 +120,7 @@ final _rules = <_Rule>[
         'HollowTheme',
     pattern: RegExp(r'\bColor\(\s*0x'),
     excludeDirs: [_theme],
-    baseline: 137,
+    baseline: 136,
   ),
   _Rule(
     id: 'radius-literal',
@@ -200,6 +200,24 @@ final _rules = <_Rule>[
         'HollowSheetHandle itself',
     pattern: RegExp(r'\bshowModalBottomSheet\b'),
     excludeFiles: ['hollow_sheet.dart'],
+    baseline: 0,
+  ),
+  _Rule(
+    id: 'raw-slider',
+    what: 'a Material Slider / RangeSlider',
+    fix: 'HollowSlider (onMedia: true over video); a slider with its own '
+        'track art is a design-ignore with the reason',
+    pattern: RegExp(r'(?<![\w.])(Range)?Slider\('),
+    excludeFiles: ['hollow_slider.dart'],
+    baseline: 0,
+  ),
+  _Rule(
+    id: 'raw-switch',
+    what: 'a Material or Cupertino Switch / Checkbox / Radio',
+    fix: 'HollowToggle with a semanticLabel; a choice among a few options is '
+        'a row of HollowChip',
+    pattern: RegExp(
+        r'(?<![\w.])(Cupertino)?(Switch|Checkbox|Radio)(ListTile)?(\.adaptive)?\('),
     baseline: 0,
   ),
   _Rule(

@@ -103,6 +103,7 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:hollow/src/ui/chat/chat_pane_shared.dart';
 import 'package:hollow/src/ui/dialogs/no_turn_dialog.dart';
 import 'package:hollow/src/core/services/attachment_export.dart';
+import 'package:hollow/src/ui/components/hollow_slider.dart';
 
 // The twins' shared building blocks live in chat_pane_shared.dart, re-exported
 // here for the existing consumers (mobile routes, archive viewers).
@@ -2937,7 +2938,7 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
           final call = menuRef.watch(callProvider);
           return Row(children: [
             Icon(LucideIcons.volume2, size: 14, color: hollow.textSecondary),
-            Expanded(child: Slider(
+            Expanded(child: HollowSlider(
               value: volume,
               min: 0,
               max: 2,

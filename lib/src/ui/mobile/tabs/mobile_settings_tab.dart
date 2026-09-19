@@ -86,6 +86,8 @@ import 'package:hollow/src/ui/components/relay_no_turn_chip.dart';
 import 'package:hollow/src/core/services/at_rest.dart';
 import 'package:hollow/src/ui/components/hollow_sheet.dart';
 import 'package:hollow/src/ui/components/hollow_spinner.dart';
+import 'package:hollow/src/ui/components/hollow_slider.dart';
+import 'package:hollow/src/ui/components/hollow_toggle.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 class MobileSettingsTab extends ConsumerWidget {
@@ -1706,7 +1708,7 @@ class _AppearanceTab extends StatelessWidget {
         SizedBox(height: HollowSpacing.md),
         AmbientBackgroundToggle(),
         SizedBox(height: HollowSpacing.xl),
-        HollowSectionHeader('Layout'),
+        HollowSectionHeader('Presence'),
         _InvisibleToggleRow(),
         SizedBox(height: HollowSpacing.xl),
       ],
@@ -1804,17 +1806,13 @@ class _SoundEffectsControls extends ConsumerWidget {
               ),
             ),
             const SizedBox(width: HollowSpacing.md),
-            Switch(
+            HollowToggle(
+              semanticLabel: 'Play sound effects',
               value: enabled,
               onChanged: (v) {
                 ref.read(soundEffectsEnabledProvider.notifier).setEnabled(v);
                 if (v) SoundService.instance.play(HollowSound.notification);
               },
-              activeTrackColor: hollow.accent,
-              // Same knob as the deprecated `activeColor` its siblings in this
-              // file still pass.
-              activeThumbColor: Colors.white,
-              inactiveTrackColor: hollow.border,
             ),
           ],
         ),
@@ -1838,13 +1836,11 @@ class _SoundEffectsControls extends ConsumerWidget {
                       )),
                 ],
               ),
-              Slider(
+              HollowSlider(
                 value: volume.clamp(0.0, 1.0),
                 min: 0.0,
                 max: 1.0,
                 divisions: 20,
-                activeColor: hollow.accent,
-                inactiveColor: hollow.border,
                 onChanged: enabled
                     ? (v) => ref
                         .read(soundEffectsVolumeProvider.notifier)
@@ -2062,14 +2058,12 @@ class _ThemeToggleRow extends ConsumerWidget {
             color: hollow.textPrimary,
           )),
         ),
-        Switch(
+        HollowToggle(
+          semanticLabel: 'Dark mode',
           value: isDark,
           onChanged: (v) =>
               ref.read(themeModeProvider.notifier).setMode(
                   v ? ThemeMode.dark : ThemeMode.light),
-          activeTrackColor: hollow.accent,
-          activeColor: Colors.white,
-          inactiveTrackColor: hollow.border,
         ),
       ],
     );
@@ -2268,13 +2262,11 @@ class _BackgroundSection extends ConsumerWidget {
                   )),
             ],
           ),
-          Slider(
+          HollowSlider(
             value: bg.panelOpacity.clamp(0.0, 0.92),
             min: 0.0,
             max: 0.92,
             divisions: 23,
-            activeColor: hollow.accent,
-            inactiveColor: hollow.border,
             onChanged: (v) => ref.read(backgroundProvider.notifier).setOpacity(v),
           ),
         ],
@@ -2357,13 +2349,11 @@ class _ReduceTransparencyRow extends ConsumerWidget {
             ],
           ),
         ),
-        Switch(
+        HollowToggle(
+          semanticLabel: 'Reduce transparency',
           value: on,
           onChanged: (v) =>
               ref.read(reduceTransparencyProvider.notifier).setEnabled(v),
-          activeTrackColor: hollow.accent,
-          activeColor: Colors.white,
-          inactiveTrackColor: hollow.border,
         ),
       ],
     );
@@ -2415,13 +2405,11 @@ class _InvisibleToggleRow extends ConsumerWidget {
             ],
           ),
         ),
-        Switch(
+        HollowToggle(
+          semanticLabel: 'Appear invisible',
           value: invisible,
           onChanged: (v) =>
               ref.read(invisibleModeProvider.notifier).setInvisible(v),
-          activeTrackColor: hollow.accent,
-          activeColor: Colors.white,
-          inactiveTrackColor: hollow.border,
         ),
       ],
     );
@@ -2457,7 +2445,8 @@ class _AlwaysRelayCallsRow extends ConsumerWidget {
             ],
           ),
         ),
-        Switch(
+        HollowToggle(
+          semanticLabel: 'Always relay calls',
           value: enabled,
           onChanged: (v) async {
             try {
@@ -2469,9 +2458,6 @@ class _AlwaysRelayCallsRow extends ConsumerWidget {
               }
             }
           },
-          activeTrackColor: hollow.accent,
-          activeThumbColor: Colors.white,
-          inactiveTrackColor: hollow.border,
         ),
       ],
     );
@@ -2514,13 +2500,11 @@ class _OfflineInboxSection extends ConsumerWidget {
                 ],
               ),
             ),
-            Switch(
+            HollowToggle(
+              semanticLabel: "Hold my messages while I'm offline",
               value: enabled,
               onChanged: (v) =>
                   ref.read(offlineInboxProvider.notifier).setEnabled(v),
-              activeTrackColor: hollow.accent,
-              activeColor: Colors.white,
-              inactiveTrackColor: hollow.border,
             ),
           ],
         ),
@@ -2617,13 +2601,11 @@ class _AutoDownloadSlider extends ConsumerWidget {
             )),
           ],
         ),
-        Slider(
+        HollowSlider(
           value: off ? 0 : value.toDouble().clamp(34, 2048),
           min: 0,
           max: 2048,
           divisions: 50,
-          activeColor: hollow.accent,
-          inactiveColor: hollow.border,
           // Below the 34 MB direct-transfer cap there is nothing to threshold,
           // so anything under it snaps to Off.
           onChanged: (v) => ref
@@ -2669,13 +2651,11 @@ class _CacheCapSlider extends ConsumerWidget {
             )),
           ],
         ),
-        Slider(
+        HollowSlider(
           value: value.toDouble().clamp(256, 10240),
           min: 256,
           max: 10240,
           divisions: 40,
-          activeColor: hollow.accent,
-          inactiveColor: hollow.border,
           onChanged: (v) =>
               ref.read(vaultCacheCapProvider.notifier).setCap(v.round()),
         ),
@@ -2714,13 +2694,11 @@ class _FilesCacheCapSlider extends ConsumerWidget {
             )),
           ],
         ),
-        Slider(
+        HollowSlider(
           value: value.toDouble().clamp(512, 51200),
           min: 512,
           max: 51200,
           divisions: 99,
-          activeColor: hollow.accent,
-          inactiveColor: hollow.border,
           onChanged: (v) =>
               ref.read(filesCacheCapProvider.notifier).setCap(v.round()),
         ),
@@ -2761,13 +2739,11 @@ class _AssetCacheCapSlider extends ConsumerWidget {
             )),
           ],
         ),
-        Slider(
+        HollowSlider(
           value: value.toDouble().clamp(64, 4096),
           min: 64,
           max: 4096,
           divisions: 63,
-          activeColor: hollow.accent,
-          inactiveColor: hollow.border,
           onChanged: (v) =>
               ref.read(assetCacheCapProvider.notifier).setCap(v.round()),
         ),
@@ -2859,13 +2835,11 @@ class _MicGainSlider extends ConsumerWidget {
                   )),
             ],
           ),
-          Slider(
+          HollowSlider(
             value: gain.clamp(kMicGainMin, kMicGainMax),
             min: kMicGainMin,
             max: kMicGainMax,
             divisions: 83,
-            activeColor: hollow.accent,
-            inactiveColor: hollow.border,
             onChanged: locked
                 ? null
                 : (v) => ref.read(micGainProvider.notifier).setGain(v),
@@ -2918,13 +2892,11 @@ class _VoiceEnhanceToggle extends ConsumerWidget {
               ),
             ),
             const SizedBox(width: HollowSpacing.md),
-            Switch(
+            HollowToggle(
+              semanticLabel: 'Voice enhancement',
               value: enhance,
               onChanged: (v) =>
                   ref.read(voiceEnhanceProvider.notifier).setEnabled(v),
-              activeTrackColor: hollow.accent,
-              activeColor: Colors.white,
-              inactiveTrackColor: hollow.border,
             ),
           ],
         ),
@@ -2954,16 +2926,14 @@ class _VoiceEnhanceToggle extends ConsumerWidget {
                 ),
               ),
               const SizedBox(width: HollowSpacing.md),
-              Switch(
+              HollowToggle(
+                semanticLabel: 'Dynamic mode',
                 value: dynMode && enhance,
                 onChanged: enhance
                     ? (v) => ref
                         .read(voiceEnhanceDynamicProvider.notifier)
                         .setEnabled(v)
                     : null,
-                activeTrackColor: hollow.accent,
-                activeColor: Colors.white,
-                inactiveTrackColor: hollow.border,
               ),
             ],
           ),
@@ -2987,14 +2957,12 @@ class _VoiceEnhanceToggle extends ConsumerWidget {
                       )),
                 ],
               ),
-              Slider(
+              HollowSlider(
                 value:
                     strength.clamp(kEnhanceStrengthMin, kEnhanceStrengthMax),
                 min: kEnhanceStrengthMin,
                 max: kEnhanceStrengthMax,
                 divisions: 30,
-                activeColor: hollow.accent,
-                inactiveColor: hollow.border,
                 onChanged: strengthLocked
                     ? null
                     : (v) => ref
@@ -3027,13 +2995,11 @@ class _VoiceEnhanceToggle extends ConsumerWidget {
               ),
             ),
             const SizedBox(width: HollowSpacing.md),
-            Switch(
+            HollowToggle(
+              semanticLabel: 'AI noise suppression',
               value: ref.watch(noiseSuppressAiProvider).valueOrNull ?? false,
               onChanged: (v) =>
                   ref.read(noiseSuppressAiProvider.notifier).setEnabled(v),
-              activeTrackColor: hollow.accent,
-              activeColor: Colors.white,
-              inactiveTrackColor: hollow.border,
             ),
           ],
         ),
@@ -3202,13 +3168,11 @@ class _RingtoneVolumeSlider extends ConsumerWidget {
                 )),
           ],
         ),
-        Slider(
+        HollowSlider(
           value: volume.clamp(0.0, 1.0),
           min: 0.0,
           max: 1.0,
           divisions: 20,
-          activeColor: hollow.accent,
-          inactiveColor: hollow.border,
           onChanged: (v) =>
               ref.read(ringtoneVolumeProvider.notifier).setVolume(v),
         ),
@@ -3242,11 +3206,13 @@ class _SecurityTabState extends ConsumerState<_SecurityTab> {
   }
 
   Future<void> _loadStatus() async {
-    // The one funnel every protection change already runs through, so the
-    // duress card's availability can never lag behind this tab's own state.
-    ref.invalidate(identityProtectionProvider);
     try {
       final status = await identity_api.getIdentityProtectionStatus();
+      // The one funnel every protection change already runs through, so the
+      // duress card's availability can never lag behind this tab's own state.
+      // Past the first await: from initState it asserts in debug builds and
+      // the tab never leaves its spinner.
+      if (mounted) ref.invalidate(identityProtectionProvider);
       final appLock = AppLockService();
       final lockType = await appLock.getLockType();
       final canBio = await appLock.canUseBiometrics();
@@ -3365,9 +3331,11 @@ class _SecurityTabState extends ConsumerState<_SecurityTab> {
                     ],
                   ),
                 ),
-                Switch(
+                HollowToggle(
+                  semanticLabel: Platform.isIOS
+                      ? 'Face ID / Touch ID'
+                      : 'Fingerprint / face unlock',
                   value: _biometricEnabled,
-                  activeThumbColor: hollow.accent,
                   onChanged: (v) => _toggleBiometric(v),
                 ),
               ],
@@ -3884,12 +3852,10 @@ class _ToggleRow extends StatelessWidget {
             color: hollow.textPrimary, fontSize: 13,
           )),
         ),
-        Switch(
+        HollowToggle(
+          semanticLabel: label,
           value: value,
           onChanged: onChanged,
-          activeTrackColor: hollow.accent,
-          activeColor: Colors.white,
-          inactiveTrackColor: hollow.border,
         ),
       ],
     );

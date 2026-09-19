@@ -1,0 +1,22 @@
+[
+  {"op": "log", "message": "Design sweep 7, the lower half of Audio & Video and Files & Storage (ringtone, sound effects, cache caps), reached by dragging the content."},
+  {"op": "tap", "target": "semantics:Settings"},
+  {"op": "wait", "ms": 1500},
+  {"op": "tap", "target": "text:Audio & Video", "soft": true},
+  {"op": "wait", "ms": 1500},
+  {"op": "scroll", "target": "text:Camera", "dy": -400, "soft": true},
+  {"op": "wait", "ms": 600},
+  {"op": "shot", "name": "s7-10-audio-scrolled", "soft": true},
+  {"op": "scroll", "target": "text:Camera", "dy": -600, "index": 0, "soft": true},
+  {"op": "scroll", "target": "type:SingleChildScrollView", "index": 0, "dy": -1200, "soft": true},
+  {"op": "wait", "ms": 600},
+  {"op": "shot", "name": "s7-11-audio-bottom", "soft": true},
+  {"op": "tap", "target": "text:Files & Storage", "soft": true},
+  {"op": "wait", "ms": 1500},
+  {"op": "scroll", "target": "text:By conversation", "dy": -1500, "soft": true},
+  {"op": "wait", "ms": 600},
+  {"op": "shot", "name": "s7-12-storage-lower", "soft": true},
+  {"op": "scroll", "target": "type:SingleChildScrollView", "index": 0, "dy": -1500, "soft": true},
+  {"op": "wait", "ms": 600},
+  {"op": "shot", "name": "s7-13-storage-bottom", "soft": true}
+]

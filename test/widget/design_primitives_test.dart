@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
@@ -14,7 +15,9 @@ import 'package:hollow/src/ui/components/hollow_list_row.dart';
 import 'package:hollow/src/ui/components/hollow_section_header.dart';
 import 'package:hollow/src/ui/components/hollow_sheet.dart';
 import 'package:hollow/src/ui/components/hollow_skeleton.dart';
+import 'package:hollow/src/ui/components/hollow_slider.dart';
 import 'package:hollow/src/ui/components/hollow_spinner.dart';
+import 'package:hollow/src/ui/components/hollow_toggle.dart';
 
 /// The design-language primitives (`reports/reference/HOLLOW_DESIGN_LANGUAGE.md`
 /// section 4). These replace 46 local chip, pill, tag and badge classes plus
@@ -672,6 +675,127 @@ void main() {
 
       final spinner = tester.widget<HollowSpinner>(find.byType(HollowSpinner));
       expect(spinner.color, hollow.textOnAccent);
+    });
+  });
+
+  group('HollowSlider', () {
+    testWidgets('one geometry, the accent fill, no tick comb', (tester) async {
+      final hollow = await _pump(
+        tester,
+        SizedBox(
+          width: 240,
+          child: HollowSlider(value: 0.5, divisions: 50, onChanged: (_) {}),
+        ),
+      );
+
+      final theme = tester.widget<SliderTheme>(find.descendant(
+        of: find.byType(HollowSlider),
+        matching: find.byType(SliderTheme),
+      )).data;
+      expect(theme.trackHeight, HollowSlider.trackHeight);
+      expect(theme.activeTrackColor, hollow.accent);
+      expect(theme.inactiveTrackColor, hollow.border);
+      expect(theme.tickMarkShape, SliderTickMarkShape.noTickMark);
+    });
+
+    testWidgets('clamps a value outside its range instead of asserting',
+        (tester) async {
+      await _pump(
+        tester,
+        SizedBox(
+          width: 240,
+          child: HollowSlider(value: 3, max: 2, onChanged: (_) {}),
+        ),
+      );
+
+      expect(tester.takeException(), isNull);
+      expect(tester.widget<Slider>(find.byType(Slider)).value, 2);
+    });
+
+    testWidgets('a finger gets 48 px of height, a pointer keeps it slim',
+        (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      await _pump(
+        tester,
+        Column(mainAxisSize: MainAxisSize.min, children: [
+          SizedBox(
+            width: 240,
+            child: HollowSlider(value: 0.5, onChanged: (_) {}),
+          ),
+        ]),
+      );
+      expect(tester.getSize(find.byType(Slider)).height,
+          greaterThanOrEqualTo(HollowSlider.touchTarget));
+
+      debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+      await _pump(
+        tester,
+        Column(mainAxisSize: MainAxisSize.min, children: [
+          SizedBox(
+            width: 240,
+            child: HollowSlider(value: 0.5, onChanged: (_) {}),
+          ),
+        ]),
+      );
+      expect(tester.getSize(find.byType(Slider)).height,
+          lessThan(HollowSlider.touchTarget));
+      debugDefaultTargetPlatformOverride = null;
+    });
+
+    testWidgets('over media the unfilled track ignores the theme',
+        (tester) async {
+      final hollow = await _pump(
+        tester,
+        SizedBox(
+          width: 240,
+          child: HollowSlider(value: 0.5, onMedia: true, onChanged: (_) {}),
+        ),
+        light: true,
+      );
+
+      final theme = tester.widget<SliderTheme>(find.descendant(
+        of: find.byType(HollowSlider),
+        matching: find.byType(SliderTheme),
+      )).data;
+      expect(theme.inactiveTrackColor, isNot(hollow.border));
+    });
+  });
+
+  group('HollowToggle', () {
+    testWidgets('a finger gets 48 px while the switch stays 36 x 20',
+        (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      var value = false;
+      await _pump(
+        tester,
+        StatefulBuilder(
+          builder: (context, setState) => HollowToggle(
+            value: value,
+            semanticLabel: 'Dark mode',
+            onChanged: (v) => setState(() => value = v),
+          ),
+        ),
+      );
+
+      expect(tester.getSize(find.byType(HollowToggle)), const Size(48, 48));
+      // The corner of the hit area, outside the painted track.
+      await tester.tapAt(tester.getTopLeft(find.byType(HollowToggle)) +
+          const Offset(2, 2));
+      await tester.pump();
+      expect(value, isTrue);
+      debugDefaultTargetPlatformOverride = null;
+    });
+
+    testWidgets('keeps its desktop size with a pointer', (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+      await _pump(
+        tester,
+        HollowToggle(value: true, semanticLabel: 'Dark mode', onChanged: (_) {}),
+      );
+
+      expect(tester.getSize(find.byType(HollowToggle)), const Size(36, 20));
+      expect(find.bySemanticsLabel('Dark mode'), findsOneWidget);
+      debugDefaultTargetPlatformOverride = null;
     });
   });
 

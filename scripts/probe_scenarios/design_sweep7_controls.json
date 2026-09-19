@@ -1,0 +1,153 @@
+[
+ {
+  "op": "log",
+  "message": "Design sweep 7: every settings page with a slider or a switch, which moved onto HollowSlider / HollowToggle. Run once before and once after, then stack the pairs."
+ },
+ {
+  "op": "tap",
+  "target": "semantics:Settings"
+ },
+ {
+  "op": "wait",
+  "ms": 1500
+ },
+ {
+  "op": "tap",
+  "target": "text:Appearance",
+  "soft": true
+ },
+ {
+  "op": "wait",
+  "ms": 1200
+ },
+ {
+  "op": "shot",
+  "name": "s7-01-appearance"
+ },
+ {
+  "op": "wheel",
+  "target": "type:Scrollable",
+  "index": 1,
+  "dy": 500,
+  "soft": true
+ },
+ {
+  "op": "wait",
+  "ms": 600
+ },
+ {
+  "op": "shot",
+  "name": "s7-02-appearance-lower",
+  "soft": true
+ },
+ {
+  "op": "tap",
+  "target": "text:Accessibility",
+  "soft": true
+ },
+ {
+  "op": "wait",
+  "ms": 1200
+ },
+ {
+  "op": "shot",
+  "name": "s7-03-accessibility"
+ },
+ {
+  "op": "wheel",
+  "target": "type:Scrollable",
+  "index": 1,
+  "dy": 500,
+  "soft": true
+ },
+ {
+  "op": "wait",
+  "ms": 600
+ },
+ {
+  "op": "shot",
+  "name": "s7-04-accessibility-lower",
+  "soft": true
+ },
+ {
+  "op": "tap",
+  "target": "text:Audio & Video",
+  "soft": true
+ },
+ {
+  "op": "wait",
+  "ms": 1500
+ },
+ {
+  "op": "shot",
+  "name": "s7-05-audio"
+ },
+ {
+  "op": "wheel",
+  "target": "type:Scrollable",
+  "index": 1,
+  "dy": 500,
+  "soft": true
+ },
+ {
+  "op": "wait",
+  "ms": 600
+ },
+ {
+  "op": "shot",
+  "name": "s7-06-audio-mid",
+  "soft": true
+ },
+ {
+  "op": "wheel",
+  "target": "type:Scrollable",
+  "index": 1,
+  "dy": 500,
+  "soft": true
+ },
+ {
+  "op": "wait",
+  "ms": 600
+ },
+ {
+  "op": "shot",
+  "name": "s7-07-audio-lower",
+  "soft": true
+ },
+ {
+  "op": "tap",
+  "target": "text:Files & Storage",
+  "soft": true
+ },
+ {
+  "op": "wait",
+  "ms": 1500
+ },
+ {
+  "op": "shot",
+  "name": "s7-08-storage"
+ },
+ {
+  "op": "theme",
+  "value": "light",
+  "frames": 30
+ },
+ {
+  "op": "tap",
+  "target": "text:Appearance",
+  "soft": true
+ },
+ {
+  "op": "wait",
+  "ms": 1200
+ },
+ {
+  "op": "shot",
+  "name": "s7-09-appearance-light"
+ },
+ {
+  "op": "theme",
+  "value": "dark",
+  "frames": 30
+ }
+]

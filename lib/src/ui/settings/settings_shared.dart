@@ -13,6 +13,7 @@ import 'package:hollow/src/ui/components/hollow_section_header.dart';
 import 'package:hollow/src/ui/components/hollow_toggle.dart';
 import 'package:hollow/src/ui/components/rainbow_slider_track.dart';
 import 'package:hollow/src/ui/components/ui_scale.dart';
+import 'package:hollow/src/ui/components/hollow_slider.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Shared scaffolding for the Settings surfaces, desktop and mobile. One
@@ -136,7 +137,8 @@ class SettingsToggleRow extends StatelessWidget {
                       .copyWith(color: hollow.textPrimary),
                 ),
         ),
-        HollowToggle(value: value, onChanged: onChanged),
+        HollowToggle(
+            value: value, onChanged: onChanged, semanticLabel: label),
       ],
     );
   }
@@ -234,23 +236,13 @@ class SettingsLabeledSlider extends StatelessWidget {
           ],
         ),
         const SizedBox(height: HollowSpacing.xs),
-        SliderTheme(
-          data: SliderTheme.of(context).copyWith(
-            activeTrackColor: hollow.accent,
-            inactiveTrackColor: hollow.border,
-            thumbColor: hollow.accent,
-            overlayColor: hollow.accent.withValues(alpha: 0.1),
-            trackHeight: 3,
-            thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 6),
-          ),
-          child: Slider(
-            value: value,
-            min: min,
-            max: max,
-            divisions: divisions,
-            label: label,
-            onChanged: onChanged,
-          ),
+        HollowSlider(
+          value: value,
+          min: min,
+          max: max,
+          divisions: divisions,
+          label: label,
+          onChanged: onChanged,
         ),
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.xs),
@@ -535,26 +527,16 @@ class _ScaleSliderBlock extends StatelessWidget {
           ],
         ),
         const SizedBox(height: HollowSpacing.xs),
-        SliderTheme(
-          data: SliderTheme.of(context).copyWith(
-            activeTrackColor: hollow.accent,
-            inactiveTrackColor: hollow.border,
-            thumbColor: hollow.accent,
-            overlayColor: hollow.accent.withValues(alpha: 0.1),
-            trackHeight: 3,
-            thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 6),
-          ),
-          child: Slider(
-            value: value.clamp(min, max),
-            min: min,
-            max: max,
-            divisions: scaleDivisions(min, max),
-            label: scalePercentLabel(value),
-            semanticFormatterCallback: scalePercentLabel,
-            onChangeStart: onChangeStart,
-            onChanged: onChanged,
-            onChangeEnd: onChangeEnd,
-          ),
+        HollowSlider(
+          value: value.clamp(min, max),
+          min: min,
+          max: max,
+          divisions: scaleDivisions(min, max),
+          label: scalePercentLabel(value),
+          semanticFormatterCallback: scalePercentLabel,
+          onChangeStart: onChangeStart,
+          onChanged: onChanged,
+          onChangeEnd: onChangeEnd,
         ),
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.xs),
@@ -640,7 +622,7 @@ class AccentHueSliderRow extends StatelessWidget {
           activeTrackColor: Colors.transparent,
           inactiveTrackColor: Colors.transparent,
         ),
-        child: Slider(
+        child: Slider( // design-ignore: the hue picker paints its own rainbow track
           value: hue.clamp(0, 359),
           min: 0,
           max: 359,

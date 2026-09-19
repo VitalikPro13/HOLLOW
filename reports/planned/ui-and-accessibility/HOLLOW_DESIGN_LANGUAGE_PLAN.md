@@ -1,6 +1,6 @@
 # Hollow design language and the grand redesign
 
-**Status:** IN PROGRESS, sessions 1 to 5 done 2026-09-19 (decisions applied, sweeps 3c to 6 done). Direction agreed 2026-09-14, research the same day.
+**Status:** IN PROGRESS, sessions 1 to 6 done 2026-09-19 (decisions applied, sweeps 3c to 7 done). Direction agreed 2026-09-14, research the same day.
 
 **Read this section first in a new session.** It is the handoff: what exists, what it changed, and the next thing to pick up. Everything below section 0 is the original plan, kept for its research digest and its screen-by-screen program; where it and this section disagree, this section is right.
 
@@ -80,7 +80,15 @@ New tokens: `HollowTypography.micro` (10/500, absorbs 155 orphaned sites) and `m
   - Scenario `fleet/design_sweep6_mobile.json` (server sheet, channel sheet, message actions sheet dark and light). The composer's send button has no semantics label in Saved messages, so the scenario taps it by position; worth an a11y look.
   - **Left for later:** sheet HEADERS still vary (the audio sheet has an icon beside a heading-size title, the server sheet a centred title); that belongs to the screen phases. Desktop's incoming-call countdown became `HollowSpinner.large(value:)` (32 in a 36 box) while mobile's dial kept its own size; align them in the call screen pass.
 
-Guard baselines moved: raw-spinner 127 to 0, raw-bottom-sheet 29 to 0, radius 149 to 123, material-colors 234 to 223, edge-insets 233 to 230 (sweep 6); font-size 703 to 689 and sized-box-gap 178 to 176 (sweep 5), local-label-class **36 to 28 to 0**, upper-case-label 42 to 0, letter-spacing 57 to 0, raw-divider 51 to 41 to 0, font-size 744 to 703, gradient 23 to 21, font-size 824 to 809 to 791 to 785, edge-insets 266 to 257 to 248 to 236, radius 177 to 175 to 168, letter-spacing 66 to 64 to 63, sized-box-gap 202 to 192 to 182.
+- **Sweep 7, one slider and one switch (session 6, 2026-09-19).** `HollowSlider` (`components/hollow_slider.dart`) is the only slider and `HollowToggle` the only switch; two new guard rules, `raw-slider` and `raw-switch` (Material or Cupertino `Switch` / `Checkbox` / `Radio`), start at **0**.
+  - About 30 sliders under eight hand-rolled themes (track 2, 3 or 4 px, thumb 5, 6 or 7, halo 10 or 12 or none, three halo alphas, a white thumb on the opacity slider, Material's default look in the call volume popup) are one geometry now: 3 px track, 6 px thumb, 12 px halo at 12 %, `accent` fill, `border` for the rest, **no tick marks** (the 50-step cache and auto-download sliders drew a comb), the drag label on the `overlay` surface. `onMedia: true` over video and the annotation bar (the old `Colors.white24` / `0x33FFFFFF`), `halo: false` for the vertical volume popover, `activeColor` only for the annotation pen colour. Audio's two private `_slimSliderTheme` helpers are deleted. The accent hue picker keeps its rainbow track with a `design-ignore`.
+  - The 13 Material `Switch`es were all on mobile (settings, roles, Twitch) while other mobile rows already used `HollowToggle`, so one screen mixed a 52 x 32 Material switch with a 36 x 20 Hollow one. All are `HollowToggle` now, each with a `semanticLabel` (the row's title; `SettingsToggleRow` passes its label too). The roles row's `AnimatedOpacity` is gone because the toggle fades itself when disabled (it was 0.16).
+  - **Touch targets.** On Android and iOS the toggle's hit area grows to 48 x 48 (the painted switch stays 36 x 20) and the slider sits in a 48 px tall box. Mobile rows with a toggle are therefore a few px taller than before; desktop is unchanged. **Trap:** the render slider ignores a minimum height when its height is unbounded and asserts, so the slider takes a fixed `SizedBox(height: 48)`, never a `ConstrainedBox(minHeight:)`; a widget test caught it before any render did.
+  - Scenarios `design_sweep7_controls.json` + `design_sweep7_lower.json` (desktop: Accessibility, Audio & Video top to bottom, Files & Storage, light Appearance; the wheel does not scroll a settings page, dragging a content text does) and `fleet/design_sweep7_mobile.json` (Appearance, Accessibility, Network, Audio & Video, Files & Storage, Security). The desktop settings pages got denser: Material 3's slider was about 48 px tall with its padding, the Hollow one is about 24.
+  - **Open for Vitalik:** the toggle is 36 x 20 on a phone too, where iOS's own switch is 51 x 31. One size keeps parity with desktop and the hit area is 48 either way; a touch variant is one constant if he wants it bigger.
+  - **Found and fixed the same session:** mobile Settings > Security never left its spinner in debug builds (the simulator): `_loadStatus` ran `ref.invalidate` synchronously from `initState`, the same assert sweep 3c fixed on desktop, and it threw before the `try`, so `_loading` never cleared. The invalidate now runs past the first await. Release builds skip the assert, so users never saw it. "Appear invisible" sat under "Layout" on mobile and inside the desktop Layout card; it is its own "Presence" section on both now.
+
+Guard baselines moved: material-colors 223 to 207, color-literal 137 to 136, raw-slider and raw-switch new at 0 (sweep 7); raw-spinner 127 to 0, raw-bottom-sheet 29 to 0, radius 149 to 123, material-colors 234 to 223, edge-insets 233 to 230 (sweep 6); font-size 703 to 689 and sized-box-gap 178 to 176 (sweep 5), local-label-class **36 to 28 to 0**, upper-case-label 42 to 0, letter-spacing 57 to 0, raw-divider 51 to 41 to 0, font-size 744 to 703, gradient 23 to 21, font-size 824 to 809 to 791 to 785, edge-insets 266 to 257 to 248 to 236, radius 177 to 175 to 168, letter-spacing 66 to 64 to 63, sized-box-gap 202 to 192 to 182.
 
 ### Four bugs the work surfaced, all fixed
 
@@ -97,12 +105,12 @@ Every sweep: probe screenshots **before**, change, probe screenshots **after**, 
 
 ### Where to pick up next
 
-**Sweeps 3 to 6 are done** (sessions 4 and 5). **Next session starts at sweep 7.**
+**Sweeps 3 to 7 are done** (sessions 4 to 6). **Next session starts at sweep 8, the dialog pass.**
 
 1. ~~Sweep 3c~~ done, see above.
 2. ~~Sweep 4, dividers~~ done, see above.
 3. ~~Sweep 5, empty states~~ done, see above.
-4. ~~Sweep 6, sheet + spinner~~ done, see above. **Sweeps 7 to 9:** START HERE with the remaining Material `Switch` / `Slider`, the dialog pass (28 files), the filled-button audit.
+4. ~~Sweep 6, sheet + spinner~~ done, see above. ~~Sweep 7, Switch / Slider~~ done. **Sweeps 8 and 9:** START HERE with the dialog pass (28 files), then the filled-button audit.
 5. **Then the screen work**, phases 2 onward below, with the Shop's per-kind card shapes (verdict 9) and the compact message mode (verdict 8) inside it.
 
 ### Session 3 (2026-09-18): decisions rendered, picked and applied

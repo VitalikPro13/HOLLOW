@@ -1,0 +1,467 @@
+{
+  "_": [
+    "Design sweep 7, the mobile half: every settings page with a Material Switch or Slider, which moved onto HollowToggle / HollowSlider.",
+    "Shot on the unswept commit first, then with the sweep applied, and stacked. One peer.",
+    "Subpages scroll through their first Scrollable; the root list is scrolled once before Files & Storage and Security.",
+    "run (on the Mac mini): pwsh scripts/fleet.ps1 -Scenario design_sweep7_mobile -Peers a"
+  ],
+  "peers": [
+    "a"
+  ],
+  "steps": [
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 1500
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "semantics:Settings",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 1500
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "text:Appearance",
+      "index": 0,
+      "soft": true
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 1500
+    },
+    {
+      "peer": "a",
+      "op": "shot",
+      "name": "m7-01-appearance",
+      "soft": true
+    },
+    {
+      "peer": "a",
+      "op": "scroll",
+      "target": "type:Scrollable",
+      "index": 0,
+      "dy": -600,
+      "soft": true
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 800
+    },
+    {
+      "peer": "a",
+      "op": "shot",
+      "name": "m7-02-appearance-2",
+      "soft": true
+    },
+    {
+      "peer": "a",
+      "op": "scroll",
+      "target": "type:Scrollable",
+      "index": 0,
+      "dy": -600,
+      "soft": true
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 800
+    },
+    {
+      "peer": "a",
+      "op": "shot",
+      "name": "m7-03-appearance-3",
+      "soft": true
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "semantics:Back",
+      "index": 0,
+      "soft": true
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 1000
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "text:Accessibility",
+      "index": 0,
+      "soft": true
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 1500
+    },
+    {
+      "peer": "a",
+      "op": "shot",
+      "name": "m7-04-accessibility",
+      "soft": true
+    },
+    {
+      "peer": "a",
+      "op": "scroll",
+      "target": "type:Scrollable",
+      "index": 0,
+      "dy": -600,
+      "soft": true
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 800
+    },
+    {
+      "peer": "a",
+      "op": "shot",
+      "name": "m7-05-accessibility-2",
+      "soft": true
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "semantics:Back",
+      "index": 0,
+      "soft": true
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 1000
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "text:Network",
+      "index": 0,
+      "soft": true
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 1500
+    },
+    {
+      "peer": "a",
+      "op": "shot",
+      "name": "m7-06-network",
+      "soft": true
+    },
+    {
+      "peer": "a",
+      "op": "scroll",
+      "target": "type:Scrollable",
+      "index": 0,
+      "dy": -600,
+      "soft": true
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 800
+    },
+    {
+      "peer": "a",
+      "op": "shot",
+      "name": "m7-07-network-2",
+      "soft": true
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "semantics:Back",
+      "index": 0,
+      "soft": true
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 1000
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "text:Audio & Video",
+      "index": 0,
+      "soft": true
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 1500
+    },
+    {
+      "peer": "a",
+      "op": "shot",
+      "name": "m7-08-audio-video",
+      "soft": true
+    },
+    {
+      "peer": "a",
+      "op": "scroll",
+      "target": "type:Scrollable",
+      "index": 0,
+      "dy": -600,
+      "soft": true
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 800
+    },
+    {
+      "peer": "a",
+      "op": "shot",
+      "name": "m7-09-audio-video-2",
+      "soft": true
+    },
+    {
+      "peer": "a",
+      "op": "scroll",
+      "target": "type:Scrollable",
+      "index": 0,
+      "dy": -600,
+      "soft": true
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 800
+    },
+    {
+      "peer": "a",
+      "op": "shot",
+      "name": "m7-10-audio-video-3",
+      "soft": true
+    },
+    {
+      "peer": "a",
+      "op": "scroll",
+      "target": "type:Scrollable",
+      "index": 0,
+      "dy": -600,
+      "soft": true
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 800
+    },
+    {
+      "peer": "a",
+      "op": "shot",
+      "name": "m7-11-audio-video-4",
+      "soft": true
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "semantics:Back",
+      "index": 0,
+      "soft": true
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 1000
+    },
+    {
+      "peer": "a",
+      "op": "scroll",
+      "target": "text:Audio & Video",
+      "index": 0,
+      "dy": -400
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 800
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "text:Files & Storage",
+      "index": 0,
+      "soft": true
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 1500
+    },
+    {
+      "peer": "a",
+      "op": "shot",
+      "name": "m7-12-files-storage",
+      "soft": true
+    },
+    {
+      "peer": "a",
+      "op": "scroll",
+      "target": "type:Scrollable",
+      "index": 0,
+      "dy": -600,
+      "soft": true
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 800
+    },
+    {
+      "peer": "a",
+      "op": "shot",
+      "name": "m7-13-files-storage-2",
+      "soft": true
+    },
+    {
+      "peer": "a",
+      "op": "scroll",
+      "target": "type:Scrollable",
+      "index": 0,
+      "dy": -600,
+      "soft": true
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 800
+    },
+    {
+      "peer": "a",
+      "op": "shot",
+      "name": "m7-14-files-storage-3",
+      "soft": true
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "semantics:Back",
+      "index": 0,
+      "soft": true
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 1000
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "text:Security",
+      "index": 0,
+      "soft": true
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 1500
+    },
+    {
+      "peer": "a",
+      "op": "shot",
+      "name": "m7-15-security",
+      "soft": true
+    },
+    {
+      "peer": "a",
+      "op": "scroll",
+      "target": "type:Scrollable",
+      "index": 0,
+      "dy": -600,
+      "soft": true
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 800
+    },
+    {
+      "peer": "a",
+      "op": "shot",
+      "name": "m7-16-security-2",
+      "soft": true
+    },
+    {
+      "peer": "a",
+      "op": "scroll",
+      "target": "type:Scrollable",
+      "index": 0,
+      "dy": -600,
+      "soft": true
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 800
+    },
+    {
+      "peer": "a",
+      "op": "shot",
+      "name": "m7-17-security-3",
+      "soft": true
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "semantics:Back",
+      "index": 0,
+      "soft": true
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 1000
+    },
+    {
+      "peer": "a",
+      "op": "theme",
+      "value": "light",
+      "frames": 30
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "text:Security",
+      "index": 0,
+      "soft": true
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 1500
+    },
+    {
+      "peer": "a",
+      "op": "shot",
+      "name": "m7-18-security-light",
+      "soft": true
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "semantics:Back",
+      "index": 0,
+      "soft": true
+    },
+    {
+      "peer": "a",
+      "op": "theme",
+      "value": "dark",
+      "frames": 30
+    }
+  ]
+}

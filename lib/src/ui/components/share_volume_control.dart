@@ -13,6 +13,7 @@ import 'package:hollow/src/ui/components/hollow_tooltip.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:hollow/src/ui/components/overlay_hosts.dart';
 import 'package:hollow/src/ui/components/hollow_sheet.dart';
+import 'package:hollow/src/ui/components/hollow_slider.dart';
 
 /// Volume button for the screen-share control bars, opening the share-audio
 /// panel as a desktop popover or a mobile sheet.
@@ -181,33 +182,20 @@ class _ShareVolumePanelState extends ConsumerState<ShareVolumePanel> {
             Expanded(
               child: SizedBox(
                 height: 28,
-                child: SliderTheme(
-                  data: SliderThemeData(
-                    activeTrackColor: hollow.accent,
-                    inactiveTrackColor: hollow.border,
-                    thumbColor: hollow.accent,
-                    overlayColor: hollow.accent.withValues(alpha: 0.08),
-                    trackHeight: 2,
-                    thumbShape:
-                        const RoundSliderThumbShape(enabledThumbRadius: 5),
-                    overlayShape:
-                        const RoundSliderOverlayShape(overlayRadius: 10),
-                  ),
-                  child: Slider(
-                    value: volume,
-                    min: 0.0,
-                    max: 200.0,
-                    onChanged: (v) {
+                child: HollowSlider(
+                  value: volume,
+                  min: 0.0,
+                  max: 200.0,
+                  onChanged: (v) {
                       setState(() => _dragVolume = v);
                       ShareAudioLevel.setVolumePercent(v);
                     },
-                    onChangeEnd: (v) {
+                  onChangeEnd: (v) {
                       setState(() => _dragVolume = null);
                       ref
                           .read(shareAudioVolumeProvider.notifier)
                           .setVolume(v);
                     },
-                  ),
                 ),
               ),
             ),

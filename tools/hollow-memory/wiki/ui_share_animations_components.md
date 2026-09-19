@@ -704,6 +704,16 @@ Static class + `_HollowToastWidget` `StatefulWidget`.
 **Visual:** `hollow.elevated` background, `radiusMd` corners, `hollow.border` border. Row: colored icon (18px) + message text.
 
 
+## HollowSlider
+
+File: `lib/src/ui/components/hollow_slider.dart`
+
+The ONLY slider (guard `raw-slider` at 0; the accent hue picker in `settings_shared.dart` is the one `design-ignore`, it paints `RainbowSliderTrackShape`). Wraps a Material `Slider` in one `SliderThemeData`: 3px `RoundedRectSliderTrackShape`, 6px thumb (no elevation), 12px halo at 12% of the active colour, `accent` fill / `border` rest, disabled parts `textTertiary`, NO tick marks, value label (`label:`) shown on drag on the `overlay` surface. Clamps `value` into `[min, max]` itself.
+
+**Parameters:** `value`, `onChanged`, `onChangeStart`, `onChangeEnd`, `min` (0), `max` (1), `divisions`, `label`, `semanticFormatterCallback`, `onMedia` (unfilled track = translucent white, for video controls and the annotation bar), `halo` (false in a tight box such as the vertical volume popover), `activeColor` (only when the value IS a picked colour: the annotation pen).
+
+**Touch:** on Android/iOS the slider sits in a fixed `SizedBox(height: 48)`. Not a `ConstrainedBox(minHeight:)`: `RenderSlider` ignores a minimum when its height is unbounded and asserts inside a `Column`.
+
 ## HollowToggle
 
 File: `lib/src/ui/components/hollow_toggle.dart`
@@ -712,9 +722,9 @@ File: `lib/src/ui/components/hollow_toggle.dart`
 
 **Parameters:** `value` (bool), `onChanged` (ValueChanged<bool>?), `semanticLabel` (a11y, Phase 2.1 — names what the switch controls, e.g. "Reduce motion").
 
-**Accessibility (Phase 2.1):** wrapped in `MergeSemantics` > `HollowFocusRing` > `Semantics(toggled: value, enabled, label: semanticLabel)` — announces on/off state to screen readers and is flippable by Voice Control. **Keyboard focus (Phase 2.6):** the `HollowFocusRing` (pill radius) makes it Tab-focusable; Enter/Space flips it. Disabled toggles (`onChanged == null`) are not focusable.
+**Accessibility (Phase 2.1):** wrapped in `MergeSemantics` > `Semantics(toggled: value, enabled, label: semanticLabel)` > opaque `GestureDetector` > the painted switch inside `HollowFocusRing` — announces on/off state to screen readers and is flippable by Voice Control. **Keyboard focus (Phase 2.6):** the `HollowFocusRing` (pill radius) makes it Tab-focusable; Enter/Space flips it. Disabled toggles (`onChanged == null`) are not focusable.
 
-**Dimensions:** Track: 36x20px pill. Thumb: 16px circle. 2px padding on each side.
+**Dimensions:** Track: 36x20px pill. Thumb: 16px circle. 2px padding on each side. On Android/iOS the hit area is padded to 48x48 around the same painted switch (so a mobile row holding one is 48 tall); desktop stays 36x20. It is the ONLY switch: Material/Cupertino `Switch`/`Checkbox`/`Radio` are guarded at 0 (`raw-switch`), and every call site passes `semanticLabel` (the row title).
 
 **Animation:**
 - `AnimationController` at 200ms, initial value matches `widget.value`.

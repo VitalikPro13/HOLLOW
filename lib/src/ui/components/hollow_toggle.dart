@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
@@ -28,6 +29,14 @@ class _HollowToggleState extends State<HollowToggle>
   late final AnimationController _controller;
   late final Animation<double> _thumbPosition;
   late Animation<Color?> _trackColorAnimation;
+
+  static const double _width = 36;
+  static const double _height = 20;
+  static const double _touchTarget = 48;
+
+  static bool get _isTouch =>
+      defaultTargetPlatform == TargetPlatform.android ||
+      defaultTargetPlatform == TargetPlatform.iOS;
 
   static const _thumbShadow = BoxShadow(
     color: Color.fromRGBO(0, 0, 0, 0.15),
@@ -84,64 +93,78 @@ class _HollowToggleState extends State<HollowToggle>
   Widget build(BuildContext context) {
     final isDisabled = widget.onChanged == null;
 
-    return MergeSemantics(
-      child: HollowFocusRing(
-        enabled: !isDisabled,
-        borderRadius: BorderRadius.circular(10),
-        onActivate: isDisabled ? null : () => widget.onChanged!(!widget.value),
-        child: Semantics(
-          // The semantic onTap mirrors the gesture, so Voice Control can flip
-          // it.
-          toggled: widget.value,
-          enabled: !isDisabled,
-          label: widget.semanticLabel,
-          onTap: isDisabled ? null : () => widget.onChanged!(!widget.value),
-          child: GestureDetector(
-            onTap: isDisabled ? null : () => widget.onChanged!(!widget.value),
-            child: FadeTransition(
-            opacity: AlwaysStoppedAnimation(isDisabled ? 0.4 : 1.0),
-            child: MouseRegion(
-              cursor: isDisabled
-                  ? SystemMouseCursors.basic
-                  : SystemMouseCursors.click,
-              child: AnimatedBuilder(
-                animation: _thumbPosition,
-                builder: (context, _) {
-                  final thumbLeft = 2.0 + (_thumbPosition.value * 16.0);
+    void toggle() => widget.onChanged!(!widget.value);
 
-                  return SizedBox(
-                    width: 36,
-                    height: 20,
-                    child: DecoratedBox(
-                      decoration: BoxDecoration(
-                        color: _trackColorAnimation.value,
-                        borderRadius: BorderRadius.circular(10),
-                      ),
-                      child: Stack(
-                        children: [
-                          Positioned(
-                            left: thumbLeft,
-                            top: 2,
-                            child: Container(
-                              width: 16,
-                              height: 16,
-                              decoration: const BoxDecoration(
-                                color: Colors.white,
-                                shape: BoxShape.circle,
-                                boxShadow: [_thumbShadow],
-                              ),
-                            ),
-                          ),
-                        ],
+    Widget visual = HollowFocusRing(
+      enabled: !isDisabled,
+      borderRadius: BorderRadius.circular(10),
+      onActivate: isDisabled ? null : toggle,
+      child: FadeTransition(
+        opacity: AlwaysStoppedAnimation(isDisabled ? 0.4 : 1.0),
+        child: AnimatedBuilder(
+          animation: _thumbPosition,
+          builder: (context, _) {
+            final thumbLeft = 2.0 + (_thumbPosition.value * 16.0);
+
+            return SizedBox(
+              width: _width,
+              height: _height,
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  color: _trackColorAnimation.value,
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Stack(
+                  children: [
+                    Positioned(
+                      left: thumbLeft,
+                      top: 2,
+                      child: Container(
+                        width: 16,
+                        height: 16,
+                        decoration: const BoxDecoration(
+                          color: Colors.white,
+                          shape: BoxShape.circle,
+                          boxShadow: [_thumbShadow],
+                        ),
                       ),
                     ),
-                  );
-                },
+                  ],
+                ),
               ),
-            ),
-          ),
+            );
+          },
         ),
       ),
+    );
+
+    // A finger needs 48 px; the switch keeps its size and the hit area grows.
+    if (_isTouch) {
+      visual = Padding(
+        padding: const EdgeInsets.symmetric(
+          horizontal: (_touchTarget - _width) / 2,
+          vertical: (_touchTarget - _height) / 2,
+        ),
+        child: visual,
+      );
+    }
+
+    return MergeSemantics(
+      // The semantic onTap mirrors the gesture, so Voice Control can flip it.
+      child: Semantics(
+        toggled: widget.value,
+        enabled: !isDisabled,
+        label: widget.semanticLabel,
+        onTap: isDisabled ? null : toggle,
+        child: MouseRegion(
+          cursor:
+              isDisabled ? SystemMouseCursors.basic : SystemMouseCursors.click,
+          child: GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: isDisabled ? null : toggle,
+            child: visual,
+          ),
+        ),
       ),
     );
   }

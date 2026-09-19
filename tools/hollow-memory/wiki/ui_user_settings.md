@@ -176,7 +176,7 @@ Separated by 1px divider + spacing. Header: `_FieldLabel(label: 'CONNECTIONS')`.
 
 The old `_buildSystemTab()` is gone. Its sections now live in per-category card builders, all returning `List<Widget>` of `SettingsCard`s:
 
-- **Appearance** (`_appearanceCards`): Theme card (dark mode + `_AccentColorPicker`), Background card (`_BackgroundPicker`), Layout card (Window layout picker, appear-invisible, + minimize-to-tray on desktop). All apply immediately.
+- **Appearance** (`_appearanceCards`): Theme card (dark mode + `_AccentColorPicker`), Background card (`_BackgroundPicker`), Layout card (Window layout picker, + minimize-to-tray and open-profiles-expanded on desktop), Presence card (appear invisible). All apply immediately.
 - **Network** (`_networkCards`): Relay card — relay list (`_buildRelayRow`), add-relay field (`_buildAddRelayField`), and "Apply & Restart" when the selection differs from the active relay.
 - **Files & Storage** (`_filesCards`): Downloads card (`_buildAutoDownloadSlider`), Cache card (`_buildCacheCapSlider`), Data Location card (`_buildDataLocation` + open-folder), Media card (`_ImageQualitySelector`). Sliders read/write providers directly.
 - **Audio & Video** (`_audioCards`): Devices card wrapping `_AudioDeviceSettings`.
@@ -603,7 +603,6 @@ Icon row with the Follow group, a divider, then the Support group:
 **Follow icons (left):**
 - YouTube (SimpleIcons.youtube, red) -> youtube.com/@Anon_Listen
 - X (SimpleIcons.x, textPrimary) -> x.com/Anon_Listen
-- TikTok (SVG asset `assets/tiktok-solo-icon.svg`) -> tiktok.com/@AnonListen
 - Twitch (SimpleIcons.twitch, purple) -> twitch.tv/AnonListen
 - Kick (SimpleIcons.kick) -> kick.com/AnonListen
 
@@ -615,9 +614,6 @@ Icon row with the Follow group, a divider, then the Support group:
 
 ### _BrandIcon
 `StatefulWidget`. Hover state: elevated background, 1.15x scale animation, icon color transitions from textSecondary to brand color. Uses `HollowTooltip` for platform name. Click opens URL externally.
-
-### _SvgBrandIcon
-Same pattern as `_BrandIcon` but renders an SVG asset. Uses `ColorFilter.mode(textSecondary, srcIn)` when not hovering, removes filter on hover to show original colors.
 
 ### _KickBotIcon
 Variant with custom green color (#C0FF00). Same hover pattern. Uses `assets/kickbot-logo.svg`.

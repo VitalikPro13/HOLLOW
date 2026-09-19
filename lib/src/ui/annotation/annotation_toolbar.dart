@@ -1,4 +1,5 @@
 ﻿import 'package:flutter/material.dart';
+import 'package:hollow/src/ui/components/hollow_slider.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import 'annotation_controller.dart';
@@ -63,13 +64,13 @@ class AnnotationToolbar extends StatelessWidget {
               const _Divider(),
               SizedBox(
                 width: 110,
-                child: Slider(
+                child: HollowSlider(
                   min: 1,
                   max: 24,
                   value: controller.width,
                   onChanged: controller.setWidth,
                   activeColor: controller.color,
-                  inactiveColor: const Color(0x33FFFFFF),
+                  onMedia: true,
                 ),
               ),
               const _Divider(),
