@@ -193,7 +193,7 @@ class _MobileIncomingCallOverlayState
                       SizedBox(
                         width: 52,
                         height: 52,
-                        child: CircularProgressIndicator(
+                        child: CircularProgressIndicator( // design-ignore: countdown dial with the seconds inside, not a spinner
                           value: _secondsLeft / 30.0,
                           strokeWidth: 3,
                           backgroundColor:

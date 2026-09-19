@@ -32,6 +32,7 @@ import 'sticker_pack_card.dart' show kStickerPackExtension;
 import 'package:hollow/src/ui/components/hollow_divider.dart';
 import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/overlay_hosts.dart';
+import 'package:hollow/src/ui/components/hollow_spinner.dart';
 
 /// Picks an image file and processes it at STICKER bounds (≤512px, ≤512 KB,
 /// alpha and animation preserved). Null on cancel, a toast on failure.
@@ -1033,14 +1034,7 @@ class _StickerPickerBodyState extends ConsumerState<StickerPickerBody> {
 
   Widget _klipyTab(HollowTheme hollow) {
     if (_loading) {
-      return Center(
-        child: SizedBox(
-          width: 20,
-          height: 20,
-          child: CircularProgressIndicator(
-              strokeWidth: 2, color: hollow.textTertiary),
-        ),
-      );
+      return const Center(child: HollowSpinner.medium());
     }
     final err = _error;
     if (err != null) {
@@ -1370,12 +1364,7 @@ class _StickerCellState extends ConsumerState<_StickerCell> {
                 Container(
                   color: Colors.black.withValues(alpha: 0.45),
                   child: const Center(
-                    child: SizedBox(
-                      width: 18,
-                      height: 18,
-                      child: CircularProgressIndicator(
-                          strokeWidth: 2, color: Colors.white),
-                    ),
+                    child: HollowSpinner(color: Colors.white), // design-ignore: over a scrim
                   ),
                 ),
             ],

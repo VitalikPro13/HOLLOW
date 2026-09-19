@@ -10,6 +10,7 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/mobile/mobile_page_route.dart';
+import 'package:hollow/src/ui/components/hollow_spinner.dart';
 
 /// Shows a full-screen mobile crop route, returning cropped PNG bytes or null.
 ///
@@ -347,13 +348,8 @@ class _MobileImageCropRouteState extends State<MobileImageCropRoute> {
                       },
                     )
                   : const Center(
-                      child: SizedBox(
-                        width: 24,
-                        height: 24,
-                        child: CircularProgressIndicator(
-                          strokeWidth: 2,
-                          color: Colors.white54,
-                        ),
+                      child: HollowSpinner.medium(
+                        color: Colors.white54, // design-ignore: over the black crop canvas
                       ),
                     ),
             ),

@@ -162,7 +162,8 @@ option and no local variant.
 - **An action row with no primary is all ghost.** A toolbar never mixes outline
   and ghost. A button is outlined only because it stands next to a filled one.
 - Buttons in a row are `sm` 8 apart. Always.
-- While a request runs: **loading, not disabled**. Success toast after the await,
+- While a request runs: **loading, not disabled**, via `HollowButton(loading: true)`
+  (never a child swapped for a spinner). Success toast after the await,
   failure toast on a rethrow. A bare fire-and-forget call is a zone crash.
 - Dialogs: ghost Cancel, filled confirm, `danger` only when destructive.
 
@@ -176,7 +177,10 @@ honest line about what is true now, one optional second line, at most one
 action; a pane takes the default, a list inside a card or section takes
 `dense: true`; never a local `*Empty*` helper, CI-guarded) · `HollowDivider` (the hairline, nothing else) · `HollowListRow`
 (leading / title / subtitle / trailing, hover on the whole row) ·
-`HollowSkeleton` (2 to 10 second loads, keeps the final geometry) · `HollowCard`.
+`HollowSkeleton` (2 to 10 second loads, keeps the final geometry) · `HollowSpinner`
+(small 14 in a row or button, medium 20 in a card, large 32 for a pane; quiet
+`textSecondary`, never the accent) · `showHollowSheet()` (the only bottom sheet:
+overlay, `radiusXl`, one `HollowSheetHandle`) · `HollowCard`.
 
 **Cards:** only for a repeatable self-contained unit (a listing, a device, a
 news item). A settings group is not a card. A section is not a card. Cards do
@@ -240,7 +244,8 @@ motion; never add another.
 `BorderRadius.circular` · `letterSpacing:` · `toUpperCase()` on a label ·
 `Divider(` outside components · a Chip/Pill/Tag/Badge class outside components ·
 numeric `EdgeInsets` and `SizedBox` gaps · gradients · `BoxShadow` blur above 12
-· raw `Material(` outside components.
+· raw `Material(` outside components · `CircularProgressIndicator(` ·
+`showModalBottomSheet`.
 
 Exemption is `// design-ignore: <reason>` on the offending line, for a genuine
 one-off (a brand asset's exact colour, a platform-mandated metric). Not for "I

@@ -11,6 +11,7 @@ import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_section_header.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
+import 'package:hollow/src/ui/components/hollow_spinner.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/hollow_toggle.dart';
@@ -287,12 +288,6 @@ class _SecurityTabState extends ConsumerState<SecurityTab> {
     }
   }
 
-  Widget _busySpinner(Color color) => SizedBox(
-        width: 14,
-        height: 14,
-        child: CircularProgressIndicator(strokeWidth: 2, color: color),
-      );
-
   Future<void> _enablePassword() async {
     final passphrase = await _askPassphrase(context, 'Set app password', confirm: true, buttonLabel: 'Set password');
     if (passphrase == null || !mounted) return;
@@ -430,12 +425,9 @@ class _SecurityTabState extends ConsumerState<SecurityTab> {
           const HollowSectionHeader('App Lock'),
 
           if (_protectionLoading)
-            Padding(
-              padding: const EdgeInsets.all(HollowSpacing.md),
-              child: SizedBox(
-                width: 20, height: 20,
-                child: CircularProgressIndicator(strokeWidth: 2, color: hollow.accent),
-              ),
+            const Padding(
+              padding: EdgeInsets.all(HollowSpacing.md),
+              child: HollowSpinner.medium(),
             )
           else
             ..._appLockChildren(hollow),
@@ -492,9 +484,8 @@ class _SecurityTabState extends ConsumerState<SecurityTab> {
       else
         HollowButton.filled(
           onPressed: _busyAction == null ? _enablePassword : null,
-          icon: _busyAction == 'enablePassword'
-              ? _busySpinner(hollow.textOnAccent)
-              : const Icon(LucideIcons.lock, size: 16),
+          loading: _busyAction == 'enablePassword',
+          icon: const Icon(LucideIcons.lock, size: 16),
           child: const Text('Set password'),
         ),
 
@@ -593,17 +584,15 @@ class _SecurityTabState extends ConsumerState<SecurityTab> {
         children: [
           HollowButton.ghost(
             onPressed: _busyAction == null ? _changePassword : null,
-            icon: _busyAction == 'changePassword'
-                ? _busySpinner(hollow.accent)
-                : const Icon(LucideIcons.keyRound, size: 16),
+            loading: _busyAction == 'changePassword',
+            icon: const Icon(LucideIcons.keyRound, size: 16),
             child: const Text('Change password'),
           ),
           const SizedBox(width: HollowSpacing.sm),
           HollowButton.ghost(
             onPressed: _busyAction == null ? _removePassword : null,
-            icon: _busyAction == 'removePassword'
-                ? _busySpinner(hollow.accent)
-                : const Icon(LucideIcons.shieldOff, size: 16),
+            loading: _busyAction == 'removePassword',
+            icon: const Icon(LucideIcons.shieldOff, size: 16),
             child: const Text('Remove app lock'),
           ),
         ],
@@ -631,17 +620,10 @@ class _SecurityTabState extends ConsumerState<SecurityTab> {
   List<Widget> _recoveryChildren(HollowTheme hollow) {
     if (_loading) {
       return [
-        Center(
+        const Center(
           child: Padding(
-            padding: const EdgeInsets.all(HollowSpacing.xl),
-            child: SizedBox(
-              width: 20,
-              height: 20,
-              child: CircularProgressIndicator(
-                strokeWidth: 2,
-                color: hollow.accent,
-              ),
-            ),
+            padding: EdgeInsets.all(HollowSpacing.xl),
+            child: HollowSpinner.medium(),
           ),
         ),
       ];

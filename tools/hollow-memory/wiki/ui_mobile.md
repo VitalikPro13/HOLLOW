@@ -84,7 +84,7 @@ Channel accordion now respects layout ordering + categories:
 
 ### Server Long-Press Context Sheet
 **File:** `lib/src/ui/mobile/tabs/mobile_chats_tab.dart` (`_ServerContextSheet`)
-Long-press on a server row opens `showModalBottomSheet` with:
+Long-press on a server row opens `showHollowSheet` with:
 - Handle bar + server name header
 - **Server Settings** → pushes `MobileServerSettingsRoute`
 - **Create Channel** → `showCreateChannelDialog()` (gated by `Permission.manageChannels`)
@@ -207,7 +207,7 @@ Both DM and channel builders wire:
 - **Sync indicator:** Below header for channel chats. Uses `serverSyncStatusProvider`. Shows spinner + "Syncing..."/"Retrying..." (warning color) / "Sync failed" with tappable "Retry" link. Hidden when idle/synced/connecting.
 
 ### Emoji Picker in Input Bar
-Smiley icon (`LucideIcons.smile`) between mic and send buttons. Opens `showModalBottomSheet` with 30-emoji grid (from `kReactionEmojis`). Inserts selected emoji at cursor position via `_controller.text.replaceRange()`.
+Smiley icon (`LucideIcons.smile`) between mic and send buttons. Opens `showHollowSheet` with 30-emoji grid (from `kReactionEmojis`). Inserts selected emoji at cursor position via `_controller.text.replaceRange()`.
 
 ---
 
@@ -251,7 +251,7 @@ Below the Channels section, a "Management" section with `_NavRow` widgets (icon 
 **Purpose:** Shared profile bottom sheet used from member panel, DM header tap, and friend long-press.
 
 ### Layout
-- `SafeArea` → `ConstrainedBox(maxHeight: 0.9 × screen)` → `Column(min)`: drag handle (32×4px) OUTSIDE the scrollable, then `Flexible(SingleChildScrollView(...))` for everything below. The cap keeps the barrier tappable and the external handle keeps drag-to-dismiss working when a long showcase makes the content scroll (same shape as mobile_message_actions.dart) — before this, a filled showcase produced a full-screen sheet that couldn't be closed.
+- `SafeArea` → `ConstrainedBox(maxHeight: 0.9 × screen)` → `Column(min)`: (the `showHollowSheet` handle sits above, OUTSIDE the scrollable), then `Flexible(SingleChildScrollView(...))` for everything below. The cap keeps the barrier tappable and the external handle keeps drag-to-dismiss working when a long showcase makes the content scroll (same shape as mobile_message_actions.dart) — before this, a filled showcase produced a full-screen sheet that couldn't be closed.
 - Banner (180px) — `AnimatedGifImage` or gradient fallback via `bannerColorFromId()`
 - Avatar (72px) overlapping banner by 36px (`Transform.translate`), bordered
 - Name: local nickname (bold) + profile name (secondary) if nickname set, else just profile name
@@ -443,14 +443,14 @@ Unified input: auto-detects peer ID (`12D3KooW` prefix) vs temporary nickname. B
 
 ## Bottom Sheet SafeArea Pattern
 
-**CRITICAL:** All `showModalBottomSheet` builders must wrap content in `SafeArea(child: ...)` for Android 3-button navigation bar compatibility. The canonical pattern is `mobile_chats_tab.dart:_showServerSheet`. For `DraggableScrollableSheet`, use `viewPadding.bottom + HollowSpacing.xl` in ListView padding instead.
+**CRITICAL:** All `showHollowSheet` builders must wrap content in `SafeArea(child: ...)` for Android 3-button navigation bar compatibility. The canonical pattern is `mobile_chats_tab.dart:_showServerSheet`. For `DraggableScrollableSheet`, use `viewPadding.bottom + HollowSpacing.xl` in ListView padding instead.
 
 ---
 
 ## Mobile Message Actions
 
 **File:** `lib/src/ui/mobile/mobile_message_actions.dart`
-**Function:** `showMobileMessageActions()` — `showModalBottomSheet` with contextual actions.
+**Function:** `showMobileMessageActions()` — `showHollowSheet(scrollControlled: true)` with contextual actions.
 
 ### Bottom Sheet Layout
 ```
@@ -796,7 +796,7 @@ Staggered entrance (400ms): message preview fades+slides in first, then each act
 - Copy Peer ID — clipboard + toast
 
 ### Pattern
-Reuses existing `_SheetAction` widget (same as server context sheet). Bottom sheet with drag handle + peer name header.
+Reuses existing `_SheetAction` widget (same as server context sheet). `showHollowSheet` (its shared handle) + peer name header.
 
 ## Notification Levels (Server Settings)
 

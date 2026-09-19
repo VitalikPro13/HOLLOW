@@ -49,6 +49,8 @@ import 'package:hollow/src/ui/settings/server_template.dart';
 import 'package:hollow/src/ui/settings/settings_shared.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:hollow/src/core/providers/relay_domain_provider.dart';
+import 'package:hollow/src/ui/components/hollow_sheet.dart';
+import 'package:hollow/src/ui/components/hollow_spinner.dart';
 import 'package:atlas_icons/atlas_icons.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
@@ -764,17 +766,10 @@ class _MobileServerSettingsRouteState
                               // Non-blocking: the tile already shows the
                               // cropped bytes.
                               if (_iconBusy)
-                                Positioned(
+                                const Positioned(
                                   right: 4,
                                   bottom: 4,
-                                  child: SizedBox(
-                                    width: 14,
-                                    height: 14,
-                                    child: CircularProgressIndicator(
-                                      strokeWidth: 2,
-                                      color: hollow.textSecondary,
-                                    ),
-                                  ),
+                                  child: HollowSpinner(),
                                 ),
                             ],
                           ),
@@ -823,17 +818,10 @@ class _MobileServerSettingsRouteState
                                     ),
                             ),
                             if (_bannerBusy)
-                              Positioned(
+                              const Positioned(
                                 right: 4,
                                 bottom: 4,
-                                child: SizedBox(
-                                  width: 14,
-                                  height: 14,
-                                  child: CircularProgressIndicator(
-                                    strokeWidth: 2,
-                                    color: hollow.textSecondary,
-                                  ),
-                                ),
+                                child: HollowSpinner(),
                               ),
                           ],
                         ),
@@ -1400,25 +1388,12 @@ class _NotificationSection extends ConsumerWidget {
       (ChannelNotificationLevel.nothing, 'Nothing', LucideIcons.bellOff),
     ];
 
-    showModalBottomSheet(
+    showHollowSheet(
       context: context,
-      backgroundColor: hollow.overlay,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(hollow.radiusLg)),
-      ),
       builder: (ctx) => SafeArea(
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Padding(
-              padding: const EdgeInsets.only(top: HollowSpacing.sm),
-              child: Container(
-                width: 32, height: 4,
-                decoration: BoxDecoration(
-                  color: hollow.border, borderRadius: BorderRadius.circular(2)),
-              ),
-            ),
-            const SizedBox(height: HollowSpacing.sm),
             Text('#$channelName',
                 style: HollowTypography.body.copyWith(
                   color: hollow.textSecondary, fontSize: 12)),
@@ -2175,11 +2150,7 @@ class _ChannelLayoutEditorState extends ConsumerState<_ChannelLayoutEditor> {
       return const Padding(
         padding: EdgeInsets.symmetric(vertical: HollowSpacing.md),
         child: Center(
-          child: SizedBox(
-            width: 16,
-            height: 16,
-            child: CircularProgressIndicator(strokeWidth: 2),
-          ),
+          child: HollowSpinner(),
         ),
       );
     }

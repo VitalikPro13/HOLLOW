@@ -12,7 +12,9 @@ import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/hollow_key_combo.dart';
 import 'package:hollow/src/ui/components/hollow_list_row.dart';
 import 'package:hollow/src/ui/components/hollow_section_header.dart';
+import 'package:hollow/src/ui/components/hollow_sheet.dart';
 import 'package:hollow/src/ui/components/hollow_skeleton.dart';
+import 'package:hollow/src/ui/components/hollow_spinner.dart';
 
 /// The design-language primitives (`reports/reference/HOLLOW_DESIGN_LANGUAGE.md`
 /// section 4). These replace 46 local chip, pill, tag and badge classes plus
@@ -584,6 +586,128 @@ void main() {
       );
 
       expect(tester.takeException(), isNull);
+    });
+  });
+  group('HollowSpinner', () {
+    testWidgets('three sizes on the icon ramp, quiet by default',
+        (tester) async {
+      final hollow = await _pump(tester, const HollowSpinner());
+
+      expect(tester.getSize(find.byType(HollowSpinner)), const Size(14, 14));
+      final ring = tester.widget<CircularProgressIndicator>(
+          find.byType(CircularProgressIndicator));
+      // A spinner reports a state; the accent is kept for what can be acted on.
+      expect(ring.color, hollow.textSecondary);
+
+      await _pump(tester, const HollowSpinner.medium());
+      expect(tester.getSize(find.byType(HollowSpinner)), const Size(20, 20));
+      await _pump(tester, const HollowSpinner.large());
+      expect(tester.getSize(find.byType(HollowSpinner)), const Size(32, 32));
+    });
+
+    testWidgets('announces itself as loading', (tester) async {
+      await _pump(tester, const HollowSpinner());
+
+      expect(find.bySemanticsLabel('Loading'), findsOneWidget);
+    });
+  });
+
+  group('HollowButton loading', () {
+    testWidgets('keeps its width, swaps the label for a spinner, ignores taps',
+        (tester) async {
+      var taps = 0;
+      await _pump(
+        tester,
+        HollowButton.filled(onPressed: () => taps++, child: const Text('Save')),
+      );
+      final idle = tester.getSize(find.byType(HollowButton));
+
+      await _pump(
+        tester,
+        HollowButton.filled(
+          onPressed: () => taps++,
+          loading: true,
+          child: const Text('Save'),
+        ),
+      );
+      await tester.pump(const Duration(milliseconds: 100));
+
+      expect(tester.getSize(find.byType(HollowButton)), idle);
+      expect(find.byType(HollowSpinner), findsOneWidget);
+      // The label's box must not stretch the ring into an oval.
+      expect(tester.getSize(find.byType(CircularProgressIndicator)),
+          const Size(14, 14));
+      await tester.tap(find.byType(HollowButton), warnIfMissed: false);
+      expect(taps, 0);
+    });
+
+    testWidgets('does not fade like a disabled button', (tester) async {
+      await _pump(
+        tester,
+        const HollowButton.filled(
+          onPressed: null,
+          loading: true,
+          child: Text('Save'),
+        ),
+      );
+      await tester.pump(const Duration(milliseconds: 100));
+
+      final fade = tester.widget<FadeTransition>(find.descendant(
+        of: find.byType(HollowButton),
+        matching: find.byType(FadeTransition),
+      ).first);
+      expect(fade.opacity.value, 1.0);
+    });
+
+    testWidgets('the spinner takes the variant foreground', (tester) async {
+      final hollow = await _pump(
+        tester,
+        HollowButton.filled(
+          onPressed: () {},
+          loading: true,
+          child: const Text('Save'),
+        ),
+      );
+      await tester.pump(const Duration(milliseconds: 100));
+
+      final spinner = tester.widget<HollowSpinner>(find.byType(HollowSpinner));
+      expect(spinner.color, hollow.textOnAccent);
+    });
+  });
+
+  group('showHollowSheet', () {
+    testWidgets('floats on the overlay surface with one handle',
+        (tester) async {
+      late HollowTheme hollow;
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: HollowThemeData.dark(),
+          home: Scaffold(
+            body: Builder(builder: (context) {
+              hollow = HollowTheme.of(context);
+              return Center(
+                child: TextButton(
+                  onPressed: () => showHollowSheet<void>(
+                    context: context,
+                    builder: (_) => const Text('Sheet body'),
+                  ),
+                  child: const Text('Open'),
+                ),
+              );
+            }),
+          ),
+        ),
+      );
+
+      await tester.tap(find.text('Open'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Sheet body'), findsOneWidget);
+      expect(find.byType(HollowSheetHandle), findsOneWidget);
+      final surface = tester.widget<ColoredBox>(find
+          .ancestor(of: find.byType(HollowSheetHandle), matching: find.byType(ColoredBox))
+          .first);
+      expect(surface.color, hollow.overlay);
     });
   });
 }

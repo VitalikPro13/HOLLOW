@@ -164,17 +164,9 @@ class _ExportShardsDialogState extends State<_ExportShardsDialog> {
         const SizedBox(width: HollowSpacing.sm),
         HollowButton.filled(
           onPressed: _exporting ? null : _export,
-          icon: _exporting
-              ? SizedBox(
-                  width: 14,
-                  height: 14,
-                  child: CircularProgressIndicator(
-                    strokeWidth: 2,
-                    valueColor: AlwaysStoppedAnimation(hollow.textPrimary),
-                  ),
-                )
-              : const Icon(LucideIcons.download, size: 14),
-          child: Text(_exporting ? 'Exporting...' : 'Export'),
+          loading: _exporting,
+          icon: const Icon(LucideIcons.download, size: 14),
+          child: const Text('Export'),
         ),
       ],
     );
@@ -272,17 +264,9 @@ class _ImportShardsDialogState extends State<_ImportShardsDialog> {
         const SizedBox(width: HollowSpacing.sm),
         HollowButton.filled(
           onPressed: _importing ? null : _pickAndImport,
-          icon: _importing
-              ? SizedBox(
-                  width: 14,
-                  height: 14,
-                  child: CircularProgressIndicator(
-                    strokeWidth: 2,
-                    valueColor: AlwaysStoppedAnimation(hollow.textPrimary),
-                  ),
-                )
-              : const Icon(LucideIcons.upload, size: 14),
-          child: Text(_importing ? 'Importing...' : 'Select File'),
+          loading: _importing,
+          icon: const Icon(LucideIcons.upload, size: 14),
+          child: const Text('Select File'),
         ),
       ],
     );

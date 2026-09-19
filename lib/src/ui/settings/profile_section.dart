@@ -17,6 +17,7 @@ import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_section_header.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
+import 'package:hollow/src/ui/components/hollow_spinner.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/dialogs/twitch_device_code_dialog.dart';
@@ -227,25 +228,12 @@ class ProfileSection extends ConsumerWidget {
     return Stack(
       children: [
         banner,
-        Positioned(
+        const Positioned(
           top: HollowSpacing.xs,
           right: HollowSpacing.xs,
-          child: _processingSpinner(hollow),
+          child: HollowSpinner(),
         ),
       ],
-    );
-  }
-
-  /// Non-blocking spinner shown while Rust WebP-encodes the picked image; the
-  /// preview already shows the cropped bytes.
-  Widget _processingSpinner(HollowTheme hollow) {
-    return SizedBox(
-      width: 14,
-      height: 14,
-      child: CircularProgressIndicator(
-        strokeWidth: 2,
-        color: hollow.textSecondary,
-      ),
     );
   }
 
@@ -278,10 +266,10 @@ class ProfileSection extends ConsumerWidget {
               ),
             ),
             if (avatarProcessing)
-              Positioned(
+              const Positioned(
                 right: 0,
                 bottom: 0,
-                child: _processingSpinner(hollow),
+                child: HollowSpinner(),
               ),
           ],
         ),
@@ -703,11 +691,7 @@ class _TwitchConnectionRowState extends ConsumerState<TwitchConnectionRow> {
         if (_busy)
           const Padding(
             padding: EdgeInsets.symmetric(horizontal: HollowSpacing.md),
-            child: SizedBox(
-              width: 14,
-              height: 14,
-              child: CircularProgressIndicator(strokeWidth: 2),
-            ),
+            child: HollowSpinner(),
           )
         else if (_connected) ...[
           // Connected but not verified: the mark is one press away, so offer it

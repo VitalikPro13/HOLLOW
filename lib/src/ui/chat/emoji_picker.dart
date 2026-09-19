@@ -30,6 +30,7 @@ import '../components/hollow_tooltip.dart';
 import 'emoji_data.dart';
 import 'emote_image.dart';
 import 'package:hollow/src/ui/components/overlay_hosts.dart';
+import 'package:hollow/src/ui/components/hollow_spinner.dart';
 
 /// Quick-reaction defaults (mobile long-press row, hover bar shortcuts).
 const kQuickReactionEmojis = [
@@ -649,14 +650,7 @@ class _EmojiPickerBodyState extends ConsumerState<EmojiPickerBody> {
 
   Widget _ffzTab(HollowTheme hollow) {
     if (_ffzLoading) {
-      return Center(
-        child: SizedBox(
-          width: 20,
-          height: 20,
-          child: CircularProgressIndicator(
-              strokeWidth: 2, color: hollow.textTertiary),
-        ),
-      );
+      return const Center(child: HollowSpinner.medium());
     }
     if (_ffzError != null) return HollowEmptyState(title: _ffzError!);
     final rows = _ffzResults ?? const [];
@@ -1159,14 +1153,8 @@ class _EmoteNameDialogState extends State<_EmoteNameDialog> {
         ),
         HollowButton.filled(
           onPressed: _saving ? null : _submit,
-          child: _saving
-              ? SizedBox(
-                  width: 14,
-                  height: 14,
-                  child: CircularProgressIndicator(
-                      strokeWidth: 2, color: hollow.textSecondary),
-                )
-              : const Text('Save'),
+          loading: _saving,
+          child: const Text('Save'),
         ),
       ],
     );

@@ -281,7 +281,7 @@ Circular 36x36 container with the accent color. Play icon is nudged 1.5px right 
 `_buildPreparing(hollow)`:
 - Thumbnail image as background (or black).
 - 50% black overlay.
-- Centered 48px `CircularProgressIndicator` (accent color, 3px stroke, white24 background).
+- Centered `HollowSpinner.large(value:)` in white (over video).
 - Phase text below spinner (vault phase from transfer state, or "Preparing video..." for vault, "Loading..." for P2P).
 
 ### Playing Mode
@@ -463,7 +463,7 @@ Toasts: info on request, error on failure.
 - Max dimensions: 300x250.
 - Aspect-ratio-preserving size calculation from `attachment.width`/`attachment.height`.
 - **Complete with file on disk (2026-09-14):** tap opens the media viewer. `open()` calls `openMediaViewer(context, _mediaItem().withDiskPath(diskPath))` (`lib/src/ui/media/media_viewer_route.dart`), where `_mediaItem()` builds a `MediaItem` from `attachment` plus the widget's `messageId`/`senderId`/`timestampMs`/`isMine`. `.withDiskPath(diskPath)` matters because the stored row may not carry a disk path yet, so the bubble opens on the path it just resolved. Wrapped in `HollowFocusRing` + `GestureDetector` + `MouseRegion(cursor: click)` around a `ConstrainedBox` > `ClipRRect(radiusMd)` > `AttachmentImage`.
-- **Downloading:** Placeholder with `CircularProgressIndicator` (40px, determinate if progress > 0), status text below.
+- **Downloading:** Placeholder with `HollowSpinner.large(value:)` (determinate if progress > 0), status text below.
 - **Partial progress (not downloading):** Placeholder with 80px `LinearProgressIndicator` and percentage text.
 - **Idle / not downloaded (issue #41):** PRESSABLE placeholder — sized box with a circular download button (44px, `download` icon), plus a media-type icon (`image`/`video`, 12px) next to formattedSize. Tap = `_startManualDownload`. Falls back to the static icon-only box when no download hook (error-builder path).
 

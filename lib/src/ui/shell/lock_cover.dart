@@ -5,6 +5,7 @@ import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:hollow/src/ui/components/hollow_spinner.dart';
 
 /// The desktop lock cover, as its own opaque route so it sits above every
 /// dialog the app may have left open and nothing below it paints. The 32px
@@ -55,14 +56,7 @@ class LockCoverScreen extends ConsumerWidget {
               ),
               if (unlocking) ...[
                 const SizedBox(height: HollowSpacing.lg),
-                SizedBox(
-                  width: 22,
-                  height: 22,
-                  child: CircularProgressIndicator(
-                    strokeWidth: 2.5,
-                    color: hollow.accent,
-                  ),
-                ),
+                const HollowSpinner.medium(),
               ],
             ],
           ),

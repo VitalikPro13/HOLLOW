@@ -21,6 +21,7 @@ import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/chat/file_card_status.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
+import 'package:hollow/src/ui/components/hollow_spinner.dart';
 
 /// Renders an audio attachment inline in a message bubble.
 ///
@@ -641,15 +642,7 @@ class _StatusCircle extends StatelessWidget {
       decoration: BoxDecoration(color: color, shape: BoxShape.circle),
       child: Center(
         child: busy
-            ? SizedBox(
-                width: 16,
-                height: 16,
-                child: CircularProgressIndicator(
-                  strokeWidth: 2,
-                  valueColor: const AlwaysStoppedAnimation(Colors.white),
-                  backgroundColor: Colors.white.withValues(alpha: 0.24),
-                ),
-              )
+            ? HollowSpinner(color: HollowTheme.of(context).textOnAccent)
             : Icon(LucideIcons.cloudOff, color: iconColor, size: 16),
       ),
     );

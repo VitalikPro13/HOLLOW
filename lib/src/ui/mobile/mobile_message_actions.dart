@@ -8,6 +8,7 @@ import 'package:hollow/src/ui/chat/file_card_status.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/slashed_icon.dart';
+import 'package:hollow/src/ui/components/hollow_sheet.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 const _kQuickReactionCount = 6;
@@ -33,16 +34,11 @@ void showMobileMessageActions({
   FileBarAction fileAction = FileBarAction.download,
   VoidCallback? onStopWaiting,
 }) {
-  final hollow = HollowTheme.of(context);
-  showModalBottomSheet(
+  showHollowSheet(
     context: context,
-    backgroundColor: hollow.overlay,
     // The emoji grid and long action lists exceed the default sheet cap on
     // short phones.
-    isScrollControlled: true,
-    shape: RoundedRectangleBorder(
-      borderRadius: BorderRadius.vertical(top: Radius.circular(hollow.radiusXl)),
-    ),
+    scrollControlled: true,
     builder: (_) => _MessageActionsSheet(
       messageText: messageText,
       senderName: senderName,
@@ -122,19 +118,6 @@ class _MessageActionsSheetState extends State<_MessageActionsSheet> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Padding(
-              padding: const EdgeInsets.only(top: HollowSpacing.sm),
-              child: Container(
-                width: 32,
-                height: 4,
-                decoration: BoxDecoration(
-                  color: hollow.border,
-                  borderRadius: BorderRadius.circular(2),
-                ),
-              ),
-            ),
-            const SizedBox(height: HollowSpacing.sm),
-
             // Scrolls when the content is taller than the sheet cap.
             Flexible(
               child: SingleChildScrollView(

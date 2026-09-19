@@ -11,6 +11,7 @@ import 'package:hollow/src/core/providers/server_avatar_anim_provider.dart';
 import 'package:hollow/src/core/providers/server_avatar_provider.dart';
 import 'package:hollow/src/core/providers/server_banner_provider.dart';
 import 'package:hollow/src/ui/components/animated_gif_image.dart';
+import 'package:hollow/src/ui/components/hollow_spinner.dart';
 import 'package:hollow/src/ui/components/server_icon_image.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
@@ -632,17 +633,10 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
                 return Stack(
                   children: [
                     icon,
-                    Positioned(
+                    const Positioned(
                       right: 2,
                       bottom: 2,
-                      child: SizedBox(
-                        width: 14,
-                        height: 14,
-                        child: CircularProgressIndicator(
-                          strokeWidth: 2,
-                          color: hollow.textSecondary,
-                        ),
-                      ),
+                      child: HollowSpinner(),
                     ),
                   ],
                 );
@@ -712,17 +706,10 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
                 return Stack(
                   children: [
                     preview,
-                    Positioned(
+                    const Positioned(
                       right: 2,
                       bottom: 2,
-                      child: SizedBox(
-                        width: 14,
-                        height: 14,
-                        child: CircularProgressIndicator(
-                          strokeWidth: 2,
-                          color: hollow.textSecondary,
-                        ),
-                      ),
+                      child: HollowSpinner(),
                     ),
                   ],
                 );

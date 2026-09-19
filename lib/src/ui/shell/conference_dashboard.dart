@@ -29,6 +29,7 @@ import 'package:hollow/src/ui/dialogs/screen_share_dialog.dart';
 import 'package:hollow/src/core/providers/relay_domain_provider.dart';
 import 'package:hollow/src/ui/dialogs/relay_switch_dialog.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:hollow/src/ui/components/hollow_spinner.dart';
 
 /// Human-readable joiner-side denial message.
 String conferenceDenyMessage(String? reason) {
@@ -772,14 +773,7 @@ class _LobbyView extends ConsumerWidget {
                   .copyWith(color: hollow.textSecondary),
             ),
             const SizedBox(height: HollowSpacing.lg),
-            SizedBox(
-              width: 20,
-              height: 20,
-              child: CircularProgressIndicator(
-                strokeWidth: 2,
-                color: hollow.accent,
-              ),
-            ),
+            const HollowSpinner.medium(),
             const SizedBox(height: HollowSpacing.xl),
             HollowButton.ghost(
               onPressed: () =>

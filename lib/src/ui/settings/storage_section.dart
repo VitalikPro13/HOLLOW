@@ -16,6 +16,7 @@ import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_section_header.dart';
+import 'package:hollow/src/ui/components/hollow_spinner.dart';
 import 'package:hollow/src/ui/components/overlay_anchor.dart';
 import 'package:hollow/src/ui/components/hollow_tooltip.dart';
 import 'package:hollow/src/ui/components/hollow_menu.dart';
@@ -36,7 +37,7 @@ class StorageBreakdownView extends ConsumerWidget {
     return async.when(
       loading: () => const Padding(
         padding: EdgeInsets.all(24),
-        child: Center(child: CircularProgressIndicator(strokeWidth: 2)),
+        child: Center(child: HollowSpinner.large()),
       ),
       error: (e, _) => Text('Could not read storage: $e',
           style: HollowTypography.caption.copyWith(color: hollow.error)),

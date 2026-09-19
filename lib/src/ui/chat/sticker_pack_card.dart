@@ -244,20 +244,13 @@ class _StickerPackCardState extends ConsumerState<StickerPackCard> {
                 widget.status.control == FileCardControl.busy) ...[
               // Slow FFI behind a button is a busy state, never a second tap.
               const SizedBox(height: HollowSpacing.sm),
-              SizedBox(
+              const SizedBox(
                 width: double.infinity,
                 child: HollowButton.ghost(
-                  icon: SizedBox(
-                    width: 14,
-                    height: 14,
-                    child: CircularProgressIndicator(
-                      strokeWidth: 2,
-                      valueColor: AlwaysStoppedAnimation(hollow.textSecondary),
-                    ),
-                  ),
                   onPressed: null,
+                  loading: true,
                   semanticLabel: 'Requesting this sticker pack',
-                  child: const Text('Requesting...'),
+                  child: Text('Requesting...'),
                 ),
               ),
             ],

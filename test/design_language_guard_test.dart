@@ -111,7 +111,7 @@ final _rules = <_Rule>[
     fix: 'use hollow.<token>; Colors.transparent is the only allowed one',
     pattern: RegExp(r'\bColors\.(?!transparent\b)\w+'),
     excludeDirs: [_theme],
-    baseline: 234,
+    baseline: 223,
   ),
   _Rule(
     id: 'color-literal',
@@ -128,7 +128,7 @@ final _rules = <_Rule>[
     fix: 'use hollow.radiusXs / radiusMd / radiusLg / radiusXl',
     pattern: RegExp(r'BorderRadius\.circular\(\s*[0-9]'),
     excludeDirs: [_theme],
-    baseline: 149,
+    baseline: 123,
   ),
   _Rule(
     id: 'letter-spacing',
@@ -184,6 +184,25 @@ final _rules = <_Rule>[
     baseline: 0,
   ),
   _Rule(
+    id: 'raw-spinner',
+    what: 'a raw CircularProgressIndicator',
+    fix: 'HollowSpinner (small in a row or button, medium in a card, large '
+        'for a pane); a busy button is HollowButton(loading: true)',
+    pattern: RegExp(r'\bCircularProgressIndicator\('),
+    excludeFiles: ['hollow_spinner.dart'],
+    baseline: 0,
+  ),
+  _Rule(
+    id: 'raw-bottom-sheet',
+    what: 'a hand-styled showModalBottomSheet',
+    fix: 'showHollowSheet (surface, radius and handle in one place); a '
+        'DraggableScrollableSheet passes handle: false and places '
+        'HollowSheetHandle itself',
+    pattern: RegExp(r'\bshowModalBottomSheet\b'),
+    excludeFiles: ['hollow_sheet.dart'],
+    baseline: 0,
+  ),
+  _Rule(
     id: 'local-label-builder',
     what: 'a _xChip / _xPill / _xTag / _xBadge builder function outside '
         'components/',
@@ -210,7 +229,7 @@ final _rules = <_Rule>[
     pattern:
         RegExp(r'EdgeInsets\.(all|symmetric|only|fromLTRB)\([^)]*\b\d'),
     excludeDirs: [_theme],
-    baseline: 233,
+    baseline: 230,
   ),
   _Rule(
     id: 'sized-box-gap',

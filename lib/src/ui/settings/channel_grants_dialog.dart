@@ -14,6 +14,7 @@ import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
+import 'package:hollow/src/ui/components/hollow_spinner.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/label_visuals.dart';
 import 'package:hollow/src/ui/components/member_search_picker.dart';
@@ -219,7 +220,7 @@ class _ChannelGrantsDialogState extends ConsumerState<_ChannelGrantsDialog> {
               },
               loading: () => const Padding(
                 padding: EdgeInsets.symmetric(vertical: HollowSpacing.lg),
-                child: Center(child: CircularProgressIndicator()),
+                child: Center(child: HollowSpinner.large()),
               ),
               error: (e, _) => Text('Error: $e'),
             ),

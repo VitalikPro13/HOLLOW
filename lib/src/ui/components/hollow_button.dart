@@ -4,6 +4,7 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/ui/components/hollow_focus_ring.dart';
+import 'package:hollow/src/ui/components/hollow_spinner.dart';
 
 enum HollowButtonVariant { filled, ghost, outline, danger }
 
@@ -27,6 +28,11 @@ class HollowButton extends StatefulWidget {
   /// an icon-only button, or when the visible text is the wrong announcement.
   final String? semanticLabel;
 
+  /// A request this button started is running: the label gives way to a
+  /// spinner in the same colours at the same width, and presses are ignored.
+  /// Loading, never disabled, so the button does not fade while it works.
+  final bool loading;
+
   const HollowButton({
     super.key,
     required this.onPressed,
@@ -36,6 +42,7 @@ class HollowButton extends StatefulWidget {
     this.expand = false,
     this.compact = false,
     this.semanticLabel,
+    this.loading = false,
     this.danger = false,
   });
 
@@ -47,6 +54,7 @@ class HollowButton extends StatefulWidget {
     this.expand = false,
     this.compact = false,
     this.semanticLabel,
+    this.loading = false,
   })  : variant = HollowButtonVariant.filled,
         danger = false;
 
@@ -58,6 +66,7 @@ class HollowButton extends StatefulWidget {
     this.expand = false,
     this.compact = false,
     this.semanticLabel,
+    this.loading = false,
   })  : variant = HollowButtonVariant.ghost,
         danger = false;
 
@@ -69,6 +78,7 @@ class HollowButton extends StatefulWidget {
     this.expand = false,
     this.compact = false,
     this.semanticLabel,
+    this.loading = false,
     this.danger = false,
   }) : variant = HollowButtonVariant.outline;
 
@@ -80,6 +90,7 @@ class HollowButton extends StatefulWidget {
     this.expand = false,
     this.compact = false,
     this.semanticLabel,
+    this.loading = false,
   })  : variant = HollowButtonVariant.danger,
         danger = false;
 
@@ -135,8 +146,8 @@ class _HollowButtonState extends State<HollowButton>
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
-    final isDisabled = widget.onPressed == null;
-    final isInteractive = !isDisabled;
+    final isDisabled = widget.onPressed == null && !widget.loading;
+    final isInteractive = widget.onPressed != null && !widget.loading;
 
     Color bg;
     Color fg;
@@ -215,6 +226,36 @@ class _HollowButtonState extends State<HollowButton>
 
     if (widget.expand) {
       content = SizedBox(width: double.infinity, child: content);
+    }
+
+    if (widget.loading) {
+      content = Stack(
+        alignment: Alignment.center,
+        children: [
+          Visibility(
+            visible: false,
+            maintainSize: true,
+            maintainAnimation: true,
+            maintainState: true,
+            // A screen reader still hears what the button is, then "Loading".
+            maintainSemantics: true,
+            child: content,
+          ),
+          // Positioned so the spinner, a pixel taller than a label line,
+          // paints over the label's box instead of growing the button.
+          Positioned.fill(
+            child: OverflowBox(
+              // Zero minimums, or the label's tight width stretches the
+              // spinner into an oval.
+              minWidth: 0,
+              minHeight: 0,
+              maxWidth: double.infinity,
+              maxHeight: double.infinity,
+              child: HollowSpinner(color: fg),
+            ),
+          ),
+        ],
+      );
     }
 
     return MergeSemantics(

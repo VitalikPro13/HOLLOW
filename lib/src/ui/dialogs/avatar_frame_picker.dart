@@ -213,17 +213,9 @@ class _AvatarFramePickerDialogState
           const SizedBox(height: HollowSpacing.lg),
           HollowButton.outline(
             onPressed: _busy ? null : _upload,
-            icon: _busy
-                ? SizedBox(
-                    width: 14,
-                    height: 14,
-                    child: CircularProgressIndicator(
-                      strokeWidth: 2,
-                      color: hollow.textSecondary,
-                    ),
-                  )
-                : const Icon(LucideIcons.upload, size: 14),
-            child: Text(_busy ? 'Processing...' : 'Upload an image or GIF'),
+            loading: _busy,
+            icon: const Icon(LucideIcons.upload, size: 14),
+            child: const Text('Upload an image or GIF'),
           ),
         ],
       ),

@@ -48,6 +48,8 @@ import 'package:hollow/src/ui/mobile/mobile_server_settings_route.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:hollow/src/core/providers/relay_domain_provider.dart';
 import 'package:hollow/src/ui/dialogs/relay_switch_dialog.dart';
+import 'package:hollow/src/ui/components/hollow_sheet.dart';
+import 'package:hollow/src/ui/components/hollow_spinner.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:flutter/services.dart';
 
@@ -86,13 +88,8 @@ class _MobileChatsTabState extends ConsumerState<MobileChatsTab> {
   }
 
   void _showDmSheet(BuildContext context, String peerId, String name) {
-    final hollow = HollowTheme.of(context);
-    showModalBottomSheet<void>(
+    showHollowSheet<void>(
       context: context,
-      backgroundColor: hollow.overlay,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(hollow.radiusLg)),
-      ),
       builder: (_) => SafeArea(
         child: _DmContextSheet(
           peerId: peerId,
@@ -104,13 +101,8 @@ class _MobileChatsTabState extends ConsumerState<MobileChatsTab> {
   }
 
   void _showServerSheet(BuildContext context, String serverId, String serverName) {
-    final hollow = HollowTheme.of(context);
-    showModalBottomSheet<void>(
+    showHollowSheet<void>(
       context: context,
-      backgroundColor: hollow.overlay,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(hollow.radiusLg)),
-      ),
       builder: (_) => SafeArea(
         child: _ServerContextSheet(
           serverId: serverId,
@@ -791,17 +783,6 @@ class _DmContextSheet extends ConsumerWidget {
       mainAxisSize: MainAxisSize.min,
       children: [
         Padding(
-          padding: const EdgeInsets.only(top: HollowSpacing.sm),
-          child: Container(
-            width: 32, height: 4,
-            decoration: BoxDecoration(
-              color: hollow.border,
-              borderRadius: BorderRadius.circular(2),
-            ),
-          ),
-        ),
-        const SizedBox(height: HollowSpacing.sm),
-        Padding(
           padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.lg),
           child: Text(name,
               style: HollowTypography.body.copyWith(
@@ -1116,7 +1097,6 @@ class _ChannelListState extends ConsumerState<_ChannelList> {
 
   @override
   Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
     // Only THIS server's participant map, so mute, camera and share changes
     // elsewhere do not rebuild the whole channel tree.
     final voiceParticipantsByChannel = ref.watch(
@@ -1146,20 +1126,13 @@ class _ChannelListState extends ConsumerState<_ChannelList> {
     });
 
     if (_loading) {
-      return Padding(
-        padding: const EdgeInsets.only(
+      return const Padding(
+        padding: EdgeInsets.only(
           left: 44 + HollowSpacing.lg + HollowSpacing.md,
           bottom: HollowSpacing.sm,
           top: HollowSpacing.xs,
         ),
-        child: SizedBox(
-          width: 16,
-          height: 16,
-          child: CircularProgressIndicator(
-            strokeWidth: 2,
-            color: hollow.textSecondary,
-          ),
-        ),
+        child: HollowSpinner(),
       );
     }
 
@@ -1788,19 +1761,10 @@ class _ServerContextSheet extends ConsumerWidget {
     final canManageChannels = (perms & Permission.manageChannels) != 0;
 
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: HollowSpacing.md),
+      padding: const EdgeInsets.only(bottom: HollowSpacing.md),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Container(
-            width: 36,
-            height: 4,
-            decoration: BoxDecoration(
-              color: hollow.textSecondary.withValues(alpha: 0.3),
-              borderRadius: BorderRadius.circular(2),
-            ),
-          ),
-          const SizedBox(height: HollowSpacing.md),
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.lg),
             child: Text(

@@ -11,6 +11,7 @@ import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/hollow_focus_ring.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
+import 'package:hollow/src/ui/components/hollow_spinner.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/hollow_tooltip.dart';
@@ -245,7 +246,7 @@ class _LabelsTabState extends ConsumerState<LabelsTab> {
         (ref.watch(myPermissionsProvider(widget.serverId)).valueOrNull ?? 0) &
             Permission.manageRoles != 0;
 
-    if (labels == null) return const Center(child: CircularProgressIndicator());
+    if (labels == null) return const Center(child: HollowSpinner.large());
 
     if (labels.isEmpty && !canManage) {
       return const HollowEmptyState(title: 'No labels available yet');
@@ -543,7 +544,7 @@ class _AssignDialogState extends ConsumerState<_AssignDialog> {
               ),
               loading: () => const Padding(
                 padding: EdgeInsets.symmetric(vertical: HollowSpacing.lg),
-                child: Center(child: CircularProgressIndicator()),
+                child: Center(child: HollowSpinner.large()),
               ),
               error: (e, _) => Text('Error: $e'),
             ),

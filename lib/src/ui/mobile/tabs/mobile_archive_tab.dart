@@ -34,6 +34,8 @@ import 'package:hollow/src/ui/dialogs/recovery_pool_dialog.dart';
 import 'package:hollow/src/ui/dialogs/shard_bundle_dialog.dart';
 import 'package:hollow/src/ui/shell/mobile_nav.dart';
 import 'package:hollow/src/ui/mobile/mobile_imported_archive_viewer_route.dart';
+import 'package:hollow/src/ui/components/hollow_sheet.dart';
+import 'package:hollow/src/ui/components/hollow_spinner.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 class MobileArchiveTab extends ConsumerWidget {
@@ -230,7 +232,7 @@ class _MobileDmList extends ConsumerWidget {
     final hiddenSet = ref.watch(hiddenArchiveDmsProvider);
 
     return dmListAsync.when(
-      loading: () => const Center(child: CircularProgressIndicator()),
+      loading: () => const Center(child: HollowSpinner.large()),
       error: (e, _) => Center(
         child: Text('Failed to load: $e',
             style: TextStyle(color: hollow.error)),
@@ -340,29 +342,12 @@ class _MobileDmList extends ConsumerWidget {
     final name = entry.peerId == ref.read(savedMessagesPeerIdProvider)
         ? 'Saved messages'
         : displayNameFor(profiles, entry.peerId);
-    showModalBottomSheet(
+    showHollowSheet(
       context: context,
-      backgroundColor: hollow.overlay,
-      shape: RoundedRectangleBorder(
-        borderRadius:
-            BorderRadius.vertical(top: Radius.circular(hollow.radiusXl)),
-      ),
       builder: (_) => SafeArea(
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Padding(
-              padding: const EdgeInsets.only(top: HollowSpacing.sm),
-              child: Container(
-                width: 32,
-                height: 4,
-                decoration: BoxDecoration(
-                  color: hollow.border,
-                  borderRadius: BorderRadius.circular(2),
-                ),
-              ),
-            ),
-            const SizedBox(height: HollowSpacing.md),
             HollowPressable(
               onTap: () {
                 Navigator.pop(context);
@@ -581,7 +566,7 @@ class _MobileChannelList extends ConsumerWidget {
     final search = ref.watch(archiveSearchProvider).toLowerCase();
 
     return channelListAsync.when(
-      loading: () => const Center(child: CircularProgressIndicator()),
+      loading: () => const Center(child: HollowSpinner.large()),
       error: (e, _) => Center(
         child: Text('Failed to load: $e',
             style: TextStyle(color: hollow.error)),
@@ -700,29 +685,12 @@ class _MobileChannelList extends ConsumerWidget {
   void _showChannelExportSheet(
       BuildContext context, ArchiveChannelEntry ch) {
     final hollow = HollowTheme.of(context);
-    showModalBottomSheet(
+    showHollowSheet(
       context: context,
-      backgroundColor: hollow.overlay,
-      shape: RoundedRectangleBorder(
-        borderRadius:
-            BorderRadius.vertical(top: Radius.circular(hollow.radiusXl)),
-      ),
       builder: (_) => SafeArea(
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Padding(
-              padding: const EdgeInsets.only(top: HollowSpacing.sm),
-              child: Container(
-                width: 32,
-                height: 4,
-                decoration: BoxDecoration(
-                  color: hollow.border,
-                  borderRadius: BorderRadius.circular(2),
-                ),
-              ),
-            ),
-            const SizedBox(height: HollowSpacing.md),
             HollowPressable(
               onTap: () {
                 Navigator.pop(context);
@@ -764,29 +732,12 @@ class _MobileChannelList extends ConsumerWidget {
   void _showServerExportSheet(BuildContext context,
       ArchiveChannelGroup group, int totalMsgCount) {
     final hollow = HollowTheme.of(context);
-    showModalBottomSheet(
+    showHollowSheet(
       context: context,
-      backgroundColor: hollow.overlay,
-      shape: RoundedRectangleBorder(
-        borderRadius:
-            BorderRadius.vertical(top: Radius.circular(hollow.radiusXl)),
-      ),
       builder: (_) => SafeArea(
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Padding(
-              padding: const EdgeInsets.only(top: HollowSpacing.sm),
-              child: Container(
-                width: 32,
-                height: 4,
-                decoration: BoxDecoration(
-                  color: hollow.border,
-                  borderRadius: BorderRadius.circular(2),
-                ),
-              ),
-            ),
-            const SizedBox(height: HollowSpacing.md),
             HollowPressable(
               onTap: () {
                 Navigator.pop(context);
@@ -1081,10 +1032,7 @@ class _VaultServerSectionState extends ConsumerState<_VaultServerSection> {
                     ],
                   );
                 },
-                loading: () => const SizedBox(
-                  width: 12, height: 12,
-                  child: CircularProgressIndicator(strokeWidth: 1.5),
-                ),
+                loading: () => const HollowSpinner(),
                 error: (_, _) => Text('Error',
                     style: HollowTypography.caption
                         .copyWith(color: hollow.error, fontSize: 11)),
@@ -1120,10 +1068,7 @@ class _VaultServerSectionState extends ConsumerState<_VaultServerSection> {
             },
             loading: () => const Padding(
               padding: EdgeInsets.all(HollowSpacing.md),
-              child: Center(child: SizedBox(
-                width: 20, height: 20,
-                child: CircularProgressIndicator(strokeWidth: 2),
-              )),
+              child: Center(child: HollowSpinner.medium()),
             ),
             error: (e, _) => Padding(
               padding: const EdgeInsets.all(HollowSpacing.sm),
@@ -1140,29 +1085,12 @@ class _VaultServerSectionState extends ConsumerState<_VaultServerSection> {
     final hollow = HollowTheme.of(context);
     final totalShards = files.fold<int>(0, (sum, f) => sum + f.localShardCount);
 
-    showModalBottomSheet(
+    showHollowSheet(
       context: context,
-      backgroundColor: hollow.overlay,
-      shape: RoundedRectangleBorder(
-        borderRadius:
-            BorderRadius.vertical(top: Radius.circular(hollow.radiusXl)),
-      ),
       builder: (_) => SafeArea(
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Padding(
-              padding: const EdgeInsets.only(top: HollowSpacing.sm),
-              child: Container(
-                width: 32,
-                height: 4,
-                decoration: BoxDecoration(
-                  color: hollow.border,
-                  borderRadius: BorderRadius.circular(2),
-                ),
-              ),
-            ),
-            const SizedBox(height: HollowSpacing.md),
             HollowPressable(
               onTap: () {
                 Navigator.pop(context);
@@ -1444,12 +1372,7 @@ class _MobileImportedArchivesViewState
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
                   if (_loading)
-                    SizedBox(
-                      width: 16,
-                      height: 16,
-                      child: CircularProgressIndicator(
-                          strokeWidth: 2, color: hollow.accent),
-                    )
+                    const HollowSpinner()
                   else
                     Icon(LucideIcons.folderOpen,
                         size: 16, color: hollow.accent),
@@ -1471,7 +1394,7 @@ class _MobileImportedArchivesViewState
         Expanded(
           child: pathsAsync.when(
             loading: () =>
-                const Center(child: CircularProgressIndicator()),
+                const Center(child: HollowSpinner.large()),
             error: (e, _) => Center(
               child: Text('Error: $e',
                   style: TextStyle(color: hollow.error)),
@@ -1521,29 +1444,12 @@ class _MobileImportedArchivesViewState
   void _showRemoveSheet(BuildContext context, String path) {
     final hollow = HollowTheme.of(context);
     final fileName = path.split(Platform.pathSeparator).last;
-    showModalBottomSheet(
+    showHollowSheet(
       context: context,
-      backgroundColor: hollow.overlay,
-      shape: RoundedRectangleBorder(
-        borderRadius:
-            BorderRadius.vertical(top: Radius.circular(hollow.radiusXl)),
-      ),
       builder: (_) => SafeArea(
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Padding(
-              padding: const EdgeInsets.only(top: HollowSpacing.sm),
-              child: Container(
-                width: 32,
-                height: 4,
-                decoration: BoxDecoration(
-                  color: hollow.border,
-                  borderRadius: BorderRadius.circular(2),
-                ),
-              ),
-            ),
-            const SizedBox(height: HollowSpacing.md),
             Padding(
               padding: const EdgeInsets.symmetric(
                   horizontal: HollowSpacing.lg),
@@ -1620,10 +1526,7 @@ class _MobileArchiveEntryCard extends ConsumerWidget {
           child: verifyAsync.when(
             loading: () => Row(
               children: [
-                const SizedBox(
-                    width: 16,
-                    height: 16,
-                    child: CircularProgressIndicator(strokeWidth: 2)),
+                const HollowSpinner(),
                 const SizedBox(width: HollowSpacing.sm),
                 Expanded(
                   child: Text(fileName,

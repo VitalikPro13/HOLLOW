@@ -90,16 +90,10 @@ class _ShareDashboardState extends ConsumerState<ShareDashboard> {
           if (_subTab == _ShareSubTab.myShares) ...[
             HollowButton.ghost(
               compact: true,
-              icon: _sharing
-                  ? SizedBox(
-                      width: 14,
-                      height: 14,
-                      child: CircularProgressIndicator(
-                          strokeWidth: 2, color: hollow.textSecondary),
-                    )
-                  : const Icon(LucideIcons.filePlus, size: 14),
+              loading: _sharing,
+              icon: const Icon(LucideIcons.filePlus, size: 14),
               onPressed: _sharing ? null : _pickFile,
-              child: Text(_sharing ? 'Sharing…' : 'Share a File'),
+              child: const Text('Share a File'),
             ),
             const SizedBox(width: HollowSpacing.sm),
             HollowButton.filled(

@@ -24,6 +24,7 @@ import 'package:hollow/src/ui/mobile/mobile_chat_route.dart';
 import 'package:hollow/src/ui/mobile/mobile_page_route.dart';
 import 'package:hollow/src/ui/mobile/mobile_profile_sheet.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
+import 'package:hollow/src/ui/components/hollow_sheet.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 class MobileFriendsTab extends ConsumerStatefulWidget {
@@ -207,15 +208,9 @@ class _MobileFriendsTabState extends ConsumerState<MobileFriendsTab> {
   }
 
   void _showAddFriendDialog(BuildContext context, WidgetRef ref) {
-    final hollow = HollowTheme.of(context);
-    showModalBottomSheet(
+    showHollowSheet(
       context: context,
-      backgroundColor: hollow.overlay,
-      isScrollControlled: true,
-      shape: RoundedRectangleBorder(
-        borderRadius:
-            BorderRadius.vertical(top: Radius.circular(hollow.radiusXl)),
-      ),
+      scrollControlled: true,
       builder: (_) => const _AddFriendSheet(),
     );
   }
@@ -333,23 +328,12 @@ class _FriendRow extends ConsumerWidget {
     final isFav = favs.contains(peerId);
     final name = localNicknames[peerId] ?? displayNameFor(profiles, peerId);
 
-    showModalBottomSheet(
+    showHollowSheet(
       context: context,
-      backgroundColor: hollow.overlay,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(hollow.radiusXl)),
-      ),
       builder: (_) => SafeArea(
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Padding(
-              padding: const EdgeInsets.only(top: HollowSpacing.sm),
-              child: Container(width: 32, height: 4,
-                decoration: BoxDecoration(color: hollow.border, borderRadius: BorderRadius.circular(2)),
-              ),
-            ),
-            const SizedBox(height: HollowSpacing.md),
             Text(name, style: HollowTypography.body.copyWith(
               color: hollow.textPrimary, fontWeight: FontWeight.w600,
             )),
@@ -727,27 +711,15 @@ class _AddFriendSheetState extends ConsumerState<_AddFriendSheet> {
       child: SafeArea(
         child: SingleChildScrollView(
           child: Padding(
-            padding: const EdgeInsets.fromLTRB(
-              HollowSpacing.lg,
-              HollowSpacing.sm,
-              HollowSpacing.lg,
-              HollowSpacing.lg,
+            padding: const EdgeInsets.only(
+              left: HollowSpacing.lg,
+              right: HollowSpacing.lg,
+              bottom: HollowSpacing.lg,
             ),
             child: Column(
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Center(
-                  child: Container(
-                    width: 32,
-                    height: 4,
-                    decoration: BoxDecoration(
-                      color: hollow.border,
-                      borderRadius: BorderRadius.circular(2),
-                    ),
-                  ),
-                ),
-                const SizedBox(height: HollowSpacing.lg),
                 Text(
                   'Add Friend',
                   style: HollowTypography.heading

@@ -414,7 +414,7 @@ class _CountdownRing extends StatelessWidget {
               SizedBox(
                 width: 30,
                 height: 30,
-                child: CircularProgressIndicator(
+                child: CircularProgressIndicator( // design-ignore: countdown dial with the seconds inside, not a spinner
                   value: controller.value,
                   strokeWidth: 2.5,
                   backgroundColor: trackColor.withValues(alpha: 0.4),

@@ -15,6 +15,7 @@ import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/label_visuals.dart';
 import 'package:hollow/src/ui/components/member_search_picker.dart';
+import 'package:hollow/src/ui/components/hollow_spinner.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 class MobileLabelsRoute extends ConsumerStatefulWidget {
@@ -102,7 +103,7 @@ class _MobileLabelsRouteState extends ConsumerState<MobileLabelsRoute> {
 
             Expanded(
               child: _loading
-                  ? const Center(child: CircularProgressIndicator())
+                  ? const Center(child: HollowSpinner.large())
                   : _labels.isEmpty
                       ? HollowEmptyState(
                           glyph: LucideIcons.tag,

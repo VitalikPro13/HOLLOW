@@ -27,6 +27,7 @@ import '../components/popup_animator.dart';
 import 'package:hollow/src/ui/components/hollow_divider.dart';
 import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/overlay_hosts.dart';
+import 'package:hollow/src/ui/components/hollow_spinner.dart';
 
 /// The GIF picker (issue #26): Popular, Favourites and Recent plus search
 /// through the Hollow website's no-log Klipy proxy.
@@ -501,14 +502,7 @@ class _GifPickerBodyState extends ConsumerState<GifPickerBody> {
           : _recentView(hollow);
     }
     if (_loading) {
-      return Center(
-        child: SizedBox(
-          width: 20,
-          height: 20,
-          child: CircularProgressIndicator(
-              strokeWidth: 2, color: hollow.textTertiary),
-        ),
-      );
+      return const Center(child: HollowSpinner.medium());
     }
     if (_error != null) {
       return Center(
@@ -771,14 +765,9 @@ class _GifPickerBodyState extends ConsumerState<GifPickerBody> {
               ],
             ),
             if (_loadingMore)
-              Padding(
-                padding: const EdgeInsets.symmetric(vertical: 8),
-                child: SizedBox(
-                  width: 16,
-                  height: 16,
-                  child: CircularProgressIndicator(
-                      strokeWidth: 2, color: hollow.textTertiary),
-                ),
+              const Padding(
+                padding: EdgeInsets.symmetric(vertical: HollowSpacing.sm),
+                child: HollowSpinner(),
               ),
           ],
         ),
@@ -1182,12 +1171,7 @@ class _GifCellState extends ConsumerState<_GifCell> {
                     Container(
                       color: Colors.black.withValues(alpha: 0.45),
                       child: const Center(
-                        child: SizedBox(
-                          width: 18,
-                          height: 18,
-                          child: CircularProgressIndicator(
-                              strokeWidth: 2, color: Colors.white),
-                        ),
+                        child: HollowSpinner(color: Colors.white), // design-ignore: over a scrim
                       ),
                     ),
                 ],

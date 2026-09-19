@@ -15,6 +15,7 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:video_player/video_player.dart';
 import 'package:visibility_detector/visibility_detector.dart';
+import 'package:hollow/src/ui/components/hollow_spinner.dart';
 
 /// Extensions we will hand to a player. Anything else (a watch page, a
 /// playlist, an embed URL) opens in the browser rather than the decoder.
@@ -360,14 +361,7 @@ class _LinkPreviewCardState extends ConsumerState<LinkPreviewCard> {
             image,
             const ColoredBox(color: Color(0x66000000)),
             const Center(
-              child: SizedBox(
-                width: 26,
-                height: 26,
-                child: CircularProgressIndicator(
-                  strokeWidth: 2,
-                  color: Colors.white,
-                ),
-              ),
+              child: HollowSpinner.medium(color: Colors.white), // design-ignore: over a scrim
             ),
           ],
         ),

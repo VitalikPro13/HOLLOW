@@ -133,6 +133,7 @@ import 'package:hollow/src/core/providers/guest_provider.dart';
 import 'package:hollow/src/ui/guest/public_channel_browser.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:window_manager/window_manager.dart';
+import 'package:hollow/src/ui/components/hollow_spinner.dart';
 
 const _kDesktopBreakpoint = 1024.0;
 const _kTabletBreakpoint = 600.0;
@@ -2973,14 +2974,7 @@ class _UnlockingOverlay extends StatelessWidget {
             children: [
               Icon(LucideIcons.lockKeyholeOpen, size: 32, color: hollow.accent),
               const SizedBox(height: HollowSpacing.lg),
-              SizedBox(
-                width: 24,
-                height: 24,
-                child: CircularProgressIndicator(
-                  strokeWidth: 2.5,
-                  color: hollow.accent,
-                ),
-              ),
+              const HollowSpinner.medium(),
               const SizedBox(height: HollowSpacing.lg),
               Text(
                 'Unlocking…',

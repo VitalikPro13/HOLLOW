@@ -19,6 +19,7 @@ import 'package:hollow/src/ui/archive/shared/archive_sender_filter.dart';
 import 'package:hollow/src/ui/components/long_press_message.dart';
 import 'package:hollow/src/ui/archive/shared/archive_toolbar.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
+import 'package:hollow/src/ui/components/hollow_spinner.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/media/media_viewer_scope.dart';
 import 'package:hollow/src/ui/dialogs/export_archive_dialog.dart';
@@ -122,7 +123,7 @@ class _MobileArchiveViewerRouteState
                 switchInCurve: Curves.easeOut,
                 child: messagesAsync.when(
                   loading: () =>
-                      const Center(key: ValueKey('loading'), child: CircularProgressIndicator()),
+                      const Center(key: ValueKey('loading'), child: HollowSpinner.large()),
                   error: (e, _) => Center(
                     key: const ValueKey('error'),
                     child: Text('Failed to load: $e',
@@ -304,7 +305,7 @@ class _MobileArchiveViewerRouteState
                 switchInCurve: Curves.easeOut,
                 child: messagesAsync.when(
                   loading: () =>
-                      const Center(key: ValueKey('loading'), child: CircularProgressIndicator()),
+                      const Center(key: ValueKey('loading'), child: HollowSpinner.large()),
                   error: (e, _) => Center(
                     key: const ValueKey('error'),
                     child: Text('Failed to load: $e',

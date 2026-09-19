@@ -1,6 +1,6 @@
 # Hollow design language and the grand redesign
 
-**Status:** IN PROGRESS, sessions 1 to 5 done 2026-09-19 (decisions applied, sweeps 3c, 4 and 5 done). Direction agreed 2026-09-14, research the same day.
+**Status:** IN PROGRESS, sessions 1 to 5 done 2026-09-19 (decisions applied, sweeps 3c to 6 done). Direction agreed 2026-09-14, research the same day.
 
 **Read this section first in a new session.** It is the handoff: what exists, what it changed, and the next thing to pick up. Everything below section 0 is the original plan, kept for its research digest and its screen-by-screen program; where it and this section disagree, this section is right.
 
@@ -71,7 +71,16 @@ New tokens: `HollowTypography.micro` (10/500, absorbs 155 orphaned sites) and `m
   - Pairs as `cmp_*.png` (before | after) from a small PIL stacker, desktop `e5-*` and mobile `m5-*`.
   - **Left for later:** "Manage Labels" in server settings still has an icon beside its heading.
 
-Guard baselines moved: font-size 703 to 689 and sized-box-gap 178 to 176 (sweep 5), local-label-class **36 to 28 to 0**, upper-case-label 42 to 0, letter-spacing 57 to 0, raw-divider 51 to 41 to 0, font-size 744 to 703, gradient 23 to 21, font-size 824 to 809 to 791 to 785, edge-insets 266 to 257 to 248 to 236, radius 177 to 175 to 168, letter-spacing 66 to 64 to 63, sized-box-gap 202 to 192 to 182.
+- **Sweep 6, one spinner and one sheet (session 5, 2026-09-19).** Three primitives, then every site. `raw-spinner` 127 to **0** and `raw-bottom-sheet` 29 to **0**, both hard bans.
+  - `HollowSpinner` (`components/hollow_spinner.dart`): small 14 (a row, a button), medium 20 (a card or section), large 32 (a pane), `textSecondary` by default because a spinner is a state and never the accent, optional `value` for a determinate ring, a "Loading" semantics label. The six old sizes (14/16/18/20/24/36) and their accent/secondary/primary colours are gone.
+  - `HollowButton(loading: true)`: the label stays laid out invisibly (same width, screen reader keeps the name), a spinner in the variant foreground paints over it through `Positioned.fill` + `OverflowBox` with ZERO minimums, presses are ignored and it does not fade. About 40 busy buttons that swapped their child for a spinner use it; labels that changed while busy ("Exporting...") are fixed now, since the spinner hides them.
+  - `showHollowSheet()` + `HollowSheetHandle` (`components/hollow_sheet.dart`): overlay surface, `radiusXl` top corners, one handle with 8 px above and below. The surface is a `ColoredBox` read from the SHEET's own context (the route's `backgroundColor` is transparent), so a theme change while a sheet is open repaints it; before, every sheet stayed dark around light content. 26 mobile sheets and 3 shared ones converted; their hand-drawn 32 or 36 px handles are gone, the three pickers gained one, and the two `DraggableScrollableSheet`s pass `handle: false` and place the handle themselves.
+  - Kept with `design-ignore`: the countdown dials with seconds inside (mobile incoming call 52 px, notification banner 30 px), the recovery pool's 120 px gauge, and spinners over video or a picking scrim (white).
+  - Renders caught two bugs the first unit test missed: the spinner, a pixel taller than a label line, grew a loading button by 1 px, and `OverflowBox` inherited the label's tight minimum width and drew the spinner as a 52x14 oval. Both are pinned by tests now.
+  - Scenario `fleet/design_sweep6_mobile.json` (server sheet, channel sheet, message actions sheet dark and light). The composer's send button has no semantics label in Saved messages, so the scenario taps it by position; worth an a11y look.
+  - **Left for later:** sheet HEADERS still vary (the audio sheet has an icon beside a heading-size title, the server sheet a centred title); that belongs to the screen phases. Desktop's incoming-call countdown became `HollowSpinner.large(value:)` (32 in a 36 box) while mobile's dial kept its own size; align them in the call screen pass.
+
+Guard baselines moved: raw-spinner 127 to 0, raw-bottom-sheet 29 to 0, radius 149 to 123, material-colors 234 to 223, edge-insets 233 to 230 (sweep 6); font-size 703 to 689 and sized-box-gap 178 to 176 (sweep 5), local-label-class **36 to 28 to 0**, upper-case-label 42 to 0, letter-spacing 57 to 0, raw-divider 51 to 41 to 0, font-size 744 to 703, gradient 23 to 21, font-size 824 to 809 to 791 to 785, edge-insets 266 to 257 to 248 to 236, radius 177 to 175 to 168, letter-spacing 66 to 64 to 63, sized-box-gap 202 to 192 to 182.
 
 ### Four bugs the work surfaced, all fixed
 
@@ -88,12 +97,12 @@ Every sweep: probe screenshots **before**, change, probe screenshots **after**, 
 
 ### Where to pick up next
 
-**Sweeps 3 to 5 are done** (sessions 4 and 5). **Next session starts at sweep 6.**
+**Sweeps 3 to 6 are done** (sessions 4 and 5). **Next session starts at sweep 7.**
 
 1. ~~Sweep 3c~~ done, see above.
 2. ~~Sweep 4, dividers~~ done, see above.
 3. ~~Sweep 5, empty states~~ done, see above.
-4. **Sweeps 6 to 9:** START HERE with `showHollowSheet()` + one Hollow spinner (new primitives, then their sweeps), remaining Material `Switch` / `Slider`, the dialog pass (28 files), the filled-button audit.
+4. ~~Sweep 6, sheet + spinner~~ done, see above. **Sweeps 7 to 9:** START HERE with the remaining Material `Switch` / `Slider`, the dialog pass (28 files), the filled-button audit.
 5. **Then the screen work**, phases 2 onward below, with the Shop's per-kind card shapes (verdict 9) and the compact message mode (verdict 8) inside it.
 
 ### Session 3 (2026-09-18): decisions rendered, picked and applied

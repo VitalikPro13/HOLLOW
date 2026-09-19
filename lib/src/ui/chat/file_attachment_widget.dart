@@ -28,6 +28,7 @@ import 'package:hollow/src/ui/components/attachment_image.dart';
 import 'package:hollow/src/ui/media/media_item.dart';
 import 'package:hollow/src/ui/media/media_viewer_route.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:hollow/src/ui/components/hollow_spinner.dart';
 
 /// File extensions that route to the video bubble.
 const _videoExtensions = kMediaVideoExtensions;
@@ -416,14 +417,7 @@ class FileAttachmentWidget extends ConsumerWidget {
       // One circle, three faces: the button, its spinner, or the reason there
       // is nothing to press.
       final Widget circleContent = switch (status.control) {
-        FileCardControl.busy => Padding(
-            padding: const EdgeInsets.all(12),
-            child: CircularProgressIndicator(
-              strokeWidth: 2,
-              valueColor: AlwaysStoppedAnimation(hollow.textPrimary),
-              backgroundColor: hollow.border,
-            ),
-          ),
+        FileCardControl.busy => const Center(child: HollowSpinner()),
         FileCardControl.none => Icon(LucideIcons.cloudOff,
             size: 20, color: hollow.textSecondary),
         _ => Icon(LucideIcons.download, size: 20, color: hollow.textPrimary),
@@ -498,15 +492,8 @@ class FileAttachmentWidget extends ConsumerWidget {
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
           if (isDownloading) ...[
-            SizedBox(
-              width: 40,
-              height: 40,
-              child: CircularProgressIndicator(
-                value: progress > 0 ? progress.clamp(0.0, 1.0) : null,
-                strokeWidth: 3,
-                valueColor: AlwaysStoppedAnimation(hollow.accent),
-                backgroundColor: hollow.border,
-              ),
+            HollowSpinner.large(
+              value: progress > 0 ? progress.clamp(0.0, 1.0) : null,
             ),
             const SizedBox(height: HollowSpacing.sm),
             Text(
@@ -640,17 +627,9 @@ class FileAttachmentWidget extends ConsumerWidget {
                   ),
                 ] else if (showBusy) ...[
                   const SizedBox(width: HollowSpacing.md),
-                  Padding(
-                    padding: const EdgeInsets.all(HollowSpacing.xs),
-                    child: SizedBox(
-                      width: 18,
-                      height: 18,
-                      child: CircularProgressIndicator(
-                        strokeWidth: 2,
-                        valueColor: AlwaysStoppedAnimation(hollow.textPrimary),
-                        backgroundColor: hollow.border,
-                      ),
-                    ),
+                  const Padding(
+                    padding: EdgeInsets.all(HollowSpacing.xs),
+                    child: HollowSpinner(),
                   ),
                 ],
               ],

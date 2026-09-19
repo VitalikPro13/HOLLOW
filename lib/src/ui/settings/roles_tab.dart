@@ -6,6 +6,7 @@ import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
+import 'package:hollow/src/ui/components/hollow_spinner.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/hollow_toggle.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
@@ -126,7 +127,7 @@ class _RolesTabState extends ConsumerState<RolesTab> {
     final hollow = HollowTheme.of(context);
 
     if (_loading) {
-      return const Center(child: CircularProgressIndicator());
+      return const Center(child: HollowSpinner.large());
     }
 
     final myRole =

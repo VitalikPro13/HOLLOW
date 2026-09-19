@@ -14,6 +14,7 @@ import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_focus_ring.dart';
 import 'package:hollow/src/ui/components/hollow_section_header.dart';
+import 'package:hollow/src/ui/components/hollow_spinner.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
@@ -77,11 +78,7 @@ class _ConnectingContent extends StatelessWidget {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              SizedBox(
-                width: 26,
-                height: 26,
-                child: CircularProgressIndicator(strokeWidth: 2.5, color: hollow.accent),
-              ),
+              const HollowSpinner.large(),
               const SizedBox(height: HollowSpacing.lg),
               Text(
                 message,
@@ -537,13 +534,7 @@ class _DeviceLinkContentState extends ConsumerState<_DeviceLinkContent> {
         _header(hollow, LucideIcons.send, 'Sending your data',
             'Copying your messages, friends and profile to your other device…'),
         const SizedBox(height: HollowSpacing.xl),
-        Center(
-          child: SizedBox(
-            width: 22,
-            height: 22,
-            child: CircularProgressIndicator(strokeWidth: 2.5, color: hollow.accent),
-          ),
-        ),
+        const Center(child: HollowSpinner.medium()),
         const SizedBox(height: HollowSpacing.lg),
         Text(
           'Keep both devices online until this finishes.',
@@ -590,13 +581,7 @@ class _DeviceLinkContentState extends ConsumerState<_DeviceLinkContent> {
         _header(hollow, LucideIcons.checkCheck, 'Device linked',
             'Your data was copied across. Restarting Hollow to finish…'),
         const SizedBox(height: HollowSpacing.lg),
-        Center(
-          child: SizedBox(
-            width: 22,
-            height: 22,
-            child: CircularProgressIndicator(strokeWidth: 2.5, color: hollow.accent),
-          ),
-        ),
+        const Center(child: HollowSpinner.medium()),
         const SizedBox(height: HollowSpacing.lg),
         Text(
           'Servers and their history were copied too. New messages reach both '

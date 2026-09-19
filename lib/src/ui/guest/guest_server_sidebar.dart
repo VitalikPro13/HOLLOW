@@ -22,6 +22,7 @@ import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/dialogs/relay_switch_dialog.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:hollow/src/ui/components/hollow_spinner.dart';
 
 class GuestServerSidebar extends ConsumerStatefulWidget {
   const GuestServerSidebar({super.key});
@@ -472,18 +473,9 @@ class _GuestServerSection extends ConsumerWidget {
 
   Widget _buildChannelList(BuildContext context, HollowTheme hollow) {
     if (isLoading) {
-      return Padding(
-        padding: const EdgeInsets.symmetric(vertical: HollowSpacing.md),
-        child: Center(
-          child: SizedBox(
-            width: 18,
-            height: 18,
-            child: CircularProgressIndicator(
-              strokeWidth: 2,
-              color: hollow.accent,
-            ),
-          ),
-        ),
+      return const Padding(
+        padding: EdgeInsets.symmetric(vertical: HollowSpacing.md),
+        child: Center(child: HollowSpinner()),
       );
     }
 

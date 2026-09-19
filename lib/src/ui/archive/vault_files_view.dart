@@ -12,6 +12,7 @@ import 'package:hollow/src/ui/components/hollow_section_header.dart';
 import 'package:hollow/src/ui/dialogs/recovery_pool_dialog.dart';
 import 'package:hollow/src/ui/dialogs/shard_bundle_dialog.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:hollow/src/ui/components/hollow_spinner.dart';
 
 /// Right panel for the Vault Files tab: every server the user belongs to, with
 /// expandable sections listing its vault files and their shard status.
@@ -149,11 +150,7 @@ class _ServerVaultSectionState extends ConsumerState<_ServerVaultSection> {
                     ),
                   );
                 },
-                loading: () => const SizedBox(
-                  width: 12,
-                  height: 12,
-                  child: CircularProgressIndicator(strokeWidth: 1.5),
-                ),
+                loading: () => const HollowSpinner(),
                 error: (_, _) => Text(
                   'Error',
                   style: HollowTypography.caption.copyWith(
@@ -235,13 +232,7 @@ class _ServerVaultSectionState extends ConsumerState<_ServerVaultSection> {
             },
             loading: () => const Padding(
               padding: EdgeInsets.all(HollowSpacing.lg),
-              child: Center(
-                child: SizedBox(
-                  width: 20,
-                  height: 20,
-                  child: CircularProgressIndicator(strokeWidth: 2),
-                ),
-              ),
+              child: Center(child: HollowSpinner.medium()),
             ),
             error: (e, _) => Padding(
               padding: const EdgeInsets.all(HollowSpacing.md),

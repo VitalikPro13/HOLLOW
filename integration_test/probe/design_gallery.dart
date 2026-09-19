@@ -13,7 +13,9 @@ import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/hollow_key_combo.dart';
 import 'package:hollow/src/ui/components/hollow_list_row.dart';
 import 'package:hollow/src/ui/components/hollow_section_header.dart';
+import 'package:hollow/src/ui/components/hollow_sheet.dart';
 import 'package:hollow/src/ui/components/hollow_skeleton.dart';
+import 'package:hollow/src/ui/components/hollow_spinner.dart';
 
 /// Every design-language primitive in every state, dark beside light, in one
 /// screenshot.
@@ -361,6 +363,69 @@ class _GalleryPane extends StatelessWidget {
               HollowButton.danger(
                 onPressed: () {},
                 child: const Text('Delete this server'),
+              ),
+              const SizedBox(height: HollowSpacing.sm),
+              Text('Loading keeps the width and the colours:',
+                  style: HollowTypography.caption
+                      .copyWith(color: hollow.textSecondary)),
+              Row(
+                children: [
+                  HollowButton.filled(
+                    onPressed: () {},
+                    loading: true,
+                    child: const Text('Create a server'),
+                  ),
+                  const SizedBox(width: HollowSpacing.sm),
+                  HollowButton.outline(
+                    onPressed: () {},
+                    loading: true,
+                    child: const Text('Join with a link'),
+                  ),
+                  const SizedBox(width: HollowSpacing.sm),
+                  HollowButton.ghost(
+                    onPressed: () {},
+                    loading: true,
+                    child: const Text('Refresh'),
+                  ),
+                ],
+              ),
+              const SizedBox(height: HollowSpacing.xl),
+
+              const HollowSectionHeader('Spinner'),
+              const Row(
+                children: [
+                  HollowSpinner(),
+                  SizedBox(width: HollowSpacing.lg),
+                  HollowSpinner.medium(),
+                  SizedBox(width: HollowSpacing.lg),
+                  HollowSpinner.large(),
+                  SizedBox(width: HollowSpacing.lg),
+                  HollowSpinner.medium(value: 0.65),
+                ],
+              ),
+              const SizedBox(height: HollowSpacing.xl),
+
+              const HollowSectionHeader('Sheet'),
+              Container(
+                height: 120,
+                decoration: BoxDecoration(
+                  color: hollow.overlay,
+                  borderRadius: BorderRadius.vertical(
+                      top: Radius.circular(hollow.radiusXl)),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const HollowSheetHandle(),
+                    Padding(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: HollowSpacing.lg),
+                      child: Text('showHollowSheet: overlay, radiusXl, one handle',
+                          style: HollowTypography.body
+                              .copyWith(color: hollow.textPrimary)),
+                    ),
+                  ],
+                ),
               ),
               const SizedBox(height: HollowSpacing.xl),
 

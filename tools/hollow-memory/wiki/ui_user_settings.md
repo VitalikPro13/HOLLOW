@@ -145,7 +145,7 @@ Two `_ImageRow` widgets for Avatar and Banner. Each checks whether an image curr
 2. GIF check: if `.gif`, skips crop. Max 1MB, stores raw bytes directly (bumps `_avatarPickGen` so a late crop-processing result can't clobber it).
 3. Non-GIF: opens `showImageCropDialog()` with 1:1 aspect ratio, "Crop Avatar" title.
 4. **Cropped PNG bytes are staged IMMEDIATELY** (`_pendingAvatarBytes = cropped`, `_avatarChanged = true`, `_avatarBusy = true`) — the preview updates instantly. `network_api.processAvatar(rawBytes:)` (Rust WebP encode) runs in a tracked, never-throwing future (`_avatarProcessing`); success swaps in the processed WebP, failure REVERTS to the captured prior bytes + error toast. Every completion is generation-guarded (`_avatarPickGen`).
-5. While `_avatarBusy`, a small 14px `CircularProgressIndicator` overlays the preview avatar (passed to `ProfileSection` as `avatarProcessing`).
+5. While `_avatarBusy`, a `HollowSpinner()` overlays the preview avatar (passed to `ProfileSection` as `avatarProcessing`).
 
 `_clearAvatar()`: Sets `_pendingAvatarBytes` to empty `Uint8List(0)` (the CLEAR sentinel), `_avatarChanged = true`, bumps the generation.
 
@@ -472,7 +472,7 @@ Only shown when `!_hasPassword && _osKeychainAvailable`. Standalone device-level
 
 ### Recovery Phrase Section
 
-**Loading state**: 20x20 accent-colored `CircularProgressIndicator`.
+**Loading state**: `HollowSpinner.medium()`.
 
 **Error state**: Red error text "Failed to load mnemonic: {error}".
 

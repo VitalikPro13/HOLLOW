@@ -16,6 +16,7 @@ import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/hollow_focus_ring.dart';
+import 'package:hollow/src/ui/components/hollow_spinner.dart';
 import 'package:hollow/src/ui/components/hollow_toggle.dart';
 import 'package:hollow/src/ui/components/hollow_chip.dart';
 
@@ -272,12 +273,7 @@ class _ScreenShareDialogState extends State<_ScreenShareDialog> {
 
                     Expanded(
                       child: _loading
-                          ? Center(
-                              child: CircularProgressIndicator(
-                                color: hollow.accent,
-                                strokeWidth: 2,
-                              ),
-                            )
+                          ? const Center(child: HollowSpinner.large())
                           : sources.isEmpty
                               ? HollowEmptyState(
                                   title: _showScreens

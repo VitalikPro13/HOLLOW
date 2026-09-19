@@ -90,6 +90,8 @@ import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 import 'package:hollow/src/ui/dialogs/no_turn_dialog.dart';
 import 'package:hollow/src/core/services/at_rest.dart';
+import 'package:hollow/src/ui/components/hollow_sheet.dart';
+import 'package:hollow/src/ui/components/hollow_spinner.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
 
@@ -1052,14 +1054,9 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     // The software keyboard otherwise stays up under the sheet and covers half
     // the picker.
     _focusNode.unfocus();
-    final hollow = HollowTheme.of(context);
-    showModalBottomSheet<void>(
+    showHollowSheet<void>(
       context: context,
-      backgroundColor: hollow.overlay,
-      isScrollControlled: true,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(hollow.radiusLg)),
-      ),
+      scrollControlled: true,
       builder: (_) => SafeArea(
         child: SizedBox(
           height: MediaQuery.sizeOf(context).height * 0.55,
@@ -1081,14 +1078,9 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
   /// token and stages in the composer like an emote.
   void _showGifSheet() {
     _focusNode.unfocus();
-    final hollow = HollowTheme.of(context);
-    showModalBottomSheet<void>(
+    showHollowSheet<void>(
       context: context,
-      backgroundColor: hollow.overlay,
-      isScrollControlled: true,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(hollow.radiusLg)),
-      ),
+      scrollControlled: true,
       builder: (_) => SafeArea(
         child: SizedBox(
           // Taller than the sticker sheet: the Popular row costs a line of
@@ -1145,14 +1137,9 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
   /// stays OPEN, unlike the GIF sheet, so sending several is repeated taps.
   void _showStickerSheet() {
     _focusNode.unfocus();
-    final hollow = HollowTheme.of(context);
-    showModalBottomSheet<void>(
+    showHollowSheet<void>(
       context: context,
-      backgroundColor: hollow.overlay,
-      isScrollControlled: true,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(hollow.radiusLg)),
-      ),
+      scrollControlled: true,
       builder: (_) => SafeArea(
         child: SizedBox(
           height: MediaQuery.sizeOf(context).height * 0.62,
@@ -1201,28 +1188,12 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
       );
     }
 
-    showModalBottomSheet<void>(
+    showHollowSheet<void>(
       context: context,
-      backgroundColor: hollow.overlay,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(hollow.radiusLg)),
-      ),
       builder: (_) => SafeArea(
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Padding(
-              padding: const EdgeInsets.only(top: HollowSpacing.sm),
-              child: Container(
-                width: 32,
-                height: 4,
-                decoration: BoxDecoration(
-                  color: hollow.border,
-                  borderRadius: BorderRadius.circular(2),
-                ),
-              ),
-            ),
-            const SizedBox(height: HollowSpacing.sm),
             row(
               icon: LucideIcons.image,
               label: 'Photo',
@@ -1884,14 +1855,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              SizedBox(
-                width: 12,
-                height: 12,
-                child: CircularProgressIndicator(
-                  strokeWidth: 1.5,
-                  color: isRetrying ? hollow.warning : hollow.accent,
-                ),
-              ),
+              HollowSpinner(color: isRetrying ? hollow.warning : null),
               const SizedBox(width: HollowSpacing.sm),
               Text(
                 isRetrying ? 'Retrying sync...' : 'Syncing...',
@@ -3153,28 +3117,12 @@ class _MobileChatHeader extends ConsumerWidget {
         .toList()
       ..sort((a, b) => b!.timestamp.compareTo(a!.timestamp));
 
-    showModalBottomSheet(
+    showHollowSheet(
       context: context,
-      backgroundColor: hollow.overlay,
-      shape: RoundedRectangleBorder(
-        borderRadius:
-            BorderRadius.vertical(top: Radius.circular(hollow.radiusXl)),
-      ),
       builder: (_) => SafeArea(
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Padding(
-              padding: const EdgeInsets.only(top: HollowSpacing.sm),
-              child: Container(
-                width: 32,
-                height: 4,
-                decoration: BoxDecoration(
-                  color: hollow.border,
-                  borderRadius: BorderRadius.circular(2),
-                ),
-              ),
-            ),
             Padding(
               padding: const EdgeInsets.all(HollowSpacing.md),
               child: Align(

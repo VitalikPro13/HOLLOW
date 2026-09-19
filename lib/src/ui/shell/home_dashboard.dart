@@ -43,6 +43,7 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:hollow/src/core/brand_icons.dart';
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 import 'package:url_launcher/url_launcher.dart';
+import 'package:hollow/src/ui/components/hollow_spinner.dart';
 
 /// Total visible DM message count, the number two synced devices compare.
 ///
@@ -1548,14 +1549,7 @@ class _ConnectionRow extends StatelessWidget {
               ),
             ),
             if (showSpinner) ...[
-              SizedBox(
-                width: 10,
-                height: 10,
-                child: CircularProgressIndicator(
-                  strokeWidth: 1.5,
-                  color: statusColor,
-                ),
-              ),
+              HollowSpinner(color: statusColor),
               const SizedBox(width: 4),
             ],
             Text(

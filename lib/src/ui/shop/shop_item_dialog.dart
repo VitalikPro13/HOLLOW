@@ -231,16 +231,7 @@ class _ShopItemDialogState extends ConsumerState<_ShopItemDialog> {
           if (owned != null)
             HollowButton.filled(
               onPressed: _busy ? null : () => _wear(owned),
-              icon: _busy
-                  ? SizedBox(
-                      width: 14,
-                      height: 14,
-                      child: CircularProgressIndicator(
-                        strokeWidth: 2,
-                        color: hollow.textSecondary,
-                      ),
-                    )
-                  : null,
+              loading: _busy,
               child: const Text('Wear it'),
             ),
           // Beside Wear it, Buy is the quieter button.

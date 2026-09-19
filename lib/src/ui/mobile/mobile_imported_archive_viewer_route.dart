@@ -31,6 +31,7 @@ import 'package:hollow/src/ui/media/media_viewer_scope.dart';
 import 'package:hollow/src/ui/dialogs/message_proof_dialog.dart';
 import 'package:hollow/src/ui/mobile/mobile_archive_message_actions.dart';
 import 'package:hollow/src/core/services/at_rest.dart';
+import 'package:hollow/src/ui/components/hollow_spinner.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Full-screen route for viewing an imported .hollow-archive file.
@@ -102,7 +103,7 @@ class _MobileImportedArchiveViewerRouteState
           switchInCurve: Curves.easeOut,
           child: dataAsync.when(
           loading: () =>
-              const Center(key: ValueKey('loading'), child: CircularProgressIndicator()),
+              const Center(key: ValueKey('loading'), child: HollowSpinner.large()),
           error: (e, _) => Column(
             key: const ValueKey('error'),
             children: [

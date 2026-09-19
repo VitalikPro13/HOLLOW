@@ -14,6 +14,7 @@ import 'package:hollow/src/ui/components/hollow_section_header.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/status_dot.dart';
+import 'package:hollow/src/ui/components/hollow_spinner.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 class MobileStorageRoute extends ConsumerStatefulWidget {
@@ -129,7 +130,7 @@ class _MobileStorageRouteState extends ConsumerState<MobileStorageRoute> {
 
             Expanded(
               child: _loading
-                  ? Center(child: CircularProgressIndicator(color: hollow.accent))
+                  ? const Center(child: HollowSpinner.large())
                   : ListView(
                       padding: const EdgeInsets.all(HollowSpacing.lg),
                       children: [

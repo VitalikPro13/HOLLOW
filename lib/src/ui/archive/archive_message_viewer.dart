@@ -25,6 +25,7 @@ import 'package:hollow/src/ui/dialogs/message_proof_dialog.dart';
 import 'package:hollow/src/core/services/attachment_export.dart';
 import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:hollow/src/ui/components/hollow_spinner.dart';
 
 /// Right panel of "My Data" — shows empty state or a read-only message viewer.
 class ArchiveMessageViewer extends ConsumerStatefulWidget {
@@ -150,7 +151,7 @@ class _ArchiveDmViewer extends ConsumerWidget {
           Expanded(
             child: messagesAsync.when(
               loading: () =>
-                  const Center(child: CircularProgressIndicator()),
+                  const Center(child: HollowSpinner.large()),
               error: (e, _) => Center(
                 child: Text('Failed to load messages: $e',
                     style: TextStyle(color: hollow.error)),
@@ -441,7 +442,7 @@ class _ArchiveChannelViewer extends ConsumerWidget {
           Expanded(
             child: messagesAsync.when(
               loading: () =>
-                  const Center(child: CircularProgressIndicator()),
+                  const Center(child: HollowSpinner.large()),
               error: (e, _) => Center(
                 child: Text('Failed to load messages: $e',
                     style: TextStyle(color: hollow.error)),

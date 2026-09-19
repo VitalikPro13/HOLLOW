@@ -184,17 +184,9 @@ class _InitiateDialogState extends ConsumerState<_InitiateDialog> {
         const SizedBox(width: HollowSpacing.sm),
         HollowButton.filled(
           onPressed: _starting ? null : _initiate,
-          icon: _starting
-              ? SizedBox(
-                  width: 14,
-                  height: 14,
-                  child: CircularProgressIndicator(
-                    strokeWidth: 2,
-                    valueColor: AlwaysStoppedAnimation(hollow.textPrimary),
-                  ),
-                )
-              : const Icon(LucideIcons.shield, size: 14),
-          child: Text(_starting ? 'Starting...' : 'Start Pool'),
+          loading: _starting,
+          icon: const Icon(LucideIcons.shield, size: 14),
+          child: const Text('Start Pool'),
         ),
       ],
     );
@@ -347,17 +339,9 @@ class _JoinDialogState extends ConsumerState<_JoinDialog> {
         const SizedBox(width: HollowSpacing.sm),
         HollowButton.filled(
           onPressed: _joining ? null : _join,
-          icon: _joining
-              ? SizedBox(
-                  width: 14,
-                  height: 14,
-                  child: CircularProgressIndicator(
-                    strokeWidth: 2,
-                    valueColor: AlwaysStoppedAnimation(hollow.textPrimary),
-                  ),
-                )
-              : const Icon(LucideIcons.logIn, size: 14),
-          child: Text(_joining ? 'Joining...' : 'Join Pool'),
+          loading: _joining,
+          icon: const Icon(LucideIcons.logIn, size: 14),
+          child: const Text('Join Pool'),
         ),
       ],
     );

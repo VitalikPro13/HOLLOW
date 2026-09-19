@@ -10,6 +10,7 @@ import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
+import 'package:hollow/src/ui/components/hollow_spinner.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import '../components/follow_days_steps.dart';
 
@@ -173,7 +174,7 @@ class _MobileTwitchSettingsRouteState
 
             Expanded(
               child: _loading
-                  ? const Center(child: CircularProgressIndicator())
+                  ? const Center(child: HollowSpinner.large())
                   : ListView(
                       padding: const EdgeInsets.all(HollowSpacing.lg),
                       children: [

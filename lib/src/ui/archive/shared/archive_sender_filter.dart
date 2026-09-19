@@ -7,6 +7,7 @@ import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:hollow/src/ui/components/hollow_sheet.dart';
 
 /// Size preset: the desktop dialog and the mobile sheet keep their own
 /// dimensions.
@@ -289,15 +290,9 @@ void showArchiveFilterSheet(
   required Map<String, String> senderNames,
   required ValueChanged<String?> onSelected,
 }) {
-  final hollow = HollowTheme.of(context);
-  showModalBottomSheet(
+  showHollowSheet(
     context: context,
-    backgroundColor: hollow.overlay,
-    shape: RoundedRectangleBorder(
-      borderRadius:
-          BorderRadius.vertical(top: Radius.circular(hollow.radiusXl)),
-    ),
-    isScrollControlled: true,
+    scrollControlled: true,
     builder: (_) => ArchiveFilterSheet(
       senderIds: senderIds,
       selectedSender: selectedSender,
@@ -323,23 +318,10 @@ class ArchiveFilterSheet extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-
     return SafeArea(
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Padding(
-            padding: const EdgeInsets.only(top: HollowSpacing.sm),
-            child: Container(
-              width: 32,
-              height: 4,
-              decoration: BoxDecoration(
-                color: hollow.border,
-                borderRadius: BorderRadius.circular(2),
-              ),
-            ),
-          ),
           _SenderFilterList(
             senderIds: senderIds,
             selectedSender: selectedSender,

@@ -451,7 +451,7 @@ Uses `SingleTickerProviderStateMixin` for animation.
 - Call type label: "Incoming video call..." or "Incoming voice call..."
 - Button row:
   - Decline (`HollowButton.danger`, `LucideIcons.phoneOff`) -- calls `callProvider.notifier.rejectCall()`
-  - Countdown timer: `CircularProgressIndicator` (value = secondsLeft/30) wrapping countdown text, turns red at 5s
+  - Countdown timer: `HollowSpinner.large(value: secondsLeft/30)` wrapping countdown text, turns red at 5s
   - Accept (`HollowButton.filled`, phone/video icon) -- calls `callProvider.notifier.acceptCall()`
 
 ### Providers read

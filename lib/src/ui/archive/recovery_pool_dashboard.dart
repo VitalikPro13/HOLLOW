@@ -267,7 +267,7 @@ class RecoveryPoolDashboard extends ConsumerWidget {
         child: Stack(
           fit: StackFit.expand,
           children: [
-            CircularProgressIndicator(
+            CircularProgressIndicator( // design-ignore: a 120px gauge, not a spinner
               value: progress,
               strokeWidth: 8,
               backgroundColor: hollow.border,

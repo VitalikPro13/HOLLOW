@@ -7,6 +7,7 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_toggle.dart';
+import 'package:hollow/src/ui/components/hollow_sheet.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// What the user picked in the mobile share sheet.
@@ -20,15 +21,9 @@ class MobileScreenShareChoice {
 /// and the OS handles permission.
 Future<MobileScreenShareChoice?> showMobileScreenShareSheet(
     BuildContext context) {
-  final hollow = HollowTheme.of(context);
-  return showModalBottomSheet<MobileScreenShareChoice>(
+  return showHollowSheet<MobileScreenShareChoice>(
     context: context,
-    backgroundColor: hollow.overlay,
-    isScrollControlled: true,
-    shape: RoundedRectangleBorder(
-      borderRadius:
-          BorderRadius.vertical(top: Radius.circular(hollow.radiusXl)),
-    ),
+    scrollControlled: true,
     builder: (_) => const _ScreenShareSheet(),
   );
 }
@@ -80,20 +75,6 @@ class _ScreenShareSheetState extends State<_ScreenShareSheet> {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Center(
-              child: Padding(
-                padding: const EdgeInsets.only(top: HollowSpacing.sm),
-                child: Container(
-                  width: 32,
-                  height: 4,
-                  decoration: BoxDecoration(
-                    color: hollow.border,
-                    borderRadius: BorderRadius.circular(2),
-                  ),
-                ),
-              ),
-            ),
-            const SizedBox(height: HollowSpacing.lg),
             Row(
               children: [
                 Icon(LucideIcons.monitor, size: 20, color: hollow.textPrimary),

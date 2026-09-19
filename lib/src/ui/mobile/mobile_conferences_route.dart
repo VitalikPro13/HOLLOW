@@ -16,6 +16,7 @@ import 'package:hollow/src/ui/mobile/mobile_page_route.dart';
 import 'package:hollow/src/ui/mobile/mobile_voice_channel_route.dart';
 import 'package:hollow/src/ui/components/hollow_tooltip.dart';
 import 'package:hollow/src/core/providers/relay_domain_provider.dart';
+import 'package:hollow/src/ui/components/hollow_spinner.dart';
 import 'package:hollow/src/ui/shell/conference_dashboard.dart'
     show
         conferenceDenyMessage,
@@ -341,14 +342,7 @@ class _MobileConferencesRouteState
                   .copyWith(color: hollow.textSecondary),
             ),
             const SizedBox(height: HollowSpacing.lg),
-            SizedBox(
-              width: 20,
-              height: 20,
-              child: CircularProgressIndicator(
-                strokeWidth: 2,
-                color: hollow.accent,
-              ),
-            ),
+            const HollowSpinner.medium(),
             const SizedBox(height: HollowSpacing.xl),
             HollowButton.ghost(
               onPressed: () =>

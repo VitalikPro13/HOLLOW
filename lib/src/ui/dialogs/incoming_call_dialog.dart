@@ -14,6 +14,7 @@ import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
+import 'package:hollow/src/ui/components/hollow_spinner.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Incoming call card, rendered only while a call is ringing inbound.
@@ -249,20 +250,9 @@ class _IncomingCallOverlayState extends ConsumerState<IncomingCallOverlay>
                         child: Stack(
                           alignment: Alignment.center,
                           children: [
-                            SizedBox(
-                              width: 36,
-                              height: 36,
-                              child: CircularProgressIndicator(
-                                value: _secondsLeft / 30.0,
-                                strokeWidth: 2.5,
-                                backgroundColor:
-                                    hollow.border.withValues(alpha: 0.3),
-                                valueColor: AlwaysStoppedAnimation<Color>(
-                                  _secondsLeft <= 5
-                                      ? hollow.error
-                                      : hollow.textSecondary,
-                                ),
-                              ),
+                            HollowSpinner.large(
+                              value: _secondsLeft / 30.0,
+                              color: _secondsLeft <= 5 ? hollow.error : null,
                             ),
                             Text(
                               '$_secondsLeft',

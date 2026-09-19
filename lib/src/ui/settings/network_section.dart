@@ -482,12 +482,8 @@ class _GifProxySettingsCardState extends ConsumerState<GifProxySettingsCard> {
                 onPressed: _keyBusy || _keyController.text.trim() == apiKey
                     ? null
                     : () => _saveKey(_keyController.text),
-                child: _keyBusy
-                    ? const SizedBox(
-                        width: 14,
-                        height: 14,
-                        child: CircularProgressIndicator(strokeWidth: 2))
-                    : const Text('Save'),
+                loading: _keyBusy,
+                child: const Text('Save'),
               ),
             ],
           ),
@@ -537,12 +533,8 @@ class _GifProxySettingsCardState extends ConsumerState<GifProxySettingsCard> {
                           _hostsController.text.trim() == hosts.join(', ')
                       ? null
                       : () => _saveHosts(_hostsController.text.split(',')),
-                  child: _hostsBusy
-                      ? const SizedBox(
-                          width: 14,
-                          height: 14,
-                          child: CircularProgressIndicator(strokeWidth: 2))
-                      : const Text('Save'),
+                  loading: _hostsBusy,
+                  child: const Text('Save'),
                 ),
               ],
             ),
@@ -602,12 +594,8 @@ class _GifProxySettingsCardState extends ConsumerState<GifProxySettingsCard> {
                 onPressed: _busy || _controller.text.trim() == current
                     ? null
                     : () => _save(_controller.text),
-                child: _busy
-                    ? const SizedBox(
-                        width: 14,
-                        height: 14,
-                        child: CircularProgressIndicator(strokeWidth: 2))
-                    : const Text('Save'),
+                loading: _busy,
+                child: const Text('Save'),
               ),
             ],
           ),
@@ -972,12 +960,8 @@ class _LinkPreviewSettingsCardState
                     _proxyBusy || _proxyController.text.trim() == proxy
                         ? null
                         : () => _saveProxy(_proxyController.text),
-                child: _proxyBusy
-                    ? const SizedBox(
-                        width: 14,
-                        height: 14,
-                        child: CircularProgressIndicator(strokeWidth: 2))
-                    : const Text('Save'),
+                loading: _proxyBusy,
+                child: const Text('Save'),
               ),
             ],
           ),

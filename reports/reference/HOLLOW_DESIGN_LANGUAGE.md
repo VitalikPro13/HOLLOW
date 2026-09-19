@@ -239,7 +239,7 @@ Consequences worth stating, because these are the observed inconsistencies:
 - **An action row with no primary is all ghost.** A toolbar does not mix outline and ghost. Whether a button is outlined is never a per-site decision: it is outlined only when it stands next to a filled primary.
 - **A row that exists FOR one action** (wear a frame, unlink a device, a member card's action) carries it as a compact `outline`; the row's other actions stay ghost icons.
 - Buttons in a row are `sm` 8 apart. Always.
-- While a request runs the button shows **loading, not disabled**, and the success toast fires after the await.
+- While a request runs the button shows **loading, not disabled** (`HollowButton(loading: true)`: same width, same colours, a spinner in the variant foreground, presses ignored), and the success toast fires after the await.
 - An icon-only button carries a tooltip and a `semanticLabel`.
 
 ### 4.3 The rest
@@ -251,6 +251,8 @@ Consequences worth stating, because these are the observed inconsistencies:
 | `HollowDivider` | every inline `Divider(` (guarded at 0) | The hairline. Nothing else. No colour parameter. |
 | `HollowListRow` | ad hoc rows | Leading, title, subtitle, trailing. Hover on the whole row, no dead zone between rows. |
 | `HollowSkeleton` | none | Keeps the final geometry. Used only for 2 to 10 second loads. |
+| `HollowSpinner` | 127 raw `CircularProgressIndicator`s at six sizes (guarded) | Three sizes on the icon ramp: small 14 (a row, a button), medium 20 (a card or section), large 32 (a pane). `textSecondary` by default: a spinner reports a state, it is not an action, so it never takes the accent. Optional `value` for a determinate ring. |
+| `showHollowSheet()` + `HollowSheetHandle` | 29 hand-styled `showModalBottomSheet`s, each drawing its own handle (guarded) | `overlay` surface, `radiusXl` on the top corners, one handle with 8 px above and below. `scrollControlled` for tall content; a `DraggableScrollableSheet` passes `handle: false` and places the handle itself. |
 | `HollowCard` | itself | Only for a repeatable self-contained unit: a listing, a device, a news item. A settings group is not a card. A section is not a card. |
 
 **Cards.** A card is a background step (`elevated`) and nothing else: no hairline, no shadow, in both themes. Cards do not nest. A coloured strip on a card edge is forbidden; status is a dot or a word. Anything repeated more than three times is a list of `HollowListRow`, not a grid of cards, unless the item **is** the art (the Shop, a gallery), in which case the art is the card: full bleed, title and price beneath it.

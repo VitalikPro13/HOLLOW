@@ -214,38 +214,27 @@ class _SystemNotificationsCardState
                 state != NotificationPermissionState.granted)
               HollowButton.ghost(
                 onPressed: _busy != null ? null : _request,
-                icon: _spinnerOr(hollow, 'request', LucideIcons.bellRing),
+                loading: _busy == 'request',
+                icon: const Icon(LucideIcons.bellRing, size: 16),
                 child: const Text('Request permission'),
               ),
             if (info != null && info.canOpenSettings)
               HollowButton.ghost(
                 onPressed: _busy != null ? null : _openSettings,
-                icon: _spinnerOr(hollow, 'open', LucideIcons.externalLink),
+                loading: _busy == 'open',
+                icon: const Icon(LucideIcons.externalLink, size: 16),
                 child: const Text('Open system settings'),
               ),
             HollowButton.filled(
               onPressed: _busy != null ? null : _sendTest,
-              icon: _spinnerOr(hollow, 'test', LucideIcons.send),
+              loading: _busy == 'test',
+              icon: const Icon(LucideIcons.send, size: 16),
               child: const Text('Send a test notification'),
             ),
           ],
         ),
       ],
     );
-  }
-
-  Widget _spinnerOr(HollowTheme hollow, String tag, IconData icon) {
-    if (_busy == tag) {
-      return SizedBox(
-        width: 14,
-        height: 14,
-        child: CircularProgressIndicator(
-          strokeWidth: 2,
-          color: hollow.textSecondary,
-        ),
-      );
-    }
-    return Icon(icon, size: 16);
   }
 
   static String _statusLabel(NotificationPermissionState state) =>
@@ -773,16 +762,8 @@ class _MutedDmRowState extends ConsumerState<_MutedDmRow> {
           HollowButton.ghost(
             onPressed: _busy ? null : _unmute,
             compact: true,
-            icon: _busy
-                ? SizedBox(
-                    width: 14,
-                    height: 14,
-                    child: CircularProgressIndicator(
-                      strokeWidth: 2,
-                      color: hollow.textSecondary,
-                    ),
-                  )
-                : const Icon(LucideIcons.bell, size: 14),
+            loading: _busy,
+            icon: const Icon(LucideIcons.bell, size: 14),
             child: const Text('Unmute'),
           ),
         ],

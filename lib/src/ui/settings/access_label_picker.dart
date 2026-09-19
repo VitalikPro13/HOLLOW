@@ -7,6 +7,7 @@ import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_empty_state.dart';
+import 'package:hollow/src/ui/components/hollow_spinner.dart';
 import 'package:hollow/src/ui/components/label_visuals.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
@@ -77,7 +78,7 @@ class _AccessLabelPickerDialogState
           ),
           const SizedBox(height: HollowSpacing.md),
           if (labelsAsync.isLoading && accessLabels.isEmpty)
-            const Center(child: CircularProgressIndicator())
+            const Center(child: HollowSpinner.large())
           else if (accessLabels.isEmpty)
             Container(
               width: double.infinity,

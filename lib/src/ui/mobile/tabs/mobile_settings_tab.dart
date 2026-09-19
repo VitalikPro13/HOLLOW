@@ -84,6 +84,8 @@ import 'package:hollow/src/ui/chat/hollow_link_utils.dart';
 import 'package:hollow/src/core/providers/relay_status_provider.dart';
 import 'package:hollow/src/ui/components/relay_no_turn_chip.dart';
 import 'package:hollow/src/core/services/at_rest.dart';
+import 'package:hollow/src/ui/components/hollow_sheet.dart';
+import 'package:hollow/src/ui/components/hollow_spinner.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 class MobileSettingsTab extends ConsumerWidget {
@@ -1029,15 +1031,10 @@ class _ProfileTabState extends ConsumerState<_ProfileTab> {
                                     )
                                   : _bannerGradient(bannerColor),
                           if (_bannerBusy)
-                            Positioned(
+                            const Positioned(
                               top: HollowSpacing.xs,
                               right: HollowSpacing.xs,
-                              child: SizedBox(
-                                width: 14, height: 14,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2, color: hollow.textSecondary,
-                                ),
-                              ),
+                              child: HollowSpinner(),
                             ),
                         ],
                       ),
@@ -1081,15 +1078,10 @@ class _ProfileTabState extends ConsumerState<_ProfileTab> {
                               ),
                             ),
                             if (_avatarBusy)
-                              Positioned(
+                              const Positioned(
                                 right: 0,
                                 bottom: 0,
-                                child: SizedBox(
-                                  width: 14, height: 14,
-                                  child: CircularProgressIndicator(
-                                    strokeWidth: 2, color: hollow.textSecondary,
-                                  ),
-                                ),
+                                child: HollowSpinner(),
                               ),
                           ],
                         ),
@@ -1376,11 +1368,7 @@ class _TwitchRowState extends ConsumerState<_TwitchRow> {
           if (_busy)
             const Padding(
               padding: EdgeInsets.symmetric(horizontal: HollowSpacing.md),
-              child: SizedBox(
-                width: 14,
-                height: 14,
-                child: CircularProgressIndicator(strokeWidth: 2),
-              ),
+              child: HollowSpinner(),
             )
           else if (_connected) ...[
             if (_verifiedLogin == null)
@@ -3283,7 +3271,7 @@ class _SecurityTabState extends ConsumerState<_SecurityTab> {
     final hollow = HollowTheme.of(context);
 
     if (_loading) {
-      return const Center(child: CircularProgressIndicator());
+      return const Center(child: HollowSpinner.large());
     }
 
     return ListView(
@@ -3333,14 +3321,7 @@ class _SecurityTabState extends ConsumerState<_SecurityTab> {
                 ),
               ),
               if (_appLockBusy)
-                SizedBox(
-                  width: 18,
-                  height: 18,
-                  child: CircularProgressIndicator(
-                    strokeWidth: 2,
-                    color: hollow.accent,
-                  ),
-                )
+                const HollowSpinner()
               else
                 HollowButton.outline(
                   onPressed: _hasPassword ? _removeAppLock : _enableAppLock,
@@ -3562,27 +3543,12 @@ class _SecurityTabState extends ConsumerState<_SecurityTab> {
   /// Asks for the lock type; null when the sheet is dismissed.
   Future<String?> _chooseLockType() async {
     final hollow = HollowTheme.of(context);
-    return showModalBottomSheet<String>(
+    return showHollowSheet<String>(
       context: context,
-      backgroundColor: hollow.overlay,
-      shape: RoundedRectangleBorder(
-        borderRadius:
-            BorderRadius.vertical(top: Radius.circular(hollow.radiusXl)),
-      ),
       builder: (ctx) => SafeArea(
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const SizedBox(height: HollowSpacing.sm),
-            Container(
-              width: 32,
-              height: 4,
-              decoration: BoxDecoration(
-                color: hollow.border,
-                borderRadius: BorderRadius.circular(2),
-              ),
-            ),
-            const SizedBox(height: HollowSpacing.lg),
             Text('Choose lock type',
                 style: HollowTypography.subheading
                     .copyWith(color: hollow.textPrimary)),
@@ -3824,7 +3790,6 @@ class _BackupExportButtonState extends ConsumerState<_BackupExportButton> {
 
   @override
   Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -3841,16 +3806,10 @@ class _BackupExportButtonState extends ConsumerState<_BackupExportButton> {
         const SizedBox(height: HollowSpacing.sm),
         HollowButton.outline(
           onPressed: _busy ? null : _export,
+          loading: _busy,
           expand: true,
-          icon: _busy
-              ? SizedBox(
-                  width: 16,
-                  height: 16,
-                  child: CircularProgressIndicator(
-                    strokeWidth: 2, color: hollow.accent),
-                )
-              : const Icon(LucideIcons.download, size: 16),
-          child: Text(_busy ? 'Exporting…' : 'Export backup'),
+          icon: const Icon(LucideIcons.download, size: 16),
+          child: const Text('Export backup'),
         ),
       ],
     );
@@ -4175,13 +4134,9 @@ class _AboutTab extends ConsumerWidget {
 
         const HollowSectionHeader('News'),
         if (!newsState.hasFetched)
-          Padding(
-            padding: const EdgeInsets.all(HollowSpacing.lg),
-            child: Center(child: SizedBox(
-              width: 20, height: 20,
-              child: CircularProgressIndicator(
-                strokeWidth: 2, color: hollow.accent),
-            )),
+          const Padding(
+            padding: EdgeInsets.all(HollowSpacing.lg),
+            child: Center(child: HollowSpinner.medium()),
           )
         else if (newsState.posts.isEmpty)
           const HollowEmptyState(dense: true, title: 'No news yet')
@@ -4336,14 +4291,10 @@ class _AboutTab extends ConsumerWidget {
 
     if (!context.mounted) return;
 
-    showModalBottomSheet(
+    showHollowSheet(
       context: context,
-      isScrollControlled: true,
-      backgroundColor: hollow.overlay,
-      shape: RoundedRectangleBorder(
-        borderRadius:
-            BorderRadius.vertical(top: Radius.circular(hollow.radiusXl)),
-      ),
+      scrollControlled: true,
+      handle: false,
       builder: (_) => DraggableScrollableSheet(
         initialChildSize: 0.85,
         minChildSize: 0.5,
@@ -4351,17 +4302,7 @@ class _AboutTab extends ConsumerWidget {
         expand: false,
         builder: (context, scrollController) => Column(
           children: [
-            Padding(
-              padding: const EdgeInsets.only(top: HollowSpacing.sm),
-              child: Container(
-                width: 32,
-                height: 4,
-                decoration: BoxDecoration(
-                  color: hollow.border,
-                  borderRadius: BorderRadius.circular(2),
-                ),
-              ),
-            ),
+            const HollowSheetHandle(),
             Padding(
               padding: const EdgeInsets.all(HollowSpacing.md),
               child: Text(

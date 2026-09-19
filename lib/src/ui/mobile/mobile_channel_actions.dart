@@ -7,6 +7,7 @@ import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
+import 'package:hollow/src/ui/components/hollow_sheet.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/settings/access_label_picker.dart';
@@ -21,14 +22,9 @@ void showMobileChannelActions({
   required bool canManage,
   VoidCallback? onChanged,
 }) {
-  final hollow = HollowTheme.of(context);
-  showModalBottomSheet(
+  showHollowSheet(
     context: context,
-    backgroundColor: hollow.overlay,
-    isScrollControlled: true,
-    shape: RoundedRectangleBorder(
-      borderRadius: BorderRadius.vertical(top: Radius.circular(hollow.radiusXl)),
-    ),
+    scrollControlled: true,
     builder: (_) => _ChannelActionsSheet(
       serverId: serverId,
       channel: channel,
@@ -80,18 +76,6 @@ class _ChannelActionsSheetState extends State<_ChannelActionsSheet> {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Padding(
-            padding: const EdgeInsets.only(top: HollowSpacing.sm),
-            child: Container(
-              width: 32,
-              height: 4,
-              decoration: BoxDecoration(
-                color: hollow.border,
-                borderRadius: BorderRadius.circular(2),
-              ),
-            ),
-          ),
-          const SizedBox(height: HollowSpacing.sm),
           AnimatedSize(
             duration: const Duration(milliseconds: 200),
             curve: Curves.easeOutCubic,

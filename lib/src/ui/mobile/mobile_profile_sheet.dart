@@ -33,6 +33,7 @@ import 'package:hollow/src/ui/dialogs/report_user_dialog.dart';
 import 'package:hollow/src/ui/mobile/mobile_chat_route.dart';
 import 'package:hollow/src/ui/mobile/mobile_page_route.dart';
 import 'package:hollow/src/core/brand_icons.dart';
+import 'package:hollow/src/ui/components/hollow_sheet.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:url_launcher/url_launcher.dart';
 
@@ -48,14 +49,9 @@ void showMobileProfileSheet(
   String? role,
   List<crdt_api.LabelFfi>? labels,
 }) {
-  final hollow = HollowTheme.of(context);
-  showModalBottomSheet(
+  showHollowSheet(
     context: context,
-    backgroundColor: hollow.overlay,
-    isScrollControlled: true,
-    shape: RoundedRectangleBorder(
-      borderRadius: BorderRadius.vertical(top: Radius.circular(hollow.radiusXl)),
-    ),
+    scrollControlled: true,
     builder: (_) => MobileProfileSheet(
       peerId: peerId,
       role: role,
@@ -126,16 +122,6 @@ class MobileProfileSheet extends ConsumerWidget {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Padding(
-              padding: const EdgeInsets.only(top: HollowSpacing.sm),
-              child: Container(
-                width: 32, height: 4,
-                decoration: BoxDecoration(
-                  color: hollow.border,
-                  borderRadius: BorderRadius.circular(2),
-                ),
-              ),
-            ),
             Flexible(
               child: SingleChildScrollView(
       child: Column(
@@ -145,7 +131,6 @@ class MobileProfileSheet extends ConsumerWidget {
         // banner surface shares. Only the HEIGHT is a target, so an older 3:1
         // banner still decodes at its own aspect instead of being squashed
         // before BoxFit.cover sees it.
-        const SizedBox(height: HollowSpacing.sm),
         LayoutBuilder(
           builder: (context, constraints) {
             final width = constraints.maxWidth.isFinite

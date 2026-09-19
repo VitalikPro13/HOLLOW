@@ -8,6 +8,7 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
+import 'package:hollow/src/ui/components/hollow_spinner.dart';
 
 /// Shows a crop dialog, returning the cropped region as raw PNG bytes or null.
 ///
@@ -319,18 +320,11 @@ class _ImageCropDialogState extends State<_ImageCropDialog> {
                           ],
                         ),
                       )
-                    : SizedBox(
+                    : const SizedBox(
                         width: 300,
                         height: 200,
                         child: Center(
-                          child: SizedBox(
-                            width: 24,
-                            height: 24,
-                            child: CircularProgressIndicator(
-                              strokeWidth: 2,
-                              color: hollow.accent,
-                            ),
-                          ),
+                          child: HollowSpinner.large(),
                         ),
                       ),
               ),

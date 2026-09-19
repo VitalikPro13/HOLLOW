@@ -313,16 +313,7 @@ class _OwnedItemRowState extends ConsumerState<_OwnedItemRow> {
                           onPressed:
                               _busyKind == null ? () => _wear(kind) : null,
                           compact: true,
-                          icon: _busyKind == kind
-                              ? SizedBox(
-                                  width: 14,
-                                  height: 14,
-                                  child: CircularProgressIndicator(
-                                    strokeWidth: 2,
-                                    color: hollow.textSecondary,
-                                  ),
-                                )
-                              : null,
+                          loading: _busyKind == kind,
                           child: Text(wearKindLabel(kind)),
                         ),
                   ],
@@ -836,16 +827,7 @@ class _CredentialRowState extends ConsumerState<_CredentialRow> {
         HollowButton.ghost(
           onPressed: _busy ? null : _remove,
           compact: true,
-          icon: _busy
-              ? SizedBox(
-                  width: 14,
-                  height: 14,
-                  child: CircularProgressIndicator(
-                    strokeWidth: 2,
-                    color: hollow.textSecondary,
-                  ),
-                )
-              : null,
+          loading: _busy,
           child: const Text('Remove'),
         ),
       ],

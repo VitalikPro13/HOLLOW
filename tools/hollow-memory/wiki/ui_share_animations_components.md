@@ -144,7 +144,7 @@ File: `lib/src/ui/share/paste_link_dialog.dart`
 - Watches `shareTabProvider` for `pendingManifests[_rootHash]`.
 - When manifest arrives: cancels countdown, transitions to confirm state, populates file info.
 - 10-second timeout: cleans up, returns to input state with "No seeders found" error.
-- Shows `CircularProgressIndicator` (24x24, strokeWidth 2) + "Looking for seeders... {remaining}s".
+- Shows `HollowSpinner.medium()` + "Looking for seeders... {remaining}s".
 
 ### Confirm State
 
@@ -221,7 +221,7 @@ On error: shows error toast "Could not open folder".
 
 **Indicator states:**
 - Completed: green checkmark on `success` at 12% alpha background.
-- In-progress: `CircularProgressIndicator` (32x32, strokeWidth 2.5) with percentage text (8px, w600) centered inside.
+- In-progress: `HollowSpinner.large(value:)` with percentage text (8px, w600) centered inside.
 - Failed: progress ring in `hollow.error` color.
 
 **Details:** File name + status line:

@@ -285,19 +285,10 @@ class _ExportArchiveDialogContentState
         const SizedBox(width: HollowSpacing.sm),
         HollowButton.filled(
           onPressed: _exporting ? null : _export,
-          icon: _exporting
-              ? SizedBox(
-                  width: 14,
-                  height: 14,
-                  child: CircularProgressIndicator(
-                    strokeWidth: 2,
-                    valueColor:
-                        AlwaysStoppedAnimation(hollow.textOnAccent),
-                  ),
-                )
-              : Icon(LucideIcons.fileOutput,
-                  size: 14, color: hollow.textOnAccent),
-          child: Text(_exporting ? 'Exporting...' : 'Export & Sign'),
+          loading: _exporting,
+          icon: Icon(LucideIcons.fileOutput,
+              size: 14, color: hollow.textOnAccent),
+          child: const Text('Export & Sign'),
         ),
       ],
     );

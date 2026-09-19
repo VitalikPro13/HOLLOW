@@ -7,6 +7,7 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:hollow/src/ui/components/hollow_spinner.dart';
 
 /// Compose-box staged link preview card, shown above the input bar while the
 /// message being typed carries a URL.
@@ -106,16 +107,7 @@ class StagedLinkPreviewCard extends StatelessWidget {
         borderRadius: BorderRadius.circular(hollow.radiusMd),
       ),
       child: loading
-          ? Center(
-              child: SizedBox(
-                width: 18,
-                height: 18,
-                child: CircularProgressIndicator(
-                  strokeWidth: 2,
-                  color: hollow.accent,
-                ),
-              ),
-            )
+          ? const Center(child: HollowSpinner())
           : Icon(LucideIcons.link2, color: hollow.textSecondary, size: 20),
     );
   }

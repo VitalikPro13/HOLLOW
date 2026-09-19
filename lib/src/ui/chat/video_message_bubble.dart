@@ -31,6 +31,7 @@ import 'package:hollow/src/ui/media/media_item.dart';
 import 'package:hollow/src/ui/media/media_viewer_controls.dart';
 import 'package:hollow/src/ui/media/media_playback_session.dart';
 import 'package:hollow/src/ui/media/media_viewer_route.dart';
+import 'package:hollow/src/ui/components/hollow_spinner.dart';
 
 /// Renders a video attachment inline in a message bubble.
 ///
@@ -525,16 +526,7 @@ class _VideoMessageBubbleState extends ConsumerState<VideoMessageBubble> {
                       mainAxisSize: MainAxisSize.min,
                       children: [
                         if (control == FileCardControl.busy)
-                          SizedBox(
-                            width: 32,
-                            height: 32,
-                            child: CircularProgressIndicator(
-                              strokeWidth: 3,
-                              valueColor:
-                                  AlwaysStoppedAnimation(hollow.textSecondary),
-                              backgroundColor: Colors.white24,
-                            ),
-                          )
+                          const HollowSpinner.large()
                         else
                           Icon(LucideIcons.cloudOff,
                               color: hollow.textSecondary, size: 32),
@@ -553,14 +545,9 @@ class _VideoMessageBubbleState extends ConsumerState<VideoMessageBubble> {
               // buttons occupy, so the swap never reads as a different widget.
               Center(
                 child: _CenterCircle(
-                  child: Padding(
-                    padding: const EdgeInsets.all(16),
-                    child: CircularProgressIndicator(
-                      value: progress > 0 ? progress.clamp(0.0, 1.0) : null,
-                      strokeWidth: 3,
-                      valueColor: const AlwaysStoppedAnimation(Colors.white),
-                      backgroundColor: Colors.white24,
-                    ),
+                  child: HollowSpinner.large(
+                    value: progress > 0 ? progress.clamp(0.0, 1.0) : null,
+                    color: Colors.white, // design-ignore: over video
                   ),
                 ),
               )
@@ -655,15 +642,7 @@ class _VideoMessageBubbleState extends ConsumerState<VideoMessageBubble> {
         Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            SizedBox(
-              width: 48,
-              height: 48,
-              child: CircularProgressIndicator(
-                strokeWidth: 3,
-                valueColor: AlwaysStoppedAnimation(hollow.accent),
-                backgroundColor: Colors.white24,
-              ),
-            ),
+            const HollowSpinner.large(color: Colors.white), // design-ignore: over video
             const SizedBox(height: HollowSpacing.md),
             Text(
               phase,
@@ -1097,11 +1076,7 @@ class _KeepAndSeedButtonState extends ConsumerState<_KeepAndSeedButton> {
           mainAxisSize: MainAxisSize.min,
           children: [
             if (_loading)
-              const SizedBox(
-                width: 12, height: 12,
-                child: CircularProgressIndicator(
-                  strokeWidth: 1.5, color: Colors.white),
-              )
+              const HollowSpinner(color: Colors.white) // design-ignore: over video
             else
               Icon(
                 seeding ? LucideIcons.check : (kept ? LucideIcons.pause : LucideIcons.hardDrive),

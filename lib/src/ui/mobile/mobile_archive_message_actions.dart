@@ -4,6 +4,7 @@ import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
+import 'package:hollow/src/ui/components/hollow_sheet.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 void showMobileArchiveMessageActions({
@@ -15,14 +16,8 @@ void showMobileArchiveMessageActions({
   VoidCallback? onDownload,
   VoidCallback? onInfo,
 }) {
-  final hollow = HollowTheme.of(context);
-  showModalBottomSheet(
+  showHollowSheet(
     context: context,
-    backgroundColor: hollow.overlay,
-    shape: RoundedRectangleBorder(
-      borderRadius:
-          BorderRadius.vertical(top: Radius.circular(hollow.radiusXl)),
-    ),
     builder: (_) => _ArchiveActionsSheet(
       messageText: messageText,
       senderName: senderName,
@@ -136,19 +131,6 @@ class _ArchiveActionsSheetState extends State<_ArchiveActionsSheet>
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Padding(
-            padding: const EdgeInsets.only(top: HollowSpacing.sm),
-            child: Container(
-              width: 32,
-              height: 4,
-              decoration: BoxDecoration(
-                color: hollow.border,
-                borderRadius: BorderRadius.circular(2),
-              ),
-            ),
-          ),
-          const SizedBox(height: HollowSpacing.sm),
-
           _stagger(0, child: Padding(
             padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.md),
             child: Container(

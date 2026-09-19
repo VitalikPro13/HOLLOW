@@ -14,6 +14,7 @@ import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/overlay_anchor.dart';
 import 'package:hollow/src/ui/components/overlay_hosts.dart';
 import 'package:hollow/src/ui/media/media_zoom_math.dart';
+import 'package:hollow/src/ui/components/hollow_spinner.dart';
 
 /// One control of the viewer's bars, and the same row of the overflow menu.
 @immutable
@@ -63,16 +64,13 @@ class MediaControlButton extends StatelessWidget {
       semanticLabel: spec.label,
       borderRadius: BorderRadius.circular(hollow.radiusMd),
       padding: const EdgeInsets.all(HollowSpacing.sm),
+      // The spinner keeps the icon's box so the control row never shifts.
       child: spec.busy
-          ? SizedBox(
-              width: 18,
-              height: 18,
-              child: CircularProgressIndicator(
-                strokeWidth: 2,
-                valueColor: AlwaysStoppedAnimation(hollow.accent),
-              ),
+          ? SizedBox.square(
+              dimension: _controlIconSize,
+              child: Center(child: HollowSpinner(color: color)),
             )
-          : Icon(spec.icon, size: 18, color: color),
+          : Icon(spec.icon, size: _controlIconSize, color: color),
     );
   }
 }
@@ -619,3 +617,5 @@ class _VerticalVolumePopoverState extends State<VerticalVolumePopover> {
     );
   }
 }
+
+const double _controlIconSize = 18;

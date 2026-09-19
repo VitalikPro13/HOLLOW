@@ -147,24 +147,14 @@ class _ImportedPackDialogState extends ConsumerState<_ImportedPackDialog> {
     required String label,
     required Set<String> kinds,
     required bool filled,
-    required HollowTheme hollow,
   }) {
     final busy = _busyKey == key;
-    final icon = busy
-        ? SizedBox(
-            width: 14,
-            height: 14,
-            child: CircularProgressIndicator(
-              strokeWidth: 2,
-              color: hollow.textSecondary,
-            ),
-          )
-        : null;
     final onPressed = _busyKey == null ? () => _wear(key, kinds) : null;
     final child = Text(label);
     return filled
-        ? HollowButton.filled(onPressed: onPressed, icon: icon, child: child)
-        : HollowButton.outline(onPressed: onPressed, icon: icon, child: child);
+        ? HollowButton.filled(onPressed: onPressed, loading: busy, child: child)
+        : HollowButton.outline(
+            onPressed: onPressed, loading: busy, child: child);
   }
 
   @override
@@ -239,7 +229,6 @@ class _ImportedPackDialogState extends ConsumerState<_ImportedPackDialog> {
             kinds: {kind},
             // With more than one kind, "Wear all" becomes the primary action.
             filled: kinds.length == 1,
-            hollow: hollow,
           ),
         if (kinds.length >= 2)
           _wearButton(
@@ -247,7 +236,6 @@ class _ImportedPackDialogState extends ConsumerState<_ImportedPackDialog> {
             label: 'Wear all',
             kinds: kinds.toSet(),
             filled: true,
-            hollow: hollow,
           ),
       ],
     );

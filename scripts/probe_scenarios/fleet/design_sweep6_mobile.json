@@ -1,0 +1,196 @@
+{
+  "_": [
+    "Design sweep 6, the mobile half: the bottom sheets that became",
+    "showHollowSheet (one surface, one radius, one drag handle).",
+    "",
+    "One peer creates a throwaway server, opens the server sheet and a channel",
+    "sheet from the chats tab, then sends itself a note in Saved messages and",
+    "opens the message actions sheet on it. Shot on the unswept commit first,",
+    "then with the sweep applied, and stacked.",
+    "",
+    "Traps: after dismissing a sheet wait for its barrier to go before the next",
+    "tap; the composer's send button has no semantics label here, so it is",
+    "tapped by position (402x874 logical).",
+    "The channel list expands on a tap but loads `general` late and a tap can land mid-toggle, so the channel sheet steps are soft; the sheet shares showHollowSheet with the other two.",
+    "",
+    "",
+    "run (on the Mac mini): pwsh scripts/fleet.ps1 -Scenario design_sweep6_mobile -Peers a"
+  ],
+  "peers": [
+    "a"
+  ],
+  "steps": [
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "semantics:New conversation",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 1000
+    },
+    {
+      "peer": "a",
+      "op": "enter_text",
+      "target": "hint:Server name",
+      "value": "sweep6"
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "text:Create",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "target": "text:sweep6",
+      "timeout_ms": 30000
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 1500
+    },
+    {
+      "peer": "a",
+      "op": "long_press",
+      "target": "text:sweep6",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 1200
+    },
+    {
+      "peer": "a",
+      "op": "shot",
+      "name": "m6-01-server-sheet"
+    },
+    {
+      "peer": "a",
+      "op": "tap_at",
+      "x": 200,
+      "y": 120
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 1500
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "text:sweep6",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 1500
+    },
+    {
+      "peer": "a",
+      "op": "long_press",
+      "target": "text:general",
+      "index": 0,
+      "soft": true
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 1200
+    },
+    {
+      "peer": "a",
+      "op": "shot",
+      "name": "m6-02-channel-sheet",
+      "soft": true
+    },
+    {
+      "peer": "a",
+      "op": "tap_at",
+      "x": 200,
+      "y": 120
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 1500
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "text:Saved messages",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 2500
+    },
+    {
+      "peer": "a",
+      "op": "enter_text",
+      "target": "hint:Type a message...",
+      "value": "sheet probe"
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 500
+    },
+    {
+      "peer": "a",
+      "op": "tap_at",
+      "x": 374,
+      "y": 811
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 1500
+    },
+    {
+      "peer": "a",
+      "op": "long_press",
+      "target": "text:sheet probe",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 1200
+    },
+    {
+      "peer": "a",
+      "op": "shot",
+      "name": "m6-03-message-sheet"
+    },
+    {
+      "peer": "a",
+      "op": "theme",
+      "value": "light",
+      "frames": 30
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 600
+    },
+    {
+      "peer": "a",
+      "op": "shot",
+      "name": "m6-04-message-sheet-light"
+    },
+    {
+      "peer": "a",
+      "op": "theme",
+      "value": "dark",
+      "frames": 30
+    }
+  ]
+}

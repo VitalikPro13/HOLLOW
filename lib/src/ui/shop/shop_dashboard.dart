@@ -14,6 +14,7 @@ import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/animated_gif_image.dart';
 import 'package:hollow/src/ui/components/avatar_frame.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
+import 'package:hollow/src/ui/components/hollow_spinner.dart';
 import 'package:hollow/src/ui/components/hover_scope.dart';
 import 'package:hollow/src/ui/components/hollow_badge.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
@@ -290,12 +291,7 @@ class _ShopDashboardState extends ConsumerState<ShopDashboard> {
         _artistStrip(hollow),
         Expanded(
           child: catalog.when(
-            loading: () => Center(
-              child: CircularProgressIndicator(
-                strokeWidth: 2,
-                color: hollow.accent,
-              ),
-            ),
+            loading: () => const Center(child: HollowSpinner.large()),
             error: (error, _) => _buildError(hollow, error),
             data: (data) => _buildGrid(hollow, data),
           ),

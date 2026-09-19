@@ -12,6 +12,7 @@ import 'package:hollow/src/ui/components/hollow_toggle.dart';
 import 'package:hollow/src/ui/components/hollow_tooltip.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:hollow/src/ui/components/overlay_hosts.dart';
+import 'package:hollow/src/ui/components/hollow_sheet.dart';
 
 /// Volume button for the screen-share control bars, opening the share-audio
 /// panel as a desktop popover or a mobile sheet.
@@ -122,37 +123,17 @@ class ShareVolumeButton extends ConsumerWidget {
 
 /// Mobile bottom sheet hosting the share-audio panel.
 Future<void> showShareVolumeSheet(BuildContext context) {
-  final hollow = HollowTheme.of(context);
-  return showModalBottomSheet<void>(
+  return showHollowSheet<void>(
     context: context,
-    backgroundColor: hollow.overlay,
-    shape: RoundedRectangleBorder(
-      borderRadius:
-          BorderRadius.vertical(top: Radius.circular(hollow.radiusXl)),
-    ),
-    builder: (_) => SafeArea(
+    builder: (_) => const SafeArea(
       child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.lg),
+        padding: EdgeInsets.symmetric(horizontal: HollowSpacing.lg),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Center(
-              child: Padding(
-                padding: const EdgeInsets.only(top: HollowSpacing.sm),
-                child: Container(
-                  width: 32,
-                  height: 4,
-                  decoration: BoxDecoration(
-                    color: hollow.border,
-                    borderRadius: BorderRadius.circular(2),
-                  ),
-                ),
-              ),
-            ),
-            const SizedBox(height: HollowSpacing.lg),
-            const ShareVolumePanel(),
-            const SizedBox(height: HollowSpacing.md),
+            ShareVolumePanel(),
+            SizedBox(height: HollowSpacing.md),
           ],
         ),
       ),

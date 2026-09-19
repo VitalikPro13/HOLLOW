@@ -19,17 +19,15 @@ import 'package:hollow/src/ui/components/hollow_section_header.dart';
 import 'package:hollow/src/ui/components/status_dot.dart';
 import 'package:hollow/src/ui/mobile/mobile_profile_sheet.dart';
 import 'package:hollow/src/core/brand_icons.dart';
+import 'package:hollow/src/ui/components/hollow_sheet.dart';
+import 'package:hollow/src/ui/components/hollow_spinner.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 void showMobileMemberPanel(BuildContext context, String serverId) {
-  final hollow = HollowTheme.of(context);
-  showModalBottomSheet(
+  showHollowSheet(
     context: context,
-    backgroundColor: hollow.overlay,
-    isScrollControlled: true,
-    shape: RoundedRectangleBorder(
-      borderRadius: BorderRadius.vertical(top: Radius.circular(hollow.radiusXl)),
-    ),
+    scrollControlled: true,
+    handle: false,
     builder: (_) => DraggableScrollableSheet(
       initialChildSize: 0.5,
       minChildSize: 0.3,
@@ -81,16 +79,7 @@ class _MemberPanelContent extends ConsumerWidget {
 
     return Column(
       children: [
-        Padding(
-          padding: const EdgeInsets.only(top: HollowSpacing.sm, bottom: HollowSpacing.sm),
-          child: Container(
-            width: 32, height: 4,
-            decoration: BoxDecoration(
-              color: hollow.border,
-              borderRadius: BorderRadius.circular(2),
-            ),
-          ),
-        ),
+        const HollowSheetHandle(),
 
         const Padding(
           padding: EdgeInsets.only(
@@ -103,7 +92,7 @@ class _MemberPanelContent extends ConsumerWidget {
 
         Expanded(
           child: membersAsync.when(
-            loading: () => const Center(child: CircularProgressIndicator()),
+            loading: () => const Center(child: HollowSpinner.large()),
             error: (_, _) => Center(
               child: Text('Failed to load members',
                   style: HollowTypography.body.copyWith(color: hollow.textSecondary)),

@@ -32,6 +32,7 @@ import 'package:hollow/src/ui/media/media_viewer_scope.dart';
 import 'package:hollow/src/ui/dialogs/message_proof_dialog.dart';
 import 'package:hollow/src/core/services/attachment_export.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:hollow/src/ui/components/hollow_spinner.dart';
 
 /// Two-panel layout for "Imported Archives" sub-tab.
 class ImportedArchivesView extends ConsumerWidget {
@@ -146,12 +147,7 @@ class _ImportedArchiveListState extends ConsumerState<_ImportedArchiveList> {
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
                   if (_loading)
-                    SizedBox(
-                      width: 14,
-                      height: 14,
-                      child: CircularProgressIndicator(
-                          strokeWidth: 2, color: hollow.accent),
-                    )
+                    const HollowSpinner()
                   else
                     Icon(LucideIcons.folderOpen,
                         size: 14, color: hollow.accent),
@@ -176,7 +172,7 @@ class _ImportedArchiveListState extends ConsumerState<_ImportedArchiveList> {
               children: [
                 pathsAsync.when(
                   loading: () =>
-                      const Center(child: CircularProgressIndicator()),
+                      const Center(child: HollowSpinner.large()),
                   error: (e, _) => Center(
                     child: Text('Error: $e',
                         style: TextStyle(color: hollow.error)),
@@ -288,10 +284,7 @@ class _ArchiveEntryCard extends ConsumerWidget {
           child: verifyAsync.when(
             loading: () => Row(
               children: [
-                const SizedBox(
-                    width: 14,
-                    height: 14,
-                    child: CircularProgressIndicator(strokeWidth: 2)),
+                const HollowSpinner(),
                 const SizedBox(width: HollowSpacing.sm),
                 Expanded(
                   child: Text(fileName,
@@ -472,7 +465,7 @@ class _ImportedArchiveViewer extends ConsumerWidget {
     return Container(
       color: hollow.background,
       child: dataAsync.when(
-        loading: () => const Center(child: CircularProgressIndicator()),
+        loading: () => const Center(child: HollowSpinner.large()),
         error: (e, _) => Center(
           child: Text('Failed to load archive: $e',
               style: TextStyle(color: hollow.error)),

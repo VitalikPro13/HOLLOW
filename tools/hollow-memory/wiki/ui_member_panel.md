@@ -111,7 +111,7 @@ Two rendering paths for online members:
 
 ### Empty/Error States
 - Empty members: centered "No members" text
-- Loading: centered 24px `CircularProgressIndicator` (strokeWidth 2)
+- Loading: centered `HollowSpinner.large()`
 - Error: centered "Failed to load members" text
 
 ## _PeerMemberContent — DM/Home Peer List

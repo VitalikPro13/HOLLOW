@@ -15,6 +15,7 @@ import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'guides_models.dart';
+import 'package:hollow/src/ui/components/hollow_spinner.dart';
 
 /// Width of the desktop Help slide-out panel.
 const double kHelpPanelWidth = 340;
@@ -151,13 +152,7 @@ class _HelpResourceCenterState extends ConsumerState<HelpResourceCenter> {
 
     return SafeArea(
       child: manifestAsync.when(
-        loading: () => const Center(
-          child: SizedBox(
-            width: 22,
-            height: 22,
-            child: CircularProgressIndicator(strokeWidth: 2),
-          ),
-        ),
+        loading: () => const Center(child: HollowSpinner.large()),
         error: (_, _) => _HelpError(onClose: widget.onClose),
         data: (manifest) {
           // Expand the first module by default, once.

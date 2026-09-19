@@ -19,6 +19,7 @@ import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_section_header.dart';
+import 'package:hollow/src/ui/components/hollow_spinner.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -416,23 +417,13 @@ class _ShowcaseEditorDialogState extends ConsumerState<_ShowcaseEditorDialog> {
         ),
         HollowButton.filled(
           onPressed: _busy ? null : _save,
-          child: _busy ? _savingSpinner(hollow) : const Text('Save'),
+          loading: _busy,
+          child: const Text('Save'),
         ),
       ],
     );
   }
 }
-
-/// In-button progress for a Save that is finishing background bakes or the
-/// profile write.
-Widget _savingSpinner(HollowTheme hollow) => SizedBox(
-      width: 14,
-      height: 14,
-      child: CircularProgressIndicator(
-        strokeWidth: 2,
-        color: hollow.textOnAccent,
-      ),
-    );
 
 /// One side's block list.
 class _SideEditor extends StatelessWidget {
@@ -523,13 +514,8 @@ class _SideEditor extends StatelessWidget {
               ? null
               : onAddBlock,
           compact: true,
-          icon: busy
-              ? const SizedBox(
-                  width: 12,
-                  height: 12,
-                  child: CircularProgressIndicator(strokeWidth: 2),
-                )
-              : const Icon(LucideIcons.plus),
+          loading: busy,
+          icon: const Icon(LucideIcons.plus),
           child: const Text('Add Block'),
         ),
       ],
@@ -913,13 +899,7 @@ class _GamePickerDialogState extends State<_GamePickerDialog> {
           if (_searching)
             const Padding(
               padding: EdgeInsets.all(HollowSpacing.lg),
-              child: Center(
-                child: SizedBox(
-                  width: 18,
-                  height: 18,
-                  child: CircularProgressIndicator(strokeWidth: 2),
-                ),
-              ),
+              child: Center(child: HollowSpinner()),
             )
           else if (_error != null)
             Padding(
@@ -1228,7 +1208,8 @@ class _ShelfEditorDialogState extends State<_ShelfEditorDialog> {
         ),
         HollowButton.filled(
           onPressed: _games.isEmpty || _saving ? null : _save,
-          child: _saving ? _savingSpinner(hollow) : const Text('Save'),
+          loading: _saving,
+          child: const Text('Save'),
         ),
       ],
     );

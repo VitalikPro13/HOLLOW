@@ -13,6 +13,7 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
+import 'package:hollow/src/ui/components/hollow_spinner.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/mobile/mobile_page_route.dart';
@@ -235,17 +236,10 @@ class _VerifyContactBodyState extends ConsumerState<VerifyContactBody> {
         if (_error != null)
           _ErrorBox(hollow: hollow, message: _error!)
         else if (_number == null)
-          Padding(
-            padding: const EdgeInsets.symmetric(vertical: HollowSpacing.xl),
+          const Padding(
+            padding: EdgeInsets.symmetric(vertical: HollowSpacing.xl),
             child: Center(
-              child: SizedBox(
-                width: 22,
-                height: 22,
-                child: CircularProgressIndicator(
-                  strokeWidth: 2,
-                  color: hollow.accent,
-                ),
-              ),
+              child: HollowSpinner.medium(),
             ),
           )
         else ...[
@@ -509,14 +503,7 @@ class _VerifiedRow extends StatelessWidget {
           ),
           const SizedBox(width: HollowSpacing.sm),
           if (busy)
-            SizedBox(
-              width: 18,
-              height: 18,
-              child: CircularProgressIndicator(
-                strokeWidth: 2,
-                color: hollow.accent,
-              ),
-            )
+            const HollowSpinner()
           else if (isVerified)
             HollowButton.ghost(
               onPressed: () => onChanged(false),

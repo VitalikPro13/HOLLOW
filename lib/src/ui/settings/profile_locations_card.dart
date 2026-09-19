@@ -16,6 +16,7 @@ import 'package:hollow/src/ui/components/hollow_badge.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_section_header.dart';
+import 'package:hollow/src/ui/components/hollow_spinner.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -368,16 +369,7 @@ class _ProfileLocationsCardState extends State<ProfileLocationsCard> {
               'stays on disk. Identity protection via the OS keychain holds '
               'only one identity per computer. Use password protection for '
               'additional profiles.',
-          action: _busy
-              ? SizedBox(
-                  width: 14,
-                  height: 14,
-                  child: CircularProgressIndicator(
-                    strokeWidth: 2,
-                    color: hollow.textSecondary,
-                  ),
-                )
-              : null,
+          action: _busy ? const HollowSpinner() : null,
         ),
         if (_envOverrideActive) ...[
           Text(

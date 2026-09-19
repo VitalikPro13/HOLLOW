@@ -165,7 +165,7 @@ live DS3 full payload + cache-hit path + Zelda TOTK no-Steam degrade.
   "No games found for 'q'" empty state — the empty state is gated on the
   last COMPLETED query matching the current field text, so it never flashes
   while the debounce is pending. **Save spinners**: both Save buttons
-  (editor + shelf) show `_savingSpinner` (textOnAccent, 14px) and disable
+  (editor + shelf) show `HollowButton(loading: _saving)` and disable
   while awaiting `_pendingBakes` AND the profile write; the size-check
   early-returns and a failed `updateShowcaseBoard` reset `_busy` (toast) —
   previously wedge paths.

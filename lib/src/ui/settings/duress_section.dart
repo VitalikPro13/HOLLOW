@@ -12,6 +12,7 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
+import 'package:hollow/src/ui/components/hollow_spinner.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/hollow_toggle.dart';
@@ -116,14 +117,9 @@ class _DuressCodeCardState extends ConsumerState<DuressCodeCard> {
           style: HollowTypography.body
               .copyWith(color: hollow.textSecondary, fontSize: 12),
         ),
-      _ => Padding(
-          padding: const EdgeInsets.all(HollowSpacing.sm),
-          child: SizedBox(
-            width: 18,
-            height: 18,
-            child:
-                CircularProgressIndicator(strokeWidth: 2, color: hollow.accent),
-          ),
+      _ => const Padding(
+          padding: EdgeInsets.all(HollowSpacing.sm),
+          child: HollowSpinner(),
         ),
     };
   }
@@ -164,9 +160,8 @@ class _DuressCodeCardState extends ConsumerState<DuressCodeCard> {
           const SizedBox(height: HollowSpacing.md),
           HollowButton.outline(
             onPressed: _busy ? null : _setCode,
-            icon: _busy
-                ? _spinner(hollow.accent)
-                : const Icon(LucideIcons.shieldAlert, size: 16),
+            loading: _busy,
+            icon: const Icon(LucideIcons.shieldAlert, size: 16),
             child: const Text('Set a duress code'),
           ),
         ],
@@ -222,9 +217,8 @@ class _DuressCodeCardState extends ConsumerState<DuressCodeCard> {
           children: [
             HollowButton.ghost(
               onPressed: _busy ? null : _setCode,
-              icon: _busy
-                  ? _spinner(hollow.accent)
-                  : const Icon(LucideIcons.keyRound, size: 16),
+              loading: _busy,
+              icon: const Icon(LucideIcons.keyRound, size: 16),
               child: const Text('Change code'),
             ),
             const SizedBox(width: HollowSpacing.sm),
@@ -238,12 +232,6 @@ class _DuressCodeCardState extends ConsumerState<DuressCodeCard> {
       ],
     );
   }
-
-  Widget _spinner(Color color) => SizedBox(
-        width: 14,
-        height: 14,
-        child: CircularProgressIndicator(strokeWidth: 2, color: color),
-      );
 
   Future<void> _setCode() async {
     final current = ref.read(duressStatusProvider).valueOrNull;
@@ -344,14 +332,8 @@ class _AccountDangerZoneCardState extends ConsumerState<AccountDangerZoneCard> {
             HollowButton.outline(
               danger: true,
               onPressed: _busy ? null : () => _destroy(kDuressScopeDeviceRevoke),
-              icon: _busy
-                  ? SizedBox(
-                      width: 14,
-                      height: 14,
-                      child: CircularProgressIndicator(
-                          strokeWidth: 2, color: hollow.error),
-                    )
-                  : const Icon(LucideIcons.unlink, size: 16),
+              loading: _busy,
+              icon: const Icon(LucideIcons.unlink, size: 16),
               child: const Text('Unlink and destroy this device'),
             ),
             HollowButton.outline(

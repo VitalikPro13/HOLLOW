@@ -10,6 +10,7 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
+import 'package:hollow/src/ui/components/hollow_spinner.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/shop/hollowpack_import.dart';
@@ -196,15 +197,6 @@ class _RedeemCodeDialogState extends ConsumerState<RedeemCodeDialog> {
     }
   }
 
-  Widget _spinner(HollowTheme hollow) => SizedBox(
-        width: 14,
-        height: 14,
-        child: CircularProgressIndicator(
-          strokeWidth: 2,
-          color: hollow.textSecondary,
-        ),
-      );
-
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
@@ -269,7 +261,7 @@ class _RedeemCodeDialogState extends ConsumerState<RedeemCodeDialog> {
           const SizedBox(height: HollowSpacing.md),
           Row(
             children: [
-              _spinner(hollow),
+              const HollowSpinner(),
               const SizedBox(width: HollowSpacing.sm),
               Text(
                 'Minting your support mark and fetching the art',
@@ -299,7 +291,7 @@ class _RedeemCodeDialogState extends ConsumerState<RedeemCodeDialog> {
       if (_step == _Step.found || _step == _Step.redeeming)
         HollowButton.filled(
           onPressed: busy ? null : _redeem,
-          icon: _step == _Step.redeeming ? _spinner(hollow) : null,
+          loading: _step == _Step.redeeming,
           child: Text(looked?.alreadySupported == true
               ? 'Redeem anyway'
               : 'Redeem'),
@@ -307,7 +299,7 @@ class _RedeemCodeDialogState extends ConsumerState<RedeemCodeDialog> {
       else
         HollowButton.filled(
           onPressed: busy ? null : _lookUp,
-          icon: _step == _Step.looking ? _spinner(hollow) : null,
+          loading: _step == _Step.looking,
           child: const Text('Look up'),
         ),
     ];

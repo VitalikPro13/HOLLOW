@@ -18,6 +18,7 @@ import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/saved_messages_avatar.dart';
 import 'package:hollow/src/ui/dialogs/export_archive_dialog.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:hollow/src/ui/components/hollow_spinner.dart';
 
 /// Left panel of "My Data" — DMs|Channels inner tabs + search + scrollable list.
 class ArchiveConversationList extends ConsumerWidget {
@@ -118,7 +119,7 @@ class _DmListState extends ConsumerState<_DmList> {
     final hiddenSet = ref.watch(hiddenArchiveDmsProvider);
 
     return dmListAsync.when(
-      loading: () => const Center(child: CircularProgressIndicator()),
+      loading: () => const Center(child: HollowSpinner.large()),
       error: (e, _) => Center(
         child: Text('Failed to load: $e',
             style: TextStyle(color: hollow.error)),
@@ -383,7 +384,7 @@ class _ChannelList extends ConsumerWidget {
     final selectedChannel = ref.watch(archiveSelectedChannelProvider);
 
     return channelListAsync.when(
-      loading: () => const Center(child: CircularProgressIndicator()),
+      loading: () => const Center(child: HollowSpinner.large()),
       error: (e, _) => Center(
         child: Text('Failed to load: $e',
             style: TextStyle(color: hollow.error)),

@@ -13,6 +13,7 @@ import 'package:hollow/src/ui/components/hollow_chip.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
+import 'package:hollow/src/ui/components/hollow_spinner.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/hollow_tooltip.dart';
@@ -533,7 +534,7 @@ class _ChannelsTabState extends ConsumerState<ChannelsTab> {
         const <crdt_api.LabelFfi>[];
 
     if (!_loaded) {
-      return const Center(child: CircularProgressIndicator());
+      return const Center(child: HollowSpinner.large());
     }
 
     // Adopt layout edits made OUTSIDE this editor, but only while the user has

@@ -23,6 +23,7 @@ import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/core/providers/relay_domain_provider.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:hollow/src/ui/components/hollow_sheet.dart';
 
 /// What the tile, the row and the menu all call the two states.
 String pendingJoinTitle({required bool rejected}) =>
@@ -122,14 +123,8 @@ void showPendingJoinSheet({
   required WidgetRef ref,
   required String serverId,
 }) {
-  final hollow = HollowTheme.of(context);
-  showModalBottomSheet<void>(
+  showHollowSheet<void>(
     context: context,
-    backgroundColor: hollow.overlay,
-    shape: RoundedRectangleBorder(
-      borderRadius:
-          BorderRadius.vertical(top: Radius.circular(hollow.radiusLg)),
-    ),
     // The callbacks close over the OPENING surface's context and ref, because
     // the sheet is gone by the time an action runs and a toast anchored to its
     // context would never appear.
@@ -174,22 +169,11 @@ class _PendingJoinSheet extends ConsumerWidget {
     final reason = info?.reason ?? '';
 
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: HollowSpacing.md),
+      padding: const EdgeInsets.only(bottom: HollowSpacing.md),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Center(
-            child: Container(
-              width: 36,
-              height: 4,
-              decoration: BoxDecoration(
-                color: hollow.textSecondary.withValues(alpha: 0.3),
-                borderRadius: BorderRadius.circular(2),
-              ),
-            ),
-          ),
-          const SizedBox(height: HollowSpacing.md),
           Padding(
             padding:
                 const EdgeInsets.symmetric(horizontal: HollowSpacing.lg),

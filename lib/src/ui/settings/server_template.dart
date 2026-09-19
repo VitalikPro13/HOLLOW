@@ -16,6 +16,7 @@ import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_section_header.dart';
+import 'package:hollow/src/ui/components/hollow_spinner.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -460,12 +461,7 @@ class _TemplateApplyProgressDialog extends StatelessWidget {
       content: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          SizedBox(
-            width: 16,
-            height: 16,
-            child: CircularProgressIndicator(
-                strokeWidth: 2, color: hollow.accent),
-          ),
+          const HollowSpinner(),
           const SizedBox(width: HollowSpacing.md),
           Text(
             'Updating settings and channels…',

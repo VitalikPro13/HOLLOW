@@ -32,6 +32,7 @@ import 'package:hollow/src/ui/components/support_glyph.dart';
 import 'package:hollow/src/ui/shell/user_context_menu.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:hollow/src/core/brand_icons.dart';
+import 'package:hollow/src/ui/components/hollow_spinner.dart';
 
 /// Right-side member panel showing online peers or server members.
 class MemberPanel extends ConsumerWidget {
@@ -439,13 +440,7 @@ class _ServerMemberContent extends ConsumerWidget {
 
         Expanded(
           child: isLoading
-              ? const Center(
-                  child: SizedBox(
-                    width: 24,
-                    height: 24,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  ),
-                )
+              ? const Center(child: HollowSpinner.large())
               : error != null
                   ? Center(
                       child: Padding(

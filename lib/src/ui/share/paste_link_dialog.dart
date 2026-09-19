@@ -9,6 +9,7 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
+import 'package:hollow/src/ui/components/hollow_spinner.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/share/share_card.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -124,14 +125,7 @@ class _PasteLinkDialogState extends ConsumerState<PasteLinkDialog> {
           mainAxisSize: MainAxisSize.min,
           children: [
             const SizedBox(height: HollowSpacing.lg),
-            SizedBox(
-              width: 24,
-              height: 24,
-              child: CircularProgressIndicator(
-                strokeWidth: 2,
-                color: hollow.accent,
-              ),
-            ),
+            const HollowSpinner.medium(),
             const SizedBox(height: HollowSpacing.md),
             Text(
               'Looking for seeders... ${remaining}s',

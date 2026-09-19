@@ -115,15 +115,9 @@ class _BackupCategoryViewState extends State<BackupCategoryView> {
               // filled primary.
               HollowButton.outline(
                 onPressed: _exporting ? null : _exportBackup,
-                icon: _exporting
-                    ? SizedBox(
-                        width: 14,
-                        height: 14,
-                        child: CircularProgressIndicator(
-                            strokeWidth: 2, color: hollow.textSecondary),
-                      )
-                    : const Icon(LucideIcons.download, size: 16),
-                child: Text(_exporting ? 'Exporting…' : 'Export backup'),
+                loading: _exporting,
+                icon: const Icon(LucideIcons.download, size: 16),
+                child: const Text('Export backup'),
               ),
             ],
           ),

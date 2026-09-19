@@ -15,6 +15,7 @@ import 'package:hollow/src/ui/components/overlay_hosts.dart';
 import 'package:hollow/src/ui/share/share_card.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:url_launcher/url_launcher.dart';
+import 'package:hollow/src/ui/components/hollow_spinner.dart';
 
 /// Shows a download manager popup anchored near the tap position.
 void showDownloadManagerPopup({
@@ -476,17 +477,9 @@ class _ShareDownloadTile extends StatelessWidget {
               child: Stack(
                 alignment: Alignment.center,
                 children: [
-                  SizedBox(
-                    width: 32,
-                    height: 32,
-                    child: CircularProgressIndicator(
-                      value: progress,
-                      strokeWidth: 2.5,
-                      backgroundColor: hollow.border,
-                      valueColor: AlwaysStoppedAnimation(
-                        failed ? hollow.error : hollow.accent,
-                      ),
-                    ),
+                  HollowSpinner.large(
+                    value: progress,
+                    color: failed ? hollow.error : null,
                   ),
                   Text(
                     '${(progress * 100).round()}%',

@@ -7,6 +7,7 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
+import 'package:hollow/src/ui/components/hollow_spinner.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -161,14 +162,7 @@ class _TwitchDeviceCodeDialogState extends State<TwitchDeviceCodeDialog> {
               Row(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  SizedBox(
-                    width: 14,
-                    height: 14,
-                    child: CircularProgressIndicator(
-                      strokeWidth: 2,
-                      color: hollow.textSecondary,
-                    ),
-                  ),
+                  const HollowSpinner(),
                   const SizedBox(width: HollowSpacing.sm),
                   Text(
                     'Waiting for authorization...',
@@ -178,14 +172,7 @@ class _TwitchDeviceCodeDialogState extends State<TwitchDeviceCodeDialog> {
                 ],
               ),
           ] else ...[
-            SizedBox(
-              width: 20,
-              height: 20,
-              child: CircularProgressIndicator(
-                strokeWidth: 2,
-                color: hollow.textSecondary,
-              ),
-            ),
+            const HollowSpinner.medium(),
           ],
         ],
       ),

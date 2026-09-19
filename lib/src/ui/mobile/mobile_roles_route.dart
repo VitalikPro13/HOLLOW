@@ -8,6 +8,7 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
+import 'package:hollow/src/ui/components/hollow_spinner.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 class MobileRolesRoute extends ConsumerStatefulWidget {
@@ -130,7 +131,7 @@ class _MobileRolesRouteState extends ConsumerState<MobileRolesRoute> {
 
             Expanded(
               child: _loading
-                  ? const Center(child: CircularProgressIndicator())
+                  ? const Center(child: HollowSpinner.large())
                   : ListView(
                       padding: const EdgeInsets.all(HollowSpacing.lg),
                       children: [

@@ -283,7 +283,7 @@ Contains three elements:
 **Layout:** Container with `hollow.surface` background, `radiusMd` corners, `hollow.border` border. Row containing:
 - `HollowAvatar(peerId, size: 20)`
 - Name text (11px caption, single line ellipsis)
-- Spinner (conditional): 10x10 `CircularProgressIndicator` with 1.5 stroke width in `statusColor`
+- Spinner (conditional): `HollowSpinner()` in `statusColor`
 - Status label text (10px, w500, `statusColor`)
 
 The spinner is shown when `showSpinner == true` (connection stage is not failed and not encrypted).
