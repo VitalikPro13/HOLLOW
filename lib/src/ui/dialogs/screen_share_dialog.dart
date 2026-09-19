@@ -209,306 +209,277 @@ class _ScreenShareDialogState extends State<_ScreenShareDialog> {
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
-    final radius = BorderRadius.circular(hollow.radiusLg);
     final sources = _filteredSources;
 
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.all(HollowSpacing.xl),
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(
-            maxWidth: 680,
-            maxHeight: 560,
-            minWidth: 400,
-          ),
-          child: Material(
-            color: Colors.transparent,
-            child: Container(
-              padding: const EdgeInsets.all(HollowSpacing.xl),
-              decoration: BoxDecoration(
-                color: hollow.overlay,
-                borderRadius: radius,
-                border: Border.all(
-                    color: hollow.accent.withValues(alpha: 0.15)),
-                boxShadow: [
-                  BoxShadow(
-                    color: Colors.black.withValues(alpha: 0.3),
-                    blurRadius: 24,
-                    offset: const Offset(0, 8),
-                  ),
-                ],
-              ),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    'Share Your Screen',
-                    style: HollowTypography.heading.copyWith(
-                      color: hollow.textPrimary,
-                      fontSize: 16,
-                    ),
-                  ),
-                  const SizedBox(height: HollowSpacing.md),
-
-                  // Portal-first Wayland picker: ONE entry, because the
-                  // desktop's own portal dialog is where the user picks, right
-                  // after pressing Share.
-                  if (_portalMode) ...[
-                    _buildPortalSection(hollow),
-                    const SizedBox(height: HollowSpacing.md),
-                  ] else ...[
-                    Row(
-                      children: [
-                        _buildTab(hollow, 'Screens', _showScreens, () {
-                          setState(() => _showScreens = true);
-                        }),
-                        const SizedBox(width: HollowSpacing.sm),
-                        _buildTab(hollow, 'Windows', !_showScreens, () {
-                          setState(() => _showScreens = false);
-                        }),
-                      ],
-                    ),
-                    const SizedBox(height: HollowSpacing.md),
-
-                    Expanded(
-                      child: _loading
-                          ? const Center(child: HollowSpinner.large())
-                          : sources.isEmpty
-                              ? HollowEmptyState(
-                                  title: _showScreens
-                                      ? 'No screens found'
-                                      : 'No windows found',
-                                )
-                              : GridView.builder(
-                                  gridDelegate:
-                                      SliverGridDelegateWithFixedCrossAxisCount(
-                                    crossAxisCount: _showScreens ? 2 : 3,
-                                    mainAxisSpacing: HollowSpacing.sm,
-                                    crossAxisSpacing: HollowSpacing.sm,
-                                    childAspectRatio: 16 / 10,
-                                  ),
-                                  itemCount: sources.length,
-                                  itemBuilder: (context, index) {
-                                    final source = sources[index];
-                                    final isSelected =
-                                        source.id == _selectedSourceId;
-                                    return _buildSourceTile(
-                                        hollow, source, isSelected);
-                                  },
-                                ),
-                    ),
-                    const SizedBox(height: HollowSpacing.md),
-                  ],
-
-                  // Switching the profile also snaps the fps default, which the
-                  // user can still override afterwards.
-                  Row(
-                    children: [
-                      Text(
-                        'Optimize for',
-                        style: HollowTypography.caption.copyWith(
-                          color: hollow.textSecondary,
-                          fontSize: 12,
-                        ),
-                      ),
-                      const SizedBox(width: HollowSpacing.sm),
-                      _option(
-                          'Smooth motion',
-                          _profile == ScreenContentProfile.motion,
-                          () => setState(() {
-                                _profile = ScreenContentProfile.motion;
-                                _fps = ScreenShareFps.fps60;
-                              })),
-                      _option(
-                          'Sharp text',
-                          _profile == ScreenContentProfile.text,
-                          () => setState(() {
-                                _profile = ScreenContentProfile.text;
-                                _fps = ScreenShareFps.fps15;
-                              })),
-                    ],
-                  ),
-                  const SizedBox(height: HollowSpacing.sm),
-                  Row(
-                    children: [
-                      Text(
-                        'Resolution',
-                        style: HollowTypography.caption.copyWith(
-                          color: hollow.textSecondary,
-                          fontSize: 12,
-                        ),
-                      ),
-                      const SizedBox(width: HollowSpacing.sm),
-                      ..._availableResolutions.map((r) =>
-                          _option(r.label, r == _resolution,
-                              () => setState(() => _resolution = r))),
-                    ],
-                  ),
-                  const SizedBox(height: HollowSpacing.sm),
-                  Row(
-                    children: [
-                      Text(
-                        'Frame Rate',
-                        style: HollowTypography.caption.copyWith(
-                          color: hollow.textSecondary,
-                          fontSize: 12,
-                        ),
-                      ),
-                      const SizedBox(width: HollowSpacing.sm),
-                      ...ScreenShareFps.values.map((f) =>
-                          _option(f.label, f == _fps,
-                              () => setState(() => _fps = f))),
-                    ],
-                  ),
-                  const SizedBox(height: HollowSpacing.md),
-
-                  Builder(builder: (context) {
-                    // Older macOS exposes no system-audio API at all, so the
-                    // toggle locks off and says why rather than enabling a
-                    // feature that silently does nothing.
-                    final audioBlocked =
-                        MacOsScreenAudioSupport.audioSendBlockedByOldOs;
-                    if (audioBlocked && _shareAudio) {
-                      // Never send with a stale-true value.
-                      WidgetsBinding.instance.addPostFrameCallback(
-                          (_) => setState(() => _shareAudio = false));
-                    }
-                    return Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Row(
-                          children: [
-                            HollowToggle(
-                              value: audioBlocked ? false : _shareAudio,
-                              onChanged: audioBlocked
-                                  ? null
-                                  : (v) => setState(() => _shareAudio = v),
-                            ),
-                            const SizedBox(width: HollowSpacing.sm),
-                            Text(
-                              'Share audio',
-                              style: HollowTypography.caption.copyWith(
-                                color: audioBlocked
-                                    ? hollow.textTertiary
-                                    : hollow.textSecondary,
-                                fontSize: 12,
-                              ),
-                            ),
-                          ],
-                        ),
-                        if (_portalMode && _shareAudio) ...[
-                          const SizedBox(height: HollowSpacing.xs),
-                          Text(
-                            'On Wayland, audio is captured system-wide '
-                            '(Hollow\'s own audio excluded), even when the '
-                            'portal shares a single window.',
-                            style: HollowTypography.caption.copyWith(
-                              color: hollow.textTertiary,
-                              fontSize: 11,
-                            ),
-                          ),
-                        ],
-                        if (audioBlocked) ...[
-                          const SizedBox(height: HollowSpacing.xs),
-                          Text(
-                            'Audio sharing needs macOS 13.0 or later. '
-                            'You\'re on ${MacOsScreenAudioSupport.versionLabel ?? 'an older version'}. '
-                            'Apple exposes no system-audio API before 13.0. '
-                            'Update to 13.0+ to share audio. '
-                            'Video sharing still works.',
-                            style: HollowTypography.caption.copyWith(
-                              color: hollow.textTertiary,
-                              fontSize: 11,
-                            ),
-                          ),
-                        ],
-                      ],
-                    );
-                  }),
-                  const SizedBox(height: HollowSpacing.lg),
-
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.end,
-                    children: [
-                      HollowButton.ghost(
-                        onPressed: () => Navigator.pop(context),
-                        child: const Text('Cancel'),
-                      ),
-                      const SizedBox(width: HollowSpacing.sm),
-                      HollowButton.filled(
-                        onPressed: _portalMode
-                            ? () {
-                                // The id is the sentinel the native side maps
-                                // onto the generic PipeWire capturer, and a
-                                // fresh pick bumps the restore generation so
-                                // the portal prompts again.
-                                if (_portalFresh) {
-                                  DesktopCaptureSupport.bumpPortalGeneration();
-                                }
-                                final portalId =
-                                    DesktopCaptureSupport.portalSourceId;
-                                network_api.logFromDart(
-                                  message: '[SCREEN-AUDIO] Share confirmed: '
-                                      'portal id=$portalId '
-                                      'audio=$_shareAudio',
-                                );
-                                Navigator.pop(
-                                  context,
-                                  ScreenShareSelection(
-                                    sourceId: portalId,
-                                    width: _resolution.width,
-                                    height: _resolution.height,
-                                    fps: _fps.value,
-                                    shareAudio: _shareAudio,
-                                    profile: _profile,
-                                  ),
-                                );
-                              }
-                            : _selectedSourceId != null
-                            ? () {
-                                final selectedSource = _sources[_selectedSourceId!];
-                                // For a WINDOW source the source id IS the
-                                // HWND, which the per-app capturer resolves to
-                                // audio pids itself. libwebrtc's `pid` arrives
-                                // as 0 for windows, so it cannot be used.
-                                final isWindow =
-                                    selectedSource?.type == SourceType.Window;
-                                final hwnd = isWindow
-                                    ? (int.tryParse(_selectedSourceId!) ?? 0)
-                                    : 0;
-                                network_api.logFromDart(
-                                  message: '[SCREEN-AUDIO] Share confirmed: '
-                                      'type=${selectedSource?.type} '
-                                      'pid=${selectedSource?.pid ?? 0} '
-                                      'hwnd=$hwnd '
-                                      'audio=$_shareAudio '
-                                      'id=$_selectedSourceId',
-                                );
-                                Navigator.pop(
-                                  context,
-                                  ScreenShareSelection(
-                                    sourceId: _selectedSourceId!,
-                                    width: _resolution.width,
-                                    height: _resolution.height,
-                                    fps: _fps.value,
-                                    shareAudio: _shareAudio,
-                                    pid: selectedSource?.pid ?? 0,
-                                    windowHwnd: hwnd,
-                                    profile: _profile,
-                                  ),
-                                );
-                              }
-                            : null,
-                        child: const Text('Share'),
-                      ),
-                    ],
-                  ),
-                ],
-              ),
+    return HollowDialogSurface(
+      width: 680,
+      maxHeight: 560,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            'Share your screen',
+            style: HollowTypography.heading.copyWith(
+              color: hollow.textPrimary,
             ),
           ),
-        ),
+          const SizedBox(height: HollowSpacing.md),
+
+          // Portal-first Wayland picker: ONE entry, because the
+          // desktop's own portal dialog is where the user picks, right
+          // after pressing Share.
+          if (_portalMode) ...[
+            _buildPortalSection(hollow),
+            const SizedBox(height: HollowSpacing.md),
+          ] else ...[
+            Row(
+              children: [
+                _buildTab(hollow, 'Screens', _showScreens, () {
+                  setState(() => _showScreens = true);
+                }),
+                const SizedBox(width: HollowSpacing.sm),
+                _buildTab(hollow, 'Windows', !_showScreens, () {
+                  setState(() => _showScreens = false);
+                }),
+              ],
+            ),
+            const SizedBox(height: HollowSpacing.md),
+
+            Expanded(
+              child: _loading
+                  ? const Center(child: HollowSpinner.large())
+                  : sources.isEmpty
+                      ? HollowEmptyState(
+                          title: _showScreens
+                              ? 'No screens found'
+                              : 'No windows found',
+                        )
+                      : GridView.builder(
+                          gridDelegate:
+                              SliverGridDelegateWithFixedCrossAxisCount(
+                            crossAxisCount: _showScreens ? 2 : 3,
+                            mainAxisSpacing: HollowSpacing.sm,
+                            crossAxisSpacing: HollowSpacing.sm,
+                            childAspectRatio: 16 / 10,
+                          ),
+                          itemCount: sources.length,
+                          itemBuilder: (context, index) {
+                            final source = sources[index];
+                            final isSelected =
+                                source.id == _selectedSourceId;
+                            return _buildSourceTile(
+                                hollow, source, isSelected);
+                          },
+                        ),
+            ),
+            const SizedBox(height: HollowSpacing.md),
+          ],
+
+          // Switching the profile also snaps the fps default, which the
+          // user can still override afterwards.
+          Row(
+            children: [
+              Text(
+                'Optimize for',
+                style: HollowTypography.caption.copyWith(
+                  color: hollow.textSecondary,
+                  fontSize: 12,
+                ),
+              ),
+              const SizedBox(width: HollowSpacing.sm),
+              _option(
+                  'Smooth motion',
+                  _profile == ScreenContentProfile.motion,
+                  () => setState(() {
+                        _profile = ScreenContentProfile.motion;
+                        _fps = ScreenShareFps.fps60;
+                      })),
+              _option(
+                  'Sharp text',
+                  _profile == ScreenContentProfile.text,
+                  () => setState(() {
+                        _profile = ScreenContentProfile.text;
+                        _fps = ScreenShareFps.fps15;
+                      })),
+            ],
+          ),
+          const SizedBox(height: HollowSpacing.sm),
+          Row(
+            children: [
+              Text(
+                'Resolution',
+                style: HollowTypography.caption.copyWith(
+                  color: hollow.textSecondary,
+                  fontSize: 12,
+                ),
+              ),
+              const SizedBox(width: HollowSpacing.sm),
+              ..._availableResolutions.map((r) =>
+                  _option(r.label, r == _resolution,
+                      () => setState(() => _resolution = r))),
+            ],
+          ),
+          const SizedBox(height: HollowSpacing.sm),
+          Row(
+            children: [
+              Text(
+                'Frame rate',
+                style: HollowTypography.caption.copyWith(
+                  color: hollow.textSecondary,
+                  fontSize: 12,
+                ),
+              ),
+              const SizedBox(width: HollowSpacing.sm),
+              ...ScreenShareFps.values.map((f) =>
+                  _option(f.label, f == _fps,
+                      () => setState(() => _fps = f))),
+            ],
+          ),
+          const SizedBox(height: HollowSpacing.md),
+
+          Builder(builder: (context) {
+            // Older macOS exposes no system-audio API at all, so the
+            // toggle locks off and says why rather than enabling a
+            // feature that silently does nothing.
+            final audioBlocked =
+                MacOsScreenAudioSupport.audioSendBlockedByOldOs;
+            if (audioBlocked && _shareAudio) {
+              // Never send with a stale-true value.
+              WidgetsBinding.instance.addPostFrameCallback(
+                  (_) => setState(() => _shareAudio = false));
+            }
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    HollowToggle(
+                      value: audioBlocked ? false : _shareAudio,
+                      onChanged: audioBlocked
+                          ? null
+                          : (v) => setState(() => _shareAudio = v),
+                    ),
+                    const SizedBox(width: HollowSpacing.sm),
+                    Text(
+                      'Share audio',
+                      style: HollowTypography.caption.copyWith(
+                        color: audioBlocked
+                            ? hollow.textTertiary
+                            : hollow.textSecondary,
+                        fontSize: 12,
+                      ),
+                    ),
+                  ],
+                ),
+                if (_portalMode && _shareAudio) ...[
+                  const SizedBox(height: HollowSpacing.xs),
+                  Text(
+                    'On Wayland, audio is captured system-wide '
+                    '(Hollow\'s own audio excluded), even when the '
+                    'portal shares a single window.',
+                    style: HollowTypography.caption.copyWith(
+                      color: hollow.textTertiary,
+                      fontSize: 11,
+                    ),
+                  ),
+                ],
+                if (audioBlocked) ...[
+                  const SizedBox(height: HollowSpacing.xs),
+                  Text(
+                    'Audio sharing needs macOS 13.0 or later. '
+                    'You\'re on ${MacOsScreenAudioSupport.versionLabel ?? 'an older version'}. '
+                    'Apple exposes no system-audio API before 13.0. '
+                    'Update to 13.0+ to share audio. '
+                    'Video sharing still works.',
+                    style: HollowTypography.caption.copyWith(
+                      color: hollow.textTertiary,
+                      fontSize: 11,
+                    ),
+                  ),
+                ],
+              ],
+            );
+          }),
+          const SizedBox(height: HollowSpacing.lg),
+
+          Row(
+            mainAxisAlignment: MainAxisAlignment.end,
+            children: [
+              HollowButton.ghost(
+                onPressed: () => Navigator.pop(context),
+                child: const Text('Cancel'),
+              ),
+              const SizedBox(width: HollowSpacing.sm),
+              HollowButton.filled(
+                onPressed: _portalMode
+                    ? () {
+                        // The id is the sentinel the native side maps
+                        // onto the generic PipeWire capturer, and a
+                        // fresh pick bumps the restore generation so
+                        // the portal prompts again.
+                        if (_portalFresh) {
+                          DesktopCaptureSupport.bumpPortalGeneration();
+                        }
+                        final portalId =
+                            DesktopCaptureSupport.portalSourceId;
+                        network_api.logFromDart(
+                          message: '[SCREEN-AUDIO] Share confirmed: '
+                              'portal id=$portalId '
+                              'audio=$_shareAudio',
+                        );
+                        Navigator.pop(
+                          context,
+                          ScreenShareSelection(
+                            sourceId: portalId,
+                            width: _resolution.width,
+                            height: _resolution.height,
+                            fps: _fps.value,
+                            shareAudio: _shareAudio,
+                            profile: _profile,
+                          ),
+                        );
+                      }
+                    : _selectedSourceId != null
+                    ? () {
+                        final selectedSource = _sources[_selectedSourceId!];
+                        // For a WINDOW source the source id IS the
+                        // HWND, which the per-app capturer resolves to
+                        // audio pids itself. libwebrtc's `pid` arrives
+                        // as 0 for windows, so it cannot be used.
+                        final isWindow =
+                            selectedSource?.type == SourceType.Window;
+                        final hwnd = isWindow
+                            ? (int.tryParse(_selectedSourceId!) ?? 0)
+                            : 0;
+                        network_api.logFromDart(
+                          message: '[SCREEN-AUDIO] Share confirmed: '
+                              'type=${selectedSource?.type} '
+                              'pid=${selectedSource?.pid ?? 0} '
+                              'hwnd=$hwnd '
+                              'audio=$_shareAudio '
+                              'id=$_selectedSourceId',
+                        );
+                        Navigator.pop(
+                          context,
+                          ScreenShareSelection(
+                            sourceId: _selectedSourceId!,
+                            width: _resolution.width,
+                            height: _resolution.height,
+                            fps: _fps.value,
+                            shareAudio: _shareAudio,
+                            pid: selectedSource?.pid ?? 0,
+                            windowHwnd: hwnd,
+                            profile: _profile,
+                          ),
+                        );
+                      }
+                    : null,
+                child: const Text('Share'),
+              ),
+            ],
+          ),
+        ],
       ),
     );
   }

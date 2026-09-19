@@ -7,9 +7,6 @@ import 'package:hollow/src/core/providers/channel_provider.dart';
 import 'package:hollow/src/core/providers/notification_provider.dart';
 import 'package:hollow/src/core/providers/unread_provider.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
-import 'package:hollow/src/theme/hollow_theme.dart';
-import 'package:hollow/src/theme/hollow_typography.dart';
-import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_menu.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
@@ -367,29 +364,13 @@ Future<bool> _confirmClearLabelGate(
     'admin' => 'Admin and above',
     _ => 'Everyone',
   };
-  final confirmed = await showHollowDialog<bool>(
+  return showHollowConfirm(
     context: context,
-    builder: (ctx) => HollowDialog(
-      title: 'Remove label requirement?',
-      content: Text(
-        '#$channelName will use tier-based access ($tierLabel) instead of '
-        'its access labels.',
-        style: HollowTypography.body
-            .copyWith(color: HollowTheme.of(ctx).textSecondary),
-      ),
-      actions: [
-        HollowButton.ghost(
-          onPressed: () => Navigator.of(ctx).pop(false),
-          child: const Text('Cancel'),
-        ),
-        HollowButton.filled(
-          onPressed: () => Navigator.of(ctx).pop(true),
-          child: const Text('Remove'),
-        ),
-      ],
-    ),
+    title: 'Remove label requirement?',
+    message: '#$channelName will use tier-based access ($tierLabel) instead '
+        'of its access labels.',
+    confirmLabel: 'Remove',
   );
-  return confirmed ?? false;
 }
 
 void _renameChannel(
@@ -423,48 +404,33 @@ void _renameChannel(
   );
 }
 
-void _confirmDeleteChannel(
-    BuildContext context, String serverId, ChannelInfo channel) {
-  showHollowDialog(
+Future<void> _confirmDeleteChannel(
+    BuildContext context, String serverId, ChannelInfo channel) async {
+  final confirmed = await showHollowConfirm(
     context: context,
-    builder: (ctx) => HollowDialog(
-      title: 'Delete #${channel.name}?',
-      content: Text(
-        'This cannot be undone. Its messages stay on the devices that '
+    title: 'Delete #${channel.name}?',
+    message: 'This cannot be undone. Its messages stay on the devices that '
         'already have them, but the channel disappears for everyone.',
-        style: HollowTypography.body
-            .copyWith(color: HollowTheme.of(ctx).textSecondary),
-      ),
-      actions: [
-        HollowButton.ghost(
-          onPressed: () => Navigator.of(ctx).pop(),
-          child: const Text('Cancel'),
-        ),
-        HollowButton.danger(
-          onPressed: () async {
-            Navigator.of(ctx).pop();
-            try {
-              await crdt_api.removeChannel(
-                serverId: serverId,
-                channelId: channel.channelId,
-              );
-            } catch (_) {
-              if (context.mounted) {
-                HollowToast.show(context, 'Could not delete channel',
-                    type: HollowToastType.error);
-              }
-              return;
-            }
-            if (context.mounted) {
-              HollowToast.show(context, 'Channel deleted',
-                  type: HollowToastType.success);
-            }
-          },
-          child: const Text('Delete'),
-        ),
-      ],
-    ),
+    confirmLabel: 'Delete',
+    destructive: true,
   );
+  if (!confirmed) return;
+  try {
+    await crdt_api.removeChannel(
+      serverId: serverId,
+      channelId: channel.channelId,
+    );
+  } catch (_) {
+    if (context.mounted) {
+      HollowToast.show(context, 'Could not delete channel',
+          type: HollowToastType.error);
+    }
+    return;
+  }
+  if (context.mounted) {
+    HollowToast.show(context, 'Channel deleted',
+        type: HollowToastType.success);
+  }
 }
 
 /// The right-click menu for a category header.
@@ -604,39 +570,24 @@ Future<void> _bulkCategoryAccess(BuildContext context, WidgetRef ref,
   );
 }
 
-void _confirmDeleteCategory(BuildContext context, WidgetRef ref,
-    String serverId, int categoryIndex, String categoryName) {
-  showHollowDialog(
+Future<void> _confirmDeleteCategory(BuildContext context, WidgetRef ref,
+    String serverId, int categoryIndex, String categoryName) async {
+  final confirmed = await showHollowConfirm(
     context: context,
-    builder: (ctx) => HollowDialog(
-      title: 'Delete $categoryName?',
-      content: Text(
-        'The category header is removed. Its channels are kept and become '
-        'uncategorised.',
-        style: HollowTypography.body
-            .copyWith(color: HollowTheme.of(ctx).textSecondary),
-      ),
-      actions: [
-        HollowButton.ghost(
-          onPressed: () => Navigator.of(ctx).pop(),
-          child: const Text('Cancel'),
-        ),
-        HollowButton.danger(
-          onPressed: () {
-            Navigator.of(ctx).pop();
-            _mutateLayout(ref, serverId, (layout) {
-              if (categoryIndex < layout.length &&
-                  layout[categoryIndex] is CategoryItem) {
-                layout.removeAt(categoryIndex);
-              }
-              return layout;
-            });
-          },
-          child: const Text('Delete'),
-        ),
-      ],
-    ),
+    title: 'Delete $categoryName?',
+    message: 'The category header is removed. Its channels are kept and '
+        'become uncategorised.',
+    confirmLabel: 'Delete',
+    destructive: true,
   );
+  if (!confirmed) return;
+  _mutateLayout(ref, serverId, (layout) {
+    if (categoryIndex < layout.length &&
+        layout[categoryIndex] is CategoryItem) {
+      layout.removeAt(categoryIndex);
+    }
+    return layout;
+  });
 }
 
 /// The right-click menu for empty space in the channel list.

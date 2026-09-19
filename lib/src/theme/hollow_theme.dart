@@ -16,6 +16,8 @@ class HollowTheme extends ThemeExtension<HollowTheme> {
   /// The hover level, one step past [overlay], for rows inside a floating
   /// surface. Controls on the canvas hover to [elevated].
   final Color hover;
+  /// The flat dim behind a dialog or sheet.
+  final Color scrim;
   final Color accent;
   final Color accentHover;
   final Color accentMuted;
@@ -50,6 +52,7 @@ class HollowTheme extends ThemeExtension<HollowTheme> {
     required this.elevated,
     required this.overlay,
     required this.hover,
+    required this.scrim,
     required this.accent,
     required this.accentHover,
     required this.accentMuted,
@@ -144,6 +147,7 @@ class HollowTheme extends ThemeExtension<HollowTheme> {
       elevated: ladder.raised,
       overlay: ladder.overlay,
       hover: ladder.hover,
+      scrim: ladder.scrim,
       accent: accent,
       accentHover: accentHover,
       accentMuted: accentMuted,
@@ -214,6 +218,7 @@ class HollowTheme extends ThemeExtension<HollowTheme> {
     Color? elevated,
     Color? overlay,
     Color? hover,
+    Color? scrim,
     Color? accent,
     Color? accentHover,
     Color? accentMuted,
@@ -239,6 +244,7 @@ class HollowTheme extends ThemeExtension<HollowTheme> {
       elevated: elevated ?? this.elevated,
       overlay: overlay ?? this.overlay,
       hover: hover ?? this.hover,
+      scrim: scrim ?? this.scrim,
       accent: accent ?? this.accent,
       accentHover: accentHover ?? this.accentHover,
       accentMuted: accentMuted ?? this.accentMuted,
@@ -269,6 +275,7 @@ class HollowTheme extends ThemeExtension<HollowTheme> {
       elevated: Color.lerp(elevated, other.elevated, t)!,
       overlay: Color.lerp(overlay, other.overlay, t)!,
       hover: Color.lerp(hover, other.hover, t)!,
+      scrim: Color.lerp(scrim, other.scrim, t)!,
       accent: Color.lerp(accent, other.accent, t)!,
       accentHover: Color.lerp(accentHover, other.accentHover, t)!,
       accentMuted: Color.lerp(accentMuted, other.accentMuted, t)!,

@@ -555,7 +555,7 @@ Provider: `reduceMotionProvider` -- `AsyncNotifierProvider<ReduceMotionNotifier,
 
 ### Reduce Transparency
 Provider: `reduceTransparencyProvider` -- `AsyncNotifierProvider<ReduceTransparencyNotifier, bool>`
-- Key: `'reduce_transparency'`. Default `false`. Also mirrors into a process-wide `reduceTransparencyFlag` ValueNotifier so the ref-less `showHollowDialog` can drop glass blur to 0.
+- Key: `'reduce_transparency'`. Default `false`. Governs the chat wallpaper panel (`app.dart`) only: dialogs lost their backdrop blur in design sweep 8, and the `reduceTransparencyFlag` mirror that fed them is gone.
 
 ### Audio Input Device
 Provider: `audioInputDeviceProvider` -- `AsyncNotifierProvider<AudioInputDeviceNotifier, String?>`

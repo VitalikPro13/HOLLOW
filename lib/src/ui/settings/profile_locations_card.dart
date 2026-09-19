@@ -91,17 +91,13 @@ class _ProfileLocationsCardState extends State<ProfileLocationsCard> {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(
-              'Hollow will restart using "${row.name}":',
-              style: HollowTypography.body,
-            ),
+            HollowDialogText('Hollow will restart using "${row.name}":'),
             const SizedBox(height: HollowSpacing.xs),
-            Text(row.path, style: HollowTypography.mono.copyWith(fontSize: 11)),
+            Text(row.path, style: HollowTypography.monoSmall),
             const SizedBox(height: HollowSpacing.sm),
-            Text(
+            const HollowDialogText(
               'If the folder is empty, first-time setup will create a new '
               'identity there. Your current profile stays on disk untouched.',
-              style: HollowTypography.bodySmall,
             ),
           ],
         ),
@@ -596,30 +592,26 @@ class _EraseProfileDialogState extends State<_EraseProfileDialog> {
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
+          HollowDialogText(
             'This permanently deletes the identity key, message history, '
             'and downloaded files of "${widget.name}":',
-            style: HollowTypography.body,
           ),
           const SizedBox(height: HollowSpacing.xs),
-          Text(widget.path,
-              style: HollowTypography.mono.copyWith(fontSize: 11)),
+          Text(widget.path, style: HollowTypography.monoSmall),
           const SizedBox(height: HollowSpacing.sm),
-          Text(
+          HollowDialogText(
             'Without its 24-word recovery phrase this identity cannot be '
             'restored.${widget.isRunning ? ' Hollow will restart to finish and '
                 'open first-time setup.' : ''}',
-            style: HollowTypography.bodySmall,
           ),
           if (_needsChallenge) ...[
             const SizedBox(height: HollowSpacing.md),
-            Text(
+            HollowDialogText(
               widget.challenge == _EraseChallenge.password
                   ? 'This profile is password-protected. Enter its password to '
                       'erase it.'
                   : 'This profile is protected and cannot be unlocked on this '
                       'computer. Type its name to erase it anyway.',
-              style: HollowTypography.bodySmall,
             ),
             const SizedBox(height: HollowSpacing.sm),
             HollowTextField(
@@ -644,9 +636,8 @@ class _EraseProfileDialogState extends State<_EraseProfileDialog> {
         ),
         HollowButton.danger(
           onPressed: canConfirm ? _confirm : null,
-          child: Text(_checking
-              ? 'Checking...'
-              : (widget.isRunning ? 'Erase & restart' : 'Erase profile')),
+          loading: _checking,
+          child: Text(widget.isRunning ? 'Erase & restart' : 'Erase profile'),
         ),
       ],
     );

@@ -70,11 +70,7 @@ Future<void> importHollowpackAt(
       context: context,
       builder: (dialogContext) => HollowDialog(
         title: 'That pack could not be imported',
-        content: Text(
-          message,
-          style: HollowTypography.body
-              .copyWith(color: HollowTheme.of(dialogContext).textSecondary),
-        ),
+        content: HollowDialogText(message),
         actions: [
           HollowButton.filled(
             onPressed: () => Navigator.of(dialogContext).pop(),
@@ -170,6 +166,8 @@ class _ImportedPackDialogState extends ConsumerState<_ImportedPackDialog> {
 
     return HollowDialog(
       title: 'Imported',
+      // With nothing to wear there is nothing to confirm.
+      showClose: kinds.isEmpty,
       content: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -211,17 +209,18 @@ class _ImportedPackDialogState extends ConsumerState<_ImportedPackDialog> {
             Text(
               result.license,
               style: HollowTypography.caption
-                  .copyWith(color: hollow.textTertiary, fontSize: 11),
+                  .copyWith(color: hollow.textTertiary),
             ),
           ],
         ],
       ),
       actions: [
-        HollowButton.ghost(
-          onPressed:
-              _busyKey == null ? () => Navigator.of(context).pop() : null,
-          child: const Text('Done'),
-        ),
+        if (kinds.isNotEmpty)
+          HollowButton.ghost(
+            onPressed:
+                _busyKey == null ? () => Navigator.of(context).pop() : null,
+            child: const Text('Done'),
+          ),
         for (final kind in kinds)
           _wearButton(
             key: kind,

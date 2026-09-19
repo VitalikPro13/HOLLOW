@@ -274,28 +274,12 @@ class _MobileConferencesRouteState
   }
 
   Future<void> _confirmDelete(ConferenceRoom room) async {
-    final confirmed = await showHollowDialog<bool>(
+    final confirmed = await showHollowConfirm(
       context: context,
-      builder: (ctx) {
-        final h = HollowTheme.of(ctx);
-        return HollowDialog(
-          title: 'Delete Room?',
-          content: Text(
-            'Delete "${room.name}"? Its invite link stops working forever.',
-            style: HollowTypography.body.copyWith(color: h.textSecondary),
-          ),
-          actions: [
-            HollowButton.ghost(
-              onPressed: () => Navigator.of(ctx).pop(false),
-              child: const Text('Cancel'),
-            ),
-            HollowButton.danger(
-              onPressed: () => Navigator.of(ctx).pop(true),
-              child: const Text('Delete'),
-            ),
-          ],
-        );
-      },
+      title: 'Delete room?',
+      message: 'Delete "${room.name}"? Its invite link stops working forever.',
+      confirmLabel: 'Delete',
+      destructive: true,
     );
     if (confirmed == true) {
       await ref.read(conferenceProvider.notifier).deleteRoom(room.confId);

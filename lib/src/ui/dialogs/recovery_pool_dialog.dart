@@ -10,6 +10,7 @@ import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
+import 'package:hollow/src/ui/components/hollow_tooltip.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Show the dialog to initiate a recovery pool for a server.
@@ -84,19 +85,16 @@ class _InitiateDialogState extends ConsumerState<_InitiateDialog> {
 
     if (_inviteLink != null) {
       return HollowDialog(
-        title: 'Recovery Pool Started',
+        title: 'Recovery pool started',
+        showClose: true,
         content: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(
+            HollowDialogText(
               'Share this invite link with other ex-members of '
               '${widget.serverName}. They can join to contribute their '
               'vault shards and help reconstruct files.',
-              style: HollowTypography.caption.copyWith(
-                color: hollow.textSecondary,
-                fontSize: 12,
-              ),
             ),
             const SizedBox(height: HollowSpacing.md),
             Container(
@@ -104,7 +102,6 @@ class _InitiateDialogState extends ConsumerState<_InitiateDialog> {
               decoration: BoxDecoration(
                 color: hollow.elevated,
                 borderRadius: BorderRadius.circular(hollow.radiusMd),
-                border: Border.all(color: hollow.border),
               ),
               child: Row(
                 children: [
@@ -112,49 +109,43 @@ class _InitiateDialogState extends ConsumerState<_InitiateDialog> {
                     child: SelectableText(
                       _inviteLink!,
                       style: HollowTypography.mono.copyWith(
-                        color: hollow.accent,
-                        fontSize: 12,
+                        color: hollow.accentText,
                       ),
                     ),
                   ),
                   const SizedBox(width: HollowSpacing.sm),
-                  IconButton(
-                    onPressed: _copyLink,
-                    icon: Icon(LucideIcons.copy, size: 16, color: hollow.textSecondary),
-                    iconSize: 16,
-                    padding: EdgeInsets.zero,
-                    constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+                  HollowTooltip(
+                    message: 'Copy invite link',
+                    child: HollowButton.ghost(
+                      compact: true,
+                      semanticLabel: 'Copy invite link',
+                      onPressed: _copyLink,
+                      child: const Icon(LucideIcons.copy, size: 16),
+                    ),
                   ),
                 ],
               ),
             ),
           ],
         ),
-        actions: [
-          HollowButton.filled(
-            onPressed: () => Navigator.of(context).pop(),
-            child: const Text('Done'),
-          ),
-        ],
       );
     }
 
     return HollowDialog(
-      title: 'Start Recovery Pool',
+      title: 'Start recovery pool',
       content: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
             children: [
-              Icon(LucideIcons.server, size: 16, color: hollow.accent),
+              Icon(LucideIcons.server, size: 16, color: hollow.textSecondary),
               const SizedBox(width: HollowSpacing.sm),
               Expanded(
                 child: Text(
                   widget.serverName,
-                  style: HollowTypography.body.copyWith(
+                  style: HollowTypography.label.copyWith(
                     color: hollow.textPrimary,
-                    fontWeight: FontWeight.w600,
                   ),
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
@@ -163,16 +154,12 @@ class _InitiateDialogState extends ConsumerState<_InitiateDialog> {
             ],
           ),
           const SizedBox(height: HollowSpacing.md),
-          Text(
+          const HollowDialogText(
             'Start a Recovery Pool to cooperatively gather vault shards '
             'from other ex-members. This exchanges erasure-coded file '
             'shards to reconstruct large files (videos, attachments) that '
             'were distributed across the server.\n\n'
             'Your local data stays encrypted. Only vault shards are shared.',
-            style: HollowTypography.caption.copyWith(
-              color: hollow.textSecondary,
-              fontSize: 12,
-            ),
           ),
         ],
       ),
@@ -181,12 +168,11 @@ class _InitiateDialogState extends ConsumerState<_InitiateDialog> {
           onPressed: _starting ? null : () => Navigator.of(context).pop(),
           child: const Text('Cancel'),
         ),
-        const SizedBox(width: HollowSpacing.sm),
         HollowButton.filled(
           onPressed: _starting ? null : _initiate,
           loading: _starting,
           icon: const Icon(LucideIcons.shield, size: 14),
-          child: const Text('Start Pool'),
+          child: const Text('Start pool'),
         ),
       ],
     );
@@ -305,19 +291,16 @@ class _JoinDialogState extends ConsumerState<_JoinDialog> {
     final hollow = HollowTheme.of(context);
 
     return HollowDialog(
-      title: 'Join Recovery Pool',
+      title: 'Join recovery pool',
+      width: 420,
       content: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
+          const HollowDialogText(
             'Paste the recovery pool invite link to join. You\'ll contribute '
             'your vault shards and receive shards from other ex-members to '
             'reconstruct files.',
-            style: HollowTypography.caption.copyWith(
-              color: hollow.textSecondary,
-              fontSize: 12,
-            ),
           ),
           const SizedBox(height: HollowSpacing.md),
           HollowTextField(
@@ -326,7 +309,6 @@ class _JoinDialogState extends ConsumerState<_JoinDialog> {
             autofocus: true,
             style: HollowTypography.mono.copyWith(
               color: hollow.textPrimary,
-              fontSize: 12,
             ),
           ),
         ],
@@ -336,12 +318,11 @@ class _JoinDialogState extends ConsumerState<_JoinDialog> {
           onPressed: _joining ? null : () => Navigator.of(context).pop(),
           child: const Text('Cancel'),
         ),
-        const SizedBox(width: HollowSpacing.sm),
         HollowButton.filled(
           onPressed: _joining ? null : _join,
           loading: _joining,
           icon: const Icon(LucideIcons.logIn, size: 14),
-          child: const Text('Join Pool'),
+          child: const Text('Join pool'),
         ),
       ],
     );

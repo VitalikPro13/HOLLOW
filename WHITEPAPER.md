@@ -141,7 +141,7 @@ Total: 119 bytes. The ciphertext contains the AES-256-GCM encrypted keypair (68-
 
 **Three encryption modes (all opt-in from Settings > Security):**
 
-- **Password with launch lock** (flags = `0x01`): The user's password is processed through **Argon2id** (65536 iterations, 3 parallelism, 32-byte output) with a random 16-byte salt to derive the AES-256-GCM key. Password is required on every application launch. A full-screen blur lock dialog blocks all interaction until unlocked.
+- **Password with launch lock** (flags = `0x01`): The user's password is processed through **Argon2id** (65536 iterations, 3 parallelism, 32-byte output) with a random 16-byte salt to derive the AES-256-GCM key. Password is required on every application launch. A full-screen, non-dismissible unlock dialog blocks all interaction until unlocked.
 
 - **Password with silent unlock** (flags = `0x03`): Same password-derived encryption as above, but the wrapping key is also cached in the OS credential store for silent unlock. The identity file is encrypted (protecting against file copying), but the app opens normally on the same device. A toggle in Settings ("Ask for password on launch") controls this behavior. If the OS credential store becomes unavailable, the app falls back to requesting the password.
 

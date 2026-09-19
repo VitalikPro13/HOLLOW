@@ -807,7 +807,7 @@ try {
     Step c @{ op = 'tap'; target = 'dialog > text:Mark verified'; index = 0 }
     Step c @{ op = 'wait_for'; target = 'dialog > contains:You verified'; timeout_ms = 20000 }
     Step c @{ op = 'shot'; name = "destroy-$runTag-c-verified" }
-    Step c @{ op = 'tap'; target = 'dialog > text:Done'; index = 0 }
+    Step c @{ op = 'tap'; target = 'dialog > semantics:Close'; index = 0 }
     Step c @{ op = 'wait_for'; gone = 'type:HollowDialog'; timeout_ms = 10000 }
     # The DM's own button is the standing mark, and it is what has to go away
     # when the identity behind it is destroyed.

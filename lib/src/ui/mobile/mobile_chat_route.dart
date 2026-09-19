@@ -52,7 +52,6 @@ import 'package:hollow/src/core/providers/emote_provider.dart';
 import 'package:hollow/src/ui/components/connection_progress.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_badge.dart';
-import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
@@ -3424,28 +3423,11 @@ class _DmCallButtons extends ConsumerWidget {
       final vc = ref.read(voiceChannelProvider);
       if (vc.isInVoiceChannel) {
         final channelName = vc.currentChannelName ?? 'voice';
-        final confirmed = await showHollowDialog<bool>(
+        final confirmed = await showHollowConfirm(
           context: context,
-          builder: (ctx) {
-            final h = HollowTheme.of(ctx);
-            return HollowDialog(
-              title: 'Start Call?',
-              content: Text(
-                'Starting this call will disconnect you from #$channelName.',
-                style: HollowTypography.body.copyWith(color: h.textSecondary),
-              ),
-              actions: [
-                HollowButton.ghost(
-                  onPressed: () => Navigator.pop(ctx, false),
-                  child: const Text('Cancel'),
-                ),
-                HollowButton.filled(
-                  onPressed: () => Navigator.pop(ctx, true),
-                  child: const Text('Start Call'),
-                ),
-              ],
-            );
-          },
+          title: 'Start a call?',
+          message: 'Starting this call will disconnect you from #$channelName.',
+          confirmLabel: 'Start call',
         );
         if (confirmed != true || !context.mounted) return;
       }

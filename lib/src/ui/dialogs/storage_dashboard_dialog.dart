@@ -10,10 +10,13 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_card.dart';
+import 'package:hollow/src/ui/components/hollow_chip.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_section_header.dart';
+import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/status_dot.dart';
+import 'package:hollow/src/ui/settings/settings_shared.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 void showStorageDashboardDialog(BuildContext context, String serverId) {
@@ -158,38 +161,12 @@ class _StorageDashboardContentState
     );
 
     return HollowDialog(
-      title: '',
-      content: SizedBox(
-        width: 540,
-        child: Column(
+      title: 'Storage dashboard',
+      showClose: true,
+      width: 600,
+      content: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Row(
-              children: [
-                Icon(LucideIcons.hardDrive, size: 18, color: hollow.accent),
-                const SizedBox(width: HollowSpacing.sm),
-                Text(
-                  'Storage Dashboard',
-                  style: HollowTypography.heading.copyWith(
-                    color: hollow.textPrimary,
-                  ),
-                ),
-                const Spacer(),
-                HollowPressable(
-                  onTap: () => Navigator.of(context).pop(),
-                  borderRadius: BorderRadius.circular(hollow.radiusMd),
-                  padding: const EdgeInsets.all(HollowSpacing.xs),
-                  semanticLabel: 'Close',
-                  child: Icon(
-                    LucideIcons.x,
-                    size: 16,
-                    color: hollow.textSecondary,
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: HollowSpacing.lg),
-
             ...[
               // Full width below the erasure-coding threshold, side by side
               // above it.
@@ -258,7 +235,6 @@ class _StorageDashboardContentState
             ],
           ],
         ),
-      ),
     );
   }
 
@@ -366,7 +342,7 @@ class _StorageDashboardContentState
             ),
             Text(
               '${redundancyFactor.toStringAsFixed(1)}x overhead',
-              style: HollowTypography.caption.copyWith(color: hollow.textSecondary.withValues(alpha: 0.6), fontSize: 11),
+              style: HollowTypography.caption.copyWith(color: hollow.textTertiary),
             ),
           ],
         ),
@@ -383,41 +359,44 @@ class _StorageDashboardContentState
     final currentMb = (_stats?.myPledgeBytes.toDouble() ?? 512 * 1024 * 1024) / (1024 * 1024);
     final controller = TextEditingController(text: currentMb.toInt().toString());
 
-    final result = await showDialog<int>(
+    final result = await showHollowDialog<int>(
       context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: hollow.overlay,
-        title: Text('Set Storage Pledge', style: TextStyle(color: hollow.textPrimary, fontSize: 16)),
-        content: TextField(
-          controller: controller,
-          keyboardType: TextInputType.number,
-          autofocus: true,
-          style: TextStyle(color: hollow.textPrimary),
-          decoration: InputDecoration(
-            suffixText: 'MB',
-            suffixStyle: TextStyle(color: hollow.textSecondary),
-            hintText: 'Min 512',
-            hintStyle: TextStyle(color: hollow.textSecondary.withValues(alpha: 0.4)),
-            enabledBorder: UnderlineInputBorder(borderSide: BorderSide(color: hollow.border)),
-            focusedBorder: UnderlineInputBorder(borderSide: BorderSide(color: hollow.accent)),
+      builder: (ctx) {
+        void save() {
+          final mb = int.tryParse(controller.text);
+          if (mb != null && mb >= 512) Navigator.pop(ctx, mb);
+        }
+
+        return HollowDialog(
+          title: 'Set storage pledge',
+          width: 420,
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              const SettingsFieldLabel(label: 'Pledge in MB'),
+              const SizedBox(height: HollowSpacing.sm),
+              HollowTextField(
+                controller: controller,
+                keyboardType: TextInputType.number,
+                autofocus: true,
+                hintText: 'Min 512',
+                onSubmitted: (_) => save(),
+              ),
+            ],
           ),
-        ),
-        actions: [
-          HollowButton.ghost(
-            compact: true,
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('Cancel'),
-          ),
-          HollowButton.filled(
-            compact: true,
-            onPressed: () {
-              final mb = int.tryParse(controller.text);
-              if (mb != null && mb >= 512) Navigator.pop(ctx, mb);
-            },
-            child: const Text('Save'),
-          ),
-        ],
-      ),
+          actions: [
+            HollowButton.ghost(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Cancel'),
+            ),
+            HollowButton.filled(
+              onPressed: save,
+              child: const Text('Save'),
+            ),
+          ],
+        );
+      },
     );
 
     if (result != null) {
@@ -446,7 +425,7 @@ class _StorageDashboardContentState
       children: [
         HollowPressable(
           onTap: () => _editPledge(hollow),
-          borderRadius: BorderRadius.circular(4),
+          borderRadius: BorderRadius.circular(hollow.radiusXs),
           padding: EdgeInsets.zero,
           child: Row(
             children: [
@@ -531,30 +510,29 @@ class _StorageDashboardContentState
   ];
 
   Future<void> _editRetention(HollowTheme hollow, String key, String currentValue) async {
-    final result = await showDialog<String>(
+    final title = key == 'retention_files'
+        ? 'File retention'
+        : key == 'retention_messages'
+            ? 'Message retention'
+            : 'Voice retention';
+    final result = await showHollowDialog<String>(
       context: context,
-      builder: (ctx) => SimpleDialog(
-        backgroundColor: hollow.overlay,
-        title: Text(
-          key == 'retention_files' ? 'File Retention' : key == 'retention_messages' ? 'Message Retention' : 'Voice Retention',
-          style: TextStyle(color: hollow.textPrimary, fontSize: 16),
-        ),
-        children: [
-          for (final (value, label) in _retentionOptions)
-            SimpleDialogOption(
-              onPressed: () => Navigator.pop(ctx, value),
-              child: Row(
-                children: [
-                  if (value == currentValue || (currentValue == '' && value == 'permanent'))
-                    Icon(LucideIcons.check, size: 14, color: hollow.accent)
-                  else
-                    const SizedBox(width: 14),
-                  const SizedBox(width: HollowSpacing.sm),
-                  Text(label, style: TextStyle(color: hollow.textPrimary)),
-                ],
+      builder: (ctx) => HollowDialog(
+        title: title,
+        showClose: true,
+        content: Wrap(
+          spacing: HollowSpacing.sm,
+          runSpacing: HollowSpacing.sm,
+          children: [
+            for (final (value, label) in _retentionOptions)
+              HollowChip(
+                label: label,
+                selected: value == currentValue ||
+                    (currentValue == '' && value == 'permanent'),
+                onTap: () => Navigator.pop(ctx, value),
               ),
-            ),
-        ],
+          ],
+        ),
       ),
     );
 
@@ -596,8 +574,6 @@ class _StorageDashboardContentState
           'Changes affect new content only.',
           style: HollowTypography.caption.copyWith(
             color: hollow.textSecondary,
-            fontStyle: FontStyle.italic,
-            fontSize: 10,
           ),
         ),
       ],
@@ -607,7 +583,7 @@ class _StorageDashboardContentState
   Widget _retentionRow(HollowTheme hollow, String label, String settingKey, String policy, {bool canEdit = true}) {
     return HollowPressable(
       onTap: canEdit ? () => _editRetention(hollow, settingKey, policy) : null,
-      borderRadius: BorderRadius.circular(4),
+      borderRadius: BorderRadius.circular(hollow.radiusXs),
       padding: EdgeInsets.zero,
       child: Row(
         children: [
@@ -659,7 +635,6 @@ class _StorageDashboardContentState
             'Every member stores all files. Erasure coding activates at 6+ members.',
             style: HollowTypography.caption.copyWith(
               color: hollow.textSecondary,
-              fontSize: 10,
             ),
           ),
         ],
@@ -707,7 +682,6 @@ class _StorageDashboardContentState
           '$shardCount shard${shardCount != 1 ? 's' : ''} stored locally',
           style: HollowTypography.caption.copyWith(
             color: hollow.textSecondary,
-            fontSize: 10,
           ),
         ),
       ],
@@ -723,7 +697,7 @@ class _StorageDashboardContentState
             : color;
 
     return ClipRRect(
-      borderRadius: BorderRadius.circular(4),
+      borderRadius: BorderRadius.circular(hollow.radiusXs),
       child: SizedBox(
         height: 8,
         child: Stack(
@@ -738,7 +712,7 @@ class _StorageDashboardContentState
                 child: Container(
                   decoration: BoxDecoration(
                     color: barColor,
-                    borderRadius: BorderRadius.circular(4),
+                    borderRadius: BorderRadius.circular(hollow.radiusXs),
                   ),
                 ),
               ),

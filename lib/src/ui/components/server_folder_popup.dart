@@ -622,58 +622,26 @@ class _FolderRenameDialogState extends ConsumerState<_FolderRenameDialog> {
 
   @override
   Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-
-    return Center(
-      child: Material(
-        color: Colors.transparent,
-        child: Container(
-          width: 280,
-          padding: const EdgeInsets.all(HollowSpacing.xl),
-          decoration: BoxDecoration(
-            color: hollow.overlay,
-            borderRadius: BorderRadius.circular(hollow.radiusLg),
-            border: Border.all(color: hollow.border),
-          ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                'Rename Folder',
-                style: HollowTypography.subheading.copyWith(
-                  color: hollow.textPrimary,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-              const SizedBox(height: HollowSpacing.md),
-              HollowTextField(
-                controller: _controller,
-                hintText: 'Folder name',
-                maxLength: 32,
-                autofocus: true,
-                onSubmitted: (_) => _save(),
-              ),
-              const SizedBox(height: HollowSpacing.lg),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.end,
-                children: [
-                  HollowButton.ghost(
-                    onPressed: () => Navigator.of(context).pop(),
-                    child: const Text('Cancel'),
-                  ),
-                  const SizedBox(width: HollowSpacing.sm),
-                  HollowButton.filled(
-                    onPressed: _save,
-                    child: const Text('Save'),
-                  ),
-                ],
-              ),
-            ],
-          ),
-        ),
+    return HollowDialog(
+      title: 'Rename folder',
+      width: 420,
+      content: HollowTextField(
+        controller: _controller,
+        hintText: 'Folder name',
+        maxLength: 32,
+        autofocus: true,
+        onSubmitted: (_) => _save(),
       ),
+      actions: [
+        HollowButton.ghost(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Cancel'),
+        ),
+        HollowButton.filled(
+          onPressed: _save,
+          child: const Text('Save'),
+        ),
+      ],
     );
   }
 }
-

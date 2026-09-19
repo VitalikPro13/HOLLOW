@@ -76,24 +76,16 @@ class ReduceMotionNotifier extends AsyncNotifier<ReduceMotionMode> {
 
 /// Whether to reduce transparency / blur effects (accessibility).
 ///
-/// Dialog blur drops to sigma 0 and the background-image panel renders fully
-/// opaque. Persisted as `reduce_transparency`. Default: false.
+/// The background-image panel renders fully opaque. Persisted as `reduce_transparency`. Default: false.
 final reduceTransparencyProvider =
     AsyncNotifierProvider<ReduceTransparencyNotifier, bool>(
         ReduceTransparencyNotifier.new);
-
-/// Process-wide mirror of [reduceTransparencyProvider], so top-level helpers
-/// without a `ref` (e.g. `showHollowDialog`) can consult it synchronously.
-/// Kept in sync by [ReduceTransparencyNotifier].
-final ValueNotifier<bool> reduceTransparencyFlag = ValueNotifier<bool>(false);
 
 class ReduceTransparencyNotifier extends AsyncNotifier<bool> {
   @override
   Future<bool> build() async {
     final val = await storage_api.loadSetting(key: 'reduce_transparency');
-    final on = val == 'true';
-    reduceTransparencyFlag.value = on;
-    return on;
+    return val == 'true';
   }
 
   Future<void> setEnabled(bool value) async {
@@ -101,7 +93,6 @@ class ReduceTransparencyNotifier extends AsyncNotifier<bool> {
       key: 'reduce_transparency',
       value: value.toString(),
     );
-    reduceTransparencyFlag.value = value;
     state = AsyncData(value);
   }
 }

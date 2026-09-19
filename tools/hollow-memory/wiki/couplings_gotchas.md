@@ -506,7 +506,7 @@ Related: `FadeTransition` drops its subtree from the SEMANTICS tree at opacity 0
 **Where:**
 - `lib/src/ui/app.dart` -- `MaterialApp.builder` wraps the navigator child in a `Column` with `WindowTitleBar` at top
 - `lib/src/ui/shell/window_title_bar.dart` -- the title bar widget
-- The Navigator child is wrapped in `ClipRect` to prevent `BackdropFilter` blur bleed from dialogs into the title bar area
+- The Navigator child is wrapped in `ClipRect` so nothing painted by a route bleeds into the title bar area (it once contained the dialog backdrop blur, removed in design sweep 8)
 
 **Correct approach:** Keep `WindowTitleBar` in `MaterialApp.builder`. Wrap the navigator child in `ClipRect`. Never move the title bar into `HollowShell` or any widget below the Navigator.
 

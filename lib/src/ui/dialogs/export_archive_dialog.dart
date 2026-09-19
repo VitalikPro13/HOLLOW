@@ -10,8 +10,9 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
-import 'package:hollow/src/ui/components/hollow_pressable.dart';
+import 'package:hollow/src/ui/components/hollow_chip.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
+import 'package:hollow/src/ui/settings/settings_shared.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Show the export archive dialog for a DM, channel, or server.
@@ -172,6 +173,12 @@ class _ExportArchiveDialogContentState
     }
   }
 
+  static const _fileModes = <(String, String, String)>[
+    ('full', 'Full', 'Include all files (largest)'),
+    ('images_only', 'Images only', 'Include images, skip videos and large files'),
+    ('placeholder', 'Placeholder', 'No files, just metadata (smallest)'),
+  ];
+
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
@@ -180,9 +187,12 @@ class _ExportArchiveDialogContentState
         : widget.isDm
             ? LucideIcons.messageSquare
             : LucideIcons.hash;
+    final modeDescription =
+        _fileModes.firstWhere((m) => m.$1 == _fileMode).$3;
 
     return HollowDialog(
-      title: 'Export Archive',
+      title: 'Export archive',
+      width: 420,
       content: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -200,9 +210,8 @@ class _ExportArchiveDialogContentState
                 Expanded(
                   child: Text(
                     widget.name,
-                    style: HollowTypography.body.copyWith(
+                    style: HollowTypography.label.copyWith(
                       color: hollow.textPrimary,
-                      fontWeight: FontWeight.w600,
                     ),
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
@@ -213,63 +222,47 @@ class _ExportArchiveDialogContentState
                     '${widget.messageCount} messages',
                     style: HollowTypography.caption.copyWith(
                       color: hollow.textSecondary,
-                      fontSize: 11,
                     ),
                   ),
               ],
             ),
           ),
-
           const SizedBox(height: HollowSpacing.lg),
-
+          const SettingsFieldLabel(label: 'File mode'),
+          const SizedBox(height: HollowSpacing.sm),
+          Row(
+            children: [
+              for (var i = 0; i < _fileModes.length; i++) ...[
+                if (i > 0) const SizedBox(width: HollowSpacing.sm),
+                Expanded(
+                  child: HollowChip(
+                    expand: true,
+                    label: _fileModes[i].$2,
+                    selected: _fileMode == _fileModes[i].$1,
+                    onTap: () => setState(() => _fileMode = _fileModes[i].$1),
+                  ),
+                ),
+              ],
+            ],
+          ),
+          const SizedBox(height: HollowSpacing.sm),
           Text(
-            'File mode',
-            style: HollowTypography.body.copyWith(
-              color: hollow.textPrimary,
-              fontWeight: FontWeight.w600,
-              fontSize: 13,
+            modeDescription,
+            style: HollowTypography.caption.copyWith(
+              color: hollow.textSecondary,
             ),
           ),
-          const SizedBox(height: HollowSpacing.sm),
-
-          _FileModeOption(
-            icon: LucideIcons.hardDrive,
-            label: 'Full',
-            description: 'Include all files (largest)',
-            isSelected: _fileMode == 'full',
-            onTap: () => setState(() => _fileMode = 'full'),
-          ),
-          const SizedBox(height: HollowSpacing.xs),
-          _FileModeOption(
-            icon: LucideIcons.image,
-            label: 'Images only',
-            description: 'Include images, skip videos and large files',
-            isSelected: _fileMode == 'images_only',
-            onTap: () => setState(() => _fileMode = 'images_only'),
-          ),
-          const SizedBox(height: HollowSpacing.xs),
-          _FileModeOption(
-            icon: LucideIcons.fileText,
-            label: 'Placeholder',
-            description: 'No files, just metadata (smallest)',
-            isSelected: _fileMode == 'placeholder',
-            onTap: () => setState(() => _fileMode = 'placeholder'),
-          ),
-
-          const SizedBox(height: HollowSpacing.sm),
-
+          const SizedBox(height: HollowSpacing.md),
           Row(
             children: [
               Icon(LucideIcons.shieldCheck,
-                  size: 12, color: hollow.accent.withValues(alpha: 0.6)),
-              const SizedBox(width: 6),
+                  size: 14, color: hollow.textTertiary),
+              const SizedBox(width: HollowSpacing.xs),
               Expanded(
                 child: Text(
                   'Archive will be signed with your Ed25519 key for cryptographic verification.',
                   style: HollowTypography.caption.copyWith(
-                    color: hollow.textSecondary.withValues(alpha: 0.7),
-                    fontSize: 10,
-                    fontStyle: FontStyle.italic,
+                    color: hollow.textTertiary,
                   ),
                 ),
               ),
@@ -282,96 +275,14 @@ class _ExportArchiveDialogContentState
           onPressed: _exporting ? null : () => Navigator.of(context).pop(),
           child: const Text('Cancel'),
         ),
-        const SizedBox(width: HollowSpacing.sm),
         HollowButton.filled(
           onPressed: _exporting ? null : _export,
           loading: _exporting,
           icon: Icon(LucideIcons.fileOutput,
               size: 14, color: hollow.textOnAccent),
-          child: const Text('Export & Sign'),
+          child: const Text('Export and sign'),
         ),
       ],
-    );
-  }
-}
-
-class _FileModeOption extends StatelessWidget {
-  final IconData icon;
-  final String label;
-  final String description;
-  final bool isSelected;
-  final VoidCallback onTap;
-
-  const _FileModeOption({
-    required this.icon,
-    required this.label,
-    required this.description,
-    required this.isSelected,
-    required this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-
-    return HollowPressable(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(hollow.radiusMd),
-      padding: EdgeInsets.zero,
-      child: Container(
-        padding: const EdgeInsets.symmetric(
-          horizontal: HollowSpacing.md,
-          vertical: HollowSpacing.sm,
-        ),
-        decoration: BoxDecoration(
-          color: isSelected
-              ? hollow.accent.withValues(alpha: 0.1)
-              : Colors.transparent,
-          borderRadius: BorderRadius.circular(hollow.radiusMd),
-          border: Border.all(
-            color: isSelected
-                ? hollow.accent.withValues(alpha: 0.4)
-                : hollow.border,
-          ),
-        ),
-        child: Row(
-          children: [
-            Icon(
-              icon,
-              size: 16,
-              color: isSelected ? hollow.accent : hollow.textSecondary,
-            ),
-            const SizedBox(width: HollowSpacing.sm),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    label,
-                    style: HollowTypography.body.copyWith(
-                      color: isSelected
-                          ? hollow.accent
-                          : hollow.textPrimary,
-                      fontWeight:
-                          isSelected ? FontWeight.w600 : FontWeight.normal,
-                      fontSize: 13,
-                    ),
-                  ),
-                  Text(
-                    description,
-                    style: HollowTypography.caption.copyWith(
-                      color: hollow.textSecondary,
-                      fontSize: 10,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            if (isSelected)
-              Icon(LucideIcons.check, size: 14, color: hollow.accent),
-          ],
-        ),
-      ),
     );
   }
 }

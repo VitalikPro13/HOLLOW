@@ -11,6 +11,7 @@ import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_badge.dart';
 import 'package:hollow/src/ui/components/hollow_chip.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
+import 'package:hollow/src/ui/components/hollow_divider.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_section_header.dart';
 import 'package:hollow/src/ui/components/platform_icons.dart';
@@ -54,6 +55,8 @@ const double _kCenterWidth = 560.0;
 
 const double _kSideWidth = 300.0;
 
+/// Room reserved beside the details pane when scaling; the hairline takes 1
+/// of it and the centre pane the rest.
 const double _kPanelGap = HollowSpacing.md;
 
 class _GameCardDialog extends StatefulWidget {
@@ -108,23 +111,6 @@ class _GameCardDialogState extends State<_GameCardDialog> {
     }
   }
 
-  /// The profile dialog's card recipe, with the border tinted toward the game's
-  /// own colour once probed.
-  BoxDecoration _surface(HollowTheme hollow) => BoxDecoration(
-        color: hollow.overlay,
-        borderRadius: BorderRadius.circular(hollow.radiusLg),
-        border: Border.all(
-          color: (_gameAccent ?? hollow.accent).withValues(alpha: 0.18),
-        ),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: 0.3),
-            blurRadius: 24,
-            offset: const Offset(0, 8),
-          ),
-        ],
-      );
-
   bool get _hasSidePanel =>
       details.platforms.isNotEmpty ||
       details.releaseDate.isNotEmpty ||
@@ -163,27 +149,22 @@ class _GameCardDialogState extends State<_GameCardDialog> {
         ? centerWidth
         : centerWidth + (sideWidth + _kPanelGap) * sides;
 
-    final centerPanel = Container(
-      width: centerWidth,
-      decoration: _surface(hollow),
-      clipBehavior: Clip.antiAlias,
-      child: _CenterPanel(
-        name: name,
-        year: year,
-        blurb: blurb,
-        coverBytes: coverBytes,
-        artBytes: artBytes,
-        details: details,
-        accent: _gameAccent ?? hollow.accent,
-      ),
+    final centerPanel = _CenterPanel(
+      name: name,
+      year: year,
+      blurb: blurb,
+      coverBytes: coverBytes,
+      artBytes: artBytes,
+      details: details,
+      accent: _gameAccent ?? hollow.accent,
     );
 
-    Widget sidePanel(double w) => Container(
-          width: w,
-          decoration: _surface(hollow),
-          clipBehavior: Clip.antiAlias,
-          padding: const EdgeInsets.all(HollowSpacing.md),
-          child: _DetailsPanel(name: name, details: details, assets: assets),
+    Widget sidePanel({double? width}) => SizedBox(
+          width: width,
+          child: Padding(
+            padding: const EdgeInsets.all(HollowSpacing.md),
+            child: _DetailsPanel(name: name, details: details, assets: assets),
+          ),
         );
 
     final Widget content;
@@ -195,39 +176,32 @@ class _GameCardDialogState extends State<_GameCardDialog> {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           centerPanel,
-          const SizedBox(height: _kPanelGap),
-          sidePanel(centerWidth),
+          const HollowDivider(),
+          sidePanel(),
         ],
       );
     } else {
-      // Panels size to their OWN content and are never stretched to each
-      // other's height, which leaves a dead band of surface under the shorter
-      // one.
-      content = Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          centerPanel,
-          const SizedBox(width: _kPanelGap),
-          sidePanel(sideWidth),
-        ],
+      // The hairline between the panes runs the full height of the taller one.
+      content = IntrinsicHeight(
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Expanded(child: centerPanel),
+            const HollowVerticalDivider(),
+            sidePanel(width: sideWidth),
+          ],
+        ),
       );
     }
 
-    return Center(
-      child: Padding(
-        padding: EdgeInsets.fromLTRB(
-          HollowSpacing.xl,
-          HollowSpacing.xl + safe.top,
-          HollowSpacing.xl,
-          HollowSpacing.xl + safe.bottom,
-        ),
-        child: ConstrainedBox(
-          constraints: BoxConstraints(maxWidth: width, maxHeight: maxHeight),
-          child: Material(
-            color: Colors.transparent,
-            child: SingleChildScrollView(child: content),
-          ),
-        ),
+    return Padding(
+      padding: EdgeInsets.only(top: safe.top, bottom: safe.bottom),
+      child: HollowDialogSurface(
+        width: width,
+        maxWidth: width,
+        maxHeight: maxHeight,
+        padded: false,
+        child: SingleChildScrollView(child: content),
       ),
     );
   }

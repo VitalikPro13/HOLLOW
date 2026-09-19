@@ -8,7 +8,6 @@ import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/ui/components/hollow_divider.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
-import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_section_header.dart';
 import 'package:hollow/src/ui/components/hollow_tooltip.dart';
 import 'package:hollow/src/ui/components/version_egg_tap_target.dart';
@@ -240,63 +239,40 @@ void _showLegalDocument(
 
   showHollowDialog(
     context: context,
-    builder: (ctx) => Material(
-      color: Colors.transparent,
-      child: Center(
-        // The interface zoom shrinks the logical viewport, so this sheet can
-        // exceed the screen; the margin keeps the clamped result a dialog.
-        child: Padding(
-          padding: const EdgeInsets.all(HollowSpacing.lg),
-          child: Container(
-            width: 640,
-            height: 520,
-            decoration: BoxDecoration(
-              color: hollow.overlay,
-              borderRadius: BorderRadius.circular(16),
-              border: Border.all(color: hollow.border),
-            ),
-            child: Column(
+    // A fixed reading size; the surface clamps it to the zoomed viewport and
+    // the Column fills the capped height so the document scrolls inside it.
+    builder: (ctx) => HollowDialogSurface(
+      width: 640,
+      maxHeight: 520,
+      padded: false,
+      child: Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(HollowSpacing.xl,
+                HollowSpacing.lg, HollowSpacing.md, HollowSpacing.md),
+            child: Row(
               children: [
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(24, 20, 12, 0),
-                  child: Row(
-                    children: [
-                      Expanded(
-                        child: Text(
-                          title,
-                          style: HollowTypography.heading.copyWith(
-                            color: hollow.textPrimary,
-                            fontSize: 18,
-                          ),
-                        ),
-                      ),
-                      HollowPressable(
-                        onTap: () => Navigator.of(ctx).pop(),
-                        semanticLabel: 'Close',
-                        child: Padding(
-                          padding: const EdgeInsets.all(8),
-                          child: Icon(LucideIcons.x, size: 18,
-                              color: hollow.textSecondary),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-                const SizedBox(height: 12),
-                Container(
-                    height: 1,
-                    color: hollow.border.withValues(alpha: 0.5)),
                 Expanded(
-                  child: legalMarkdownView(
-                    hollow,
-                    body,
-                    padding: const EdgeInsets.all(24),
+                  child: Text(
+                    title,
+                    style: HollowTypography.heading
+                        .copyWith(color: hollow.textPrimary),
                   ),
                 ),
+                const SizedBox(width: HollowSpacing.sm),
+                const HollowDialogCloseButton(),
               ],
             ),
           ),
-        ),
+          const HollowDivider(),
+          Expanded(
+            child: legalMarkdownView(
+              hollow,
+              body,
+              padding: const EdgeInsets.all(HollowSpacing.xl),
+            ),
+          ),
+        ],
       ),
     ),
   );

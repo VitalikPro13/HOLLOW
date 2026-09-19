@@ -88,6 +88,38 @@ void main() {
       fail(buf.toString());
     }
   });
+
+  test('no dialog draws its own frame', () {
+    // A hand-drawn dialog opens as `showHollowDialog(... builder: ... Center(`
+    // with its own Material and decorated Container. The frame is
+    // HollowDialogSurface; a builder returns HollowDialog, the surface, or a
+    // widget that builds one.
+    final frame = RegExp(r'\b(Center|Material|Container|DecoratedBox)\(');
+    final hits = <String>[];
+    for (final entity in Directory('lib/src/ui').listSync(recursive: true)) {
+      if (entity is! File || !entity.path.endsWith('.dart')) continue;
+      final path = entity.path.replaceAll(r'\', '/');
+      if (path.startsWith(_components)) continue;
+      final source = entity.readAsStringSync();
+      for (final call in RegExp(r'showHollowDialog\b').allMatches(source)) {
+        final window = source.substring(
+            call.end, (call.end + 500).clamp(0, source.length));
+        final builder = window.indexOf('builder:');
+        if (builder < 0) continue;
+        final start = builder + 'builder:'.length;
+        final body =
+            window.substring(start, (start + 260).clamp(0, window.length));
+        if (frame.hasMatch(body)) {
+          final line = '\n'.allMatches(source.substring(0, call.start)).length;
+          hits.add('$path:${line + 1}');
+        }
+      }
+    }
+    expect(hits, isEmpty,
+        reason: 'These dialogs draw their own frame. Return HollowDialog, or '
+            'HollowDialogSurface for a layout of its own '
+            '(HOLLOW_DESIGN_LANGUAGE.md 4.4):\n  ${hits.join('\n  ')}');
+  });
 }
 
 // --- The rules ---------------------------------------------------------------
@@ -103,7 +135,7 @@ final _rules = <_Rule>[
         'not a literal',
     pattern: RegExp(r'\bfontSize\s*:'),
     excludeDirs: [_theme],
-    baseline: 689,
+    baseline: 597,
   ),
   _Rule(
     id: 'material-colors',
@@ -111,7 +143,7 @@ final _rules = <_Rule>[
     fix: 'use hollow.<token>; Colors.transparent is the only allowed one',
     pattern: RegExp(r'\bColors\.(?!transparent\b)\w+'),
     excludeDirs: [_theme],
-    baseline: 207,
+    baseline: 190,
   ),
   _Rule(
     id: 'color-literal',
@@ -120,7 +152,7 @@ final _rules = <_Rule>[
         'HollowTheme',
     pattern: RegExp(r'\bColor\(\s*0x'),
     excludeDirs: [_theme],
-    baseline: 136,
+    baseline: 133,
   ),
   _Rule(
     id: 'radius-literal',
@@ -128,7 +160,7 @@ final _rules = <_Rule>[
     fix: 'use hollow.radiusXs / radiusMd / radiusLg / radiusXl',
     pattern: RegExp(r'BorderRadius\.circular\(\s*[0-9]'),
     excludeDirs: [_theme],
-    baseline: 123,
+    baseline: 117,
   ),
   _Rule(
     id: 'letter-spacing',
@@ -247,7 +279,7 @@ final _rules = <_Rule>[
     pattern:
         RegExp(r'EdgeInsets\.(all|symmetric|only|fromLTRB)\([^)]*\b\d'),
     excludeDirs: [_theme],
-    baseline: 230,
+    baseline: 225,
   ),
   _Rule(
     id: 'sized-box-gap',
@@ -256,7 +288,7 @@ final _rules = <_Rule>[
         'chips), 12 grouped, 16 separated, 24 sectioned',
     pattern: RegExp(r'SizedBox\(\s*(width|height)\s*:\s*\d'),
     excludeDirs: [_theme],
-    baseline: 176,
+    baseline: 171,
   ),
   _Rule(
     id: 'gradient',
@@ -275,7 +307,18 @@ final _rules = <_Rule>[
     pattern: RegExp(r'blurRadius\s*:\s*(\d+(?:\.\d+)?)'),
     threshold: 12,
     excludeDirs: [_theme],
-    baseline: 28,
+    baseline: 15,
+  ),
+  _Rule(
+    id: 'raw-dialog',
+    what: 'showDialog / showGeneralDialog / AlertDialog / SimpleDialog / '
+        'Dialog( outside components/',
+    fix: 'showHollowDialog with HollowDialog (or HollowDialogSurface); a '
+        'yes-or-no question is showHollowConfirm',
+    pattern: RegExp(
+        r'\bshow(General)?Dialog\s*[<(]|(?<![\w.])(Alert|Simple)?Dialog\('),
+    excludeDirs: [_theme, _components],
+    baseline: 0,
   ),
   _Rule(
     id: 'raw-material',
@@ -284,7 +327,7 @@ final _rules = <_Rule>[
         'a documented overlay host is the only exception',
     pattern: RegExp(r'(?<![\w.])Material\('),
     excludeDirs: [_theme, _components],
-    baseline: 55,
+    baseline: 26,
   ),
 ];
 

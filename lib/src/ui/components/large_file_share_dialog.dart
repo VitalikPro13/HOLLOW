@@ -32,11 +32,9 @@ Future<bool> confirmLargeFileShare(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
+          HollowDialogText(
             '"$fileName" is over 34 MB, so it can\'t be sent directly. It will '
             'be hosted as a Hollow Share link and transferred peer-to-peer.',
-            style:
-                HollowTypography.body.copyWith(color: hollow.textSecondary),
           ),
           const SizedBox(height: HollowSpacing.md),
           Text(
@@ -82,10 +80,9 @@ Future<bool> confirmLargeFilesShare(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
+          const HollowDialogText(
             'These are over 34 MB, so they can\'t be sent directly. They will '
             'be hosted as Hollow Share links and transferred peer-to-peer.',
-            style: HollowTypography.body.copyWith(color: hollow.textSecondary),
           ),
           const SizedBox(height: HollowSpacing.sm),
           for (final f in files)

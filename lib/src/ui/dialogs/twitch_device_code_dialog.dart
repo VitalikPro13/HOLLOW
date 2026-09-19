@@ -90,12 +90,14 @@ class _TwitchDeviceCodeDialogState extends State<TwitchDeviceCodeDialog> {
 
     return HollowDialog(
       title: 'Connect Twitch',
+      // An error leaves nothing to confirm; success closes on its own.
+      showClose: _error != null,
       content: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.center,
         children: [
           if (_error != null) ...[
-            Icon(LucideIcons.alertCircle, size: 32, color: hollow.error),
+            Icon(LucideIcons.alertCircle, size: 24, color: hollow.error),
             const SizedBox(height: HollowSpacing.md),
             Text(
               _error!,
@@ -107,22 +109,18 @@ class _TwitchDeviceCodeDialogState extends State<TwitchDeviceCodeDialog> {
               child: Column(
                 children: [
                   Icon(LucideIcons.checkCircle,
-                      size: 32, color: hollow.accent),
+                      size: 24, color: hollow.success),
                   const SizedBox(height: HollowSpacing.md),
                   Text(
                     'Twitch connected!',
                     style:
-                        HollowTypography.body.copyWith(color: hollow.accent),
+                        HollowTypography.body.copyWith(color: hollow.textPrimary),
                   ),
                 ],
               ),
             ),
           ] else if (_userCode != null) ...[
-            Text(
-              'Enter this code on Twitch:',
-              style: HollowTypography.body
-                  .copyWith(color: hollow.textSecondary),
-            ),
+            const HollowDialogText('Enter this code on Twitch:'),
             const SizedBox(height: HollowSpacing.lg),
             GestureDetector(
               onTap: () {
@@ -137,8 +135,6 @@ class _TwitchDeviceCodeDialogState extends State<TwitchDeviceCodeDialog> {
                 decoration: BoxDecoration(
                   color: hollow.elevated,
                   borderRadius: BorderRadius.circular(hollow.radiusMd),
-                  border: Border.all(
-                      color: hollow.accent.withValues(alpha: 0.3)),
                 ),
                 child: Row(
                   mainAxisSize: MainAxisSize.min,
@@ -147,7 +143,6 @@ class _TwitchDeviceCodeDialogState extends State<TwitchDeviceCodeDialog> {
                       _userCode!,
                       style: HollowTypography.heading.copyWith(
                         color: hollow.textPrimary,
-                        fontSize: 24,
                       ),
                     ),
                     const SizedBox(width: HollowSpacing.md),
@@ -177,14 +172,7 @@ class _TwitchDeviceCodeDialogState extends State<TwitchDeviceCodeDialog> {
         ],
       ),
       actions: [
-        if (_error != null)
-          HollowButton.ghost(
-            onPressed: () => Navigator.of(context).pop(),
-            child: const Text('Close'),
-          )
-        else if (_done)
-          const SizedBox.shrink()
-        else ...[
+        if (_error == null && !_done) ...[
           HollowButton.ghost(
             onPressed: () => Navigator.of(context).pop(),
             child: const Text('Cancel'),

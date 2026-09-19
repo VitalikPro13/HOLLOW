@@ -1029,65 +1029,34 @@ class _LocalNicknameDialogState extends ConsumerState<_LocalNicknameDialog> {
 
   @override
   Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-
-    return Center(
-      child: Material(
-        color: Colors.transparent,
-        child: Container(
-          width: 300,
-          padding: const EdgeInsets.all(HollowSpacing.xl),
-          decoration: BoxDecoration(
-            color: hollow.overlay,
-            borderRadius: BorderRadius.circular(hollow.radiusLg),
-            border: Border.all(color: hollow.border),
+    return HollowDialog(
+      title: 'Set nickname',
+      width: 420,
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          const HollowDialogText('Only visible to you'),
+          const SizedBox(height: HollowSpacing.md),
+          HollowTextField(
+            controller: _controller,
+            hintText: 'Nickname (leave empty to clear)',
+            maxLength: 32,
+            autofocus: true,
+            onSubmitted: (_) => _save(),
           ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                'Set Nickname',
-                style: HollowTypography.subheading.copyWith(
-                  color: hollow.textPrimary,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-              const SizedBox(height: HollowSpacing.xs),
-              Text(
-                'Only visible to you',
-                style: HollowTypography.caption.copyWith(
-                  color: hollow.textSecondary,
-                  fontSize: 11,
-                ),
-              ),
-              const SizedBox(height: HollowSpacing.md),
-              HollowTextField(
-                controller: _controller,
-                hintText: 'Nickname (leave empty to clear)',
-                maxLength: 32,
-                autofocus: true,
-                onSubmitted: (_) => _save(),
-              ),
-              const SizedBox(height: HollowSpacing.lg),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.end,
-                children: [
-                  HollowButton.ghost(
-                    onPressed: () => Navigator.of(context).pop(),
-                    child: const Text('Cancel'),
-                  ),
-                  const SizedBox(width: HollowSpacing.sm),
-                  HollowButton.filled(
-                    onPressed: _save,
-                    child: const Text('Save'),
-                  ),
-                ],
-              ),
-            ],
-          ),
-        ),
+        ],
       ),
+      actions: [
+        HollowButton.ghost(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Cancel'),
+        ),
+        HollowButton.filled(
+          onPressed: _save,
+          child: const Text('Save'),
+        ),
+      ],
     );
   }
 }

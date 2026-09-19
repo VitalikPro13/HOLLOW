@@ -1,6 +1,6 @@
 # Dialogs -- All Modal Dialogs
 
-Every modal dialog in the project. All files live under `lib/src/ui/dialogs/`. Most use `showHollowDialog()` from `lib/src/ui/components/hollow_dialog.dart` which provides scale 0.95->1.0 + fade entrance with full-screen glassmorphism blur barrier.
+Every modal dialog in the project. All files live under `lib/src/ui/dialogs/`. Every modal opens with `showHollowDialog()` from `lib/src/ui/components/hollow_dialog.dart`: a scale 0.96->1.0 + fade entrance over the flat `HollowTheme.scrim` (65% black dark, 32% light; NO backdrop blur since design sweep 8, 2026-09-19). The frame is always `HollowDialogSurface` (overlay, hairline, 12 px shadow, radiusLg desktop / radiusXl + full width on a phone); a standard dialog is `HollowDialog` (title in `heading`, sentence case; `showClose`, `leadingActions`, `width`); a yes-or-no question is `showHollowConfirm()`. Raw `showDialog`/`showGeneralDialog` and hand-drawn frames are CI-guarded (`design_language_guard_test.dart`). Rules: `reports/reference/HOLLOW_DESIGN_LANGUAGE.md` 4.4.
 
 ---
 

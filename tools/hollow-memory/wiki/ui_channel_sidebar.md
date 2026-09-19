@@ -138,7 +138,7 @@ Alignment is `Alignment.topCenter` so the collapse visually shrinks from the bot
 - `hasUnread` = `!isSelected && !isMuted && unreadProvider.notifier.isChannelUnread(serverId, channelId)` -- only shows unread indicator when the channel is NOT currently selected and NOT muted.
 
 **Visual rendering:**
-- Outer `Padding` with horizontal `HollowSpacing.sm`, vertical `HollowSpacing.xxs`.
+- Outer padding `evenListRowPadding(context, inset: HollowSpacing.sm, vertical: HollowSpacing.xxs)`: the desktop scroll gutter (10 px, `HollowScrollBehavior`) already insets the right, so the row gives it back and the selected pill sits evenly (10/10 desktop, 8/8 touch). The Home friend and request rows use the same helper.
 - `HollowPressable` with `subtle: true`, `borderRadius: hollow.radiusMd`.
 - Background: `hollow.accentMuted` when selected, `Colors.transparent` otherwise. Hover: `hollow.elevated`.
 - `AnimatedDefaultTextStyle` transitions text color and weight: selected or unread channels use `hollow.textPrimary` + `FontWeight.w600`; otherwise `hollow.textSecondary` + `FontWeight.w400`.

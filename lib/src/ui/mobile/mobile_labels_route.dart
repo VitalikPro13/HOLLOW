@@ -14,6 +14,7 @@ import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/label_visuals.dart';
+import 'package:hollow/src/ui/settings/settings_shared.dart';
 import 'package:hollow/src/ui/components/member_search_picker.dart';
 import 'package:hollow/src/ui/components/hollow_spinner.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -157,7 +158,8 @@ class _MobileLabelsRouteState extends ConsumerState<MobileLabelsRoute> {
         builder: (ctx, setDialogState) {
           final hollow = HollowTheme.of(ctx);
           return HollowDialog(
-            title: existing == null ? 'New Label' : 'Edit Label',
+            title: existing == null ? 'Create label' : 'Edit label',
+            width: 420,
             content: Column(
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -170,9 +172,7 @@ class _MobileLabelsRouteState extends ConsumerState<MobileLabelsRoute> {
                   autofocus: true,
                 ),
                 const SizedBox(height: HollowSpacing.lg),
-                Text('Color', style: HollowTypography.caption.copyWith(
-                  color: hollow.textSecondary,
-                )),
+                const SettingsFieldLabel(label: 'Color'),
                 const SizedBox(height: HollowSpacing.sm),
                 Wrap(
                   spacing: HollowSpacing.sm,
@@ -192,9 +192,7 @@ class _MobileLabelsRouteState extends ConsumerState<MobileLabelsRoute> {
                   )).toList(),
                 ),
                 const SizedBox(height: HollowSpacing.lg),
-                Text('Type', style: HollowTypography.caption.copyWith(
-                  color: hollow.textSecondary,
-                )),
+                const SettingsFieldLabel(label: 'Type'),
                 const SizedBox(height: HollowSpacing.sm),
                 Row(
                   children: [
@@ -467,6 +465,15 @@ class _ManageSection extends ConsumerWidget {
   }
 
   Future<void> _deleteLabel(BuildContext context, crdt_api.LabelFfi label) async {
+    final ok = await showHollowConfirm(
+      context: context,
+      title: 'Delete "${label.name}"?',
+      message: 'Everyone who has this label loses it. This cannot be undone.',
+      confirmLabel: 'Delete',
+      destructive: true,
+    );
+    if (!ok) return;
+    if (!context.mounted) return;
     try {
       await crdt_api.deleteLabel(serverId: serverId, labelId: label.labelId);
       onReload();
@@ -481,15 +488,15 @@ class _ManageSection extends ConsumerWidget {
   }
 
   void _showAssignDialog(BuildContext context, WidgetRef ref, crdt_api.LabelFfi label) {
+    // Toggles apply live, so any dismissal reloads the list.
     showHollowDialog(
       context: context,
       builder: (_) => _AssignDialog(
         label: label,
         members: members,
         serverId: serverId,
-        onReload: onReload,
       ),
-    );
+    ).then((_) => onReload());
   }
 }
 
@@ -497,13 +504,11 @@ class _AssignDialog extends ConsumerStatefulWidget {
   final crdt_api.LabelFfi label;
   final List<crdt_api.MemberFfi> members;
   final String serverId;
-  final VoidCallback onReload;
 
   const _AssignDialog({
     required this.label,
     required this.members,
     required this.serverId,
-    required this.onReload,
   });
 
   @override
@@ -531,14 +536,9 @@ class _AssignDialogState extends ConsumerState<_AssignDialog> {
 
     return HollowDialog(
       title: 'Assign "${widget.label.name}"',
-      content: Container(
+      showClose: true,
+      content: SizedBox(
         width: double.infinity,
-        padding: const EdgeInsets.all(HollowSpacing.lg),
-        decoration: BoxDecoration(
-          color: hollow.surface.withValues(alpha: 0.4),
-          borderRadius: BorderRadius.circular(hollow.radiusMd),
-          border: Border.all(color: hollow.border),
-        ),
         child: MemberSearchPicker(
           members: widget.members,
           maxListHeight: 300,
@@ -555,15 +555,6 @@ class _AssignDialogState extends ConsumerState<_AssignDialog> {
           onTapMember: (m) => _toggle(m.peerId),
         ),
       ),
-      actions: [
-        HollowButton.filled(
-          onPressed: () {
-            Navigator.pop(context);
-            widget.onReload();
-          },
-          child: const Text('Done'),
-        ),
-      ],
     );
   }
 

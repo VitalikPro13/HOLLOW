@@ -8,6 +8,7 @@ import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_badge.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_chip.dart';
+import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_divider.dart';
 import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/hollow_key_combo.dart';
@@ -796,6 +797,138 @@ void main() {
       expect(tester.getSize(find.byType(HollowToggle)), const Size(36, 20));
       expect(find.bySemanticsLabel('Dark mode'), findsOneWidget);
       debugDefaultTargetPlatformOverride = null;
+    });
+  });
+
+  group('HollowDialog', () {
+    BoxDecoration frameOf(WidgetTester tester) => tester
+        .widget<DecoratedBox>(find
+            .descendant(
+                of: find.byType(HollowDialogSurface),
+                matching: find.byType(DecoratedBox))
+            .first)
+        .decoration as BoxDecoration;
+
+    testWidgets('frame is the overlay surface with a small shadow',
+        (tester) async {
+      final hollow = await _pump(
+        tester,
+        const HollowDialog(title: 'Title', content: Text('Body')),
+      );
+      final frame = frameOf(tester);
+      expect(frame.color, hollow.overlay);
+      expect(frame.boxShadow!.single.blurRadius, lessThanOrEqualTo(12));
+      expect(frame.borderRadius, BorderRadius.circular(hollow.radiusLg));
+    });
+
+    testWidgets('a phone takes the sheet radius and the full width',
+        (tester) async {
+      tester.view.physicalSize = const Size(390, 800);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      final hollow = await _pump(
+        tester,
+        const HollowDialog(title: 'T', content: Text('Short')),
+      );
+      expect(frameOf(tester).borderRadius,
+          BorderRadius.circular(hollow.radiusXl));
+      final width = tester
+          .getSize(find
+              .descendant(
+                  of: find.byType(HollowDialogSurface),
+                  matching: find.byType(DecoratedBox))
+              .first)
+          .width;
+      expect(width, 390 - HollowSpacing.xl * 2);
+    });
+
+    testWidgets('a fixed width holds on desktop', (tester) async {
+      tester.view.physicalSize = const Size(1280, 800);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      await _pump(
+        tester,
+        const HollowDialog(title: 'T', width: 420, content: Text('x')),
+      );
+      final size = tester.getSize(find
+          .descendant(
+              of: find.byType(HollowDialogSurface),
+              matching: find.byType(DecoratedBox))
+          .first);
+      expect(size.width, 420);
+    });
+
+    testWidgets('showClose puts a labelled close button in the title row',
+        (tester) async {
+      await _pump(
+        tester,
+        const HollowDialog(
+            title: 'Proof', showClose: true, content: Text('x')),
+      );
+      expect(find.byType(HollowDialogCloseButton), findsOneWidget);
+      expect(find.bySemanticsLabel('Close'), findsOneWidget);
+    });
+
+    testWidgets('leading actions sit apart from the confirm',
+        (tester) async {
+      await _pump(
+        tester,
+        HollowDialog(
+          title: 'T',
+          content: const Text('x'),
+          leadingActions: [
+            HollowButton.ghost(onPressed: () {}, child: const Text('Reset')),
+          ],
+          actions: [
+            HollowButton.filled(onPressed: () {}, child: const Text('Save')),
+          ],
+        ),
+      );
+      final reset = tester.getCenter(find.text('Reset'));
+      final save = tester.getCenter(find.text('Save'));
+      expect(reset.dy, save.dy);
+      expect(save.dx - reset.dx, greaterThan(150));
+    });
+
+    testWidgets('showHollowConfirm resolves true only on the confirm',
+        (tester) async {
+      bool? result;
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: HollowThemeData.dark(),
+          home: Scaffold(
+            body: Builder(
+              builder: (context) => TextButton(
+                onPressed: () async {
+                  result = await showHollowConfirm(
+                    context: context,
+                    title: 'Delete it?',
+                    message: 'Gone for good.',
+                    confirmLabel: 'Delete',
+                    destructive: true,
+                  );
+                },
+                child: const Text('Open'),
+              ),
+            ),
+          ),
+        ),
+      );
+
+      await tester.tap(find.text('Open'));
+      await tester.pumpAndSettle();
+      final confirm = tester.widget<HollowButton>(find.ancestor(
+          of: find.text('Delete'), matching: find.byType(HollowButton)));
+      expect(confirm.variant, HollowButtonVariant.danger);
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+      expect(result, isFalse);
+
+      await tester.tap(find.text('Open'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Delete'));
+      await tester.pumpAndSettle();
+      expect(result, isTrue);
     });
   });
 

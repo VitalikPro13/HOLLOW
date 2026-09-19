@@ -2,8 +2,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/relay_status_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
-import 'package:hollow/src/theme/hollow_theme.dart';
-import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/app.dart' show hollowNavigatorKey;
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
@@ -37,14 +35,12 @@ Future<bool> _ensureTurn(
   await showHollowDialog<void>(
     context: context,
     builder: (dialogContext) {
-      final hollow = HollowTheme.of(dialogContext);
       return HollowDialog(
         title: 'Always relay calls needs a TURN server',
-        content: Text(
+        content: const HollowDialogText(
           'This relay has no TURN server, so a relayed call cannot be set up. '
           'Turn off Always relay calls in Settings > Security to call on this '
           'relay.',
-          style: HollowTypography.body.copyWith(color: hollow.textSecondary),
         ),
         actions: [
           HollowButton.filled(

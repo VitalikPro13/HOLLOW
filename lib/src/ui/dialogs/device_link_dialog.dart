@@ -12,10 +12,10 @@ import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/app.dart' show hollowNavigatorKey;
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
-import 'package:hollow/src/ui/components/hollow_focus_ring.dart';
 import 'package:hollow/src/ui/components/hollow_section_header.dart';
 import 'package:hollow/src/ui/components/hollow_spinner.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
+import 'package:hollow/src/ui/components/hollow_toggle.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Entry mode for the device-link dialog.
@@ -64,30 +64,19 @@ class _ConnectingContent extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
-    return Center(
-      child: Material(
-        color: Colors.transparent,
-        child: Container(
-          constraints: const BoxConstraints(maxWidth: 320),
-          padding: const EdgeInsets.all(HollowSpacing.xl),
-          decoration: BoxDecoration(
-            color: hollow.overlay,
-            borderRadius: BorderRadius.circular(hollow.radiusLg),
-            border: Border.all(color: hollow.accent.withValues(alpha: 0.15)),
+    return HollowDialogSurface(
+      maxWidth: 320,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const HollowSpinner.large(),
+          const SizedBox(height: HollowSpacing.lg),
+          Text(
+            message,
+            textAlign: TextAlign.center,
+            style: HollowTypography.body.copyWith(color: hollow.textPrimary),
           ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const HollowSpinner.large(),
-              const SizedBox(height: HollowSpacing.lg),
-              Text(
-                message,
-                textAlign: TextAlign.center,
-                style: HollowTypography.body.copyWith(color: hollow.textPrimary),
-              ),
-            ],
-          ),
-        ),
+        ],
       ),
     );
   }
@@ -189,151 +178,107 @@ class _DeviceLinkContentState extends ConsumerState<_DeviceLinkContent> {
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
     final state = ref.watch(deviceLinkSyncProvider);
-    final radius = BorderRadius.circular(hollow.radiusLg);
-    final screenWidth = MediaQuery.sizeOf(context).width;
-    final isCompact = screenWidth < 600;
-    final minWidth =
-        isCompact ? (screenWidth - HollowSpacing.xl * 2).clamp(0.0, 480.0) : 360.0;
+    return switch (state.phase) {
+      LinkPhase.confirmPush => _confirmPush(hollow, state),
+      LinkPhase.receiving ||
+      LinkPhase.importing ||
+      LinkPhase.waiting =>
+        _progress(hollow, state),
+      LinkPhase.sending => _sending(hollow),
+      LinkPhase.pushDone => _pushDone(),
+      LinkPhase.done => _done(hollow),
+      LinkPhase.failed => _failed(state),
+      LinkPhase.showingCode => _showCode(hollow, state),
+      LinkPhase.idle => widget.mode == DeviceLinkMode.enterCode
+          ? _enterCode(hollow)
+          : _showCode(hollow, state),
+    };
+  }
 
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.all(HollowSpacing.xl),
-        child: ConstrainedBox(
-          constraints: BoxConstraints(maxWidth: 460, minWidth: minWidth),
-          child: Material(
-            color: Colors.transparent,
-            child: Container(
-              decoration: BoxDecoration(
-                color: hollow.overlay,
-                borderRadius: radius,
-                border: Border.all(color: hollow.accent.withValues(alpha: 0.15)),
-                boxShadow: [
-                  BoxShadow(color: Colors.black.withValues(alpha: 0.3), blurRadius: 32),
-                ],
-              ),
-              padding: const EdgeInsets.all(HollowSpacing.xl),
-              child: SingleChildScrollView(child: _body(hollow, state)),
-            ),
-          ),
-        ),
+  /// Every phase is one dialog: its title, one line of prose, then extras.
+  Widget _phase({
+    required String title,
+    required String subtitle,
+    List<Widget> children = const [],
+    List<Widget> actions = const [],
+  }) {
+    return HollowDialog(
+      title: title,
+      width: 420,
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          HollowDialogText(subtitle),
+          if (children.isNotEmpty) const SizedBox(height: HollowSpacing.lg),
+          ...children,
+        ],
       ),
-    );
-  }
-
-  Widget _body(HollowTheme hollow, DeviceLinkState state) {
-    switch (state.phase) {
-      case LinkPhase.confirmPush:
-        return _confirmPush(hollow, state);
-      case LinkPhase.receiving:
-      case LinkPhase.importing:
-      case LinkPhase.waiting:
-        return _progress(hollow, state);
-      case LinkPhase.sending:
-        return _sending(hollow);
-      case LinkPhase.pushDone:
-        return _pushDone(hollow, state);
-      case LinkPhase.done:
-        return _done(hollow, state);
-      case LinkPhase.failed:
-        return _failed(hollow, state);
-      case LinkPhase.showingCode:
-        return _showCode(hollow, state);
-      case LinkPhase.idle:
-        return widget.mode == DeviceLinkMode.enterCode
-            ? _enterCode(hollow)
-            : _showCode(hollow, state);
-    }
-  }
-
-  Widget _header(HollowTheme hollow, IconData icon, String title, String subtitle) {
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Container(
-          width: 52,
-          height: 52,
-          decoration: BoxDecoration(
-            color: hollow.accent.withValues(alpha: 0.1),
-            borderRadius: BorderRadius.circular(hollow.radiusMd),
-          ),
-          child: Icon(icon, size: 26, color: hollow.accent),
-        ),
-        const SizedBox(height: HollowSpacing.md),
-        Text(title, style: HollowTypography.heading.copyWith(color: hollow.textPrimary)),
-        const SizedBox(height: HollowSpacing.xs),
-        Text(
-          subtitle,
-          textAlign: TextAlign.center,
-          style: HollowTypography.body.copyWith(color: hollow.textSecondary, fontSize: 13),
-        ),
-      ],
+      actions: actions,
     );
   }
 
   Widget _showCode(HollowTheme hollow, DeviceLinkState state) {
     final code = state.code ?? '······';
-    return Column(
-      mainAxisSize: MainAxisSize.min,
+    return _phase(
+      title: 'Link a device',
+      subtitle:
+          'On your other (empty) device, choose "Link a device" and enter this code.',
       children: [
-        _header(hollow, LucideIcons.smartphone, 'Link a device',
-            'On your other (empty) device, choose "Link a device" and enter this code.'),
-        const SizedBox(height: HollowSpacing.xl),
         Container(
           padding: const EdgeInsets.symmetric(
               horizontal: HollowSpacing.lg, vertical: HollowSpacing.md),
           decoration: BoxDecoration(
             color: hollow.elevated,
             borderRadius: BorderRadius.circular(hollow.radiusMd),
-            border: Border.all(color: hollow.accent.withValues(alpha: 0.25)),
           ),
           child: Text(
             code.split('').join(' '),
-            style: HollowTypography.heading.copyWith(
+            textAlign: TextAlign.center,
+            style: HollowTypography.display.copyWith(
               color: hollow.textPrimary,
-              fontFamily: 'monospace',
-              fontSize: 30,
-              fontWeight: FontWeight.w700,
+              fontFeatures: const [FontFeature.tabularFigures()],
             ),
           ),
         ),
         const SizedBox(height: HollowSpacing.sm),
         Text(
           'Expires in ${_fmtCountdown(_countdown)}',
-          style: HollowTypography.caption.copyWith(
+          textAlign: TextAlign.center,
+          style: HollowTypography.bodySmall.copyWith(
             color: _countdown < 30 ? hollow.error : hollow.textSecondary,
-            fontSize: 12,
+            fontFeatures: const [FontFeature.tabularFigures()],
           ),
         ),
         const SizedBox(height: HollowSpacing.md),
         Row(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Icon(LucideIcons.info, size: 13, color: hollow.textSecondary),
+            Icon(LucideIcons.info, size: 14, color: hollow.textSecondary),
             const SizedBox(width: HollowSpacing.xs),
             Flexible(
               child: Text(
                 'Keep this device online until the transfer finishes.',
                 style: HollowTypography.caption
-                    .copyWith(color: hollow.textSecondary, fontSize: 11),
+                    .copyWith(color: hollow.textSecondary),
               ),
             ),
           ],
         ),
-        const SizedBox(height: HollowSpacing.lg),
-        HollowButton.ghost(onPressed: _close, expand: true, child: const Text('Cancel')),
+      ],
+      actions: [
+        HollowButton.ghost(onPressed: _close, child: const Text('Cancel')),
       ],
     );
   }
 
   Widget _enterCode(HollowTheme hollow) {
     final online = ref.watch(overallConnectionProvider).isOnline;
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: CrossAxisAlignment.stretch,
+    return _phase(
+      title: 'Link this device',
+      subtitle:
+          'Enter the 6-character code shown on your other device to pull all your data.',
       children: [
-        _header(hollow, LucideIcons.download, 'Link this device',
-            'Enter the 6-character code shown on your other device to pull all your data.'),
-        const SizedBox(height: HollowSpacing.xl),
         HollowTextField(
           controller: _codeController,
           hintText: 'ABC123',
@@ -342,43 +287,41 @@ class _DeviceLinkContentState extends ConsumerState<_DeviceLinkContent> {
             UpperCaseTextFormatter(),
             LengthLimitingTextInputFormatter(6),
           ],
-          style: HollowTypography.heading.copyWith(
-            color: hollow.textPrimary,
-            fontFamily: 'monospace',
-            fontSize: 22,
-          ),
+          style: HollowTypography.heading.copyWith(color: hollow.textPrimary),
         ),
         const SizedBox(height: HollowSpacing.sm),
         // No scope toggles here: the POPULATED device chooses scope when it
         // confirms the push, because it is the one building the snapshot.
         Text(
           'Your messages, friends and profile transfer automatically.',
-          style: HollowTypography.caption.copyWith(color: hollow.textSecondary, fontSize: 11),
+          style: HollowTypography.caption.copyWith(color: hollow.textSecondary),
         ),
-        const SizedBox(height: HollowSpacing.lg),
-        if (!online)
-          Text('Hollow is not connected to the relay yet.',
-              style: HollowTypography.caption.copyWith(color: hollow.textSecondary)),
-        Row(
-          mainAxisAlignment: MainAxisAlignment.end,
-          children: [
-            HollowButton.ghost(onPressed: _close, child: const Text('Cancel')),
-            const SizedBox(width: HollowSpacing.sm),
-            HollowButton.filled(
-              onPressed: !online ? null : () {
-                final code = _codeController.text.trim();
-                if (code.length == 6) {
-                  // Scope is decided by the populated device.
-                  ref.read(deviceLinkSyncProvider.notifier).enterCode(
-                        code,
-                        includeVault: false,
-                        includeFiles: false,
-                      );
-                }
-              },
-              child: const Text('Link'),
-            ),
-          ],
+        if (!online) ...[
+          const SizedBox(height: HollowSpacing.sm),
+          Text(
+            'Hollow is not connected to the relay yet.',
+            style:
+                HollowTypography.caption.copyWith(color: hollow.textSecondary),
+          ),
+        ],
+      ],
+      actions: [
+        HollowButton.ghost(onPressed: _close, child: const Text('Cancel')),
+        HollowButton.filled(
+          onPressed: !online
+              ? null
+              : () {
+                  final code = _codeController.text.trim();
+                  if (code.length == 6) {
+                    // Scope is decided by the populated device.
+                    ref.read(deviceLinkSyncProvider.notifier).enterCode(
+                          code,
+                          includeVault: false,
+                          includeFiles: false,
+                        );
+                  }
+                },
+          child: const Text('Link'),
         ),
       ],
     );
@@ -389,87 +332,66 @@ class _DeviceLinkContentState extends ConsumerState<_DeviceLinkContent> {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         const HollowSectionHeader('Transfer options', dense: true),
-        _checkRow(hollow, 'Include downloaded files', _includeFiles,
-            () => setState(() => _includeFiles = !_includeFiles)),
+        _toggleRow(hollow, 'Include downloaded files', _includeFiles,
+            (v) => setState(() => _includeFiles = v)),
         const SizedBox(height: HollowSpacing.xs),
-        _checkRow(hollow, 'Include vault shard data', _includeVault,
-            () => setState(() => _includeVault = !_includeVault)),
+        _toggleRow(hollow, 'Include vault shard data', _includeVault,
+            (v) => setState(() => _includeVault = v)),
         const SizedBox(height: HollowSpacing.xs),
         Text(
           'Messages, friends and profile always transfer. Files re-sync automatically if left off.',
-          style: HollowTypography.caption
-              .copyWith(color: hollow.textSecondary, fontSize: 10),
+          style: HollowTypography.caption.copyWith(color: hollow.textSecondary),
         ),
       ],
     );
   }
 
-  Widget _checkRow(HollowTheme hollow, String label, bool value, VoidCallback onTap) {
-    return HollowFocusRing(
-      enabled: true,
-      onActivate: onTap,
-      borderRadius: BorderRadius.circular(hollow.radiusMd),
-      child: GestureDetector(
-        onTap: onTap,
-        behavior: HitTestBehavior.opaque,
-        child: Row(
-          children: [
-            Container(
-              width: 18,
-              height: 18,
-              decoration: BoxDecoration(
-                color: value ? hollow.accent : Colors.transparent,
-                borderRadius: BorderRadius.circular(4),
-                border: Border.all(color: value ? hollow.accent : hollow.border, width: 1.5),
-              ),
-              child: value ? const Icon(LucideIcons.check, size: 12, color: Colors.white) : null,
-            ),
-            const SizedBox(width: HollowSpacing.sm),
-            Text(label,
-                style: HollowTypography.body.copyWith(color: hollow.textPrimary, fontSize: 13)),
-          ],
+  Widget _toggleRow(HollowTheme hollow, String label, bool value,
+      ValueChanged<bool> onChanged) {
+    return Row(
+      children: [
+        Expanded(
+          child: Text(
+            label,
+            style: HollowTypography.label.copyWith(color: hollow.textPrimary),
+          ),
         ),
-      ),
+        const SizedBox(width: HollowSpacing.sm),
+        HollowToggle(value: value, onChanged: onChanged, semanticLabel: label),
+      ],
     );
   }
 
   Widget _confirmPush(HollowTheme hollow, DeviceLinkState state) {
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        _header(hollow, LucideIcons.shieldCheck, 'Send your data?',
-            'Your other device is asking to sync. This sends your full history and identity to it.'),
-        const SizedBox(height: HollowSpacing.lg),
-        _scopeToggles(hollow),
-        const SizedBox(height: HollowSpacing.lg),
-        Row(
-          mainAxisAlignment: MainAxisAlignment.end,
-          children: [
-            HollowButton.ghost(
-              onPressed: () {
-                if (state.peerId != null) {
-                  ref.read(deviceLinkSyncProvider.notifier).declinePush(state.peerId!);
-                }
-                Navigator.of(context).maybePop();
-              },
-              child: const Text('Decline'),
-            ),
-            const SizedBox(width: HollowSpacing.sm),
-            HollowButton.filled(
-              onPressed: () {
-                if (state.peerId != null) {
-                  ref.read(deviceLinkSyncProvider.notifier).acceptPush(
-                        state.peerId!,
-                        includeVault: _includeVault,
-                        includeFiles: _includeFiles,
-                      );
-                }
-              },
-              icon: const Icon(LucideIcons.send, size: 15),
-              child: const Text('Send data'),
-            ),
-          ],
+    return _phase(
+      title: 'Send your data?',
+      subtitle:
+          'Your other device is asking to sync. This sends your full history and identity to it.',
+      children: [_scopeToggles(hollow)],
+      actions: [
+        HollowButton.ghost(
+          onPressed: () {
+            if (state.peerId != null) {
+              ref
+                  .read(deviceLinkSyncProvider.notifier)
+                  .declinePush(state.peerId!);
+            }
+            Navigator.of(context).maybePop();
+          },
+          child: const Text('Decline'),
+        ),
+        HollowButton.filled(
+          onPressed: () {
+            if (state.peerId != null) {
+              ref.read(deviceLinkSyncProvider.notifier).acceptPush(
+                    state.peerId!,
+                    includeVault: _includeVault,
+                    includeFiles: _includeFiles,
+                  );
+            }
+          },
+          icon: const Icon(LucideIcons.send, size: 14),
+          child: const Text('Send data'),
         ),
       ],
     );
@@ -487,38 +409,41 @@ class _DeviceLinkContentState extends ConsumerState<_DeviceLinkContent> {
       label = 'Importing…';
     }
 
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: CrossAxisAlignment.stretch,
+    return _phase(
+      title: 'Linking this device',
+      subtitle: label,
       children: [
-        _header(hollow, LucideIcons.refreshCw, 'Linking this device', label),
-        const SizedBox(height: HollowSpacing.xl),
         // The ONE real progress bar: actual bytes, never a fabricated ramp.
         ClipRRect(
           borderRadius: BorderRadius.circular(99),
           child: LinearProgressIndicator(
             value: receiving && state.totalBytes > 0 ? state.progress : null,
             minHeight: 8,
-            backgroundColor: hollow.surface,
+            backgroundColor: hollow.elevated,
             valueColor: AlwaysStoppedAnimation(hollow.accent),
           ),
         ),
-        const SizedBox(height: HollowSpacing.sm),
-        if (receiving && state.totalBytes > 0)
+        if (receiving && state.totalBytes > 0) ...[
+          const SizedBox(height: HollowSpacing.sm),
           Text(
             '${_fmtBytes(state.bytesReceived)} / ${_fmtBytes(state.totalBytes)}',
-            style: HollowTypography.caption.copyWith(color: hollow.textSecondary, fontSize: 12),
+            style: HollowTypography.bodySmall.copyWith(
+              color: hollow.textSecondary,
+              fontFeatures: const [FontFeature.tabularFigures()],
+            ),
           ),
+        ],
         if (waiting) ...[
           const SizedBox(height: HollowSpacing.sm),
           Text(
             'Your other device must be online to send your data.',
-            textAlign: TextAlign.center,
-            style: HollowTypography.caption.copyWith(color: hollow.textSecondary, fontSize: 11),
+            style:
+                HollowTypography.caption.copyWith(color: hollow.textSecondary),
           ),
         ],
-        const SizedBox(height: HollowSpacing.lg),
-        HollowButton.ghost(onPressed: _close, expand: true, child: const Text('Cancel')),
+      ],
+      actions: [
+        HollowButton.ghost(onPressed: _close, child: const Text('Cancel')),
       ],
     );
   }
@@ -527,38 +452,34 @@ class _DeviceLinkContentState extends ConsumerState<_DeviceLinkContent> {
   // rather than a bar. It stays up until the RECEIVER acks, so "Data sent"
   // means the other device has everything, not that our bytes left.
   Widget _sending(HollowTheme hollow) {
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: CrossAxisAlignment.stretch,
+    return _phase(
+      title: 'Sending your data',
+      subtitle:
+          'Copying your messages, friends and profile to your other device…',
       children: [
-        _header(hollow, LucideIcons.send, 'Sending your data',
-            'Copying your messages, friends and profile to your other device…'),
-        const SizedBox(height: HollowSpacing.xl),
         const Center(child: HollowSpinner.medium()),
         const SizedBox(height: HollowSpacing.lg),
         Text(
           'Keep both devices online until this finishes.',
           textAlign: TextAlign.center,
-          style: HollowTypography.caption.copyWith(color: hollow.textSecondary, fontSize: 11),
+          style: HollowTypography.caption.copyWith(color: hollow.textSecondary),
         ),
       ],
     );
   }
 
-  Widget _pushDone(HollowTheme hollow, DeviceLinkState state) {
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        _header(hollow, LucideIcons.checkCheck, 'Data sent',
-            'Your other device received everything and will restart to finish.'),
-        const SizedBox(height: HollowSpacing.lg),
+  Widget _pushDone() {
+    // A button rather than the close X: leaving must also reset the link.
+    return _phase(
+      title: 'Data sent',
+      subtitle:
+          'Your other device received everything and will restart to finish.',
+      actions: [
         HollowButton.filled(
           onPressed: () {
             ref.read(deviceLinkSyncProvider.notifier).reset();
             Navigator.of(context).maybePop();
           },
-          expand: true,
           child: const Text('Done'),
         ),
       ],
@@ -568,32 +489,29 @@ class _DeviceLinkContentState extends ConsumerState<_DeviceLinkContent> {
   // The snapshot replaced the identity and the database, and this process still
   // holds the throwaway identity it started with, so it CANNOT read the imported
   // DB. Hence the automatic restart; counts would read 0 until it happens.
-  Widget _done(HollowTheme hollow, DeviceLinkState state) {
+  Widget _done(HollowTheme hollow) {
     // Once only, shortly after the done view appears.
     if (!_restartScheduled) {
       _restartScheduled = true;
       Future.delayed(const Duration(milliseconds: 1500), _restartApp);
     }
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: CrossAxisAlignment.stretch,
+    return _phase(
+      title: 'Device linked',
+      subtitle: 'Your data was copied across. Restarting Hollow to finish…',
       children: [
-        _header(hollow, LucideIcons.checkCheck, 'Device linked',
-            'Your data was copied across. Restarting Hollow to finish…'),
-        const SizedBox(height: HollowSpacing.lg),
         const Center(child: HollowSpinner.medium()),
         const SizedBox(height: HollowSpacing.lg),
         Text(
           'Servers and their history were copied too. New messages reach both '
           'devices from now on.',
           textAlign: TextAlign.center,
-          style: HollowTypography.caption.copyWith(color: hollow.textSecondary, fontSize: 10),
+          style: HollowTypography.caption.copyWith(color: hollow.textSecondary),
         ),
-        const SizedBox(height: HollowSpacing.md),
+      ],
+      actions: [
         HollowButton.filled(
           onPressed: _restartApp,
-          icon: const Icon(LucideIcons.power, size: 15),
-          expand: true,
+          icon: const Icon(LucideIcons.power, size: 14),
           child: const Text('Restart now'),
         ),
       ],
@@ -606,44 +524,36 @@ class _DeviceLinkContentState extends ConsumerState<_DeviceLinkContent> {
     await relaunchApp();
   }
 
-  Widget _failed(HollowTheme hollow, DeviceLinkState state) {
+  Widget _failed(DeviceLinkState state) {
     // A wrong or expired code is recoverable, so "Try again" resets to idle and
     // re-renders the enter-code view in place. "Back" still goes to Welcome,
     // where the shell discards the throwaway identity and relaunches.
     final isEnterCode = widget.mode == DeviceLinkMode.enterCode;
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        _header(hollow, LucideIcons.alertTriangle, 'Link failed',
-            state.error ?? 'Something went wrong.'),
-        const SizedBox(height: HollowSpacing.lg),
-        if (isEnterCode) ...[
-          HollowButton.filled(
-            onPressed: () {
-              // Back to the enter-code view in place.
-              _codeController.clear();
-              ref.read(deviceLinkSyncProvider.notifier).reset();
-            },
-            expand: true,
-            child: const Text('Try again'),
-          ),
-          const SizedBox(height: HollowSpacing.sm),
-          HollowButton.ghost(
-            onPressed: _close,
-            expand: true,
-            child: const Text('Back'),
-          ),
-        ] else
-          HollowButton.ghost(
-            onPressed: () {
-              ref.read(deviceLinkSyncProvider.notifier).reset();
-              Navigator.of(context).maybePop();
-            },
-            expand: true,
-            child: const Text('Close'),
-          ),
-      ],
+    return _phase(
+      title: 'Link failed',
+      subtitle: state.error ?? 'Something went wrong.',
+      actions: isEnterCode
+          ? [
+              HollowButton.ghost(onPressed: _close, child: const Text('Back')),
+              HollowButton.filled(
+                onPressed: () {
+                  // Back to the enter-code view in place.
+                  _codeController.clear();
+                  ref.read(deviceLinkSyncProvider.notifier).reset();
+                },
+                child: const Text('Try again'),
+              ),
+            ]
+          : [
+              // A button rather than the close X: leaving must also reset.
+              HollowButton.ghost(
+                onPressed: () {
+                  ref.read(deviceLinkSyncProvider.notifier).reset();
+                  Navigator.of(context).maybePop();
+                },
+                child: const Text('Close'),
+              ),
+            ],
     );
   }
 }

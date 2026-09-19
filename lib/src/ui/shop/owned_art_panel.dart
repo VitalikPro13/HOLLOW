@@ -466,29 +466,15 @@ class _KeptCodeRowState extends ConsumerState<_KeptCodeRow> {
   }
 
   Future<void> _forget(BuildContext context, WidgetRef ref) async {
-    final confirmed = await showHollowDialog<bool>(
+    final confirmed = await showHollowConfirm(
       context: context,
-      builder: (dialogContext) => HollowDialog(
-        title: 'Forget this code?',
-        content: Text(
-          'Hollow will stop keeping it. The receipt email still has it, so '
-          'this is not the last copy.',
-          style: HollowTypography.body
-              .copyWith(color: HollowTheme.of(dialogContext).textSecondary),
-        ),
-        actions: [
-          HollowButton.ghost(
-            onPressed: () => Navigator.of(dialogContext).pop(false),
-            child: const Text('Cancel'),
-          ),
-          HollowButton.danger(
-            onPressed: () => Navigator.of(dialogContext).pop(true),
-            child: const Text('Forget'),
-          ),
-        ],
-      ),
+      title: 'Forget this code?',
+      message: 'Hollow will stop keeping it. The receipt email still has it, '
+          'so this is not the last copy.',
+      confirmLabel: 'Forget',
+      destructive: true,
     );
-    if (confirmed != true) return;
+    if (!confirmed) return;
     try {
       await shop.forgetRedeemCode(code: code);
       ref.invalidate(shop.keptRedeemCodesProvider);
@@ -746,30 +732,16 @@ class _CredentialRowState extends ConsumerState<_CredentialRow> {
 
   Future<void> _remove() async {
     final label = supportCredLabel(cred);
-    final confirmed = await showHollowDialog<bool>(
+    final confirmed = await showHollowConfirm(
       context: context,
-      builder: (dialogContext) => HollowDialog(
-        title: 'Remove this mark?',
-        content: Text(
-          'The mark for $label leaves your profile on every device and cannot '
-          'be brought back. The code you redeemed is spent. The files stay in '
-          'your library, and Owned on the Shop tab goes away.',
-          style: HollowTypography.body
-              .copyWith(color: HollowTheme.of(dialogContext).textSecondary),
-        ),
-        actions: [
-          HollowButton.ghost(
-            onPressed: () => Navigator.of(dialogContext).pop(false),
-            child: const Text('Cancel'),
-          ),
-          HollowButton.danger(
-            onPressed: () => Navigator.of(dialogContext).pop(true),
-            child: const Text('Remove'),
-          ),
-        ],
-      ),
+      title: 'Remove this mark?',
+      message: 'The mark for $label leaves your profile on every device and '
+          'cannot be brought back. The code you redeemed is spent. The files '
+          'stay in your library, and Owned on the Shop tab goes away.',
+      confirmLabel: 'Remove',
+      destructive: true,
     );
-    if (confirmed != true || !mounted) return;
+    if (!confirmed || !mounted) return;
     setState(() => _busy = true);
     try {
       await ref.read(shop.supportMarksFfiProvider).remove(cred.item);

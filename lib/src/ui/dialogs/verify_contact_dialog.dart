@@ -45,16 +45,9 @@ class _VerifyContactDialog extends StatelessWidget {
   Widget build(BuildContext context) {
     return HollowDialog(
       title: 'Verify contact',
-      content: SizedBox(
-        width: 460,
-        child: VerifyContactBody(peerId: peerId),
-      ),
-      actions: [
-        HollowButton.ghost(
-          onPressed: () => Navigator.of(context).pop(),
-          child: const Text('Done'),
-        ),
-      ],
+      showClose: true,
+      width: 460 + HollowSpacing.xl * 2,
+      content: VerifyContactBody(peerId: peerId),
     );
   }
 }
@@ -84,8 +77,6 @@ class MobileVerifyContactRoute extends StatelessWidget {
                     icon: Icon(Icons.arrow_back, color: hollow.textPrimary),
                     tooltip: 'Back',
                   ),
-                  Icon(LucideIcons.shieldCheck, size: 18, color: hollow.accent),
-                  const SizedBox(width: HollowSpacing.sm),
                   Text(
                     'Verify contact',
                     style: HollowTypography.subheading.copyWith(
@@ -222,14 +213,10 @@ class _VerifyContactBodyState extends ConsumerState<VerifyContactBody> {
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(
+        HollowDialogText(
           'Compare this number with $name over a channel you already trust: '
           'in person, on a video call, or through another app. If it matches on '
           'both screens, your messages reach only each other.',
-          style: HollowTypography.body.copyWith(
-            color: hollow.textSecondary,
-            fontSize: 13,
-          ),
         ),
         const SizedBox(height: HollowSpacing.lg),
 
@@ -247,7 +234,7 @@ class _VerifyContactBodyState extends ConsumerState<VerifyContactBody> {
           const SizedBox(height: HollowSpacing.md),
           Row(
             children: [
-              HollowButton.outline(
+              HollowButton.ghost(
                 onPressed: () async {
                   await Clipboard.setData(ClipboardData(
                     text: verification_api.formatSafetyNumber(number: _number!),
@@ -256,7 +243,7 @@ class _VerifyContactBodyState extends ConsumerState<VerifyContactBody> {
                     HollowToast.show(context, 'Safety number copied');
                   }
                 },
-                icon: const Icon(LucideIcons.copy),
+                icon: const Icon(LucideIcons.copy, size: 14),
                 compact: true,
                 child: const Text('Copy'),
               ),
@@ -353,9 +340,9 @@ class _NumberBlock extends StatelessWidget {
                     for (final g in row)
                       Text(
                         g,
-                        style: HollowTypography.mono.copyWith(
+                        style: HollowTypography.subheading.copyWith(
                           color: hollow.textPrimary,
-                          fontSize: 17,
+                          fontFeatures: const [FontFeature.tabularFigures()],
                         ),
                       ),
                   ],
@@ -395,7 +382,7 @@ class _CompareResult extends StatelessWidget {
                   ? 'Numbers match.'
                   : "Numbers don't match. Do not treat this contact as verified. "
                       'Check you both read the whole number, then try again.',
-              style: HollowTypography.body.copyWith(color: color, fontSize: 12),
+              style: HollowTypography.bodySmall.copyWith(color: color),
             ),
           ),
         ],
@@ -446,7 +433,7 @@ class _AlertLine extends StatelessWidget {
                 : isNewDevice
                     ? 'A new device was added to $name since you last talked.'
                     : '$name reinstalled or re-keyed a device.',
-            style: HollowTypography.body.copyWith(color: color, fontSize: 12),
+            style: HollowTypography.bodySmall.copyWith(color: color),
           ),
         ),
       ],
@@ -476,17 +463,14 @@ class _VerifiedRow extends StatelessWidget {
       width: double.infinity,
       padding: const EdgeInsets.all(HollowSpacing.md),
       decoration: BoxDecoration(
-        color: isVerified ? hollow.success.withValues(alpha: 0.08) : null,
+        color: hollow.elevated,
         borderRadius: BorderRadius.circular(hollow.radiusMd),
-        border: Border.all(
-          color: isVerified ? hollow.success.withValues(alpha: 0.5) : hollow.border,
-        ),
       ),
       child: Row(
         children: [
           Icon(
             isVerified ? LucideIcons.shieldCheck : LucideIcons.shield,
-            size: 18,
+            size: 16,
             color: isVerified ? hollow.success : hollow.textSecondary,
           ),
           const SizedBox(width: HollowSpacing.sm),
@@ -495,25 +479,27 @@ class _VerifiedRow extends StatelessWidget {
               isVerified
                   ? 'You verified $name.'
                   : 'Not verified yet.',
-              style: HollowTypography.body.copyWith(
+              style: HollowTypography.label.copyWith(
                 color: hollow.textPrimary,
-                fontSize: 13,
               ),
             ),
           ),
           const SizedBox(width: HollowSpacing.sm),
-          if (busy)
-            const HollowSpinner()
-          else if (isVerified)
-            HollowButton.ghost(
+          // The row exists for this one action, so it is a compact outline;
+          // removing trust is cautionary, hence the danger tint.
+          if (isVerified)
+            HollowButton.outline(
               onPressed: () => onChanged(false),
               compact: true,
+              danger: true,
+              loading: busy,
               child: const Text('Remove'),
             )
           else
-            HollowButton.filled(
+            HollowButton.outline(
               onPressed: () => onChanged(true),
               compact: true,
+              loading: busy,
               child: const Text('Mark verified'),
             ),
         ],
@@ -534,9 +520,8 @@ class _ErrorBox extends StatelessWidget {
       width: double.infinity,
       padding: const EdgeInsets.all(HollowSpacing.md),
       decoration: BoxDecoration(
-        color: hollow.error.withValues(alpha: 0.08),
+        color: hollow.elevated,
         borderRadius: BorderRadius.circular(hollow.radiusMd),
-        border: Border.all(color: hollow.error.withValues(alpha: 0.4)),
       ),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -546,9 +531,8 @@ class _ErrorBox extends StatelessWidget {
           Expanded(
             child: Text(
               "Couldn't build a safety number for this contact.\n$message",
-              style: HollowTypography.body.copyWith(
+              style: HollowTypography.bodySmall.copyWith(
                 color: hollow.textSecondary,
-                fontSize: 12,
               ),
             ),
           ),

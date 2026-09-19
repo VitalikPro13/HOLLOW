@@ -111,11 +111,7 @@ class _AvatarFramePickerDialogState
         context: context,
         builder: (_) => HollowDialog(
           title: 'That image cannot be a frame',
-          content: Text(
-            message,
-            style: HollowTypography.body
-                .copyWith(color: HollowTheme.of(context).textSecondary),
-          ),
+          content: HollowDialogText(message),
           actions: [
             HollowButton.filled(
               onPressed: () => Navigator.of(context).pop(),
@@ -158,7 +154,6 @@ class _AvatarFramePickerDialogState
             'people who can already see your profile.',
             style: HollowTypography.caption.copyWith(
               color: hollow.textSecondary,
-              fontSize: 11,
             ),
           ),
           const SizedBox(height: HollowSpacing.lg),
@@ -210,15 +205,16 @@ class _AvatarFramePickerDialogState
                 ),
             ],
           ),
-          const SizedBox(height: HollowSpacing.lg),
-          HollowButton.outline(
-            onPressed: _busy ? null : _upload,
-            loading: _busy,
-            icon: const Icon(LucideIcons.upload, size: 14),
-            child: const Text('Upload an image or GIF'),
-          ),
         ],
       ),
+      leadingActions: [
+        HollowButton.ghost(
+          onPressed: _busy ? null : _upload,
+          loading: _busy,
+          icon: const Icon(LucideIcons.upload, size: 14),
+          child: const Text('Upload an image or GIF'),
+        ),
+      ],
       actions: [
         HollowButton.ghost(
           onPressed: () => Navigator.of(context).pop(),

@@ -7,9 +7,8 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
-import 'package:hollow/src/ui/components/hollow_pressable.dart';
+import 'package:hollow/src/ui/components/hollow_chip.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Report categories the relay accepts. The wire strings are exact: the relay
 /// silently ignores anything else.
@@ -58,30 +57,16 @@ Future<void> confirmAndBlockUser(
   required String displayName,
 }) async {
   final container = ProviderScope.containerOf(context, listen: false);
-  final confirmed = await showHollowDialog<bool>(
+  final confirmed = await showHollowConfirm(
     context: context,
-    builder: (ctx) => HollowDialog(
-      title: 'Block $displayName?',
-      content: Text(
-        'They won\'t be able to send you friend requests, direct messages, '
+    title: 'Block $displayName?',
+    message: "They won't be able to send you friend requests, direct messages, "
         'or call you, and their messages in shared channels are hidden. '
         'They are not notified.',
-        style: HollowTypography.body
-            .copyWith(color: HollowTheme.of(ctx).textSecondary),
-      ),
-      actions: [
-        HollowButton.ghost(
-          onPressed: () => Navigator.of(ctx).pop(false),
-          child: const Text('Cancel'),
-        ),
-        HollowButton.danger(
-          onPressed: () => Navigator.of(ctx).pop(true),
-          child: const Text('Block'),
-        ),
-      ],
-    ),
+    confirmLabel: 'Block',
+    destructive: true,
   );
-  if (confirmed != true || !context.mounted) return;
+  if (!confirmed || !context.mounted) return;
   try {
     await container.read(blockedUsersProvider.notifier).block(masterId);
     if (context.mounted) {
@@ -127,30 +112,30 @@ class _ReportUserDialogState extends State<_ReportUserDialog> {
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
+          HollowDialogText(
             widget.displayName != null && widget.displayName!.isNotEmpty
                 ? 'Why are you reporting ${widget.displayName}?'
                 : 'Why are you reporting this user?',
-            style: HollowTypography.body
-                .copyWith(color: hollow.textSecondary),
           ),
           const SizedBox(height: HollowSpacing.md),
-          for (final (value, label) in _reportCategories)
-            Padding(
-              padding: const EdgeInsets.only(bottom: HollowSpacing.xs),
-              child: _ReasonRow(
-                label: label,
-                selected: _selected == value,
-                onTap: () => setState(() => _selected = value),
-              ),
-            ),
-          const SizedBox(height: HollowSpacing.sm),
+          Wrap(
+            spacing: HollowSpacing.sm,
+            runSpacing: HollowSpacing.sm,
+            children: [
+              for (final (value, label) in _reportCategories)
+                HollowChip(
+                  label: label,
+                  selected: _selected == value,
+                  onTap: () => setState(() => _selected = value),
+                ),
+            ],
+          ),
+          const SizedBox(height: HollowSpacing.lg),
           Text(
             'Reports are anonymous: the relay only keeps a per-category '
             'counter, never who reported whom.',
             style: HollowTypography.caption.copyWith(
               color: hollow.textSecondary,
-              fontSize: 11,
             ),
           ),
         ],
@@ -167,67 +152,6 @@ class _ReportUserDialogState extends State<_ReportUserDialog> {
           child: const Text('Report'),
         ),
       ],
-    );
-  }
-}
-
-/// A selectable reason row. Selection is a tinted chip border, never a filled
-/// button.
-class _ReasonRow extends StatelessWidget {
-  final String label;
-  final bool selected;
-  final VoidCallback onTap;
-
-  const _ReasonRow({
-    required this.label,
-    required this.selected,
-    required this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-    return Semantics(
-      selected: selected,
-      child: HollowPressable(
-        onTap: onTap,
-        subtle: true,
-        borderRadius: BorderRadius.circular(hollow.radiusMd),
-        backgroundColor: null,
-        child: Container(
-          width: double.infinity,
-          padding: const EdgeInsets.symmetric(
-            horizontal: HollowSpacing.md,
-            vertical: HollowSpacing.sm,
-          ),
-          decoration: BoxDecoration(
-            color: selected ? hollow.accent.withValues(alpha: 0.12) : null,
-            borderRadius: BorderRadius.circular(hollow.radiusMd),
-            border: Border.all(
-              color: selected ? hollow.accent : hollow.border,
-            ),
-          ),
-          child: Row(
-            children: [
-              Icon(
-                selected ? LucideIcons.circleCheck : LucideIcons.circle,
-                size: 16,
-                color: selected ? hollow.accentText : hollow.textSecondary,
-              ),
-              const SizedBox(width: HollowSpacing.sm),
-              Expanded(
-                child: Text(
-                  label,
-                  style: HollowTypography.body.copyWith(
-                    color: hollow.textPrimary,
-                    fontWeight: selected ? FontWeight.w600 : FontWeight.w400,
-                  ),
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
     );
   }
 }

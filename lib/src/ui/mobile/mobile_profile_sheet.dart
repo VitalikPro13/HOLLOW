@@ -640,16 +640,17 @@ class _NicknameDialog extends ConsumerStatefulWidget {
 }
 
 class _NicknameDialogState extends ConsumerState<_NicknameDialog> {
+  bool _saving = false;
+
   @override
   Widget build(BuildContext context) {
     return HollowDialog(
-      title: 'Set Nickname',
+      title: 'Set nickname',
       content: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text('Only visible to you.',
-              style: HollowTypography.bodySmall),
+          const HollowDialogText('Only visible to you.'),
           const SizedBox(height: HollowSpacing.lg),
           HollowTextField(
             controller: widget.controller,
@@ -668,6 +669,7 @@ class _NicknameDialogState extends ConsumerState<_NicknameDialog> {
         ),
         HollowButton.filled(
           onPressed: _save,
+          loading: _saving,
           child: const Text('Save'),
         ),
       ],
@@ -675,13 +677,16 @@ class _NicknameDialogState extends ConsumerState<_NicknameDialog> {
   }
 
   Future<void> _save() async {
+    if (_saving) return;
     final nickname = widget.controller.text.trim();
+    setState(() => _saving = true);
     try {
       await ref
           .read(localNicknameProvider.notifier)
           .setNickname(widget.peerId, nickname);
     } catch (_) {
       if (mounted) {
+        setState(() => _saving = false);
         HollowToast.show(context, 'Could not save nickname',
             type: HollowToastType.error);
       }

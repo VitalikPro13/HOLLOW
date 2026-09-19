@@ -25,78 +25,61 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Passphrase prompt shared by App Lock and Identity Backup. Returns the
 /// passphrase, or null if cancelled; [confirm] adds a second field that must
-/// match.
+/// match; [destructive] makes the confirm a danger button.
 Future<String?> askPassphraseDialog(BuildContext context, String title,
-    {bool confirm = false, String buttonLabel = 'Encrypt'}) async {
+    {bool confirm = false,
+    String buttonLabel = 'Encrypt',
+    bool destructive = false}) async {
   final controller = TextEditingController();
   final confirmController = TextEditingController();
   return showHollowDialog<String>(
     context: context,
     builder: (ctx) {
-      final hollow = HollowTheme.of(ctx);
-      return Center(
-        child: Material(
-          type: MaterialType.transparency,
-          child: Container(
-            width: 360,
-            padding: const EdgeInsets.all(HollowSpacing.xl),
-            decoration: BoxDecoration(
-              color: hollow.overlay,
-              borderRadius: BorderRadius.circular(hollow.radiusLg),
-              border: Border.all(color: hollow.accent.withValues(alpha: 0.15)),
+      void submit() {
+        final pass = controller.text.trim();
+        if (pass.isEmpty) return;
+        if (confirm && pass != confirmController.text.trim()) {
+          HollowToast.show(ctx, "Passphrases don't match", type: HollowToastType.error);
+          return;
+        }
+        Navigator.of(ctx).pop(pass);
+      }
+
+      return HollowDialog(
+        title: title,
+        width: 420,
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            HollowTextField(
+              controller: controller,
+              obscureText: true,
+              autofocus: true,
+              hintText: 'Enter passphrase',
+              onSubmitted: confirm ? null : (val) {
+                if (val.isNotEmpty) Navigator.of(ctx).pop(val);
+              },
             ),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(title, style: HollowTypography.heading.copyWith(
-                  color: hollow.textPrimary, fontSize: 16,
-                )),
-                const SizedBox(height: HollowSpacing.lg),
-                HollowTextField(
-                  controller: controller,
-                  obscureText: true,
-                  autofocus: true,
-                  hintText: 'Enter passphrase',
-                  onSubmitted: confirm ? null : (val) {
-                    if (val.isNotEmpty) Navigator.of(ctx).pop(val);
-                  },
-                ),
-                if (confirm) ...[
-                  const SizedBox(height: HollowSpacing.sm),
-                  HollowTextField(
-                    controller: confirmController,
-                    obscureText: true,
-                    hintText: 'Confirm passphrase',
-                  ),
-                ],
-                const SizedBox(height: HollowSpacing.lg),
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.end,
-                  children: [
-                    HollowButton.ghost(
-                      onPressed: () => Navigator.of(ctx).pop(null),
-                      child: const Text('Cancel'),
-                    ),
-                    const SizedBox(width: HollowSpacing.sm),
-                    HollowButton.filled(
-                      onPressed: () {
-                        final pass = controller.text.trim();
-                        if (pass.isEmpty) return;
-                        if (confirm && pass != confirmController.text.trim()) {
-                          HollowToast.show(ctx, 'Passphrases don\'t match', type: HollowToastType.error);
-                          return;
-                        }
-                        Navigator.of(ctx).pop(pass);
-                      },
-                      child: Text(buttonLabel),
-                    ),
-                  ],
-                ),
-              ],
-            ),
-          ),
+            if (confirm) ...[
+              const SizedBox(height: HollowSpacing.md),
+              HollowTextField(
+                controller: confirmController,
+                obscureText: true,
+                hintText: 'Confirm passphrase',
+              ),
+            ],
+          ],
         ),
+        actions: [
+          HollowButton.ghost(
+            onPressed: () => Navigator.of(ctx).pop(null),
+            child: const Text('Cancel'),
+          ),
+          destructive
+              ? HollowButton.danger(onPressed: submit, child: Text(buttonLabel))
+              : HollowButton.filled(onPressed: submit, child: Text(buttonLabel)),
+        ],
       );
     },
   );
@@ -365,7 +348,8 @@ class _SecurityTabState extends ConsumerState<SecurityTab> {
   }
 
   Future<void> _removePassword() async {
-    final pass = await _askPassphrase(context, 'Enter current password', buttonLabel: 'Remove password');
+    final pass = await _askPassphrase(context, 'Enter current password',
+        buttonLabel: 'Remove password', destructive: true);
     if (pass == null || !mounted) return;
 
     await _runProtectionAction('removePassword', () async {
@@ -401,9 +385,13 @@ class _SecurityTabState extends ConsumerState<SecurityTab> {
   }
 
   Future<String?> _askPassphrase(BuildContext context, String title,
-          {bool confirm = false, String buttonLabel = 'Encrypt'}) =>
+          {bool confirm = false,
+          String buttonLabel = 'Encrypt',
+          bool destructive = false}) =>
       askPassphraseDialog(context, title,
-          confirm: confirm, buttonLabel: buttonLabel);
+          confirm: confirm,
+          buttonLabel: buttonLabel,
+          destructive: destructive);
 
   @override
   Widget build(BuildContext context) {

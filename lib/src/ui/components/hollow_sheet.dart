@@ -28,6 +28,7 @@ Future<T?> showHollowSheet<T>({
     // The surface is painted inside the builder from the sheet's own context,
     // so a theme change while the sheet is open repaints it too.
     backgroundColor: Colors.transparent,
+    barrierColor: hollow.scrim,
     isScrollControlled: scrollControlled,
     isDismissible: isDismissible,
     enableDrag: enableDrag,

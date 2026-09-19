@@ -259,9 +259,24 @@ Consequences worth stating, because these are the observed inconsistencies:
 
 **Cards.** A card is a background step (`elevated`) and nothing else: no hairline, no shadow, in both themes. Cards do not nest. A coloured strip on a card edge is forbidden; status is a dot or a word. Anything repeated more than three times is a list of `HollowListRow`, not a grid of cards, unless the item **is** the art (the Shop, a gallery), in which case the art is the card: full bleed, title and price beneath it.
 
-### 4.4 Surfaces that already have one law
+### 4.4 Dialogs
 
-These are settled and stay settled: dialogs through `showHollowDialog()` (ghost Cancel, filled confirm, danger only when destructive), context menus through `showHollowMenu` opened by `ContextMenuTarget`, toasts through `HollowToast`, scrollbars through `HollowScrollBehavior` (one app-wide gutter, never a manual `Scrollbar`).
+One route, one frame, one action rule.
+
+- **Open** every modal with `showHollowDialog()`. Never `showDialog`, `showGeneralDialog`, `AlertDialog`, `SimpleDialog` or `Dialog(` (guarded; `showHollowMenu` is the one documented exception).
+- **Frame.** `HollowDialogSurface` is the only frame: `overlay` fill, the hairline, a 12 px shadow, `radiusLg` on desktop and `radiusXl` on a phone, where it spans the screen minus 24. A standard dialog is `HollowDialog` (title, scrolling content, action row). A dialog whose layout is its own (a hero, a crop canvas, a two-pane window) puts that layout inside `HollowDialogSurface` directly (`padded: false` for content that runs to the edge). A dialog never draws its own `Container` with a radius, fill, border or shadow, and never tints its frame (no red border on an error dialog: the danger button and the copy say it).
+- **Behind it.** The flat `scrim` token (65% black on dark, 32% on light), shared with `showHollowSheet()`. **No backdrop blur** (decided 2026-09-19, Vitalik): the dimmed canvas against the `overlay` card is the depth step, the same everywhere, with or without Reduce Transparency.
+- **Width.** Shrink-wrap between 300 and 600 by default; a form of fields takes `width: 420`; wider only for a real layout (settings, the game card).
+- **Title.** `heading` in `textPrimary`, **sentence case** ("Leave server", "Crop banner", "Start a call?"). No icon beside it. A status belongs in the body, not a coloured glyph in the title row.
+- **Body.** Prose is `HollowDialogText` (`body` in `textSecondary`); a field's label is `SettingsFieldLabel`; groups inside a big dialog are `HollowSectionHeader`.
+- **Actions.** Trailing, 8 apart, primary LAST: ghost Cancel, then ONE `filled` confirm, or `danger` when the confirm destroys something (delete, leave, remove, wipe, revoke). `outline` only for a second alternative beside the filled. Ghost extras that are not the answer (Forgot password, Reset, Copy) go in `leadingActions`. A busy confirm is `loading: true`.
+- **Close.** A dialog with a Cancel needs no X. A dialog with nothing to confirm (a viewer, a status, an info card) takes `showClose: true` (the ghost X at the title's edge, `HollowDialogCloseButton` in a custom layout) and no Done button; an acknowledgement the person must read (a recovery phrase, a warning) ends with ONE filled button instead ("I saved it", "Got it").
+- **A yes-or-no question** is `showHollowConfirm()`, never a hand-built pair. A one-field name prompt is `promptForName()`.
+- Keyboard insets are handled by `showHollowDialog()`; a builder never pads by `viewInsets` itself.
+
+### 4.5 Surfaces that already have one law
+
+These are settled and stay settled: context menus through `showHollowMenu` opened by `ContextMenuTarget`, toasts through `HollowToast`, scrollbars through `HollowScrollBehavior` (one app-wide gutter, never a manual `Scrollbar`).
 
 ---
 
@@ -304,6 +319,8 @@ Guarded by `test/design_language_guard_test.dart`. Each rule carries a **baselin
 | 11 | `BoxShadow` with `blurRadius` above 12 | anywhere |
 | 12 | Raw `Material(` | outside `components/` and the documented overlay hosts |
 | 13 | Material `Slider` / `RangeSlider`; Material or Cupertino `Switch` / `Checkbox` / `Radio` | outside `hollow_slider.dart` |
+| 14 | `showDialog` / `showGeneralDialog` / `AlertDialog` / `SimpleDialog` / `Dialog(` | outside `components/` |
+| 15 | A hand-drawn dialog frame (`color: hollow.overlay` in a file that opens a dialog) | outside `components/` |
 
 Already law and unchanged: purpose labels on icon-only controls, `HollowFocusRing`, `showHollowMenu`, `setShellTab`, the hover rules, `Colors.transparent` never animated, the `accentText` and `textTertiary` contrast checks, `reversedChatList()`, one mutation path per state.
 

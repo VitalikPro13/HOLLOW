@@ -167,6 +167,21 @@ option and no local variant.
   failure toast on a rethrow. A bare fire-and-forget call is a zone crash.
 - Dialogs: ghost Cancel, filled confirm, `danger` only when destructive.
 
+## Dialogs
+
+- Open with `showHollowDialog()` only (never `showDialog`, `showGeneralDialog`,
+  `AlertDialog`, `Dialog(`; guarded). Frame with `HollowDialog` (title +
+  content + actions) or, for a layout of its own, `HollowDialogSurface`
+  (`padded: false` to run to the edge). **Never draw a dialog frame by hand**:
+  no Container with overlay fill, radius, border or shadow, no tinted border.
+- Title: `heading`, **sentence case**, no icon beside it. Body prose:
+  `HollowDialogText`. A form of fields: `width: 420`.
+- Actions trailing, 8 apart, primary LAST: ghost Cancel, then ONE `filled`
+  (or `danger` for delete/leave/remove/wipe). Ghost extras go in
+  `leadingActions`. Nothing to confirm = `showClose: true` and no Done button.
+- A yes-or-no question is `showHollowConfirm()`; a one-field name prompt is
+  `promptForName()`.
+
 ## The rest of the components
 
 `HollowSectionHeader` (title in `subheading`, or `label` with `dense: true`
@@ -192,7 +207,7 @@ repeated more than three times is a list of `HollowListRow`, not a grid of
 cards, unless the item **is** the art (the Shop, a gallery), where the art is
 the card: full bleed, title and price beneath.
 
-Already-settled surfaces: `showHollowDialog()`, `showHollowMenu` via
+Already-settled surfaces: `showHollowMenu` via
 `ContextMenuTarget`, `HollowToast`, `HollowScrollBehavior`.
 
 ## Motion and state
@@ -230,9 +245,12 @@ motion; never add another.
    `test/contrast_test.dart` and `test/a11y_label_guard_test.dart` as well when
    you touched a component.
 2. **`flutter analyze`** is clean.
-3. **Screenshots.** Drive the app with `scripts\ui_probe.ps1` (peer-to-peer:
-   `scripts\fleet.ps1`), **read your own PNGs**, and fix what looks wrong before
-   reporting. Verifying UI from source does not count. Desktop and mobile both.
+3. **Screenshots.** Drive the app with `scripts\fleet.ps1` on a THROWAWAY
+   fixture peer (`-Onboard -Fresh`, then `-Scenario ... -Peers a`), never
+   `ui_probe.ps1`'s default, which mirrors Vitalik's real identity. A scenario
+   creates the server or channel it needs; a step that misses is driven by hand
+   with `-Live`, never shot empty. **Read your own PNGs**, and fix what looks
+   wrong before reporting. Verifying UI from source does not count. Desktop and mobile both.
    For a component rather than a screen, add it to the design sheet and shoot
    that: `ui_probe.ps1 -Widget design-gallery` renders every primitive in every
    state, dark beside light, needing no data directory.
@@ -247,7 +265,8 @@ motion; never add another.
 `Divider(` outside components · a Chip/Pill/Tag/Badge class outside components ·
 numeric `EdgeInsets` and `SizedBox` gaps · gradients · `BoxShadow` blur above 12
 · raw `Material(` outside components · `CircularProgressIndicator(` ·
-`showModalBottomSheet` · Material `Slider` / `Switch` / `Checkbox` / `Radio`.
+`showModalBottomSheet` · Material `Slider` / `Switch` / `Checkbox` / `Radio` ·
+`showDialog` / `showGeneralDialog` / `AlertDialog` · a hand-drawn dialog frame.
 
 Exemption is `// design-ignore: <reason>` on the offending line, for a genuine
 one-off (a brand asset's exact colour, a platform-mandated metric). Not for "I

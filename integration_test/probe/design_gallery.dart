@@ -8,6 +8,7 @@ import 'package:hollow/src/ui/components/hollow_badge.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_card.dart';
 import 'package:hollow/src/ui/components/hollow_chip.dart';
+import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_divider.dart';
 import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/hollow_key_combo.dart';
@@ -448,6 +449,42 @@ class _GalleryPane extends StatelessWidget {
                     ),
                   ],
                 ),
+              ),
+              const SizedBox(height: HollowSpacing.xl),
+
+              const HollowSectionHeader('Dialog'),
+              HollowDialog(
+                title: 'Leave server?',
+                content: const HollowDialogText(
+                    'You will need a new invite to rejoin.'),
+                actions: [
+                  HollowButton.ghost(
+                      onPressed: () {}, child: const Text('Cancel')),
+                  HollowButton.danger(
+                      onPressed: () {}, child: const Text('Leave server')),
+                ],
+              ),
+              HollowDialog(
+                title: 'Set app password',
+                width: 420,
+                content: const HollowDialogText(
+                    'Asked every time Hollow starts.'),
+                leadingActions: [
+                  HollowButton.ghost(
+                      onPressed: () {}, child: const Text('Forgot it?')),
+                ],
+                actions: [
+                  HollowButton.ghost(
+                      onPressed: () {}, child: const Text('Cancel')),
+                  HollowButton.filled(
+                      onPressed: () {}, child: const Text('Set password')),
+                ],
+              ),
+              const HollowDialog(
+                title: 'Message proof',
+                showClose: true,
+                content: HollowDialogText(
+                    'Nothing to confirm, so the X closes it.'),
               ),
               const SizedBox(height: HollowSpacing.xl),
 

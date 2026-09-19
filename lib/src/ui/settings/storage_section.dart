@@ -281,7 +281,14 @@ class _CleanupMenu extends ConsumerWidget {
 
     Future<void> clear(
         String title, String body, Future<void> Function() run) async {
-      if (await _confirm(context, title, body)) await run();
+      final ok = await showHollowConfirm(
+        context: context,
+        title: title,
+        message: body,
+        confirmLabel: 'Clear',
+        destructive: true,
+      );
+      if (ok) await run();
     }
 
     return HollowTooltip(
@@ -533,11 +540,13 @@ class _RowTrashButton extends StatelessWidget {
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
     void handleTap() async {
-      final ok = await _confirm(
-        context,
-        'Clear "$label"?',
-        'Deletes the downloaded files for this conversation from disk. '
-            'The messages stay, and files can be downloaded again later.',
+      final ok = await showHollowConfirm(
+        context: context,
+        title: 'Clear "$label"?',
+        message: 'Deletes the downloaded files for this conversation from '
+            'disk. The messages stay, and files can be downloaded again later.',
+        confirmLabel: 'Clear',
+        destructive: true,
       );
       if (ok) await onConfirmed();
     }
@@ -552,27 +561,4 @@ class _RowTrashButton extends StatelessWidget {
       child: Icon(LucideIcons.trash2, size: 16, color: hollow.error),
     );
   }
-}
-
-Future<bool> _confirm(BuildContext context, String title, String body) async {
-  final hollow = HollowTheme.of(context);
-  final result = await showHollowDialog<bool>(
-    context: context,
-    builder: (ctx) => HollowDialog(
-      title: title,
-      content: Text(body,
-          style: HollowTypography.body.copyWith(color: hollow.textSecondary)),
-      actions: [
-        HollowButton.ghost(
-          child: const Text('Cancel'),
-          onPressed: () => Navigator.of(ctx).pop(false),
-        ),
-        HollowButton.danger(
-          child: const Text('Clear'),
-          onPressed: () => Navigator.of(ctx).pop(true),
-        ),
-      ],
-    ),
-  );
-  return result ?? false;
 }

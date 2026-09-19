@@ -3,7 +3,6 @@ import 'package:flutter/services.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
-import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
@@ -24,25 +23,19 @@ void showInviteDialog(
       final hollow = HollowTheme.of(dialogContext);
 
       return HollowDialog(
-        title: 'Invite Link',
+        title: 'Invite link',
+        showClose: true,
         content: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(
-              subtitle,
-              style: HollowTypography.body
-                  .copyWith(color: hollow.textSecondary),
-            ),
+            HollowDialogText(subtitle),
             const SizedBox(height: HollowSpacing.lg),
             Container(
               padding: const EdgeInsets.all(HollowSpacing.md),
               decoration: BoxDecoration(
                 color: hollow.elevated,
                 borderRadius: BorderRadius.circular(hollow.radiusMd),
-                border: Border.all(
-                  color: hollow.accent.withValues(alpha: 0.3),
-                ),
               ),
               child: Row(
                 children: [
@@ -50,7 +43,7 @@ void showInviteDialog(
                     child: SelectableText(
                       link,
                       style: HollowTypography.mono.copyWith(
-                        color: hollow.accent,
+                        color: hollow.accentText,
                       ),
                     ),
                   ),
@@ -68,7 +61,7 @@ void showInviteDialog(
                     padding: const EdgeInsets.all(HollowSpacing.xs),
                     semanticLabel: 'Copy invite link',
                     child: Icon(LucideIcons.copy,
-                        size: 18, color: hollow.accent),
+                        size: 16, color: hollow.accentText),
                   ),
                 ],
               ),
@@ -82,12 +75,6 @@ void showInviteDialog(
             ),
           ],
         ),
-        actions: [
-          HollowButton.filled(
-            onPressed: () => Navigator.of(dialogContext).pop(),
-            child: const Text('Done'),
-          ),
-        ],
       );
     },
   );

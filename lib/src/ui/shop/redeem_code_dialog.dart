@@ -162,26 +162,21 @@ class _RedeemCodeDialogState extends ConsumerState<RedeemCodeDialog> {
       await showHollowDialog<void>(
         context: host,
         builder: (dialogContext) {
-          final hollow = HollowTheme.of(dialogContext);
           return HollowDialog(
             title: 'Support mark saved',
             content: Column(
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(
+                HollowDialogText(
                   'Your support mark for ${outcome.title} by '
                   '${outcome.artistName} is on your profile.',
-                  style: HollowTypography.body
-                      .copyWith(color: hollow.textSecondary),
                 ),
                 const SizedBox(height: HollowSpacing.md),
-                Text(
+                HollowDialogText(
                   'The pack did not arrive: ${outcome.packError}. Import the '
                   '.hollowpack from your Ko-fi download to wear the art; the '
                   'mark lights up the moment you wear it.',
-                  style: HollowTypography.body
-                      .copyWith(color: hollow.textSecondary),
                 ),
               ],
             ),
@@ -209,7 +204,7 @@ class _RedeemCodeDialogState extends ConsumerState<RedeemCodeDialog> {
         hintText: 'The code from your receipt',
         autofocus: widget.initialCode.isEmpty,
         onSubmitted: busy ? null : (_) => _lookUp(),
-        style: HollowTypography.mono.copyWith(fontSize: 12),
+        style: HollowTypography.mono,
       ),
       if (_problem != null) ...[
         const SizedBox(height: HollowSpacing.sm),
@@ -220,11 +215,10 @@ class _RedeemCodeDialogState extends ConsumerState<RedeemCodeDialog> {
       ],
       if (_step == _Step.entering && _problem == null) ...[
         const SizedBox(height: HollowSpacing.md),
-        Text(
+        const HollowDialogText(
           'Redeeming mints a support mark for your profile through a blind '
           'signature: the shop signs it without learning who you are. Hollow '
           'then fetches the art and puts it in your library.',
-          style: HollowTypography.body.copyWith(color: hollow.textSecondary),
         ),
       ],
       if (looked != null && _step != _Step.entering) ...[
@@ -251,11 +245,10 @@ class _RedeemCodeDialogState extends ConsumerState<RedeemCodeDialog> {
             style: HollowTypography.body.copyWith(color: hollow.warning),
           )
         else
-          Text(
+          const HollowDialogText(
             'Once redeemed, the mark lives in your profile and its backup. '
             'It cannot be minted again for another identity, and the code '
             'is spent.',
-            style: HollowTypography.body.copyWith(color: hollow.textSecondary),
           ),
         if (_step == _Step.redeeming) ...[
           const SizedBox(height: HollowSpacing.md),
@@ -274,16 +267,17 @@ class _RedeemCodeDialogState extends ConsumerState<RedeemCodeDialog> {
       ],
     ];
 
+    final copyCode = HollowButton.ghost(
+      onPressed: () async {
+        await Clipboard.setData(ClipboardData(text: _code.text.trim()));
+        if (!context.mounted) return;
+        HollowToast.show(context, 'Code copied',
+            type: HollowToastType.success);
+      },
+      child: const Text('Copy code'),
+    );
+
     final actions = <Widget>[
-      HollowButton.ghost(
-        onPressed: () async {
-          await Clipboard.setData(ClipboardData(text: _code.text.trim()));
-          if (!context.mounted) return;
-          HollowToast.show(context, 'Code copied',
-              type: HollowToastType.success);
-        },
-        child: const Text('Copy code'),
-      ),
       HollowButton.ghost(
         onPressed: busy ? null : () => Navigator.of(context).pop(),
         child: const Text('Cancel'),
@@ -306,11 +300,13 @@ class _RedeemCodeDialogState extends ConsumerState<RedeemCodeDialog> {
 
     return HollowDialog(
       title: 'Redeem a code',
+      width: 420,
       content: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: children,
       ),
+      leadingActions: [copyCode],
       actions: actions,
     );
   }

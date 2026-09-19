@@ -18,8 +18,6 @@ import 'package:hollow/src/core/providers/server_strip_layout_provider.dart';
 import 'package:hollow/src/core/providers/unread_provider.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
-import 'package:hollow/src/theme/hollow_theme.dart';
-import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/chat/hollow_link_utils.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
@@ -298,29 +296,15 @@ Future<void> confirmAndLeaveServer(
   required String serverId,
   required String serverName,
 }) async {
-  final confirmed = await showHollowDialog<bool>(
+  final confirmed = await showHollowConfirm(
     context: context,
-    builder: (ctx) => HollowDialog(
-      title: 'Leave server',
-      content: Text(
-        'Are you sure you want to leave "$serverName"? You will need a new '
-        'invite to rejoin.',
-        style: HollowTypography.body
-            .copyWith(color: HollowTheme.of(ctx).textSecondary),
-      ),
-      actions: [
-        HollowButton.ghost(
-          onPressed: () => Navigator.of(ctx).pop(false),
-          child: const Text('Cancel'),
-        ),
-        HollowButton.danger(
-          onPressed: () => Navigator.of(ctx).pop(true),
-          child: const Text('Leave server'),
-        ),
-      ],
-    ),
+    title: 'Leave server',
+    message: 'Are you sure you want to leave "$serverName"? You will need a '
+        'new invite to rejoin.',
+    confirmLabel: 'Leave server',
+    destructive: true,
   );
-  if (confirmed != true || !context.mounted) return;
+  if (!confirmed || !context.mounted) return;
 
   try {
     await crdt_api.leaveServer(serverId: serverId);
@@ -367,6 +351,7 @@ void promptForName({
 
       return HollowDialog(
         title: title,
+        width: 420,
         content: Padding(
           padding: const EdgeInsets.only(top: HollowSpacing.xs),
           child: HollowTextField(

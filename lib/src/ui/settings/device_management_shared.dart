@@ -64,29 +64,15 @@ Future<void> renameDeviceFlow(
 Future<void> syncFromDeviceFlow(
     BuildContext context, WidgetRef ref, MyDevice device) async {
   final name = deviceTitle(device);
-  final confirmed = await showHollowDialog<bool>(
+  final confirmed = await showHollowConfirm(
     context: context,
-    builder: (ctx) => HollowDialog(
-      title: 'Sync from this device?',
-      content: Text(
+    title: 'Sync from this device?',
+    message:
         'Pull servers and friends FROM "$name" onto THIS device. Use this if a '
         'server or friend exists on "$name" but is missing here. It only adds '
         'what\'s missing. Nothing is removed, and your messages are unaffected.\n\n'
         '"$name" must be online.',
-        style: HollowTypography.body
-            .copyWith(color: HollowTheme.of(ctx).textSecondary),
-      ),
-      actions: [
-        HollowButton.ghost(
-          onPressed: () => Navigator.of(ctx).pop(false),
-          child: const Text('Cancel'),
-        ),
-        HollowButton.filled(
-          onPressed: () => Navigator.of(ctx).pop(true),
-          child: const Text('Sync now'),
-        ),
-      ],
-    ),
+    confirmLabel: 'Sync now',
   );
   if (confirmed != true) return;
   if (!device.online) {
@@ -112,28 +98,14 @@ Future<void> syncFromDeviceFlow(
 /// Confirms, then permanently revokes the device.
 Future<void> removeDeviceFlow(BuildContext context, MyDevice device) async {
   final name = deviceTitle(device);
-  final confirmed = await showHollowDialog<bool>(
+  final confirmed = await showHollowConfirm(
     context: context,
-    builder: (ctx) => HollowDialog(
-      title: 'Remove this device?',
-      content: Text(
-        'This permanently removes "$name" '
+    title: 'Remove this device?',
+    message: 'This permanently removes "$name" '
         'from your identity. It will stop receiving your messages and is removed '
         'from your servers. This cannot be undone from the removed device.',
-        style: HollowTypography.body
-            .copyWith(color: HollowTheme.of(ctx).textSecondary),
-      ),
-      actions: [
-        HollowButton.ghost(
-          onPressed: () => Navigator.of(ctx).pop(false),
-          child: const Text('Cancel'),
-        ),
-        HollowButton.danger(
-          onPressed: () => Navigator.of(ctx).pop(true),
-          child: const Text('Remove device'),
-        ),
-      ],
-    ),
+    confirmLabel: 'Remove device',
+    destructive: true,
   );
   if (confirmed != true) return;
   try {
@@ -151,40 +123,16 @@ Future<void> removeDeviceFlow(BuildContext context, MyDevice device) async {
 
 /// Confirms, then drops ALL other linked devices.
 Future<void> resetDeviceListsFlow(BuildContext context) async {
-  final confirmed = await showHollowDialog<bool>(
+  final confirmed = await showHollowConfirm(
     context: context,
-    builder: (ctx) => HollowDialog(
-      title: 'Reset device list?',
-      content: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            'This permanently removes ALL your other linked devices, not just '
-            'this one. Each is signed out and wiped, and your friends stop '
-            'seeing them. Only this device stays. To use another device again, '
-            'link it fresh.\n\nUse this to clean up leftover or ghost devices.',
-            style: HollowTypography.body
-                .copyWith(color: HollowTheme.of(ctx).textSecondary),
-          ),
-          const SizedBox(height: HollowSpacing.lg),
-          Row(
-            mainAxisAlignment: MainAxisAlignment.end,
-            children: [
-              HollowButton.ghost(
-                onPressed: () => Navigator.of(ctx).pop(false),
-                child: const Text('Cancel'),
-              ),
-              const SizedBox(width: HollowSpacing.sm),
-              HollowButton.danger(
-                onPressed: () => Navigator.of(ctx).pop(true),
-                child: const Text('Reset'),
-              ),
-            ],
-          ),
-        ],
-      ),
-    ),
+    title: 'Reset device list?',
+    message:
+        'This permanently removes ALL your other linked devices, not just '
+        'this one. Each is signed out and wiped, and your friends stop '
+        'seeing them. Only this device stays. To use another device again, '
+        'link it fresh.\n\nUse this to clean up leftover or ghost devices.',
+    confirmLabel: 'Reset',
+    destructive: true,
   );
   if (confirmed != true) return;
   try {

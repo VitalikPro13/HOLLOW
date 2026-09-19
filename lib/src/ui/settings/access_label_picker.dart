@@ -69,12 +69,9 @@ class _AccessLabelPickerDialogState
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
+          const HollowDialogText(
             'Members holding ANY selected label get access. Admins and the '
             'Owner always have access.',
-            style: HollowTypography.bodySmall.copyWith(
-              color: hollow.textSecondary,
-            ),
           ),
           const SizedBox(height: HollowSpacing.md),
           if (labelsAsync.isLoading && accessLabels.isEmpty)

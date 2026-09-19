@@ -191,28 +191,17 @@ class ShareCard extends ConsumerWidget {
     );
   }
 
-  void _confirmRemove(BuildContext context, WidgetRef ref) {
-    showHollowDialog(
+  Future<void> _confirmRemove(BuildContext context, WidgetRef ref) async {
+    final confirmed = await showHollowConfirm(
       context: context,
-      builder: (ctx) => HollowDialog(
-        title: 'Remove Share',
-        content: Text('Remove "${item.fileName}" from your shares?'),
-        actions: [
-          HollowButton.ghost(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('Cancel'),
-          ),
-          HollowButton.danger(
-            onPressed: () {
-              share_api.shareRemove(rootHash: item.rootHash, deleteFile: false);
-              ref.read(shareTabProvider.notifier).removeShare(item.rootHash);
-              Navigator.pop(ctx);
-            },
-            child: const Text('Remove'),
-          ),
-        ],
-      ),
+      title: 'Remove share',
+      message: 'Remove "${item.fileName}" from your shares?',
+      confirmLabel: 'Remove',
+      destructive: true,
     );
+    if (!confirmed) return;
+    share_api.shareRemove(rootHash: item.rootHash, deleteFile: false);
+    ref.read(shareTabProvider.notifier).removeShare(item.rootHash);
   }
 
   static String formatSize(int bytes) {

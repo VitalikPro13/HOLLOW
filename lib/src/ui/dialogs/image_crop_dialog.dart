@@ -81,7 +81,6 @@ class _ImageCropDialogState extends State<_ImageCropDialog> {
 
     final scaleX = _maxDisplayWidth / imgW;
     final scaleY = _maxDisplayHeight / imgH;
-    final scale = min(scaleX, scaleY).clamp(0.0, 1.0); // never upscale
     // A small image is allowed to upscale, or the crop is unusable.
     final finalScale = min(scaleX, scaleY);
 
@@ -105,16 +104,6 @@ class _ImageCropDialogState extends State<_ImageCropDialog> {
       _decodedImage = img;
       _imageLoaded = true;
     });
-  }
-
-  void _clampCrop() {
-    double l = _cropRect.left;
-    double t = _cropRect.top;
-    double w = _cropRect.width;
-    double h = _cropRect.height;
-    l = l.clamp(0.0, _displayW - w);
-    t = t.clamp(0.0, _displayH - h);
-    _cropRect = Rect.fromLTWH(l, t, w, h);
   }
 
   void _onPanStart(DragStartDetails details, _DragMode mode) {
@@ -230,125 +219,101 @@ class _ImageCropDialogState extends State<_ImageCropDialog> {
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
 
-    return Center(
-      child: Material(
-        color: Colors.transparent,
-        child: Container(
-          width: max(_displayW, 300) + HollowSpacing.xl * 2,
-          decoration: BoxDecoration(
-            color: hollow.overlay,
-            borderRadius: BorderRadius.circular(hollow.radiusLg),
-            border: Border.all(color: hollow.border),
+    // Not HollowDialog: its scrolling body would contend with the crop drags.
+    return HollowDialogSurface(
+      width: max(_displayW, 300) + HollowSpacing.xl * 2,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            widget.title,
+            style: HollowTypography.heading.copyWith(
+              color: hollow.textPrimary,
+            ),
           ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
+          const SizedBox(height: HollowSpacing.xs),
+          Text(
+            'Drag to move, corners to resize',
+            style: HollowTypography.caption.copyWith(
+              color: hollow.textSecondary,
+            ),
+          ),
+          const SizedBox(height: HollowSpacing.lg),
+
+          Center(
+            child: _imageLoaded && _decodedImage != null
+                ? SizedBox(
+                    width: _displayW,
+                    height: _displayH,
+                    child: Stack(
+                      children: [
+                        Positioned.fill(
+                          child: Image.memory(
+                            widget.imageBytes,
+                            fit: BoxFit.fill,
+                            width: _displayW,
+                            height: _displayH,
+                          ),
+                        ),
+
+                        Positioned.fill(
+                          child: RepaintBoundary(
+                            child: CustomPaint(
+                              painter: _CropOverlayPainter(
+                                cropRect: _cropRect,
+                                overlayColor: Colors.black.withValues(alpha: 0.6),
+                                borderColor: hollow.accent,
+                              ),
+                            ),
+                          ),
+                        ),
+
+                        Positioned.fromRect(
+                          rect: _cropRect,
+                          child: GestureDetector(
+                            onPanStart: (d) => _onPanStart(d, _DragMode.move),
+                            onPanUpdate: _onPanUpdate,
+                            onPanEnd: _onPanEnd,
+                            child: MouseRegion(
+                              cursor: SystemMouseCursors.move,
+                              child: Container(color: Colors.transparent),
+                            ),
+                          ),
+                        ),
+
+                        _buildHandle(hollow, _cropRect.topLeft, _DragMode.topLeft, SystemMouseCursors.resizeUpLeft),
+                        _buildHandle(hollow, _cropRect.topRight, _DragMode.topRight, SystemMouseCursors.resizeUpRight),
+                        _buildHandle(hollow, _cropRect.bottomLeft, _DragMode.bottomLeft, SystemMouseCursors.resizeDownLeft),
+                        _buildHandle(hollow, _cropRect.bottomRight, _DragMode.bottomRight, SystemMouseCursors.resizeDownRight),
+                      ],
+                    ),
+                  )
+                : const SizedBox(
+                    width: 300,
+                    height: 200,
+                    child: Center(
+                      child: HollowSpinner.large(),
+                    ),
+                  ),
+          ),
+
+          const SizedBox(height: HollowSpacing.xl),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.end,
             children: [
-              Padding(
-                padding: const EdgeInsets.fromLTRB(
-                  HollowSpacing.xl,
-                  HollowSpacing.lg,
-                  HollowSpacing.xl,
-                  HollowSpacing.md,
-                ),
-                child: Row(
-                  children: [
-                    Text(
-                      widget.title,
-                      style: HollowTypography.subheading.copyWith(
-                        color: hollow.textPrimary,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                    const Spacer(),
-                    Text(
-                      'Drag to move, corners to resize',
-                      style: HollowTypography.caption.copyWith(
-                        color: hollow.textSecondary,
-                        fontSize: 11,
-                      ),
-                    ),
-                  ],
-                ),
+              HollowButton.ghost(
+                onPressed: () => Navigator.of(context).pop(null),
+                child: const Text('Cancel'),
               ),
-
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.xl),
-                child: _imageLoaded && _decodedImage != null
-                    ? SizedBox(
-                        width: _displayW,
-                        height: _displayH,
-                        child: Stack(
-                          children: [
-                            Positioned.fill(
-                              child: Image.memory(
-                                widget.imageBytes,
-                                fit: BoxFit.fill,
-                                width: _displayW,
-                                height: _displayH,
-                              ),
-                            ),
-
-                            Positioned.fill(
-                              child: RepaintBoundary(
-                                child: CustomPaint(
-                                  painter: _CropOverlayPainter(
-                                    cropRect: _cropRect,
-                                    overlayColor: Colors.black.withValues(alpha: 0.6),
-                                    borderColor: hollow.accent,
-                                  ),
-                                ),
-                              ),
-                            ),
-
-                            Positioned.fromRect(
-                              rect: _cropRect,
-                              child: GestureDetector(
-                                onPanStart: (d) => _onPanStart(d, _DragMode.move),
-                                onPanUpdate: _onPanUpdate,
-                                onPanEnd: _onPanEnd,
-                                child: MouseRegion(
-                                  cursor: SystemMouseCursors.move,
-                                  child: Container(color: Colors.transparent),
-                                ),
-                              ),
-                            ),
-
-                            _buildHandle(hollow, _cropRect.topLeft, _DragMode.topLeft, SystemMouseCursors.resizeUpLeft),
-                            _buildHandle(hollow, _cropRect.topRight, _DragMode.topRight, SystemMouseCursors.resizeUpRight),
-                            _buildHandle(hollow, _cropRect.bottomLeft, _DragMode.bottomLeft, SystemMouseCursors.resizeDownLeft),
-                            _buildHandle(hollow, _cropRect.bottomRight, _DragMode.bottomRight, SystemMouseCursors.resizeDownRight),
-                          ],
-                        ),
-                      )
-                    : const SizedBox(
-                        width: 300,
-                        height: 200,
-                        child: Center(
-                          child: HollowSpinner.large(),
-                        ),
-                      ),
-              ),
-
-              Padding(
-                padding: const EdgeInsets.all(HollowSpacing.lg),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.end,
-                  children: [
-                    HollowButton.ghost(
-                      onPressed: () => Navigator.of(context).pop(null),
-                      child: const Text('Cancel'),
-                    ),
-                    const SizedBox(width: HollowSpacing.sm),
-                    HollowButton.filled(
-                      onPressed: _onConfirm,
-                      child: const Text('Apply'),
-                    ),
-                  ],
-                ),
+              const SizedBox(width: HollowSpacing.sm),
+              HollowButton.filled(
+                onPressed: _onConfirm,
+                child: const Text('Apply'),
               ),
             ],
           ),
-        ),
+        ],
       ),
     );
   }

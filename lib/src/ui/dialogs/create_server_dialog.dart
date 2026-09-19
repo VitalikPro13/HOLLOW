@@ -9,11 +9,10 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
-import 'package:hollow/src/ui/components/hollow_pressable.dart';
+import 'package:hollow/src/ui/components/hollow_section_header.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/dialogs/relay_switch_dialog.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Shows a dialog to join or create a server.
 void showCreateServerDialog(BuildContext context) {
@@ -24,49 +23,29 @@ void showCreateServerDialog(BuildContext context) {
     context: context,
     builder: (dialogContext) {
       final hollow = HollowTheme.of(dialogContext);
-      final screenWidth = MediaQuery.sizeOf(dialogContext).width;
-      final isCompact = screenWidth < 600;
-      final minWidth = isCompact
-          ? (screenWidth - HollowSpacing.xl * 2).clamp(0.0, 600.0)
-          : 400.0;
+      final isCompact = MediaQuery.sizeOf(dialogContext).width <
+          HollowDialogSurface.compactBreakpoint;
 
+      // Two separate regions, each with its own filled primary: the person
+      // picks a region, never both, so neither button outranks the other.
       final joinSection = Consumer(builder: (context, joinRef, _) => Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(
-            children: [
-              Icon(LucideIcons.logIn, size: 18, color: hollow.accent),
-              const SizedBox(width: HollowSpacing.sm),
-              Text(
-                'Join a Server',
-                style: HollowTypography.subheading.copyWith(
-                  color: hollow.textPrimary,
-                ),
-              ),
-            ],
+          const HollowSectionHeader(
+            'Join a Server',
+            subtitle: 'Paste an invite link or server ID.',
           ),
-          const SizedBox(height: HollowSpacing.sm),
-          Text(
-            'Paste an invite link or server ID.',
-            style: HollowTypography.caption.copyWith(
-              color: hollow.textSecondary,
-            ),
-          ),
-          const SizedBox(height: HollowSpacing.lg),
           HollowTextField(
             controller: joinController,
             hintText: 'Invite link or server ID',
             autofocus: !isCompact,
-            style: HollowTypography.mono.copyWith(
-              color: hollow.textPrimary,
-              fontSize: 12,
-            ),
+            style: HollowTypography.mono.copyWith(color: hollow.textPrimary),
             onSubmitted: (_) {
               _handleJoin(dialogContext, joinRef, joinController);
             },
           ),
-          const SizedBox(height: HollowSpacing.md),
+          const SizedBox(height: HollowSpacing.sm),
           HollowButton.filled(
             onPressed: () => _handleJoin(dialogContext, joinRef, joinController),
             expand: true,
@@ -79,26 +58,10 @@ void showCreateServerDialog(BuildContext context) {
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(
-            children: [
-              Icon(LucideIcons.plus, size: 18, color: hollow.accent),
-              const SizedBox(width: HollowSpacing.sm),
-              Text(
-                'Create a Server',
-                style: HollowTypography.subheading.copyWith(
-                  color: hollow.textPrimary,
-                ),
-              ),
-            ],
+          const HollowSectionHeader(
+            'Create a Server',
+            subtitle: 'Start your own server. You can invite others later.',
           ),
-          const SizedBox(height: HollowSpacing.sm),
-          Text(
-            'Start your own server. You can invite others later.',
-            style: HollowTypography.caption.copyWith(
-              color: hollow.textSecondary,
-            ),
-          ),
-          const SizedBox(height: HollowSpacing.lg),
           HollowTextField(
             controller: nameController,
             hintText: 'My Awesome Server',
@@ -106,8 +69,8 @@ void showCreateServerDialog(BuildContext context) {
               _handleCreate(dialogContext, nameController);
             },
           ),
-          const SizedBox(height: HollowSpacing.md),
-          HollowButton.outline(
+          const SizedBox(height: HollowSpacing.sm),
+          HollowButton.filled(
             onPressed: () => _handleCreate(dialogContext, nameController),
             expand: true,
             child: const Text('Create'),
@@ -130,67 +93,26 @@ void showCreateServerDialog(BuildContext context) {
                 createSection,
               ],
             )
-          : Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Expanded(child: joinSection),
-                const Padding(
-                  padding:
-                      EdgeInsets.symmetric(horizontal: HollowSpacing.lg),
-                  child: SizedBox(
-                    height: 180,
+          : IntrinsicHeight(
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Expanded(child: joinSection),
+                  const Padding(
+                    padding:
+                        EdgeInsets.symmetric(horizontal: HollowSpacing.lg),
                     child: HollowVerticalDivider(),
                   ),
-                ),
-                Expanded(child: createSection),
-              ],
+                  Expanded(child: createSection),
+                ],
+              ),
             );
 
-      return Center(
-        child: Padding(
-          padding: const EdgeInsets.all(HollowSpacing.xl),
-          child: ConstrainedBox(
-            constraints: BoxConstraints(maxWidth: 600, minWidth: minWidth),
-            child: Material(
-              color: Colors.transparent,
-              child: Container(
-                padding: const EdgeInsets.all(HollowSpacing.lg),
-                decoration: BoxDecoration(
-                  color: hollow.overlay,
-                  borderRadius: BorderRadius.circular(hollow.radiusLg),
-                  border: Border.all(
-                    color: hollow.accent.withValues(alpha: 0.15),
-                  ),
-                  boxShadow: [
-                    BoxShadow(
-                      color: Colors.black.withValues(alpha: 0.2),
-                      blurRadius: 24,
-                    ),
-                  ],
-                ),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Align(
-                      alignment: Alignment.centerRight,
-                      child: HollowPressable(
-                        onTap: () => Navigator.of(dialogContext).pop(),
-                        borderRadius: BorderRadius.circular(hollow.radiusMd),
-                        padding: const EdgeInsets.all(HollowSpacing.xs),
-                        semanticLabel: 'Close',
-                        child: Icon(LucideIcons.x,
-                            size: 18, color: hollow.textSecondary),
-                      ),
-                    ),
-                    Flexible(
-                      child: SingleChildScrollView(child: body),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ),
-        ),
+      return HollowDialog(
+        title: 'Add a server',
+        showClose: true,
+        width: 600,
+        content: body,
       );
     },
   );

@@ -181,87 +181,53 @@ class _ChannelActionsSheetState extends State<_ChannelActionsSheet> {
     final controller = TextEditingController(text: widget.channel.name);
     showHollowDialog(
       context: context,
-      builder: (ctx) => Center(
-        child: Padding(
-          padding: const EdgeInsets.all(HollowSpacing.xl),
-          child: Material(
-            color: Colors.transparent,
-            child: Builder(builder: (ctx2) {
-              final hollow = HollowTheme.of(ctx2);
-              Future<void> submit() async {
-                final name = controller.text.trim();
-                if (name.isEmpty || name == widget.channel.name) {
-                  Navigator.pop(ctx2);
-                  return;
-                }
-                Navigator.pop(ctx2);
-                try {
-                  await crdt_api.renameChannel(
-                    serverId: widget.serverId,
-                    channelId: widget.channel.channelId,
-                    newName: name,
-                  );
-                } catch (_) {
-                  if (mounted) {
-                    HollowToast.show(context, 'Could not rename channel',
-                        type: HollowToastType.error);
-                  }
-                  return;
-                }
-                widget.onChanged?.call();
-                if (mounted) {
-                  HollowToast.show(context, 'Channel renamed',
-                      type: HollowToastType.success);
-                }
-              }
+      builder: (ctx) {
+        Future<void> submit() async {
+          final name = controller.text.trim();
+          Navigator.pop(ctx);
+          if (name.isEmpty || name == widget.channel.name) return;
+          try {
+            await crdt_api.renameChannel(
+              serverId: widget.serverId,
+              channelId: widget.channel.channelId,
+              newName: name,
+            );
+          } catch (_) {
+            if (mounted) {
+              HollowToast.show(context, 'Could not rename channel',
+                  type: HollowToastType.error);
+            }
+            return;
+          }
+          widget.onChanged?.call();
+          if (mounted) {
+            HollowToast.show(context, 'Channel renamed',
+                type: HollowToastType.success);
+          }
+        }
 
-              return Container(
-                constraints: const BoxConstraints(maxWidth: 360),
-                padding: const EdgeInsets.all(HollowSpacing.xl),
-                decoration: BoxDecoration(
-                  color: hollow.overlay,
-                  borderRadius: BorderRadius.circular(hollow.radiusLg),
-                  border: Border.all(color: hollow.border),
-                ),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text('Rename Channel',
-                        style: HollowTypography.heading
-                            .copyWith(color: hollow.textPrimary)),
-                    const SizedBox(height: HollowSpacing.md),
-                    HollowTextField(
-                      controller: controller,
-                      hintText: 'Channel name',
-                      autofocus: true,
-                      maxLength: 32,
-                      onSubmitted: (_) => submit(),
-                    ),
-                    const SizedBox(height: HollowSpacing.md),
-                    Row(
-                      children: [
-                        Expanded(
-                          child: HollowButton.ghost(
-                            onPressed: () => Navigator.pop(ctx2),
-                            child: const Text('Cancel'),
-                          ),
-                        ),
-                        const SizedBox(width: HollowSpacing.md),
-                        Expanded(
-                          child: HollowButton.filled(
-                            onPressed: submit,
-                            child: const Text('Rename'),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ],
-                ),
-              );
-            }),
+        return HollowDialog(
+          title: 'Rename channel',
+          width: 420,
+          content: HollowTextField(
+            controller: controller,
+            hintText: 'Channel name',
+            autofocus: true,
+            maxLength: 32,
+            onSubmitted: (_) => submit(),
           ),
-        ),
-      ),
+          actions: [
+            HollowButton.ghost(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Cancel'),
+            ),
+            HollowButton.filled(
+              onPressed: submit,
+              child: const Text('Rename'),
+            ),
+          ],
+        );
+      },
     );
   }
 
@@ -472,30 +438,13 @@ class _ChannelActionsSheetState extends State<_ChannelActionsSheet> {
 
   /// Confirms dropping a label gate, which widens access.
   Future<bool> _confirmClearLabelGate(String tier) async {
-    final confirmed = await showHollowDialog<bool>(
+    return showHollowConfirm(
       context: context,
-      builder: (ctx) => HollowDialog(
-        title: 'Remove label requirement?',
-        content: Text(
-          '#${widget.channel.name} will use tier-based access '
+      title: 'Remove label requirement?',
+      message: '#${widget.channel.name} will use tier-based access '
           '(${_accessLabel(tier)}) instead of its access labels.',
-          style: HollowTypography.body.copyWith(
-            color: HollowTheme.of(ctx).textSecondary,
-          ),
-        ),
-        actions: [
-          HollowButton.ghost(
-            onPressed: () => Navigator.of(ctx).pop(false),
-            child: const Text('Cancel'),
-          ),
-          HollowButton.filled(
-            onPressed: () => Navigator.of(ctx).pop(true),
-            child: const Text('Remove'),
-          ),
-        ],
-      ),
+      confirmLabel: 'Remove',
     );
-    return confirmed ?? false;
   }
 
   static String _accessLabel(String value) {

@@ -190,28 +190,11 @@ class _MobileChatsTabState extends ConsumerState<MobileChatsTab> {
     // Already in a DIFFERENT voice channel.
     if (vcState.isInVoiceChannel) {
       if (!mounted) return;
-      final confirmed = await showHollowDialog<bool>(
+      final confirmed = await showHollowConfirm(
         context: context,
-        builder: (ctx) {
-          final h = HollowTheme.of(ctx);
-          return HollowDialog(
-            title: 'Switch Voice Channel?',
-            content: Text(
-              'Leave current voice channel and join #${channel.name}?',
-              style: HollowTypography.body.copyWith(color: h.textSecondary),
-            ),
-            actions: [
-              HollowButton.ghost(
-                onPressed: () => Navigator.pop(ctx, false),
-                child: const Text('Cancel'),
-              ),
-              HollowButton.filled(
-                onPressed: () => Navigator.pop(ctx, true),
-                child: const Text('Switch'),
-              ),
-            ],
-          );
-        },
+        title: 'Switch voice channel?',
+        message: 'Leave current voice channel and join #${channel.name}?',
+        confirmLabel: 'Switch',
       );
       if (confirmed != true || !mounted) return;
     }
@@ -1592,80 +1575,32 @@ class _NewConversationDialogState
 
   @override
   Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.all(HollowSpacing.xl),
-        child: Material(
-          color: Colors.transparent,
-          child: Container(
-            constraints: const BoxConstraints(maxWidth: 400),
-            padding: const EdgeInsets.all(HollowSpacing.xl),
-            decoration: BoxDecoration(
-              color: hollow.overlay,
-              borderRadius: BorderRadius.circular(hollow.radiusLg),
-              border: Border.all(
-                color: hollow.accent.withValues(alpha: 0.15),
-              ),
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.black.withValues(alpha: 0.3),
-                  blurRadius: 20,
-                ),
-              ],
-            ),
-            child: SingleChildScrollView(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    children: [
-                      Expanded(
-                        child: Text(
-                          'New',
-                          style: HollowTypography.heading
-                              .copyWith(color: hollow.textPrimary),
-                        ),
-                      ),
-                      HollowPressable(
-                        onTap: () => Navigator.of(context).pop(),
-                        semanticLabel: 'Close',
-                        borderRadius:
-                            BorderRadius.circular(hollow.radiusMd),
-                        padding: const EdgeInsets.all(HollowSpacing.xs),
-                        child: Icon(LucideIcons.x,
-                            size: 18, color: hollow.textSecondary),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: HollowSpacing.xl),
-
-                  const HollowSectionHeader('Join a Server'),
-                  _InputRow(
-                    controller: _joinController,
-                    hint: 'Invite link or server ID',
-                    mono: true,
-                    buttonLabel: 'Join',
-                    onSubmit: _handleJoin,
-                  ),
-
-                  const SizedBox(height: HollowSpacing.xl),
-
-                  const HollowSectionHeader('Create a Server'),
-                  _InputRow(
-                    controller: _createController,
-                    hint: 'Server name',
-                    mono: false,
-                    buttonLabel: 'Create',
-                    onSubmit: _handleCreate,
-                  ),
-
-                ],
-              ),
-            ),
+    return HollowDialog(
+      title: 'New',
+      showClose: true,
+      maxWidth: 400,
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const HollowSectionHeader('Join a Server'),
+          _InputRow(
+            controller: _joinController,
+            hint: 'Invite link or server ID',
+            mono: true,
+            buttonLabel: 'Join',
+            onSubmit: _handleJoin,
           ),
-        ),
+          const SizedBox(height: HollowSpacing.xl),
+          const HollowSectionHeader('Create a Server'),
+          _InputRow(
+            controller: _createController,
+            hint: 'Server name',
+            mono: false,
+            buttonLabel: 'Create',
+            onSubmit: _handleCreate,
+          ),
+        ],
       ),
     );
   }
@@ -1826,88 +1761,38 @@ class _ServerContextSheet extends ConsumerWidget {
     );
   }
 
-  static void _confirmLeaveOrDelete(
+  static Future<void> _confirmLeaveOrDelete(
     BuildContext context,
     WidgetRef ref,
     String serverId,
     String serverName,
     bool isOwner,
-  ) {
-    showHollowDialog(
+  ) async {
+    final confirmed = await showHollowConfirm(
       context: context,
-      builder: (_) => Center(
-        child: Padding(
-          padding: const EdgeInsets.all(HollowSpacing.xl),
-          child: Material(
-            color: Colors.transparent,
-            child: Builder(builder: (ctx) {
-              final hollow = HollowTheme.of(ctx);
-              return Container(
-                constraints: const BoxConstraints(maxWidth: 360),
-                padding: const EdgeInsets.all(HollowSpacing.xl),
-                decoration: BoxDecoration(
-                  color: hollow.overlay,
-                  borderRadius: BorderRadius.circular(hollow.radiusLg),
-                  border: Border.all(color: hollow.border),
-                ),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text(
-                      isOwner ? 'Delete Server' : 'Leave Server',
-                      style: HollowTypography.heading.copyWith(color: hollow.textPrimary),
-                    ),
-                    const SizedBox(height: HollowSpacing.md),
-                    Text(
-                      isOwner
-                          ? 'Are you sure you want to delete "$serverName"? This cannot be undone.'
-                          : 'Are you sure you want to leave "$serverName"?',
-                      textAlign: TextAlign.center,
-                      style: HollowTypography.body.copyWith(color: hollow.textSecondary),
-                    ),
-                    const SizedBox(height: HollowSpacing.xl),
-                    Row(
-                      children: [
-                        Expanded(
-                          child: HollowButton.ghost(
-                            onPressed: () => Navigator.pop(ctx),
-                            child: const Text('Cancel'),
-                          ),
-                        ),
-                        const SizedBox(width: HollowSpacing.md),
-                        Expanded(
-                          child: HollowButton.danger(
-                            onPressed: () async {
-                              Navigator.pop(ctx);
-                              if (isOwner) {
-                                await crdt_api.deleteServer(serverId: serverId);
-                              } else {
-                                await crdt_api.leaveServer(serverId: serverId);
-                              }
-                              ref.read(selectedServerProvider.notifier).state = null;
-                              ref.read(selectedChannelProvider.notifier).state = null;
-                              ref.read(channelListProvider.notifier).clear();
-                              if (context.mounted) {
-                                HollowToast.show(
-                                  context,
-                                  isOwner ? 'Server deleted' : 'Left server',
-                                  type: HollowToastType.success,
-                                );
-                              }
-                            },
-                            child: Text(isOwner ? 'Delete' : 'Leave'),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ],
-                ),
-              );
-            }),
-          ),
-        ),
-      ),
+      title: isOwner ? 'Delete server' : 'Leave server',
+      message: isOwner
+          ? 'Are you sure you want to delete "$serverName"? This cannot be undone.'
+          : 'Are you sure you want to leave "$serverName"?',
+      confirmLabel: isOwner ? 'Delete' : 'Leave',
+      destructive: true,
     );
+    if (!confirmed) return;
+    if (isOwner) {
+      await crdt_api.deleteServer(serverId: serverId);
+    } else {
+      await crdt_api.leaveServer(serverId: serverId);
+    }
+    ref.read(selectedServerProvider.notifier).state = null;
+    ref.read(selectedChannelProvider.notifier).state = null;
+    ref.read(channelListProvider.notifier).clear();
+    if (context.mounted) {
+      HollowToast.show(
+        context,
+        isOwner ? 'Server deleted' : 'Left server',
+        type: HollowToastType.success,
+      );
+    }
   }
 }
 

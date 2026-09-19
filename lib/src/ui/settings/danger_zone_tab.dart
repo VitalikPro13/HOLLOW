@@ -18,41 +18,17 @@ class DangerZoneTab extends ConsumerWidget {
 
   const DangerZoneTab({super.key, required this.server});
 
-  void _confirmDelete(BuildContext context, WidgetRef ref) {
-    showHollowDialog(
+  Future<void> _confirmDelete(BuildContext context, WidgetRef ref) async {
+    final confirmed = await showHollowConfirm(
       context: context,
-      builder: (dialogContext) => HollowDialog(
-        title: 'Delete server',
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              'Are you sure you want to delete "${server.name}"?',
-              style: HollowTypography.body,
-            ),
-            const SizedBox(height: HollowSpacing.sm),
-            Text(
-              'This action cannot be undone. All channels and messages will be permanently deleted.',
-              style: HollowTypography.bodySmall,
-            ),
-          ],
-        ),
-        actions: [
-          HollowButton.ghost(
-            onPressed: () => Navigator.of(dialogContext).pop(),
-            child: const Text('Cancel'),
-          ),
-          HollowButton.danger(
-            onPressed: () {
-              Navigator.of(dialogContext).pop();
-              _deleteServer(context, ref);
-            },
-            child: const Text('Delete server'),
-          ),
-        ],
-      ),
+      title: 'Delete server',
+      message: 'Are you sure you want to delete "${server.name}"?\n\n'
+          'This action cannot be undone. All channels and messages will be '
+          'permanently deleted.',
+      confirmLabel: 'Delete server',
+      destructive: true,
     );
+    if (confirmed && context.mounted) await _deleteServer(context, ref);
   }
 
   Future<void> _deleteServer(BuildContext context, WidgetRef ref) async {
@@ -80,41 +56,16 @@ class DangerZoneTab extends ConsumerWidget {
     }
   }
 
-  void _confirmLeave(BuildContext context, WidgetRef ref) {
-    showHollowDialog(
+  Future<void> _confirmLeave(BuildContext context, WidgetRef ref) async {
+    final confirmed = await showHollowConfirm(
       context: context,
-      builder: (dialogContext) => HollowDialog(
-        title: 'Leave server',
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              'Are you sure you want to leave "${server.name}"?',
-              style: HollowTypography.body,
-            ),
-            const SizedBox(height: HollowSpacing.sm),
-            Text(
-              'You will need a new invite to rejoin this server.',
-              style: HollowTypography.bodySmall,
-            ),
-          ],
-        ),
-        actions: [
-          HollowButton.ghost(
-            onPressed: () => Navigator.of(dialogContext).pop(),
-            child: const Text('Cancel'),
-          ),
-          HollowButton.danger(
-            onPressed: () {
-              Navigator.of(dialogContext).pop();
-              _leaveServer(context, ref);
-            },
-            child: const Text('Leave server'),
-          ),
-        ],
-      ),
+      title: 'Leave server',
+      message: 'Are you sure you want to leave "${server.name}"?\n\n'
+          'You will need a new invite to rejoin this server.',
+      confirmLabel: 'Leave server',
+      destructive: true,
     );
+    if (confirmed && context.mounted) await _leaveServer(context, ref);
   }
 
   Future<void> _leaveServer(BuildContext context, WidgetRef ref) async {

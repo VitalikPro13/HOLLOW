@@ -277,7 +277,7 @@ class _MobileStorageRouteState extends ConsumerState<MobileStorageRoute> {
     final result = await showHollowDialog<int>(
       context: context,
       builder: (ctx) => HollowDialog(
-        title: 'Set Storage Pledge',
+        title: 'Set storage pledge',
         content: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
@@ -375,7 +375,7 @@ class _MobileStorageRouteState extends ConsumerState<MobileStorageRoute> {
       context: context,
       builder: (ctx) {
         return HollowDialog(
-          title: key == 'retention_files' ? 'File Retention' : 'Message Retention',
+          title: key == 'retention_files' ? 'File retention' : 'Message retention',
           content: Column(
             mainAxisSize: MainAxisSize.min,
             children: [

@@ -123,33 +123,26 @@ class _WelcomeContentState extends State<_WelcomeContent> {
     final path = result.files.single.path;
     if (path == null) return;
 
-    final passphrase = await showDialog<String>(
+    final controller = TextEditingController();
+    final passphrase = await showHollowDialog<String>(
       context: context,
       builder: (ctx) {
-        final hollow = HollowTheme.of(ctx);
-        final controller = TextEditingController();
-        return AlertDialog(
-          backgroundColor: hollow.overlay,
-          title: Text('Enter Backup Passphrase', style: HollowTypography.heading.copyWith(color: hollow.textPrimary)),
-          content: TextField(
+        return HollowDialog(
+          title: 'Enter backup passphrase',
+          width: 420,
+          content: HollowTextField(
             controller: controller,
             obscureText: true,
             autofocus: true,
-            decoration: InputDecoration(
-              hintText: 'Passphrase',
-              hintStyle: TextStyle(color: hollow.textSecondary),
-            ),
-            style: TextStyle(color: hollow.textPrimary),
+            hintText: 'Passphrase',
             onSubmitted: (val) { if (val.isNotEmpty) Navigator.of(ctx).pop(val); },
           ),
           actions: [
             HollowButton.ghost(
-              compact: true,
               onPressed: () => Navigator.of(ctx).pop(null),
               child: const Text('Cancel'),
             ),
             HollowButton.filled(
-              compact: true,
               onPressed: () {
                 final pass = controller.text.trim();
                 if (pass.isNotEmpty) Navigator.of(ctx).pop(pass);
@@ -182,46 +175,13 @@ class _WelcomeContentState extends State<_WelcomeContent> {
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
-    final radius = BorderRadius.circular(hollow.radiusLg);
-    final screenWidth = MediaQuery.sizeOf(context).width;
-    final isCompact = screenWidth < 600;
-    // Never force a minimum wider than the screen.
-    final minWidth = isCompact
-        ? (screenWidth - HollowSpacing.xl * 2).clamp(0.0, 480.0)
-        : 360.0;
 
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.all(HollowSpacing.xl),
-        child: ConstrainedBox(
-          constraints: BoxConstraints(
-            maxWidth: 480,
-            minWidth: minWidth,
-          ),
-          child: Material(
-            color: Colors.transparent,
-            child: Container(
-              decoration: BoxDecoration(
-                color: hollow.overlay,
-                borderRadius: radius,
-                border: Border.all(
-                  color: hollow.accent.withValues(alpha: 0.15),
-                ),
-                boxShadow: [
-                  BoxShadow(
-                    color: Colors.black.withValues(alpha: 0.3),
-                    blurRadius: 32,
-                  ),
-                ],
-              ),
-              padding: const EdgeInsets.all(HollowSpacing.xl),
-              // Scrolls when a short screen squeezes the available height.
-              child: SingleChildScrollView(
-                child: _buildMenu(hollow),
-              ),
-            ),
-          ),
-        ),
+    return HollowDialogSurface(
+      maxWidth: 480,
+      minWidth: 360,
+      // Scrolls when a short screen squeezes the available height.
+      child: SingleChildScrollView(
+        child: _buildMenu(hollow),
       ),
     );
   }
@@ -230,17 +190,13 @@ class _WelcomeContentState extends State<_WelcomeContent> {
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
-        Container(
-          width: 56,
-          height: 56,
-          decoration: BoxDecoration(
-            color: hollow.accent.withValues(alpha: 0.1),
-            borderRadius: BorderRadius.circular(hollow.radiusMd),
-          ),
-          child: Icon(
-            LucideIcons.shield,
-            size: 28,
-            color: hollow.accent,
+        ClipRRect(
+          borderRadius: BorderRadius.circular(hollow.radiusLg),
+          child: Image.asset(
+            'assets/hollow_logo_rounded.png',
+            width: 56,
+            height: 56,
+            semanticLabel: 'Hollow',
           ),
         ),
 

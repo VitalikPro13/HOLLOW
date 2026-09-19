@@ -340,20 +340,12 @@ Future<void> importServerTemplate(
     if (diff.isEmpty) {
       showHollowDialog(
         context: context,
-        builder: (ctx) => HollowDialog(
+        builder: (ctx) => const HollowDialog(
           title: 'No changes needed',
-          content: Text(
+          showClose: true,
+          content: HollowDialogText(
             'This template matches your current server structure.',
-            style: HollowTypography.body.copyWith(
-              color: HollowTheme.of(ctx).textSecondary,
-            ),
           ),
-          actions: [
-            HollowButton.ghost(
-              onPressed: () => Navigator.of(ctx).pop(),
-              child: const Text('OK'),
-            ),
-          ],
         ),
       );
       return;
@@ -597,77 +589,75 @@ Future<bool?> _showConfirmationDialog(
       final hollow = HollowTheme.of(ctx);
       return HollowDialog(
         title: 'Apply template',
-        content: SingleChildScrollView(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                'Apply "${template.name}" to this server?',
-                style: HollowTypography.body
-                    .copyWith(color: hollow.textPrimary),
-              ),
-              const SizedBox(height: HollowSpacing.sm),
-              Text(
-                'Removed channels will disappear from the sidebar, but their '
-                'messages are never deleted. They remain in everyone\u2019s '
-                'local database.',
-                style: HollowTypography.caption
-                    .copyWith(color: hollow.textSecondary),
-              ),
-              const SizedBox(height: HollowSpacing.lg),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Apply "${template.name}" to this server?',
+              style: HollowTypography.body
+                  .copyWith(color: hollow.textPrimary),
+            ),
+            const SizedBox(height: HollowSpacing.sm),
+            Text(
+              'Removed channels will disappear from the sidebar, but their '
+              'messages are never deleted. They remain in everyone\u2019s '
+              'local database.',
+              style: HollowTypography.caption
+                  .copyWith(color: hollow.textSecondary),
+            ),
+            const SizedBox(height: HollowSpacing.lg),
 
-              if (diff.nameChange != null ||
-                  diff.descriptionChange != null ||
-                  diff.iconChanged) ...[
-                const HollowSectionHeader('Settings', dense: true),
-                if (diff.nameChange != null)
-                  _changeRow(hollow, LucideIcons.type,
-                      'Name \u2192 ${diff.nameChange}'),
-                if (diff.descriptionChange != null)
-                  _changeRow(hollow, LucideIcons.alignLeft,
-                      'Description will be updated'),
-                if (diff.iconChanged)
-                  _changeRow(
-                      hollow, LucideIcons.image, 'Server icon will change'),
-                const SizedBox(height: HollowSpacing.md),
-              ],
-
-              if (diff.channelsToAdd.isNotEmpty) ...[
-                const HollowSectionHeader('Channels to add', dense: true),
-                for (final ch in diff.channelsToAdd)
-                  _changeRow(
-                    hollow,
-                    ch.channelType == 'voice'
-                        ? LucideIcons.volume2
-                        : LucideIcons.hash,
-                    ch.name,
-                    color: hollow.accent,
-                  ),
-                const SizedBox(height: HollowSpacing.md),
-              ],
-
-              if (diff.channelsToRemove.isNotEmpty) ...[
-                const HollowSectionHeader('Channels to remove', dense: true),
-                for (final ch in diff.channelsToRemove)
-                  _changeRow(
-                    hollow,
-                    ch.channelType == ChannelType.voice
-                        ? LucideIcons.volume2
-                        : LucideIcons.hash,
-                    ch.name,
-                    color: hollow.error,
-                  ),
-                const SizedBox(height: HollowSpacing.md),
-              ],
-
-              if (diff.layoutChanged &&
-                  diff.channelsToAdd.isEmpty &&
-                  diff.channelsToRemove.isEmpty)
-                _changeRow(hollow, LucideIcons.layoutList,
-                    'Channel ordering will be updated'),
+            if (diff.nameChange != null ||
+                diff.descriptionChange != null ||
+                diff.iconChanged) ...[
+              const HollowSectionHeader('Settings', dense: true),
+              if (diff.nameChange != null)
+                _changeRow(hollow, LucideIcons.type,
+                    'Name \u2192 ${diff.nameChange}'),
+              if (diff.descriptionChange != null)
+                _changeRow(hollow, LucideIcons.alignLeft,
+                    'Description will be updated'),
+              if (diff.iconChanged)
+                _changeRow(
+                    hollow, LucideIcons.image, 'Server icon will change'),
+              const SizedBox(height: HollowSpacing.md),
             ],
-          ),
+
+            if (diff.channelsToAdd.isNotEmpty) ...[
+              const HollowSectionHeader('Channels to add', dense: true),
+              for (final ch in diff.channelsToAdd)
+                _changeRow(
+                  hollow,
+                  ch.channelType == 'voice'
+                      ? LucideIcons.volume2
+                      : LucideIcons.hash,
+                  ch.name,
+                  color: hollow.accentText,
+                ),
+              const SizedBox(height: HollowSpacing.md),
+            ],
+
+            if (diff.channelsToRemove.isNotEmpty) ...[
+              const HollowSectionHeader('Channels to remove', dense: true),
+              for (final ch in diff.channelsToRemove)
+                _changeRow(
+                  hollow,
+                  ch.channelType == ChannelType.voice
+                      ? LucideIcons.volume2
+                      : LucideIcons.hash,
+                  ch.name,
+                  color: hollow.error,
+                ),
+              const SizedBox(height: HollowSpacing.md),
+            ],
+
+            if (diff.layoutChanged &&
+                diff.channelsToAdd.isEmpty &&
+                diff.channelsToRemove.isEmpty)
+              _changeRow(hollow, LucideIcons.layoutList,
+                  'Channel ordering will be updated'),
+          ],
         ),
         actions: [
           HollowButton.ghost(

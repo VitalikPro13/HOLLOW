@@ -40,3 +40,27 @@ class HollowScrollBehavior extends MaterialScrollBehavior {
 /// Width reserved for the scrollbar on desktop vertical scrollables: the 6px
 /// thumb plus a hair either side.
 const double kScrollGutter = 10.0;
+
+/// The right inset [HollowScrollBehavior] adds to a vertical scrollable here:
+/// [kScrollGutter] on desktop, nothing on touch platforms.
+double scrollGutterOf(BuildContext context) =>
+    switch (Theme.of(context).platform) {
+      TargetPlatform.linux ||
+      TargetPlatform.macOS ||
+      TargetPlatform.windows =>
+        kScrollGutter,
+      _ => 0,
+    };
+
+/// Padding for a row inside a vertical list whose fill (selection, hover)
+/// must sit evenly inset: the right side gives back what the scroll gutter
+/// already reserves, so the fill's two outer gaps match.
+EdgeInsets evenListRowPadding(
+  BuildContext context, {
+  required double inset,
+  double vertical = 0,
+}) {
+  final gutter = scrollGutterOf(context);
+  final side = inset > gutter ? inset : gutter;
+  return EdgeInsets.fromLTRB(side, vertical, side - gutter, vertical);
+}

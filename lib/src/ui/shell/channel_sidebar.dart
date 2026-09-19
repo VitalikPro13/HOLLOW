@@ -45,6 +45,7 @@ import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_menu.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
+import 'package:hollow/src/ui/components/hollow_scroll_behavior.dart';
 import 'package:hollow/src/ui/components/hollow_section_header.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
@@ -585,11 +586,13 @@ class _ServerContentState extends State<_ServerContent> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
+        // Reads as a category header: no band of its own, text on the
+        // channel glyph's column.
         if (!hasCategories)
           Padding(
             padding: const EdgeInsets.only(
-              left: HollowSpacing.lg,
-              top: HollowSpacing.sm,
+              left: HollowSpacing.sm * 2 + HollowSpacing.xxs,
+              top: HollowSpacing.md,
               right: HollowSpacing.sm,
             ),
             child: HollowSectionHeader(
@@ -607,7 +610,6 @@ class _ServerContentState extends State<_ServerContent> {
                   : null,
             ),
           ),
-        if (!hasCategories) const HollowDivider(),
         Expanded(
           // Right-click on empty sidebar space opens the server-level menu
           // (issue #61). Opaque so the area below the last channel is a hit
@@ -1046,10 +1048,8 @@ class _SavedMessagesCard extends StatelessWidget {
     }
 
     return Padding(
-      padding: const EdgeInsets.symmetric(
-        horizontal: HollowSpacing.sm,
-        vertical: HollowSpacing.xxs,
-      ),
+      padding: evenListRowPadding(context,
+          inset: HollowSpacing.sm, vertical: HollowSpacing.xxs),
       child: card,
     );
   }
@@ -1078,10 +1078,8 @@ class _PendingRequestTile extends ConsumerWidget {
     final name = displayNameForPeer(peerProfile, peerId);
 
     return Padding(
-      padding: const EdgeInsets.symmetric(
-        horizontal: HollowSpacing.sm,
-        vertical: HollowSpacing.xxs,
-      ),
+      padding: evenListRowPadding(context,
+          inset: HollowSpacing.sm, vertical: HollowSpacing.xxs),
       child: Container(
         padding: const EdgeInsets.symmetric(
           horizontal: HollowSpacing.sm + 2,
@@ -1198,14 +1196,14 @@ class _SidebarAddFriendDialogState
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
     return HollowDialog(
-      title: 'Add Friend',
+      title: 'Add friend',
+      width: 420,
       content: HollowTextField(
         controller: _controller,
         hintText: 'Peer ID or nickname...',
         autofocus: true,
         style: HollowTypography.mono.copyWith(
           color: hollow.textPrimary,
-          fontSize: 12,
         ),
         onSubmitted: (_) => _send(),
       ),
@@ -1216,7 +1214,7 @@ class _SidebarAddFriendDialogState
         ),
         HollowButton.filled(
           onPressed: _send,
-          child: const Text('Send Request'),
+          child: const Text('Send request'),
         ),
       ],
     );
@@ -1359,10 +1357,8 @@ class _ChannelTile extends ConsumerWidget {
         anchor: anchor,
       ),
       child: Padding(
-        padding: const EdgeInsets.symmetric(
-          horizontal: HollowSpacing.sm,
-          vertical: HollowSpacing.xxs,
-        ),
+        padding: evenListRowPadding(context,
+            inset: HollowSpacing.sm, vertical: HollowSpacing.xxs),
         child: tile,
       ),
     );
@@ -1484,10 +1480,8 @@ class _VoiceChannelTileState extends ConsumerState<_VoiceChannelTile> {
     );
 
     return Padding(
-      padding: const EdgeInsets.symmetric(
-        horizontal: HollowSpacing.sm,
-        vertical: HollowSpacing.xxs,
-      ),
+      padding: evenListRowPadding(context,
+          inset: HollowSpacing.sm, vertical: HollowSpacing.xxs),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [

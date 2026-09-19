@@ -373,20 +373,15 @@ class _ShowcaseEditorDialogState extends ConsumerState<_ShowcaseEditorDialog> {
 
   @override
   Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
     return HollowDialog(
-      title: 'Edit Showcase',
+      title: 'Edit showcase',
       content: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
+          const HollowDialogText(
             'Compose blocks on either side of your profile. Only what you '
             'put here is shown. Fill one side, both, or neither.',
-            style: HollowTypography.caption.copyWith(
-              color: hollow.textSecondary,
-              fontSize: 11,
-            ),
           ),
           const SizedBox(height: HollowSpacing.lg),
           _SideEditor(
@@ -516,7 +511,7 @@ class _SideEditor extends StatelessWidget {
           compact: true,
           loading: busy,
           icon: const Icon(LucideIcons.plus),
-          child: const Text('Add Block'),
+          child: const Text('Add block'),
         ),
       ],
     );
@@ -619,7 +614,8 @@ Future<ShowcaseBlockType?> _showBlockPicker(BuildContext context) {
   return showHollowDialog<ShowcaseBlockType>(
     context: context,
     builder: (ctx) => HollowDialog(
-      title: 'Add Block',
+      title: 'Add block',
+      showClose: true,
       content: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -636,12 +632,6 @@ Future<ShowcaseBlockType?> _showBlockPicker(BuildContext context) {
               'Free-form: bold, italic, code, spoilers, links'),
         ],
       ),
-      actions: [
-        HollowButton.ghost(
-          onPressed: () => Navigator.of(ctx).pop(),
-          child: const Text('Cancel'),
-        ),
-      ],
     ),
   );
 }
@@ -884,7 +874,8 @@ class _GamePickerDialogState extends State<_GamePickerDialog> {
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
     return HollowDialog(
-      title: 'Find a Game',
+      title: 'Find a game',
+      showClose: true,
       content: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -1015,12 +1006,6 @@ class _GamePickerDialogState extends State<_GamePickerDialog> {
           ),
         ],
       ),
-      actions: [
-        HollowButton.ghost(
-          onPressed: () => Navigator.of(context).pop(),
-          child: const Text('Cancel'),
-        ),
-      ],
     );
   }
 
@@ -1150,7 +1135,8 @@ class _ShelfEditorDialogState extends State<_ShelfEditorDialog> {
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
     return HollowDialog(
-      title: 'Game Shelf',
+      title: 'Game shelf',
+      width: 420,
       content: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -1197,7 +1183,7 @@ class _ShelfEditorDialogState extends State<_ShelfEditorDialog> {
             compact: true,
             icon: const Icon(LucideIcons.plus),
             child: Text(
-                'Add Game (${_games.length}/${ShowcaseBoard.maxShelfGames})'),
+                'Add game (${_games.length}/${ShowcaseBoard.maxShelfGames})'),
           ),
         ],
       ),
@@ -1229,6 +1215,7 @@ Future<String?> _promptText(
     context: context,
     builder: (ctx) => HollowDialog(
       title: title,
+      width: 420,
       content: HollowTextField(
         controller: controller,
         hintText: hint,
@@ -1309,7 +1296,8 @@ class _TextBlockEditorDialogState extends State<_TextBlockEditorDialog> {
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
     return HollowDialog(
-      title: widget.existing == null ? 'Add Text Block' : 'Edit Text Block',
+      title: widget.existing == null ? 'Add text block' : 'Edit text block',
+      width: 420,
       content: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,

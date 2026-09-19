@@ -411,12 +411,12 @@ class _FriendRow extends ConsumerWidget {
     showHollowDialog(
       context: context,
       builder: (_) => HollowDialog(
-        title: 'Set Nickname',
+        title: 'Set nickname',
         content: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text('Only visible to you.', style: HollowTypography.bodySmall),
+            const HollowDialogText('Only visible to you.'),
             const SizedBox(height: HollowSpacing.lg),
             HollowTextField(
               controller: controller,
@@ -459,44 +459,33 @@ class _FriendRow extends ConsumerWidget {
     );
   }
 
-  void _confirmRemove(BuildContext context, WidgetRef ref, String name) {
-    showHollowDialog(
+  Future<void> _confirmRemove(
+      BuildContext context, WidgetRef ref, String name) async {
+    final confirmed = await showHollowConfirm(
       context: context,
-      builder: (_) => HollowDialog(
-        title: 'Remove Friend',
-        content: Text('Remove $name from your friends?', style: HollowTypography.body),
-        actions: [
-          HollowButton.ghost(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Cancel'),
-          ),
-          HollowButton.danger(
-            onPressed: () async {
-              Navigator.pop(context);
-              // The awaited removal rebuilds the friends list and may unmount
-              // this tile.
-              final favourites = ref.read(favouriteFriendsProvider.notifier);
-              try {
-                await ref.read(friendsProvider.notifier).removeFriend(peerId);
-              } catch (_) {
-                if (context.mounted) {
-                  HollowToast.show(context, 'Could not remove friend',
-                      type: HollowToastType.error);
-                }
-                return;
-              }
-              // Dropped from favourites too, so no stale entry lingers.
-              favourites.remove(peerId);
-              if (context.mounted) {
-                HollowToast.show(context, 'Friend removed',
-                    type: HollowToastType.success);
-              }
-            },
-            child: const Text('Remove'),
-          ),
-        ],
-      ),
+      title: 'Remove friend',
+      message: 'Remove $name from your friends?',
+      confirmLabel: 'Remove',
+      destructive: true,
     );
+    if (!confirmed) return;
+    // The awaited removal rebuilds the friends list and may unmount this tile.
+    final favourites = ref.read(favouriteFriendsProvider.notifier);
+    try {
+      await ref.read(friendsProvider.notifier).removeFriend(peerId);
+    } catch (_) {
+      if (context.mounted) {
+        HollowToast.show(context, 'Could not remove friend',
+            type: HollowToastType.error);
+      }
+      return;
+    }
+    // Dropped from favourites too, so no stale entry lingers.
+    favourites.remove(peerId);
+    if (context.mounted) {
+      HollowToast.show(context, 'Friend removed',
+          type: HollowToastType.success);
+    }
   }
 }
 

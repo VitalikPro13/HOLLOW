@@ -6,8 +6,8 @@ import 'package:hollow/src/core/models/showcase_board.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
-import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
+import 'package:hollow/src/ui/components/hollow_divider.dart';
 import 'package:hollow/src/ui/components/profile_card_body.dart';
 import 'package:hollow/src/ui/components/showcase_blocks.dart';
 import 'package:hollow/src/ui/mobile/mobile_profile_sheet.dart';
@@ -57,6 +57,8 @@ const double kShowcasePanelWidth = 340.0;
 /// profile page rather than a floating scrap.
 const double _kEnsembleMinHeight = 560.0;
 
+/// Room reserved per wing when scaling; the hairline takes 1 of it and the
+/// card the rest.
 const double _kPanelGap = HollowSpacing.md;
 
 class ProfileDialog extends ConsumerWidget {
@@ -75,37 +77,19 @@ class ProfileDialog extends ConsumerWidget {
     this.serverId,
   });
 
-  /// The shared panel/card surface decoration.
-  BoxDecoration _surface(HollowTheme hollow) => BoxDecoration(
-        color: hollow.overlay,
-        borderRadius: BorderRadius.circular(hollow.radiusLg),
-        border: Border.all(color: hollow.accent.withValues(alpha: 0.15)),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: 0.3),
-            blurRadius: 24,
-            offset: const Offset(0, 8),
-          ),
-        ],
-      );
-
-  Widget _boardPanel(
-      HollowTheme hollow, List<ShowcaseBlock> blocks, double width) {
-    return Container(
+  Widget _boardPanel(List<ShowcaseBlock> blocks, {double? width}) {
+    return SizedBox(
       width: width,
-      decoration: _surface(hollow),
-      clipBehavior: Clip.antiAlias,
-      padding: const EdgeInsets.all(HollowSpacing.md),
-      child: ShowcaseBoardColumn(peerId: peerId, blocks: blocks),
+      child: Padding(
+        padding: const EdgeInsets.all(HollowSpacing.md),
+        child: ShowcaseBoardColumn(peerId: peerId, blocks: blocks),
+      ),
     );
   }
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final hollow = HollowTheme.of(context);
     final screenSize = MediaQuery.sizeOf(context);
-    final maxHeight = (screenSize.height - HollowSpacing.xl * 2)
-        .clamp(0.0, double.infinity);
 
     // Watched so a save from the composer updates this view live.
     final encoded = ref.watch(
@@ -132,19 +116,14 @@ class ProfileDialog extends ConsumerWidget {
         ? centerWidth
         : centerWidth + (panelWidth + _kPanelGap) * sides;
 
-    final centerCard = Container(
-      width: centerWidth,
-      decoration: _surface(hollow),
-      clipBehavior: Clip.antiAlias,
-      child: ProfileCardBody(
-        peerId: peerId,
-        nickname: nickname,
-        role: role,
-        labels: labels,
-        serverId: serverId,
-        density: ProfileCardDensity.full,
-        dismissHost: () => Navigator.of(context).pop(),
-      ),
+    final centerCard = ProfileCardBody(
+      peerId: peerId,
+      nickname: nickname,
+      role: role,
+      labels: labels,
+      serverId: serverId,
+      density: ProfileCardDensity.full,
+      dismissHost: () => Navigator.of(context).pop(),
     );
 
     final Widget content;
@@ -157,12 +136,12 @@ class ProfileDialog extends ConsumerWidget {
         children: [
           centerCard,
           if (board.hasLeft) ...[
-            const SizedBox(height: _kPanelGap),
-            _boardPanel(hollow, board.left, centerWidth),
+            const HollowDivider(),
+            _boardPanel(board.left),
           ],
           if (board.hasRight) ...[
-            const SizedBox(height: _kPanelGap),
-            _boardPanel(hollow, board.right, centerWidth),
+            const HollowDivider(),
+            _boardPanel(board.right),
           ],
         ],
       );
@@ -176,13 +155,13 @@ class ProfileDialog extends ConsumerWidget {
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               if (board.hasLeft) ...[
-                _boardPanel(hollow, board.left, panelWidth),
-                const SizedBox(width: _kPanelGap),
+                _boardPanel(board.left, width: panelWidth),
+                const HollowVerticalDivider(),
               ],
-              centerCard,
+              Expanded(child: centerCard),
               if (board.hasRight) ...[
-                const SizedBox(width: _kPanelGap),
-                _boardPanel(hollow, board.right, panelWidth),
+                const HollowVerticalDivider(),
+                _boardPanel(board.right, width: panelWidth),
               ],
             ],
           ),
@@ -190,21 +169,13 @@ class ProfileDialog extends ConsumerWidget {
       );
     }
 
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.all(HollowSpacing.xl),
-        child: ConstrainedBox(
-          constraints: BoxConstraints(
-            maxWidth: width,
-            maxHeight: maxHeight,
-          ),
-          child: Material(
-            color: Colors.transparent,
-            child: SingleChildScrollView(
-              child: content,
-            ),
-          ),
-        ),
+    // One frame for the whole ensemble; the showcase wings are panes of it.
+    return HollowDialogSurface(
+      width: width,
+      maxWidth: width,
+      padded: false,
+      child: SingleChildScrollView(
+        child: content,
       ),
     );
   }

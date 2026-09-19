@@ -1509,30 +1509,13 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
     final vc = ref.read(voiceChannelProvider);
     if (!vc.isInVoiceChannel) return true;
     final channelName = vc.currentChannelName ?? 'voice';
-    final confirmed = await showHollowDialog<bool>(
+    final confirmed = await showHollowConfirm(
       context: context,
-      builder: (ctx) {
-        final h = HollowTheme.of(ctx);
-        return HollowDialog(
-          title: 'Start Call?',
-          content: Text(
-            'Starting this call will disconnect you from #$channelName.',
-            style: HollowTypography.body.copyWith(color: h.textSecondary),
-          ),
-          actions: [
-            HollowButton.ghost(
-              onPressed: () => Navigator.pop(ctx, false),
-              child: const Text('Cancel'),
-            ),
-            HollowButton.filled(
-              onPressed: () => Navigator.pop(ctx, true),
-              child: const Text('Start Call'),
-            ),
-          ],
-        );
-      },
+      title: 'Start call?',
+      message: 'Starting this call will disconnect you from #$channelName.',
+      confirmLabel: 'Start call',
     );
-    return confirmed == true && mounted;
+    return confirmed && mounted;
   }
 
   Future<void> _startDmCall({required bool withVideo}) async {

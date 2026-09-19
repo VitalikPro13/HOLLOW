@@ -1,12 +1,9 @@
 ﻿import 'package:flutter/material.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
-import 'package:hollow/src/theme/hollow_theme.dart';
-import 'package:hollow/src/theme/hollow_typography.dart';
-import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
+import 'package:hollow/src/ui/components/hollow_chip.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
-import 'package:hollow/src/ui/components/hollow_focus_ring.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
@@ -40,37 +37,35 @@ void showCreateChannelDialog(
             onCreated?.call(channelId);
           }
 
-          final hollow = HollowTheme.of(dialogContext);
-
           return HollowDialog(
-            title: 'Create Channel',
+            title: 'Create channel',
+            width: 420,
             content: Column(
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(
+                const HollowDialogText(
                   'Choose a type and name for your new channel.',
-                  style: HollowTypography.body.copyWith(
-                    color: hollow.textSecondary,
-                  ),
                 ),
                 const SizedBox(height: HollowSpacing.lg),
                 Row(
                   children: [
                     Expanded(
-                      child: _TypeOption(
+                      child: HollowChip(
+                        expand: true,
                         icon: LucideIcons.hash,
                         label: 'Text',
-                        isSelected: !isVoice,
+                        selected: !isVoice,
                         onTap: () => setState(() => isVoice = false),
                       ),
                     ),
                     const SizedBox(width: HollowSpacing.sm),
                     Expanded(
-                      child: _TypeOption(
+                      child: HollowChip(
+                        expand: true,
                         icon: LucideIcons.volume2,
                         label: 'Voice',
-                        isSelected: isVoice,
+                        selected: isVoice,
                         onTap: () => setState(() => isVoice = true),
                       ),
                     ),
@@ -102,61 +97,4 @@ void showCreateChannelDialog(
       );
     },
   );
-}
-
-class _TypeOption extends StatelessWidget {
-  final IconData icon;
-  final String label;
-  final bool isSelected;
-  final VoidCallback onTap;
-
-  const _TypeOption({
-    required this.icon,
-    required this.label,
-    required this.isSelected,
-    required this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-    return HollowFocusRing(
-      enabled: true,
-      onActivate: onTap,
-      borderRadius: BorderRadius.circular(hollow.radiusMd),
-      child: GestureDetector(
-        onTap: onTap,
-        child: AnimatedContainer(
-          duration: HollowDurations.fast,
-          padding: const EdgeInsets.symmetric(
-            horizontal: HollowSpacing.md,
-            vertical: HollowSpacing.sm,
-          ),
-          decoration: BoxDecoration(
-            color: isSelected ? hollow.accentMuted : hollow.elevated,
-            borderRadius: BorderRadius.circular(hollow.radiusMd),
-            border: Border.all(
-              color: isSelected ? hollow.accent : hollow.border,
-              width: isSelected ? 1.5 : 1,
-            ),
-          ),
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Icon(icon, size: 18,
-                  color: isSelected ? hollow.accent : hollow.textSecondary),
-              const SizedBox(width: HollowSpacing.sm),
-              Text(
-                label,
-                style: HollowTypography.body.copyWith(
-                  color: isSelected ? hollow.accent : hollow.textSecondary,
-                  fontWeight: isSelected ? FontWeight.w600 : FontWeight.w400,
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
 }

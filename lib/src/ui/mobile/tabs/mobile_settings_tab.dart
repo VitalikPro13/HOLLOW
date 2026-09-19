@@ -764,10 +764,10 @@ class _ProfileTabState extends ConsumerState<_ProfileTab> {
     final isMobile = Platform.isAndroid || Platform.isIOS;
     final cropped = isMobile
         ? await showMobileImageCrop(
-            context: context, imageBytes: bytes, aspectRatio: 1.0, title: 'Crop Avatar',
+            context: context, imageBytes: bytes, aspectRatio: 1.0, title: 'Crop avatar',
           )
         : await showImageCropDialog(
-            context: context, imageBytes: bytes, aspectRatio: 1.0, title: 'Crop Avatar',
+            context: context, imageBytes: bytes, aspectRatio: 1.0, title: 'Crop avatar',
           );
     if (cropped == null || !mounted) return;
 
@@ -814,10 +814,10 @@ class _ProfileTabState extends ConsumerState<_ProfileTab> {
     final isMobile = Platform.isAndroid || Platform.isIOS;
     final cropped = isMobile
         ? await showMobileImageCrop(
-            context: context, imageBytes: bytes, aspectRatio: 2.5, title: 'Crop Banner',
+            context: context, imageBytes: bytes, aspectRatio: 2.5, title: 'Crop banner',
           )
         : await showImageCropDialog(
-            context: context, imageBytes: bytes, aspectRatio: 2.5, title: 'Crop Banner',
+            context: context, imageBytes: bytes, aspectRatio: 2.5, title: 'Crop banner',
           );
     if (cropped == null || !mounted) return;
 
@@ -2224,13 +2224,13 @@ class _BackgroundSection extends ConsumerWidget {
                         context: context,
                         imageBytes: bytes,
                         aspectRatio: bgAspect,
-                        title: 'Crop Background',
+                        title: 'Crop background',
                       )
                     : await showImageCropDialog(
                         context: context,
                         imageBytes: bytes,
                         aspectRatio: bgAspect,
-                        title: 'Crop Background',
+                        title: 'Crop background',
                       );
                 if (cropped == null) return;
                 ref.read(backgroundProvider.notifier).setImage(cropped);
@@ -3578,7 +3578,9 @@ class _SecurityTabState extends ConsumerState<_SecurityTab> {
     return showHollowDialog<String>(
       context: context,
       builder: (ctx) => HollowDialog(
-        title: confirm ? 'Set $label' : 'Enter $label',
+        title: confirm
+            ? 'Set ${isPin ? label : 'password'}'
+            : 'Enter ${isPin ? label : 'password'}',
         content: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
@@ -3785,7 +3787,7 @@ class _BackupExportButtonState extends ConsumerState<_BackupExportButton> {
 
   Future<void> _export() async {
     final passphrase =
-        await _askBackupPassphrase(context, 'Set Backup Passphrase');
+        await _askBackupPassphrase(context, 'Set backup passphrase');
     if (passphrase == null || !mounted) return;
 
     setState(() => _busy = true);
@@ -3894,10 +3896,8 @@ Future<String?> _askBackupPassphrase(
         actions: [
           HollowButton.ghost(
             onPressed: () => Navigator.of(ctx).pop(null),
-            compact: true,
             child: const Text('Cancel'),
           ),
-          const SizedBox(width: HollowSpacing.sm),
           HollowButton.filled(
             onPressed: () {
               final pass = controller.text.trim();
@@ -3909,7 +3909,6 @@ Future<String?> _askBackupPassphrase(
               }
               Navigator.of(ctx).pop(pass);
             },
-            compact: true,
             child: const Text('Encrypt'),
           ),
         ],
@@ -4296,102 +4295,68 @@ class _AboutTab extends ConsumerWidget {
   void _showNewsDialog(BuildContext context, NewsPost post, HollowTheme hollow) {
     showHollowDialog(
       context: context,
-      builder: (_) => Center(
-        child: Padding(
-          padding: const EdgeInsets.all(HollowSpacing.xl),
-          child: Material(
-            color: Colors.transparent,
-            child: Container(
-              constraints: const BoxConstraints(maxWidth: 400, maxHeight: 500),
-              padding: const EdgeInsets.all(HollowSpacing.lg),
-              decoration: BoxDecoration(
-                color: hollow.overlay,
-                borderRadius: BorderRadius.circular(hollow.radiusLg),
-                border: Border.all(color: hollow.border),
-              ),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    children: [
-                      Expanded(
-                        child: Text(post.title,
-                            style: HollowTypography.heading.copyWith(
-                              color: hollow.textPrimary, fontSize: 16)),
-                      ),
-                      HollowPressable(
-                        onTap: () => Navigator.pop(context),
-                        semanticLabel: 'Close',
-                        borderRadius: BorderRadius.circular(hollow.radiusMd),
-                        padding: const EdgeInsets.all(HollowSpacing.xs),
-                        child: Icon(LucideIcons.x, size: 18,
-                            color: hollow.textSecondary),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: HollowSpacing.xs),
-                  Text(post.date,
-                      style: HollowTypography.caption.copyWith(
-                        color: hollow.textSecondary, fontSize: 11)),
-                  const SizedBox(height: HollowSpacing.md),
-                  Flexible(
-                    child: SingleChildScrollView(
-                      child: MarkdownBody(
-                        data: post.body,
-                        shrinkWrap: true,
-                        selectable: true,
-                        onTapLink: (text, href, title) {
-                          if (href != null) {
-                            launchUrl(Uri.parse(href),
-                                mode: LaunchMode.externalApplication);
-                          }
-                        },
-                        styleSheet: MarkdownStyleSheet(
-                          p: HollowTypography.body.copyWith(
-                            color: hollow.textSecondary,
-                            fontSize: 13,
-                            height: 1.5,
-                          ),
-                          h2: HollowTypography.heading.copyWith(
-                            color: hollow.textPrimary,
-                            fontSize: 15,
-                          ),
-                          h3: HollowTypography.heading.copyWith(
-                            color: hollow.textPrimary,
-                            fontSize: 14,
-                          ),
-                          listBullet: HollowTypography.body.copyWith(
-                            color: hollow.textSecondary,
-                            fontSize: 13,
-                          ),
-                          strong: HollowTypography.body.copyWith(
-                            color: hollow.textPrimary,
-                            fontWeight: FontWeight.w700,
-                            fontSize: 13,
-                          ),
-                          a: HollowTypography.body.copyWith(
-                            color: hollow.accent,
-                            fontSize: 13,
-                            decoration: TextDecoration.underline,
-                            decorationColor: hollow.accent,
-                          ),
-                          blockSpacing: 8,
-                          horizontalRuleDecoration: BoxDecoration(
-                            border: Border(
-                              top: BorderSide(
-                                color: hollow.border.withValues(alpha: 0.5),
-                              ),
-                            ),
-                          ),
-                        ),
-                      ),
+      builder: (_) => HollowDialog(
+        title: post.title,
+        showClose: true,
+        maxWidth: 400,
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(post.date,
+                style: HollowTypography.caption
+                    .copyWith(color: hollow.textSecondary)),
+            const SizedBox(height: HollowSpacing.md),
+            MarkdownBody(
+              data: post.body,
+              shrinkWrap: true,
+              selectable: true,
+              onTapLink: (text, href, title) {
+                if (href != null) {
+                  launchUrl(Uri.parse(href),
+                      mode: LaunchMode.externalApplication);
+                }
+              },
+              styleSheet: MarkdownStyleSheet(
+                p: HollowTypography.body.copyWith(
+                  color: hollow.textSecondary,
+                  fontSize: 13,
+                  height: 1.5,
+                ),
+                h2: HollowTypography.heading.copyWith(
+                  color: hollow.textPrimary,
+                  fontSize: 15,
+                ),
+                h3: HollowTypography.heading.copyWith(
+                  color: hollow.textPrimary,
+                  fontSize: 14,
+                ),
+                listBullet: HollowTypography.body.copyWith(
+                  color: hollow.textSecondary,
+                  fontSize: 13,
+                ),
+                strong: HollowTypography.body.copyWith(
+                  color: hollow.textPrimary,
+                  fontWeight: FontWeight.w700,
+                  fontSize: 13,
+                ),
+                a: HollowTypography.body.copyWith(
+                  color: hollow.accent,
+                  fontSize: 13,
+                  decoration: TextDecoration.underline,
+                  decorationColor: hollow.accent,
+                ),
+                blockSpacing: 8,
+                horizontalRuleDecoration: BoxDecoration(
+                  border: Border(
+                    top: BorderSide(
+                      color: hollow.border.withValues(alpha: 0.5),
                     ),
                   ),
-                ],
+                ),
               ),
             ),
-          ),
+          ],
         ),
       ),
     );

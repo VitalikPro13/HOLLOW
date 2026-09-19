@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:hollow/src/ui/components/hollow_divider.dart';
 import 'package:hollow/src/ui/components/hollow_empty_state.dart';
+import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/overlay_anchor.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -412,67 +413,25 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
         .toList()
       ..sort((a, b) => b.timestamp.compareTo(a.timestamp));
 
-    showDialog(
+    showHollowDialog(
       context: context,
-      builder: (ctx) => Dialog(
-        backgroundColor: hollow.overlay,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(hollow.radiusLg),
-          side: BorderSide(color: hollow.border),
-        ),
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 420, maxHeight: 400),
-          child: Padding(
-            padding: const EdgeInsets.all(HollowSpacing.lg),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    Icon(LucideIcons.pin, size: 18, color: hollow.accent),
-                    const SizedBox(width: HollowSpacing.sm),
-                    Text(
-                      'Pinned Messages',
-                      style: HollowTypography.subheading.copyWith(
-                        color: hollow.textPrimary,
-                      ),
-                    ),
-                    const Spacer(),
-                    HollowPressable(
-                      semanticLabel: 'Close',
-                      onTap: () => Navigator.pop(ctx),
-                      padding: const EdgeInsets.all(4),
-                      child: Icon(LucideIcons.x, size: 16, color: hollow.textSecondary),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: HollowSpacing.md),
-                if (pinnedMessages.isEmpty)
-                  Padding(
-                    padding: const EdgeInsets.symmetric(vertical: HollowSpacing.xl),
-                    child: Center(
-                      child: Text(
-                        'Pinned messages not loaded in current view.',
-                        style: HollowTypography.body.copyWith(
-                          color: hollow.textSecondary,
-                        ),
-                      ),
-                    ),
-                  )
-                else
-                  Flexible(
-                    child: ListView.builder(
-                      shrinkWrap: true,
-                      itemCount: pinnedMessages.length,
-                      itemBuilder: (_, index) =>
-                          _buildPinnedItem(hollow, pinnedMessages, index),
-                    ),
-                  ),
-              ],
-            ),
-          ),
-        ),
+      builder: (ctx) => HollowDialog(
+        title: 'Pinned messages',
+        width: 420,
+        showClose: true,
+        content: pinnedMessages.isEmpty
+            ? const HollowEmptyState(
+                dense: true,
+                title: 'Pinned messages not loaded in current view.',
+              )
+            : Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  for (var i = 0; i < pinnedMessages.length; i++)
+                    _buildPinnedItem(hollow, pinnedMessages, i),
+                ],
+              ),
       ),
     );
   }

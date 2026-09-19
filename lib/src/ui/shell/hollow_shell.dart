@@ -552,87 +552,55 @@ class _HollowShellState extends ConsumerState<HollowShell>
       context: context,
       barrierDismissible: false,
       builder: (ctx) {
-        final hollow = HollowTheme.of(ctx);
-        final screenWidth = MediaQuery.sizeOf(ctx).width;
-        return Center(
-          child: Padding(
-            padding: const EdgeInsets.all(HollowSpacing.lg),
-          child: Material(
-            type: MaterialType.transparency,
-            child: Container(
-              width: (screenWidth - HollowSpacing.lg * 2).clamp(0.0, 420.0),
-              padding: const EdgeInsets.all(HollowSpacing.xl),
-              decoration: BoxDecoration(
-                color: hollow.overlay,
-                borderRadius: BorderRadius.circular(hollow.radiusLg),
-                border: Border.all(color: hollow.error.withValues(alpha: 0.3)),
+        return HollowDialog(
+          title: 'Identity locked',
+          width: 420,
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              HollowDialogText(
+                errorMessage ?? 'This identity was bound to another device and cannot be used here. Enter your 24-word recovery phrase to unlock your identity on this device.',
               ),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    children: [
-                      Icon(LucideIcons.shieldAlert, size: 20, color: hollow.error),
-                      const SizedBox(width: HollowSpacing.sm),
-                      Text('Identity Locked', style: HollowTypography.heading.copyWith(
-                        color: hollow.textPrimary, fontSize: 16,
-                      )),
-                    ],
-                  ),
-                  const SizedBox(height: HollowSpacing.md),
-                  Text(
-                    errorMessage ?? 'This identity was bound to another device and cannot be used here. Enter your 24-word recovery phrase to unlock your identity on this device.',
-                    style: HollowTypography.body.copyWith(
-                      color: hollow.textSecondary, fontSize: 13,
-                    ),
-                  ),
-                  const SizedBox(height: HollowSpacing.lg),
-                  HollowTextField(
-                    controller: controller,
-                    autofocus: true,
-                    hintText: 'Enter 24-word recovery phrase',
-                  ),
-                  const SizedBox(height: HollowSpacing.lg),
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.end,
-                    children: [
-                      HollowButton.filled(
-                        onPressed: () async {
-                          final phrase = controller.text.trim();
-                          final words = phrase.split(RegExp(r'\s+'));
-                          if (words.length != 24) {
-                            // The lock cover is up while this runs, and it
-                            // silences every other toast.
-                            HollowToast.show(ctx, 'Must be exactly 24 words',
-                                type: HollowToastType.error,
-                                allowWhileLocked: true);
-                            return;
-                          }
-                          try {
-                            await identity_api.restoreIdentityFromMnemonic(phrase: phrase);
-                            await identity_api.unlockIdentity();
-                            // Reset to plaintext, so the App Lock marker and
-                            // biometric secret are stale.
-                            await AppLockService().clearAll();
-                            if (ctx.mounted) Navigator.of(ctx).pop(true);
-                          } catch (e) {
-                            if (ctx.mounted) {
-                              HollowToast.show(ctx, 'Recovery failed: $e',
-                                  type: HollowToastType.error,
-                                  allowWhileLocked: true);
-                            }
-                          }
-                        },
-                        child: const Text('Recover Identity'),
-                      ),
-                    ],
-                  ),
-                ],
+              const SizedBox(height: HollowSpacing.lg),
+              HollowTextField(
+                controller: controller,
+                autofocus: true,
+                hintText: 'Enter 24-word recovery phrase',
               ),
+            ],
+          ),
+          actions: [
+            HollowButton.filled(
+              onPressed: () async {
+                final phrase = controller.text.trim();
+                final words = phrase.split(RegExp(r'\s+'));
+                if (words.length != 24) {
+                  // The lock cover is up while this runs, and it
+                  // silences every other toast.
+                  HollowToast.show(ctx, 'Must be exactly 24 words',
+                      type: HollowToastType.error,
+                      allowWhileLocked: true);
+                  return;
+                }
+                try {
+                  await identity_api.restoreIdentityFromMnemonic(phrase: phrase);
+                  await identity_api.unlockIdentity();
+                  // Reset to plaintext, so the App Lock marker and
+                  // biometric secret are stale.
+                  await AppLockService().clearAll();
+                  if (ctx.mounted) Navigator.of(ctx).pop(true);
+                } catch (e) {
+                  if (ctx.mounted) {
+                    HollowToast.show(ctx, 'Recovery failed: $e',
+                        type: HollowToastType.error,
+                        allowWhileLocked: true);
+                  }
+                }
+              },
+              child: const Text('Recover identity'),
             ),
-          ),
-          ),
+          ],
         );
       },
     );
@@ -681,103 +649,61 @@ class _HollowShellState extends ConsumerState<HollowShell>
         barrierDismissible: false,
         builder: (ctx) {
           final hollow = HollowTheme.of(ctx);
-          final screenWidth = MediaQuery.sizeOf(ctx).width;
-          return Center(
-            child: Padding(
-              padding: const EdgeInsets.all(HollowSpacing.lg),
-              child: Material(
-                type: MaterialType.transparency,
-                child: Container(
-                  width: (screenWidth - HollowSpacing.lg * 2).clamp(0.0, 380.0),
-                  padding: const EdgeInsets.all(HollowSpacing.xl),
-                  decoration: BoxDecoration(
-                    color: hollow.overlay,
-                    borderRadius: BorderRadius.circular(hollow.radiusLg),
-                    border: Border.all(color: hollow.accent.withValues(alpha: 0.15)),
+          return HollowDialog(
+            title: 'Unlock Hollow',
+            width: 420,
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                HollowDialogText(
+                  'Enter your app $secretLabel to unlock your identity.',
+                ),
+                if (attempts > 0) ...[
+                  const SizedBox(height: HollowSpacing.xs),
+                  Text(
+                    'Wrong ${isPin ? 'PIN' : 'password'}. Try again.',
+                    style: HollowTypography.body.copyWith(color: hollow.error),
                   ),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Row(
-                        children: [
-                          Icon(LucideIcons.lock, size: 20, color: hollow.accent),
-                          const SizedBox(width: HollowSpacing.sm),
-                          Text('Unlock Hollow', style: HollowTypography.heading.copyWith(
-                            color: hollow.textPrimary, fontSize: 16,
-                          )),
-                        ],
-                      ),
-                      const SizedBox(height: HollowSpacing.sm),
-                      Text(
-                        'Enter your app $secretLabel to unlock your identity.',
-                        style: HollowTypography.body.copyWith(
-                          color: hollow.textSecondary, fontSize: 12,
-                        ),
-                      ),
-                      if (attempts > 0) ...[
-                        const SizedBox(height: HollowSpacing.xs),
-                        Text(
-                          'Wrong ${isPin ? 'PIN' : 'password'}. Try again.',
-                          style: HollowTypography.body.copyWith(
-                            color: hollow.error, fontSize: 12,
-                          ),
-                        ),
-                      ],
-                      const SizedBox(height: HollowSpacing.lg),
-                      HollowTextField(
-                        controller: controller,
-                        obscureText: true,
-                        autofocus: true,
-                        hintText: isPin ? 'PIN' : 'Password',
-                        keyboardType: isPin ? TextInputType.number : null,
-                        onSubmitted: (val) {
-                          if (val.isNotEmpty) Navigator.of(ctx).pop(val);
-                        },
-                      ),
-                      const SizedBox(height: HollowSpacing.lg),
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                        children: [
-                          HollowButton.ghost(
-                            onPressed: () => Navigator.of(ctx).pop('__recover__'),
-                            child: Text('Recover with phrase',
-                              style: TextStyle(fontSize: 12, color: hollow.textSecondary),
-                            ),
-                          ),
-                          Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              if (hasBiometric) ...[
-                                HollowPressable(
-                                  semanticLabel: 'Unlock with biometrics',
-                                  onTap: () =>
-                                      Navigator.of(ctx).pop('__biometric__'),
-                                  borderRadius:
-                                      BorderRadius.circular(hollow.radiusMd),
-                                  padding:
-                                      const EdgeInsets.all(HollowSpacing.sm),
-                                  child: Icon(LucideIcons.fingerprint,
-                                      size: 18, color: hollow.accent),
-                                ),
-                                const SizedBox(width: HollowSpacing.xs),
-                              ],
-                              HollowButton.filled(
-                                onPressed: () {
-                                  final pass = controller.text.trim();
-                                  if (pass.isNotEmpty) Navigator.of(ctx).pop(pass);
-                                },
-                                child: const Text('Unlock'),
-                              ),
-                            ],
-                          ),
-                        ],
-                      ),
-                    ],
+                ],
+                const SizedBox(height: HollowSpacing.lg),
+                HollowTextField(
+                  controller: controller,
+                  obscureText: true,
+                  autofocus: true,
+                  hintText: isPin ? 'PIN' : 'Password',
+                  keyboardType: isPin ? TextInputType.number : null,
+                  onSubmitted: (val) {
+                    if (val.isNotEmpty) Navigator.of(ctx).pop(val);
+                  },
+                ),
+              ],
+            ),
+            leadingActions: [
+              HollowButton.ghost(
+                onPressed: () => Navigator.of(ctx).pop('__recover__'),
+                child: const Text('Recover with phrase'),
+              ),
+            ],
+            actions: [
+              if (hasBiometric)
+                HollowTooltip(
+                  message: 'Unlock with biometrics',
+                  child: HollowButton.ghost(
+                    compact: true,
+                    semanticLabel: 'Unlock with biometrics',
+                    onPressed: () => Navigator.of(ctx).pop('__biometric__'),
+                    child: const Icon(LucideIcons.fingerprint, size: 16),
                   ),
                 ),
+              HollowButton.filled(
+                onPressed: () {
+                  final pass = controller.text.trim();
+                  if (pass.isNotEmpty) Navigator.of(ctx).pop(pass);
+                },
+                child: const Text('Unlock'),
               ),
-            ),
+            ],
           );
         },
       );
@@ -830,77 +756,50 @@ class _HollowShellState extends ConsumerState<HollowShell>
       context: context,
       barrierDismissible: false,
       builder: (ctx) {
-        final hollow = HollowTheme.of(ctx);
-        final screenWidth = MediaQuery.sizeOf(ctx).width;
-        return Center(
-          child: Padding(
-            padding: const EdgeInsets.all(HollowSpacing.lg),
-          child: Material(
-            type: MaterialType.transparency,
-            child: Container(
-              width: (screenWidth - HollowSpacing.lg * 2).clamp(0.0, 420.0),
-              padding: const EdgeInsets.all(HollowSpacing.xl),
-              decoration: BoxDecoration(
-                color: hollow.overlay,
-                borderRadius: BorderRadius.circular(hollow.radiusLg),
-                border: Border.all(color: hollow.accent.withValues(alpha: 0.15)),
+        return HollowDialog(
+          title: 'Recover identity',
+          width: 420,
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              const HollowDialogText(
+                'Enter your 24-word recovery phrase to reset your identity. This will remove the existing password.',
               ),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text('Recover Identity', style: HollowTypography.heading.copyWith(
-                    color: hollow.textPrimary, fontSize: 16,
-                  )),
-                  const SizedBox(height: HollowSpacing.sm),
-                  Text(
-                    'Enter your 24-word recovery phrase to reset your identity. This will remove the existing password.',
-                    style: HollowTypography.body.copyWith(
-                      color: hollow.textSecondary, fontSize: 12,
-                    ),
-                  ),
-                  const SizedBox(height: HollowSpacing.lg),
-                  HollowTextField(
-                    controller: controller,
-                    autofocus: true,
-                    hintText: 'Enter 24-word recovery phrase',
-                  ),
-                  const SizedBox(height: HollowSpacing.lg),
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.end,
-                    children: [
-                      HollowButton.ghost(
-                        onPressed: () => Navigator.of(ctx).pop(false),
-                        child: const Text('Cancel'),
-                      ),
-                      const SizedBox(width: HollowSpacing.sm),
-                      HollowButton.filled(
-                        onPressed: () async {
-                          final phrase = controller.text.trim();
-                          final words = phrase.split(RegExp(r'\s+'));
-                          if (words.length != 24) {
-                            HollowToast.show(ctx, 'Must be exactly 24 words', type: HollowToastType.error);
-                            return;
-                          }
-                          try {
-                            await identity_api.restoreIdentityFromMnemonic(phrase: phrase);
-                            await identity_api.unlockIdentity();
-                            if (ctx.mounted) Navigator.of(ctx).pop(true);
-                          } catch (e) {
-                            if (ctx.mounted) {
-                              HollowToast.show(ctx, 'Recovery failed: $e', type: HollowToastType.error);
-                            }
-                          }
-                        },
-                        child: const Text('Recover'),
-                      ),
-                    ],
-                  ),
-                ],
+              const SizedBox(height: HollowSpacing.lg),
+              HollowTextField(
+                controller: controller,
+                autofocus: true,
+                hintText: 'Enter 24-word recovery phrase',
               ),
+            ],
+          ),
+          actions: [
+            HollowButton.ghost(
+              onPressed: () => Navigator.of(ctx).pop(false),
+              child: const Text('Cancel'),
             ),
-          ),
-          ),
+            HollowButton.filled(
+              onPressed: () async {
+                final phrase = controller.text.trim();
+                final words = phrase.split(RegExp(r'\s+'));
+                if (words.length != 24) {
+                  HollowToast.show(ctx, 'Must be exactly 24 words', type: HollowToastType.error);
+                  return;
+                }
+                try {
+                  await identity_api.restoreIdentityFromMnemonic(phrase: phrase);
+                  await identity_api.unlockIdentity();
+                  if (ctx.mounted) Navigator.of(ctx).pop(true);
+                } catch (e) {
+                  if (ctx.mounted) {
+                    HollowToast.show(ctx, 'Recovery failed: $e', type: HollowToastType.error);
+                  }
+                }
+              },
+              child: const Text('Recover'),
+            ),
+          ],
         );
       },
     );
@@ -2844,61 +2743,21 @@ class _RightChannelChatState extends State<_RightChannelChat> {
 
 /// Shows server settings as a dialog popup (used during split view).
 void _showServerSettingsDialog(BuildContext context, ServerInfo server) {
-  showGeneralDialog(
+  showHollowDialog(
     context: context,
-    barrierDismissible: true,
-    barrierLabel: 'Server Settings',
-    barrierColor: Colors.black.withValues(alpha: 0.5),
-    transitionDuration: HollowDurations.normal,
-    pageBuilder: (context, anim1, anim2) {
-      return Center(
-        // The zoom shrinks the logical viewport, so this panel can be TALLER
-        // than the screen it opens on. The clamp keeps it on-screen and the
-        // padding keeps it reading as a dialog rather than a takeover.
-        child: Padding(
-          padding: const EdgeInsets.all(HollowSpacing.lg),
-          child: Material(
-            color: Colors.transparent,
-            child: Container(
-              width: 800,
-              height: 600,
-              clipBehavior: Clip.antiAlias,
-              decoration: BoxDecoration(
-                color: HollowTheme.of(context).overlay,
-                borderRadius: BorderRadius.circular(
-                  HollowTheme.of(context).radiusLg,
-                ),
-                border: Border.all(
-                  color: HollowTheme.of(context).border,
-                ),
-                boxShadow: [
-                  BoxShadow(
-                    color: Colors.black.withValues(alpha: 0.3),
-                    blurRadius: 24,
-                    offset: const Offset(0, 8),
-                  ),
-                ],
-              ),
-              child: ServerSettingsPanel(
-                server: server,
-                onClose: () => Navigator.of(context).pop(),
-              ),
-            ),
-          ),
+    // The zoom shrinks the logical viewport, so the surface's screen clamp
+    // keeps this fixed-size panel on-screen.
+    builder: (context) => HollowDialogSurface(
+      width: 800,
+      padded: false,
+      child: SizedBox(
+        height: 600,
+        child: ServerSettingsPanel(
+          server: server,
+          onClose: () => Navigator.of(context).pop(),
         ),
-      );
-    },
-    transitionBuilder: (context, anim1, anim2, child) {
-      return FadeTransition(
-        opacity: CurvedAnimation(parent: anim1, curve: Curves.easeOut),
-        child: ScaleTransition(
-          scale: Tween<double>(begin: 0.95, end: 1.0).animate(
-            CurvedAnimation(parent: anim1, curve: Curves.easeOut),
-          ),
-          child: child,
-        ),
-      );
-    },
+      ),
+    ),
   );
 }
 

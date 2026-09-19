@@ -1125,6 +1125,7 @@ class _EmoteNameDialogState extends State<_EmoteNameDialog> {
     final hollow = HollowTheme.of(context);
     return HollowDialog(
       title: 'Name this emote',
+      width: 420,
       content: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,

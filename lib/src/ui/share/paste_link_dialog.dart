@@ -94,7 +94,8 @@ class _PasteLinkDialogState extends ConsumerState<PasteLinkDialog> {
     }
 
     return HollowDialog(
-      title: 'Open Share Link',
+      title: 'Open share link',
+      width: 420,
       content: _buildContent(hollow),
       actions: _buildActions(),
     );

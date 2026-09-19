@@ -92,29 +92,14 @@ List<AlbumItem> channelAlbumItems(List<ChannelChatMessage> messages,
 /// Asks before a delete from the album bubble takes every item with it. The
 /// viewer deletes one item at a time.
 Future<bool> confirmDeleteAlbum(BuildContext context, int count) async {
-  final hollow = HollowTheme.of(context);
-  final result = await showHollowDialog<bool>(
+  return showHollowConfirm(
     context: context,
-    builder: (ctx) => HollowDialog(
-      title: 'Delete album',
-      content: Text(
-        'This deletes all $count items for everyone. To delete one item, open '
-        'it and delete it from the viewer.',
-        style: HollowTypography.body.copyWith(color: hollow.textSecondary),
-      ),
-      actions: [
-        HollowButton.ghost(
-          child: const Text('Cancel'),
-          onPressed: () => Navigator.of(ctx).pop(false),
-        ),
-        HollowButton.danger(
-          child: Text('Delete all $count'),
-          onPressed: () => Navigator.of(ctx).pop(true),
-        ),
-      ],
-    ),
+    title: 'Delete album',
+    message: 'This deletes all $count items for everyone. To delete one item, '
+        'open it and delete it from the viewer.',
+    confirmLabel: 'Delete all $count',
+    destructive: true,
   );
-  return result ?? false;
 }
 
 /// Most cells a mosaic shows; the last one carries "+N" for the rest.

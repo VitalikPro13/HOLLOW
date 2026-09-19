@@ -190,14 +190,11 @@ class _CategoryBulkAccessDialogState extends State<_CategoryBulkAccessDialog> {
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
+          HollowDialogText(
             'Applies to ${widget.channelCount} '
             'channel${widget.channelCount == 1 ? '' : 's'} in this '
             'category. Each channel keeps its own setting afterwards. '
             'Nothing stays linked to the category.',
-            style: HollowTypography.bodySmall.copyWith(
-              color: hollow.textSecondary,
-            ),
           ),
           const SizedBox(height: HollowSpacing.lg),
           _section(

@@ -159,7 +159,7 @@ class _RingtoneClipEditorDialogState
     final clipDuration = (_end - _start).clamp(0.1, _kMaxClip);
 
     return HollowDialog(
-      title: 'Trim Ringtone',
+      title: 'Trim ringtone',
       content: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -168,7 +168,6 @@ class _RingtoneClipEditorDialogState
             '$fileName  ${_loaded ? _formatTime(_totalDuration) : ''}',
             style: HollowTypography.caption.copyWith(
               color: hollow.textSecondary,
-              fontSize: 11,
             ),
             overflow: TextOverflow.ellipsis,
           ),
@@ -190,7 +189,6 @@ class _RingtoneClipEditorDialogState
               'Drag the highlighted region (max ${_kMaxClip.toInt()}s)',
               style: HollowTypography.caption.copyWith(
                 color: hollow.textSecondary,
-                fontSize: 11,
               ),
             ),
             const SizedBox(height: HollowSpacing.sm),
@@ -223,17 +221,15 @@ class _RingtoneClipEditorDialogState
                   children: [
                     Text(
                       '${clipDuration.toStringAsFixed(1)}s',
-                      style: HollowTypography.body.copyWith(
-                        color: hollow.accent,
-                        fontSize: 13,
-                        fontWeight: FontWeight.w700,
+                      style: HollowTypography.label.copyWith(
+                        color: hollow.textPrimary,
+                        fontFeatures: const [FontFeature.tabularFigures()],
                       ),
                     ),
                     Text(
                       'clip',
                       style: HollowTypography.caption.copyWith(
                         color: hollow.textSecondary,
-                        fontSize: 10,
                       ),
                     ),
                   ],
@@ -256,7 +252,7 @@ class _RingtoneClipEditorDialogState
               children: [
                 Text('Move window',
                     style: HollowTypography.caption.copyWith(
-                      color: hollow.textSecondary, fontSize: 11,
+                      color: hollow.textSecondary,
                     )),
                 const SizedBox(width: HollowSpacing.sm),
                 _StepButton(
@@ -301,43 +297,33 @@ class _RingtoneClipEditorDialogState
           ],
         ],
       ),
-      actions: [
+      leadingActions: [
         if (_loaded)
-          // One full-width row, because a bare Wrap right-aligns everything and
-          // Preview belongs on the left.
-          SizedBox(
-            width: double.infinity,
-            child: Row(
-              children: [
-                HollowButton.ghost(
-                  onPressed: _isPlaying ? _stopPreview : _startPreview,
-                  compact: true,
-                  icon: Icon(
-                    _isPlaying ? LucideIcons.square : LucideIcons.play,
-                    size: 14,
-                  ),
-                  child: Text(_isPlaying ? 'Stop' : 'Preview'),
-                ),
-                const Spacer(),
-                HollowButton.ghost(
-                  onPressed: () => Navigator.pop(context),
-                  compact: true,
-                  child: const Text('Cancel'),
-                ),
-                const SizedBox(width: HollowSpacing.sm),
-                HollowButton.filled(
-                  onPressed: () {
-                    ref.read(ringtoneStartProvider.notifier).setStart(_start);
-                    ref.read(ringtoneEndProvider.notifier).setEnd(_end);
-                    _stopPreview();
-                    Navigator.pop(context);
-                  },
-                  compact: true,
-                  child: const Text('Save'),
-                ),
-              ],
+          HollowButton.ghost(
+            onPressed: _isPlaying ? _stopPreview : _startPreview,
+            icon: Icon(
+              _isPlaying ? LucideIcons.square : LucideIcons.play,
+              size: 14,
             ),
+            child: Text(_isPlaying ? 'Stop' : 'Preview'),
           ),
+      ],
+      actions: [
+        if (_loaded) ...[
+          HollowButton.ghost(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+          HollowButton.filled(
+            onPressed: () {
+              ref.read(ringtoneStartProvider.notifier).setStart(_start);
+              ref.read(ringtoneEndProvider.notifier).setEnd(_end);
+              _stopPreview();
+              Navigator.pop(context);
+            },
+            child: const Text('Save'),
+          ),
+        ],
       ],
     );
   }
@@ -366,7 +352,7 @@ class _NudgeField extends StatelessWidget {
       children: [
         Text(label,
             style: HollowTypography.caption.copyWith(
-              color: hollow.textSecondary, fontSize: 10,
+              color: hollow.textSecondary,
             )),
         const SizedBox(height: 2),
         Row(
@@ -382,9 +368,8 @@ class _NudgeField extends StatelessWidget {
                 padding: const EdgeInsets.symmetric(vertical: 6),
                 child: Text(
                   value,
-                  style: HollowTypography.body.copyWith(
+                  style: HollowTypography.bodySmall.copyWith(
                     color: hollow.textPrimary,
-                    fontSize: 12,
                     fontFeatures: [const FontFeature.tabularFigures()],
                   ),
                 ),

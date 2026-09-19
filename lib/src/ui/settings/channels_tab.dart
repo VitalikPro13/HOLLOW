@@ -18,6 +18,7 @@ import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/hollow_tooltip.dart';
 import 'package:hollow/src/ui/settings/access_label_picker.dart';
+import 'package:hollow/src/ui/shell/server_context_menus.dart' show promptForName;
 import 'package:hollow/src/ui/settings/category_bulk_access_dialog.dart';
 import 'package:hollow/src/ui/settings/channel_access_pickers.dart';
 import 'package:hollow/src/ui/settings/channel_grants_dialog.dart';
@@ -391,33 +392,15 @@ class _ChannelsTabState extends ConsumerState<ChannelsTab> {
 
   /// Picking a plain tier on a label-gated channel widens access, so confirm
   /// before silently clearing the gate.
-  Future<bool> _confirmClearLabelGate(String channelName, String tier) async {
-    final confirmed = await showHollowDialog<bool>(
-      context: context,
-      builder: (ctx) => HollowDialog(
+  Future<bool> _confirmClearLabelGate(String channelName, String tier) =>
+      showHollowConfirm(
+        context: context,
         title: 'Remove label requirement?',
-        content: Text(
-          '#$channelName will use tier-based access '
-          '(${switch (tier) { 'moderator' => 'Mod+', 'admin' => 'Admin+', _ => 'Everyone' }}) '
-          'instead of its access labels.',
-          style: HollowTypography.body.copyWith(
-            color: HollowTheme.of(ctx).textSecondary,
-          ),
-        ),
-        actions: [
-          HollowButton.ghost(
-            onPressed: () => Navigator.of(ctx).pop(false),
-            child: const Text('Cancel'),
-          ),
-          HollowButton.filled(
-            onPressed: () => Navigator.of(ctx).pop(true),
-            child: const Text('Remove'),
-          ),
-        ],
-      ),
-    );
-    return confirmed ?? false;
-  }
+        message: '#$channelName will use tier-based access '
+            '(${switch (tier) { 'moderator' => 'Mod+', 'admin' => 'Admin+', _ => 'Everyone' }}) '
+            'instead of its access labels.',
+        confirmLabel: 'Remove',
+      );
 
   /// Awaited rename with an error toast: fire-and-forget rejected unhandled on
   /// a dead node, with no user feedback at all.
@@ -437,92 +420,53 @@ class _ChannelsTabState extends ConsumerState<ChannelsTab> {
   }
 
   void _renameChannel(String channelId, String currentName) {
-    final controller = TextEditingController(text: currentName);
-    showHollowDialog(
+    promptForName(
       context: context,
-      builder: (ctx) => HollowDialog(
-        title: 'Rename channel',
-        content: HollowTextField(
-          controller: controller,
-          hintText: 'Channel name',
-          autofocus: true,
-          onSubmitted: (_) {
-            final newName = controller.text.trim();
-            if (newName.isNotEmpty && newName != currentName) {
-              _commitRename(channelId, newName);
-            }
-            Navigator.pop(ctx);
-          },
-        ),
-        actions: [
-          HollowButton.ghost(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('Cancel'),
-          ),
-          HollowButton.filled(
-            onPressed: () {
-              final newName = controller.text.trim();
-              if (newName.isNotEmpty && newName != currentName) {
-                _commitRename(channelId, newName);
-              }
-              Navigator.pop(ctx);
-            },
-            child: const Text('Rename'),
-          ),
-        ],
-      ),
+      title: 'Rename channel',
+      hintText: 'Channel name',
+      initial: currentName,
+      confirmLabel: 'Rename',
+      onSubmit: (newName) {
+        if (newName != currentName) _commitRename(channelId, newName);
+      },
     );
   }
 
-  void _deleteChannel(String channelId, String name) {
-    showHollowDialog(
+  Future<void> _deleteChannel(String channelId, String name) async {
+    final confirmed = await showHollowConfirm(
       context: context,
-      builder: (ctx) => HollowDialog(
-        title: 'Delete channel',
-        content: Text(
-          'Are you sure you want to delete #$name? This cannot be undone.',
-          style: HollowTypography.body,
-        ),
-        actions: [
-          HollowButton.ghost(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('Cancel'),
-          ),
-          HollowButton.danger(
-            onPressed: () async {
-              Navigator.pop(ctx);
-              setState(() {
-                _layout.removeWhere(
-                    (i) => i is ChannelItem && i.channelId == channelId);
-              });
-              try {
-                await crdt_api.removeChannel(
-                  serverId: widget.serverId,
-                  channelId: channelId,
-                );
-              } catch (_) {
-                if (mounted) {
-                  // Re-sync the optimistically-pruned layout from the DB.
-                  setState(() => _loaded = false);
-                  _loadLayout();
-                  HollowToast.show(context, 'Could not delete channel',
-                      type: HollowToastType.error);
-                }
-                return;
-              }
-              if (mounted) {
-                HollowToast.show(
-                  context,
-                  'Channel #$name deleted',
-                  type: HollowToastType.info,
-                );
-              }
-            },
-            child: const Text('Delete'),
-          ),
-        ],
-      ),
+      title: 'Delete channel',
+      message: 'Are you sure you want to delete #$name? This cannot be undone.',
+      confirmLabel: 'Delete',
+      destructive: true,
     );
+    if (!confirmed || !mounted) return;
+    setState(() {
+      _layout.removeWhere(
+          (i) => i is ChannelItem && i.channelId == channelId);
+    });
+    try {
+      await crdt_api.removeChannel(
+        serverId: widget.serverId,
+        channelId: channelId,
+      );
+    } catch (_) {
+      if (mounted) {
+        // Re-sync the optimistically-pruned layout from the DB.
+        setState(() => _loaded = false);
+        _loadLayout();
+        HollowToast.show(context, 'Could not delete channel',
+            type: HollowToastType.error);
+      }
+      return;
+    }
+    if (mounted) {
+      HollowToast.show(
+        context,
+        'Channel #$name deleted',
+        type: HollowToastType.info,
+      );
+    }
   }
 
   @override

@@ -1,6 +1,6 @@
 # Hollow design language and the grand redesign
 
-**Status:** IN PROGRESS, sessions 1 to 6 done 2026-09-19 (decisions applied, sweeps 3c to 7 done). Direction agreed 2026-09-14, research the same day.
+**Status:** IN PROGRESS, sessions 1 to 7 done 2026-09-19 (decisions applied, sweeps 3c to 8 done). Direction agreed 2026-09-14, research the same day.
 
 **Read this section first in a new session.** It is the handoff: what exists, what it changed, and the next thing to pick up. Everything below section 0 is the original plan, kept for its research digest and its screen-by-screen program; where it and this section disagree, this section is right.
 
@@ -88,7 +88,20 @@ New tokens: `HollowTypography.micro` (10/500, absorbs 155 orphaned sites) and `m
   - **Open for Vitalik:** the toggle is 36 x 20 on a phone too, where iOS's own switch is 51 x 31. One size keeps parity with desktop and the hit area is 48 either way; a touch variant is one constant if he wants it bigger.
   - **Found and fixed the same session:** mobile Settings > Security never left its spinner in debug builds (the simulator): `_loadStatus` ran `ref.invalidate` synchronously from `initState`, the same assert sweep 3c fixed on desktop, and it threw before the `try`, so `_loading` never cleared. The invalidate now runs past the first await. Release builds skip the assert, so users never saw it. "Appear invisible" sat under "Layout" on mobile and inside the desktop Layout card; it is its own "Presence" section on both now.
 
-Guard baselines moved: material-colors 223 to 207, color-literal 137 to 136, raw-slider and raw-switch new at 0 (sweep 7); raw-spinner 127 to 0, raw-bottom-sheet 29 to 0, radius 149 to 123, material-colors 234 to 223, edge-insets 233 to 230 (sweep 6); font-size 703 to 689 and sized-box-gap 178 to 176 (sweep 5), local-label-class **36 to 28 to 0**, upper-case-label 42 to 0, letter-spacing 57 to 0, raw-divider 51 to 41 to 0, font-size 744 to 703, gradient 23 to 21, font-size 824 to 809 to 791 to 785, edge-insets 266 to 257 to 248 to 236, radius 177 to 175 to 168, letter-spacing 66 to 64 to 63, sized-box-gap 202 to 192 to 182.
+- **Sweep 8, the dialog pass (session 7, 2026-09-19).** One frame, one action rule, no blur. Rules in `HOLLOW_DESIGN_LANGUAGE.md` 4.4 and the skill.
+  - Component (`components/hollow_dialog.dart`): `HollowDialogSurface` is the only frame (overlay, hairline, 12 px shadow, `radiusLg` desktop / `radiusXl` + full width on a phone, width policy `width` / `maxWidth` / `maxHeight`, `padded: false` for edge-to-edge layouts). `HollowDialog` sits on it and gained `showClose`, `leadingActions`, `width`. New: `HollowDialogCloseButton`, `HollowDialogText`, `showHollowConfirm()`. Entrance from 0.96, exit on the motion token. Six widget tests, a Dialog row on the design sheet.
+  - **Backdrop blur removed (Vitalik: blur reads as AI slop).** A flat theme token `scrim` (65% black dark, 32% light) behind dialogs AND sheets; 55% was tried first and left the chat too legible behind the dialog. `reduceTransparencyFlag` is gone (Reduce Transparency still governs the wallpaper). Blur survives only where it does a job: NSFW images, the game card's cover art.
+  - Five agents by folder converted ~20 hand-drawn frames, 7 raw `showDialog` / `showGeneralDialog` / `AlertDialog` / `SimpleDialog` sites and audited ~100 `HollowDialog`s: tinted borders and title icons gone, titles sentence case, primary last, danger for delete/leave/remove/kick/ban/wipe, lone Done/Close buttons became the X, ~40 hand-built yes/no pairs became `showHollowConfirm` (private `_confirm` helpers deleted). Profile and game card became ONE window split into panes (were detached cards). Mobile matches desktop wording.
+  - **Casing trap:** dialog TITLES are sentence case, but `HollowSectionHeader` and card titles inside a dialog stay Title Case (Vitalik's 3c verdict); two agents lowercased those and were reverted.
+  - Guard: `raw-dialog` at **0** (one `design-ignore`: the archive sender filter, an anchored popover inside a SelectionArea) and a second test, **no dialog draws its own frame** (a `showHollowDialog` builder that opens with Center / Material / Container / DecoratedBox), which catches 15 of the old frames on HEAD.
+  - Scenarios `fleet/design_sweep8_fixes.json` (desktop, a throwaway peer that creates its own server and label) and `fleet/design_sweep8_mobile.json` (mini, 5 shots, three throwaway servers). The first desktop pass used `ui_probe.ps1` on a mirror of the real identity; those scenarios were deleted.
+  - **Found, unverified on a device:** on the iOS Simulator a row in mobile Chats whose server sheet has opened once never fires `onLongPress` again (logged: the callback does not run; a different row still works; dismissing by barrier or by an action makes no difference). Pre-existing on HEAD. A widget test of `HollowPressable` + `showHollowSheet` with the same A, B, A, A sequence PASSES, so the primitives are fine; the cause is either in the mobile shell or the live binding's synthetic `tester.longPress`. Check on a phone before digging further.
+  - **Follow-ups the same session (Vitalik's review):** Add a server was loose (a hard-coded 180 px divider taller than both columns, a second 8 px on top of the section header's own gap, field-to-button 12 instead of 8): `IntrinsicHeight` + stretch, gaps on the ramp. The channel panel's default "Text channels" sat in its own band between two hairlines: now it reads as a category header (no divider, `md` above, text on the `#` column). Label delete asks first ("Delete "X"?", danger), desktop and mobile. The welcome screen shows the Hollow logo instead of a shield in an accent box. "Add a server" kept as the title.
+  - **Casualties caught before they broke anything:** `fleet.ps1` onboarding waited for "Your Recovery Phrase" (now sentence case; fixed, onboarding re-verified); `fleet_destroy.ps1` and `fleet_relay_switch.ps1` tapped a "Done" that became the X (now `dialog > semantics:Close`). Any copy change in a sweep needs a grep of `scripts/` and `integration_test/` for the old string.
+  - **Probe identity (Vitalik):** the first sweep 8 shots ran `ui_probe.ps1`'s default, a mirror of his REAL data dir. Never again: verification is `fleet.ps1` on throwaway fixture peers (`feedback_probe_throwaway_identities_only`); the follow-up shots used `fleet/design_sweep8_fixes.json` and a live un-onboarded peer for the welcome screen.
+  - **Left for later / open for Vitalik:** the welcome screen's option rows are still icon-in-a-tinted-box; the game card's white-on-scrim X over art (a `HollowDialogCloseButton(onMedia:)` would replace it); the imported-pack dialog can show 3+ outline wear buttons; the storage dashboard's sections are cards inside a dialog; `promptForName` could take `maxLength` (three agents asked); the archive filter wants a real anchored popover primitive; the friends manager tab strip sits on `surface` inside an overlay.
+
+Guard baselines moved: font-size 689 to 597, material-colors 207 to 190, color-literal 136 to 133, radius 123 to 117, edge-insets 230 to 225, sized-box-gap 176 to 171, big-shadow 28 to 15, raw-material 55 to 26, raw-dialog new at 0 (sweep 8); material-colors 223 to 207, color-literal 137 to 136, raw-slider and raw-switch new at 0 (sweep 7); raw-spinner 127 to 0, raw-bottom-sheet 29 to 0, radius 149 to 123, material-colors 234 to 223, edge-insets 233 to 230 (sweep 6); font-size 703 to 689 and sized-box-gap 178 to 176 (sweep 5), local-label-class **36 to 28 to 0**, upper-case-label 42 to 0, letter-spacing 57 to 0, raw-divider 51 to 41 to 0, font-size 744 to 703, gradient 23 to 21, font-size 824 to 809 to 791 to 785, edge-insets 266 to 257 to 248 to 236, radius 177 to 175 to 168, letter-spacing 66 to 64 to 63, sized-box-gap 202 to 192 to 182.
 
 ### Four bugs the work surfaced, all fixed
 
@@ -105,12 +118,12 @@ Every sweep: probe screenshots **before**, change, probe screenshots **after**, 
 
 ### Where to pick up next
 
-**Sweeps 3 to 7 are done** (sessions 4 to 6). **Next session starts at sweep 8, the dialog pass.**
+**Sweeps 3 to 8 are done** (sessions 4 to 7). **Next session starts at sweep 9, the filled-button audit.**
 
 1. ~~Sweep 3c~~ done, see above.
 2. ~~Sweep 4, dividers~~ done, see above.
 3. ~~Sweep 5, empty states~~ done, see above.
-4. ~~Sweep 6, sheet + spinner~~ done, see above. ~~Sweep 7, Switch / Slider~~ done. **Sweeps 8 and 9:** START HERE with the dialog pass (28 files), then the filled-button audit.
+4. ~~Sweep 6, sheet + spinner~~ done, see above. ~~Sweep 7, Switch / Slider~~ done. ~~Sweep 8, dialogs~~ done. **Sweep 9:** START HERE with the filled-button audit (one filled per region).
 5. **Then the screen work**, phases 2 onward below, with the Shop's per-kind card shapes (verdict 9) and the compact message mode (verdict 8) inside it.
 
 ### Session 3 (2026-09-18): decisions rendered, picked and applied

@@ -12,12 +12,17 @@ class SurfaceLadder {
   final Color overlay;
   final Color hover;
 
+  /// The dim laid over the app behind a dialog or sheet. Flat, never a blur:
+  /// depth comes from the step between the dimmed canvas and [overlay].
+  final Color scrim;
+
   const SurfaceLadder({
     required this.chrome,
     required this.canvas,
     required this.raised,
     required this.overlay,
     required this.hover,
+    required this.scrim,
   });
 
   List<Color> get all => [chrome, canvas, raised, overlay, hover];
@@ -32,6 +37,7 @@ abstract final class SurfaceLadders {
     raised: Color(0xFF181A20),
     overlay: Color(0xFF1E2127),
     hover: Color(0xFF262930),
+    scrim: Color(0xA6000000),
   );
 
   static const light = SurfaceLadder(
@@ -40,5 +46,6 @@ abstract final class SurfaceLadders {
     raised: Color(0xFFF5F6F8),
     overlay: Color(0xFFFFFFFF),
     hover: Color(0xFFEBEDF0),
+    scrim: Color(0x52000000),
   );
 }

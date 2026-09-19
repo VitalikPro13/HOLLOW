@@ -81,17 +81,13 @@ class _ManageMemberDialogState extends ConsumerState<_ManageMemberDialog> {
 
     return HollowDialog(
       title: 'Manage $name',
+      showClose: _view == _View.overview,
       content: switch (_view) {
         _View.overview => _buildOverview(context, member, name),
         _View.pickDuration => _buildDurationPicker(context, name),
       },
       actions: [
-        if (_view == _View.overview)
-          HollowButton.ghost(
-            onPressed: () => Navigator.of(context).pop(),
-            child: const Text('Close'),
-          )
-        else
+        if (_view == _View.pickDuration)
           HollowButton.ghost(
             onPressed:
                 _busy ? null : () => setState(() => _view = _View.overview),
@@ -198,30 +194,13 @@ class _ManageMemberDialogState extends ConsumerState<_ManageMemberDialog> {
 
   Future<void> _confirmRoleChange(String newRole, String name) async {
     final roleName = roleDisplayName(newRole);
-    final confirmed = await showHollowDialog<bool>(
+    final confirmed = await showHollowConfirm(
       context: context,
-      builder: (ctx) {
-        final h = HollowTheme.of(ctx);
-        return HollowDialog(
-          title: 'Change role',
-          content: Text(
-            "Change $name's role to $roleName?",
-            style: HollowTypography.body.copyWith(color: h.textSecondary),
-          ),
-          actions: [
-            HollowButton.ghost(
-              onPressed: () => Navigator.pop(ctx, false),
-              child: const Text('Cancel'),
-            ),
-            HollowButton.filled(
-              onPressed: () => Navigator.pop(ctx, true),
-              child: const Text('Change'),
-            ),
-          ],
-        );
-      },
+      title: 'Change role',
+      message: "Change $name's role to $roleName?",
+      confirmLabel: 'Change',
     );
-    if (confirmed != true || !mounted) return;
+    if (!confirmed || !mounted) return;
     setState(() => _busy = true);
     try {
       await crdt_api.changeMemberRole(
@@ -408,22 +387,21 @@ class _ManageMemberDialogState extends ConsumerState<_ManageMemberDialog> {
   }
 
   Widget _buildDurationPicker(BuildContext context, String name) {
-    final hollow = HollowTheme.of(context);
     final channel = _pendingChannel;
     if (channel == null) return const SizedBox.shrink();
     return Column(
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        Text(
+        HollowDialogText(
           'How long should $name have access to #${channel.name}?',
-          style: HollowTypography.body.copyWith(color: hollow.textPrimary),
         ),
         const SizedBox(height: HollowSpacing.md),
+        // A list of answers, not a confirm: all ghost, like the mute picker.
         for (final (label, secs) in kGrantDurationOptions)
           Padding(
-            padding: const EdgeInsets.only(bottom: HollowSpacing.sm),
-            child: HollowButton.outline(
+            padding: const EdgeInsets.only(bottom: HollowSpacing.xs),
+            child: HollowButton.ghost(
               onPressed: _busy ? null : () => _grant(channel, secs, label),
               expand: true,
               child: Text(label),

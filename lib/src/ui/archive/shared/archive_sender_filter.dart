@@ -200,7 +200,7 @@ class ArchiveFilterButton extends StatelessWidget {
     final hollow = HollowTheme.of(context);
     return HollowPressable(
       onTap: () async {
-        final picked = await showDialog<String?>(
+        final picked = await showDialog<String?>( // design-ignore: anchored popover inside SelectionArea
           context: context,
           barrierColor: Colors.transparent,
           builder: (ctx) => ArchiveFilterDialog(

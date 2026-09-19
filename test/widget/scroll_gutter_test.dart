@@ -74,4 +74,39 @@ void main() {
         reason: 'Material only decorates the vertical axis, and a horizontal '
             'strip (emote rows, the server folder shelf) has no room to give');
   });
+
+  for (final platform in <TargetPlatform>[
+    TargetPlatform.windows,
+    TargetPlatform.android,
+  ]) {
+    testWidgets('$platform: a list row fill sits evenly inside the panel',
+        (tester) async {
+      await tester.pumpWidget(MaterialApp(
+        theme: ThemeData(platform: platform),
+        scrollBehavior: const HollowScrollBehavior(),
+        home: Center(
+          child: SizedBox(
+            width: 240,
+            height: 300,
+            child: ListView(
+              children: [
+                Builder(
+                  builder: (context) => Padding(
+                    padding: evenListRowPadding(context, inset: 8),
+                    child: const SizedBox(key: ValueKey('fill'), height: 36),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ));
+
+      final panel = tester.getRect(find.byType(ListView));
+      final fill = tester.getRect(find.byKey(const ValueKey('fill')));
+      expect(fill.left - panel.left, panel.right - fill.right,
+          reason: 'the scroll gutter must not make the right gap wider than '
+              'the left one');
+    });
+  }
 }

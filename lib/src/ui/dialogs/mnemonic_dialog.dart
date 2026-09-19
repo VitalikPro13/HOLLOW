@@ -17,26 +17,23 @@ void showMnemonicDialog(BuildContext context, String mnemonic) {
       final hollow = HollowTheme.of(dialogContext);
 
       return HollowDialog(
-        title: 'Your Recovery Phrase',
+        title: 'Your recovery phrase',
         content: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(
+            const HollowDialogText(
               'This is your 24-word recovery phrase. Write it down and keep '
               'it safe. You will need it to restore your identity if you lose '
               'access to this device.',
-              style:
-                  HollowTypography.body.copyWith(color: hollow.textSecondary),
             ),
             const SizedBox(height: HollowSpacing.lg),
             Container(
+              width: double.infinity,
               padding: const EdgeInsets.all(HollowSpacing.md),
               decoration: BoxDecoration(
                 color: hollow.elevated,
                 borderRadius: BorderRadius.circular(hollow.radiusMd),
-                border:
-                    Border.all(color: hollow.warning.withValues(alpha: 0.4)),
               ),
               child: SelectableText(
                 mnemonic,
@@ -46,21 +43,22 @@ void showMnemonicDialog(BuildContext context, String mnemonic) {
                 ),
               ),
             ),
-            const SizedBox(height: HollowSpacing.md),
-            HollowButton.ghost(
-              onPressed: () {
-                Clipboard.setData(ClipboardData(text: mnemonic));
-                HollowToast.show(
-                  dialogContext,
-                  'Copied to clipboard',
-                  type: HollowToastType.success,
-                );
-              },
-              icon: const Icon(LucideIcons.copy, size: 16),
-              child: const Text('Copy'),
-            ),
           ],
         ),
+        leadingActions: [
+          HollowButton.ghost(
+            onPressed: () {
+              Clipboard.setData(ClipboardData(text: mnemonic));
+              HollowToast.show(
+                dialogContext,
+                'Copied to clipboard',
+                type: HollowToastType.success,
+              );
+            },
+            icon: const Icon(LucideIcons.copy, size: 16),
+            child: const Text('Copy'),
+          ),
+        ],
         actions: [
           HollowButton.filled(
             onPressed: () => Navigator.of(dialogContext).pop(),

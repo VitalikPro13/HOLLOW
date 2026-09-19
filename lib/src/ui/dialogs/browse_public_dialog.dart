@@ -9,7 +9,6 @@ import 'package:hollow/src/core/providers/split_view_provider.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/ui/chat/hollow_link_utils.dart';
-import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
@@ -21,70 +20,35 @@ void showBrowsePublicDialog(BuildContext context, WidgetRef ref) {
   showHollowDialog(
     context: context,
     builder: (dialogContext) {
-      final hollow = HollowTheme.of(dialogContext);
-
-      return Center(
-        child: Padding(
-          padding: const EdgeInsets.all(HollowSpacing.xl),
-          child: Material(
-            color: Colors.transparent,
-            child: Container(
-              width: 420,
-              padding: const EdgeInsets.all(HollowSpacing.xl),
-              decoration: BoxDecoration(
-                color: hollow.overlay,
-                borderRadius: BorderRadius.circular(hollow.radiusXl),
-                border: Border.all(color: hollow.border),
-              ),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    'Browse Public Channels',
-                    style: TextStyle(
-                      color: hollow.textPrimary,
-                      fontSize: 18,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                  const SizedBox(height: HollowSpacing.sm),
-                  Text(
-                    'Enter a server invite link or ID to browse its public channels as a guest.',
-                    style: TextStyle(
-                      color: hollow.textSecondary,
-                      fontSize: 13,
-                    ),
-                  ),
-                  const SizedBox(height: HollowSpacing.lg),
-                  HollowTextField(
-                    controller: controller,
-                    hintText: 'Server ID or invite link',
-                    autofocus: true,
-                    onSubmitted: (_) =>
-                        _browse(dialogContext, ref, controller),
-                  ),
-                  const SizedBox(height: HollowSpacing.lg),
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.end,
-                    children: [
-                      HollowButton.ghost(
-                        onPressed: () => Navigator.pop(dialogContext),
-                        child: const Text('Cancel'),
-                      ),
-                      const SizedBox(width: HollowSpacing.sm),
-                      HollowButton.filled(
-                        onPressed: () =>
-                            _browse(dialogContext, ref, controller),
-                        child: const Text('Browse'),
-                      ),
-                    ],
-                  ),
-                ],
-              ),
+      return HollowDialog(
+        title: 'Browse public channels',
+        width: 420,
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            const HollowDialogText(
+              'Enter a server invite link or ID to browse its public channels as a guest.',
             ),
-          ),
+            const SizedBox(height: HollowSpacing.lg),
+            HollowTextField(
+              controller: controller,
+              hintText: 'Server ID or invite link',
+              autofocus: true,
+              onSubmitted: (_) => _browse(dialogContext, ref, controller),
+            ),
+          ],
         ),
+        actions: [
+          HollowButton.ghost(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text('Cancel'),
+          ),
+          HollowButton.filled(
+            onPressed: () => _browse(dialogContext, ref, controller),
+            child: const Text('Browse'),
+          ),
+        ],
       );
     },
   );

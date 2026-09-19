@@ -17,6 +17,7 @@ import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/hollow_tooltip.dart';
 import 'package:hollow/src/ui/components/label_visuals.dart';
 import 'package:hollow/src/ui/components/member_search_picker.dart';
+import 'package:hollow/src/ui/settings/settings_shared.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
@@ -100,6 +101,7 @@ class _LabelsTabState extends ConsumerState<LabelsTab> {
       builder: (ctx) => StatefulBuilder(
         builder: (ctx, setDialogState) => HollowDialog(
           title: existing == null ? 'Create label' : 'Edit label',
+          width: 420,
           content: Column(
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
@@ -111,11 +113,11 @@ class _LabelsTabState extends ConsumerState<LabelsTab> {
                 onChanged: (v) => name = v,
               ),
               const SizedBox(height: HollowSpacing.md),
-              Text('Color', style: HollowTypography.label),
+              const SettingsFieldLabel(label: 'Color'),
               const SizedBox(height: HollowSpacing.sm),
               Wrap(
-                spacing: 8,
-                runSpacing: 8,
+                spacing: HollowSpacing.sm,
+                runSpacing: HollowSpacing.sm,
                 children: kLabelPresetColors.map((c) {
                   final isSelected = c == selectedColor;
                   return HollowFocusRing(
@@ -129,7 +131,10 @@ class _LabelsTabState extends ConsumerState<LabelsTab> {
                         decoration: BoxDecoration(
                           color: c, shape: BoxShape.circle,
                           border: isSelected
-                              ? Border.all(color: Colors.white, width: 2) : null,
+                              ? Border.all(
+                                  color: HollowTheme.of(ctx).textPrimary,
+                                  width: 2)
+                              : null,
                         ),
                       ),
                     ),
@@ -137,7 +142,7 @@ class _LabelsTabState extends ConsumerState<LabelsTab> {
                 }).toList(),
               ),
               const SizedBox(height: HollowSpacing.md),
-              Text('Type', style: HollowTypography.label),
+              const SettingsFieldLabel(label: 'Type'),
               const SizedBox(height: HollowSpacing.sm),
               Row(
                 children: [
@@ -213,9 +218,19 @@ class _LabelsTabState extends ConsumerState<LabelsTab> {
     }
   }
 
-  Future<void> _deleteLabel(String labelId) async {
+  Future<void> _deleteLabel(crdt_api.LabelFfi label) async {
+    final ok = await showHollowConfirm(
+      context: context,
+      title: 'Delete "${label.name}"?',
+      message: 'Everyone who has this label loses it. This cannot be undone.',
+      confirmLabel: 'Delete',
+      destructive: true,
+    );
+    if (!ok) return;
+    if (!mounted) return;
     try {
-      await crdt_api.deleteLabel(serverId: widget.serverId, labelId: labelId);
+      await crdt_api.deleteLabel(
+          serverId: widget.serverId, labelId: label.labelId);
       await Future.delayed(const Duration(milliseconds: 100));
       _loadLabels();
     } catch (e) {
@@ -385,7 +400,7 @@ class _LabelsTabState extends ConsumerState<LabelsTab> {
                         message: 'Delete label',
                         child: HollowPressable(
                           semanticLabel: 'Delete label',
-                          onTap: () => _deleteLabel(label.labelId),
+                          onTap: () => _deleteLabel(label),
                           borderRadius: BorderRadius.circular(hollow.radiusMd),
                           padding: const EdgeInsets.all(HollowSpacing.xs),
                           child: Icon(LucideIcons.trash2, size: 14,
@@ -413,23 +428,17 @@ Future<void> showLabelAssignDialog(
 }) {
   return showHollowDialog(
     context: context,
-    builder: (_) => _AssignDialog(
-      serverId: serverId,
-      label: label,
-      onDone: onDone ?? () {},
-    ),
-  );
+    builder: (_) => _AssignDialog(serverId: serverId, label: label),
+  ).then((_) => onDone?.call());
 }
 
 class _AssignDialog extends ConsumerStatefulWidget {
   final String serverId;
   final crdt_api.LabelFfi label;
-  final VoidCallback onDone;
 
   const _AssignDialog({
     required this.serverId,
     required this.label,
-    required this.onDone,
   });
 
   @override
@@ -506,16 +515,14 @@ class _AssignDialogState extends ConsumerState<_AssignDialog> {
 
     return HollowDialog(
       title: 'Assign "${widget.label.name}"',
+      showClose: true,
       content: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
+          const HollowDialogText(
             'Tap a member to add or remove the label. Changes apply '
             'immediately.',
-            style: HollowTypography.bodySmall.copyWith(
-              color: hollow.textSecondary,
-            ),
           ),
           const SizedBox(height: HollowSpacing.lg),
           Container(
@@ -551,15 +558,6 @@ class _AssignDialogState extends ConsumerState<_AssignDialog> {
           ),
         ],
       ),
-      actions: [
-        HollowButton.filled(
-          onPressed: () {
-            widget.onDone();
-            Navigator.of(context).pop();
-          },
-          child: const Text('Done'),
-        ),
-      ],
     );
   }
 }

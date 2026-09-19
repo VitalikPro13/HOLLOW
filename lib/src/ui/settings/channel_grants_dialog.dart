@@ -79,17 +79,13 @@ class _ChannelGrantsDialogState extends ConsumerState<_ChannelGrantsDialog> {
   Widget build(BuildContext context) {
     return HollowDialog(
       title: 'Temporary access: #${widget.channelName}',
+      showClose: _view == _View.overview,
       content: switch (_view) {
         _View.overview => _buildOverview(context),
         _View.pickDuration => _buildDurationPicker(context),
       },
       actions: [
-        if (_view == _View.overview)
-          HollowButton.ghost(
-            onPressed: () => Navigator.of(context).pop(),
-            child: const Text('Close'),
-          )
-        else
+        if (_view == _View.pickDuration)
           HollowButton.ghost(
             onPressed: _busy
                 ? null
@@ -122,12 +118,9 @@ class _ChannelGrantsDialogState extends ConsumerState<_ChannelGrantsDialog> {
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(
+        const HollowDialogText(
           'Grant a member time-boxed access to this channel. Access is '
           'removed automatically when the timer runs out.',
-          style: HollowTypography.bodySmall.copyWith(
-            color: hollow.textSecondary,
-          ),
         ),
         const SizedBox(height: HollowSpacing.lg),
         if (grants.isNotEmpty) ...[
@@ -231,20 +224,17 @@ class _ChannelGrantsDialogState extends ConsumerState<_ChannelGrantsDialog> {
   }
 
   Widget _buildDurationPicker(BuildContext context) {
-    final hollow = HollowTheme.of(context);
     return Column(
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        Text(
-          'How long should $_pendingName have access?',
-          style: HollowTypography.body.copyWith(color: hollow.textPrimary),
-        ),
+        HollowDialogText('How long should $_pendingName have access?'),
         const SizedBox(height: HollowSpacing.md),
+        // A list of answers, not a confirm: all ghost, like the mute picker.
         for (final (label, secs) in kGrantDurationOptions)
           Padding(
-            padding: const EdgeInsets.only(bottom: HollowSpacing.sm),
-            child: HollowButton.outline(
+            padding: const EdgeInsets.only(bottom: HollowSpacing.xs),
+            child: HollowButton.ghost(
               onPressed: _busy ? null : () => _grant(secs, label),
               expand: true,
               child: Text(label),

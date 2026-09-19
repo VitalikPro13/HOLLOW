@@ -276,6 +276,7 @@ class _DuressCodeCardState extends ConsumerState<DuressCodeCard> {
         title: 'Remove duress code',
         message: 'Enter your app password to remove the duress code.',
         confirmLabel: 'Remove',
+        destructive: true,
       ),
     );
     if (password == null || !mounted) return;
@@ -446,14 +447,14 @@ class _DuressCodeDialogState extends State<_DuressCodeDialog> {
 
     return HollowDialog(
       title: widget.isChange ? 'Change duress code' : 'Set a duress code',
+      width: 420,
       content: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
+          const HollowDialogText(
             'Typed at the unlock prompt, this code deletes your data and '
             'restarts Hollow at first-time setup. It never shows an error.',
-            style: HollowTypography.body.copyWith(fontSize: 12),
           ),
           const SizedBox(height: HollowSpacing.md),
           HollowTextField(
@@ -464,7 +465,7 @@ class _DuressCodeDialogState extends State<_DuressCodeDialog> {
             hintText: 'Your app password',
             onChanged: (_) => _clearError(),
           ),
-          const SizedBox(height: HollowSpacing.sm),
+          const SizedBox(height: HollowSpacing.md),
           HollowTextField(
             controller: _code,
             obscureText: true,
@@ -472,7 +473,7 @@ class _DuressCodeDialogState extends State<_DuressCodeDialog> {
             hintText: 'Duress code',
             onChanged: (_) => _clearError(),
           ),
-          const SizedBox(height: HollowSpacing.sm),
+          const SizedBox(height: HollowSpacing.md),
           HollowTextField(
             controller: _repeat,
             obscureText: true,
@@ -496,14 +497,14 @@ class _DuressCodeDialogState extends State<_DuressCodeDialog> {
             Text(
               _scopeEffect(kDuressScopeDevice),
               style: HollowTypography.caption
-                  .copyWith(color: hollow.textSecondary, fontSize: 11),
+                  .copyWith(color: hollow.textSecondary),
             ),
           const SizedBox(height: HollowSpacing.lg),
           Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Padding(
-                padding: const EdgeInsets.only(top: 2),
+                padding: const EdgeInsets.only(top: HollowSpacing.xxs),
                 child: Icon(LucideIcons.triangleAlert,
                     size: 14, color: hollow.warning),
               ),
@@ -512,7 +513,7 @@ class _DuressCodeDialogState extends State<_DuressCodeDialog> {
                 child: Text(
                   'Typing this code destroys your data. There is no undo.',
                   style: HollowTypography.caption
-                      .copyWith(color: hollow.warning, fontSize: 11),
+                      .copyWith(color: hollow.warning),
                 ),
               ),
             ],
@@ -566,7 +567,6 @@ class _DestroyDialogState extends State<_DestroyDialog> {
 
   @override
   Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
     final ready = _confirm.text.trim() == _confirmWord;
 
     return HollowDialog(
@@ -575,10 +575,9 @@ class _DestroyDialogState extends State<_DestroyDialog> {
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
+          const HollowDialogText(
             'Hollow deletes your messages, files and keys, then restarts and '
             'opens first-time setup.',
-            style: HollowTypography.body.copyWith(fontSize: 12),
           ),
           const SizedBox(height: HollowSpacing.lg),
           _ScopePicker(
@@ -589,11 +588,7 @@ class _DestroyDialogState extends State<_DestroyDialog> {
             onNotifyFriends: (value) => setState(() => _notifyFriends = value),
           ),
           const SizedBox(height: HollowSpacing.lg),
-          Text(
-            'Type $_confirmWord to confirm.',
-            style: HollowTypography.body
-                .copyWith(color: hollow.textSecondary, fontSize: 12),
-          ),
+          const HollowDialogText('Type $_confirmWord to confirm.'),
           const SizedBox(height: HollowSpacing.sm),
           HollowTextField(
             controller: _confirm,
@@ -651,8 +646,7 @@ class _ScopePicker extends StatelessWidget {
       children: [
         Text(
           'What gets destroyed',
-          style: HollowTypography.body
-              .copyWith(color: hollow.textPrimary, fontSize: 13),
+          style: HollowTypography.label.copyWith(color: hollow.textPrimary),
         ),
         const SizedBox(height: HollowSpacing.sm),
         Wrap(
@@ -671,14 +665,14 @@ class _ScopePicker extends StatelessWidget {
         Text(
           _scopeEffect(scope),
           style: HollowTypography.caption
-              .copyWith(color: hollow.textSecondary, fontSize: 11),
+              .copyWith(color: hollow.textSecondary),
         ),
         if (scope == kDuressScopeIdentity) ...[
-          const SizedBox(height: 2),
+          const SizedBox(height: HollowSpacing.xxs),
           Text(
             _identityDelivery,
             style: HollowTypography.caption
-                .copyWith(color: hollow.textSecondary, fontSize: 11),
+                .copyWith(color: hollow.textSecondary),
           ),
         ],
         if (note != null) ...[
@@ -686,7 +680,7 @@ class _ScopePicker extends StatelessWidget {
           Text(
             note!,
             style: HollowTypography.caption
-                .copyWith(color: hollow.textSecondary, fontSize: 11),
+                .copyWith(color: hollow.textSecondary),
           ),
         ],
         if (scope == kDuressScopeIdentity) ...[
@@ -699,15 +693,15 @@ class _ScopePicker extends StatelessWidget {
                   children: [
                     Text(
                       'Tell my friends',
-                      style: HollowTypography.body
-                          .copyWith(color: hollow.textPrimary, fontSize: 13),
+                      style: HollowTypography.label
+                          .copyWith(color: hollow.textPrimary),
                     ),
-                    const SizedBox(height: 2),
+                    const SizedBox(height: HollowSpacing.xxs),
                     Text(
                       'Their chat with you carries a note that this identity '
                       'was destroyed, and their verification of you is cleared.',
                       style: HollowTypography.caption
-                          .copyWith(color: hollow.textSecondary, fontSize: 11),
+                          .copyWith(color: hollow.textSecondary),
                     ),
                   ],
                 ),
@@ -726,11 +720,13 @@ class _PasswordPromptDialog extends StatefulWidget {
   final String title;
   final String message;
   final String confirmLabel;
+  final bool destructive;
 
   const _PasswordPromptDialog({
     required this.title,
     required this.message,
     required this.confirmLabel,
+    this.destructive = false,
   });
 
   @override
@@ -756,11 +752,12 @@ class _PasswordPromptDialogState extends State<_PasswordPromptDialog> {
   Widget build(BuildContext context) {
     return HollowDialog(
       title: widget.title,
+      width: 420,
       content: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(widget.message, style: HollowTypography.body.copyWith(fontSize: 12)),
+          HollowDialogText(widget.message),
           const SizedBox(height: HollowSpacing.md),
           HollowTextField(
             controller: _controller,
@@ -777,10 +774,15 @@ class _PasswordPromptDialogState extends State<_PasswordPromptDialog> {
           onPressed: () => Navigator.of(context).pop(),
           child: const Text('Cancel'),
         ),
-        HollowButton.filled(
-          onPressed: _submit,
-          child: Text(widget.confirmLabel),
-        ),
+        widget.destructive
+            ? HollowButton.danger(
+                onPressed: _submit,
+                child: Text(widget.confirmLabel),
+              )
+            : HollowButton.filled(
+                onPressed: _submit,
+                child: Text(widget.confirmLabel),
+              ),
       ],
     );
   }

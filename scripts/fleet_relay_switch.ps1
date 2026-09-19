@@ -343,7 +343,7 @@ function Get-ServerInvite($peer, $name, $as) {
     Step $peer @{ op = 'capture'; target = 'type:SelectableText'; as = $as }
     # By its own button, not Escape: the link holds focus and a key press from
     # there has reached nothing before.
-    Invoke-SoftStep $peer @{ op = 'tap'; target = 'dialog > text:Done'; index = 0 } | Out-Null
+    Invoke-SoftStep $peer @{ op = 'tap'; target = 'dialog > semantics:Close'; index = 0 } | Out-Null
     $gone = Invoke-SoftStep $peer @{ op = 'wait_for'; gone = 'type:SelectableText'; timeout_ms = 5000 }
     if (-not $gone.ok) {
         Invoke-SoftStep $peer @{ op = 'key'; value = 'escape' } | Out-Null

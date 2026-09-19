@@ -332,11 +332,11 @@ class _MobileServerSettingsRouteState
       final cropped = isMobile
           ? await showMobileImageCrop(
               context: context, imageBytes: bytes,
-              aspectRatio: 1.0, title: 'Crop Server Avatar',
+              aspectRatio: 1.0, title: 'Crop server avatar',
             )
           : await showImageCropDialog(
               context: context, imageBytes: bytes,
-              aspectRatio: 1.0, title: 'Crop Server Avatar',
+              aspectRatio: 1.0, title: 'Crop server avatar',
             );
       if (cropped == null || !mounted || gen != _iconPickGen) return;
       toSend = cropped;
@@ -439,11 +439,11 @@ class _MobileServerSettingsRouteState
       final cropped = isMobile
           ? await showMobileImageCrop(
               context: context, imageBytes: bytes,
-              aspectRatio: 3.0, title: 'Crop Server Banner',
+              aspectRatio: 3.0, title: 'Crop server banner',
             )
           : await showImageCropDialog(
               context: context, imageBytes: bytes,
-              aspectRatio: 3.0, title: 'Crop Server Banner',
+              aspectRatio: 3.0, title: 'Crop server banner',
             );
       if (cropped == null || !mounted || gen != _bannerPickGen) return;
       toSend = cropped;
@@ -502,158 +502,46 @@ class _MobileServerSettingsRouteState
     }
   }
 
-  void _confirmDelete() {
-    showHollowDialog(
+  Future<void> _confirmDelete() async {
+    final server = ref.read(serverListProvider)[widget.serverId];
+    final confirmed = await showHollowConfirm(
       context: context,
-      builder: (_) => Center(
-        child: Padding(
-          padding: const EdgeInsets.all(HollowSpacing.xl),
-          child: Material(
-            color: Colors.transparent,
-            child: Builder(builder: (ctx) {
-              final hollow = HollowTheme.of(ctx);
-              final server = ref.read(serverListProvider)[widget.serverId];
-              return Container(
-                constraints: const BoxConstraints(maxWidth: 360),
-                padding: const EdgeInsets.all(HollowSpacing.xl),
-                decoration: BoxDecoration(
-                  color: hollow.overlay,
-                  borderRadius: BorderRadius.circular(hollow.radiusLg),
-                  border: Border.all(color: hollow.border),
-                ),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text(
-                      'Delete Server',
-                      style: HollowTypography.heading
-                          .copyWith(color: hollow.textPrimary),
-                    ),
-                    const SizedBox(height: HollowSpacing.md),
-                    Text(
-                      'Are you sure you want to delete "${server?.name}"? This cannot be undone.',
-                      textAlign: TextAlign.center,
-                      style: HollowTypography.body
-                          .copyWith(color: hollow.textSecondary),
-                    ),
-                    const SizedBox(height: HollowSpacing.xl),
-                    Row(
-                      children: [
-                        Expanded(
-                          child: HollowButton.ghost(
-                            onPressed: () => Navigator.pop(ctx),
-                            child: const Text('Cancel'),
-                          ),
-                        ),
-                        const SizedBox(width: HollowSpacing.md),
-                        Expanded(
-                          child: HollowButton.danger(
-                            onPressed: () async {
-                              Navigator.pop(ctx);
-                              await crdt_api.deleteServer(
-                                  serverId: widget.serverId);
-                              ref.read(selectedServerProvider.notifier).state =
-                                  null;
-                              ref
-                                  .read(selectedChannelProvider.notifier)
-                                  .state = null;
-                              ref.read(channelListProvider.notifier).clear();
-                              if (mounted) {
-                                Navigator.pop(context);
-                                HollowToast.show(context, 'Server deleted',
-                                    type: HollowToastType.success);
-                              }
-                            },
-                            child: const Text('Delete'),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ],
-                ),
-              );
-            }),
-          ),
-        ),
-      ),
+      title: 'Delete server',
+      message:
+          'Are you sure you want to delete "${server?.name}"? This cannot be undone.',
+      confirmLabel: 'Delete',
+      destructive: true,
     );
+    if (!confirmed) return;
+    await crdt_api.deleteServer(serverId: widget.serverId);
+    ref.read(selectedServerProvider.notifier).state = null;
+    ref.read(selectedChannelProvider.notifier).state = null;
+    ref.read(channelListProvider.notifier).clear();
+    if (mounted) {
+      Navigator.pop(context);
+      HollowToast.show(context, 'Server deleted',
+          type: HollowToastType.success);
+    }
   }
 
-  void _confirmLeave() {
-    showHollowDialog(
+  Future<void> _confirmLeave() async {
+    final server = ref.read(serverListProvider)[widget.serverId];
+    final confirmed = await showHollowConfirm(
       context: context,
-      builder: (_) => Center(
-        child: Padding(
-          padding: const EdgeInsets.all(HollowSpacing.xl),
-          child: Material(
-            color: Colors.transparent,
-            child: Builder(builder: (ctx) {
-              final hollow = HollowTheme.of(ctx);
-              final server = ref.read(serverListProvider)[widget.serverId];
-              return Container(
-                constraints: const BoxConstraints(maxWidth: 360),
-                padding: const EdgeInsets.all(HollowSpacing.xl),
-                decoration: BoxDecoration(
-                  color: hollow.overlay,
-                  borderRadius: BorderRadius.circular(hollow.radiusLg),
-                  border: Border.all(color: hollow.border),
-                ),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text(
-                      'Leave Server',
-                      style: HollowTypography.heading
-                          .copyWith(color: hollow.textPrimary),
-                    ),
-                    const SizedBox(height: HollowSpacing.md),
-                    Text(
-                      'Are you sure you want to leave "${server?.name}"?',
-                      textAlign: TextAlign.center,
-                      style: HollowTypography.body
-                          .copyWith(color: hollow.textSecondary),
-                    ),
-                    const SizedBox(height: HollowSpacing.xl),
-                    Row(
-                      children: [
-                        Expanded(
-                          child: HollowButton.ghost(
-                            onPressed: () => Navigator.pop(ctx),
-                            child: const Text('Cancel'),
-                          ),
-                        ),
-                        const SizedBox(width: HollowSpacing.md),
-                        Expanded(
-                          child: HollowButton.danger(
-                            onPressed: () async {
-                              Navigator.pop(ctx);
-                              await crdt_api.leaveServer(
-                                  serverId: widget.serverId);
-                              ref.read(selectedServerProvider.notifier).state =
-                                  null;
-                              ref
-                                  .read(selectedChannelProvider.notifier)
-                                  .state = null;
-                              ref.read(channelListProvider.notifier).clear();
-                              if (mounted) {
-                                Navigator.pop(context);
-                                HollowToast.show(context, 'Left server',
-                                    type: HollowToastType.success);
-                              }
-                            },
-                            child: const Text('Leave'),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ],
-                ),
-              );
-            }),
-          ),
-        ),
-      ),
+      title: 'Leave server',
+      message: 'Are you sure you want to leave "${server?.name}"?',
+      confirmLabel: 'Leave',
+      destructive: true,
     );
+    if (!confirmed) return;
+    await crdt_api.leaveServer(serverId: widget.serverId);
+    ref.read(selectedServerProvider.notifier).state = null;
+    ref.read(selectedChannelProvider.notifier).state = null;
+    ref.read(channelListProvider.notifier).clear();
+    if (mounted) {
+      Navigator.pop(context);
+      HollowToast.show(context, 'Left server', type: HollowToastType.success);
+    }
   }
 
   @override
@@ -1592,67 +1480,36 @@ class _ChannelLayoutEditorState extends ConsumerState<_ChannelLayoutEditor> {
     final controller = TextEditingController();
     showHollowDialog(
       context: context,
-      builder: (ctx) => Center(
-        child: Padding(
-          padding: const EdgeInsets.all(HollowSpacing.xl),
-          child: Material(
-            color: Colors.transparent,
-            child: Builder(builder: (ctx2) {
-              final hollow = HollowTheme.of(ctx2);
-              void submit() {
-                final name = controller.text.trim();
-                if (name.isEmpty) return;
-                Navigator.pop(ctx2);
-                setState(() => _layout.add(CategoryItem(name)));
-              }
+      builder: (ctx) {
+        void submit() {
+          final name = controller.text.trim();
+          if (name.isEmpty) return;
+          Navigator.pop(ctx);
+          setState(() => _layout.add(CategoryItem(name)));
+        }
 
-              return Container(
-                constraints: const BoxConstraints(maxWidth: 360),
-                padding: const EdgeInsets.all(HollowSpacing.xl),
-                decoration: BoxDecoration(
-                  color: hollow.overlay,
-                  borderRadius: BorderRadius.circular(hollow.radiusLg),
-                  border: Border.all(color: hollow.border),
-                ),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text('New Category',
-                        style: HollowTypography.heading
-                            .copyWith(color: hollow.textPrimary)),
-                    const SizedBox(height: HollowSpacing.md),
-                    HollowTextField(
-                      controller: controller,
-                      hintText: 'Category name',
-                      autofocus: true,
-                      maxLength: 32,
-                      onSubmitted: (_) => submit(),
-                    ),
-                    const SizedBox(height: HollowSpacing.md),
-                    Row(
-                      children: [
-                        Expanded(
-                          child: HollowButton.ghost(
-                            onPressed: () => Navigator.pop(ctx2),
-                            child: const Text('Cancel'),
-                          ),
-                        ),
-                        const SizedBox(width: HollowSpacing.md),
-                        Expanded(
-                          child: HollowButton.filled(
-                            onPressed: submit,
-                            child: const Text('Add'),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ],
-                ),
-              );
-            }),
+        return HollowDialog(
+          title: 'Create category',
+          width: 420,
+          content: HollowTextField(
+            controller: controller,
+            hintText: 'Category name',
+            autofocus: true,
+            maxLength: 32,
+            onSubmitted: (_) => submit(),
           ),
-        ),
-      ),
+          actions: [
+            HollowButton.ghost(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Cancel'),
+            ),
+            HollowButton.filled(
+              onPressed: submit,
+              child: const Text('Create'),
+            ),
+          ],
+        );
+      },
     );
   }
 
@@ -1660,70 +1517,36 @@ class _ChannelLayoutEditorState extends ConsumerState<_ChannelLayoutEditor> {
     final controller = TextEditingController(text: currentName);
     showHollowDialog(
       context: context,
-      builder: (ctx) => Center(
-        child: Padding(
-          padding: const EdgeInsets.all(HollowSpacing.xl),
-          child: Material(
-            color: Colors.transparent,
-            child: Builder(builder: (ctx2) {
-              final hollow = HollowTheme.of(ctx2);
-              void submit() {
-                final name = controller.text.trim();
-                if (name.isEmpty || name == currentName) {
-                  Navigator.pop(ctx2);
-                  return;
-                }
-                Navigator.pop(ctx2);
-                setState(() => _layout[index] = CategoryItem(name));
-              }
+      builder: (ctx) {
+        void submit() {
+          final name = controller.text.trim();
+          Navigator.pop(ctx);
+          if (name.isEmpty || name == currentName) return;
+          setState(() => _layout[index] = CategoryItem(name));
+        }
 
-              return Container(
-                constraints: const BoxConstraints(maxWidth: 360),
-                padding: const EdgeInsets.all(HollowSpacing.xl),
-                decoration: BoxDecoration(
-                  color: hollow.overlay,
-                  borderRadius: BorderRadius.circular(hollow.radiusLg),
-                  border: Border.all(color: hollow.border),
-                ),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text('Rename Category',
-                        style: HollowTypography.heading
-                            .copyWith(color: hollow.textPrimary)),
-                    const SizedBox(height: HollowSpacing.md),
-                    HollowTextField(
-                      controller: controller,
-                      hintText: 'Category name',
-                      autofocus: true,
-                      maxLength: 32,
-                      onSubmitted: (_) => submit(),
-                    ),
-                    const SizedBox(height: HollowSpacing.md),
-                    Row(
-                      children: [
-                        Expanded(
-                          child: HollowButton.ghost(
-                            onPressed: () => Navigator.pop(ctx2),
-                            child: const Text('Cancel'),
-                          ),
-                        ),
-                        const SizedBox(width: HollowSpacing.md),
-                        Expanded(
-                          child: HollowButton.filled(
-                            onPressed: submit,
-                            child: const Text('Rename'),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ],
-                ),
-              );
-            }),
+        return HollowDialog(
+          title: 'Rename category',
+          width: 420,
+          content: HollowTextField(
+            controller: controller,
+            hintText: 'Category name',
+            autofocus: true,
+            maxLength: 32,
+            onSubmitted: (_) => submit(),
           ),
-        ),
-      ),
+          actions: [
+            HollowButton.ghost(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Cancel'),
+            ),
+            HollowButton.filled(
+              onPressed: submit,
+              child: const Text('Rename'),
+            ),
+          ],
+        );
+      },
     );
   }
 
@@ -1985,154 +1808,70 @@ class _ChannelLayoutEditorState extends ConsumerState<_ChannelLayoutEditor> {
     final controller = TextEditingController(text: currentName);
     showHollowDialog(
       context: context,
-      builder: (ctx) => Center(
-        child: Padding(
-          padding: const EdgeInsets.all(HollowSpacing.xl),
-          child: Material(
-            color: Colors.transparent,
-            child: Builder(builder: (ctx2) {
-              final hollow = HollowTheme.of(ctx2);
-              Future<void> submit() async {
-                final name = controller.text.trim();
-                if (name.isEmpty || name == currentName) {
-                  Navigator.pop(ctx2);
-                  return;
-                }
-                Navigator.pop(ctx2);
-                await crdt_api.renameChannel(
-                  serverId: widget.serverId,
-                  channelId: channelId,
-                  newName: name,
-                );
-                final old = _channels[channelId];
-                if (old != null) {
-                  setState(() {
-                    _channels[channelId] = old.copyWith(name: name);
-                  });
-                }
-              }
+      builder: (ctx) {
+        Future<void> submit() async {
+          final name = controller.text.trim();
+          Navigator.pop(ctx);
+          if (name.isEmpty || name == currentName) return;
+          await crdt_api.renameChannel(
+            serverId: widget.serverId,
+            channelId: channelId,
+            newName: name,
+          );
+          final old = _channels[channelId];
+          if (old != null) {
+            setState(() {
+              _channels[channelId] = old.copyWith(name: name);
+            });
+          }
+        }
 
-              return Container(
-                constraints: const BoxConstraints(maxWidth: 360),
-                padding: const EdgeInsets.all(HollowSpacing.xl),
-                decoration: BoxDecoration(
-                  color: hollow.overlay,
-                  borderRadius: BorderRadius.circular(hollow.radiusLg),
-                  border: Border.all(color: hollow.border),
-                ),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text('Rename Channel',
-                        style: HollowTypography.heading
-                            .copyWith(color: hollow.textPrimary)),
-                    const SizedBox(height: HollowSpacing.md),
-                    HollowTextField(
-                      controller: controller,
-                      hintText: 'Channel name',
-                      autofocus: true,
-                      maxLength: 32,
-                      onSubmitted: (_) => submit(),
-                    ),
-                    const SizedBox(height: HollowSpacing.md),
-                    Row(
-                      children: [
-                        Expanded(
-                          child: HollowButton.ghost(
-                            onPressed: () => Navigator.pop(ctx2),
-                            child: const Text('Cancel'),
-                          ),
-                        ),
-                        const SizedBox(width: HollowSpacing.md),
-                        Expanded(
-                          child: HollowButton.filled(
-                            onPressed: submit,
-                            child: const Text('Rename'),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ],
-                ),
-              );
-            }),
+        return HollowDialog(
+          title: 'Rename channel',
+          width: 420,
+          content: HollowTextField(
+            controller: controller,
+            hintText: 'Channel name',
+            autofocus: true,
+            maxLength: 32,
+            onSubmitted: (_) => submit(),
           ),
-        ),
-      ),
+          actions: [
+            HollowButton.ghost(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Cancel'),
+            ),
+            HollowButton.filled(
+              onPressed: submit,
+              child: const Text('Rename'),
+            ),
+          ],
+        );
+      },
     );
   }
 
-  void _deleteChannel(int index, String channelId, String name) {
-    showHollowDialog(
+  Future<void> _deleteChannel(int index, String channelId, String name) async {
+    final confirmed = await showHollowConfirm(
       context: context,
-      builder: (ctx) => Center(
-        child: Padding(
-          padding: const EdgeInsets.all(HollowSpacing.xl),
-          child: Material(
-            color: Colors.transparent,
-            child: Builder(builder: (ctx2) {
-              final hollow = HollowTheme.of(ctx2);
-              return Container(
-                constraints: const BoxConstraints(maxWidth: 360),
-                padding: const EdgeInsets.all(HollowSpacing.xl),
-                decoration: BoxDecoration(
-                  color: hollow.overlay,
-                  borderRadius: BorderRadius.circular(hollow.radiusLg),
-                  border: Border.all(color: hollow.border),
-                ),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text('Delete Channel',
-                        style: HollowTypography.heading
-                            .copyWith(color: hollow.textPrimary)),
-                    const SizedBox(height: HollowSpacing.md),
-                    Text(
-                      'Are you sure you want to delete #$name?',
-                      textAlign: TextAlign.center,
-                      style: HollowTypography.body
-                          .copyWith(color: hollow.textSecondary),
-                    ),
-                    const SizedBox(height: HollowSpacing.xl),
-                    Row(
-                      children: [
-                        Expanded(
-                          child: HollowButton.ghost(
-                            onPressed: () => Navigator.pop(ctx2),
-                            child: const Text('Cancel'),
-                          ),
-                        ),
-                        const SizedBox(width: HollowSpacing.md),
-                        Expanded(
-                          child: HollowButton.danger(
-                            onPressed: () async {
-                              Navigator.pop(ctx2);
-                              setState(() {
-                                _layout.removeAt(index);
-                                _channels.remove(channelId);
-                                _savedLayout = List.of(_layout);
-                              });
-                              await crdt_api.removeChannel(
-                                serverId: widget.serverId,
-                                channelId: channelId,
-                              );
-                              crdt_api.updateChannelLayout(
-                                serverId: widget.serverId,
-                                layoutJson: layoutToJson(_layout),
-                              );
-                            },
-                            child: const Text('Delete'),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ],
-                ),
-              );
-            }),
-          ),
-        ),
-      ),
+      title: 'Delete #$name?',
+      message: 'Are you sure you want to delete #$name?',
+      confirmLabel: 'Delete',
+      destructive: true,
+    );
+    if (!confirmed || !mounted) return;
+    setState(() {
+      _layout.removeAt(index);
+      _channels.remove(channelId);
+      _savedLayout = List.of(_layout);
+    });
+    await crdt_api.removeChannel(
+      serverId: widget.serverId,
+      channelId: channelId,
+    );
+    crdt_api.updateChannelLayout(
+      serverId: widget.serverId,
+      layoutJson: layoutToJson(_layout),
     );
   }
 

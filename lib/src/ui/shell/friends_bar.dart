@@ -27,6 +27,7 @@ import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/edge_scroll_row.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
+import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
@@ -330,34 +331,9 @@ class FriendsBar extends ConsumerWidget {
 
   void _showAddFriendDialog(
       BuildContext context, WidgetRef ref, HollowTheme hollow) {
-    showGeneralDialog(
+    showHollowDialog(
       context: context,
-      barrierDismissible: true,
-      barrierLabel: 'Friends',
-      barrierColor: Colors.black.withValues(alpha: 0.5),
-      transitionDuration: HollowDurations.normal,
-      pageBuilder: (context, anim1, anim2) {
-        // Padding, not just Center: the interface zoom shrinks the logical
-        // viewport, and with no margin the popup clamps flush to the window
-        // edges and loses the rounded border that says it is a popup.
-        return const Center(
-          child: Padding(
-            padding: EdgeInsets.all(HollowSpacing.lg),
-            child: _FriendsManager(),
-          ),
-        );
-      },
-      transitionBuilder: (context, anim1, anim2, child) {
-        return FadeTransition(
-          opacity: CurvedAnimation(parent: anim1, curve: Curves.easeOut),
-          child: ScaleTransition(
-            scale: Tween<double>(begin: 0.95, end: 1.0).animate(
-              CurvedAnimation(parent: anim1, curve: Curves.easeOut),
-            ),
-            child: child,
-          ),
-        );
-      },
+      builder: (context) => const _FriendsManager(),
     );
   }
 }
@@ -398,24 +374,11 @@ class _FriendsManagerState extends ConsumerState<_FriendsManager> {
         .where((f) => f.status == 'pending' && f.direction == 'outgoing')
         .toList();
 
-    return Material(
-      color: Colors.transparent,
-      child: Container(
-        width: 520,
+    return HollowDialogSurface(
+      width: 520,
+      padded: false,
+      child: SizedBox(
         height: 480,
-        clipBehavior: Clip.antiAlias,
-        decoration: BoxDecoration(
-          color: hollow.overlay,
-          borderRadius: BorderRadius.circular(hollow.radiusLg),
-          border: Border.all(color: hollow.border),
-          boxShadow: [
-            BoxShadow(
-              color: Colors.black.withValues(alpha: 0.3),
-              blurRadius: 24,
-              offset: const Offset(0, 8),
-            ),
-          ],
-        ),
         child: Column(
           children: [
             Container(
@@ -430,26 +393,15 @@ class _FriendsManagerState extends ConsumerState<_FriendsManager> {
               ),
               child: Row(
                 children: [
-                  Icon(LucideIcons.users, size: 18,
-                      color: hollow.textSecondary),
-                  const SizedBox(width: HollowSpacing.sm),
-                  Text(
-                    'Friends',
-                    style: HollowTypography.subheading.copyWith(
-                      color: hollow.textPrimary,
-                      fontWeight: FontWeight.w600,
+                  Expanded(
+                    child: Text(
+                      'Friends',
+                      style: HollowTypography.heading.copyWith(
+                        color: hollow.textPrimary,
+                      ),
                     ),
                   ),
-                  const Spacer(),
-                  HollowPressable(
-                    semanticLabel: 'Close',
-                    onTap: () => Navigator.pop(context),
-                    borderRadius:
-                        BorderRadius.circular(hollow.radiusMd),
-                    padding: const EdgeInsets.all(HollowSpacing.xs),
-                    child: Icon(LucideIcons.x, size: 18,
-                        color: hollow.textSecondary),
-                  ),
+                  const HollowDialogCloseButton(),
                 ],
               ),
             ),

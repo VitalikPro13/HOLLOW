@@ -60,30 +60,12 @@ void showJoinRejectedDialog(
   showHollowDialog(
     context: context,
     builder: (ctx) {
-      final hollow = HollowTheme.of(ctx);
       return HollowDialog(
         title: title,
-        content: Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Icon(LucideIcons.lock, size: 20, color: hollow.warning),
-            const SizedBox(width: HollowSpacing.md),
-            Expanded(
-              child: Text(
-                message,
-                style: HollowTypography.body.copyWith(
-                  color: hollow.textSecondary,
-                  fontSize: 13,
-                  height: 1.4,
-                ),
-              ),
-            ),
-          ],
-        ),
+        content: HollowDialogText(message),
         actions: [
           HollowButton.filled(
             onPressed: () => Navigator.of(ctx).pop(),
-            compact: true,
             child: const Text('OK'),
           ),
         ],
@@ -110,36 +92,24 @@ void showNsfwConfirmDialog(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Icon(LucideIcons.alertTriangle, size: 20, color: hollow.warning),
-                const SizedBox(width: HollowSpacing.md),
-                Expanded(
-                  child: RichText(
-                    text: TextSpan(
-                      style: HollowTypography.body.copyWith(
-                        color: hollow.textSecondary,
-                        fontSize: 13,
-                        height: 1.4,
-                      ),
-                      children: [
-                        TextSpan(
-                          text: serverName,
-                          style: TextStyle(
-                            color: hollow.textPrimary,
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
-                        const TextSpan(
-                          text: ' is marked NSFW. It may contain adult or '
-                              'disturbing content.',
-                        ),
-                      ],
+            Text.rich(
+              TextSpan(
+                children: [
+                  TextSpan(
+                    text: serverName,
+                    style: TextStyle(
+                      color: hollow.textPrimary,
+                      fontWeight: FontWeight.w600,
                     ),
                   ),
-                ),
-              ],
+                  const TextSpan(
+                    text: ' is marked NSFW. It may contain adult or '
+                        'disturbing content.',
+                  ),
+                ],
+              ),
+              style:
+                  HollowTypography.body.copyWith(color: hollow.textSecondary),
             ),
             const SizedBox(height: HollowSpacing.md),
             Text(
@@ -158,12 +128,12 @@ void showNsfwConfirmDialog(
             onPressed: () => Navigator.of(ctx).pop(),
             child: const Text('Cancel'),
           ),
-          HollowButton.danger(
+          // Filled, not danger: joining destroys nothing.
+          HollowButton.filled(
             onPressed: () {
               Navigator.of(ctx).pop();
               onProceed();
             },
-            compact: true,
             child: const Text('I am 18 or older, join'),
           ),
         ],
@@ -330,8 +300,10 @@ class _TwitchJoinDialogState extends State<_TwitchJoinDialog> {
       title: _step == _JoinStep.success
           ? 'Joined!'
           : _step == _JoinStep.failed
-              ? 'Verification Failed'
-              : 'Twitch Verification',
+              ? 'Verification failed'
+              : 'Twitch verification',
+      // A failure leaves nothing to confirm; success closes on its own.
+      showClose: _step == _JoinStep.failed,
       content: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
@@ -411,16 +383,7 @@ class _TwitchJoinDialogState extends State<_TwitchJoinDialog> {
   Widget _requirementRow(HollowTheme hollow, IconData icon, String text) {
     return Row(
       children: [
-        Container(
-          width: 28,
-          height: 28,
-          decoration: BoxDecoration(
-            color: hollow.accent.withValues(alpha: 0.1),
-            borderRadius: BorderRadius.circular(hollow.radiusMd),
-          ),
-          alignment: Alignment.center,
-          child: Icon(icon, size: 14, color: hollow.accent),
-        ),
+        Icon(icon, size: 16, color: hollow.textSecondary),
         const SizedBox(width: HollowSpacing.sm),
         Expanded(
           child: Text(
@@ -450,10 +413,7 @@ class _TwitchJoinDialogState extends State<_TwitchJoinDialog> {
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
-        Text(
-          'Enter this code on Twitch:',
-          style: HollowTypography.body.copyWith(color: hollow.textSecondary),
-        ),
+        const HollowDialogText('Enter this code on Twitch:'),
         const SizedBox(height: HollowSpacing.lg),
         GestureDetector(
           onTap: () {
@@ -468,9 +428,6 @@ class _TwitchJoinDialogState extends State<_TwitchJoinDialog> {
             decoration: BoxDecoration(
               color: hollow.elevated,
               borderRadius: BorderRadius.circular(hollow.radiusMd),
-              border: Border.all(
-                color: hollow.accent.withValues(alpha: 0.3),
-              ),
             ),
             child: Row(
               mainAxisSize: MainAxisSize.min,
@@ -479,7 +436,6 @@ class _TwitchJoinDialogState extends State<_TwitchJoinDialog> {
                   _userCode!,
                   style: HollowTypography.heading.copyWith(
                     color: hollow.textPrimary,
-                    fontSize: 24,
                   ),
                 ),
                 const SizedBox(width: HollowSpacing.md),
@@ -531,14 +487,11 @@ class _TwitchJoinDialogState extends State<_TwitchJoinDialog> {
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
-        Icon(LucideIcons.checkCircle, size: 36, color: hollow.accent),
+        Icon(LucideIcons.checkCircle, size: 24, color: hollow.success),
         const SizedBox(height: HollowSpacing.md),
         Text(
           'You\'re now in ${widget.serverName}!',
-          style: HollowTypography.body.copyWith(
-            color: hollow.accent,
-            fontWeight: FontWeight.w600,
-          ),
+          style: HollowTypography.label.copyWith(color: hollow.textPrimary),
         ),
       ],
     );
@@ -565,20 +518,9 @@ class _TwitchJoinDialogState extends State<_TwitchJoinDialog> {
           ],
         ),
         const SizedBox(height: HollowSpacing.md),
-        Container(
-          width: double.infinity,
-          padding: const EdgeInsets.all(HollowSpacing.md),
-          decoration: BoxDecoration(
-            color: hollow.error.withValues(alpha: 0.08),
-            borderRadius: BorderRadius.circular(hollow.radiusMd),
-            border: Border.all(color: hollow.error.withValues(alpha: 0.2)),
-          ),
-          child: Text(
-            _error ?? 'Unknown error',
-            style: HollowTypography.body.copyWith(
-              color: hollow.error,
-            ),
-          ),
+        Text(
+          _error ?? 'Unknown error',
+          style: HollowTypography.body.copyWith(color: hollow.error),
         ),
       ],
     );
@@ -640,12 +582,7 @@ class _TwitchJoinDialogState extends State<_TwitchJoinDialog> {
       case _JoinStep.success:
         return [];
       case _JoinStep.failed:
-        return [
-          HollowButton.ghost(
-            onPressed: () => Navigator.of(context).pop(),
-            child: const Text('Close'),
-          ),
-        ];
+        return [];
     }
   }
 }

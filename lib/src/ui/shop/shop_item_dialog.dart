@@ -154,17 +154,14 @@ class _ShopItemDialogState extends ConsumerState<_ShopItemDialog> {
 
     return HollowDialog(
       title: listing.title,
+      showClose: true,
       content: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           for (final kind in kinds) _preview(kind),
           if (listing.description.isNotEmpty) ...[
-            Text(
-              listing.description,
-              style:
-                  HollowTypography.body.copyWith(color: hollow.textSecondary),
-            ),
+            HollowDialogText(listing.description),
             const SizedBox(height: HollowSpacing.md),
           ],
           if (listing.artist.url.isEmpty)
@@ -193,7 +190,7 @@ class _ShopItemDialogState extends ConsumerState<_ShopItemDialog> {
             Text(
               listing.license,
               style: HollowTypography.caption
-                  .copyWith(color: hollow.textTertiary, fontSize: 11),
+                  .copyWith(color: hollow.textTertiary),
             ),
           ],
           if (available) ...[
@@ -221,19 +218,9 @@ class _ShopItemDialogState extends ConsumerState<_ShopItemDialog> {
         ],
       ),
       actions: [
-        HollowButton.ghost(
-          onPressed: _busy ? null : () => Navigator.of(context).pop(),
-          child: const Text('Close'),
-        ),
         // Never a price or a Buy button on a store build; the dashboard is
         // already gone there, and this is the second lock.
         if (available) ...[
-          if (owned != null)
-            HollowButton.filled(
-              onPressed: _busy ? null : () => _wear(owned),
-              loading: _busy,
-              child: const Text('Wear it'),
-            ),
           // Beside Wear it, Buy is the quieter button.
           if (!bought)
             owned != null
@@ -247,6 +234,12 @@ class _ShopItemDialogState extends ConsumerState<_ShopItemDialog> {
                     icon: const Icon(LucideIcons.externalLink, size: 14),
                     child: const Text('Buy'),
                   ),
+          if (owned != null)
+            HollowButton.filled(
+              onPressed: _busy ? null : () => _wear(owned),
+              loading: _busy,
+              child: const Text('Wear it'),
+            ),
         ],
       ],
     );

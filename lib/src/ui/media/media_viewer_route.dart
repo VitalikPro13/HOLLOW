@@ -13,12 +13,9 @@ import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/core/reduce_motion.dart';
 import 'package:hollow/src/core/services/window_fullscreen.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
-import 'package:hollow/src/theme/hollow_theme.dart';
-import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/chat/chat_input_shortcuts.dart';
 import 'package:hollow/src/ui/chat/emoji_picker.dart';
 import 'package:hollow/src/ui/components/attachment_image.dart';
-import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_menu.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
@@ -716,30 +713,17 @@ class _MediaViewerViewState extends ConsumerState<MediaViewerView>
     final messageId = _current.messageId;
     final delete = widget.actions.onDelete;
     if (messageId == null || delete == null || _deleting) return;
-    final hollow = HollowTheme.of(context);
     // None of the three panes confirm a delete of their own, so the viewer is
     // the only place this question gets asked.
-    final confirmed = await showHollowDialog<bool>(
+    final confirmed = await showHollowConfirm(
       context: context,
-      builder: (ctx) => HollowDialog(
-        title: 'Delete this message?',
-        content: Text(
+      title: 'Delete this message?',
+      message:
           'The message and its file go away for everyone in this conversation.',
-          style: HollowTypography.body.copyWith(color: hollow.textSecondary),
-        ),
-        actions: [
-          HollowButton.ghost(
-            onPressed: () => Navigator.of(ctx).pop(false),
-            child: const Text('Cancel'),
-          ),
-          HollowButton.danger(
-            onPressed: () => Navigator.of(ctx).pop(true),
-            child: const Text('Delete'),
-          ),
-        ],
-      ),
+      confirmLabel: 'Delete',
+      destructive: true,
     );
-    if (confirmed != true || !mounted) return;
+    if (!confirmed || !mounted) return;
     setState(() => _deleting = true);
     try {
       await delete(messageId);

@@ -613,9 +613,9 @@ function Invoke-Steps($steps, $label, $alwaysSoft = $false) {
 $onboardStepsMobile = @(
     @{ op = 'wait_for'; target = 'text:Create New Identity'; timeout_ms = 60000 },
     @{ op = 'tap'; target = 'text:Create New Identity'; frames = 60 },
-    @{ op = 'wait_for'; target = 'text:Your Recovery Phrase'; timeout_ms = 60000 },
+    @{ op = 'wait_for'; target = 'text:Your recovery phrase'; timeout_ms = 60000 },
     @{ op = 'tap'; target = "text:I've saved it"; frames = 40 },
-    @{ op = 'wait_for'; gone = 'text:Your Recovery Phrase'; timeout_ms = 30000 },
+    @{ op = 'wait_for'; gone = 'text:Your recovery phrase'; timeout_ms = 30000 },
     @{ op = 'wait_for'; provider = 'connection'; equals = 'connected'; timeout_ms = 120000 },
     @{ op = 'tap'; target = 'semantics:Settings'; index = 0; frames = 40 },
     @{ op = 'wait_for'; target = 'text:Name, status, avatar & banner'; timeout_ms = 20000 },
@@ -636,9 +636,9 @@ $onboardSteps = @(
     @{ op = 'wait_for'; target = 'text:Create New Identity'; timeout_ms = 60000 },
     @{ op = 'tap'; target = 'text:Create New Identity'; frames = 60 },
     # The recovery-phrase dialog is the app confirming the identity exists.
-    @{ op = 'wait_for'; target = 'text:Your Recovery Phrase'; timeout_ms = 60000 },
+    @{ op = 'wait_for'; target = 'text:Your recovery phrase'; timeout_ms = 60000 },
     @{ op = 'tap'; target = "text:I've saved it"; frames = 40 },
-    @{ op = 'wait_for'; gone = 'text:Your Recovery Phrase'; timeout_ms = 30000 },
+    @{ op = 'wait_for'; gone = 'text:Your recovery phrase'; timeout_ms = 30000 },
     # Proof the node came up, not just the widget tree.
     @{ op = 'wait_for'; target = 'text:Connected'; timeout_ms = 120000 },
     # A display name, because without one every peer, every friend row, every

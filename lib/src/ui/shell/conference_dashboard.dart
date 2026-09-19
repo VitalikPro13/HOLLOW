@@ -30,6 +30,7 @@ import 'package:hollow/src/core/providers/relay_domain_provider.dart';
 import 'package:hollow/src/ui/dialogs/relay_switch_dialog.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:hollow/src/ui/components/hollow_spinner.dart';
+import 'package:hollow/src/ui/settings/settings_shared.dart';
 
 /// Human-readable joiner-side denial message.
 String conferenceDenyMessage(String? reason) {
@@ -364,30 +365,14 @@ class _RoomCard extends ConsumerWidget {
   }
 
   Future<void> _confirmDelete(BuildContext context, WidgetRef ref) async {
-    final confirmed = await showHollowDialog<bool>(
+    final confirmed = await showHollowConfirm(
       context: context,
-      builder: (ctx) {
-        final h = HollowTheme.of(ctx);
-        return HollowDialog(
-          title: 'Delete Room?',
-          content: Text(
-            'Delete "${room.name}"? Its invite link stops working forever.',
-            style: HollowTypography.body.copyWith(color: h.textSecondary),
-          ),
-          actions: [
-            HollowButton.ghost(
-              onPressed: () => Navigator.of(ctx).pop(false),
-              child: const Text('Cancel'),
-            ),
-            HollowButton.danger(
-              onPressed: () => Navigator.of(ctx).pop(true),
-              child: const Text('Delete'),
-            ),
-          ],
-        );
-      },
+      title: 'Delete room?',
+      message: 'Delete "${room.name}"? Its invite link stops working forever.',
+      confirmLabel: 'Delete',
+      destructive: true,
     );
-    if (confirmed == true) {
+    if (confirmed) {
       await ref.read(conferenceProvider.notifier).deleteRoom(room.confId);
     }
   }
@@ -458,14 +443,13 @@ class _RoomFormDialogState extends ConsumerState<_RoomFormDialog> {
     final hasCode = widget.room?.hasAccessCode ?? false;
 
     return HollowDialog(
-      title: _isEdit ? 'Edit Room' : 'Create Room',
+      title: _isEdit ? 'Edit room' : 'Create room',
+      width: 420,
       content: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text('Room name',
-              style: HollowTypography.caption
-                  .copyWith(color: hollow.textSecondary)),
+          const SettingsFieldLabel(label: 'Room name'),
           const SizedBox(height: HollowSpacing.xs),
           HollowTextField(
             controller: _nameController,
@@ -503,9 +487,7 @@ class _RoomFormDialogState extends ConsumerState<_RoomFormDialog> {
             ],
           ),
           const SizedBox(height: HollowSpacing.md),
-          Text('Access code (optional)',
-              style: HollowTypography.caption
-                  .copyWith(color: hollow.textSecondary)),
+          const SettingsFieldLabel(label: 'Access code (optional)'),
           const SizedBox(height: HollowSpacing.xs),
           HollowTextField(
             controller: _codeController,
@@ -542,8 +524,8 @@ class _RoomFormDialogState extends ConsumerState<_RoomFormDialog> {
           child: const Text('Cancel'),
         ),
         HollowButton.filled(
-          onPressed:
-              _nameController.text.trim().isEmpty || _saving ? null : _submit,
+          loading: _saving,
+          onPressed: _nameController.text.trim().isEmpty ? null : _submit,
           child: Text(_isEdit ? 'Save' : 'Create'),
         ),
       ],
@@ -623,16 +605,13 @@ class _JoinConferenceDialogState extends ConsumerState<_JoinConferenceDialog> {
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
     return HollowDialog(
-      title: 'Join a Meeting',
+      title: 'Join a meeting',
+      width: 420,
       content: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
-            'Paste a meeting invite link or its id.',
-            style:
-                HollowTypography.body.copyWith(color: hollow.textSecondary),
-          ),
+          const HollowDialogText('Paste a meeting invite link or its id.'),
           const SizedBox(height: HollowSpacing.md),
           HollowTextField(
             controller: _controller,
@@ -691,18 +670,14 @@ class _AccessCodeDialogState extends State<_AccessCodeDialog> {
 
   @override
   Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
     return HollowDialog(
-      title: 'Access Code',
+      title: 'Access code',
+      width: 420,
       content: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
-            'This meeting requires an access code.',
-            style:
-                HollowTypography.body.copyWith(color: hollow.textSecondary),
-          ),
+          const HollowDialogText('This meeting requires an access code.'),
           const SizedBox(height: HollowSpacing.md),
           HollowTextField(
             controller: _controller,
@@ -1370,32 +1345,15 @@ class _ParticipantRow extends ConsumerWidget {
 
   Future<void> _confirmKick(
       BuildContext context, WidgetRef ref, String name) async {
-    final confirmed = await showHollowDialog<bool>(
+    final confirmed = await showHollowConfirm(
       context: context,
-      builder: (dialogContext) {
-        final hollow = HollowTheme.of(dialogContext);
-        return HollowDialog(
-          title: 'Remove from meeting?',
-          content: Text(
-            '$name will be removed and can only rejoin through the '
-            'waiting room.',
-            style:
-                HollowTypography.body.copyWith(color: hollow.textSecondary),
-          ),
-          actions: [
-            HollowButton.ghost(
-              onPressed: () => Navigator.of(dialogContext).pop(false),
-              child: const Text('Cancel'),
-            ),
-            HollowButton.danger(
-              onPressed: () => Navigator.of(dialogContext).pop(true),
-              child: const Text('Remove'),
-            ),
-          ],
-        );
-      },
+      title: 'Remove from meeting?',
+      message: '$name will be removed and can only rejoin through the '
+          'waiting room.',
+      confirmLabel: 'Remove',
+      destructive: true,
     );
-    if (confirmed == true) {
+    if (confirmed) {
       await ref.read(conferenceProvider.notifier).kick(peerId);
     }
   }

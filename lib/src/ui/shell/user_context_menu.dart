@@ -24,7 +24,6 @@ import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
-import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_menu.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/profile_card_popup.dart';
@@ -422,29 +421,15 @@ Future<void> _copyUserId(BuildContext context, String master) async {
 
 Future<void> _confirmRemoveFriend(
     BuildContext context, WidgetRef ref, String master, String name) async {
-  final confirmed = await showHollowDialog<bool>(
+  final confirmed = await showHollowConfirm(
     context: context,
-    builder: (ctx) => HollowDialog(
-      title: 'Remove $name?',
-      content: Text(
-        'You will both drop off each other\'s friend list. Your conversation '
-        'stays on this device.',
-        style: HollowTypography.body
-            .copyWith(color: HollowTheme.of(ctx).textSecondary),
-      ),
-      actions: [
-        HollowButton.ghost(
-          onPressed: () => Navigator.of(ctx).pop(false),
-          child: const Text('Cancel'),
-        ),
-        HollowButton.danger(
-          onPressed: () => Navigator.of(ctx).pop(true),
-          child: const Text('Remove'),
-        ),
-      ],
-    ),
+    title: 'Remove $name?',
+    message: "You will both drop off each other's friend list. Your "
+        'conversation stays on this device.',
+    confirmLabel: 'Remove',
+    destructive: true,
   );
-  if (confirmed != true || !context.mounted) return;
+  if (!confirmed || !context.mounted) return;
   try {
     await ref.read(friendsProvider.notifier).removeFriend(master);
     if (context.mounted) {

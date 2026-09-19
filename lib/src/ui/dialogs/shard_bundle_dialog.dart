@@ -122,21 +122,20 @@ class _ExportShardsDialogState extends State<_ExportShardsDialog> {
     final hollow = HollowTheme.of(context);
 
     return HollowDialog(
-      title: 'Export Shards',
+      title: 'Export shards',
       content: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
             children: [
-              Icon(LucideIcons.server, size: 16, color: hollow.accent),
+              Icon(LucideIcons.server, size: 16, color: hollow.textSecondary),
               const SizedBox(width: HollowSpacing.sm),
               Expanded(
                 child: Text(
                   widget.serverName,
-                  style: HollowTypography.body.copyWith(
+                  style: HollowTypography.label.copyWith(
                     color: hollow.textPrimary,
-                    fontWeight: FontWeight.w600,
                   ),
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
@@ -145,14 +144,10 @@ class _ExportShardsDialogState extends State<_ExportShardsDialog> {
             ],
           ),
           const SizedBox(height: HollowSpacing.md),
-          Text(
+          HollowDialogText(
             'Export ${widget.shardCount} vault shards as a .hollow-shards bundle. '
             'Share this file with other ex-members so they can import your '
             'shards and reconstruct files.',
-            style: HollowTypography.caption.copyWith(
-              color: hollow.textSecondary,
-              fontSize: 12,
-            ),
           ),
         ],
       ),
@@ -161,7 +156,6 @@ class _ExportShardsDialogState extends State<_ExportShardsDialog> {
           onPressed: _exporting ? null : () => Navigator.of(context).pop(),
           child: const Text('Cancel'),
         ),
-        const SizedBox(width: HollowSpacing.sm),
         HollowButton.filled(
           onPressed: _exporting ? null : _export,
           loading: _exporting,
@@ -241,32 +235,21 @@ class _ImportShardsDialogState extends State<_ImportShardsDialog> {
     }
 
     return HollowDialog(
-      title: 'Import Shards',
-      content: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            'Select a .hollow-shards bundle from another ex-member. '
-            'New manifests and shards will be imported into your local vault.',
-            style: HollowTypography.caption.copyWith(
-              color: hollow.textSecondary,
-              fontSize: 12,
-            ),
-          ),
-        ],
+      title: 'Import shards',
+      content: const HollowDialogText(
+        'Select a .hollow-shards bundle from another ex-member. '
+        'New manifests and shards will be imported into your local vault.',
       ),
       actions: [
         HollowButton.ghost(
           onPressed: _importing ? null : () => Navigator.of(context).pop(),
           child: const Text('Cancel'),
         ),
-        const SizedBox(width: HollowSpacing.sm),
         HollowButton.filled(
           onPressed: _importing ? null : _pickAndImport,
           loading: _importing,
           icon: const Icon(LucideIcons.upload, size: 14),
-          child: const Text('Select File'),
+          child: const Text('Select file'),
         ),
       ],
     );
@@ -275,7 +258,8 @@ class _ImportShardsDialogState extends State<_ImportShardsDialog> {
   Widget _buildResult(HollowTheme hollow) {
     final r = _result!;
     return HollowDialog(
-      title: 'Import Complete',
+      title: 'Import complete',
+      showClose: true,
       content: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -304,37 +288,23 @@ class _ImportShardsDialogState extends State<_ImportShardsDialog> {
             hollow: hollow,
           ),
           const SizedBox(height: HollowSpacing.sm),
-          Container(
-            padding: const EdgeInsets.all(HollowSpacing.md),
-            decoration: BoxDecoration(
-              color: const Color(0xFF4CAF50).withValues(alpha: 0.08),
-              borderRadius: BorderRadius.circular(hollow.radiusMd),
-            ),
-            child: Row(
-              children: [
-                const Icon(LucideIcons.checkCircle, size: 16, color: Color(0xFF4CAF50)),
-                const SizedBox(width: HollowSpacing.sm),
-                Expanded(
-                  child: Text(
-                    '${r.newReconstructable} files now reconstructable',
-                    style: HollowTypography.body.copyWith(
-                      color: const Color(0xFF4CAF50),
-                      fontSize: 13,
-                      fontWeight: FontWeight.w600,
-                    ),
+          const SizedBox(height: HollowSpacing.sm),
+          Row(
+            children: [
+              Icon(LucideIcons.checkCircle, size: 16, color: hollow.success),
+              const SizedBox(width: HollowSpacing.sm),
+              Expanded(
+                child: Text(
+                  '${r.newReconstructable} files now reconstructable',
+                  style: HollowTypography.label.copyWith(
+                    color: hollow.textPrimary,
                   ),
                 ),
-              ],
-            ),
+              ),
+            ],
           ),
         ],
       ),
-      actions: [
-        HollowButton.filled(
-          onPressed: () => Navigator.of(context).pop(),
-          child: const Text('Done'),
-        ),
-      ],
     );
   }
 }
@@ -357,17 +327,14 @@ class _ResultRow extends StatelessWidget {
       children: [
         Text(
           label,
-          style: HollowTypography.caption.copyWith(
+          style: HollowTypography.bodySmall.copyWith(
             color: hollow.textSecondary,
-            fontSize: 12,
           ),
         ),
         Text(
           value,
-          style: HollowTypography.body.copyWith(
+          style: HollowTypography.label.copyWith(
             color: hollow.textPrimary,
-            fontSize: 13,
-            fontWeight: FontWeight.w500,
           ),
         ),
       ],

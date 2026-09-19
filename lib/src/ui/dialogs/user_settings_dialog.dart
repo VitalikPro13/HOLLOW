@@ -15,6 +15,7 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/animated_gif_image.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
+import 'package:hollow/src/ui/components/hollow_divider.dart';
 import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
@@ -311,7 +312,7 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
       context: context,
       imageBytes: raw,
       aspectRatio: 1.0,
-      title: 'Crop Avatar',
+      title: 'Crop avatar',
     );
     if (cropped == null || !mounted) return;
 
@@ -377,7 +378,7 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
       context: context,
       imageBytes: raw,
       aspectRatio: 2.5,
-      title: 'Crop Banner',
+      title: 'Crop banner',
     );
     if (cropped == null || !mounted) return;
 
@@ -641,20 +642,12 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
-    final radius = BorderRadius.circular(hollow.radiusLg);
     final screen = MediaQuery.of(context).size;
 
     // Grows with the window rather than sitting at a fixed size, which left the
-    // rail and the cards cramped.
+    // rail and the cards cramped. The surface clamps both to the viewport.
     final dialogWidth = screen.width * 0.9 < 920.0 ? screen.width * 0.9 : 920.0;
     final dialogHeight = screen.height * 0.86 < 680.0 ? screen.height * 0.86 : 680.0;
-
-    // The comfortable minimum must still yield to the viewport: in
-    // BoxConstraints a min LARGER than the max wins, so a flat minimum in a
-    // short viewport pushes the close button off screen and locks the user out
-    // at a high interface scale.
-    final dialogMinWidth = dialogWidth < 360.0 ? dialogWidth : 360.0;
-    final dialogMinHeight = dialogHeight < 420.0 ? dialogHeight : 420.0;
 
     final filtered = _filteredCategories;
     // Falls back to the first match so the content area never goes blank while
@@ -662,78 +655,50 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
     final activeForContent =
         filtered.contains(_activeTab) ? _activeTab : (filtered.isNotEmpty ? filtered.first : _activeTab);
 
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.all(HollowSpacing.lg),
-        child: ConstrainedBox(
-          constraints: BoxConstraints(
-            maxWidth: dialogWidth,
-            maxHeight: dialogHeight,
-            minHeight: dialogMinHeight,
-            minWidth: dialogMinWidth,
-          ),
-          child: Material(
-            color: Colors.transparent,
-            child: Container(
-              clipBehavior: Clip.antiAlias,
-              decoration: BoxDecoration(
-                color: hollow.overlay,
-                borderRadius: radius,
-                border: Border.all(color: hollow.border),
-                boxShadow: [
-                  BoxShadow(
-                    color: Colors.black.withValues(alpha: 0.2),
-                    blurRadius: 24,
-                  ),
-                ],
-              ),
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  // Own traversal group, so Tab cycles the categories
-                  // separately from the content pane.
-                  FocusTraversalGroup(
-                    policy: ReadingOrderTraversalPolicy(),
-                    child: _buildRail(hollow, filtered, activeForContent),
-                  ),
+    return HollowDialogSurface(
+      width: dialogWidth,
+      maxWidth: dialogWidth,
+      maxHeight: dialogHeight,
+      padded: false,
+      child: SizedBox(
+        height: dialogHeight,
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            // Own traversal group, so Tab cycles the categories
+            // separately from the content pane.
+            FocusTraversalGroup(
+              policy: ReadingOrderTraversalPolicy(),
+              child: _buildRail(hollow, filtered, activeForContent),
+            ),
 
-                  Container(width: 1, color: hollow.border),
+            const HollowVerticalDivider(),
 
-                  // Own traversal group, so Tab stays WITHIN the active pane
-                  // instead of leaking back into the category rail. The pane
-                  // sits on the canvas, as content does in the app, so its
-                  // cards read as raised rather than sunk into the dialog.
-                  Expanded(
-                    child: ColoredBox(
-                      color: hollow.background,
-                      child: FocusTraversalGroup(
-                      policy: ReadingOrderTraversalPolicy(),
-                      child: Stack(
-                        children: [
-                          _buildCategoryContent(hollow, activeForContent),
-                          Positioned(
-                            top: HollowSpacing.sm,
-                            right: HollowSpacing.sm,
-                            child: HollowPressable(
-                              onTap: () => Navigator.of(context).pop(),
-                              subtle: true,
-                              borderRadius:
-                                  BorderRadius.circular(hollow.radiusMd),
-                              padding: const EdgeInsets.all(HollowSpacing.xs),
-                              semanticLabel: 'Close',
-                              child: Icon(LucideIcons.x,
-                                  size: 18, color: hollow.textSecondary),
-                            ),
-                          ),
-                        ],
+            // Own traversal group, so Tab stays WITHIN the active pane
+            // instead of leaking back into the category rail. The pane
+            // sits on the canvas, as content does in the app, so its
+            // cards read as raised rather than sunk into the dialog.
+            Expanded(
+              child: ColoredBox(
+                color: hollow.background,
+                child: FocusTraversalGroup(
+                  policy: ReadingOrderTraversalPolicy(),
+                  child: Stack(
+                    children: [
+                      _buildCategoryContent(hollow, activeForContent),
+                      Positioned(
+                        top: HollowSpacing.sm,
+                        right: HollowSpacing.sm,
+                        child: HollowDialogCloseButton(
+                          onPressed: () => Navigator.of(context).pop(),
+                        ),
                       ),
-                    ),
-                    ),
+                    ],
                   ),
-                ],
+                ),
               ),
             ),
-          ),
+          ],
         ),
       ),
     );
@@ -758,7 +723,6 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
               'Settings',
               style: HollowTypography.heading.copyWith(
                 color: hollow.textPrimary,
-                fontSize: 18,
               ),
             ),
           ),

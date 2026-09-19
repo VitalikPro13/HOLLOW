@@ -5,7 +5,6 @@ import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 Future<String?> showLicenseKeyDialog(
   BuildContext context, {
@@ -86,106 +85,39 @@ class _LicenseKeyContentState extends State<_LicenseKeyContent> {
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
-    final radius = BorderRadius.circular(hollow.radiusLg);
 
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.all(HollowSpacing.xl),
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(
-            maxWidth: 440,
-            minWidth: 340,
+    return HollowDialog(
+      title: 'License key required',
+      width: 420,
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          const HollowDialogText('Enter your beta access key to continue.'),
+          const SizedBox(height: HollowSpacing.lg),
+          HollowTextField(
+            controller: _controller,
+            hintText: 'HLLW-XXXX-XXXX-XXXX',
+            onChanged: _onChanged,
+            onSubmitted: (_) => _onSubmit(),
+            autofocus: true,
+            style: HollowTypography.mono.copyWith(color: hollow.textPrimary),
           ),
-          child: Material(
-            color: Colors.transparent,
-            child: Container(
-              decoration: BoxDecoration(
-                color: hollow.overlay,
-                borderRadius: radius,
-                border: Border.all(
-                  color: hollow.accent.withValues(alpha: 0.15),
-                ),
-                boxShadow: [
-                  BoxShadow(
-                    color: Colors.black.withValues(alpha: 0.3),
-                    blurRadius: 32,
-                  ),
-                ],
-              ),
-              padding: const EdgeInsets.all(HollowSpacing.xl),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Container(
-                    width: 56,
-                    height: 56,
-                    decoration: BoxDecoration(
-                      color: hollow.accent.withValues(alpha: 0.1),
-                      borderRadius: BorderRadius.circular(hollow.radiusMd),
-                    ),
-                    child: Icon(
-                      LucideIcons.keyRound,
-                      size: 28,
-                      color: hollow.accent,
-                    ),
-                  ),
-
-                  const SizedBox(height: HollowSpacing.lg),
-
-                  Text(
-                    'License Key Required',
-                    style: HollowTypography.heading.copyWith(
-                      color: hollow.textPrimary,
-                    ),
-                  ),
-
-                  const SizedBox(height: HollowSpacing.xs),
-
-                  Text(
-                    'Enter your beta access key to continue',
-                    style: HollowTypography.body.copyWith(
-                      color: hollow.textSecondary,
-                    ),
-                    textAlign: TextAlign.center,
-                  ),
-
-                  const SizedBox(height: HollowSpacing.xl),
-
-                  HollowTextField(
-                    controller: _controller,
-                    hintText: 'HLLW-XXXX-XXXX-XXXX',
-                    onChanged: _onChanged,
-                    onSubmitted: (_) => _onSubmit(),
-                    autofocus: true,
-                    style: HollowTypography.body.copyWith(
-                      color: hollow.textPrimary,
-                      fontFamily: 'monospace',
-                    ),
-                  ),
-
-                  if (_error != null) ...[
-                    const SizedBox(height: HollowSpacing.sm),
-                    Text(
-                      _error!,
-                      style: HollowTypography.caption.copyWith(
-                        color: hollow.error,
-                      ),
-                    ),
-                  ],
-
-                  const SizedBox(height: HollowSpacing.lg),
-
-                  HollowButton.filled(
-                    onPressed: _onSubmit,
-                    expand: true,
-                    child: const Text('Activate'),
-                  ),
-                ],
-              ),
+          if (_error != null) ...[
+            const SizedBox(height: HollowSpacing.sm),
+            Text(
+              _error!,
+              style: HollowTypography.caption.copyWith(color: hollow.error),
             ),
-          ),
-        ),
+          ],
+        ],
       ),
+      actions: [
+        HollowButton.filled(
+          onPressed: _onSubmit,
+          child: const Text('Activate'),
+        ),
+      ],
     );
   }
 }

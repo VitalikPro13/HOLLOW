@@ -59,44 +59,6 @@ Future<void> _run(
   }
 }
 
-/// A confirm with a ghost Cancel and one accented (or destructive) action.
-Future<bool> _confirm(
-  BuildContext context, {
-  required String title,
-  required String message,
-  required String confirmLabel,
-  bool isDanger = false,
-}) async {
-  final confirmed = await showHollowDialog<bool>(
-    context: context,
-    builder: (ctx) => HollowDialog(
-      title: title,
-      content: Text(
-        message,
-        style: HollowTypography.body
-            .copyWith(color: HollowTheme.of(ctx).textSecondary),
-      ),
-      actions: [
-        HollowButton.ghost(
-          onPressed: () => Navigator.of(ctx).pop(false),
-          child: const Text('Cancel'),
-        ),
-        if (isDanger)
-          HollowButton.danger(
-            onPressed: () => Navigator.of(ctx).pop(true),
-            child: Text(confirmLabel),
-          )
-        else
-          HollowButton.filled(
-            onPressed: () => Navigator.of(ctx).pop(true),
-            child: Text(confirmLabel),
-          ),
-      ],
-    ),
-  );
-  return confirmed ?? false;
-}
-
 /// Change [peerId]'s role to [newRole] after a confirm.
 Future<void> showChangeRoleDialog(
   BuildContext context,
@@ -107,8 +69,8 @@ Future<void> showChangeRoleDialog(
   required String newRole,
 }) async {
   final roleName = roleDisplayName(newRole);
-  final ok = await _confirm(
-    context,
+  final ok = await showHollowConfirm(
+    context: context,
     title: 'Change role',
     message: 'Change $displayName\'s role to $roleName?',
     confirmLabel: 'Change',
@@ -136,13 +98,13 @@ Future<void> showKickMemberDialog(
   required String peerId,
   required String displayName,
 }) async {
-  final ok = await _confirm(
-    context,
+  final ok = await showHollowConfirm(
+    context: context,
     title: 'Kick member',
     message: 'Are you sure you want to kick $displayName from the server? '
         'They can rejoin with an invite.',
     confirmLabel: 'Kick',
-    isDanger: true,
+    destructive: true,
   );
   if (!ok || !context.mounted) return;
   await _run(
@@ -163,13 +125,13 @@ Future<void> showBanMemberDialog(
   required String peerId,
   required String displayName,
 }) async {
-  final ok = await _confirm(
-    context,
+  final ok = await showHollowConfirm(
+    context: context,
     title: 'Ban member',
     message: 'Are you sure you want to ban $displayName? They will be removed '
         'and unable to rejoin.',
     confirmLabel: 'Ban',
-    isDanger: true,
+    destructive: true,
   );
   if (!ok || !context.mounted) return;
   await _run(
@@ -203,11 +165,9 @@ Future<void> showMuteMemberDialog(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            Text(
+            HollowDialogText(
               '$displayName will not be able to send messages in any channel '
               'of this server. How long?',
-              style:
-                  HollowTypography.body.copyWith(color: hollow.textSecondary),
             ),
             const SizedBox(height: HollowSpacing.md),
             for (final option in kMuteDurationOptions)
