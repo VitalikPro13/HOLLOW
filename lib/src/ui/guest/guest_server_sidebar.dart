@@ -15,6 +15,7 @@ import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/ui/chat/hollow_link_utils.dart';
 import 'package:hollow/src/ui/animations/selection_shimmer.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
+import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/hollow_menu.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
@@ -167,36 +168,14 @@ class _GuestServerSidebarState extends ConsumerState<GuestServerSidebar> {
 
           Expanded(
             child: servers.isEmpty
-                ? Center(
-                    child: Padding(
-                      padding: const EdgeInsets.all(HollowSpacing.xl),
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(
-                            LucideIcons.globe,
-                            size: 48,
-                            color: hollow.textSecondary.withValues(alpha: 0.3),
-                          ),
-                          const SizedBox(height: HollowSpacing.md),
-                          Text(
-                            'Add a server to browse\npublic channels',
-                            textAlign: TextAlign.center,
-                            style: TextStyle(
-                              color: hollow.textSecondary,
-                              fontSize: 13,
-                            ),
-                          ),
-                          const SizedBox(height: HollowSpacing.md),
-                          HollowButton.ghost(
-                            compact: true,
-                            icon: const Icon(LucideIcons.plus, size: 14),
-                            onPressed: () =>
-                                setState(() => _showAddField = true),
-                            child: const Text('Add Server'),
-                          ),
-                        ],
-                      ),
+                ? HollowEmptyState(
+                    glyph: LucideIcons.globe,
+                    title: 'Add a server to browse public channels',
+                    action: HollowButton.ghost(
+                      compact: true,
+                      icon: const Icon(LucideIcons.plus, size: 14),
+                      onPressed: () => setState(() => _showAddField = true),
+                      child: const Text('Add Server'),
                     ),
                   )
                 : ListView.builder(
@@ -509,18 +488,15 @@ class _GuestServerSection extends ConsumerWidget {
     }
 
     if (channels.isEmpty) {
-      return Padding(
-        padding: const EdgeInsets.symmetric(
+      return const Padding(
+        padding: EdgeInsets.symmetric(
           vertical: HollowSpacing.md,
           horizontal: HollowSpacing.lg,
         ),
-        child: Text(
-          'No public channels found.\nMembers may be offline.',
-          textAlign: TextAlign.center,
-          style: TextStyle(
-            color: hollow.textSecondary,
-            fontSize: 12,
-          ),
+        child: HollowEmptyState(
+          title: 'No public channels found',
+          description: 'Members may be offline.',
+          dense: true,
         ),
       );
     }

@@ -25,6 +25,7 @@ import '../components/edge_scroll_row.dart';
 import '../components/overlay_anchor.dart';
 import '../components/popup_animator.dart';
 import 'package:hollow/src/ui/components/hollow_divider.dart';
+import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/overlay_hosts.dart';
 
 /// The GIF picker (issue #26): Popular, Favourites and Recent plus search
@@ -531,7 +532,7 @@ class _GifPickerBodyState extends ConsumerState<GifPickerBody> {
         ),
       );
     }
-    if (_items.isEmpty) return _emptyHint(hollow, 'No GIFs found');
+    if (_items.isEmpty) return const HollowEmptyState(title: 'No GIFs found');
     return _grid(hollow, _items);
   }
 
@@ -544,11 +545,15 @@ class _GifPickerBodyState extends ConsumerState<GifPickerBody> {
         _listRow(hollow, library),
         Expanded(
           child: saved.isEmpty
-              ? _emptyHint(
-                  hollow,
-                  _collectionId == null
-                      ? 'No favourites yet\nTap the star on any GIF to keep it here'
-                      : 'This list is empty\nRight-click a favourite to add it')
+              ? _collectionId == null
+                  ? const HollowEmptyState(
+                      title: 'No favourites yet',
+                      description: 'Tap the star on any GIF to keep it here.',
+                    )
+                  : const HollowEmptyState(
+                      title: 'This list is empty',
+                      description: 'Right-click a favourite to add it.',
+                    )
               : _grid(hollow, [for (final g in saved) g.toItem(base)],
                   inFavorites: true),
         ),
@@ -696,8 +701,10 @@ class _GifPickerBodyState extends ConsumerState<GifPickerBody> {
     final recents = ref.watch(gifLibraryProvider).visibleRecents;
     final base = ref.watch(gifProxyUrlProvider);
     if (recents.isEmpty) {
-      return _emptyHint(
-          hollow, 'Nothing here yet\nGIFs you send show up here');
+      return const HollowEmptyState(
+        title: 'Nothing here yet',
+        description: 'GIFs you send show up here.',
+      );
     }
     return _grid(hollow, [for (final g in recents) g.toItem(base)],
         inRecents: true);
@@ -828,19 +835,6 @@ class _GifPickerBodyState extends ConsumerState<GifPickerBody> {
             onTap: () => notifier.removeRecent(item.id),
           ),
       ],
-    );
-  }
-
-  Widget _emptyHint(HollowTheme hollow, String text) {
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.all(HollowSpacing.md),
-        child: Text(
-          text,
-          textAlign: TextAlign.center,
-          style: HollowTypography.caption.copyWith(color: hollow.textTertiary),
-        ),
-      ),
     );
   }
 }

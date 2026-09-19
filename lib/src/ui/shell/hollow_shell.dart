@@ -69,6 +69,7 @@ import 'package:hollow/src/ui/chat/chat_pane.dart';
 import 'package:hollow/src/ui/chat/voice_channel_pane.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
+import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
@@ -1568,30 +1569,6 @@ class _HollowShellState extends ConsumerState<HollowShell>
     );
   }
 
-  /// Classic's resting state: nothing selected in the left panels, so the
-  /// centre pane stays empty.
-  Widget _buildEmptyChat(HollowTheme hollow) {
-    return Center(
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(
-            LucideIcons.messageSquare,
-            size: 64,
-            color: hollow.textSecondary.withValues(alpha: 0.3),
-          ),
-          const SizedBox(height: HollowSpacing.lg),
-          Text(
-            'Select a peer to start chatting',
-            style: HollowTypography.body.copyWith(
-              color: hollow.textSecondary,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
   Widget _buildChannelPlaceholder(HollowTheme hollow, ChannelInfo? channel) {
     return Column(
       children: [
@@ -1638,27 +1615,10 @@ class _HollowShellState extends ConsumerState<HollowShell>
           ),
         ),
         Expanded(
-          child: Center(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Icon(LucideIcons.hash,
-                    size: 64,
-                    color: hollow.textSecondary.withValues(alpha: 0.3)),
-                const SizedBox(height: HollowSpacing.lg),
-                Text(
-                  'Welcome to #${channel?.name ?? "general"}',
-                  style: HollowTypography.heading
-                      .copyWith(color: hollow.textPrimary),
-                ),
-                const SizedBox(height: HollowSpacing.sm),
-                Text(
-                  'Channel messages coming soon.',
-                  style: HollowTypography.body
-                      .copyWith(color: hollow.textSecondary),
-                ),
-              ],
-            ),
+          child: HollowEmptyState(
+            glyph: LucideIcons.hash,
+            title: 'Welcome to #${channel?.name ?? "general"}',
+            description: 'Channel messages coming soon.',
           ),
         ),
       ],
@@ -1724,7 +1684,10 @@ class _HollowShellState extends ConsumerState<HollowShell>
     if (selectedPeerId == null) {
       return ref.watch(layoutModeProvider) == LayoutMode.dock
           ? const HomeDashboard()
-          : _buildEmptyChat(hollow);
+          : const HollowEmptyState(
+              glyph: LucideIcons.messageSquare,
+              title: 'Select a peer to start chatting',
+            );
     }
     return ChatPane(
       key: ValueKey(selectedPeerId),
@@ -2683,28 +2646,9 @@ class _SplitChatAreaState extends ConsumerState<_SplitChatArea> {
         splitPaneIndex: 0,
       );
     }
-    return _buildSplitEmptyChat(hollow);
-  }
-
-  Widget _buildSplitEmptyChat(HollowTheme hollow) {
-    return Center(
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(
-            LucideIcons.messageSquare,
-            size: 48,
-            color: hollow.textSecondary.withValues(alpha: 0.3),
-          ),
-          const SizedBox(height: HollowSpacing.md),
-          Text(
-            'Select a conversation',
-            style: HollowTypography.body.copyWith(
-              color: hollow.textSecondary,
-            ),
-          ),
-        ],
-      ),
+    return const HollowEmptyState(
+      glyph: LucideIcons.messageSquare,
+      title: 'Select a conversation',
     );
   }
 }
@@ -2838,24 +2782,9 @@ class _RightPaneChatContent extends ConsumerWidget {
 
     return Container(
       color: hollow.background,
-      child: Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(
-              LucideIcons.columns,
-              size: 48,
-              color: hollow.textSecondary.withValues(alpha: 0.3),
-            ),
-            const SizedBox(height: HollowSpacing.md),
-            Text(
-              'Select a conversation',
-              style: HollowTypography.body.copyWith(
-                color: hollow.textSecondary,
-              ),
-            ),
-          ],
-        ),
+      child: const HollowEmptyState(
+        glyph: LucideIcons.columns,
+        title: 'Select a conversation',
       ),
     );
   }

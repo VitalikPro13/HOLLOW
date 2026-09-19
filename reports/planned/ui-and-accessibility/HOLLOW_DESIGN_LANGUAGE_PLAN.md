@@ -1,12 +1,12 @@
 # Hollow design language and the grand redesign
 
-**Status:** IN PROGRESS, sessions 1 to 4 done 2026-09-18 (decisions applied, sweeps 3c and 4 done). Direction agreed 2026-09-14, research the same day.
+**Status:** IN PROGRESS, sessions 1 to 5 done 2026-09-19 (decisions applied, sweeps 3c, 4 and 5 done). Direction agreed 2026-09-14, research the same day.
 
 **Read this section first in a new session.** It is the handoff: what exists, what it changed, and the next thing to pick up. Everything below section 0 is the original plan, kept for its research digest and its screen-by-screen program; where it and this section disagree, this section is right.
 
 ---
 
-## STATE OF PLAY (2026-09-18)
+## STATE OF PLAY (2026-09-19)
 
 ### What shipped
 
@@ -60,7 +60,18 @@ New tokens: `HollowTypography.micro` (10/500, absorbs 155 orphaned sites) and `m
   - **Trap:** the theme's `DividerThemeData(space: 1)` makes a bare `Divider(color: ...)` 1 px tall, NOT Material's 16. A first pass wrapped those sites in 8 px of padding and the Overview tab grew 16 px per divider; the diff against the before shots caught it.
   - Kept, not hairlines: the annotation toolbar's `_Divider` (exempt overlay), `hollow_shell._SplitDivider` (a drag handle), `UnreadDivider`, `HollowMenuDivider`.
 
-Guard baselines moved: local-label-class **36 to 28 to 0**, upper-case-label 42 to 0, letter-spacing 57 to 0, raw-divider 51 to 41 to 0, font-size 744 to 703, gradient 23 to 21, font-size 824 to 809 to 791 to 785, edge-insets 266 to 257 to 248 to 236, radius 177 to 175 to 168, letter-spacing 66 to 64 to 63, sized-box-gap 202 to 192 to 182.
+- **Sweep 5, empty states (session 5, 2026-09-19).** `HollowEmptyState` had zero uses; now every empty list, pane and picker grid in `lib/src/ui` renders through it (desktop shell, chat panes, the three pickers, guest, help, settings, archive, share, shop, dialogs, mobile: about 80 sites in 55 files). New guard rule `local-empty-state` (a `*Empty*` class or `_xEmpty` builder outside components, `OrEmpty` excepted) at **0**, a hard ban.
+  - **`dense: true`** added to the component: a list INSIDE a settings card or a section (blocked users, verified contacts, muted conversations, owned art, marks, "No matching settings"), start-aligned, no own padding, title `bodySmall`, no glyph (asserted). The default stays the centred pane. Widget test + a design-sheet row.
+  - Deleted: `_buildEmptyState` (share, conferences), `_buildEmptyDmState`, `_buildEmptyChannelState`, `_buildEmptyChat`, `_buildSplitEmptyChat`, the three pickers' `_emptyHint`, owned art's `_EmptyState`, and `sidebar/empty_peer_list.dart` (no callers).
+  - The 40 to 64 px half-alpha icons became the 24 px `textTertiary` glyph; heading-size empty titles (mobile chats, mobile conferences, channel start "Welcome to #name") became the body title. Copy kept, only split: a `\n` or second sentence became `description`, no terminal period or "!" on titles ("Say hello!" dropped). Mobile wording matches desktop where the state is the same.
+  - New copy an agent wrote, worth Vitalik's eye: download manager "Downloaded files and shard activity show up here.", showcase search "Check the spelling or try a shorter name.", mobile vault "Join a server to see vault files.", mobile imported archives "Tap Load Archive above.", owned art title "No art yet".
+  - Left alone on purpose: toasts, errors beside a trigger, menu rows, status lines (recovery phrase, audio diagnostic), the "No vault files" row status, and the screen-share "Waiting for / Connecting to screen share" placeholders on the black video surface (connection states, not empty ones).
+  - Scenario `design_sweep5_empty.json` (desktop, 21 shots: conferences, share, archive, friends panel tabs, picker searches, server labels/emotes, settings search). A `semantics:Close` target matches the WINDOW's close button first and quits the app; close panels with `escape`.
+  - Mobile verified on the mini with `fleet/design_sweep5_mobile.json` (fresh peer: conferences, friends, the four Archive tabs, Verified Contacts, Blocked Users, light chats), before and after. The render caught the one real bug: a one-line dense state is only as wide as its text, so a centring parent centred it (mobile Blocked Users sat mid-screen beside a start-aligned Verified Contacts). Dense now claims the width through `Align(topStart, heightFactor: 1)`, which still shrink-wraps where the width is unbounded; a widget test pins it. Settings rows below the fold need a `scroll` on `text:Appearance` before the tap.
+  - Pairs as `cmp_*.png` (before | after) from a small PIL stacker, desktop `e5-*` and mobile `m5-*`.
+  - **Left for later:** "Manage Labels" in server settings still has an icon beside its heading.
+
+Guard baselines moved: font-size 703 to 689 and sized-box-gap 178 to 176 (sweep 5), local-label-class **36 to 28 to 0**, upper-case-label 42 to 0, letter-spacing 57 to 0, raw-divider 51 to 41 to 0, font-size 744 to 703, gradient 23 to 21, font-size 824 to 809 to 791 to 785, edge-insets 266 to 257 to 248 to 236, radius 177 to 175 to 168, letter-spacing 66 to 64 to 63, sized-box-gap 202 to 192 to 182.
 
 ### Four bugs the work surfaced, all fixed
 
@@ -77,12 +88,12 @@ Every sweep: probe screenshots **before**, change, probe screenshots **after**, 
 
 ### Where to pick up next
 
-**Sweeps 3 to 4 are done** (session 4). **Next session starts at sweep 5.**
+**Sweeps 3 to 5 are done** (sessions 4 and 5). **Next session starts at sweep 6.**
 
 1. ~~Sweep 3c~~ done, see above.
 2. ~~Sweep 4, dividers~~ done, see above.
-3. **Sweep 5: the ~60 inline empty states** onto `HollowEmptyState`. START HERE.
-4. **Sweeps 6 to 9:** `showHollowSheet()` + one Hollow spinner (new primitives, then their sweeps), remaining Material `Switch` / `Slider`, the dialog pass (28 files), the filled-button audit.
+3. ~~Sweep 5, empty states~~ done, see above.
+4. **Sweeps 6 to 9:** START HERE with `showHollowSheet()` + one Hollow spinner (new primitives, then their sweeps), remaining Material `Switch` / `Slider`, the dialog pass (28 files), the filled-button audit.
 5. **Then the screen work**, phases 2 onward below, with the Shop's per-kind card shapes (verdict 9) and the compact message mode (verdict 8) inside it.
 
 ### Session 3 (2026-09-18): decisions rendered, picked and applied

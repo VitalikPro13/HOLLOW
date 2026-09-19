@@ -7,6 +7,7 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
+import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/dialogs/verify_contact_dialog.dart';
 import 'package:hollow/src/ui/settings/settings_shared.dart';
@@ -132,12 +133,11 @@ class VerifiedContactsCard extends ConsumerWidget {
       title: 'Verified Contacts',
       children: [
         if (verified.isEmpty)
-          Text(
-            'No verified contacts yet. Open a contact\'s profile and choose '
-            '"Verify contact" to compare safety numbers.',
-            style: HollowTypography.caption.copyWith(
-              color: hollow.textSecondary,
-            ),
+          const HollowEmptyState(
+            dense: true,
+            title: 'No verified contacts yet',
+            description: 'Open a contact\'s profile and choose '
+                '"Verify contact" to compare safety numbers.',
           )
         else ...[
           verifiedContactsIntro(hollow),

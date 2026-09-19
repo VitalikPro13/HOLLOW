@@ -18,6 +18,7 @@ import 'package:hollow/src/ui/components/hover_scope.dart';
 import 'package:hollow/src/ui/components/hollow_badge.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_chip.dart';
+import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/hollow_tooltip.dart';
@@ -338,13 +339,10 @@ class _ShopDashboardState extends ConsumerState<ShopDashboard> {
   Widget _buildGrid(HollowTheme hollow, shop.ShopCatalog catalog) {
     final listings = catalog.listings.where(_matches).toList();
     if (listings.isEmpty) {
-      return Center(
-        child: Text(
-          catalog.listings.isEmpty
-              ? 'Nothing is on sale yet.'
-              : 'Nothing here yet.',
-          style: HollowTypography.body.copyWith(color: hollow.textSecondary),
-        ),
+      return HollowEmptyState(
+        title: catalog.listings.isEmpty
+            ? 'Nothing is on sale yet'
+            : 'Nothing here yet',
       );
     }
 

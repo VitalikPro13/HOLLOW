@@ -30,6 +30,7 @@ import 'emote_image.dart';
 import 'gif_picker.dart' show GifMenuItem, PickerListDropdown, showGifMenu;
 import 'sticker_pack_card.dart' show kStickerPackExtension;
 import 'package:hollow/src/ui/components/hollow_divider.dart';
+import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/overlay_hosts.dart';
 
 /// Picks an image file and processes it at STICKER bounds (≤512px, ≤512 KB,
@@ -601,11 +602,12 @@ class _StickerPickerBodyState extends ConsumerState<StickerPickerBody> {
           _Cell(hash: s.hash, w: s.w, h: s.h, label: s.name, pack: s.pack),
     ];
     if (cells.isEmpty) {
-      return _emptyHint(
-          hollow,
-          all.isEmpty
-              ? 'No server stickers yet.\nAdmins add them in Server Settings.'
-              : 'No matches');
+      return all.isEmpty
+          ? const HollowEmptyState(
+              title: 'No server stickers yet',
+              description: 'Admins add them in Server Settings.',
+            )
+          : const HollowEmptyState(title: 'No matches');
     }
     return _grid(hollow, cells);
   }
@@ -673,13 +675,19 @@ class _StickerPickerBodyState extends ConsumerState<StickerPickerBody> {
           ),
         Expanded(
           child: cells.isEmpty
-              ? _emptyHint(
-                  hollow,
-                  all.isEmpty
-                      ? 'Your stickers work in every chat.\nUpload artwork, or save some\nfrom the KLIPY tab.'
-                      : filter != null
-                          ? 'This pack is empty.\nUpload into it, or right-click a\nsticker to add it here.'
-                          : 'No matches')
+              ? all.isEmpty
+                  ? const HollowEmptyState(
+                      title: 'Your stickers work in every chat',
+                      description:
+                          'Upload artwork, or save some from the KLIPY tab.',
+                    )
+                  : filter != null
+                      ? const HollowEmptyState(
+                          title: 'This pack is empty',
+                          description: 'Upload into it, or right-click a '
+                              'sticker to add it here.',
+                        )
+                      : const HollowEmptyState(title: 'No matches')
               : _grid(hollow, cells, removable: true),
         ),
         Padding(
@@ -1014,7 +1022,7 @@ class _StickerPickerBodyState extends ConsumerState<StickerPickerBody> {
   Widget _recentTab(HollowTheme hollow) {
     final recents = ref.watch(stickerRecentsProvider);
     if (recents.isEmpty) {
-      return _emptyHint(hollow, 'Stickers you send show up here.');
+      return const HollowEmptyState(title: 'Stickers you send show up here');
     }
     return _grid(
       hollow,
@@ -1052,7 +1060,7 @@ class _StickerPickerBodyState extends ConsumerState<StickerPickerBody> {
       );
     }
     if (_remote.isEmpty) {
-      return _emptyHint(hollow, 'No stickers found');
+      return const HollowEmptyState(title: 'No stickers found');
     }
     return _grid(
       hollow,
@@ -1069,20 +1077,6 @@ class _StickerPickerBodyState extends ConsumerState<StickerPickerBody> {
       savable: true,
     );
   }
-
-  Widget _emptyHint(HollowTheme hollow, String text) => Center(
-        child: Padding(
-          padding: const EdgeInsets.all(HollowSpacing.lg),
-          child: Text(
-            text,
-            textAlign: TextAlign.center,
-            style: HollowTypography.caption.copyWith(
-              color: hollow.textTertiary,
-              height: 1.5,
-            ),
-          ),
-        ),
-      );
 
   Widget _grid(
     HollowTheme hollow,

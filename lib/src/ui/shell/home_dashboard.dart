@@ -26,6 +26,7 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_divider.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
+import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/stat_bar.dart';
 import 'package:hollow/src/ui/animations/startup_reveal.dart';
 import 'package:hollow/src/ui/components/hollow_focus_ring.dart';
@@ -626,27 +627,11 @@ class _RecentConversationsColumn extends ConsumerWidget {
         ),
 
         if (conversations.isEmpty)
-          Expanded(
-            child: Center(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(LucideIcons.messageCircle, size: 40,
-                      color: hollow.textSecondary.withValues(alpha: 0.2)),
-                  const SizedBox(height: HollowSpacing.md),
-                  Text(
-                    'No conversations yet',
-                    style: HollowTypography.body
-                        .copyWith(color: hollow.textSecondary),
-                  ),
-                  const SizedBox(height: HollowSpacing.xs),
-                  Text(
-                    'Add a friend to start chatting',
-                    style: HollowTypography.caption
-                        .copyWith(color: hollow.textSecondary),
-                  ),
-                ],
-              ),
+          const Expanded(
+            child: HollowEmptyState(
+              glyph: LucideIcons.messageCircle,
+              title: 'No conversations yet',
+              description: 'Add a friend to start chatting.',
             ),
           )
         else
@@ -1020,17 +1005,11 @@ class _NetworkColumn extends ConsumerWidget {
           ),
 
         if (accepted.isEmpty)
-          Padding(
-            padding: const EdgeInsets.symmetric(
+          const Padding(
+            padding: EdgeInsets.symmetric(
               vertical: HollowSpacing.sm,
             ),
-            child: Text(
-              'No friends added',
-              style: HollowTypography.caption.copyWith(
-                color: hollow.textSecondary,
-                fontSize: 11,
-              ),
-            ),
+            child: HollowEmptyState(title: 'No friends added', dense: true),
           ),
 
         const SizedBox(height: HollowSpacing.lg),

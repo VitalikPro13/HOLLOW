@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:hollow/src/ui/components/hollow_divider.dart';
+import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/overlay_anchor.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -1965,21 +1966,10 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
         ref.watch(myPermissionsProvider(widget.serverId)).valueOrNull ??
             Permission.all;
     if (perms & Permission.readMessages == 0) {
-      return Expanded(
-        child: Center(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(LucideIcons.eyeOff,
-                  size: 48, color: hollow.textSecondary.withValues(alpha: 0.3)),
-              const SizedBox(height: HollowSpacing.md),
-              Text(
-                'You don\'t have permission to read messages in this channel',
-                style:
-                    HollowTypography.body.copyWith(color: hollow.textSecondary),
-              ),
-            ],
-          ),
+      return const Expanded(
+        child: HollowEmptyState(
+          glyph: LucideIcons.eyeOff,
+          title: 'You don\'t have permission to read messages in this channel',
         ),
       );
     }
@@ -2008,36 +1998,15 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
             color: hollow.background,
             child: messages.isEmpty
                 ? (_historyLoaded
-                    ? _buildEmptyChannelState(hollow)
+                    ? HollowEmptyState(
+                        glyph: LucideIcons.hash,
+                        title: 'Welcome to #${widget.channelName}',
+                        description: 'This is the beginning of the channel.',
+                      )
                     : const SizedBox.shrink())
                 : _buildMessageList(hollow, messages),
           ),
         ),
-      ),
-    );
-  }
-
-  Widget _buildEmptyChannelState(HollowTheme hollow) {
-    return Center(
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(
-            LucideIcons.hash,
-            size: 64,
-            color: hollow.textSecondary.withValues(alpha: 0.3),
-          ),
-          const SizedBox(height: HollowSpacing.lg),
-          Text(
-            'Welcome to #${widget.channelName}',
-            style: HollowTypography.heading.copyWith(color: hollow.textPrimary),
-          ),
-          const SizedBox(height: HollowSpacing.sm),
-          Text(
-            'This is the beginning of the channel.',
-            style: HollowTypography.body.copyWith(color: hollow.textSecondary),
-          ),
-        ],
       ),
     );
   }

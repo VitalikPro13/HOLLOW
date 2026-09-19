@@ -5,6 +5,7 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:hollow/src/ui/components/hollow_divider.dart';
 import 'package:hollow/src/ui/components/edge_scroll_row.dart';
+import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/overlay_anchor.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -534,11 +535,12 @@ class _EmojiPickerBodyState extends ConsumerState<EmojiPickerBody> {
         ? emotes
         : emotes.where((e) => e.name.contains(_search)).toList();
     if (filtered.isEmpty) {
-      return _emptyHint(
-          hollow,
-          emotes.isEmpty
-              ? 'No custom emotes yet.\nAdmins add them in Server Settings.'
-              : 'No matches');
+      return emotes.isEmpty
+          ? const HollowEmptyState(
+              title: 'No custom emotes yet',
+              description: 'Admins add them in Server Settings.',
+            )
+          : const HollowEmptyState(title: 'No matches');
     }
     return _emoteGrid(
       filtered.length,
@@ -561,11 +563,12 @@ class _EmojiPickerBodyState extends ConsumerState<EmojiPickerBody> {
       children: [
         Expanded(
           child: filtered.isEmpty
-              ? _emptyHint(
-                  hollow,
-                  emotes.isEmpty
-                      ? 'Your personal emotes work in every\nchat. Upload one, or grab some\nfrom the FFZ tab.'
-                      : 'No matches')
+              ? emotes.isEmpty
+                  ? const HollowEmptyState(
+                      title: 'Your personal emotes work in every chat',
+                      description: 'Upload one, or grab some from the FFZ tab.',
+                    )
+                  : const HollowEmptyState(title: 'No matches')
               : _emoteGrid(
                   filtered.length,
                   (i) => _emoteCell(
@@ -655,10 +658,10 @@ class _EmojiPickerBodyState extends ConsumerState<EmojiPickerBody> {
         ),
       );
     }
-    if (_ffzError != null) return _emptyHint(hollow, _ffzError!);
+    if (_ffzError != null) return HollowEmptyState(title: _ffzError!);
     final rows = _ffzResults ?? const [];
     if (rows.isEmpty) {
-      return _emptyHint(hollow, 'No emotes found');
+      return const HollowEmptyState(title: 'No emotes found');
     }
     return Column(
       children: [
@@ -784,16 +787,6 @@ class _EmojiPickerBodyState extends ConsumerState<EmojiPickerBody> {
       child: cell,
     );
   }
-
-  Widget _emptyHint(HollowTheme hollow, String text) {
-    return Center(
-      child: Text(
-        text,
-        textAlign: TextAlign.center,
-        style: HollowTypography.caption.copyWith(color: hollow.textTertiary),
-      ),
-    );
-  }
 }
 
 // Lazily built by ROW, so the 1.9k-emoji list stays cheap.
@@ -836,11 +829,7 @@ class _UnicodeGrid extends StatelessWidget {
     } else {
       final matches = _searchMatches();
       if (matches.isEmpty) {
-        return Center(
-          child: Text('No matches',
-              style: HollowTypography.caption
-                  .copyWith(color: hollow.textTertiary)),
-        );
+        return const HollowEmptyState(title: 'No matches');
       }
       entries = <_GridEntry>[];
       _addEmojiRows(entries, matches);

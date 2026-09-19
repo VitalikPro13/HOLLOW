@@ -24,6 +24,7 @@ import 'package:hollow/src/ui/archive/shared/archive_toolbar.dart';
 import 'package:hollow/src/ui/archive/shared/archive_verification_banner.dart';
 import 'package:hollow/src/ui/archive/shared/imported_archive_prep.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
+import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/media/media_viewer_scope.dart';
@@ -250,11 +251,7 @@ class _MobileImportedArchiveViewerRouteState
 
         Expanded(
           child: visibleMessages.isEmpty
-              ? Center(
-                  child: Text('No messages',
-                      style: HollowTypography.body
-                          .copyWith(color: hollow.textSecondary)),
-                )
+              ? const HollowEmptyState(title: 'No messages')
               : isDm
                   ? _buildDmMessageList(
                       prep.dmMessages!, profiles, localPeerId, data,

@@ -19,6 +19,7 @@ import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_badge.dart';
 import 'package:hollow/src/ui/components/hollow_section_header.dart';
 import 'package:hollow/src/ui/components/hollow_chip.dart';
+import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
@@ -253,24 +254,8 @@ class _MobileDmList extends ConsumerWidget {
             filtered.where((e) => hiddenSet.contains(e.peerId)).toList();
 
         if (visible.isEmpty && hidden.isEmpty) {
-          return Center(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Icon(LucideIcons.messageSquare,
-                    size: 40,
-                    color:
-                        hollow.textSecondary.withValues(alpha: 0.3)),
-                const SizedBox(height: HollowSpacing.md),
-                Text(
-                  search.isEmpty
-                      ? 'No DM conversations'
-                      : 'No matches',
-                  style: HollowTypography.body
-                      .copyWith(color: hollow.textSecondary),
-                ),
-              ],
-            ),
+          return HollowEmptyState(
+            title: search.isEmpty ? 'No DM conversations' : 'No matches',
           );
         }
 
@@ -619,24 +604,8 @@ class _MobileChannelList extends ConsumerWidget {
         }
 
         if (items.isEmpty) {
-          return Center(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Icon(LucideIcons.hash,
-                    size: 40,
-                    color:
-                        hollow.textSecondary.withValues(alpha: 0.3)),
-                const SizedBox(height: HollowSpacing.md),
-                Text(
-                  search.isEmpty
-                      ? 'No channel history'
-                      : 'No matches',
-                  style: HollowTypography.body
-                      .copyWith(color: hollow.textSecondary),
-                ),
-              ],
-            ),
+          return HollowEmptyState(
+            title: search.isEmpty ? 'No channel history' : 'No matches',
           );
         }
 
@@ -958,25 +927,10 @@ class _MobileVaultFilesView extends ConsumerWidget {
     final pool = ref.watch(recoveryPoolProvider);
 
     if (servers.isEmpty) {
-      return Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(LucideIcons.hardDrive,
-                size: 40,
-                color: hollow.textSecondary.withValues(alpha: 0.3)),
-            const SizedBox(height: HollowSpacing.md),
-            Text('No servers',
-                style: HollowTypography.body
-                    .copyWith(color: hollow.textSecondary)),
-            const SizedBox(height: HollowSpacing.xs),
-            Text('Join a server to see vault files',
-                style: HollowTypography.caption.copyWith(
-                  color: hollow.textSecondary.withValues(alpha: 0.6),
-                  fontSize: 11,
-                )),
-          ],
-        ),
+      return const HollowEmptyState(
+        glyph: LucideIcons.hardDrive,
+        title: 'No servers',
+        description: 'Join a server to see vault files.',
       );
     }
 
@@ -1142,12 +1096,13 @@ class _VaultServerSectionState extends ConsumerState<_VaultServerSection> {
           statusAsync.when(
             data: (files) {
               if (files.isEmpty) {
-                return Padding(
-                  padding: const EdgeInsets.only(
+                return const Padding(
+                  padding: EdgeInsets.only(
                     left: HollowSpacing.xl, bottom: HollowSpacing.md),
-                  child: Text('No erasure-coded files.',
-                      style: HollowTypography.caption
-                          .copyWith(color: hollow.textSecondary, fontSize: 12)),
+                  child: HollowEmptyState(
+                    dense: true,
+                    title: 'No erasure-coded files for this server',
+                  ),
                 );
               }
               final sorted = List.of(files)
@@ -1523,27 +1478,10 @@ class _MobileImportedArchivesViewState
             ),
             data: (paths) {
               if (paths.isEmpty) {
-                return Center(
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(LucideIcons.fileArchive,
-                          size: 40,
-                          color: hollow.textSecondary
-                              .withValues(alpha: 0.3)),
-                      const SizedBox(height: HollowSpacing.md),
-                      Text('No imported archives',
-                          style: HollowTypography.body.copyWith(
-                              color: hollow.textSecondary)),
-                      const SizedBox(height: HollowSpacing.xs),
-                      Text('Tap Load Archive above',
-                          style: HollowTypography.caption.copyWith(
-                            color: hollow.textSecondary
-                                .withValues(alpha: 0.6),
-                            fontSize: 11,
-                          )),
-                    ],
-                  ),
+                return const HollowEmptyState(
+                  glyph: LucideIcons.fileArchive,
+                  title: 'No imported archives',
+                  description: 'Tap Load Archive above.',
                 );
               }
 

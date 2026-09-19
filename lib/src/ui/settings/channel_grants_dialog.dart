@@ -12,6 +12,7 @@ import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
+import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/label_visuals.dart';
@@ -196,18 +197,8 @@ class _ChannelGrantsDialogState extends ConsumerState<_ChannelGrantsDialog> {
                         !granted.contains(m.peerId) && m.peerId != myPeerId)
                     .toList();
                 if (candidates.isEmpty) {
-                  return Padding(
-                    padding: const EdgeInsets.symmetric(
-                        vertical: HollowSpacing.lg),
-                    child: Center(
-                      child: Text(
-                        'No members to grant access to',
-                        style: HollowTypography.bodySmall.copyWith(
-                          color: hollow.textSecondary,
-                        ),
-                      ),
-                    ),
-                  );
+                  return const HollowEmptyState(
+                      title: 'No members to grant access to');
                 }
                 return MemberSearchPicker(
                   members: candidates,

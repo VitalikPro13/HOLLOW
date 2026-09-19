@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:hollow/src/core/role_hierarchy.dart';
 import 'package:hollow/src/ui/components/hollow_divider.dart';
+import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/overlay_anchor.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
@@ -457,16 +458,7 @@ class _ServerMemberContent extends ConsumerWidget {
                       ),
                     )
                   : entries.isEmpty
-                      ? Center(
-                          child: Padding(
-                            padding: const EdgeInsets.all(HollowSpacing.xl),
-                            child: Text(
-                              'No members',
-                              style: HollowTypography.bodySmall
-                                  .copyWith(color: hollow.textSecondary),
-                            ),
-                          ),
-                        )
+                      ? const HollowEmptyState(title: 'No members')
                       : ListView.builder(
                           padding: const EdgeInsets.symmetric(
                               vertical: HollowSpacing.sm),
@@ -509,7 +501,6 @@ class _PeerMemberContent extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final hollow = HollowTheme.of(context);
     final allPeers = ref.watch(peersProvider);
     final invisPeers = ref.watch(invisiblePeersProvider);
     // This pane lists PEOPLE while `peersProvider` is DEVICE-keyed, so each
@@ -527,17 +518,7 @@ class _PeerMemberContent extends ConsumerWidget {
         StartupRevealScope.interval(context, 0.60, 0.80);
 
     return peers.isEmpty
-        ? Center(
-            child: Padding(
-              padding: const EdgeInsets.all(HollowSpacing.xl),
-              child: Text(
-                'No peers online',
-                style: HollowTypography.bodySmall.copyWith(
-                  color: hollow.textSecondary,
-                ),
-              ),
-            ),
-          )
+        ? const HollowEmptyState(title: 'No peers online')
         : ListView.builder(
             itemCount: peers.length + 1, // +1 for ASOT header
             padding: const EdgeInsets.symmetric(

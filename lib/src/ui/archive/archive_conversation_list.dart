@@ -11,6 +11,7 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_chip.dart';
+import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_section_header.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
@@ -141,12 +142,8 @@ class _DmListState extends ConsumerState<_DmList> {
             filtered.where((e) => hiddenSet.contains(e.peerId)).toList();
 
         if (visible.isEmpty && hidden.isEmpty) {
-          return Center(
-            child: Text(
-              search.isEmpty ? 'No DM conversations' : 'No matches',
-              style: HollowTypography.body
-                  .copyWith(color: hollow.textSecondary),
-            ),
+          return HollowEmptyState(
+            title: search.isEmpty ? 'No DM conversations' : 'No matches',
           );
         }
 
@@ -409,12 +406,8 @@ class _ChannelList extends ConsumerWidget {
         }
 
         if (items.isEmpty) {
-          return Center(
-            child: Text(
-              search.isEmpty ? 'No channel history' : 'No matches',
-              style: HollowTypography.body
-                  .copyWith(color: hollow.textSecondary),
-            ),
+          return HollowEmptyState(
+            title: search.isEmpty ? 'No channel history' : 'No matches',
           );
         }
 

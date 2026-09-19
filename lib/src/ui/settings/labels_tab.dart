@@ -8,6 +8,7 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
+import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/hollow_focus_ring.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
@@ -247,12 +248,7 @@ class _LabelsTabState extends ConsumerState<LabelsTab> {
     if (labels == null) return const Center(child: CircularProgressIndicator());
 
     if (labels.isEmpty && !canManage) {
-      return Center(
-        child: Text(
-          'No labels available yet',
-          style: HollowTypography.body.copyWith(color: hollow.textSecondary),
-        ),
-      );
+      return const HollowEmptyState(title: 'No labels available yet');
     }
 
     return ListView(
@@ -320,14 +316,10 @@ class _LabelsTabState extends ConsumerState<LabelsTab> {
           ),
           const SizedBox(height: HollowSpacing.md),
           if (labels.isEmpty)
-            Center(
-              child: Padding(
-                padding: const EdgeInsets.all(HollowSpacing.xl),
-                child: Text(
-                  'No labels yet. Create one to get started.',
-                  style: HollowTypography.body.copyWith(color: hollow.textSecondary),
-                ),
-              ),
+            const HollowEmptyState(
+              dense: true,
+              title: 'No labels yet',
+              description: 'Create one to get started.',
             )
           else
             for (final label in labels)

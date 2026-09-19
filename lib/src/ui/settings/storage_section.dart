@@ -13,6 +13,7 @@ import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
+import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_section_header.dart';
 import 'package:hollow/src/ui/components/overlay_anchor.dart';
@@ -54,9 +55,9 @@ class StorageBreakdownView extends ConsumerWidget {
               for (final c in contexts) _ContextRow(usage: c),
             ] else ...[
               const SizedBox(height: HollowSpacing.md),
-              Text('No downloaded files are taking up space.',
-                  style: HollowTypography.caption
-                      .copyWith(color: hollow.textSecondary)),
+              const HollowEmptyState(
+                  dense: true,
+                  title: 'No downloaded files are taking up space'),
             ],
           ],
         );

@@ -15,6 +15,7 @@ import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_chip.dart';
+import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/status_dot.dart';
@@ -402,7 +403,6 @@ class _ServersCard extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final hollow = HollowTheme.of(context);
     final servers = ref.watch(serverListProvider).values.toList()
       ..sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
 
@@ -410,10 +410,8 @@ class _ServersCard extends ConsumerWidget {
       title: 'Servers',
       children: [
         if (servers.isEmpty)
-          Text(
-            'You have not joined any servers.',
-            style: HollowTypography.body.copyWith(color: hollow.textSecondary),
-          )
+          const HollowEmptyState(
+              dense: true, title: 'You have not joined any servers')
         else
           for (int i = 0; i < servers.length; i++) ...[
             if (i > 0) const SizedBox(height: HollowSpacing.md),
@@ -618,7 +616,13 @@ class _ChannelOverrideList extends ConsumerWidget {
           for (final c in all.values)
             if (c.meCanSee) c,
         ];
-        if (visible.isEmpty) return note('No channels you can see.');
+        if (visible.isEmpty) {
+          return const Padding(
+            padding: EdgeInsets.only(left: HollowSpacing.lg),
+            child: HollowEmptyState(
+                dense: true, title: 'No channels you can see'),
+          );
+        }
 
         return Padding(
           padding: const EdgeInsets.only(left: HollowSpacing.lg),
@@ -668,7 +672,6 @@ class _MutedDmsCard extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final hollow = HollowTheme.of(context);
     final notif = ref.watch(notificationSettingsProvider);
     final links = ref.watch(deviceLinkProvider);
     final profiles = ref.watch(profileProvider);
@@ -695,10 +698,7 @@ class _MutedDmsCard extends ConsumerWidget {
       title: 'Muted Direct Messages',
       children: [
         if (masters.isEmpty)
-          Text(
-            'No muted conversations.',
-            style: HollowTypography.body.copyWith(color: hollow.textSecondary),
-          )
+          const HollowEmptyState(dense: true, title: 'No muted conversations')
         else
           for (final master in masters)
             _MutedDmRow(

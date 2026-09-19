@@ -11,6 +11,7 @@ import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
+import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'guides_models.dart';
@@ -312,20 +313,10 @@ class _SearchResults extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
     if (results.isEmpty) {
-      return Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(LucideIcons.searchX,
-                size: 32, color: hollow.textSecondary.withValues(alpha: 0.4)),
-            const SizedBox(height: HollowSpacing.md),
-            Text('No help articles match that',
-                style: HollowTypography.body
-                    .copyWith(color: hollow.textSecondary)),
-          ],
-        ),
+      return const HollowEmptyState(
+        glyph: LucideIcons.searchX,
+        title: 'No help articles match that',
       );
     }
     return ListView.builder(

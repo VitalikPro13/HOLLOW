@@ -173,7 +173,8 @@ for a sub-group; optional trailing action, optional count in mono, its own
 8 px bottom gap, **no leading icon**; the label above ONE settings field is
 `SettingsFieldLabel`) · `HollowEmptyState` (one
 honest line about what is true now, one optional second line, at most one
-action) · `HollowDivider` (the hairline, nothing else) · `HollowListRow`
+action; a pane takes the default, a list inside a card or section takes
+`dense: true`; never a local `*Empty*` helper, CI-guarded) · `HollowDivider` (the hairline, nothing else) · `HollowListRow`
 (leading / title / subtitle / trailing, hover on the whole row) ·
 `HollowSkeleton` (2 to 10 second loads, keeps the final geometry) · `HollowCard`.
 

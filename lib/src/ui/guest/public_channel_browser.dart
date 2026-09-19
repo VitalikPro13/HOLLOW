@@ -5,6 +5,7 @@ import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/ui/guest/guest_server_sidebar.dart';
 import 'package:hollow/src/ui/guest/guest_chat_pane.dart';
+import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 class PublicChannelBrowser extends ConsumerWidget {
@@ -96,25 +97,9 @@ class PublicChannelBrowser extends ConsumerWidget {
                         serverId: selectedServer,
                         channelId: selectedChannel,
                       )
-                    : Center(
-                        child: Column(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Icon(
-                              LucideIcons.hash,
-                              size: 48,
-                              color: hollow.textSecondary.withValues(alpha: 0.3),
-                            ),
-                            const SizedBox(height: HollowSpacing.md),
-                            Text(
-                              'Select a channel to browse',
-                              style: TextStyle(
-                                color: hollow.textSecondary,
-                                fontSize: 15,
-                              ),
-                            ),
-                          ],
-                        ),
+                    : const HollowEmptyState(
+                        glyph: LucideIcons.hash,
+                        title: 'Select a channel to browse',
                       ),
               ),
             ],

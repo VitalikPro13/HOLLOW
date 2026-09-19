@@ -319,7 +319,7 @@ The zoom trio ignores Shift on `+`/`-` (on most layouts `+` IS Shift+`=`) and ac
    - Fallback → `_buildChannelPlaceholder()` (shows `#channelName` header + placeholder text)
 6. `selectedPeerId == null`:
    - Dock mode → `HomeDashboard`
-   - Classic mode → `_buildEmptyChat()` (placeholder with message icon)
+   - Classic mode → a `HollowEmptyState` ("Select a peer to start chatting")
 
    **The Home dashboard is a DOCK surface and stays one.** Classic's centre pane is a blank slate that only ever shows what the left panels select; dropping the dock's Home tab into it makes the two layouts bleed into each other. The consequence is deliberate: everything that lives only on the dashboard, the Network column included, is Dock-only by design, and the answer for a Classic user who wants it is "switch to Dock", not "render the dock's Home tab inside Classic".
 7. `selectedPeerId != null` → `ChatPane` (keyed by peer ID)

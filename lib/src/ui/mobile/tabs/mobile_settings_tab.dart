@@ -59,6 +59,7 @@ import 'package:hollow/src/ui/dialogs/avatar_frame_picker.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_chip.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
+import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_section_header.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
@@ -4183,9 +4184,7 @@ class _AboutTab extends ConsumerWidget {
             )),
           )
         else if (newsState.posts.isEmpty)
-          Text('No news yet',
-              style: HollowTypography.body.copyWith(
-                color: hollow.textSecondary))
+          const HollowEmptyState(dense: true, title: 'No news yet')
         else
           ...newsState.posts.take(3).map((post) => Padding(
             padding: const EdgeInsets.only(bottom: HollowSpacing.md),
@@ -4589,13 +4588,13 @@ class _VerifiedContactsTab extends ConsumerWidget {
     final verified = ref.watch(verifiedPeersProvider).toList()..sort();
 
     if (verified.isEmpty) {
-      return Padding(
-        padding: const EdgeInsets.all(HollowSpacing.lg),
-        child: Text(
-          'No verified contacts yet. Open a contact\'s profile and choose '
-          '"Verify contact" to compare safety numbers.',
-          style:
-              HollowTypography.caption.copyWith(color: hollow.textSecondary),
+      return const Padding(
+        padding: EdgeInsets.all(HollowSpacing.lg),
+        child: HollowEmptyState(
+          dense: true,
+          title: 'No verified contacts yet',
+          description: 'Open a contact\'s profile and choose '
+              '"Verify contact" to compare safety numbers.',
         ),
       );
     }
@@ -4631,13 +4630,9 @@ class _BlockedUsersTab extends ConsumerWidget {
     final blocked = ref.watch(blockedUsersProvider).toList()..sort();
 
     if (blocked.isEmpty) {
-      return Padding(
-        padding: const EdgeInsets.all(HollowSpacing.lg),
-        child: Text(
-          'No blocked users.',
-          style:
-              HollowTypography.caption.copyWith(color: hollow.textSecondary),
-        ),
+      return const Padding(
+        padding: EdgeInsets.all(HollowSpacing.lg),
+        child: HollowEmptyState(dense: true, title: 'No blocked users'),
       );
     }
 

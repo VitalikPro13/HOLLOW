@@ -19,6 +19,7 @@ import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_badge.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
+import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_section_header.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
@@ -111,7 +112,17 @@ class _OwnedArtPanelState extends ConsumerState<OwnedArtPanel> {
         header,
         const SizedBox(height: HollowSpacing.xs),
         if (items.isEmpty)
-          _EmptyState(onOpenShop: _openShop)
+          HollowEmptyState(
+            dense: true,
+            title: 'No art yet',
+            description: 'Art bought in the Hollow Shop appears here once you '
+                'import its pack.',
+            action: HollowButton.ghost(
+              onPressed: _openShop,
+              compact: true,
+              child: const Text('Open the shop'),
+            ),
+          )
         else
           for (final item in items)
             Padding(
@@ -168,37 +179,6 @@ class _OwnedArtPanelState extends ConsumerState<OwnedArtPanel> {
             ),
         ],
       ),
-    );
-  }
-}
-
-class _EmptyState extends StatelessWidget {
-  final VoidCallback onOpenShop;
-
-  const _EmptyState({required this.onOpenShop});
-
-  @override
-  Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(
-          'Art bought in the Hollow Shop appears here once you import its '
-          'pack.',
-          style: HollowTypography.caption.copyWith(color: hollow.textSecondary),
-        ),
-        const SizedBox(height: HollowSpacing.xs),
-        Align(
-          alignment: Alignment.centerLeft,
-          child: HollowButton.ghost(
-            onPressed: onOpenShop,
-            compact: true,
-            child: const Text('Open the shop'),
-          ),
-        ),
-      ],
     );
   }
 }
@@ -725,10 +705,10 @@ class _SupportMarksSectionState extends ConsumerState<_SupportMarksSection> {
         ),
         const SizedBox(height: HollowSpacing.md),
         if (creds.isEmpty)
-          Text(
-            'No marks yet. Redeem a code on the Shop tab to earn one.',
-            style:
-                HollowTypography.caption.copyWith(color: hollow.textSecondary),
+          const HollowEmptyState(
+            dense: true,
+            title: 'No marks yet',
+            description: 'Redeem a code on the Shop tab to earn one.',
           )
         else
           for (final cred in creds)

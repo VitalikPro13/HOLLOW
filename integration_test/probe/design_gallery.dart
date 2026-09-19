@@ -395,6 +395,13 @@ class _GalleryPane extends StatelessWidget {
                   ),
                 ),
               ),
+              const SizedBox(height: HollowSpacing.lg),
+              const HollowSectionHeader('Empty state, dense', dense: true),
+              const HollowEmptyState(
+                dense: true,
+                title: 'No blocked users',
+                description: 'People you block from a profile appear here.',
+              ),
               const SizedBox(height: HollowSpacing.xl),
 
               const HollowSectionHeader('Type roles'),

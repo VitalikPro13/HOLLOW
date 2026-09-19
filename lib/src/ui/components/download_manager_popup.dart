@@ -9,6 +9,7 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
+import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/overlay_hosts.dart';
 import 'package:hollow/src/ui/share/share_card.dart';
@@ -215,41 +216,10 @@ class _DownloadManagerOverlayState
                       Container(height: 1, color: hollow.border),
 
                       if (entries.isEmpty && shareItems.isEmpty)
-                        Padding(
-                          padding: const EdgeInsets.symmetric(
-                            vertical: HollowSpacing.xl + HollowSpacing.md,
-                            horizontal: HollowSpacing.lg,
-                          ),
-                          child: Column(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Icon(
-                                LucideIcons.inbox,
-                                size: 28,
-                                color:
-                                    hollow.textSecondary.withValues(alpha: 0.4),
-                              ),
-                              const SizedBox(height: HollowSpacing.sm),
-                              Text(
-                                'Nothing here yet',
-                                style: HollowTypography.caption.copyWith(
-                                  color: hollow.textSecondary
-                                      .withValues(alpha: 0.7),
-                                  fontSize: 12,
-                                ),
-                              ),
-                              const SizedBox(height: 2),
-                              Text(
-                                'Downloaded files and shard activity show up here.',
-                                style: HollowTypography.caption.copyWith(
-                                  color: hollow.textSecondary
-                                      .withValues(alpha: 0.5),
-                                  fontSize: 10,
-                                ),
-                                textAlign: TextAlign.center,
-                              ),
-                            ],
-                          ),
+                        const HollowEmptyState(
+                          title: 'Nothing here yet',
+                          description:
+                              'Downloaded files and shard activity show up here.',
                         )
                       else
                         Flexible(

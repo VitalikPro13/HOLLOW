@@ -13,6 +13,7 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
+import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/label_visuals.dart';
@@ -254,11 +255,8 @@ class _ManageMemberDialogState extends ConsumerState<_ManageMemberDialog> {
       title: 'Labels',
       children: [
         if (labels.isEmpty)
-          Text(
-            'This server has no labels yet.',
-            style:
-                HollowTypography.bodySmall.copyWith(color: hollow.textSecondary),
-          )
+          const HollowEmptyState(
+              dense: true, title: 'This server has no labels yet')
         else
           Wrap(
             spacing: HollowSpacing.sm,
@@ -326,11 +324,8 @@ class _ManageMemberDialogState extends ConsumerState<_ManageMemberDialog> {
       title: 'Temporary channel access',
       children: [
         if (gated.isEmpty)
-          Text(
-            'No label-gated channels in this server.',
-            style:
-                HollowTypography.bodySmall.copyWith(color: hollow.textSecondary),
-          )
+          const HollowEmptyState(
+              dense: true, title: 'No label-gated channels in this server')
         else
           for (final (i, channel) in gated.indexed)
             Padding(

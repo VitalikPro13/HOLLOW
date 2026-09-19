@@ -6,6 +6,7 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
+import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/label_visuals.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
@@ -85,21 +86,11 @@ class _AccessLabelPickerDialogState
                 color: hollow.elevated,
                 borderRadius: BorderRadius.circular(hollow.radiusMd),
               ),
-              child: Row(
-                children: [
-                  Icon(LucideIcons.shieldCheck,
-                      size: 18, color: hollow.textSecondary),
-                  const SizedBox(width: HollowSpacing.md),
-                  Expanded(
-                    child: Text(
-                      'No access labels yet. Create one in the Labels tab and '
-                      'mark it "Access".',
-                      style: HollowTypography.bodySmall.copyWith(
-                        color: hollow.textSecondary,
-                      ),
-                    ),
-                  ),
-                ],
+              child: const HollowEmptyState(
+                dense: true,
+                title: 'No access labels yet',
+                description:
+                    'Create one in the Labels tab and mark it "Access".',
               ),
             )
           else

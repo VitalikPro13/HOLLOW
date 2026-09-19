@@ -31,6 +31,7 @@ import 'package:hollow/src/ui/components/saved_messages_avatar.dart';
 import 'package:hollow/src/ui/components/status_dot.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
+import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/pending_join_ui.dart';
 import 'package:hollow/src/core/shared_tickers.dart';
@@ -340,30 +341,11 @@ class _MobileChatsTabState extends ConsumerState<MobileChatsTab> {
 
     Widget body;
     if (items.isEmpty) {
-      body = Expanded(
-        child: Center(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(
-                LucideIcons.messageCircle,
-                size: 48,
-                color: hollow.textSecondary.withValues(alpha: 0.4),
-              ),
-              const SizedBox(height: HollowSpacing.lg),
-              Text(
-                'No conversations yet',
-                style: HollowTypography.heading.copyWith(
-                  color: hollow.textSecondary,
-                ),
-              ),
-              const SizedBox(height: HollowSpacing.sm),
-              Text(
-                'Add a friend or join a server to start chatting',
-                style: HollowTypography.bodySmall,
-              ),
-            ],
-          ),
+      body = const Expanded(
+        child: HollowEmptyState(
+          glyph: LucideIcons.messageCircle,
+          title: 'No conversations yet',
+          description: 'Add a friend or join a server to start chatting.',
         ),
       );
     } else {
@@ -1183,17 +1165,12 @@ class _ChannelListState extends ConsumerState<_ChannelList> {
 
     final hasChannels = _displayItems.any((i) => i is _ChannelDisplayItem);
     if (!hasChannels && !canManage) {
-      return Padding(
-        padding: const EdgeInsets.only(
+      return const Padding(
+        padding: EdgeInsets.only(
           left: 44 + HollowSpacing.lg + HollowSpacing.md,
           bottom: HollowSpacing.sm,
         ),
-        child: Text(
-          'No channels',
-          style: HollowTypography.bodySmall.copyWith(
-            color: hollow.textSecondary,
-          ),
-        ),
+        child: HollowEmptyState(dense: true, title: 'No channels'),
       );
     }
 

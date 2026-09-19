@@ -15,6 +15,7 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/animated_gif_image.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
+import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
@@ -787,14 +788,10 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
               ),
               children: [
                 if (filtered.isEmpty)
-                  Padding(
-                    padding: const EdgeInsets.all(HollowSpacing.md),
-                    child: Text(
-                      'No matching settings',
-                      style: HollowTypography.caption.copyWith(
-                        color: hollow.textSecondary,
-                      ),
-                    ),
+                  const Padding(
+                    padding: EdgeInsets.all(HollowSpacing.md),
+                    child: HollowEmptyState(
+                        dense: true, title: 'No matching settings'),
                   ),
                 for (final cat in filtered) ...[
                   _TabItem(

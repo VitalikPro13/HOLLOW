@@ -9,6 +9,7 @@ import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
+import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/mobile/mobile_page_route.dart';
@@ -168,29 +169,10 @@ class _MobileConferencesRouteState
 
   Widget _buildRoomList(HollowTheme hollow, ConferenceState conf) {
     if (conf.rooms.isEmpty) {
-      return Center(
-        child: Padding(
-          padding: const EdgeInsets.all(HollowSpacing.xl),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(LucideIcons.video,
-                  size: 48,
-                  color: hollow.textSecondary.withValues(alpha: 0.4)),
-              const SizedBox(height: HollowSpacing.lg),
-              Text('No conference rooms yet',
-                  style: HollowTypography.heading
-                      .copyWith(color: hollow.textSecondary)),
-              const SizedBox(height: HollowSpacing.sm),
-              Text(
-                'Create a room and share its link to meet anyone.',
-                style: HollowTypography.bodySmall
-                    .copyWith(color: hollow.textSecondary),
-                textAlign: TextAlign.center,
-              ),
-            ],
-          ),
-        ),
+      return const HollowEmptyState(
+        glyph: LucideIcons.video,
+        title: 'No conference rooms yet',
+        description: 'Create a room and share its link to meet anyone.',
       );
     }
 

@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/ui_scale.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -318,16 +319,10 @@ class _GuestChatPaneState extends ConsumerState<GuestChatPane> {
 
         Expanded(
           child: filtered.isEmpty
-              ? Center(
-                  child: Text(
-                    _searchQuery.isNotEmpty
-                        ? 'No matching messages'
-                        : 'No messages yet',
-                    style: TextStyle(
-                      color: hollow.textSecondary,
-                      fontSize: 14,
-                    ),
-                  ),
+              ? HollowEmptyState(
+                  title: _searchQuery.isNotEmpty
+                      ? 'No matching messages'
+                      : 'No messages yet',
                 )
               : MessageActionBarScope(
                   child: Builder(

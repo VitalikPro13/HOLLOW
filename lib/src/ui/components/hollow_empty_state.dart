@@ -23,49 +23,67 @@ class HollowEmptyState extends StatelessWidget {
 
   final IconData? glyph;
 
+  /// A list inside a card or a section, where a centred pane would float:
+  /// start-aligned, no padding of its own, one step smaller, never a glyph.
+  final bool dense;
+
   const HollowEmptyState({
     super.key,
     required this.title,
     this.description,
     this.action,
     this.glyph,
-  });
+    this.dense = false,
+  }) : assert(!dense || glyph == null, 'a dense empty state takes no glyph');
 
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
+    final align = dense ? TextAlign.start : TextAlign.center;
 
+    final column = Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment:
+          dense ? CrossAxisAlignment.start : CrossAxisAlignment.center,
+      children: [
+        if (glyph != null) ...[
+          Icon(glyph, size: _glyphSize, color: hollow.textTertiary),
+          const SizedBox(height: HollowSpacing.md),
+        ],
+        Text(
+          title,
+          textAlign: align,
+          style: (dense ? HollowTypography.bodySmall : HollowTypography.body)
+              .copyWith(color: hollow.textSecondary),
+        ),
+        if (description != null) ...[
+          const SizedBox(height: HollowSpacing.xs),
+          Text(
+            description!,
+            textAlign: align,
+            style: HollowTypography.caption.copyWith(color: hollow.textTertiary),
+          ),
+        ],
+        if (action != null) ...[
+          SizedBox(height: dense ? HollowSpacing.sm : HollowSpacing.lg),
+          action!,
+        ],
+      ],
+    );
+
+    // A one-line dense state is only as wide as its text, so a centring parent
+    // would centre it; claiming the width keeps it on the start edge.
+    if (dense) {
+      return Align(
+        alignment: AlignmentDirectional.topStart,
+        heightFactor: 1,
+        child: column,
+      );
+    }
     return Center(
       child: Padding(
         padding: const EdgeInsets.all(HollowSpacing.xl),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.center,
-          children: [
-            if (glyph != null) ...[
-              Icon(glyph, size: _glyphSize, color: hollow.textTertiary),
-              const SizedBox(height: HollowSpacing.md),
-            ],
-            Text(
-              title,
-              textAlign: TextAlign.center,
-              style: HollowTypography.body.copyWith(color: hollow.textSecondary),
-            ),
-            if (description != null) ...[
-              const SizedBox(height: HollowSpacing.xs),
-              Text(
-                description!,
-                textAlign: TextAlign.center,
-                style: HollowTypography.caption
-                    .copyWith(color: hollow.textTertiary),
-              ),
-            ],
-            if (action != null) ...[
-              const SizedBox(height: HollowSpacing.lg),
-              action!,
-            ],
-          ],
-        ),
+        child: column,
       ),
     );
   }

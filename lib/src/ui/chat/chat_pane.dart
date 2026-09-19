@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/hollow_menu.dart';
 import 'package:hollow/src/ui/components/overlay_anchor.dart';
 import 'package:flutter/services.dart';
@@ -1964,33 +1965,14 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
             color: hollow.background,
             child: messages.isEmpty
                 ? (_historyLoaded
-                    ? _buildEmptyDmState(hollow)
+                    ? const HollowEmptyState(
+                        glyph: LucideIcons.messageCircle,
+                        title: 'No messages yet',
+                      )
                     : const SizedBox.shrink())
                 : _buildMessageList(hollow, messages, profiles, localPeerId),
           ),
         ),
-      ),
-    );
-  }
-
-  Widget _buildEmptyDmState(HollowTheme hollow) {
-    return Center(
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(
-            LucideIcons.messageCircle,
-            size: 48,
-            color: hollow.textSecondary.withValues(alpha: 0.3),
-          ),
-          const SizedBox(height: HollowSpacing.md),
-          Text(
-            'No messages yet. Say hello!',
-            style: HollowTypography.body.copyWith(
-              color: hollow.textSecondary,
-            ),
-          ),
-        ],
       ),
     );
   }

@@ -103,7 +103,7 @@ final _rules = <_Rule>[
         'not a literal',
     pattern: RegExp(r'\bfontSize\s*:'),
     excludeDirs: [_theme],
-    baseline: 703,
+    baseline: 689,
   ),
   _Rule(
     id: 'material-colors',
@@ -174,6 +174,16 @@ final _rules = <_Rule>[
     baseline: 0,
   ),
   _Rule(
+    id: 'local-empty-state',
+    what: 'a local empty-state class or _xEmpty builder outside components/',
+    fix: 'HollowEmptyState: a pane takes the default, a list inside a card '
+        'or section takes dense: true',
+    pattern: RegExp(
+        r'Widget\s+_(?!\w*OrEmpty)\w*[Ee]mpty\w*\(|class\s+\w*Empty\w*\s+extends'),
+    excludeDirs: [_theme, _components],
+    baseline: 0,
+  ),
+  _Rule(
     id: 'local-label-builder',
     what: 'a _xChip / _xPill / _xTag / _xBadge builder function outside '
         'components/',
@@ -209,7 +219,7 @@ final _rules = <_Rule>[
         'chips), 12 grouped, 16 separated, 24 sectioned',
     pattern: RegExp(r'SizedBox\(\s*(width|height)\s*:\s*\d'),
     excludeDirs: [_theme],
-    baseline: 178,
+    baseline: 176,
   ),
   _Rule(
     id: 'gradient',

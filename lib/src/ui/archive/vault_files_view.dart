@@ -7,6 +7,7 @@ import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
+import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/hollow_section_header.dart';
 import 'package:hollow/src/ui/dialogs/recovery_pool_dialog.dart';
 import 'package:hollow/src/ui/dialogs/shard_bundle_dialog.dart';
@@ -23,21 +24,7 @@ class VaultFilesView extends ConsumerWidget {
     final servers = ref.watch(serverListProvider);
 
     if (servers.isEmpty) {
-      return Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(LucideIcons.hardDrive, size: 40, color: hollow.textSecondary),
-            const SizedBox(height: HollowSpacing.md),
-            Text(
-              'No servers',
-              style: HollowTypography.body.copyWith(
-                color: hollow.textSecondary,
-              ),
-            ),
-          ],
-        ),
-      );
+      return const HollowEmptyState(title: 'No servers');
     }
 
     return Column(
@@ -183,17 +170,14 @@ class _ServerVaultSectionState extends ConsumerState<_ServerVaultSection> {
           statusAsync.when(
             data: (files) {
               if (files.isEmpty) {
-                return Padding(
-                  padding: const EdgeInsets.only(
+                return const Padding(
+                  padding: EdgeInsets.only(
                     left: HollowSpacing.xxl,
                     bottom: HollowSpacing.md,
                   ),
-                  child: Text(
-                    'No erasure-coded files for this server.',
-                    style: HollowTypography.caption.copyWith(
-                      color: hollow.textSecondary,
-                      fontSize: 12,
-                    ),
+                  child: HollowEmptyState(
+                    dense: true,
+                    title: 'No erasure-coded files for this server',
                   ),
                 );
               }

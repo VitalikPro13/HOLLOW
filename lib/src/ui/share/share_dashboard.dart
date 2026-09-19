@@ -12,6 +12,7 @@ import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_chip.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
+import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/share/paste_link_dialog.dart';
 import 'package:hollow/src/ui/share/share_card.dart';
@@ -158,11 +159,10 @@ class _ShareDashboardState extends ConsumerState<ShareDashboard> {
 
   Widget _buildMyShares(List<ShareItemState> userShares, HollowTheme hollow) {
     if (userShares.isEmpty) {
-      return _buildEmptyState(
-        hollow,
-        icon: LucideIcons.share2,
+      return const HollowEmptyState(
+        glyph: LucideIcons.share2,
         title: 'No shares yet',
-        subtitle: 'Paste a link or share a file to get started',
+        description: 'Paste a link or share a file to get started.',
       );
     }
 
@@ -195,11 +195,10 @@ class _ShareDashboardState extends ConsumerState<ShareDashboard> {
 
   Widget _buildServerFiles(List<ShareItemState> serverFiles, HollowTheme hollow) {
     if (serverFiles.isEmpty) {
-      return _buildEmptyState(
-        hollow,
-        icon: LucideIcons.server,
+      return const HollowEmptyState(
+        glyph: LucideIcons.server,
         title: 'No server files',
-        subtitle: 'Large files sent in server channels appear here',
+        description: 'Large files sent in server channels appear here.',
       );
     }
 
@@ -226,26 +225,6 @@ class _ShareDashboardState extends ConsumerState<ShareDashboard> {
           const SizedBox(height: HollowSpacing.lg),
         ],
       ],
-    );
-  }
-
-  Widget _buildEmptyState(
-    HollowTheme hollow, {
-    required IconData icon,
-    required String title,
-    required String subtitle,
-  }) {
-    return Center(
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(icon, size: 48, color: hollow.textSecondary),
-          const SizedBox(height: HollowSpacing.lg),
-          Text(title, style: HollowTypography.subheading.copyWith(color: hollow.textSecondary)),
-          const SizedBox(height: HollowSpacing.xs),
-          Text(subtitle, style: HollowTypography.bodySmall.copyWith(color: hollow.textSecondary)),
-        ],
-      ),
     );
   }
 

@@ -11,6 +11,7 @@ import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_chip.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
+import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
@@ -621,12 +622,9 @@ class _ChannelsTabState extends ConsumerState<ChannelsTab> {
 
         Expanded(
           child: _layout.isEmpty
-              ? Center(
-                  child: Text(
-                    'No channels yet. Create one to get started.',
-                    style: HollowTypography.body
-                        .copyWith(color: hollow.textSecondary),
-                  ),
+              ? const HollowEmptyState(
+                  title: 'No channels yet',
+                  description: 'Create one to get started.',
                 )
               : ReorderableListView.builder(
                   padding: const EdgeInsets.all(HollowSpacing.md),

@@ -1,0 +1,61 @@
+{
+  "_": [
+    "Design sweep 5, the mobile half: the empty states a freshly onboarded peer",
+    "reaches with no friends, conversations or servers. Every surface here was",
+    "a hand-built column (big faded icon, heading-size title) and is",
+    "HollowEmptyState now, the list-in-a-section ones dense.",
+    "",
+    "Shot on the unswept commit first, then again with the sweep applied, so the",
+    "pairs can be stacked. One peer is enough: nothing here is peer-to-peer.",
+    "",
+    "run (on the Mac mini): pwsh scripts/fleet.ps1 -Scenario design_sweep5_mobile -Peers a"
+  ],
+  "peers": ["a"],
+  "steps": [
+    { "peer": "a", "op": "wait", "ms": 1500 },
+    { "peer": "a", "op": "shot", "name": "m5-01-chats" },
+
+    { "peer": "a", "op": "tap", "target": "semantics:Conferences", "index": 0, "soft": true },
+    { "peer": "a", "op": "wait", "ms": 1500 },
+    { "peer": "a", "op": "shot", "name": "m5-02-conferences", "soft": true },
+    { "peer": "a", "op": "tap", "target": "semantics:Back", "index": 0, "soft": true },
+    { "peer": "a", "op": "wait", "ms": 1000 },
+
+    { "peer": "a", "op": "tap", "target": "semantics:Friends", "index": 0, "soft": true },
+    { "peer": "a", "op": "wait", "ms": 1500 },
+    { "peer": "a", "op": "shot", "name": "m5-03-friends", "soft": true },
+
+    { "peer": "a", "op": "tap", "target": "semantics:Archive", "index": 0 },
+    { "peer": "a", "op": "wait", "ms": 1500 },
+    { "peer": "a", "op": "shot", "name": "m5-04-archive-dms" },
+    { "peer": "a", "op": "tap", "target": "text:Channels", "index": 0, "soft": true },
+    { "peer": "a", "op": "wait", "ms": 1200 },
+    { "peer": "a", "op": "shot", "name": "m5-05-archive-channels", "soft": true },
+    { "peer": "a", "op": "tap", "target": "text:Vault", "index": 0, "soft": true },
+    { "peer": "a", "op": "wait", "ms": 1200 },
+    { "peer": "a", "op": "shot", "name": "m5-06-archive-vault", "soft": true },
+    { "peer": "a", "op": "tap", "target": "text:Imported", "index": 0, "soft": true },
+    { "peer": "a", "op": "wait", "ms": 1200 },
+    { "peer": "a", "op": "shot", "name": "m5-07-archive-imported", "soft": true },
+
+    { "peer": "a", "op": "tap", "target": "semantics:Settings", "index": 0 },
+    { "peer": "a", "op": "wait", "ms": 1500 },
+    { "peer": "a", "op": "scroll", "target": "text:Appearance", "index": 0, "dy": -500 },
+    { "peer": "a", "op": "wait", "ms": 800 },
+    { "peer": "a", "op": "tap", "target": "text:Verified Contacts", "index": 0, "soft": true },
+    { "peer": "a", "op": "wait", "ms": 1500 },
+    { "peer": "a", "op": "shot", "name": "m5-08-verified-contacts", "soft": true },
+    { "peer": "a", "op": "tap", "target": "semantics:Back", "index": 0, "soft": true },
+    { "peer": "a", "op": "wait", "ms": 1000 },
+    { "peer": "a", "op": "tap", "target": "text:Blocked Users", "index": 0, "soft": true },
+    { "peer": "a", "op": "wait", "ms": 1500 },
+    { "peer": "a", "op": "shot", "name": "m5-09-blocked-users", "soft": true },
+    { "peer": "a", "op": "tap", "target": "semantics:Back", "index": 0, "soft": true },
+    { "peer": "a", "op": "wait", "ms": 1000 },
+    { "peer": "a", "op": "theme", "value": "light", "frames": 30 },
+    { "peer": "a", "op": "tap", "target": "semantics:Chats", "index": 0, "soft": true },
+    { "peer": "a", "op": "wait", "ms": 1200 },
+    { "peer": "a", "op": "shot", "name": "m5-10-chats-light", "soft": true },
+    { "peer": "a", "op": "theme", "value": "dark", "frames": 30 }
+  ]
+}

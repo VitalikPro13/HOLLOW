@@ -247,7 +247,7 @@ Consequences worth stating, because these are the observed inconsistencies:
 | Component | Replaces | Rule |
 |---|---|---|
 | `HollowSectionHeader` | every private section label (guarded at 0) | Title in `subheading` (a page section, a `SettingsCard` title) or `label` via `dense` (a sub-group, a list group). Optional trailing action, optional count in mono. Carries its own 8 px bottom gap. **No leading icon.** The label above ONE settings field is `SettingsFieldLabel`, not a header. |
-| `HollowEmptyState` | 3 helpers and roughly 60 inline columns | One honest line about what is true now, one optional second line, at most one action. Optional glyph at 24. A slot for Holly, empty for now. |
+| `HollowEmptyState` | 3 helpers and roughly 60 inline columns | One honest line about what is true now, one optional second line, at most one action. Optional glyph at 24. A slot for Holly, empty for now. A pane takes the default (centred); a list inside a card or a section takes `dense: true` (start-aligned, `bodySmall`, no glyph). |
 | `HollowDivider` | every inline `Divider(` (guarded at 0) | The hairline. Nothing else. No colour parameter. |
 | `HollowListRow` | ad hoc rows | Leading, title, subtitle, trailing. Hover on the whole row, no dead zone between rows. |
 | `HollowSkeleton` | none | Keeps the final geometry. Used only for 2 to 10 second loads. |

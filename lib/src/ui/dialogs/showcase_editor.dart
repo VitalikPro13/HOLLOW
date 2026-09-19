@@ -16,6 +16,7 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
+import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_section_header.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
@@ -940,36 +941,10 @@ class _GamePickerDialogState extends State<_GamePickerDialog> {
               ),
             )
           else if (_showNoResults)
-            Padding(
-              padding: const EdgeInsets.all(HollowSpacing.lg),
-              child: Column(
-                children: [
-                  Icon(
-                    LucideIcons.searchX,
-                    size: 22,
-                    color: hollow.textSecondary.withValues(alpha: 0.6),
-                  ),
-                  const SizedBox(height: HollowSpacing.sm),
-                  Text(
-                    'No games found for “$_searchedFor”',
-                    textAlign: TextAlign.center,
-                    style: HollowTypography.body.copyWith(
-                      color: hollow.textPrimary,
-                      fontWeight: FontWeight.w600,
-                      fontSize: 12.5,
-                    ),
-                  ),
-                  const SizedBox(height: 2),
-                  Text(
-                    'Check the spelling or try a shorter name.',
-                    textAlign: TextAlign.center,
-                    style: HollowTypography.caption.copyWith(
-                      color: hollow.textSecondary,
-                      fontSize: 11,
-                    ),
-                  ),
-                ],
-              ),
+            HollowEmptyState(
+              glyph: LucideIcons.searchX,
+              title: 'No games found for “$_searchedFor”',
+              description: 'Check the spelling or try a shorter name.',
             )
           else
             ConstrainedBox(

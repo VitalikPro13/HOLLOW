@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:hollow/src/ui/components/ui_scale.dart';
+import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/message_preview.dart';
 import 'package:hollow/src/core/models/channel_chat_message.dart';
@@ -7,8 +8,6 @@ import 'package:hollow/src/core/models/chat_message.dart';
 import 'package:hollow/src/core/providers/archive_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
-import 'package:hollow/src/theme/hollow_theme.dart';
-import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/archive/shared/archive_shared_widgets.dart';
 import 'package:hollow/src/ui/chat/channel_message_bubble.dart';
 import 'package:hollow/src/ui/chat/chat_pane.dart'
@@ -387,7 +386,6 @@ class _ArchiveMessageListCoreState<T>
       }
     });
 
-    final hollow = HollowTheme.of(context);
     final messages = widget.messages;
     final searchQuery = ref.watch(archiveMessageSearchQueryProvider);
     final matchIdx = ref.watch(archiveSearchMatchIndexProvider);
@@ -396,11 +394,7 @@ class _ArchiveMessageListCoreState<T>
         messages.length, (i) => widget.textOf(messages[i]), searchQuery);
 
     if (messages.isEmpty) {
-      return Center(
-        child: Text('No messages',
-            style:
-                HollowTypography.body.copyWith(color: hollow.textSecondary)),
-      );
+      return const HollowEmptyState(title: 'No messages');
     }
 
     // Issue #35: the same scaled-viewport selection bug the live panes hit,

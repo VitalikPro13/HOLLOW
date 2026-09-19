@@ -14,6 +14,7 @@ import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
+import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_section_header.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
@@ -52,7 +53,6 @@ class _MobileFriendsTabState extends ConsumerState<MobileFriendsTab> {
 
   @override
   Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
     final friends = ref.watch(friendsProvider);
     final online = ref.watch(onlineIdentitiesProvider);
     ref.watch(profileProvider);
@@ -187,25 +187,11 @@ class _MobileFriendsTabState extends ConsumerState<MobileFriendsTab> {
         ],
 
         if (accepted.isEmpty && !hasPending)
-          SliverToBoxAdapter(
-            child: Padding(
-              padding: const EdgeInsets.symmetric(
-                horizontal: HollowSpacing.lg, vertical: HollowSpacing.xxl,
-              ),
-              child: Center(
-                child: Column(
-                  children: [
-                    Icon(LucideIcons.users, size: 40,
-                        color: hollow.textSecondary.withValues(alpha: 0.4)),
-                    const SizedBox(height: HollowSpacing.md),
-                    Text('No friends yet',
-                        style: HollowTypography.body.copyWith(color: hollow.textSecondary)),
-                    const SizedBox(height: HollowSpacing.xs),
-                    Text('Add a friend by their peer ID',
-                        style: HollowTypography.bodySmall),
-                  ],
-                ),
-              ),
+          const SliverToBoxAdapter(
+            child: HollowEmptyState(
+              glyph: LucideIcons.users,
+              title: 'No friends yet',
+              description: 'Add a friend by their peer ID.',
             ),
           ),
 

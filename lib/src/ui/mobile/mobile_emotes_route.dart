@@ -9,6 +9,7 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/chat/emoji_picker.dart';
 import 'package:hollow/src/ui/chat/emote_image.dart';
+import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/settings/emotes_tab.dart' show ServerStickersSection;
 import 'package:hollow/src/ui/components/hollow_toast.dart';
@@ -138,20 +139,13 @@ class MobileEmotesRoute extends ConsumerWidget {
                   ),
                   const SizedBox(height: HollowSpacing.md),
                   if (emotes.isEmpty)
-                    Padding(
-                      padding: const EdgeInsets.only(top: HollowSpacing.xl),
-                      child: Center(
-                        child: Text(
-                          canManage
-                              ? 'No custom emotes yet. Add one, or import '
-                                  'from the\nFFZ tab of the emoji picker in '
-                                  'any chat.'
-                              : 'No custom emotes yet.',
-                          textAlign: TextAlign.center,
-                          style: HollowTypography.caption
-                              .copyWith(color: hollow.textTertiary),
-                        ),
-                      ),
+                    HollowEmptyState(
+                      dense: true,
+                      title: 'No custom emotes yet',
+                      description: canManage
+                          ? 'Add one, or import from the FFZ tab of the emoji '
+                              'picker in any chat.'
+                          : null,
                     )
                   else
                     ...emotes.map((e) => _EmoteRow(

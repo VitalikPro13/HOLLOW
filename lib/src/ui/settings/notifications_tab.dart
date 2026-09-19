@@ -7,6 +7,7 @@ import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_chip.dart';
+import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/overlay_anchor.dart';
 import 'package:hollow/src/ui/components/hollow_menu.dart';
 import 'package:hollow/src/ui/components/hollow_section_header.dart';
@@ -68,18 +69,7 @@ class NotificationsTab extends ConsumerWidget {
           const SizedBox(height: HollowSpacing.md),
 
           if (channels.isEmpty)
-            Padding(
-              padding: const EdgeInsets.symmetric(
-                  vertical: HollowSpacing.xl),
-              child: Center(
-                child: Text(
-                  'No channels',
-                  style: HollowTypography.body.copyWith(
-                    color: hollow.textSecondary,
-                  ),
-                ),
-              ),
-            )
+            const HollowEmptyState(dense: true, title: 'No channels')
           else
             ...channels.values.map((channel) {
               final override = notifNotifier.channelOverride(

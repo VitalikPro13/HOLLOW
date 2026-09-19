@@ -7,6 +7,7 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
+import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/settings/settings_shared.dart';
 
@@ -115,12 +116,7 @@ class BlockedUsersCard extends ConsumerWidget {
       title: 'Blocked Users',
       children: [
         if (blocked.isEmpty)
-          Text(
-            'No blocked users.',
-            style: HollowTypography.caption.copyWith(
-              color: hollow.textSecondary,
-            ),
-          )
+          const HollowEmptyState(dense: true, title: 'No blocked users')
         else ...[
           blockedUsersIntro(hollow),
           const SizedBox(height: HollowSpacing.sm),

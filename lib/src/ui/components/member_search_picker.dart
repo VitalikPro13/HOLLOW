@@ -4,6 +4,7 @@ import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
+import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/label_visuals.dart';
@@ -83,17 +84,7 @@ class _MemberSearchPickerState extends State<MemberSearchPicker> {
         ),
         const SizedBox(height: HollowSpacing.sm),
         if (filtered.isEmpty)
-          Padding(
-            padding: const EdgeInsets.symmetric(vertical: HollowSpacing.lg),
-            child: Center(
-              child: Text(
-                'No members match',
-                style: HollowTypography.bodySmall.copyWith(
-                  color: hollow.textSecondary,
-                ),
-              ),
-            ),
-          )
+          const HollowEmptyState(title: 'No members match')
         else
           ConstrainedBox(
             constraints: BoxConstraints(maxHeight: widget.maxListHeight),

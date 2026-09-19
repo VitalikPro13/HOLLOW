@@ -13,6 +13,7 @@ import 'package:hollow/src/ui/chat/emoji_picker.dart';
 import 'package:hollow/src/ui/chat/emote_image.dart';
 import 'package:hollow/src/ui/chat/sticker_picker.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
+import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -109,19 +110,13 @@ class EmotesTab extends ConsumerWidget {
           ),
         if (canManage) const SizedBox(height: HollowSpacing.md),
         if (emotes.isEmpty)
-          Padding(
-            padding: const EdgeInsets.only(top: HollowSpacing.xl),
-            child: Center(
-              child: Text(
-                canManage
-                    ? 'No custom emotes yet. Add one, or import from the\n'
-                        'FFZ tab of the emoji picker in any chat.'
-                    : 'No custom emotes yet.',
-                textAlign: TextAlign.center,
-                style: HollowTypography.caption
-                    .copyWith(color: hollow.textTertiary),
-              ),
-            ),
+          HollowEmptyState(
+            dense: true,
+            title: 'No custom emotes yet',
+            description: canManage
+                ? 'Add one, or import from the FFZ tab of the emoji picker '
+                    'in any chat.'
+                : null,
           )
         else
           ...emotes.map((e) => _EmoteRow(
@@ -230,19 +225,13 @@ class ServerStickersSection extends ConsumerWidget {
           ),
         if (canManage) const SizedBox(height: HollowSpacing.md),
         if (stickers.isEmpty)
-          Padding(
-            padding: const EdgeInsets.symmetric(vertical: HollowSpacing.lg),
-            child: Center(
-              child: Text(
-                canManage
-                    ? 'No stickers yet. Add artwork, or save some from the\n'
-                        'KLIPY tab of the sticker panel in any chat.'
-                    : 'No stickers yet.',
-                textAlign: TextAlign.center,
-                style: HollowTypography.caption
-                    .copyWith(color: hollow.textTertiary),
-              ),
-            ),
+          HollowEmptyState(
+            dense: true,
+            title: 'No stickers yet',
+            description: canManage
+                ? 'Add artwork, or save some from the KLIPY tab of the '
+                    'sticker panel in any chat.'
+                : null,
           )
         else
           Wrap(

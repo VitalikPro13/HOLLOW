@@ -25,6 +25,7 @@ import 'package:hollow/src/ui/archive/shared/archive_toolbar.dart';
 import 'package:hollow/src/ui/archive/shared/archive_verification_banner.dart';
 import 'package:hollow/src/ui/archive/shared/imported_archive_prep.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
+import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/media/media_viewer_scope.dart';
@@ -182,34 +183,10 @@ class _ImportedArchiveListState extends ConsumerState<_ImportedArchiveList> {
                   ),
                   data: (paths) {
                     if (paths.isEmpty) {
-                      return Center(
-                        child: Padding(
-                          padding: const EdgeInsets.all(HollowSpacing.lg),
-                          child: Column(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Icon(LucideIcons.fileArchive,
-                                  size: 40,
-                                  color: hollow.textSecondary
-                                      .withValues(alpha: 0.3)),
-                              const SizedBox(height: HollowSpacing.md),
-                              Text(
-                                'No imported archives',
-                                style: HollowTypography.body.copyWith(
-                                    color: hollow.textSecondary),
-                              ),
-                              const SizedBox(height: HollowSpacing.xs),
-                              Text(
-                                'Load or drag a .hollow-archive file',
-                                style: HollowTypography.caption.copyWith(
-                                  color: hollow.textSecondary
-                                      .withValues(alpha: 0.6),
-                                  fontSize: 11,
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
+                      return const HollowEmptyState(
+                        glyph: LucideIcons.fileArchive,
+                        title: 'No imported archives',
+                        description: 'Load or drag a .hollow-archive file.',
                       );
                     }
 
@@ -484,21 +461,9 @@ class _ImportedArchiveViewer extends ConsumerWidget {
     final selectedPath = ref.watch(selectedImportedArchiveProvider);
 
     if (selectedPath == null) {
-      return Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(LucideIcons.fileArchive,
-                size: 64,
-                color: hollow.textSecondary.withValues(alpha: 0.3)),
-            const SizedBox(height: HollowSpacing.lg),
-            Text(
-              'Select an archive to view its contents',
-              style: HollowTypography.body
-                  .copyWith(color: hollow.textSecondary),
-            ),
-          ],
-        ),
+      return const HollowEmptyState(
+        glyph: LucideIcons.fileArchive,
+        title: 'Select an archive to view its contents',
       );
     }
 

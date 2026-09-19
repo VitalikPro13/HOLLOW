@@ -4,6 +4,7 @@ import 'package:hollow/src/ui/components/hollow_divider.dart';
 import 'package:hollow/src/ui/chat/hollow_link_utils.dart';
 
 import 'package:flutter/material.dart';
+import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/speaking_border.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/message_preview.dart';
@@ -633,11 +634,7 @@ class _ServerContentState extends State<_ServerContent> {
               child: child!,
             ),
             child: items.isEmpty
-                ? Center(
-                    child: Text('No channels',
-                        style: HollowTypography.bodySmall
-                            .copyWith(color: w.hollow.textSecondary)),
-                  )
+                ? const HollowEmptyState(title: 'No channels')
                 : ListView.builder(
                     padding:
                         const EdgeInsets.symmetric(vertical: HollowSpacing.xs),
@@ -920,22 +917,10 @@ class _HomeContent extends ConsumerWidget {
 
         Expanded(
           child: accepted.isEmpty && !hasPending
-              ? Center(
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(LucideIcons.users, size: 48,
-                          color: hollow.textSecondary.withValues(alpha: 0.3)),
-                      const SizedBox(height: HollowSpacing.md),
-                      Text('No friends yet',
-                          style: HollowTypography.body
-                              .copyWith(color: hollow.textSecondary)),
-                      const SizedBox(height: HollowSpacing.xs),
-                      Text('Add a friend by their peer ID',
-                          style: HollowTypography.caption
-                              .copyWith(color: hollow.textSecondary)),
-                    ],
-                  ),
+              ? const HollowEmptyState(
+                  glyph: LucideIcons.users,
+                  title: 'No friends yet',
+                  description: 'Add a friend by their peer ID.',
                 )
               : ListView.builder(
                   itemCount: accepted.length,

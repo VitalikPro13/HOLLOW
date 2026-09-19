@@ -12,9 +12,7 @@ import 'package:hollow/src/core/providers/download_manager_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
-import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
-import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/archive/shared/archive_message_list.dart';
 import 'package:hollow/src/ui/archive/shared/archive_toolbar.dart';
 import 'package:hollow/src/ui/chat/chat_input_shortcuts.dart';
@@ -25,6 +23,7 @@ import 'package:hollow/src/ui/media/media_viewer_scope.dart';
 import 'package:hollow/src/ui/dialogs/export_archive_dialog.dart';
 import 'package:hollow/src/ui/dialogs/message_proof_dialog.dart';
 import 'package:hollow/src/core/services/attachment_export.dart';
+import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Right panel of "My Data" — shows empty state or a read-only message viewer.
@@ -54,31 +53,15 @@ class _ArchiveMessageViewerState extends ConsumerState<ArchiveMessageViewer> {
 
   @override
   Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
     final selectedDm = ref.watch(archiveSelectedDmProvider);
     final selectedChannel = ref.watch(archiveSelectedChannelProvider);
 
     _resetOnConversationChange(selectedDm, selectedChannel);
 
     if (selectedDm == null && selectedChannel == null) {
-      return Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(
-              LucideIcons.archive,
-              size: 64,
-              color: hollow.textSecondary.withValues(alpha: 0.3),
-            ),
-            const SizedBox(height: HollowSpacing.lg),
-            Text(
-              'Select a conversation to browse your message history',
-              style: HollowTypography.body.copyWith(
-                color: hollow.textSecondary,
-              ),
-            ),
-          ],
-        ),
+      return const HollowEmptyState(
+        glyph: LucideIcons.archive,
+        title: 'Select a conversation to browse your message history',
       );
     }
 

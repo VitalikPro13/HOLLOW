@@ -18,6 +18,7 @@ import 'package:hollow/src/ui/chat/voice_channel_pane.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
+import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
@@ -151,7 +152,12 @@ class _ConferenceDashboardState extends ConsumerState<ConferenceDashboard> {
           _buildHeader(hollow, conf),
           Expanded(
             child: conf.rooms.isEmpty
-                ? _buildEmptyState(hollow)
+                ? const HollowEmptyState(
+                    glyph: LucideIcons.video,
+                    title: 'No conference rooms yet',
+                    description: 'Create a room and share its link to meet '
+                        'anyone. No server or friendship needed.',
+                  )
                 : _buildRoomList(conf),
           ),
         ],
@@ -193,30 +199,6 @@ class _ConferenceDashboardState extends ConsumerState<ConferenceDashboard> {
             icon: const Icon(LucideIcons.plus, size: 14),
             onPressed: () => showConferenceRoomFormDialog(context),
             child: const Text('Create Room'),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildEmptyState(HollowTheme hollow) {
-    return Center(
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(LucideIcons.video,
-              size: 48, color: hollow.textSecondary.withValues(alpha: 0.4)),
-          const SizedBox(height: HollowSpacing.lg),
-          Text('No conference rooms yet',
-              style: HollowTypography.heading
-                  .copyWith(color: hollow.textSecondary)),
-          const SizedBox(height: HollowSpacing.sm),
-          Text(
-            'Create a room and share its link to meet anyone. '
-            'No server or friendship needed.',
-            style: HollowTypography.bodySmall
-                .copyWith(color: hollow.textSecondary),
-            textAlign: TextAlign.center,
           ),
         ],
       ),

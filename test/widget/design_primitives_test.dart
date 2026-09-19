@@ -412,6 +412,41 @@ void main() {
 
       expect(tester.widget<Icon>(find.byType(Icon)).size, 24);
     });
+
+    testWidgets('dense sits at the start of its card, one step smaller',
+        (tester) async {
+      await _pump(
+        tester,
+        const HollowEmptyState(title: 'No blocked users', dense: true),
+      );
+
+      expect(
+        find.descendant(
+          of: find.byType(HollowEmptyState),
+          matching: find.byType(Center),
+        ),
+        findsNothing,
+      );
+      final text = tester.widget<Text>(find.text('No blocked users'));
+      expect(text.style?.fontSize, HollowTypography.bodySmall.fontSize);
+      expect(text.textAlign, TextAlign.start);
+    });
+
+    testWidgets('dense stays on the start edge inside a centring parent',
+        (tester) async {
+      // _pump already centres its child, as some mobile routes do.
+      await _pump(
+        tester,
+        const SizedBox(
+          key: Key('slot'),
+          width: 400,
+          child: HollowEmptyState(title: 'No blocked users', dense: true),
+        ),
+      );
+
+      final box = tester.getTopLeft(find.byKey(const Key('slot')));
+      expect(tester.getTopLeft(find.text('No blocked users')).dx, box.dx);
+    });
   });
 
   group('HollowListRow', () {

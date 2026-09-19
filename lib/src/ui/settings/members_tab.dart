@@ -12,6 +12,7 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
+import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/hollow_menu.dart';
 import 'package:hollow/src/ui/components/hollow_tooltip.dart';
 import 'package:hollow/src/ui/components/overlay_anchor.dart';
@@ -37,13 +38,7 @@ class MembersTab extends ConsumerWidget {
     return membersAsync.when(
       data: (members) {
         if (members.isEmpty) {
-          return Center(
-            child: Text(
-              'No members',
-              style:
-                  HollowTypography.body.copyWith(color: hollow.textSecondary),
-            ),
-          );
+          return const HollowEmptyState(title: 'No members');
         }
 
         final sorted = [...members]..sort((a, b) {

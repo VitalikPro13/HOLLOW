@@ -195,8 +195,9 @@ void main() {
   testWidgets('no marks says how to earn one', (tester) async {
     await _pump(tester);
 
+    expect(find.text('No marks yet'), findsOneWidget);
     expect(
-      find.text('No marks yet. Redeem a code on the Shop tab to earn one.'),
+      find.text('Redeem a code on the Shop tab to earn one.'),
       findsOneWidget,
     );
     expect(find.text('Remove'), findsNothing);

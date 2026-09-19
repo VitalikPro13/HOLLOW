@@ -27,6 +27,7 @@ import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/edge_scroll_row.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
+import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
@@ -129,14 +130,9 @@ class FriendsBar extends ConsumerWidget {
 
           Expanded(
             child: displayList.isEmpty
-                ? Padding(
-                    padding: const EdgeInsets.only(left: HollowSpacing.sm),
-                    child: Text(
-                      'No friends yet',
-                      style: HollowTypography.caption.copyWith(
-                        color: hollow.textSecondary,
-                      ),
-                    ),
+                ? const Padding(
+                    padding: EdgeInsets.only(left: HollowSpacing.sm),
+                    child: HollowEmptyState(title: 'No friends yet', dense: true),
                   )
                 // .builder, not the children: form, so a long friends list
                 // stays LAZY. Arrows and wheel appear only while it overflows,
@@ -637,22 +633,10 @@ class _FriendsListTab extends ConsumerWidget {
     final online = ref.watch(onlineIdentitiesProvider);
 
     if (accepted.isEmpty) {
-      return Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(LucideIcons.users, size: 40,
-                color: hollow.textSecondary.withValues(alpha: 0.3)),
-            const SizedBox(height: HollowSpacing.md),
-            Text('No friends yet',
-                style: HollowTypography.body
-                    .copyWith(color: hollow.textSecondary)),
-            const SizedBox(height: HollowSpacing.xs),
-            Text('Add a friend by their peer ID',
-                style: HollowTypography.caption
-                    .copyWith(color: hollow.textSecondary)),
-          ],
-        ),
+      return const HollowEmptyState(
+        glyph: LucideIcons.users,
+        title: 'No friends yet',
+        description: 'Add a friend by their peer ID.',
       );
     }
 
@@ -826,24 +810,10 @@ class _FavouritesReorderTab extends ConsumerWidget {
     final validFavs = favourites.where((id) => acceptedIds.contains(id)).toList();
 
     if (validFavs.isEmpty) {
-      return Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(LucideIcons.star, size: 40,
-                color: hollow.textSecondary.withValues(alpha: 0.3)),
-            const SizedBox(height: HollowSpacing.md),
-            Text('No favourites yet',
-                style: HollowTypography.body
-                    .copyWith(color: hollow.textSecondary)),
-            const SizedBox(height: HollowSpacing.xs),
-            Text(
-              'Star a friend in the Friends tab to add them here',
-              style: HollowTypography.caption
-                  .copyWith(color: hollow.textSecondary),
-            ),
-          ],
-        ),
+      return const HollowEmptyState(
+        glyph: LucideIcons.star,
+        title: 'No favourites yet',
+        description: 'Star a friend in the Friends tab to add them here.',
       );
     }
 
@@ -975,27 +945,13 @@ class _RequestsTabState extends ConsumerState<_RequestsTab> {
     final profiles = ref.watch(profileProvider);
 
     if (widget.requests.isEmpty) {
-      return Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(
-              widget.direction == 'incoming'
-                  ? LucideIcons.inbox
-                  : LucideIcons.send,
-              size: 40,
-              color: hollow.textSecondary.withValues(alpha: 0.3),
-            ),
-            const SizedBox(height: HollowSpacing.md),
-            Text(
-              widget.direction == 'incoming'
-                  ? 'No incoming requests'
-                  : 'No outgoing requests',
-              style: HollowTypography.body
-                  .copyWith(color: hollow.textSecondary),
-            ),
-          ],
-        ),
+      return HollowEmptyState(
+        glyph: widget.direction == 'incoming'
+            ? LucideIcons.inbox
+            : LucideIcons.send,
+        title: widget.direction == 'incoming'
+            ? 'No incoming requests'
+            : 'No outgoing requests',
       );
     }
 
@@ -1033,13 +989,7 @@ class _RequestsTabState extends ConsumerState<_RequestsTab> {
         ),
         Expanded(
           child: filtered.isEmpty
-              ? Center(
-                  child: Text(
-                    'No matches',
-                    style: HollowTypography.body
-                        .copyWith(color: hollow.textSecondary),
-                  ),
-                )
+              ? const HollowEmptyState(title: 'No matches')
               : _buildList(hollow, profiles, filtered),
         ),
       ],

@@ -9,6 +9,7 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
+import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
@@ -103,19 +104,11 @@ class _MobileLabelsRouteState extends ConsumerState<MobileLabelsRoute> {
               child: _loading
                   ? const Center(child: CircularProgressIndicator())
                   : _labels.isEmpty
-                      ? Center(
-                          child: Column(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Icon(LucideIcons.tag, size: 40,
-                                  color: hollow.textSecondary.withValues(alpha: 0.4)),
-                              const SizedBox(height: HollowSpacing.md),
-                              Text('No labels yet',
-                                  style: HollowTypography.body.copyWith(
-                                    color: hollow.textSecondary,
-                                  )),
-                            ],
-                          ),
+                      ? HollowEmptyState(
+                          glyph: LucideIcons.tag,
+                          title: 'No labels yet',
+                          description:
+                              canManage ? 'Create one to get started.' : null,
                         )
                       : ListView(
                           padding: const EdgeInsets.all(HollowSpacing.lg),

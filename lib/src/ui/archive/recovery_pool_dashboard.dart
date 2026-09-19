@@ -8,6 +8,7 @@ import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
+import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_section_header.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
@@ -24,12 +25,7 @@ class RecoveryPoolDashboard extends ConsumerWidget {
     final pool = ref.watch(recoveryPoolProvider);
 
     if (pool == null) {
-      return Center(
-        child: Text(
-          'No active recovery pool',
-          style: HollowTypography.body.copyWith(color: hollow.textSecondary),
-        ),
-      );
+      return const HollowEmptyState(title: 'No active recovery pool');
     }
 
     // Local vault file data stands in until the pool status arrives.

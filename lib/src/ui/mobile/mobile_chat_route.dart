@@ -54,6 +54,7 @@ import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_badge.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
+import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/long_press_message.dart';
 import 'package:hollow/src/ui/components/saved_messages_avatar.dart';
@@ -1604,26 +1605,10 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
   }
 
   Widget _buildNoReadPermission(HollowTheme hollow) {
-    return Expanded(
-      child: Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(LucideIcons.eyeOff, size: 48,
-                color: hollow.textSecondary.withValues(alpha: 0.3)),
-            const SizedBox(height: HollowSpacing.md),
-            Padding(
-              padding:
-                  const EdgeInsets.symmetric(horizontal: HollowSpacing.xl),
-              child: Text(
-                'You don\'t have permission to read messages in this channel',
-                textAlign: TextAlign.center,
-                style:
-                    HollowTypography.body.copyWith(color: hollow.textSecondary),
-              ),
-            ),
-          ],
-        ),
+    return const Expanded(
+      child: HollowEmptyState(
+        glyph: LucideIcons.eyeOff,
+        title: 'You don\'t have permission to read messages in this channel',
       ),
     );
   }
@@ -1971,11 +1956,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
         rowBuilder,
   }) {
     if (messages.isEmpty) {
-      return Center(
-        child: Text('No messages yet', style: HollowTypography.body.copyWith(
-          color: HollowTheme.of(context).textSecondary,
-        )),
-      );
+      return const HollowEmptyState(title: 'No messages yet');
     }
 
     // Message id to chronological index, for findChildIndexCallback.
@@ -3207,13 +3188,8 @@ class _MobileChatHeader extends ConsumerWidget {
               ),
             ),
             if (pinnedMessages.isEmpty)
-              Padding(
-                padding: const EdgeInsets.all(HollowSpacing.xl),
-                child: Text(
-                  'Pinned messages not loaded in current view.',
-                  style: HollowTypography.body
-                      .copyWith(color: hollow.textSecondary),
-                ),
+              const HollowEmptyState(
+                title: 'Pinned messages not loaded in current view',
               )
             else
               Flexible(
