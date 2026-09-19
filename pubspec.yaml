@@ -33,7 +33,6 @@ dependencies:
 
   lucide_icons_flutter: ^3.1.14
   atlas_icons: ^0.0.12
-  flutter_svg: ^2.0.17
   # Content-addressing showcase details assets (sha256, same hex format as
   # the Rust bundle codec).
   crypto: ^3.0.3
@@ -164,7 +163,6 @@ flutter:
     # Whole directory: the UI sound pack (join/leave voice + stream, mute,
     # notification) lives here alongside the default ringtone.
     - assets/sounds/
-    - assets/tiktok-solo-icon.svg
     - assets/rust_licenses.txt
     - assets/help/manifest.json
     - assets/help/media/

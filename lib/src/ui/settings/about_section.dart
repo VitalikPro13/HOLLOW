@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:flutter_svg/flutter_svg.dart';
 import 'package:hollow/src/core/brand_icons.dart';
 import 'package:hollow/src/core/providers/updater_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
@@ -122,12 +121,6 @@ class AboutTab extends ConsumerWidget {
                 color: hollow.textPrimary,
                 tooltip: 'X',
                 url: 'https://x.com/Anon_Listen',
-              ),
-              const SizedBox(width: HollowSpacing.sm),
-              const _SvgBrandIcon(
-                asset: 'assets/tiktok-solo-icon.svg',
-                tooltip: 'TikTok',
-                url: 'https://tiktok.com/@AnonListen',
               ),
               const SizedBox(width: HollowSpacing.sm),
               const _BrandIcon(
@@ -386,35 +379,6 @@ class _BrandIcon extends StatelessWidget {
         size: 20,
         semanticLabel: tooltip,
         color: hovering ? color : hollow.textSecondary,
-      ),
-    );
-  }
-}
-
-class _SvgBrandIcon extends StatelessWidget {
-  final String asset;
-  final String tooltip;
-  final String url;
-
-  const _SvgBrandIcon({
-    required this.asset,
-    required this.tooltip,
-    required this.url,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return _BrandHoverBox(
-      tooltip: tooltip,
-      url: url,
-      iconBuilder: (hovering, hollow) => SvgPicture.asset(
-        asset,
-        width: 20,
-        height: 20,
-        semanticsLabel: tooltip,
-        colorFilter: hovering
-            ? null
-            : ColorFilter.mode(hollow.textSecondary, BlendMode.srcIn),
       ),
     );
   }
