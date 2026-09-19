@@ -318,6 +318,24 @@ void main() {
           DefaultTextStyle.of(tester.element(find.text('Delete'))).style;
       expect(style.color, hollow.textOnError);
     });
+
+    testWidgets('every variant is the same size, border included',
+        (tester) async {
+      for (final compact in [false, true]) {
+        final sizes = <Size>{};
+        for (final variant in HollowButtonVariant.values) {
+          await _pump(
+              tester,
+              HollowButton(
+                  variant: variant,
+                  compact: compact,
+                  onPressed: () {},
+                  child: const Text('Save')));
+          sizes.add(tester.getSize(find.byType(HollowButton)));
+        }
+        expect(sizes, hasLength(1), reason: 'compact: $compact');
+      }
+    });
   });
 
   group('HollowSectionHeader', () {

@@ -67,6 +67,7 @@ class DevicesCategoryView extends StatelessWidget {
               ),
               const SizedBox(height: HollowSpacing.sm),
               HollowButton.outline(
+                danger: true,
                 onPressed: () => resetDeviceListsFlow(context),
                 icon: const Icon(LucideIcons.refreshCw, size: 16),
                 child: const Text('Reset device list'),

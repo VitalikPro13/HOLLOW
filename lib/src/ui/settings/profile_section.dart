@@ -141,11 +141,10 @@ class ProfileSection extends ConsumerWidget {
           Align(
             alignment: Alignment.centerRight,
             child: HollowButton.filled(
-              onPressed: (profileDirty && !savingProfile) ? onSaveProfile : null,
+              onPressed: profileDirty ? onSaveProfile : null,
+              loading: savingProfile,
               icon: const Icon(LucideIcons.check, size: 16),
-              child: Text(savingProfile
-                  ? 'Saving...'
-                  : (profileDirty ? 'Save profile' : 'Saved')),
+              child: Text(profileDirty ? 'Save profile' : 'Saved'),
             ),
           ),
 

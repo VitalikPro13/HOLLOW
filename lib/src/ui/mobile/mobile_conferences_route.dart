@@ -260,7 +260,7 @@ class _MobileConferencesRouteState
             ),
           ],
           const SizedBox(height: HollowSpacing.sm),
-          HollowButton.filled(
+          HollowButton.outline(
             compact: true,
             expand: true,
             icon: const Icon(LucideIcons.video, size: 14),
@@ -531,8 +531,8 @@ class _MobileConferencesRouteState
                 ref.read(conferenceProvider.notifier).deny(entry.peerId),
             child: const Text('Decline'),
           ),
-          const SizedBox(width: HollowSpacing.xs),
-          HollowButton.filled(
+          const SizedBox(width: HollowSpacing.sm),
+          HollowButton.outline(
             compact: true,
             onPressed: () =>
                 ref.read(conferenceProvider.notifier).admit(entry.peerId),

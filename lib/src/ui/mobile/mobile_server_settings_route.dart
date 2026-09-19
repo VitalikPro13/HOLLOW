@@ -737,7 +737,7 @@ class _MobileServerSettingsRouteState
                           ),
                         ),
                         const SizedBox(width: HollowSpacing.sm),
-                        HollowButton.filled(
+                        HollowButton.outline(
                           onPressed: _saving ? null : _saveName,
                           compact: true,
                           child: const Text('Save'),
@@ -761,7 +761,7 @@ class _MobileServerSettingsRouteState
                     const SizedBox(height: HollowSpacing.sm),
                     Align(
                       alignment: Alignment.centerRight,
-                      child: HollowButton.filled(
+                      child: HollowButton.outline(
                         onPressed: _saving ? null : _saveDescription,
                         compact: true,
                         child: const Text('Save'),
@@ -866,8 +866,9 @@ class _MobileServerSettingsRouteState
                     const SizedBox(height: HollowSpacing.sm),
                     Align(
                       alignment: Alignment.centerRight,
-                      child: HollowButton.filled(
-                        onPressed: _savingAccess ? null : _saveAccessSettings,
+                      child: HollowButton.outline(
+                        onPressed: _saveAccessSettings,
+                        loading: _savingAccess,
                         compact: true,
                         child: const Text('Save'),
                       ),
@@ -918,25 +919,18 @@ class _MobileServerSettingsRouteState
                             .copyWith(color: hollow.textSecondary),
                       ),
                       const SizedBox(height: HollowSpacing.sm),
-                      Row(
+                      Wrap(
+                        spacing: HollowSpacing.sm,
+                        runSpacing: HollowSpacing.sm,
                         children: [
-                          for (final days in const [1, 3, 7]) ...[
-                            if (_catchupDays == days)
-                              HollowButton.filled(
-                                compact: true,
-                                onPressed: () {},
-                                child:
-                                    Text('$days day${days == 1 ? '' : 's'}'),
-                              )
-                            else
-                              HollowButton.ghost(
-                                compact: true,
-                                onPressed: () => _setRelayCatchup(days),
-                                child:
-                                    Text('$days day${days == 1 ? '' : 's'}'),
-                              ),
-                            const SizedBox(width: HollowSpacing.sm),
-                          ],
+                          for (final days in const [1, 3, 7])
+                            HollowChip(
+                              label: '$days day${days == 1 ? '' : 's'}',
+                              selected: _catchupDays == days,
+                              onTap: _catchupDays == days
+                                  ? null
+                                  : () => _setRelayCatchup(days),
+                            ),
                         ],
                       ),
                     ],
@@ -1079,8 +1073,9 @@ class _MobileServerSettingsRouteState
                         ),
                       ),
                       const SizedBox(width: HollowSpacing.sm),
-                      HollowButton.filled(
-                        onPressed: _savingNickname ? null : _saveNickname,
+                      HollowButton.outline(
+                        onPressed: _saveNickname,
+                        loading: _savingNickname,
                         compact: true,
                         child: const Text('Save'),
                       ),
@@ -1099,7 +1094,7 @@ class _MobileServerSettingsRouteState
                     Row(
                       children: [
                         Expanded(
-                          child: HollowButton.outline(
+                          child: HollowButton.ghost(
                             onPressed: () =>
                                 exportServerTemplate(context, server),
                             icon: const Icon(LucideIcons.upload, size: 14),
@@ -1108,7 +1103,7 @@ class _MobileServerSettingsRouteState
                         ),
                         const SizedBox(width: HollowSpacing.sm),
                         Expanded(
-                          child: HollowButton.outline(
+                          child: HollowButton.ghost(
                             onPressed: () =>
                                 importServerTemplate(context, ref, server),
                             icon: const Icon(LucideIcons.download, size: 14),

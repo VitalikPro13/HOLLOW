@@ -758,10 +758,11 @@ class _AddFriendSheetState extends ConsumerState<_AddFriendSheet> {
                 const SizedBox(height: HollowSpacing.md),
                 // Directly under the input, with no competing buttons between.
                 HollowButton.filled(
-                  onPressed: _sending ? null : _send,
+                  onPressed: _send,
+                  loading: _sending,
                   expand: true,
                   icon: const Icon(LucideIcons.userPlus, size: 16),
-                  child: Text(_sending ? 'Sending...' : 'Send Friend Request'),
+                  child: const Text('Send Friend Request'),
                 ),
 
                 const SizedBox(height: HollowSpacing.xl),
@@ -856,16 +857,10 @@ class _AddFriendSheetState extends ConsumerState<_AddFriendSheet> {
                             ),
                             const SizedBox(width: HollowSpacing.sm),
                             HollowButton.outline(
-                              onPressed: nicknameState.status ==
-                                      NicknameStatus.claiming
-                                  ? null
-                                  : _claimNickname,
-                              child: Text(
-                                nicknameState.status ==
-                                        NicknameStatus.claiming
-                                    ? 'Claiming...'
-                                    : 'Claim',
-                              ),
+                              onPressed: _claimNickname,
+                              loading: nicknameState.status ==
+                                  NicknameStatus.claiming,
+                              child: const Text('Claim'),
                             ),
                           ],
                         ),

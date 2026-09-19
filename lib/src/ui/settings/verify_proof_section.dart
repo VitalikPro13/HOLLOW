@@ -292,9 +292,10 @@ class _VerifyProofSectionState extends State<VerifyProofSection> {
             ),
             const SizedBox(width: HollowSpacing.sm),
             HollowButton.filled(
-              onPressed: _verifying ? null : _onVerifyPressed,
+              onPressed: _onVerifyPressed,
+              loading: _verifying,
               icon: const Icon(LucideIcons.shieldCheck, size: 16),
-              child: Text(_verifying ? 'Verifying...' : 'Verify'),
+              child: const Text('Verify'),
             ),
           ],
         ),

@@ -1220,16 +1220,10 @@ class _AddFriendTabState extends ConsumerState<_AddFriendTab> {
                   ),
                 ),
                 const SizedBox(width: HollowSpacing.sm),
-                HollowButton.filled(
-                  onPressed:
-                      nicknameState.status == NicknameStatus.claiming
-                          ? null
-                          : _claimNickname,
-                  child: Text(
-                    nicknameState.status == NicknameStatus.claiming
-                        ? 'Claiming...'
-                        : 'Claim',
-                  ),
+                HollowButton.outline(
+                  onPressed: _claimNickname,
+                  loading: nicknameState.status == NicknameStatus.claiming,
+                  child: const Text('Claim'),
                 ),
               ],
             ),

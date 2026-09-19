@@ -11,6 +11,7 @@ import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/hollow_focus_ring.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
+import 'package:hollow/src/ui/components/hollow_section_header.dart';
 import 'package:hollow/src/ui/components/hollow_spinner.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
@@ -271,17 +272,10 @@ class _LabelsTabState extends ConsumerState<LabelsTab> {
       padding: const EdgeInsets.all(HollowSpacing.xl),
       children: [
         if (labels.isNotEmpty) ...[
-          Text(
+          const HollowSectionHeader(
             'Pick your labels',
-            style: HollowTypography.subheading.copyWith(
-              color: hollow.textPrimary, fontWeight: FontWeight.w600),
+            subtitle: 'Tap to add or remove labels from your profile',
           ),
-          const SizedBox(height: HollowSpacing.sm),
-          Text(
-            'Tap to add or remove labels from your profile',
-            style: HollowTypography.bodySmall.copyWith(color: hollow.textSecondary),
-          ),
-          const SizedBox(height: HollowSpacing.md),
           Wrap(
             spacing: 8,
             runSpacing: 8,
@@ -312,25 +306,15 @@ class _LabelsTabState extends ConsumerState<LabelsTab> {
         ],
 
         if (canManage) ...[
-          Row(
-            children: [
-              Icon(LucideIcons.settings, size: 16, color: hollow.textSecondary),
-              const SizedBox(width: HollowSpacing.sm),
-              Text(
-                'Manage Labels',
-                style: HollowTypography.subheading.copyWith(
-                  color: hollow.textPrimary, fontWeight: FontWeight.w600),
-              ),
-              const Spacer(),
-              HollowButton.filled(
-                compact: true,
-                onPressed: _showLabelDialog,
-                icon: const Icon(LucideIcons.plus),
-                child: const Text('New'),
-              ),
-            ],
+          HollowSectionHeader(
+            'Manage Labels',
+            action: HollowButton.filled(
+              compact: true,
+              onPressed: _showLabelDialog,
+              icon: const Icon(LucideIcons.plus),
+              child: const Text('New'),
+            ),
           ),
-          const SizedBox(height: HollowSpacing.md),
           if (labels.isEmpty)
             const HollowEmptyState(
               dense: true,

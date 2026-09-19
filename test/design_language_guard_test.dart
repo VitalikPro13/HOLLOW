@@ -120,7 +120,78 @@ void main() {
             'HollowDialogSurface for a layout of its own '
             '(HOLLOW_DESIGN_LANGUAGE.md 4.4):\n  ${hits.join('\n  ')}');
   });
+
+  test('no action row holds two filled buttons', () {
+    // Siblings share the innermost list literal (`children:` or `actions:`).
+    // A filled in the else of a condition never shares the screen with the
+    // one in its if.
+    final filled = RegExp(r'HollowButton\.filled\(');
+    final hits = <String>[];
+    for (final entity in Directory('lib/src/ui').listSync(recursive: true)) {
+      if (entity is! File || !entity.path.endsWith('.dart')) continue;
+      final path = entity.path.replaceAll(r'\', '/');
+      if (path.startsWith(_components)) continue;
+      final source = _blankComments(entity.readAsStringSync());
+      final byList = <int, List<int>>{};
+      for (final m in filled.allMatches(source)) {
+        final before = source.substring(0, m.start).trimRight();
+        // `) :` is a ternary's else; `child:` is a named argument.
+        if (before.endsWith('else') ||
+            RegExp(r'\)\s*:$').hasMatch(before)) {
+          continue;
+        }
+        final lineStart = source.lastIndexOf('\n', m.start) + 1;
+        final lineEnd = source.indexOf('\n', m.start);
+        if (source
+            .substring(lineStart, lineEnd < 0 ? source.length : lineEnd)
+            .contains('design-ignore:')) {
+          continue;
+        }
+        final list = _enclosingList(source, m.start);
+        if (list < 0) continue;
+        byList.putIfAbsent(list, () => []).add(m.start);
+      }
+      for (final starts in byList.values.where((s) => s.length > 1)) {
+        final lines = starts
+            .map((s) => '\n'.allMatches(source.substring(0, s)).length + 1);
+        hits.add('$path:${lines.join(',')}');
+      }
+    }
+    expect(hits, isEmpty,
+        reason: 'Two filled buttons side by side. One region has ONE primary: '
+            'the other becomes outline (an alternative) or ghost '
+            '(HOLLOW_DESIGN_LANGUAGE.md 4.2):\n  ${hits.join('\n  ')}');
+  });
 }
+
+/// Offset of the `[` that opens the list literal holding [pos], or -1 when a
+/// block body (`{`) is met first, since a builder's statements are not
+/// siblings.
+int _enclosingList(String source, int pos) {
+  var open = 0;
+  for (var i = pos - 1; i >= 0; i--) {
+    final c = source[i];
+    if (c == ')' || c == ']' || c == '}') {
+      open++;
+    } else if (c == '(' || c == '[' || c == '{') {
+      if (open > 0) {
+        open--;
+      } else if (c == '[') {
+        return i;
+      } else if (c == '{') {
+        return -1;
+      }
+    }
+  }
+  return -1;
+}
+
+/// Blanks `//` comment lines in place, so brackets in prose do not unbalance
+/// the scan and offsets still map to lines.
+String _blankComments(String source) => source
+    .split('\n')
+    .map((l) => l.trimLeft().startsWith('//') ? ' ' * l.length : l)
+    .join('\n');
 
 // --- The rules ---------------------------------------------------------------
 
@@ -135,7 +206,7 @@ final _rules = <_Rule>[
         'not a literal',
     pattern: RegExp(r'\bfontSize\s*:'),
     excludeDirs: [_theme],
-    baseline: 597,
+    baseline: 596,
   ),
   _Rule(
     id: 'material-colors',
@@ -160,7 +231,7 @@ final _rules = <_Rule>[
     fix: 'use hollow.radiusXs / radiusMd / radiusLg / radiusXl',
     pattern: RegExp(r'BorderRadius\.circular\(\s*[0-9]'),
     excludeDirs: [_theme],
-    baseline: 117,
+    baseline: 116,
   ),
   _Rule(
     id: 'letter-spacing',

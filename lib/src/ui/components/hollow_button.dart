@@ -312,13 +312,17 @@ class _HollowButtonState extends State<HollowButton>
                 child: AnimatedContainer(
                   duration: HollowDurations.fast,
                   curve: HollowCurves.subtle,
+                  // The outline's 1 px border comes out of the padding, so
+                  // swapping a variant never moves the layout around it.
                   padding: EdgeInsets.symmetric(
-                    horizontal: widget.compact
-                        ? HollowSpacing.md
-                        : HollowSpacing.lg,
-                    vertical: widget.compact
-                        ? HollowSpacing.sm
-                        : HollowSpacing.sm + 2,
+                    horizontal: (widget.compact
+                            ? HollowSpacing.md
+                            : HollowSpacing.lg) -
+                        (border != null ? 1 : 0),
+                    vertical: (widget.compact
+                            ? HollowSpacing.sm
+                            : HollowSpacing.sm + 2) -
+                        (border != null ? 1 : 0),
                   ),
                   decoration: BoxDecoration(
                     color: effectiveBg,

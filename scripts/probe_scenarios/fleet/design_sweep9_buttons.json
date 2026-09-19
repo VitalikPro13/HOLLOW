@@ -1,0 +1,558 @@
+{
+ "_": [
+  "Design sweep 9, the filled-button audit, on a throwaway desktop peer:",
+  "invite cards in chat, server Overview (five section saves, catch-up",
+  "chips, template), Labels, and the user settings pages whose buttons",
+  "moved (Network, Devices, Notifications, Updates, Profile), Conferences",
+  "and the add-friend panel. Run once before and once after, then stack.",
+  "",
+  "run: powershell -File scripts\\fleet.ps1 -Scenario design_sweep9_buttons -Peers a"
+ ],
+ "peers": [
+  "a"
+ ],
+ "steps": [
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "text:Connected",
+   "timeout_ms": 120000,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Create a server"
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 900
+  },
+  {
+   "peer": "a",
+   "op": "enter_text",
+   "target": "hint:My Awesome Server",
+   "value": "sweep9"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Create",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "server:sweep9",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "a",
+   "op": "open_server",
+   "name": "sweep9"
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "channel:general",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "a",
+   "op": "open_channel",
+   "name": "general"
+  },
+  {
+   "peer": "a",
+   "op": "right_click",
+   "target": "server:sweep9"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "menu > text:Invite people"
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "type:SelectableText",
+   "timeout_ms": 20000
+  },
+  {
+   "peer": "a",
+   "op": "capture",
+   "target": "type:SelectableText",
+   "as": "INVITE"
+  },
+  {
+   "peer": "a",
+   "op": "key",
+   "value": "escape"
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 600
+  },
+  {
+   "peer": "a",
+   "op": "enter_text",
+   "target": "field",
+   "value": "${INVITE}"
+  },
+  {
+   "peer": "a",
+   "op": "key",
+   "value": "enter"
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 600
+  },
+  {
+   "peer": "a",
+   "op": "log",
+   "message": "an id no server has, so the card offers Join"
+  },
+  {
+   "peer": "a",
+   "op": "enter_text",
+   "target": "field",
+   "value": "https://hollow.anonlisten.com/join#server=0123456789abcdef0123456789abcdef&relay=relay.anonlisten.com"
+  },
+  {
+   "peer": "a",
+   "op": "key",
+   "value": "enter"
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 2000
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "s9-01-invite-cards"
+  },
+  {
+   "peer": "a",
+   "op": "right_click",
+   "target": "server:sweep9"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "menu > text:Server settings"
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1200
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "s9-02-overview-top"
+  },
+  {
+   "peer": "a",
+   "op": "scroll",
+   "target": "text:Server name",
+   "dy": -350,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 600
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "s9-03-overview-saves"
+  },
+  {
+   "peer": "a",
+   "op": "scroll",
+   "target": "text:Access",
+   "dy": -400,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 600
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "s9-04-overview-catchup"
+  },
+  {
+   "peer": "a",
+   "op": "scroll",
+   "target": "text:Server ID",
+   "dy": -500,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 600
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "s9-05-overview-bottom"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Labels",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1000
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "s9-06-labels"
+  },
+  {
+   "peer": "a",
+   "op": "key",
+   "value": "escape"
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Settings"
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1500
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Network",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1200
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "s9-07-network"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Add relay",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 600
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "s9-08-network-add-relay"
+  },
+  {
+   "peer": "a",
+   "op": "scroll",
+   "target": "text:Offline Delivery",
+   "dy": -450,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 600
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "s9-09-network-gif"
+  },
+  {
+   "peer": "a",
+   "op": "scroll",
+   "target": "text:GIF Search",
+   "dy": -450,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 600
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "s9-10-network-lower"
+  },
+  {
+   "peer": "a",
+   "op": "scroll",
+   "target": "text:Link Previews",
+   "dy": -450,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 600
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "s9-11-network-bottom"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Devices",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1200
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "s9-12-devices"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Notifications",
+   "index": 1,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1200
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "s9-13-notifications"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Updates",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 2500
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "s9-14-updates"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Profile",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1200
+  },
+  {
+   "peer": "a",
+   "op": "scroll",
+   "target": "text:Display name",
+   "dy": -900,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 600
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "s9-15-profile-bottom"
+  },
+  {
+   "peer": "a",
+   "op": "key",
+   "value": "escape"
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Conferences",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1200
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "s9-16-conferences"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Create Room",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "a",
+   "op": "enter_text",
+   "target": "hint:e.g. Weekly sync",
+   "value": "sweep9 room",
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "dialog > text:Create",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1500
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "s9-16b-conference-room"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Add friend",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1200
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Add Friend",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 900
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "s9-17-add-friend"
+  },
+  {
+   "peer": "a",
+   "op": "key",
+   "value": "escape"
+  }
+ ],
+ "cleanup": [
+  {
+   "peer": "a",
+   "op": "key",
+   "value": "escape"
+  },
+  {
+   "peer": "a",
+   "op": "right_click",
+   "target": "server:sweep9"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "menu > text:Server settings"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Danger",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Delete server",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "dialog > text:Delete server",
+   "index": 1,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "gone": "server:sweep9",
+   "timeout_ms": 30000
+  }
+ ]
+}

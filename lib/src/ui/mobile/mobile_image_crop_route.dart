@@ -366,8 +366,9 @@ class _MobileImageCropRouteState extends State<MobileImageCropRoute> {
                   ),
                   const SizedBox(width: HollowSpacing.sm),
                   HollowButton.filled(
-                    onPressed: _cropping ? null : _onConfirm,
-                    child: Text(_cropping ? 'Cropping...' : 'Apply'),
+                    onPressed: _onConfirm,
+                    loading: _cropping,
+                    child: const Text('Apply'),
                   ),
                 ],
               ),

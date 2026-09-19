@@ -1210,9 +1210,10 @@ class _ProfileTabState extends ConsumerState<_ProfileTab> {
         const SizedBox(height: HollowSpacing.xl),
 
         HollowButton.filled(
-          onPressed: _saving ? null : _save,
+          onPressed: _save,
+          loading: _saving,
           expand: true,
-          child: Text(_saving ? 'Saving...' : 'Save profile'),
+          child: const Text('Save profile'),
         ),
 
         const SizedBox(height: HollowSpacing.xl),
@@ -1621,7 +1622,7 @@ class _NetworkTabState extends ConsumerState<_NetworkTab> {
                 ),
               ),
               const SizedBox(width: HollowSpacing.sm),
-              HollowButton.filled(
+              HollowButton.outline(
                 compact: true,
                 onPressed: () {
                   final raw = _relayController.text.trim();
@@ -3972,6 +3973,7 @@ class _ResetDeviceListButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return HollowButton.outline(
+      danger: true,
       onPressed: () => _reset(context),
       expand: true,
       icon: const Icon(LucideIcons.refreshCw, size: 16),

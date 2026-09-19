@@ -14,6 +14,7 @@ import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/chat/hollow_link_utils.dart';
+import 'package:hollow/src/ui/components/hollow_badge.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
@@ -134,23 +135,7 @@ class _ShareLinkCard extends ConsumerWidget {
           ),
           const SizedBox(width: HollowSpacing.sm),
           if (existing != null)
-            Container(
-              padding: const EdgeInsets.symmetric(
-                horizontal: HollowSpacing.sm,
-                vertical: HollowSpacing.xxs,
-              ),
-              decoration: BoxDecoration(
-                color: hollow.success.withValues(alpha: 0.15),
-                borderRadius: BorderRadius.circular(hollow.radiusXs),
-              ),
-              child: Text(
-                'In shares',
-                style: HollowTypography.caption.copyWith(
-                  color: hollow.success,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-            )
+            const HollowBadge('In shares', kind: HollowBadgeKind.success)
           else
             HollowButton.outline(
               compact: true,
@@ -226,25 +211,9 @@ class _ServerInviteCard extends ConsumerWidget {
           ),
           const SizedBox(width: HollowSpacing.sm),
           if (alreadyJoined)
-            Container(
-              padding: const EdgeInsets.symmetric(
-                horizontal: HollowSpacing.sm,
-                vertical: HollowSpacing.xxs,
-              ),
-              decoration: BoxDecoration(
-                color: hollow.success.withValues(alpha: 0.15),
-                borderRadius: BorderRadius.circular(hollow.radiusXs),
-              ),
-              child: Text(
-                'Joined',
-                style: HollowTypography.caption.copyWith(
-                  color: hollow.success,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-            )
+            const HollowBadge('Joined', kind: HollowBadgeKind.success)
           else
-            HollowButton.filled(
+            HollowButton.outline(
               compact: true,
               onPressed: () => _handleJoin(context, ref),
               child: const Text('Join'),
@@ -305,7 +274,7 @@ class _RoomInviteCard extends ConsumerWidget {
             ),
           ),
           const SizedBox(width: HollowSpacing.sm),
-          HollowButton.filled(
+          HollowButton.outline(
             compact: true,
             onPressed: () => _handleJoin(context, ref),
             child: const Text('Join'),
@@ -411,7 +380,7 @@ class _ConferenceInviteCard extends ConsumerWidget {
             ),
           ),
           const SizedBox(width: HollowSpacing.sm),
-          HollowButton.filled(
+          HollowButton.outline(
             compact: true,
             onPressed: () => _handleJoin(context, ref),
             child: const Text('Join'),
@@ -480,7 +449,7 @@ class _RecoveryLinkCard extends ConsumerWidget {
             ),
           ),
           const SizedBox(width: HollowSpacing.sm),
-          HollowButton.filled(
+          HollowButton.outline(
             compact: true,
             onPressed: () =>
                 showJoinRecoveryPoolDialog(context, prefillLink: link.fullUrl),

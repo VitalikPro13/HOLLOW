@@ -276,9 +276,10 @@ class _MobileTwitchSettingsRouteState
                         // can never be persisted.
                         if (canManage)
                           HollowButton.filled(
-                            onPressed: _saving ? null : _save,
+                            onPressed: _save,
+                            loading: _saving,
                             expand: true,
-                            child: Text(_saving ? 'Saving...' : 'Save Twitch Settings'),
+                            child: const Text('Save Twitch Settings'),
                           ),
                       ],
                     ),

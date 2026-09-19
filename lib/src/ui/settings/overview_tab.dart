@@ -18,7 +18,7 @@ import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
-import 'package:hollow/src/ui/components/hollow_pressable.dart';
+import 'package:hollow/src/ui/components/hollow_chip.dart';
 import 'package:hollow/src/ui/components/hollow_section_header.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
@@ -755,7 +755,7 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
                 ),
               ),
               const SizedBox(width: HollowSpacing.sm),
-              HollowButton.filled(
+              HollowButton.outline(
                 onPressed: _saving ? null : _saveName,
                 child: const Text('Save'),
               ),
@@ -779,7 +779,7 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
           const SizedBox(height: HollowSpacing.sm),
           Align(
             alignment: Alignment.centerRight,
-            child: HollowButton.filled(
+            child: HollowButton.outline(
               onPressed: _saving ? null : _saveDescription,
               compact: true,
               child: const Text('Save description'),
@@ -884,8 +884,9 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
           const SizedBox(height: HollowSpacing.lg),
           Align(
             alignment: Alignment.centerRight,
-            child: HollowButton.filled(
-              onPressed: _savingAccess ? null : _saveAccessSettings,
+            child: HollowButton.outline(
+              onPressed: _saveAccessSettings,
+              loading: _savingAccess,
               compact: true,
               child: const Text('Save access settings'),
             ),
@@ -939,35 +940,18 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
                   HollowTypography.label.copyWith(color: hollow.textSecondary),
             ),
             const SizedBox(height: HollowSpacing.sm),
-            // Selection chips, not buttons: a filled HollowButton reads as
-            // another primary CTA competing with the section Save buttons.
-            Row(
+            Wrap(
+              spacing: HollowSpacing.sm,
+              runSpacing: HollowSpacing.sm,
               children: [
-                for (final days in const [1, 3, 7]) ...[
-                  Builder(builder: (context) {
-                    final selected = _catchupDays == days;
-                    return HollowPressable(
-                      onTap: selected ? null : () => _setRelayCatchup(days),
-                      borderRadius: BorderRadius.circular(hollow.radiusMd),
-                      backgroundColor: selected ? hollow.accentMuted : null,
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: HollowSpacing.md,
-                        vertical: HollowSpacing.xs + 2,
-                      ),
-                      child: Text(
-                        '$days day${days == 1 ? '' : 's'}',
-                        style: HollowTypography.label.copyWith(
-                          color: selected
-                              ? hollow.accent
-                              : hollow.textSecondary,
-                          fontWeight:
-                              selected ? FontWeight.w600 : FontWeight.normal,
-                        ),
-                      ),
-                    );
-                  }),
-                  const SizedBox(width: HollowSpacing.sm),
-                ],
+                for (final days in const [1, 3, 7])
+                  HollowChip(
+                    label: '$days day${days == 1 ? '' : 's'}',
+                    selected: _catchupDays == days,
+                    onTap: _catchupDays == days
+                        ? null
+                        : () => _setRelayCatchup(days),
+                  ),
               ],
             ),
           ],
@@ -985,7 +969,7 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
           const SizedBox(height: HollowSpacing.md),
           Row(
             children: [
-              HollowButton.outline(
+              HollowButton.ghost(
                 onPressed: () =>
                     exportServerTemplate(context, widget.server),
                 icon: const Icon(LucideIcons.upload, size: 14),
@@ -993,7 +977,7 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
                 child: const Text('Export'),
               ),
               const SizedBox(width: HollowSpacing.sm),
-              HollowButton.outline(
+              HollowButton.ghost(
                 onPressed: () =>
                     importServerTemplate(context, ref, widget.server),
                 icon: const Icon(LucideIcons.download, size: 14),
@@ -1218,8 +1202,9 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
 
             Align(
               alignment: Alignment.centerRight,
-              child: HollowButton.filled(
-                onPressed: _savingTwitch ? null : _saveTwitchSettings,
+              child: HollowButton.outline(
+                onPressed: _saveTwitchSettings,
+                loading: _savingTwitch,
                 compact: true,
                 child: const Text('Save Twitch settings'),
               ),
@@ -1228,8 +1213,9 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
             const SizedBox(height: HollowSpacing.md),
             Align(
               alignment: Alignment.centerRight,
-              child: HollowButton.filled(
-                onPressed: _savingTwitch ? null : _saveTwitchSettings,
+              child: HollowButton.outline(
+                onPressed: _saveTwitchSettings,
+                loading: _savingTwitch,
                 compact: true,
                 child: const Text('Save Twitch settings'),
               ),
@@ -1268,8 +1254,9 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
               ),
             ),
             const SizedBox(width: HollowSpacing.sm),
-            HollowButton.filled(
-              onPressed: _savingNickname ? null : _saveNickname,
+            HollowButton.outline(
+              onPressed: _saveNickname,
+              loading: _savingNickname,
               child: const Text('Save'),
             ),
           ],

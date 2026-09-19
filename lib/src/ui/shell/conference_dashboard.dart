@@ -295,7 +295,7 @@ class _RoomCard extends ConsumerWidget {
             child: const Text('Copy link'),
           ),
           const SizedBox(width: HollowSpacing.sm),
-          HollowButton.filled(
+          HollowButton.outline(
             compact: true,
             icon: const Icon(LucideIcons.video, size: 14),
             onPressed: () =>

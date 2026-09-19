@@ -6,6 +6,7 @@ import 'package:hollow/src/core/providers/updater_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
+import 'package:hollow/src/ui/components/hollow_badge.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_section_header.dart';
@@ -47,27 +48,12 @@ class _UpdatesTabState extends ConsumerState<UpdatesTab> {
             children: [
               Text(
                 'Updates',
-                style: HollowTypography.heading.copyWith(
-                  color: hollow.textPrimary,
-                  fontSize: 20,
-                ),
+                style: HollowTypography.heading
+                    .copyWith(color: hollow.textPrimary),
               ),
               const SizedBox(width: HollowSpacing.md),
-              Container(
-                padding: const EdgeInsets.symmetric(
-                    horizontal: 10, vertical: 4),
-                decoration: BoxDecoration(
-                  color: hollow.accent.withValues(alpha: 0.15),
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                child: Text(
-                  'v${state.currentVersion}',
-                  style: HollowTypography.caption.copyWith(
-                    color: hollow.accent,
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
-              ),
+              HollowBadge('v${state.currentVersion}',
+                  kind: HollowBadgeKind.mono),
             ],
           ),
 
@@ -75,19 +61,15 @@ class _UpdatesTabState extends ConsumerState<UpdatesTab> {
 
           Align(
             alignment: Alignment.centerLeft,
-            child: HollowButton.filled(
-              onPressed: state.status == UpdateStatus.checking
-                  ? null
-                  : () => notifier.checkForUpdates(),
-              icon: Icon(
-                state.status == UpdateStatus.checking
-                    ? LucideIcons.loader
-                    : LucideIcons.refreshCw,
-                size: 16,
-              ),
-              child: Text(state.status == UpdateStatus.checking
-                  ? 'Checking...'
-                  : 'Check for updates'),
+            // Install & restart below owns the filled once an update is ready.
+            child: HollowButton(
+              variant: state.status == UpdateStatus.readyToInstall
+                  ? HollowButtonVariant.ghost
+                  : HollowButtonVariant.filled,
+              onPressed: () => notifier.checkForUpdates(),
+              loading: state.status == UpdateStatus.checking,
+              icon: const Icon(LucideIcons.refreshCw, size: 16),
+              child: const Text('Check for updates'),
             ),
           ),
 

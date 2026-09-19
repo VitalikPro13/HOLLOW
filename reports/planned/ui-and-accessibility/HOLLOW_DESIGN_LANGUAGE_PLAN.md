@@ -1,6 +1,6 @@
 # Hollow design language and the grand redesign
 
-**Status:** IN PROGRESS, sessions 1 to 7 done 2026-09-19 (decisions applied, sweeps 3c to 8 done). Direction agreed 2026-09-14, research the same day.
+**Status:** IN PROGRESS, sessions 1 to 8 done 2026-09-19 (decisions applied, sweeps 3c to 9 done). Direction agreed 2026-09-14, research the same day.
 
 **Read this section first in a new session.** It is the handoff: what exists, what it changed, and the next thing to pick up. Everything below section 0 is the original plan, kept for its research digest and its screen-by-screen program; where it and this section disagree, this section is right.
 
@@ -101,7 +101,19 @@ New tokens: `HollowTypography.micro` (10/500, absorbs 155 orphaned sites) and `m
   - **Probe identity (Vitalik):** the first sweep 8 shots ran `ui_probe.ps1`'s default, a mirror of his REAL data dir. Never again: verification is `fleet.ps1` on throwaway fixture peers (`feedback_probe_throwaway_identities_only`); the follow-up shots used `fleet/design_sweep8_fixes.json` and a live un-onboarded peer for the welcome screen.
   - **Left for later / open for Vitalik:** the welcome screen's option rows are still icon-in-a-tinted-box; the game card's white-on-scrim X over art (a `HollowDialogCloseButton(onMedia:)` would replace it); the imported-pack dialog can show 3+ outline wear buttons; the storage dashboard's sections are cards inside a dialog; `promptForName` could take `maxLength` (three agents asked); the archive filter wants a real anchored popover primitive; the friends manager tab strip sits on `surface` inside an overlay.
 
-Guard baselines moved: font-size 689 to 597, material-colors 207 to 190, color-literal 136 to 133, radius 123 to 117, edge-insets 230 to 225, sized-box-gap 176 to 171, big-shadow 28 to 15, raw-material 55 to 26, raw-dialog new at 0 (sweep 8); material-colors 223 to 207, color-literal 137 to 136, raw-slider and raw-switch new at 0 (sweep 7); raw-spinner 127 to 0, raw-bottom-sheet 29 to 0, radius 149 to 123, material-colors 234 to 223, edge-insets 233 to 230 (sweep 6); font-size 703 to 689 and sized-box-gap 178 to 176 (sweep 5), local-label-class **36 to 28 to 0**, upper-case-label 42 to 0, letter-spacing 57 to 0, raw-divider 51 to 41 to 0, font-size 744 to 703, gradient 23 to 21, font-size 824 to 809 to 791 to 785, edge-insets 266 to 257 to 248 to 236, radius 177 to 175 to 168, letter-spacing 66 to 64 to 63, sized-box-gap 202 to 192 to 182.
+- **Sweep 9, the filled-button audit (session 8, 2026-09-19).** `.filled` 146 to **115**, each now the one commit of its screen, pane, dialog or sheet. The rule was sharpened in `HOLLOW_DESIGN_LANGUAGE.md` 4.2 and the skill, then applied:
+  - **Per-item actions are compact outline, never filled** (a list of ten was ten primaries): invite cards' Join / Open, meeting rows' Start meeting (desktop + mobile), mobile waiting-room Admit (its gap to Decline 4 to 8), the voice pane's stream rows and grid tiles' Watch. The single focused-stream placeholder keeps its filled Watch.
+  - **Section and field saves are outline.** Server Overview had five filled Saves on one page (name, description, access, Twitch, nickname), mobile server settings four, Network five inline Saves plus the add-relay Add; all outline now. Apply & restart, Save layout, Save profile, Link a device, Set password stay filled: each is the one commit of its page. Desktop Claim (nickname) matches mobile's outline.
+  - **Two actions, no primary, both ghost:** server template Export / Import on both platforms. **Selection is a chip:** the catch-up day pickers (desktop a hand-rolled chip that changed weight on select, mobile a filled button among ghosts) are `HollowChip`s.
+  - **Cautionary:** Reset device list is `outline(danger: true)` on both platforms. Notifications: Request permission (when missing) is the filled one, Send a test notification ghost. Updates: Check for updates steps down to ghost when an update is ready (Install & restart owns the filled); its hand-drawn version pill is a mono `HollowBadge`.
+  - Busy buttons that still swapped their label ("Saving...", "Claiming...", "Verifying...", "Cropping...", "Checking...") use `loading:` now (9 sites). Two shared flags (server name + description) were left disabled-while-busy.
+  - The invite card's "Joined" and share card's "In shares" hand-drawn pills are `HollowBadge(success)`. Labels tab headers are `HollowSectionHeader` (the settings icon beside "Manage Labels", left from sweep 5, is gone).
+  - **Component bug the renders caught:** an outline was 2 px taller than a filled (the 1 px border added to the padding), so every swapped Save pushed the layout below it. The border now comes out of the padding; a widget test pins all four variants to one size, compact and not.
+  - Guard: a third test, **no action row holds two filled buttons** (two `HollowButton.filled` sharing the innermost `children:` / `actions:` list; the else of a condition does not count). 0 hits on the tree; proved to fire on a planted pair.
+  - Scenarios `fleet/design_sweep9_buttons.json` (desktop, 18 shots incl. a fake-id invite so Join shows, a created conference room, the Add Friend tab) and `fleet/design_sweep9_mobile.json` (mini). The settings pages scroll by `scroll` (drag) on a visible text; `wheel` does not move them. `text:Notifications` needs `index: 1` once Server Settings is open behind.
+  - **Left for later / open for Vitalik:** Add a server keeps two filled (Join and Create, one per column); the End meeting danger button sits beside the filled Open call on mobile with no confirm; the invite and share cards still have an accent left strip (a "coloured edge" tell) for the screen pass; the mobile profile sheet is a stack of full-width buttons (Message filled + two outline) where desktop is one primary plus an icon strip.
+
+Guard baselines moved: font-size 597 to 596, radius 117 to 116 (sweep 9); font-size 689 to 597, material-colors 207 to 190, color-literal 136 to 133, radius 123 to 117, edge-insets 230 to 225, sized-box-gap 176 to 171, big-shadow 28 to 15, raw-material 55 to 26, raw-dialog new at 0 (sweep 8); material-colors 223 to 207, color-literal 137 to 136, raw-slider and raw-switch new at 0 (sweep 7); raw-spinner 127 to 0, raw-bottom-sheet 29 to 0, radius 149 to 123, material-colors 234 to 223, edge-insets 233 to 230 (sweep 6); font-size 703 to 689 and sized-box-gap 178 to 176 (sweep 5), local-label-class **36 to 28 to 0**, upper-case-label 42 to 0, letter-spacing 57 to 0, raw-divider 51 to 41 to 0, font-size 744 to 703, gradient 23 to 21, font-size 824 to 809 to 791 to 785, edge-insets 266 to 257 to 248 to 236, radius 177 to 175 to 168, letter-spacing 66 to 64 to 63, sized-box-gap 202 to 192 to 182.
 
 ### Four bugs the work surfaced, all fixed
 
@@ -118,13 +130,17 @@ Every sweep: probe screenshots **before**, change, probe screenshots **after**, 
 
 ### Where to pick up next
 
-**Sweeps 3 to 8 are done** (sessions 4 to 7). **Next session starts at sweep 9, the filled-button audit.**
+**Sweeps 3 to 9 are done** (sessions 4 to 8). **Next session starts the screen work** (phases 2 onward below).
 
 1. ~~Sweep 3c~~ done, see above.
 2. ~~Sweep 4, dividers~~ done, see above.
 3. ~~Sweep 5, empty states~~ done, see above.
-4. ~~Sweep 6, sheet + spinner~~ done, see above. ~~Sweep 7, Switch / Slider~~ done. ~~Sweep 8, dialogs~~ done. **Sweep 9:** START HERE with the filled-button audit (one filled per region).
-5. **Then the screen work**, phases 2 onward below, with the Shop's per-kind card shapes (verdict 9) and the compact message mode (verdict 8) inside it.
+4. ~~Sweep 6, sheet + spinner~~ done, see above. ~~Sweep 7, Switch / Slider~~ done. ~~Sweep 8, dialogs~~ done. ~~Sweep 9, filled buttons~~ done.
+5. **START HERE: the screen work**, phases 2 onward below, with the Shop's per-kind card shapes (verdict 9) and the compact message mode (verdict 8) inside it. Paused 2026-09-19 by Vitalik (rate limits), to be picked up later.
+
+**The ratchet tail rides the screen work (decided 2026-09-19).** The component sweeps are done, but nine guard rules still sit above zero: font-size 596, edge-insets 225, material-colors 190, sized-box-gap 171, color-literal 133, radius 116, raw-material 26, gradient 21, big-shadow 15. They are NOT cleared by more blind sweeps: hundreds of literal swaps across files nobody is looking at are where regressions hide. Each screen pass clears the literals in the files it touches, since it is re-rendering and judging that screen anyway, and lowers the baselines in the same commit. A short mechanical sweep at the end mops up whatever no screen owned (theme-adjacent helpers, rarely seen dialogs).
+
+**What completes the epic:** (1) phases 2 and 3 done for every screen, desktop and mobile together, per screen; (2) the nine ratchet rules at or near zero; (3) phase 4, every surface with its empty, loading, error, offline and locked state; (4) phase 5, the navigation map regenerated and one screenshot matrix across Windows, Linux, the iOS Simulator and Android; (5) the "left for later" items above closed. Rough size: 12 to 15 sessions, one screen each. Home goes first (its audit sheet is section 6).
 
 ### Session 3 (2026-09-18): decisions rendered, picked and applied
 

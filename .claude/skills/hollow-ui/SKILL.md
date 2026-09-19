@@ -159,8 +159,15 @@ option and no local variant.
 - **A row that exists FOR one action** (wear, unlink, a member card's
   action) carries it as a compact `outline`; its other actions stay ghost
   icons.
+- **The same for a card, section or one field:** a Save beside one field or a
+  section's own Save is `outline`, so a settings page has NO filled unless it
+  has one commit for the whole page. **Anything repeated per item** (Join on an
+  invite card, Start meeting on a room row, Admit, Watch, Install) is compact
+  `outline`, never filled. A selection is a `HollowChip` row, never a filled
+  button among ghosts.
 - **An action row with no primary is all ghost.** A toolbar never mixes outline
-  and ghost. A button is outlined only because it stands next to a filled one.
+  and ghost. Two actions with no primary (Export / Import) are both ghost.
+  Two filled in one `children:`/`actions:` list fail CI.
 - Buttons in a row are `sm` 8 apart. Always.
 - While a request runs: **loading, not disabled**, via `HollowButton(loading: true)`
   (never a child swapped for a spinner). Success toast after the await,

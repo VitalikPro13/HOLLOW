@@ -212,7 +212,7 @@ class _SystemNotificationsCardState
             if (info != null &&
                 info.canRequest &&
                 state != NotificationPermissionState.granted)
-              HollowButton.ghost(
+              HollowButton.filled(
                 onPressed: _busy != null ? null : _request,
                 loading: _busy == 'request',
                 icon: const Icon(LucideIcons.bellRing, size: 16),
@@ -225,7 +225,7 @@ class _SystemNotificationsCardState
                 icon: const Icon(LucideIcons.externalLink, size: 16),
                 child: const Text('Open system settings'),
               ),
-            HollowButton.filled(
+            HollowButton.ghost(
               onPressed: _busy != null ? null : _sendTest,
               loading: _busy == 'test',
               icon: const Icon(LucideIcons.send, size: 16),

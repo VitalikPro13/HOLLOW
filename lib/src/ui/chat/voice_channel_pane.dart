@@ -1020,7 +1020,7 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
                 textAlign: TextAlign.center,
               ),
               const SizedBox(height: HollowSpacing.sm),
-              HollowButton.filled(
+              HollowButton.outline(
                 compact: true,
                 icon: const Icon(LucideIcons.eye, size: 14),
                 onPressed: () => notifier.watchScreenShare(src.peerId),
@@ -1809,7 +1809,7 @@ class _UnwatchedShareBanner extends ConsumerWidget {
                       ),
                     ],
                     const SizedBox(width: HollowSpacing.sm),
-                    HollowButton.filled(
+                    HollowButton.outline(
                       compact: true,
                       onPressed: () => onWatch(peerId),
                       child: const Text('Watch'),

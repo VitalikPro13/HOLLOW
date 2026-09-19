@@ -539,16 +539,18 @@ File: `lib/src/ui/components/hollow_button.dart`
 
 | Variant | Background | Text Color | Hover BG | Usage |
 |---------|-----------|------------|----------|-------|
-| `filled` | `hollow.accent` | `hollow.textOnAccent` | `hollow.accentHover` | Primary actions (ONE per logical group) |
-| `ghost` | `accentMuted` at alpha 0 | `hollow.accent` | `hollow.accentMuted` | Secondary actions, dialog Cancel |
-| `outline` | `accentMuted` at alpha 0 + accent border | `hollow.accent` | `hollow.accentMuted` | Secondary/alternative (Export, Connect, Enable) |
-| `danger` | `hollow.error` | white | error at 85% | Destructive actions ONLY (never for merely-important) |
+| `filled` | `hollow.accent` | `hollow.textOnAccent` | `hollow.accentHover` | The ONE commit of a screen, pane, dialog or sheet |
+| `ghost` | `textPrimary` 6% at alpha 0 | `hollow.textSecondary` (grey; `textPrimary` on hover) | `textPrimary` at 6% | Everything else: toolbars, Cancel, rows with several actions, two actions with no primary |
+| `outline` | accent at alpha 0 + accent border (40%, 60% hover) | `hollow.accentText` | `hollow.accentMuted` | An alternative beside a filled; the one action of a row, card, section or field; ANY per-item action (compact). `danger: true` = cautionary (error tint) |
+| `danger` | `hollow.error` | `hollow.textOnError` | error at 85% | The final destructive confirmation ONLY |
 
-Ghost/outline rest bg is the hover color at ZERO ALPHA, not `Colors.transparent` (transparent BLACK — dark flash through the lerp; fixed 2026-07-05, see memory `feedback_hover_state_patterns`). Variant conventions: dialog pairs = ghost Cancel + filled confirm (danger when destructive); selection state uses HollowPressable chips, never `.filled`.
+Rule detail: `reports/reference/HOLLOW_DESIGN_LANGUAGE.md` 4.2 (sweep 9, 2026-09-19). Two `.filled` in one `children:`/`actions:` list fail `test/design_language_guard_test.dart`. The outline's 1 px border comes out of its padding, so every variant is the same size (widget test in `design_primitives_test.dart`). Busy = `loading: true` (spinner over the invisible label, presses ignored), never a label swap. `HollowButton(variant: ...)` switches the variant in one build (Updates' Check steps to ghost once Install is ready).
+
+Ghost/outline rest bg is the hover color at ZERO ALPHA, not `Colors.transparent` (transparent BLACK, dark flash through the lerp; see memory `feedback_hover_state_patterns`). Selection is a `HollowChip`, never `.filled`.
 
 **Named constructors:** `HollowButton.filled()`, `.ghost()`, `.outline()`, `.danger()`.
 
-**Parameters:** `onPressed`, `child`, `icon`, `variant`, `expand` (full width), `compact` (reduced padding), `semanticLabel` (a11y, Phase 2.1).
+**Parameters:** `onPressed`, `child`, `icon`, `variant`, `expand` (full width), `compact` (reduced padding), `semanticLabel` (a11y, Phase 2.1), `loading`, `danger` (outline only).
 
 **Accessibility (Phase 2.1):** wrapped in `MergeSemantics` > `HollowFocusRing` > … > `Semantics(button: true, enabled, label: semanticLabel)`. A button with a `Text` child auto-names itself (leave `semanticLabel` null). **Only set `semanticLabel` for icon-only buttons** (no text child) — enforced by `test/a11y_label_guard_test.dart`.
 

@@ -225,7 +225,7 @@ A chip's label is always `Flexible` and ellipsizes. A row of equal-width sub-tab
 
 ### 4.2 Buttons
 
-`HollowButton` is healthy: four variants, one raw constructor in the tree. What was missing is which variant goes where, and it shows: 158 `.filled` uses against a rule of roughly one per screen.
+`HollowButton` is healthy: four variants, one raw constructor in the tree. What was missing is which variant goes where: 158 `.filled` uses against a rule of roughly one per screen. Sweep 9 (2026-09-19) brought it to 115, each the one commit of its screen, pane, dialog or sheet.
 
 | Variant | Where | Limit |
 |---|---|---|
@@ -238,6 +238,11 @@ Consequences worth stating, because these are the observed inconsistencies:
 
 - **An action row with no primary is all ghost.** A toolbar does not mix outline and ghost. Whether a button is outlined is never a per-site decision: it is outlined only when it stands next to a filled primary.
 - **A row that exists FOR one action** (wear a frame, unlink a device, a member card's action) carries it as a compact `outline`; the row's other actions stay ghost icons.
+- **The same holds for a card, a section or one field.** A Save beside one field, a section's own Save, Export backup in its card: a compact `outline` (or a full one where it spans the card). A settings page therefore has no filled button unless it has ONE commit for the whole page (Save profile, Save layout, Apply & restart, Link a device). Two actions with no primary (Export and Import) are both ghost.
+- **Anything repeated per item is never filled**: an invite card's Join, a meeting row's Start meeting, a waiting-room Admit, a stream row's Watch, a version row's Install. A list of ten would be ten primaries. They are compact `outline`.
+- **A selection is a chip, never a pair of buttons.** Three day counts where the chosen one is filled and the rest ghost is a `HollowChip` row.
+- **The primary can move.** When a later state owns the commit (an update ready to install), the earlier primary (Check for updates) steps down to ghost in the same build: `HollowButton(variant: ...)`.
+- A missing permission is the region's primary (Request permission filled); once granted, the test and settings actions stay ghost.
 - Buttons in a row are `sm` 8 apart. Always.
 - While a request runs the button shows **loading, not disabled** (`HollowButton(loading: true)`: same width, same colours, a spinner in the variant foreground, presses ignored), and the success toast fires after the await.
 - An icon-only button carries a tooltip and a `semanticLabel`.
@@ -321,6 +326,7 @@ Guarded by `test/design_language_guard_test.dart`. Each rule carries a **baselin
 | 13 | Material `Slider` / `RangeSlider`; Material or Cupertino `Switch` / `Checkbox` / `Radio` | outside `hollow_slider.dart` |
 | 14 | `showDialog` / `showGeneralDialog` / `AlertDialog` / `SimpleDialog` / `Dialog(` | outside `components/` |
 | 15 | A hand-drawn dialog frame (`color: hollow.overlay` in a file that opens a dialog) | outside `components/` |
+| 16 | Two `HollowButton.filled` in one list literal (a `children:` or `actions:` row); the else of a condition does not count | outside `components/` |
 
 Already law and unchanged: purpose labels on icon-only controls, `HollowFocusRing`, `showHollowMenu`, `setShellTab`, the hover rules, `Colors.transparent` never animated, the `accentText` and `textTertiary` contrast checks, `reversedChatList()`, one mutation path per state.
 

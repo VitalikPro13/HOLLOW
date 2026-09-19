@@ -261,7 +261,7 @@ class NetworkSettingsView extends ConsumerWidget {
           ),
         ),
         const SizedBox(width: HollowSpacing.sm),
-        HollowButton.filled(
+        HollowButton.outline(
           compact: true,
           onPressed: onSubmitAddRelay,
           child: const Text('Add'),
@@ -477,7 +477,7 @@ class _GifProxySettingsCardState extends ConsumerState<GifProxySettingsCard> {
                 child: const SizedBox.shrink(),
               ),
               const SizedBox(width: HollowSpacing.xs),
-              HollowButton.filled(
+              HollowButton.outline(
                 compact: true,
                 onPressed: _keyBusy || _keyController.text.trim() == apiKey
                     ? null
@@ -527,7 +527,7 @@ class _GifProxySettingsCardState extends ConsumerState<GifProxySettingsCard> {
                   ),
                 ),
                 const SizedBox(width: HollowSpacing.sm),
-                HollowButton.filled(
+                HollowButton.outline(
                   compact: true,
                   onPressed: _hostsBusy ||
                           _hostsController.text.trim() == hosts.join(', ')
@@ -589,7 +589,7 @@ class _GifProxySettingsCardState extends ConsumerState<GifProxySettingsCard> {
                 ),
               ),
               const SizedBox(width: HollowSpacing.sm),
-              HollowButton.filled(
+              HollowButton.outline(
                 compact: true,
                 onPressed: _busy || _controller.text.trim() == current
                     ? null
@@ -954,7 +954,7 @@ class _LinkPreviewSettingsCardState
                 ),
               ),
               const SizedBox(width: HollowSpacing.xs),
-              HollowButton.filled(
+              HollowButton.outline(
                 compact: true,
                 onPressed:
                     _proxyBusy || _proxyController.text.trim() == proxy

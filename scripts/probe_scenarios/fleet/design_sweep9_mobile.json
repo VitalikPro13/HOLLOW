@@ -1,0 +1,52 @@
+{
+  "_": [
+    "The mobile half of design sweep 9, the filled-button audit: a throwaway",
+    "server's settings (four section saves, the catch-up day chips, template",
+    "Export / Import), then Settings > Devices (the reset is a cautionary",
+    "outline) and Friends > Add friend (Claim).",
+    "",
+    "run (on the Mac mini): pwsh scripts/fleet.ps1 -Scenario design_sweep9_mobile -Peers a"
+  ],
+  "peers": ["a"],
+  "steps": [
+    { "peer": "a", "op": "tap", "target": "semantics:New conversation", "index": 0 },
+    { "peer": "a", "op": "wait", "ms": 1000 },
+    { "peer": "a", "op": "enter_text", "target": "hint:Server name", "value": "sweep9" },
+    { "peer": "a", "op": "tap", "target": "text:Create", "index": 0 },
+    { "peer": "a", "op": "wait_for", "target": "text:sweep9", "timeout_ms": 30000 },
+    { "peer": "a", "op": "wait", "ms": 1500 },
+
+    { "peer": "a", "op": "long_press", "target": "text:sweep9", "index": 0 },
+    { "peer": "a", "op": "wait", "ms": 1000 },
+    { "peer": "a", "op": "tap", "target": "text:Server Settings", "index": 0 },
+    { "peer": "a", "op": "wait", "ms": 2000 },
+    { "peer": "a", "op": "shot", "name": "m9-01-server-settings" },
+    { "peer": "a", "op": "scroll", "target": "text:Description", "index": 0, "dy": -350, "soft": true },
+    { "peer": "a", "op": "wait", "ms": 1000 },
+    { "peer": "a", "op": "shot", "name": "m9-02-access" },
+    { "peer": "a", "op": "scroll", "target": "text:Access", "index": 0, "dy": -450, "soft": true },
+    { "peer": "a", "op": "wait", "ms": 1000 },
+    { "peer": "a", "op": "shot", "name": "m9-03-catchup" },
+    { "peer": "a", "op": "scroll", "target": "text:Offline Catch-up", "index": 0, "dy": -450, "soft": true },
+    { "peer": "a", "op": "wait", "ms": 1000 },
+    { "peer": "a", "op": "shot", "name": "m9-04-template" },
+    { "peer": "a", "op": "key", "value": "escape", "soft": true },
+    { "peer": "a", "op": "tap", "target": "semantics:Back", "index": 0, "soft": true },
+    { "peer": "a", "op": "wait", "ms": 1200 },
+
+    { "peer": "a", "op": "tap", "target": "semantics:Settings", "index": 0, "soft": true },
+    { "peer": "a", "op": "wait", "ms": 1200 },
+    { "peer": "a", "op": "scroll", "target": "text:Appearance", "index": 0, "dy": -500, "soft": true },
+    { "peer": "a", "op": "tap", "target": "text:Devices", "index": 0, "soft": true },
+    { "peer": "a", "op": "wait", "ms": 1500 },
+    { "peer": "a", "op": "shot", "name": "m9-05-devices", "soft": true },
+    { "peer": "a", "op": "tap", "target": "semantics:Back", "index": 0, "soft": true },
+    { "peer": "a", "op": "wait", "ms": 1000 },
+
+    { "peer": "a", "op": "tap", "target": "semantics:Friends", "index": 0, "soft": true },
+    { "peer": "a", "op": "wait", "ms": 1200 },
+    { "peer": "a", "op": "tap", "target": "text:Add Friend", "index": 0, "soft": true },
+    { "peer": "a", "op": "wait", "ms": 1200 },
+    { "peer": "a", "op": "shot", "name": "m9-06-add-friend", "soft": true }
+  ]
+}
