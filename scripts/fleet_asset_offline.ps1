@@ -206,8 +206,8 @@ $failure = $null
 try {
     # ---- Gate 1: a and b become friends and talk both ways. ----------------
     Say '1/4 friending a and b'
-    Step a @{ op = 'wait_for'; target = 'text:Connected'; timeout_ms = 120000 }
-    Step b @{ op = 'wait_for'; target = 'text:Connected'; timeout_ms = 120000 }
+    Step a @{ op = 'wait_for'; provider = 'connection'; equals = 'connected'; timeout_ms = 120000 }
+    Step b @{ op = 'wait_for'; provider = 'connection'; equals = 'connected'; timeout_ms = 120000 }
     # The capture stores PEER_B into the fleet var map; later steps reference
     # it as ${PEER_B} (do NOT read .captured directly - it is a hashtable).
     Step b @{ op = 'capture'; from = 'provider'; key = 'peerId'; as = 'PEER_B' }
@@ -255,7 +255,7 @@ try {
     # ---- Gate 3: b opens with the sender STILL UP. ------------------------
     Say '3/4 b returns while a is still up'
     Restart-Peer b
-    Step b @{ op = 'wait_for'; target = 'text:Connected'; timeout_ms = 120000 }
+    Step b @{ op = 'wait_for'; provider = 'connection'; equals = 'connected'; timeout_ms = 120000 }
     Open-Dm b 'probe-a'
     Step b @{ op = 'wait_for'; target = 'contains:gif one ${RUN}'; timeout_ms = 120000 }
     Step b @{ op = 'wait_for'; target = 'semantics:GIF'; timeout_ms = 120000 }
@@ -275,7 +275,7 @@ try {
     Stop-Peer a
 
     Restart-Peer b
-    Step b @{ op = 'wait_for'; target = 'text:Connected'; timeout_ms = 120000 }
+    Step b @{ op = 'wait_for'; provider = 'connection'; equals = 'connected'; timeout_ms = 120000 }
     Open-Dm b 'probe-a'
     Step b @{ op = 'wait_for'; target = 'contains:gif two ${RUN}'; timeout_ms = 120000 }
     # The row is here and the picture cannot be: nobody online holds the bytes.
@@ -288,7 +288,7 @@ try {
     # The holder comes back. Nothing in the UI re-asks - the pull has to
     # restart itself off the holder appearing in the DM room.
     Restart-Peer a
-    Step a @{ op = 'wait_for'; target = 'text:Connected'; timeout_ms = 120000 }
+    Step a @{ op = 'wait_for'; provider = 'connection'; equals = 'connected'; timeout_ms = 120000 }
     # "gone", not "GIF": the FIRST GIF is already cached here and would match a
     # positive wait on its own, so the only honest assertion is that nothing in
     # this thread is still waiting on bytes.

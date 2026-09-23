@@ -148,8 +148,8 @@ foreach ($peer in $journeyPeers) {
 
 # --- 0. capture BOTH master ids: a addresses the request to b's, and the
 #        closing dump assertions name a's. -----------------------------------
-Step a @{ op = 'wait_for'; target = 'text:Connected'; timeout_ms = 120000 }
-Step $Decliner @{ op = 'wait_for'; target = 'text:Connected'; timeout_ms = 120000 }
+Step a @{ op = 'wait_for'; provider = 'connection'; equals = 'connected'; timeout_ms = 120000 }
+Step $Decliner @{ op = 'wait_for'; provider = 'connection'; equals = 'connected'; timeout_ms = 120000 }
 Step $Decliner @{ op = 'capture'; from = 'provider'; key = 'peerId'; as = 'PEER_B' }
 Step a @{ op = 'capture'; from = 'provider'; key = 'peerId'; as = 'PEER_A' }
 
@@ -183,7 +183,7 @@ Say "b declined the request delivered from the mailbox"
 #        The declined tombstone must swallow it - no resurrection. -----------
 Stop-Peer $Decliner
 Restart-Peer $Decliner
-Step $Decliner @{ op = 'wait_for'; target = 'text:Connected'; timeout_ms = 120000 }
+Step $Decliner @{ op = 'wait_for'; provider = 'connection'; equals = 'connected'; timeout_ms = 120000 }
 Step $Decliner @{ op = 'tap'; target = 'semantics:Add friend'; index = 0 }
 Step $Decliner @{ op = 'tap'; target = 'text:Incoming'; index = 0 }
 Step $Decliner @{ op = 'wait_for'; target = 'text:No incoming requests'; timeout_ms = 15000 }
@@ -205,7 +205,7 @@ Step $Decliner @{ op = 'dump'; name = 'friend_decline_converged' }
 #        ever reaches a while both are online is not the thing being tested.
 Stop-Peer $Decliner
 Restart-Peer a
-Step a @{ op = 'wait_for'; target = 'text:Connected'; timeout_ms = 120000 }
+Step a @{ op = 'wait_for'; provider = 'connection'; equals = 'connected'; timeout_ms = 120000 }
 Step a @{ op = 'tap'; target = 'semantics:Add friend'; index = 0 }
 Step a @{ op = 'tap'; target = 'type:_TabButton>text:Outgoing'; index = 0 }
 # 'Cancel friend request' is the outgoing ROW's own action, so it is on screen
@@ -230,7 +230,7 @@ Say "PASS gate 3b: a's friends list is empty in the dump, not just missing b's r
 #        STILL empty. If a had re-sent on waking, this is where it would show.
 Stop-Peer a
 Restart-Peer $Decliner
-Step $Decliner @{ op = 'wait_for'; target = 'text:Connected'; timeout_ms = 120000 }
+Step $Decliner @{ op = 'wait_for'; provider = 'connection'; equals = 'connected'; timeout_ms = 120000 }
 Step $Decliner @{ op = 'tap'; target = 'semantics:Add friend'; index = 0 }
 Step $Decliner @{ op = 'tap'; target = 'text:Incoming'; index = 0 }
 Step $Decliner @{ op = 'wait_for'; target = 'text:No incoming requests'; timeout_ms = 30000 }

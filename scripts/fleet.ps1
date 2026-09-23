@@ -640,7 +640,7 @@ $onboardSteps = @(
     @{ op = 'tap'; target = "text:I've saved it"; frames = 40 },
     @{ op = 'wait_for'; gone = 'text:Your recovery phrase'; timeout_ms = 30000 },
     # Proof the node came up, not just the widget tree.
-    @{ op = 'wait_for'; target = 'text:Connected'; timeout_ms = 120000 },
+    @{ op = 'wait_for'; provider = 'connection'; equals = 'connected'; timeout_ms = 120000 },
     # A display name, because without one every peer, every friend row, every
     # member panel entry and every DM tab reads '12D3KooW...' and nothing in a
     # scenario can address any of them. `${PEER}` is substituted by the runner

@@ -1,5 +1,6 @@
 ﻿import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/ui/components/hollow_count_badge.dart';
 import 'package:hollow/src/ui/components/hollow_divider.dart';
 import 'package:hollow/src/core/providers/conference_provider.dart';
 import 'package:hollow/src/core/providers/dm_navigation.dart';
@@ -331,16 +332,22 @@ class FriendsBar extends ConsumerWidget {
 
   void _showAddFriendDialog(
       BuildContext context, WidgetRef ref, HollowTheme hollow) {
-    showHollowDialog(
-      context: context,
-      builder: (context) => const _FriendsManager(),
-    );
+    showFriendsManager(context);
   }
+}
+
+/// The Friends Manager dialog; [addFriend] opens it on the Add Friend tab.
+void showFriendsManager(BuildContext context, {bool addFriend = false}) {
+  showHollowDialog(
+    context: context,
+    builder: (context) => _FriendsManager(addFriend: addFriend),
+  );
 }
 
 /// Full Friends Manager dialog with tabs.
 class _FriendsManager extends ConsumerStatefulWidget {
-  const _FriendsManager();
+  final bool addFriend;
+  const _FriendsManager({this.addFriend = false});
 
   @override
   ConsumerState<_FriendsManager> createState() => _FriendsManagerState();
@@ -349,7 +356,8 @@ class _FriendsManager extends ConsumerStatefulWidget {
 enum _FriendsTab { friends, favourites, incoming, outgoing, add }
 
 class _FriendsManagerState extends ConsumerState<_FriendsManager> {
-  _FriendsTab _activeTab = _FriendsTab.friends;
+  late _FriendsTab _activeTab =
+      widget.addFriend ? _FriendsTab.add : _FriendsTab.friends;
   final _addController = TextEditingController();
 
   @override
@@ -1361,25 +1369,9 @@ class _FriendChip extends StatelessWidget { // design-ignore: an avatar tab in t
                     Positioned(
                       left: -4,
                       top: -4,
-                      child: Container(
-                        constraints: const BoxConstraints(minWidth: 16),
-                        height: 16,
-                        padding: const EdgeInsets.symmetric(horizontal: 3),
-                        decoration: BoxDecoration(
-                          color: hollow.error,
-                          borderRadius: BorderRadius.circular(8),
-                          border:
-                              Border.all(color: hollow.surface, width: 1.5),
-                        ),
-                        alignment: Alignment.center,
-                        child: Text(
-                          unreadCount > 99 ? '99+' : '$unreadCount',
-                          style: HollowTypography.micro.copyWith(
-                            color: Colors.white,
-                            fontWeight: FontWeight.w600,
-                            height: 1,
-                          ),
-                        ),
+                      child: HollowCountBadge(
+                        count: unreadCount,
+                        ring: hollow.surface,
                       ),
                     ),
                 ],

@@ -27,6 +27,19 @@ times for chips alone. Do not invent a 47th. Reach for the component.
 3. **What are the empty, loading and error states?** Design them now, not after.
 4. **What is the mobile counterpart?** Same change, same edit. Parity is checked
    per screen, never at the end.
+5. **Redesigning a screen?** Write its brief first (design language 5.1): the
+   job in one sentence, the focal point, the one primary action, and what
+   leaves the screen. Then hold the render to the checks in 5.3: squint test,
+   nothing twice, status by exception, destructive actions out of reach,
+   accent only on what acts, icons earn their place, one row per kind of
+   thing, locale-aware dates, one main region plus at most one side panel.
+6. **Anchor panes to the window, never centre them.** A desktop screen's regions
+   run to its edges (the main region takes the width, a side panel sits on the
+   right edge at full height); a centred max-width column is a WEB layout and
+   leaves dead gutters in the app. Max widths are for prose only. A web mockup's
+   artboard frames its content; the real pane is 800 to 2500 px wide and framed
+   by nothing, so the mockup decides what goes where, never widths or centring
+   (design language 5.2 and 5.2.1).
 
 ---
 
@@ -204,7 +217,12 @@ action; a pane takes the default, a list inside a card or section takes
 `textSecondary`, never the accent) · `showHollowSheet()` (the only bottom sheet:
 overlay, `radiusXl`, one `HollowSheetHandle`) · `HollowSlider` (the only
 slider; `onMedia: true` over video) · `HollowToggle` (the only switch, with a
-`semanticLabel`; it grows its own 48 px hit area on touch) · `HollowCard`.
+`semanticLabel`; it grows its own 48 px hit area on touch) · `HollowCard` ·
+`HollowCountBadge` (the unread counter: accent for unread, error plus `@` for a
+mention, never hand-drawn) · `ConversationRow` + `PresenceAvatar` (the one
+conversation row) · `HollowTextLink` (a link inside prose, on the text's edge) ·
+`ServerAvatar`. List times go through `conversationTimeLabel()`, never `M/D`,
+in the interface face (a written date in mono reads as a typewriter).
 
 **Cards:** only for a repeatable self-contained unit (a listing, a device, a
 news item). A settings group is not a card. A section is not a card. Cards do

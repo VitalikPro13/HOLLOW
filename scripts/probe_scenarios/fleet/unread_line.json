@@ -27,7 +27,7 @@
     {
       "peer": "all",
       "op": "wait_for",
-      "target": "text:Connected",
+      "provider": "connection", "equals": "connected",
       "timeout_ms": 120000
     },
     {

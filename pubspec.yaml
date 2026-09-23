@@ -168,6 +168,8 @@ flutter:
     - assets/help/media/
     - legal/PRIVACY_POLICY.md
     - legal/TERMS_OF_USE.md
+    # Home's What's New reads the changelog of the build it ships in.
+    - changelog.txt
 
   # An image asset can refer to one or more resolution-specific "variants", see
   # https://flutter.dev/to/resolution-aware-images

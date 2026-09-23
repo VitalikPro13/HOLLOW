@@ -124,7 +124,7 @@ $failure = $null
 try {
     # ---- 1. Owner (a) creates the server, member (b) joins it normally ----
     foreach ($peer in @('a', 'b', 'c')) {
-        Step $peer @{ op = 'wait_for'; target = 'text:Connected'; timeout_ms = 120000 }
+        Step $peer @{ op = 'wait_for'; provider = 'connection'; equals = 'connected'; timeout_ms = 120000 }
     }
 
     Say '1/6 owner creates the server'
@@ -191,7 +191,7 @@ try {
     # ---- 4. The owner comes back, an epoch behind ----
     Say '5/6 the owner returns'
     Restart-Peer a
-    Step a @{ op = 'wait_for'; target = 'text:Connected'; timeout_ms = 120000 }
+    Step a @{ op = 'wait_for'; provider = 'connection'; equals = 'connected'; timeout_ms = 120000 }
     Step a @{ op = 'open_server'; name = $server }
     Step a @{ op = 'open_channel'; name = 'general' }
     Step a @{ op = 'wait_for'; target = 'text:probe-c'; timeout_ms = 90000 }

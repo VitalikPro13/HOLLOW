@@ -353,7 +353,7 @@ SQLCipher WAL lock to release before the data dir is touched again).
 
 **`Wait-ForConnected` helper:** "this peer is up and on the network" without depending on which screen
 it booted into. Waits for EITHER `tooltip:Online` (the user bar's `connectionVisual()` label, which in
-Dock mode lives only in the status dot's tooltip) OR `text:Connected` (the Home dashboard's own word),
+Dock mode lives only in the status dot's tooltip) OR `text:Connected` (the relay card's state word on the redesigned Home, since 2026-09-23; before that the old Network card's),
 never `text:Online` alone, because the member panel prints that word as a section divider and would
 false-match for a peer that is actually offline. A peer that lands straight in a server view (which is
 what a freshly-arrived server does, it self-selects) never shows either literal word on its OWN, and

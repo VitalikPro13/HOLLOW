@@ -1,5 +1,6 @@
 import 'dart:math' as math;
 
+import 'package:hollow/src/ui/components/hollow_count_badge.dart';
 import 'package:hollow/src/ui/components/hollow_divider.dart';
 import 'package:hollow/src/ui/chat/hollow_link_utils.dart';
 
@@ -1308,31 +1309,9 @@ class _ChannelTile extends ConsumerWidget {
               const SizedBox(width: HollowSpacing.xs),
             ],
             if (mentionCount > 0)
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
-                decoration: BoxDecoration(
-                  color: hollow.error,
-                  borderRadius: BorderRadius.circular(9),
-                ),
-                child: Text(
-                  '@$mentionCount',
-                  style: HollowTypography.caption.copyWith(
-                    color: Colors.white, fontWeight: FontWeight.w700, fontSize: 10),
-                ),
-              )
+              HollowCountBadge(count: mentionCount, mention: true)
             else if (hasUnread)
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
-                decoration: BoxDecoration(
-                  color: hollow.error,
-                  borderRadius: BorderRadius.circular(9),
-                ),
-                child: Text(
-                  unreadCount > 99 ? '99+' : '$unreadCount',
-                  style: HollowTypography.caption.copyWith(
-                    color: Colors.white, fontWeight: FontWeight.w700, fontSize: 10),
-                ),
-              ),
+              HollowCountBadge(count: unreadCount),
           ],
         ),
       ),

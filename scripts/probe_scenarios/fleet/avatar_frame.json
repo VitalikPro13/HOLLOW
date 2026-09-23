@@ -21,7 +21,7 @@
   ],
   "peers": ["a", "b"],
   "steps": [
-    { "peer": "all", "op": "wait_for", "target": "text:Connected", "timeout_ms": 120000 },
+    { "peer": "all", "op": "wait_for", "provider": "connection", "equals": "connected", "timeout_ms": 120000 },
     { "peer": "a", "op": "capture", "from": "provider", "key": "peerId", "as": "PEER_A" },
 
     { "peer": "a", "op": "log", "message": "b has to be able to SEE a's profile, so make them friends first" },

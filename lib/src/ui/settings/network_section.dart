@@ -16,6 +16,7 @@ import 'package:hollow/src/ui/components/hollow_focus_ring.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/relay_no_turn_chip.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
+import 'package:hollow/src/ui/settings/relay_health_card.dart';
 import 'package:hollow/src/ui/settings/settings_shared.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
@@ -96,6 +97,7 @@ class NetworkSettingsView extends ConsumerWidget {
           ],
         ],
       ),
+      const RelayHealthCard(),
       SettingsCard(
         title: 'Offline Delivery',
         children: [

@@ -1,24 +1,19 @@
-/// The Home dashboard must stay reachable as the interface zoom shrinks the
-/// logical viewport.
+/// Home must stay reachable and unbroken as the interface zoom shrinks the
+/// logical viewport (a 1596x991 window at 200% leaves ~798x480).
 ///
-/// Its three columns are `Profile | Recent Conversations | Network`, but only
-/// the middle one had a `ListView` — the side columns were plain `Column`s.
-/// At 100% on a big window that is invisible because everything fits. Raise
-/// the zoom and the viewport shrinks (`window / scale`): on a 1596x991 window
-/// at 165% the dashboard gets ~580 logical px of height, and the profile
-/// column's "Your Stats" card and the network column's news section were
-/// clipped by the shell's `ClipRect` — no scrollbar, no way down.
-///
-/// The same sweep found two bare `Text`s in tight `Row`s — the shape the
-/// `UserBar` fix had just dealt with: the "Recent Conversations" header (162px
-/// over at ~800 logical wide, because that column is the `Expanded` one the
-/// zoom squeezes first) and `StatBar`'s label/value row (8px over at EVERY
-/// window size, because the `Spacer` between them claimed the free space).
+/// Home is an inbox that fills the width plus a side panel anchored to the
+/// right edge (design language 5.2). The inbox is ONE scroll view, so its
+/// variable strips (Needs Attention, Get Set Up) can never push the list off
+/// the bottom; the panel leaves below [kHomeRailBreakpoint].
 library;
+
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:hollow/src/core/changelog.dart';
+import 'package:hollow/src/core/providers/home_setup_provider.dart';
 import 'package:hollow/src/core/providers/news_provider.dart';
 import 'package:hollow/src/core/providers/relay_stats_provider.dart';
 import 'package:hollow/src/core/providers/updater_provider.dart';
@@ -26,51 +21,49 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_theme_data.dart';
 import 'package:hollow/src/ui/components/stat_bar.dart';
 import 'package:hollow/src/ui/shell/home_dashboard.dart';
+import 'package:hollow/src/ui/shell/home_rail.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../helpers/test_app.dart';
 
-/// Both notifiers reach for the network/FFI from `build()`, which cannot work
-/// headless. Static state keeps the news panel rendering so it still occupies
-/// (and can overflow) real space.
-///
-/// Two posts with real body text on purpose: the panel is only interesting
-/// when it has more content than fits, which is what makes it scroll
-/// internally instead of stretching the column.
+/// The notifiers reach for the network/FFI from `build()`, which cannot work
+/// headless. A long post keeps the What's New card worth measuring.
 class _StubNews extends NewsNotifier {
   @override
   NewsState build() => NewsState(hasFetched: true, posts: [
         NewsPost(
           id: '1',
-          date: '2026-07-30',
-          title: 'Hollow 0.9.1 is out',
-          body: 'A body long enough that the panel has something to '
-              'scroll through. ' * 4,
-        ),
-        NewsPost(
-          id: '2',
-          date: '2026-07-28',
-          title: 'Wayland window sharing',
-          body: 'Another post with a fair amount of text in it. ' * 4,
+          date: 'September 10, 2026',
+          title: 'Linux call audio, self-hosted relays and personal emotes',
+          body: 'A body long enough that the teaser has to clamp it. ' * 6,
         ),
       ]);
 }
 
 class _StubUpdater extends UpdateNotifier {
   @override
-  UpdateState build() => const UpdateState(currentVersion: '0.9.1');
+  UpdateState build() => const UpdateState(currentVersion: '0.11.1');
 }
 
-/// Polls the relay over HTTP/FFI on a timer from `build()`.
+/// A person whose last opened changelog is older than the running build.
+class _StubJustUpdated extends HomeSetupNotifier {
+  @override
+  HomeSetupState build() =>
+      const HomeSetupState(loaded: true, changelogSeen: '0.11');
+}
+
+/// Polls the relay over HTTP on a timer from `build()`.
 class _StubRelayStats extends RelayStatsNotifier {
   @override
   RelayStats build() => const RelayStats();
 }
 
-/// Viewports the desktop shell actually renders `HomeDashboard` at. Below 600
-/// logical wide `hollow_shell` switches to `MobileShell`, so 640 is the floor
-/// worth pinning — 798x480 is 200% zoom on the reporter's 1596x991 window,
-/// and 967x581 is the 165% screenshot itself.
+/// First run with the checklist showing: the tallest Home there is.
+class _StubSetup extends HomeSetupNotifier {
+  @override
+  HomeSetupState build() => const HomeSetupState(loaded: true);
+}
+
 const _viewports = [
   Size(1280, 800),
   Size(967, 581),
@@ -78,7 +71,8 @@ const _viewports = [
   Size(640, 470),
 ];
 
-Future<Set<String>> _pumpDashboard(WidgetTester tester, Size size) async {
+Future<Set<String>> _pumpHome(WidgetTester tester, Size size,
+    {HomeSetupNotifier Function() setup = _StubSetup.new}) async {
   tester.view.physicalSize = size;
   tester.view.devicePixelRatio = 1.0;
   addTearDown(() {
@@ -89,13 +83,10 @@ Future<Set<String>> _pumpDashboard(WidgetTester tester, Size size) async {
   final overflows = <String>{};
   final prior = FlutterError.onError;
   // Collect from the handler, not `takeException`, which surfaces only the
-  // first of several. Everything else is forwarded — swallowing errors
-  // broadly is how a layout test starts passing against an empty tree.
+  // first of several. Everything else is forwarded.
   FlutterError.onError = (d) {
     final s = d.exceptionAsString();
     if (s.contains('overflow')) {
-      // Include the creator location — "overflowed by 19px" alone does not
-      // tell you which Row to go fix.
       final where = RegExp(r'(Row|Column|Flex)\b[^\n]*file:[^\s)]+')
           .firstMatch(d.toString());
       overflows.add('${s.split('\n').first}  <<${where?.group(0) ?? '?'}>>');
@@ -109,7 +100,12 @@ Future<Set<String>> _pumpDashboard(WidgetTester tester, Size size) async {
       overrides: hollowTestOverrides(extra: [
         newsProvider.overrideWith(_StubNews.new),
         updaterProvider.overrideWith(_StubUpdater.new),
+        homeSetupProvider.overrideWith(setup),
         relayStatsProvider.overrideWith(_StubRelayStats.new),
+        // The real file, read here rather than through the asset bundle,
+        // whose async load does not settle inside a widget test's fake clock.
+        changelogProvider.overrideWith((ref) async =>
+            parseChangelog(File('changelog.txt').readAsStringSync())),
       ]),
       child: MaterialApp(
         theme: HollowThemeData.dark(),
@@ -123,99 +119,87 @@ Future<Set<String>> _pumpDashboard(WidgetTester tester, Size size) async {
 }
 
 void main() {
-  group('side columns scroll', () {
-    testWidgets('both side columns can scroll, not just the middle list',
-        (tester) async {
-      await _pumpDashboard(tester, const Size(967, 581));
-
-      // The scroll VIEWS are the assertion, not the scrollbars: since issue
-      // #54 the bar itself comes from HollowScrollBehavior (desktop only, in
-      // a reserved gutter), so a widget test running as Android sees no
-      // Scrollbar widget at all. What must hold either way is that both side
-      // columns scroll.
-      final columns = tester.widgetList<SingleChildScrollView>(
-        find.byWidgetPredicate(
-          (w) => w is SingleChildScrollView && w.controller != null,
-        ),
-      );
-      expect(columns, hasLength(2),
-          reason: 'the profile and network columns must each scroll; without '
-              'them their lower cards are clipped with no way to reach them');
-    });
-
-    /// The regression this guards: the news panel is supposed to absorb the
-    /// network column's slack and scroll its posts INTERNALLY. Bounding it
-    /// only by `Expanded` made its intrinsic height (both posts, unscrolled)
-    /// inflate the column past the viewport, so the OUTER bar took over the
-    /// scrolling and the panel never collapsed into its own.
-    testWidgets('on a roomy window only the news panel scrolls, not the '
-        'column around it', (tester) async {
-      await _pumpDashboard(tester, const Size(1280, 800));
-
-      final scrolling = tester
-          .stateList<ScrollableState>(find.byType(Scrollable))
-          .map((s) => s.position.maxScrollExtent)
-          .where((e) => e > 0)
-          .toList();
-
-      expect(scrolling, hasLength(1),
-          reason: 'exactly one thing should scroll here — the news panel '
-              'inside the network column, as it did before');
-    });
-  });
-
   group('no overflow as the zoom shrinks the viewport', () {
     for (final size in _viewports) {
       testWidgets('${size.width.toInt()}x${size.height.toInt()}',
           (tester) async {
-        final overflows = await _pumpDashboard(tester, size);
+        final overflows = await _pumpHome(tester, size);
         // Landmark: if the tree had failed to build there would be nothing
-        // left to overflow and this would pass vacuously.
-        expect(find.text('Recent Conversations'), findsOneWidget);
+        // left to overflow and this would pass vacuously. The inbox's own
+        // scroll view, not its header: on a short viewport the checklist
+        // pushes the header past the fold, where a sliver is never built.
+        expect(find.byType(CustomScrollView), findsOneWidget);
         expect(overflows, isEmpty,
-            reason: 'HomeDashboard overflowed at $size:\n  '
-                '${overflows.join('\n  ')}');
+            reason: 'Home overflowed at $size:\n  ${overflows.join('\n  ')}');
       });
     }
   });
 
-  group('column count follows the width', () {
-    test('three columns while they fit, two once they do not', () {
-      // Natural widths whenever there is room for them plus the centre list.
-      expect(dashboardColumnWidths(1280).left, 240);
-      expect(dashboardColumnWidths(1280).right, 260);
-
-      // Squeezed but still three, at 200% zoom on a 1596px window.
-      final at798 = dashboardColumnWidths(798);
-      expect(at798.right, isNotNull);
-      expect(at798.left, lessThan(240));
-      expect(at798.left, greaterThan(240 * 0.85 - 0.01));
-
-      // Below the three-column minimum the Network column drops rather than
-      // every card inside it overflowing — squeezing to 62% made the relay
-      // StatBars, the stats rows AND the conversation header all break.
-      expect(dashboardColumnWidths(640).right, isNull);
-      expect(dashboardColumnWidths(640).left, 240,
-          reason: 'the profile column keeps its natural width once it is '
-              'only sharing with the conversation list');
+  group('layout follows the width', () {
+    test('the rail shows from the breakpoint up and leaves below it', () {
+      expect(homeShowsRail(1600), isTrue);
+      expect(homeShowsRail(kHomeRailBreakpoint), isTrue);
+      expect(homeShowsRail(kHomeRailBreakpoint - 1), isFalse);
     });
 
-    testWidgets('the Network column is present at 967 wide and gone at 640',
+    testWidgets('the rail is anchored to the right edge, no gutter beyond it',
         (tester) async {
-      await _pumpDashboard(tester, const Size(967, 581));
-      expect(find.byType(StatBar), findsWidgets,
-          reason: 'the relay card belongs on a normal-width dashboard');
+      await _pumpHome(tester, const Size(1280, 800));
+      final panel = find
+          .ancestor(of: find.byType(HomeRail), matching: find.byType(Container))
+          .first;
+      expect(tester.getTopRight(panel).dx, 1280,
+          reason: 'an app pane runs to the window edge; a centred group with '
+              'gutters beside it is a web-page layout');
+      expect(tester.getSize(panel).width, kHomeRailWidth);
+    });
 
-      await _pumpDashboard(tester, const Size(640, 470));
-      expect(find.byType(StatBar), findsNothing);
-      expect(find.text('Recent Conversations'), findsOneWidget,
-          reason: 'the conversation list is the one column that never drops');
+    testWidgets('the rail is present at 1280 wide and gone at 798',
+        (tester) async {
+      await _pumpHome(tester, const Size(1280, 800));
+      expect(find.byType(HomeRail), findsOneWidget);
+
+      await _pumpHome(tester, const Size(798, 480));
+      expect(find.byType(HomeRail), findsNothing);
+      expect(find.byType(CustomScrollView), findsOneWidget,
+          reason: 'the inbox is the column that never leaves');
+    });
+
+    testWidgets('a first run shows the setup checklist', (tester) async {
+      await _pumpHome(tester, const Size(1280, 800));
+      expect(find.text('Get Set Up'), findsOneWidget);
+      expect(find.text('Back up your recovery phrase'), findsOneWidget);
     });
   });
 
-  /// The 8px overflow the sweep turned up, as a standalone widget so it is
-  /// pinned deterministically. This fired at EVERY window size — it was never
-  /// a zoom bug, just an invisible one.
+  testWidgets('the panel is News, Relay and Active Now', (tester) async {
+    await _pumpHome(tester, const Size(1280, 800));
+    await tester.pump();
+    expect(find.text('News'), findsOneWidget);
+    expect(find.text('Relay'), findsOneWidget);
+    expect(find.text('Active Now'), findsOneWidget);
+    expect(find.text("What's new in 0.11.1"), findsOneWidget);
+  });
+
+  testWidgets('the first launch after an update leads with what changed',
+      (tester) async {
+    await _pumpHome(tester, const Size(1280, 800),
+        setup: _StubJustUpdated.new);
+    await tester.pump();
+    expect(find.text('Updated to 0.11.1'), findsOneWidget);
+    expect(find.text("See everything that's new"), findsOneWidget);
+  });
+
+  test('the news teaser is plain text from the first paragraph', () {
+    expect(
+      plainNewsExcerpt('## Heading\n\nCalls got **steadier**, see '
+          '[the post](https://x.y).\n\nSecond paragraph.'),
+      'Calls got steadier, see the post.',
+    );
+  });
+
+  /// StatBar now lives in Settings > Network (the relay card), where it still
+  /// shares a row with its value at narrow widths.
   group('StatBar fits a narrow card', () {
     Future<Set<String>> pumpBar(WidgetTester tester, double width) async {
       final overflows = <String>{};
@@ -240,7 +224,6 @@ void main() {
                   child: StatBar(
                     hollow: HollowTheme.of(context),
                     icon: LucideIcons.gauge,
-                    // The real pair from the relay card in the report.
                     label: 'Daily relay data',
                     value: '480 / 7940 MB',
                     progress: 0.5,
@@ -256,8 +239,6 @@ void main() {
       return overflows;
     }
 
-    // 236 = the 260px network column minus its padding, which is where this
-    // was overflowing in the field. The narrower cases are the zoom headroom.
     for (final width in const [236.0, 200.0, 160.0]) {
       testWidgets('no overflow at ${width.toInt()}px wide', (tester) async {
         final overflows = await pumpBar(tester, width);
@@ -269,8 +250,6 @@ void main() {
 
     testWidgets('the value stays whole and the label ellipses', (tester) async {
       await pumpBar(tester, 160);
-      // The number is the thing you came to read — it must never be the part
-      // that gets truncated.
       expect(find.text('480 / 7940 MB'), findsOneWidget);
       final label = tester.widget<Text>(find.text('Daily relay data'));
       expect(label.overflow, TextOverflow.ellipsis);

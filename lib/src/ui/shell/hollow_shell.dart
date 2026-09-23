@@ -19,6 +19,8 @@ import 'package:hollow/src/core/models/chat_message.dart';
 import 'package:hollow/src/core/models/node_status.dart';
 import 'package:hollow/src/core/models/server_info.dart';
 import 'package:hollow/src/core/providers/channel_chat_provider.dart';
+import 'package:hollow/src/core/providers/channel_navigation.dart';
+import 'package:hollow/src/core/providers/home_setup_provider.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
 import 'package:hollow/src/core/providers/chat_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
@@ -56,6 +58,7 @@ import 'package:hollow/src/core/providers/server_strip_layout_provider.dart';
 import 'package:hollow/src/core/providers/notification_provider.dart';
 import 'package:hollow/src/core/providers/system_notification_provider.dart';
 import 'package:hollow/src/core/providers/unread_provider.dart';
+import 'package:hollow/src/core/providers/updater_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
@@ -265,21 +268,9 @@ class _HollowShellState extends ConsumerState<HollowShell>
 
   Future<void> _openChannelFromNotification(
       String serverId, String channelId) async {
-    final channels = await ChannelListNotifier.fetchChannels(serverId);
-    final layout = await ChannelLayoutNotifier.fetchLayout(serverId);
     if (!mounted) return;
-    setShellTab(ref.read, null);
-    ref.read(selectedPeerProvider.notifier).state = null;
-    ref.read(serverSettingsOpenProvider.notifier).state = false;
-    ref.read(channelListProvider.notifier).setChannels(channels);
-    ref.read(channelLayoutProvider.notifier)
-        .setLayout(layout, serverId: serverId);
-    ref.read(selectedChannelProvider.notifier).state = channelId;
-    ref.read(selectedServerProvider.notifier).state = serverId;
-    final map =
-        Map<String, String>.from(ref.read(lastChannelPerServerProvider));
-    map[serverId] = channelId;
-    ref.read(lastChannelPerServerProvider.notifier).state = map;
+    await openServerChannel(
+        ProviderScope.containerOf(context, listen: false), serverId, channelId);
   }
 
   @override
@@ -1018,6 +1009,10 @@ class _HollowShellState extends ConsumerState<HollowShell>
     // Dock vs Classic shell (#58): read from a provider's build() this races the
     // store open, and Classic never survives a restart.
     await ref.read(layoutModeProvider.notifier).load();
+    // Home's first-run checklist flags, same reason.
+    await ref
+        .read(homeSetupProvider.notifier)
+        .load(ref.read(updaterProvider).currentVersion);
     // App lock, same reason: the store has to be open first.
     await ref.read(lockAfterMinutesProvider.notifier).load();
     _armAppLock();

@@ -125,8 +125,8 @@ foreach ($peer in $journeyPeers) {
 
 # --- 0. Both up: capture b's peer id (a needs it to address the request) and a's
 #        display name (b should render it on the incoming card). -------------
-Step a @{ op = 'wait_for'; target = 'text:Connected'; timeout_ms = 120000 }
-Step b @{ op = 'wait_for'; target = 'text:Connected'; timeout_ms = 120000 }
+Step a @{ op = 'wait_for'; provider = 'connection'; equals = 'connected'; timeout_ms = 120000 }
+Step b @{ op = 'wait_for'; provider = 'connection'; equals = 'connected'; timeout_ms = 120000 }
 # The capture step stores PEER_B into the fleet var map; later steps reference it
 # as ${PEER_B}, which Send-FleetStep expands (do NOT read .captured directly — it
 # is a hashtable, not the bare id).

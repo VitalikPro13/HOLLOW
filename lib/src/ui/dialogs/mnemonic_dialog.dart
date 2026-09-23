@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/providers/home_setup_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
@@ -61,7 +63,13 @@ void showMnemonicDialog(BuildContext context, String mnemonic) {
         ],
         actions: [
           HollowButton.filled(
-            onPressed: () => Navigator.of(dialogContext).pop(),
+            onPressed: () {
+              ProviderScope.containerOf(dialogContext, listen: false)
+                  .read(homeSetupProvider.notifier)
+                  .markPhraseSaved()
+                  .catchError((_) {});
+              Navigator.of(dialogContext).pop();
+            },
             child: const Text('I\'ve saved it'),
           ),
         ],

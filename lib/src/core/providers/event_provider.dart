@@ -47,6 +47,7 @@ import 'package:hollow/src/core/providers/friends_provider.dart';
 import 'package:hollow/src/core/providers/app_lifecycle_provider.dart';
 import 'package:hollow/src/core/providers/member_panel_provider.dart';
 import 'package:hollow/src/core/providers/unread_provider.dart';
+import 'package:hollow/src/core/providers/mention_preview_provider.dart';
 import 'package:hollow/src/core/providers/vault_status_provider.dart';
 import 'package:hollow/src/core/providers/download_manager_provider.dart';
 import 'package:hollow/src/core/providers/notification_provider.dart';
@@ -483,6 +484,15 @@ class EventStreamNotifier extends Notifier<bool> {
           ref.read(unreadProvider.notifier).onChannelMessage(
               serverId, channelId, messageId, isViewingChannel,
               isMention: isMentioned);
+          if (isMentioned && !isViewingChannel) {
+            ref.read(mentionPreviewProvider.notifier).record(MentionPreview(
+                  serverId: serverId,
+                  channelId: channelId,
+                  senderId: ref.read(deviceLinkProvider).identityOf(fromPeer),
+                  text: text,
+                  at: DateTime.fromMillisecondsSinceEpoch(timestamp.toInt()),
+                ));
+          }
         }
         // Track message ID for hint dedup (even if mention-filtered).
         _processedChannelMessageIds.add(messageId);

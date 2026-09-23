@@ -261,6 +261,10 @@ Consequences worth stating, because these are the observed inconsistencies:
 | `HollowToggle` | 13 Material `Switch`es on mobile (guarded, with `Checkbox` and `Radio`) | The one on/off control, 36 x 20 on every platform. On a touch platform the hit area grows to 48 x 48 while the painted switch stays put. Always pass `semanticLabel` (the row's title). A choice among a few options is a row of `HollowChip`, never radios. |
 | `showHollowSheet()` + `HollowSheetHandle` | 29 hand-styled `showModalBottomSheet`s, each drawing its own handle (guarded) | `overlay` surface, `radiusXl` on the top corners, one handle with 8 px above and below. `scrollControlled` for tall content; a `DraggableScrollableSheet` passes `handle: false` and places the handle itself. |
 | `HollowCard` | itself | Only for a repeatable self-contained unit: a listing, a device, a news item. A settings group is not a card. A section is not a card. |
+| `HollowCountBadge` | 10 hand-drawn unread pills (5 on desktop replaced so far) | The unread counter. **Unread is the accent, a mention is `error` with an `@`**, so red keeps meaning "someone needs you". One size (16), `ring:` the surface it sits on when it overlaps an avatar or icon corner. Distinct from `HollowBadge`, which states a fact in a wash. |
+| `ConversationRow` + `PresenceAvatar` | Home's hand-built row (the sidebar, mobile Chats and Archive rows follow in their passes) | The ONE conversation row (check 8 in 5.3): leading, title plus quiet detail (a channel's server), one-line preview, mono time, count badge. Unread is weight 600 and a `textPrimary` preview; read is 500 and `textSecondary`. |
+| `HollowTextLink` | a ghost button used as a link under prose | Accent text on the text's own edge, underline on hover, `HollowFocusRing`. For a link inside running content only; a standalone action stays a button. |
+| `ServerAvatar` | per-site server initials | A server's icon at list size: its image, else initials on its identity colour. |
 
 **Cards.** A card is a background step (`elevated`) and nothing else: no hairline, no shadow, in both themes. Cards do not nest. A coloured strip on a card edge is forbidden; status is a dot or a word. Anything repeated more than three times is a list of `HollowListRow`, not a grid of cards, unless the item **is** the art (the Shop, a gallery), in which case the art is the card: full bleed, title and price beneath it.
 
@@ -287,8 +291,53 @@ These are settled and stay settled: context menus through `showHollowMenu` opene
 
 ## 5. Screens
 
-- **Desktop:** body 14, list rows 32 to 36, message rows grouped by sender with the timestamp in mono at `textTertiary`.
-- **Mobile:** body one step up, rows 48 and above, controls in the thumb zone. Parity is checked per screen, in the same change, not at the end.
+Sections 3 and 4 make the parts consistent. This section decides whether a screen built from those parts is any good. Tokens alone give a tidy screen that still has no point; most of what reads as amateur in a finished screen is a missing decision about what the screen is for. The checks below come from Apple's Human Interface Guidelines (clarity, deference, hierarchy, progressive disclosure), Nielsen Norman Group's research on scanning and states, and the research digest in the plan. Each one can be checked against a render.
+
+### 5.1 The screen brief, before any widget
+
+Every screen pass starts with four lines, written down and agreed before code:
+
+1. **Job:** one sentence saying what a person comes to this screen to do. "Home is where I see what needs me and get back into my conversations." If it takes two sentences, the screen is two screens.
+2. **Focal point:** the one element that wins. Everything else steps back in size, weight or tone.
+3. **Primary action:** the one `filled` button, or "none" when the focal point is itself the action (a list you tap into).
+4. **Left out:** what moves elsewhere, and where to. A screen improves more from what leaves it than from what is added.
+
+### 5.2 Layout
+
+- **One alignment edge.** Text and controls in a column share one left edge. Centred content is for empty states, the welcome screen and a dialog's hero art only; a centred profile block above left-aligned cards is two axes fighting.
+- **An app pane is anchored to the window, not centred in it.** Every region of a screen runs to an edge of its pane: the main region takes the width, a side panel sits against the right edge at full height. Empty space belongs INSIDE a region (between groups, at the end of a list), never as gutters beside a centred block. A centred, max-width column is a web-page layout, and in a desktop app it reads as content floating in a hole (Home, 2026-09-23: a 720 px inbox and a rail centred together left about 120 px of dead band on each side of a 1280 window).
+- **Max widths are for prose only:** a dialog body, a news post, a long description, 50 to 75 characters a line. Lists, grids and panes fill their region. When a wide row puts two related things far apart (a name and its time), move them together in the row; do not shrink the pane.
+- **A main region plus at most one side panel.** Three regions of equal weight have no winner. The side panel holds secondary, glanceable things and never the screen's job. It is built like a server's member panel: `surface`, a hairline on its inner edge, 280 to 300 wide, full height. A navigation sidebar is 240.
+- **Narrow widths drop the side panel, never squeeze it.** Below the width where the main region stops being readable (Home: 840 px of pane), the panel leaves or folds into the main region; nothing overflows.
+- **Proximity carries the grouping** (the gap ramp in 3.5): items inside a group 4 to 8 apart, rows 4 to 12, groups 24 to 32. A line only where spacing cannot do it.
+
+### 5.2.1 A mockup is not the screen
+
+A web mockup is a fixed-size artboard: whatever sits inside it looks composed because the artboard's own edge frames it. The real screen is a resizable pane inside the app's chrome, from roughly 800 px (a small window, or 200% zoom) to 2500 px wide, and nothing frames it but the window. So a mockup decides **what** is on a screen and **which region wins**; it never decides widths, gutters or centring. Before a layout is built, answer for the real pane: what touches each edge, what grows when the window grows, and what leaves when it shrinks. Then judge the build in the running app at two or three widths, not against the artboard.
+
+### 5.3 The checks
+
+A screen is done when every one of these holds on a render, desktop and mobile, dark and light.
+
+1. **Squint test.** Blur the screenshot. The focal point from the brief is what you see first. If three things tie, it fails.
+2. **Nothing appears twice.** The same person, count or identity shown in two places on one screen weakens both. Your own name belongs in the user bar, not also in a profile column beside it.
+3. **Status by exception, identity by design.** Healthy state is silent. Connection, sync and relay figures appear when they deviate, next to what they affect, and the full numbers live in System Status. A figure that only an operator can read (message totals, peer ids) is not on a person's screen. The exception is what makes Hollow itself: the relay a person lives on, named in the console voice with its live load, belongs on Home, because members host this network and a slow evening should have a visible reason. Personality comes from the product's own nature (the relay, the greeting), never from filler panels.
+4. **Progressive disclosure.** The common case on the surface, the rest one step away (a menu, a detail pane, a settings page). Deprioritise before deleting (principle 5).
+5. **Destructive actions rest out of reach.** Block, Report, Leave, Delete and Wipe live in an overflow menu or a final Danger section, never at rest beside the primary action, and never in red on a surface a person passes every day.
+6. **The accent marks what you can act on.** Not a heading, not a name, not a decoration. A name painted in the accent reads as a link.
+7. **Icons earn their place.** An icon stands for a control or tells two kinds of item apart. An icon on every row of a settings page, or beside every label, is noise.
+8. **One row per kind of thing.** A conversation row, a person row and a settings row each look the same on every screen that shows one (Home, sidebar, mobile Chats, Archive). A second hand-built version of the same row is a bug.
+9. **Every region has a clear next step.** An empty region says what fills it and offers the one action that does (section 6). A first run is a designed screen, not the populated screen with nothing in it.
+10. **Numbers and dates are honest.** A numeric date is ambiguous across locales ("9/17" is American only), so list times go through `conversationTimeLabel()` (`core/time_labels.dart`): `14:05` today, Yesterday, a weekday within the week, `Sep 17`, then `Sep 17, 2025`. Changing numbers use tabular figures. A written date or a day name ("Sep 14", "Sat", "September 10, 2026") is words, so it takes the interface face at `textTertiary`; the console voice is for what the protocol produces (ids, hashes, versions, relay names).
+11. **Reading width.** A block of prose runs 50 to 75 characters a line.
+12. **Targets.** Desktop controls at least 28 px tall with the whole row as the hit area; touch targets at least 44 px (iOS) or 48 px (Android), whatever the painted size.
+13. **Keyboard.** Every action reachable by keyboard, Escape leaves the innermost layer, focus is visible through `HollowFocusRing`.
+14. **Five states.** Loaded, empty, loading, error, offline (section 6), each rendered once before the screen is called done.
+
+### 5.4 Platform metrics
+
+- **Desktop:** body 14, list rows 32 to 36 for one line and 48 to 56 for two, message rows grouped by sender with the timestamp in mono at `textTertiary`.
+- **Mobile:** body one step up, rows 48 and above (64 to 72 for a two-line conversation row), controls in the thumb zone, a large title at the top of a tab. Parity is checked per screen, in the same change, not at the end.
 - The chat surface is the brightest thing on screen.
 - **The window's outer 8 px are pointer-dead** (frameless resize border). Controls hugging an edge inset by `kWindowEdgeDeadStrip`.
 - Interface scale is one root scaled viewport. Window coordinates are not overlay coordinates: anchor with `overlayAnchorOf` and `overlayPositionOf`, never bare `localToGlobal`.

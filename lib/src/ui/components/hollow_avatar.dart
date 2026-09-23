@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart' show listEquals;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/color_utils.dart';
+import 'package:hollow/src/core/name_initials.dart';
 import 'package:hollow/src/core/providers/avatar_frame_provider.dart';
 import 'package:hollow/src/core/providers/avatar_provider.dart';
 import 'package:hollow/src/core/providers/profile_anim_provider.dart';
@@ -14,9 +15,10 @@ import 'package:hollow/src/ui/components/animated_gif_image.dart';
 import 'package:hollow/src/ui/components/avatar_frame.dart';
 import 'package:hollow/src/ui/components/hover_scope.dart';
 
-/// Avatar widget: a real image when available, else deterministic colour and
-/// initials from the peer ID. Bytes come from [avatarProvider] on demand, so
-/// [imageBytes] is only for explicit data such as an archive row.
+/// Avatar widget: a real image when available, else a colour from the peer ID
+/// and initials from the display name ([peerInitials]). Bytes come from
+/// [avatarProvider] on demand, so [imageBytes] is only for explicit data such
+/// as an archive row.
 ///
 /// [animate] un-gates the avatar's own animation AND its frame's. Elsewhere
 /// both hold frame 0 and play while the enclosing ROW is hovered
@@ -28,8 +30,8 @@ import 'package:hollow/src/ui/components/hover_scope.dart';
 /// the stored value, and `''` renders none.
 ///
 /// [semanticLabel] is the display name. Null EXCLUDES the avatar from the
-/// semantics tree, which is right both for a decorative avatar (its only
-/// fallback is raw peer-id initials) and beside a visible name.
+/// semantics tree, which is right both for a decorative avatar and beside a
+/// visible name.
 class HollowAvatar extends ConsumerWidget {
   final String peerId;
   final double size;
@@ -52,12 +54,7 @@ class HollowAvatar extends ConsumerWidget {
     this.semanticLabel,
   });
 
-  String _initialsFromId(String id) {
-    if (id.length < 2) return '??';
-    return id.substring(0, 2).toUpperCase(); // design-ignore: avatar initials
-  }
-
-  Widget _buildFallback(HollowTheme hollow) {
+  Widget _buildFallback(HollowTheme hollow, String displayName) {
     return Container(
       width: size,
       height: size,
@@ -67,7 +64,7 @@ class HollowAvatar extends ConsumerWidget {
       ),
       alignment: Alignment.center,
       child: Text(
-        _initialsFromId(peerId),
+        peerInitials(displayName, peerId),
         style: TextStyle(
           color: Colors.white,
           fontSize: size * 0.38,
@@ -80,6 +77,10 @@ class HollowAvatar extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final hollow = HollowTheme.of(context);
+    final displayName = ref.watch(profileProvider
+            .select((p) => chosenNameForPeer(p[peerId], peerId))) ??
+        '';
+    Widget fallback() => _buildFallback(hollow, displayName);
 
     Uint8List? bytes = imageBytes;
     if (bytes == null && peerId.isNotEmpty) {
@@ -112,13 +113,13 @@ class HollowAvatar extends ConsumerWidget {
           width: size,
           height: size,
           fit: BoxFit.cover,
-          errorWidget: _buildFallback(hollow),
+          errorWidget: fallback(),
         );
       } else {
         final still = _StaticFirstFrame(
           imageBytes: bytes,
           size: size,
-          fallback: _buildFallback(hollow),
+          fallback: fallback(),
         );
         // AnimatedGifImage decodes EVERY frame up front, so it is mounted only
         // while hovered, and it sits OVER the still rather than replacing it:
@@ -144,7 +145,7 @@ class HollowAvatar extends ConsumerWidget {
         child: image,
       );
     } else {
-      visual = _buildFallback(hollow);
+      visual = fallback();
     }
 
     // Frames (issue #54) sit IN FRONT of the avatar and take no layout space.

@@ -298,7 +298,7 @@ Layout: `SizedBox(72x48)` containing a `Row`: indicator | `Spacer` | `Stack(chil
 `Positioned(right: -6, bottom: -4)` — overlaps the icon's bottom-right corner. Only shown when `unreadCount > 0`.
 
 - Min width: 16px, height: 16px, horizontal padding: 4px.
-- Background: `hollow.error` (red).
+- A `HollowCountBadge` (2026-09-23): accent for unread, `error` with `@N` for mentions (the dock now passes `mentionCount` too), `ring: hollow.surface`.
 - Border: 2px `hollow.background` (creates an outline effect against the strip background).
 - Text: white, 9px, w700, `height: 1`. Caps at `'99+'`.
 
@@ -326,7 +326,7 @@ Instead of a left-edge pill, uses a bottom-edge horizontal bar:
 
 `Positioned(right: -5, top: -4)` — overlaps top-right corner (vs bottom-right in vertical strip).
 - Min width: 14px, height: 14px, horizontal padding: 3px.
-- Background: `hollow.error`, border: 2px `hollow.background`.
+- A `HollowCountBadge` (accent unread, error `@N` mention).
 - Text: white, 8px, w700. Caps at `'99+'`.
 
 ## _ReorderGap (Horizontal Strip Drop Zone)
@@ -532,7 +532,7 @@ Watches `serverStripLayoutProvider` live. If `currentFolder` (found by `folder.i
 - Otherwise: initials text (white, 13px, w600).
 
 **Badges (Stack, Clip.none):**
-- **Unread badge** (top: -4, right: -4): `hollow.error` pill with count text (white, 9px, w700, caps at 99+). Only shown when `unreadCount > 0`. Mute-aware (muted servers pass 0).
+- **Unread badge** (top: -4, right: -4): `HollowCountBadge` (accent, `ring: hollow.overlay`, caps at 99+). Only shown when `unreadCount > 0`. Mute-aware (muted servers pass 0).
 - **Remove button** (top: -5, left: -5): 16px circle, `hollow.surface` background, `hollow.border` outline, `LucideIcons.x` (9px, textSecondary). Only shown when `onRemove` is non-null (folder has >1 server). `HollowPressable` with zero padding.
 
 **Name label:** server name (or `'Server'` fallback), caption style, 9px, textSecondary, single line with ellipsis, centered.

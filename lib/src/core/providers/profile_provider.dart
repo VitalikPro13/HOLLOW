@@ -186,12 +186,19 @@ String displayNameFor(
 /// full map. Prefer this with `ref.watch(profileProvider.select(...))` to
 /// avoid rebuilding when unrelated profiles change.
 String displayNameForPeer(storage_api.UserProfile? profile, String peerId) {
+  return chosenNameForPeer(profile, peerId) ??
+      (peerId.length > 8 ? '${peerId.substring(0, 8)}...' : peerId);
+}
+
+/// The name a person chose or we gave them (local nickname, then profile
+/// display name), or null when all we have is their peer id.
+String? chosenNameForPeer(storage_api.UserProfile? profile, String peerId) {
   final localNick = _localNicknames[peerId];
   if (localNick != null && localNick.isNotEmpty) return localNick;
   if (profile != null && profile.displayName.isNotEmpty) {
     return profile.displayName;
   }
-  return peerId.length > 8 ? '${peerId.substring(0, 8)}...' : peerId;
+  return null;
 }
 
 /// Get a display name for a peer in a server context.

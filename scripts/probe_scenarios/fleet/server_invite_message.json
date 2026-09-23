@@ -21,7 +21,7 @@
   ],
   "peers": ["a", "b"],
   "steps": [
-    { "peer": "all", "op": "wait_for", "target": "text:Connected", "timeout_ms": 120000 },
+    { "peer": "all", "op": "wait_for", "provider": "connection", "equals": "connected", "timeout_ms": 120000 },
 
     { "peer": "a", "op": "tap", "target": "semantics:Create a server" },
     { "peer": "a", "op": "enter_text", "target": "hint:My Awesome Server", "value": "fleet-probe" },

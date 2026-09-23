@@ -9,6 +9,7 @@ import 'package:hollow/src/ui/components/hollow_tooltip.dart';
 import 'package:hollow/src/ui/dialogs/device_link_dialog.dart';
 import 'package:hollow/src/ui/settings/device_management_shared.dart';
 import 'package:hollow/src/ui/settings/settings_shared.dart';
+import 'package:hollow/src/ui/settings/sync_check_card.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Devices category: the "Your Devices" list and the link and reset tools.
@@ -32,6 +33,8 @@ class DevicesCategoryView extends StatelessWidget {
               ),
             ],
           ),
+          const SizedBox(height: HollowSpacing.lg),
+          const SyncCheckCard(),
           const SizedBox(height: HollowSpacing.lg),
           SettingsCard(
             title: 'Link a Device',

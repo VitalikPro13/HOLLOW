@@ -1,5 +1,6 @@
 ﻿import 'package:flutter/material.dart';
 import 'package:hollow/src/core/name_initials.dart';
+import 'package:hollow/src/ui/components/hollow_count_badge.dart';
 import 'package:hollow/src/ui/components/edge_scroll_row.dart';
 import 'package:hollow/src/ui/components/overlay_anchor.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -562,6 +563,10 @@ class _BottomBarState extends ConsumerState<BottomBar> {
     final serverUnreads = isServerMuted
         ? 0
         : ref.watch(unreadProvider.select((s) => s.serverUnreadCount(serverId)));
+    final serverMentions = isServerMuted
+        ? 0
+        : ref.watch(
+            unreadProvider.select((s) => s.serverMentionCount(serverId)));
     // Admitted after a parked join, still waiting on a member to add our MLS
     // leaf; the same flair the Classic strip shows.
     final awaitingSetup = ref.watch(
@@ -640,6 +645,7 @@ class _BottomBarState extends ConsumerState<BottomBar> {
                 child: _BottomServerIcon(
                   isSelected: isSelected || isRightPaneServer,
                   unreadCount: serverUnreads,
+                  mentionCount: serverMentions,
                   awaitingSetup: awaitingSetup,
                   tooltip: _isDragging ? null : name,
                   backgroundColor: colorFromId(serverId),
@@ -855,6 +861,7 @@ class _BottomServerIcon extends StatefulWidget {
   final bool isSelected;
   final bool showBorder;
   final int unreadCount;
+  final int mentionCount;
 
   /// Admitted, but waiting for a member to finish the MLS setup.
   final bool awaitingSetup;
@@ -869,6 +876,7 @@ class _BottomServerIcon extends StatefulWidget {
     this.isSelected = false,
     this.showBorder = true,
     this.unreadCount = 0,
+    this.mentionCount = 0,
     this.awaitingSetup = false,
   });
 
@@ -944,34 +952,16 @@ class _BottomServerIconState extends State<_BottomServerIcon> {
                       child: AwaitingSetupBadge(size: 14),
                     ),
                   ),
-                if (widget.unreadCount > 0)
+                if (widget.unreadCount > 0 || widget.mentionCount > 0)
                   Positioned(
-                    right: -5,
-                    top: -4,
-                    child: Container(
-                      constraints: const BoxConstraints(minWidth: 14),
-                      height: 14,
-                      padding:
-                          const EdgeInsets.symmetric(horizontal: 3),
-                      decoration: BoxDecoration(
-                        color: hollow.error,
-                        borderRadius: BorderRadius.circular(7),
-                        border: Border.all(
-                          color: hollow.surface,
-                          width: 2,
-                        ),
-                      ),
-                      alignment: Alignment.center,
-                      child: Text(
-                        widget.unreadCount > 99
-                            ? '99+'
-                            : '${widget.unreadCount}',
-                        style: HollowTypography.micro.copyWith(
-                          color: Colors.white,
-                          fontWeight: FontWeight.w600,
-                          height: 1,
-                        ),
-                      ),
+                    right: -6,
+                    top: -6,
+                    child: HollowCountBadge(
+                      count: widget.mentionCount > 0
+                          ? widget.mentionCount
+                          : widget.unreadCount,
+                      mention: widget.mentionCount > 0,
+                      ring: hollow.surface,
                     ),
                   ),
               ],

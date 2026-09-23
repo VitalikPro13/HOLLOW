@@ -1,5 +1,6 @@
 ﻿import 'package:flutter/material.dart';
 import 'package:hollow/src/core/name_initials.dart';
+import 'package:hollow/src/ui/components/hollow_count_badge.dart';
 import 'package:hollow/src/ui/components/overlay_anchor.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/color_utils.dart';
@@ -24,7 +25,6 @@ import 'package:hollow/src/core/providers/pending_join_provider.dart';
 import 'package:hollow/src/core/providers/unread_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
-import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/ui/components/hollow_focus_ring.dart';
 import 'package:hollow/src/ui/components/hollow_menu.dart';
@@ -828,29 +828,12 @@ class _ServerIconWithIndicatorState
                   Positioned(
                     right: -6,
                     bottom: -4,
-                    child: Container(
-                      constraints: const BoxConstraints(minWidth: 16),
-                      height: 16,
-                      padding: const EdgeInsets.symmetric(horizontal: 4),
-                      decoration: BoxDecoration(
-                        color: hollow.error,
-                        borderRadius: BorderRadius.circular(8),
-                        border: Border.all(
-                          color: hollow.surface,
-                          width: 2,
-                        ),
-                      ),
-                      alignment: Alignment.center,
-                      child: Text(
-                        widget.mentionCount > 0
-                            ? (widget.mentionCount > 99 ? '@99+' : '@${widget.mentionCount}')
-                            : (widget.unreadCount > 99 ? '99+' : '${widget.unreadCount}'),
-                        style: HollowTypography.micro.copyWith(
-                          color: Colors.white,
-                          fontWeight: FontWeight.w600,
-                          height: 1,
-                        ),
-                      ),
+                    child: HollowCountBadge(
+                      count: widget.mentionCount > 0
+                          ? widget.mentionCount
+                          : widget.unreadCount,
+                      mention: widget.mentionCount > 0,
+                      ring: hollow.surface,
                     ),
                   ),
               ],
