@@ -1558,6 +1558,10 @@ pub(crate) enum HavenMessage {
         /// Empty = legacy (fall back to since_timestamp).
         #[serde(default)]
         sender_timestamps: HashMap<String, i64>,
+        /// What the requester holds behind its watermarks; see [`GapDigest`].
+        /// Absent from older clients.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        gap: Option<GapDigest>,
     },
 
     #[serde(rename = "dm_sync_req")]
@@ -1570,6 +1574,10 @@ pub(crate) enum HavenMessage {
         /// single-device requesters (false = the unchanged one-directional path).
         #[serde(default)]
         both_directions: bool,
+        /// What the requester holds behind `since_timestamp`; see [`GapDigest`].
+        /// Absent from older clients.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        gap: Option<GapDigest>,
     },
 
     /// Multi-device sibling DM backfill: a sibling device asks for the FULL DM
@@ -1582,6 +1590,10 @@ pub(crate) enum HavenMessage {
     DmSiblingSyncRequest {
         #[serde(default)]
         per_convo_since: Vec<(String, i64)>,
+        /// Per conversation, what the requester holds behind its `since`; see
+        /// [`GapDigest`]. Absent from older clients.
+        #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+        gaps: HashMap<String, GapDigest>,
     },
 
     /// Sent to all connected peers when the app is shutting down.
@@ -3305,6 +3317,8 @@ pub(crate) enum MessageEnvelope {
         #[serde(default)]
         sender_timestamps: HashMap<String, i64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        gap: Option<GapDigest>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         target: Option<String>,
     },
 
@@ -4155,6 +4169,26 @@ impl RichCard {
     pub fn into_opt(self) -> Option<Box<Self>> {
         (!self.is_empty()).then(|| Box::new(self))
     }
+}
+
+/// What a sync requester already holds in `[from, until)` of one DM
+/// conversation or channel, one entry per UTC day. A high-water mark alone never
+/// asks again for a message missed while a newer one arrived (#90); the
+/// responder re-serves every day whose digest differs from its own.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub(crate) struct GapDigest {
+    pub from: i64,
+    pub until: i64,
+    pub days: Vec<GapDay>,
+}
+
+/// One UTC day of a [`GapDigest`]: rows carrying a message_id, and the XOR of
+/// their id hashes, so the digest is independent of row order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct GapDay {
+    pub d: i64,
+    pub n: u32,
+    pub h: u64,
 }
 
 /// A single DM in a DM sync batch.

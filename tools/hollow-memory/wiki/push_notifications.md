@@ -136,7 +136,7 @@ db_passphrase) -> Vec<FetchedDm>`.
 
 - `register_push_token(token, platform)` — stored on the relay; re-sent on every
   WS reconnect (`swarm.rs`).
-- `set_push_prefs(prefs_json)` — channel push filters; the reserved `~dm` entry carries muted DM senders as device ids → "nothing" (relay `dm_push_muted()` skips only the wake-up, the deposit stays buffered; synced on `setDmEnabled` and on device-list changes); channel push filters
+- `set_push_prefs(prefs_json)` — channel push filters; the reserved `~dm` entry carries muted DM senders as device ids → "nothing" (relay `dm_push_muted()` skips only the wake-up, the deposit stays buffered; synced on `setDmEnabled` and on device-list or own-device-id changes, only after `loadAll`). It ALSO lists our OWN sibling device ids (#90), because a sibling now leaves a relay-buffered copy of our own DMs for an offline phone and that must never wake it; channel push filters
   (`{server: {level, channels{cid: level}}}`) registered with the relay; cached
   in swarm.rs and re-sent on every reconnect like the token.
 - `get_push_profile(peer_id) -> PushProfile` — opens its OWN SQLCipher connection,

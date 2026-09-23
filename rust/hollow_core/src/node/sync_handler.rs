@@ -516,29 +516,69 @@ pub(crate) fn channel_sync_items(
 /// Build one page (at most 200 messages) of a channel-sync response: per-sender
 /// watermarks when the requester sent them, a legacy single timestamp otherwise,
 /// then pack and stamp `total`/`has_more`. Returns the envelope and item count.
+/// The ChannelSyncRequest for everything we may be missing in one channel:
+/// per-sender watermarks plus the digest of what we hold behind them. A
+/// pagination follow-up passes `with_gap = false`, since the first page already
+/// carried the rows behind the watermarks.
+pub(crate) fn channel_sync_request(
+    store: &crate::storage::MessageStore,
+    server_id: &str,
+    channel_id: &str,
+    with_gap: bool,
+) -> HavenMessage {
+    HavenMessage::ChannelSyncRequest {
+        server_id: server_id.to_string(),
+        channel_id: channel_id.to_string(),
+        since_timestamp: store
+            .get_latest_channel_timestamp(server_id, channel_id)
+            .unwrap_or(None)
+            .unwrap_or(0),
+        sender_timestamps: store.get_per_sender_timestamps(server_id, channel_id).unwrap_or_default(),
+        gap: if with_gap { store.channel_gap_anchor(server_id, channel_id) } else { None },
+    }
+}
+
 pub(crate) fn build_channel_sync_batch(
     store: &crate::storage::MessageStore,
     sid: &str,
     cid: &str,
     since_timestamp: i64,
     sender_timestamps: &HashMap<String, i64>,
+    // What the requester holds behind its watermarks. The rows it is missing
+    // there join this page and are never paginated: whatever does not fit is
+    // still missing at the next sync and is served then.
+    gap: Option<&GapDigest>,
 ) -> Result<(MessageEnvelope, usize), String> {
-    let messages = if !sender_timestamps.is_empty() {
+    let mut messages = if !sender_timestamps.is_empty() {
         store.get_channel_messages_since_per_sender(sid, cid, sender_timestamps, 200)
     } else {
         store.get_channel_messages_since(sid, cid, since_timestamp, 200)
     }?;
+    let tail_len = messages.len();
+    if let Some(gap) = gap {
+        let paged: std::collections::HashSet<String> =
+            messages.iter().filter_map(|m| m.message_id.clone()).collect();
+        let missed = store.get_channel_gap_messages(sid, cid, gap, 200).unwrap_or_default();
+        messages.extend(
+            missed
+                .into_iter()
+                .filter(|m| m.message_id.as_ref().is_some_and(|id| !paged.contains(id))),
+        );
+        messages.sort_by_key(|m| m.timestamp);
+    }
+    let gap_len = (messages.len() - tail_len) as u32;
     let SyncPage { items, truncated } = channel_sync_items(store, &messages);
-    let total = if !sender_timestamps.is_empty() {
+    let tail_total = if !sender_timestamps.is_empty() {
         store.count_channel_messages_since_per_sender(sid, cid, sender_timestamps)
-            .unwrap_or(items.len() as u32)
+            .unwrap_or(tail_len as u32)
     } else {
         store.count_channel_messages_since(sid, cid, since_timestamp)
-            .unwrap_or(items.len() as u32)
+            .unwrap_or(tail_len as u32)
     };
+    let total = tail_total + gap_len;
     // `truncated` = the preview budget ended the page before the query did, so
     // there is definitely more to serve even though the page is short.
-    let has_more = if truncated || (items.len() >= 200 && total > 200) {
+    let has_more = if truncated || (tail_len >= 200 && tail_total > 200) {
         Some(true)
     } else {
         None
@@ -2625,21 +2665,8 @@ pub(crate) async fn handle_request_channel_sync(
     channel_sync_sent.insert(dedup_key, std::time::Instant::now());
     if let Some(state) = server_states.get(&server_id) {
         if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
-            let since = store
-                .get_latest_channel_timestamp(&server_id, &channel_id)
-                .unwrap_or(None)
-                .unwrap_or(0);
-            let sender_ts = store
-                .get_per_sender_timestamps(&server_id, &channel_id)
+            let sync_data = serde_json::to_vec(&channel_sync_request(&store, &server_id, &channel_id, true))
                 .unwrap_or_default();
-            let local_peer = local_peer_str.to_string();
-            let sync_data = serde_json::to_vec(&HavenMessage::ChannelSyncRequest {
-                server_id: server_id.clone(),
-                channel_id: channel_id.clone(),
-                since_timestamp: since,
-                sender_timestamps: sender_ts.clone(),
-            }).unwrap_or_default();
-            let _ = local_peer;
             broadcast_raw_to_members(ws_cmd_tx, ws_room_peers, state, local_peer_str, sync_data);
         }
     }
@@ -2901,7 +2928,7 @@ pub(crate) async fn flush_pending_sync_requests(
 
         // Re-query per-sender timestamps at flush time (DB may have changed since original request).
         let sender_ts = store.get_per_sender_timestamps(&server_id, &channel_id).unwrap_or_default();
-        match build_channel_sync_batch(&store, &server_id, &channel_id, since_timestamp, &sender_ts) {
+        match build_channel_sync_batch(&store, &server_id, &channel_id, since_timestamp, &sender_ts, None) {
             Ok((envelope, count)) => {
                 hollow_log!("[HOLLOW-SYNC] Retry: sending {count} messages for {channel_id} to {peer_str}");
                 let envelope_json = serde_json::to_string(&envelope).unwrap_or_default();
@@ -3248,6 +3275,7 @@ pub(crate) async fn handle_envelope_channel_sync_req(
     cid: String,
     since_timestamp: i64,
     sender_timestamps: HashMap<String, i64>,
+    gap: Option<GapDigest>,
     crypto_store: &CryptoStore,
     _crdt_store: &CrdtStore,
     db_path: &str,
@@ -3265,7 +3293,7 @@ pub(crate) async fn handle_envelope_channel_sync_req(
         return;
     }
     let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) else { return };
-    let Ok((batch, count)) = build_channel_sync_batch(&store, &sid, &cid, since_timestamp, &sender_timestamps) else { return };
+    let Ok((batch, count)) = build_channel_sync_batch(&store, &sid, &cid, since_timestamp, &sender_timestamps, gap.as_ref()) else { return };
     if count == 0 { return; }
     let batch_json = serde_json::to_string(&batch).unwrap_or_default();
     send_encrypted_message(
@@ -3330,7 +3358,7 @@ pub(crate) async fn handle_envelope_channel_probe_resp(
     sid: String,
     cid: String,
     their_latest: i64,
-    _msg_count: u32,
+    msg_count: u32,
     _crdt_store: &CrdtStore,
     db_path: &str,
     db_passphrase: &str,
@@ -3342,19 +3370,13 @@ pub(crate) async fn handle_envelope_channel_probe_resp(
     if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
         let our_latest = store.get_latest_channel_timestamp(&sid, &cid)
             .unwrap_or(None).unwrap_or(0);
-        let _our_count = store.count_channel_messages(&sid, &cid);
-        if their_latest > our_latest {
+        // A peer holding MORE rows is also a reason: a message missed behind
+        // our newest one never moves `latest`.
+        if their_latest > our_latest || msg_count > store.count_channel_messages(&sid, &cid) {
             channel_sync_sent.insert(dedup_key, std::time::Instant::now());
-            let per_sender = store.get_per_sender_timestamps(&sid, &cid)
-                .unwrap_or_default();
             send_message_to_peer(
-                ws_cmd_tx, ws_room_peers,
-                &sender_peer_id, HavenMessage::ChannelSyncRequest {
-                    server_id: sid.clone(),
-                    channel_id: cid.clone(),
-                    since_timestamp: our_latest,
-                    sender_timestamps: per_sender,
-                },
+                ws_cmd_tx, ws_room_peers, &sender_peer_id,
+                channel_sync_request(&store, &sid, &cid, true),
             );
         }
     }
@@ -3418,9 +3440,11 @@ pub(crate) async fn handle_envelope_channel_sync_batch(
             .unwrap_or_default();
         let since = store.get_latest_channel_timestamp(&sid, &cid)
             .unwrap_or(None).unwrap_or(0);
+        // No digest: the first page already carried the rows behind the watermarks.
         let req = MessageEnvelope::ChannelSyncReq {
             sid: sid.clone(), cid: cid.clone(),
             since_timestamp: since, sender_timestamps: sender_ts,
+            gap: None,
             target: None,
         };
         let req_json = serde_json::to_string(&req).unwrap_or_default();

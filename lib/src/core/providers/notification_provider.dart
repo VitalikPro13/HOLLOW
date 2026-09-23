@@ -46,13 +46,34 @@ class NotificationSettingsNotifier
   /// key (`DM_MUTE_PREF_KEY` in ws_handler.cpp).
   static const String dmMutePrefKey = '~dm';
 
+  /// Set by [loadAll]. A sync before it would replace the relay's filters with
+  /// an empty set.
+  bool _loaded = false;
+
   @override
   NotificationSettingsState build() {
-    // A muted friend's newly linked device must join the relay filter.
+    // A newly linked device, a muted friend's or our own, must join the relay
+    // filter.
     ref.listen(deviceLinkProvider, (_, _) {
-      if (state.dmEnabled.containsValue(false)) _syncPushPrefsToRelay();
+      if (_loaded) _syncPushPrefsToRelay();
+    });
+    ref.listen(localDevicePeerIdProvider, (_, _) {
+      if (_loaded) _syncPushPrefsToRelay();
     });
     return const NotificationSettingsState();
+  }
+
+  /// Our own other devices. The copy of a message WE sent that one of them
+  /// leaves for us while we are offline must never wake us.
+  Set<String> _ownSiblingDeviceIds() {
+    final me = ref.read(localDevicePeerIdProvider).valueOrNull;
+    if (me == null) return const {};
+    final links = ref.read(deviceLinkProvider);
+    final master = links.identityOf(me);
+    return {
+      for (final e in links.links.entries)
+        if (e.value == master && e.key != me && e.key != master) e.key,
+    };
   }
 
   /// Every device id a muted DM key can wake us from: the stored key, its
@@ -115,6 +136,7 @@ class NotificationSettingsNotifier
       channelOverrides: channelLevels,
       dmEnabled: dmEnabled,
     );
+    _loaded = true;
     _syncPushPrefsToRelay();
   }
 
@@ -145,7 +167,7 @@ class NotificationSettingsNotifier
     // Muted DMs ride the reserved `~dm` entry in the same server-pref shape,
     // keyed by the sender's DEVICE ids because the relay never learns
     // device→master; a wake carries the socket's device id.
-    final muted = _mutedDmDeviceIds();
+    final muted = {..._mutedDmDeviceIds(), ..._ownSiblingDeviceIds()};
     if (muted.isNotEmpty) {
       prefs[dmMutePrefKey] = {
         'level': 'all',

@@ -383,10 +383,11 @@ These are the plaintext variants used before MLS is established or as fallback. 
 
 ### Channel Sync
 
-- **`ChannelSyncRequest { server_id, channel_id, since_timestamp, sender_timestamps }`** — `"ch_sync_req"` — request channel messages since timestamp. `sender_timestamps: HashMap<String, i64>` for per-sender gap-free sync (empty = legacy fallback).
+- **`ChannelSyncRequest { server_id, channel_id, since_timestamp, sender_timestamps, gap }`** — `"ch_sync_req"` — request channel messages since timestamp. `sender_timestamps: HashMap<String, i64>` for per-sender sync (empty = legacy fallback). `gap: Option<GapDigest>` (`#[serde(default)]`, #90) = what the requester holds behind its watermarks; the MLS twin `ChannelSyncReq` carries the same field.
 - **`ChannelSyncProbe { server_id, channel_id, our_latest, msg_count }`** — `"ch_sync_probe"` — lightweight probe asking "what's your latest timestamp for this channel?" Used to skip channels with no new messages before full sync.
 - **`ChannelSyncProbeResponse { server_id, channel_id, their_latest, msg_count }`** — `"ch_sync_probe_resp"` — response to a sync probe with the peer's latest timestamp and count.
-- **`DmSyncRequest { since_timestamp }`** — `"dm_sync_req"` — request missed DMs from a peer since timestamp.
+- **`DmSyncRequest { since_timestamp, both_directions, gap }`** — `"dm_sync_req"` — request missed DMs from a peer since timestamp; `gap: Option<GapDigest>` (#90) covers the rows behind it. `DmSiblingSyncRequest` carries `gaps: HashMap<convo, GapDigest>`.
+- **`GapDigest { from, until, days: Vec<GapDay { d, n, h }> }`** — per UTC day `d`: row count `n` and XOR `h` of the message_id hashes in `[from, until)`; see rust_storage_db "Gap digest".
 
 ### Public Channel Messages (Plaintext Transport)
 

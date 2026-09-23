@@ -8,6 +8,10 @@ if [ -z "${TURN_SECRET:-}" ]; then
     exit 1
 fi
 
+# The container mounts the certificate at /certs; a host install points this at
+# its own copy.
+cert_dir=${CERT_DIR:-/certs}
+
 ip=${PUBLIC_IP:-}
 if [ -z "$ip" ]; then
     ip=$(ip -4 route get 1.1.1.1 2>/dev/null | sed -n 's/.*src \([0-9.]*\).*/\1/p' | head -n 1 || true)
@@ -39,8 +43,8 @@ set -- \
     --no-tcp-relay \
     --min-port=49152 \
     --max-port=65535 \
-    --cert=/certs/fullchain.pem \
-    --pkey=/certs/privkey.pem \
+    --cert="$cert_dir/fullchain.pem" \
+    --pkey="$cert_dir/privkey.pem" \
     --no-stdout-log \
     --simple-log \
     --log-file=/dev/null \

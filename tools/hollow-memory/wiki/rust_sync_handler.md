@@ -680,9 +680,9 @@ Flow:
 Flow:
 1. Dedup check: skip if same channel synced within 5 seconds
 2. Query local latest timestamp from DB
-3. If `their_latest > our_latest`: we're behind, trigger a sync
-4. Insert dedup key, query per-sender timestamps
-5. Send `HavenMessage::ChannelSyncRequest` to the responder peer (plaintext, not MLS)
+3. If `their_latest > our_latest` OR the peer holds more rows (`msg_count > ours`, #90): trigger a sync
+4. Insert dedup key
+5. Send `channel_sync_request(store, sid, cid, true)` (plaintext, not MLS): per-sender timestamps plus the gap digest
 
 ## handle_envelope_channel_sync_batch()
 

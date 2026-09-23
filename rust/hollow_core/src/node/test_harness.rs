@@ -14959,6 +14959,340 @@ async fn freshly_linked_device_backfills_dm_link_previews_from_its_sibling() {
     drop(c);
 }
 
+/// Persist a DM row signed by `signer_tag`'s master exactly as the send path signs
+/// it, so it survives every backfill signature check. The row lands in `node`'s DB
+/// only: no envelope is sent, which is how a test stages "this device has it and
+/// that one never got it".
+#[allow(clippy::too_many_arguments)]
+fn plant_signed_dm(
+    node: &TestNode,
+    signer_tag: u8,
+    recipient_master: &str,
+    convo: &str,
+    is_mine: bool,
+    ts: i64,
+    mid: &str,
+    text: &str,
+) {
+    use base64::Engine as _;
+    let kp = NativeKeypair::from_secret_bytes(&seed_bytes(signer_tag));
+    let pk_b64 = base64::engine::general_purpose::STANDARD.encode(kp.public_key_protobuf());
+    let order_us = ts * 1000;
+    let extras = super::crypto_handler::SignedExtras {
+        mid: Some(mid),
+        reply_to: None,
+        file_id: None,
+        order_us: Some(order_us),
+        lp_digest: None,
+        album: None,
+    };
+    let (sig, pk) = super::crypto_handler::sign_message_versioned(
+        &kp, &pk_b64, "dm", recipient_master, &kp.peer_id(), ts, &extras, text,
+    );
+    node.store()
+        .insert(
+            convo, text, is_mine, ts, sig.as_deref(), pk.as_deref(), Some(mid),
+            None, None, Some(order_us), None,
+        )
+        .expect("plant dm row");
+}
+
+/// Issue #90: a DM one device sent while its sibling was away must reach that
+/// sibling even when the sibling already holds a NEWER message in the thread.
+/// How the first copy was missed does not matter (an offline sibling gets no copy
+/// at send time); what matters is that no later sync ever asks for it again.
+/// Phase A heals through the friend alone (sibling offline), phase B through the
+/// sibling alone (friend offline).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn sibling_fills_a_dm_gap_behind_its_newest_message() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    const F: u8 = 211;
+    const M: u8 = 212;
+    const D1: u8 = 213;
+    const D2: u8 = 214;
+    let f_master = NativeKeypair::from_secret_bytes(&seed_bytes(F)).peer_id();
+    let m_master = NativeKeypair::from_secret_bytes(&seed_bytes(M)).peer_id();
+    let d1 = NativeKeypair::from_secret_bytes(&seed_bytes(D1)).peer_id();
+    let d2 = NativeKeypair::from_secret_bytes(&seed_bytes(D2)).peer_id();
+    let siblings = [d1.clone(), d2.clone()];
+    super::resolver::seed_self(&m_master, &siblings);
+    super::resolver::update_many(&m_master, [d1.as_str(), d2.as_str()]);
+
+    let f = spawn_node_with_friends(&relay, F, F, &[&m_master]).await;
+    sleep_ms(1200).await; // spawn stagger, as in the freshly-linked test above
+    let n1 = spawn_node_full(&relay, M, D1, &[&f_master], Some(&siblings)).await;
+    let n2 = spawn_node_full(&relay, M, D2, &[&f_master], Some(&siblings)).await;
+    expect_dm_pair_ready(&relay, &f, &n1, 15).await;
+    expect_dm_pair_ready(&relay, &f, &n2, 15).await;
+
+    // Everyone but D2 holds the friend's reply AND the own sends before it; D2
+    // holds only the reply, so its newest message sits past the gap. The sends
+    // are hours older than the reply, well outside any lookback overlap.
+    let now = super::types::now_ms();
+    let reply_ts = now - 60 * 60 * 1000;
+    let gap_a_ts = now - 3 * 60 * 60 * 1000;
+    let gap_b_ts = now - 2 * 60 * 60 * 1000;
+    for (node, mine) in [(&n1, false), (&n2, false), (&f, true)] {
+        let convo = if mine { &m_master } else { &f_master };
+        plant_signed_dm(node, F, &m_master, convo, mine, reply_ts, "gap-reply", "the reply");
+    }
+    for (node, mine) in [(&n1, true), (&f, false)] {
+        let convo = if mine { &f_master } else { &m_master };
+        plant_signed_dm(node, M, &f_master, convo, mine, gap_a_ts, "gap-a", "sent from d1 first");
+    }
+
+    // Phase A: D1 is away, so only the friend can hand D2 its own send.
+    relay.set_online(&d1, false);
+    relay.set_online(&d2, false);
+    assert!(wait_until(10, async || !relay.online_devices().contains(&d2)).await);
+    relay.set_online(&d2, true);
+    assert!(
+        wait_until(25, async || n2.store().dm_message_exists("gap-a")).await,
+        "the friend must re-serve an own send older than the sibling's newest message"
+    );
+
+    // Phase B: a second send D2 never saw, planted only now so phase A could
+    // not have carried it, with the friend away so only D1 can supply it. The
+    // per-sibling backfill cooldown would otherwise swallow the next request.
+    relay.set_online(&f.device_id, false);
+    for (node, mine) in [(&n1, true), (&f, false)] {
+        let convo = if mine { &f_master } else { &m_master };
+        plant_signed_dm(node, M, &f_master, convo, mine, gap_b_ts, "gap-b", "sent from d1 second");
+    }
+    super::crypto_handler::reset_sibling_backfill_cooldown();
+    relay.set_online(&d1, true);
+    relay.set_online(&d2, false);
+    assert!(wait_until(10, async || !relay.online_devices().contains(&d2)).await);
+    relay.set_online(&d2, true);
+    assert!(
+        wait_until(30, async || n2.store().dm_message_exists("gap-b")).await,
+        "the sibling must re-serve an own send older than the other sibling's newest message"
+    );
+
+    let thread: Vec<String> = n2.dm_thread(&f_master).into_iter().map(|b| b.text).collect();
+    assert_eq!(
+        thread,
+        ["sent from d1 first", "sent from d1 second", "the reply"],
+        "D2's thread must hold every message once, oldest first"
+    );
+
+    drop(f);
+    drop(n1);
+    drop(n2);
+}
+
+/// #90, the send-time half: an offline sibling gets a relay-buffered copy of a DM
+/// its sibling sends, so it holds the message even when neither that sibling nor
+/// the friend is online when it comes back, which no backfill can cover.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn offline_sibling_gets_a_buffered_copy_of_an_own_send() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    const F: u8 = 217;
+    const M: u8 = 218;
+    const D1: u8 = 219;
+    const D2: u8 = 220;
+    let f_master = NativeKeypair::from_secret_bytes(&seed_bytes(F)).peer_id();
+    let m_master = NativeKeypair::from_secret_bytes(&seed_bytes(M)).peer_id();
+    let d1 = NativeKeypair::from_secret_bytes(&seed_bytes(D1)).peer_id();
+    let d2 = NativeKeypair::from_secret_bytes(&seed_bytes(D2)).peer_id();
+    let siblings = [d1.clone(), d2.clone()];
+    super::resolver::seed_self(&m_master, &siblings);
+    super::resolver::update_many(&m_master, [d1.as_str(), d2.as_str()]);
+
+    let mut f = spawn_node_with_friends(&relay, F, F, &[&m_master]).await;
+    sleep_ms(1200).await; // spawn stagger, as in the DM gap test above
+    let mut n1 = spawn_node_full(&relay, M, D1, &[&f_master], Some(&siblings)).await;
+    let n2 = spawn_node_full(&relay, M, D2, &[&f_master], Some(&siblings)).await;
+    expect_dm_pair_ready(&relay, &f, &n1, 15).await;
+    expect_dm_pair_ready(&relay, &f, &n2, 15).await;
+    expect_olm_confirmed(&n1, &n2, 15).await;
+
+    // D1 must SEE D2 leave: a sender that still counts D2 as present takes the
+    // live path, which the relay would buffer anyway and prove nothing.
+    drain_events(&mut n1);
+    relay.set_online(&d2, false);
+    assert!(
+        wait_event(&mut n1, std::time::Duration::from_secs(10), |ev| {
+            matches!(ev, NetworkEvent::PeerDisconnected { peer_id } if *peer_id == d2)
+        })
+        .await,
+        "D1 must notice D2 going offline"
+    );
+    drain_events(&mut f);
+    const MID: &str = "sib-buffered-1";
+    n1.cmd_tx
+        .send(NodeCommand::SendMessage {
+            peer_id: f_master.clone(),
+            text: "sent while d2 was away".to_string(),
+            message_id: MID.to_string(),
+            reply_to_mid: None,
+            link_preview: None,
+        })
+        .await
+        .unwrap();
+    assert!(
+        wait_event(&mut f, std::time::Duration::from_secs(10), |ev| {
+            matches!(ev, NetworkEvent::MessageReceived { message_id, .. } if message_id == MID)
+        })
+        .await,
+        "the friend receives it live"
+    );
+    assert!(
+        wait_until(10, async || relay.buffered_count(&d2) > 0).await,
+        "the relay must be holding a copy for the offline sibling"
+    );
+
+    // Nobody who could backfill it is online when D2 returns.
+    relay.set_online(&d1, false);
+    relay.set_online(&f.device_id, false);
+    assert!(
+        wait_until(10, async || {
+            let online = relay.online_devices();
+            !online.contains(&d1) && !online.contains(&f.device_id)
+        })
+        .await
+    );
+    relay.set_online(&d2, true);
+    assert!(
+        wait_until(15, async || n2.store().dm_message_exists(MID)).await,
+        "the returning sibling must get its sibling's send from the relay buffer alone"
+    );
+    let thread = n2.dm_thread(&f_master);
+    assert_eq!(thread.len(), 1);
+    assert!(thread[0].is_mine, "filed as our own send in the thread with the friend");
+
+    drop(f);
+    drop(n1);
+    drop(n2);
+}
+
+/// Persist a channel row signed by `signer_tag`'s master exactly as the send path
+/// signs it, in `node`'s DB only; see `plant_signed_dm`.
+#[allow(clippy::too_many_arguments)]
+fn plant_signed_channel_message(
+    node: &TestNode,
+    signer_tag: u8,
+    server_id: &str,
+    channel_id: &str,
+    is_mine: bool,
+    ts: i64,
+    mid: &str,
+    text: &str,
+) {
+    use base64::Engine as _;
+    let kp = NativeKeypair::from_secret_bytes(&seed_bytes(signer_tag));
+    let pk_b64 = base64::engine::general_purpose::STANDARD.encode(kp.public_key_protobuf());
+    let order_us = ts * 1000;
+    let extras = super::crypto_handler::SignedExtras {
+        mid: Some(mid),
+        reply_to: None,
+        file_id: None,
+        order_us: Some(order_us),
+        lp_digest: None,
+        album: None,
+    };
+    let (sig, pk) = super::crypto_handler::sign_message_versioned(
+        &kp, &pk_b64, "ch", &format!("{server_id}:{channel_id}"), &kp.peer_id(), ts, &extras, text,
+    );
+    node.store()
+        .insert_channel_message(
+            server_id, channel_id, &kp.peer_id(), text, is_mine, ts, sig.as_deref(),
+            pk.as_deref(), Some(mid), None, None, Some(order_us), None,
+        )
+        .expect("plant channel row");
+}
+
+/// The channel half of #90: a message a member missed, hours older than the
+/// newest one it holds, must come back on the next sync. Per-sender watermarks
+/// with a lookback never ask for it again, and the probe used to see "same
+/// newest message" and skip the sync altogether.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn channel_member_fills_a_gap_behind_its_newest_message() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    const A: u8 = 215;
+    const J: u8 = 216;
+    let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(A)).peer_id();
+    let j_master = NativeKeypair::from_secret_bytes(&seed_bytes(J)).peer_id();
+
+    let mut a = spawn_node_with_friends(&relay, A, A, &[&j_master]).await;
+    sleep_ms(1200).await; // spawn stagger, as in the DM gap test above
+    let mut j = spawn_node_with_friends(&relay, J, J, &[&a_master]).await;
+    expect_dm_pair_ready(&relay, &a, &j, 15).await;
+
+    let server_id = create_server_and_wait(&mut a, "Gap Server").await;
+    let general = general_channel_of(&server_id);
+    j.cmd_tx
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false })
+        .await
+        .unwrap();
+    assert!(
+        wait_event(&mut j, std::time::Duration::from_secs(8), |ev| {
+            matches!(ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id)
+        })
+        .await,
+        "J must join the server"
+    );
+    expect_mls_leaf(&a, &server_id, &j.device_id, 15).await;
+
+    // A holds an old message and a newer one; J holds only the newer one.
+    let now = super::types::now_ms();
+    let newest_ts = now - 60 * 60 * 1000;
+    let missed_ts = now - 3 * 60 * 60 * 1000;
+    plant_signed_channel_message(&a, A, &server_id, &general, true, missed_ts, "ch-gap-old", "missed");
+    for (node, mine) in [(&a, true), (&j, false)] {
+        plant_signed_channel_message(node, A, &server_id, &general, mine, newest_ts, "ch-gap-new", "newest");
+    }
+
+    // Ask until a request clears the 5 s per-channel de-dup that J's own join
+    // sync may still hold. Every ask carries the digest, and without it no ask
+    // could return the missed row. The wait is on J's sync events rather than
+    // its DB; see the self-heal test above for why polling a store is not free.
+    drain_events(&mut j);
+    let mut filled = false;
+    for _ in 0..4 {
+        j.cmd_tx
+            .send(NodeCommand::RequestChannelSync { server_id: server_id.clone(), channel_id: general.clone() })
+            .await
+            .unwrap();
+        filled = wait_event(&mut j, std::time::Duration::from_secs(6), |ev| {
+            matches!(ev, NetworkEvent::MessageSyncCompleted { server_id: sid, new_message_count }
+                if *sid == server_id && *new_message_count > 0)
+        })
+        .await;
+        if filled {
+            break;
+        }
+    }
+    assert!(filled, "a sync must bring in the missed row");
+    let texts: Vec<String> = j
+        .channel_messages(&server_id, &general)
+        .into_iter()
+        .map(|m| m.text)
+        .collect();
+    assert_eq!(texts, ["missed", "newest"], "the missed message is back, in order, once");
+
+    drop(a);
+    drop(j);
+}
+
 // Media forwarder control plane: the fwd_* client plumbing, with a mock node F
 // playing the FORWARDER role (the real forwarder's media plane is out of harness
 // scope). Verified: JoinForwarderRoom is a PURE transport join with no RoomCleared;
@@ -20424,6 +20758,7 @@ async fn restricted_channel_history_and_files_never_reach_a_non_qualifier() {
         channel_id: general.clone(),
         since_timestamp: 0,
         sender_timestamps: HashMap::new(),
+        gap: None,
     })
     .unwrap();
     for frame in [probe, req] {
@@ -20482,7 +20817,8 @@ fn harness_fixed_sleep_budget_does_not_grow() {
     // dropping its SQLCipher handles", which is the same reason `restart_node` pays it.
     // 2026-09-17: the two album tests added two spawn staggers, one auto-download
     // advert window and one backfill DB-row settle (7.4 s).
-    const BUDGET_MS: u64 = 620_600;
+    // 2026-09-23: the three #90 gap and buffered-copy tests added three spawn staggers (3.6 s).
+    const BUDGET_MS: u64 = 624_200;
 
     let src = include_str!("test_harness.rs");
     // Built from pieces so this scan does not count its own source text.

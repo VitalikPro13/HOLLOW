@@ -975,6 +975,8 @@ ulimit -n 500000
 
 Files in `relay-uws/`: `Dockerfile`, `docker-compose.yml`, `.env.example`, `SELF_HOSTING.md` (the single user-facing guide), `keys/`, the hook scripts in `deploy/certbot/` and `deploy/coturn/`, `deploy/harden-host.sh`, plus the systemd unit templates in `deploy/`.
 
+`SELF_HOSTING.md` also has a **Without Docker** section (2026-09-23, issue #33): the relay under systemd with the production unit's `NotifyAccess`/`FileDescriptorStoreMax`/`LimitCORE` lines (so native installs keep restart persistence, which Docker cannot), snap certbot + a `renewal-hooks/deploy` script copying the pair to `/etc/hollow-relay/` (restarts coturn only, never the relay), coturn through the same `coturn-start.sh` with `CERT_DIR=/etc/hollow-relay`, and the push sidecar as a plain Node unit.
+
 Rewritten for 0.11.1. ONE file a self-hoster edits: `.env`. `turnserver.conf.example` is GONE (coturn takes flags only, from `deploy/coturn/coturn-start.sh`), and so are `deploy/hollow-relay-cert-renewed.path`/`.service` (the relay hot-reloads its certificate, so a renewal restarts nothing).
 
 Five services:

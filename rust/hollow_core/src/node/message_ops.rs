@@ -433,10 +433,10 @@ async fn fan_out_dm_envelope(
     // live-union logic, excluding THIS device (never echo to ourselves).
     let own_master = super::resolver::resolve(local_peer_str);
     let sibling_json = sibling_envelope_json.unwrap_or(envelope_json);
-    // Siblings are live-only: an offline sibling is reached via the pending queue
-    // and backfill, never a push (we never push our own phone for our own message).
+    // Offline siblings included (#90): backfill alone needs the two devices, or
+    // the friend, online at the same time.
     let mut siblings: HashSet<String> = collect_target_devices(
-        ws_room_peers, None, &dm_room, &own_master, "", /*exclude*/ Some(device_peer_id),
+        ws_room_peers, Some(olm), &dm_room, &own_master, "", /*exclude*/ Some(device_peer_id),
     ).into_iter().collect();
     // ALSO union peers in our `inbox:{master}` room. A freshly-linked sibling joins
     // the inbox room immediately but may not have joined this DM room yet when we
@@ -481,7 +481,7 @@ fn collect_target_devices(
     ws_room_peers: &HashMap<String, HashSet<String>>,
     // When Some, also include OFFLINE-but-real devices: a device in the resolver's
     // signed-list view that we hold an Olm session with, so a fully-quit phone
-    // wakes. None = live-only, which is what self fan-out uses.
+    // gets a relay-buffered copy. None = live-only.
     olm: Option<&OlmManager>,
     dm_room: &str,
     master: &str,
@@ -495,8 +495,7 @@ fn collect_target_devices(
         .into_iter()
         .filter(|d| super::crypto_handler::ws_room_for_peer(ws_room_peers, d).is_some())
         .collect();
-    // Offline-but-real devices (Step 9A) — see `offline_session_devices`. Self
-    // fan-out passes None to skip this (never push our own phone).
+    // Offline-but-real devices (Step 9A) — see `offline_session_devices`.
     if let Some(olm) = olm {
         set.extend(offline_session_devices(olm, ws_room_peers, master));
     }
@@ -576,9 +575,8 @@ async fn send_dm_to_device(
     envelope_json: &str,
     dm_room: &str,
     // True when `device_peer` is one of OUR OWN siblings rather than the genuine
-    // recipient. A sibling mirror is NEVER notification-worthy, so an offline
-    // sibling must NOT get the room-send push trigger; it is queued for silent
-    // delivery on the sibling's next reconnect.
+    // recipient. Online, a sibling is reached through the inbox room instead of
+    // the DM room.
     is_sibling: bool,
 ) {
     // EXACT-device reachability, not the identity-wide `peer_is_reachable`: in a
@@ -610,12 +608,11 @@ async fn send_dm_to_device(
             event_tx, ws_cmd_tx, ws_room_peers,
         ).await;
         queue_pending_envelope(pending_messages, device_peer, envelope_json);
-    } else if is_sibling {
-        // Session exists but our OWN sibling is offline. Do NOT room-send, which
-        // would trigger a push for our own message; queue for silent delivery, and
-        // backfill closes the gap on the next inbox-join.
-        queue_pending_envelope(pending_messages, device_peer, envelope_json);
     } else {
+        // Offline: the relay buffers the copy and replays it when the device joins
+        // the DM room. For a genuine recipient that deposit is also the push
+        // trigger; an offline SIBLING's phone lists our devices on the relay's
+        // `~dm` no-push filter, so our own message never wakes it.
         send_dm_offline_recipient(olm, crypto_store, ws_cmd_tx, device_peer, envelope_json, dm_room);
         // Also queue for when this device comes back online (push may fail).
         queue_pending_envelope(pending_messages, device_peer, envelope_json);

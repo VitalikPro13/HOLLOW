@@ -14,6 +14,13 @@ use super::types::*;
 static SIBLING_BACKFILL_LAST: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
 const SIBLING_BACKFILL_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(15);
 
+#[cfg(test)]
+pub(crate) fn reset_sibling_backfill_cooldown() {
+    if let Some(map) = SIBLING_BACKFILL_LAST.get() {
+        map.lock().unwrap_or_else(|p| p.into_inner()).clear();
+    }
+}
+
 /// Send a `DmSiblingSyncRequest` to a sibling device, throttled per-sibling so the
 /// two detection paths and reconnect re-fires collapse into one request.
 pub(crate) fn request_sibling_dm_backfill(
@@ -37,31 +44,25 @@ pub(crate) fn request_sibling_dm_backfill(
         guard.insert(sibling_peer_id.to_string(), Instant::now());
     }
 
-    let per_convo_since: Vec<(String, i64)> =
-        match crate::storage::MessageStore::open(db_path, db_passphrase) {
-            Ok(store) => store.get_dm_peer_ids()
-                .into_iter()
-                .map(|c| {
-                    // Lookback overlap: a bare high-watermark skips messages that were missed
-                    // while a newer one arrived. Duplicates are dropped by id on receipt.
-                    let ts = (store
-                        .get_latest_dm_timestamp_any(&c)
-                        .unwrap_or(None)
-                        .unwrap_or(0)
-                        - crate::storage::messages::SYNC_LOOKBACK_MS)
-                        .max(0);
-                    (c, ts)
-                })
-                .collect(),
-            Err(_) => Vec::new(),
-        };
+    let mut per_convo_since: Vec<(String, i64)> = Vec::new();
+    let mut gaps: HashMap<String, GapDigest> = HashMap::new();
+    if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+        for convo in store.get_dm_peer_ids() {
+            let (since, gap) = store.dm_sync_anchor(&convo, true);
+            if let Some(gap) = gap {
+                gaps.insert(convo.clone(), gap);
+            }
+            per_convo_since.push((convo, since));
+        }
+    }
     hollow_log!(
-        "[HOLLOW-SYNC] Requesting sibling DM backfill from {sibling_peer_id} ({} known convo(s))",
-        per_convo_since.len()
+        "[HOLLOW-SYNC] Requesting sibling DM backfill from {sibling_peer_id} ({} known convo(s), {} gap digest(s))",
+        per_convo_since.len(),
+        gaps.len()
     );
     send_message_to_peer(
         ws_cmd_tx, ws_room_peers,
-        sibling_peer_id, HavenMessage::DmSiblingSyncRequest { per_convo_since },
+        sibling_peer_id, HavenMessage::DmSiblingSyncRequest { per_convo_since, gaps },
     );
 }
 

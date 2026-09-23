@@ -3675,22 +3675,13 @@ async fn run_event_loop(
                                             // possibly offline, device.
                                             let multi_device =
                                                 !super::resolver::devices_for(&master_peer_str).is_empty();
-                                            // Lookback overlap — mid-deduped
-                                            // on receipt (watermark-gap heal).
-                                            let since = (if multi_device {
-                                                store.get_latest_dm_timestamp_any(&convo)
-                                            } else {
-                                                store.get_latest_dm_timestamp(&convo)
-                                            }
-                                            .unwrap_or(None)
-                                            .unwrap_or(0)
-                                                - crate::storage::messages::SYNC_LOOKBACK_MS)
-                                                .max(0);
+                                            let (since, gap) = store.dm_sync_anchor(&convo, multi_device);
                                             send_message_to_peer(
                                                 &ws_cmd_tx, &ws_room_peers,
                                                 &peer_id, HavenMessage::DmSyncRequest {
                                                     since_timestamp: since,
                                                     both_directions: multi_device,
+                                                    gap,
                                                 },
                                             );
                                         }
@@ -4269,22 +4260,13 @@ async fn run_event_loop(
                                             // high-water iff we have a sibling.
                                             let multi_device =
                                                 !super::resolver::devices_for(&master_peer_str).is_empty();
-                                            // Lookback overlap — mid-deduped
-                                            // on receipt (watermark-gap heal).
-                                            let since = (if multi_device {
-                                                store.get_latest_dm_timestamp_any(&convo)
-                                            } else {
-                                                store.get_latest_dm_timestamp(&convo)
-                                            }
-                                            .unwrap_or(None)
-                                            .unwrap_or(0)
-                                                - crate::storage::messages::SYNC_LOOKBACK_MS)
-                                                .max(0);
+                                            let (since, gap) = store.dm_sync_anchor(&convo, multi_device);
                                             send_message_to_peer(
                                                 &ws_cmd_tx, &ws_room_peers,
                                                 pid_str, HavenMessage::DmSyncRequest {
                                                     since_timestamp: since,
                                                     both_directions: multi_device,
+                                                    gap,
                                                 },
                                             );
                                         }
@@ -5153,18 +5135,9 @@ async fn run_event_loop(
                                             for peer_id_str in &added_peers {
                                                 if !peer_is_reachable(&ws_room_peers, peer_id_str) { continue; }
                                                 for cid in &sync_cids {
-                                                    let sender_ts = store.get_per_sender_timestamps(&server_id, cid)
-                                                        .unwrap_or_default();
-                                                    let our_latest = store.get_latest_channel_timestamp(&server_id, cid)
-                                                        .unwrap_or(None).unwrap_or(0);
                                                     send_message_to_peer(
-                                                        &ws_cmd_tx, &ws_room_peers,
-                                                        peer_id_str, HavenMessage::ChannelSyncRequest {
-                                                            server_id: server_id.clone(),
-                                                            channel_id: cid.clone(),
-                                                            since_timestamp: our_latest,
-                                                            sender_timestamps: sender_ts,
-                                                        },
+                                                        &ws_cmd_tx, &ws_room_peers, peer_id_str,
+                                                        sync_handler::channel_sync_request(&store, &server_id, cid, true),
                                                     );
                                                 }
                                             }
@@ -5337,18 +5310,17 @@ async fn run_event_loop(
                             // Send a plaintext ChannelSyncRequest rather than an MLS ChannelProbe: an
                             // MLS probe silently fails at a stale epoch after reconnection, so sync never
                             // completes. The response handler uses MLS if available, Olm otherwise.
-                            let sender_ts = sync_store.as_ref()
-                                .map(|s| s.get_per_sender_timestamps(server_id, channel_id).unwrap_or_default())
-                                .unwrap_or_default();
-                            send_message_to_peer(
-                                &ws_cmd_tx, &ws_room_peers,
-                                &peer_str, HavenMessage::ChannelSyncRequest {
+                            let request = match sync_store.as_ref() {
+                                Some(store) => sync_handler::channel_sync_request(store, server_id, channel_id, true),
+                                None => HavenMessage::ChannelSyncRequest {
                                     server_id: server_id.clone(),
                                     channel_id: channel_id.clone(),
                                     since_timestamp: *our_latest,
-                                    sender_timestamps: sender_ts,
+                                    sender_timestamps: HashMap::new(),
+                                    gap: None,
                                 },
-                            );
+                            };
+                            send_message_to_peer(&ws_cmd_tx, &ws_room_peers, &peer_str, request);
                         }
                     }
 
@@ -5936,25 +5908,55 @@ fn request_dm_resync_after_rekey(
         // cross-direction high-water mark (mirrors the PeerJoined DM-sync) so a
         // friend also re-serves messages we sent from another device.
         let multi_device = !super::resolver::devices_for(master_peer_str).is_empty();
-        // Lookback overlap — a high-watermark skips messages missed while a
-        // newer one arrived; the overlap is mid-deduplicated on receipt.
-        let since = (if multi_device {
-            store.get_latest_dm_timestamp_any(&convo)
-        } else {
-            store.get_latest_dm_timestamp(&convo)
-        }
-        .unwrap_or(None)
-        .unwrap_or(0)
-            - crate::storage::messages::SYNC_LOOKBACK_MS)
-            .max(0);
+        let (since, gap) = store.dm_sync_anchor(&convo, multi_device);
         hollow_log!("[HOLLOW-SYNC] Post-rekey DM resync from {peer_str} since {since} (both={multi_device})");
         send_message_to_peer(
             ws_cmd_tx, ws_room_peers,
             peer_str, HavenMessage::DmSyncRequest {
                 since_timestamp: since,
                 both_directions: multi_device,
+                gap,
             },
         );
+    }
+}
+
+/// Deliver one DM sync reply, or queue it and re-key when we hold no session:
+/// the requester built its half before asking, ours may never have been built,
+/// and a user-visible MessageSendFailed for an internal reply would be wrong.
+#[allow(clippy::too_many_arguments)]
+async fn send_dm_sync_reply(
+    olm: &mut OlmManager,
+    crypto_store: &CryptoStore,
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    pending_messages: &mut HashMap<String, Vec<String>>,
+    key_request_in_flight: &mut HashMap<String, std::time::Instant>,
+    device_keypair: &crate::identity::native_identity::NativeKeypair,
+    device_peer_id: &str,
+    peer_str: &str,
+    envelope: &MessageEnvelope,
+) {
+    let envelope_json = serde_json::to_string(envelope).unwrap_or_default();
+    if olm.has_session(peer_str) {
+        send_encrypted_message(
+            olm, crypto_store,
+            peer_str, &envelope_json, event_tx,
+            ws_cmd_tx, ws_room_peers,
+        ).await;
+        return;
+    }
+    pending_messages
+        .entry(peer_str.to_string())
+        .or_default()
+        .push(envelope_json);
+    if !key_request_is_fresh(key_request_in_flight, peer_str) {
+        send_message_to_peer(
+            ws_cmd_tx, ws_room_peers,
+            peer_str, signed_key_request(device_keypair, device_peer_id, peer_str),
+        );
+        key_request_in_flight.insert(peer_str.to_string(), std::time::Instant::now());
     }
 }
 
@@ -7252,22 +7254,10 @@ async fn handle_incoming_request(
                         // Pagination: if has_more, send a follow-up ChannelSyncRequest
                         // with updated per-sender timestamps from our DB.
                         if has_more == Some(true) {
-                            let sender_ts = store
-                                .get_per_sender_timestamps(&sid, &cid)
-                                .unwrap_or_default();
-                            let since = store
-                                .get_latest_channel_timestamp(&sid, &cid)
-                                .unwrap_or(None)
-                                .unwrap_or(0);
                             hollow_log!("[HOLLOW-SYNC] Requesting next page for {cid} in {sid}");
                             send_message_to_peer(
-                                ws_cmd_tx, ws_room_peers,
-                                peer_str, HavenMessage::ChannelSyncRequest {
-                                    server_id: sid.clone(),
-                                    channel_id: cid.clone(),
-                                    since_timestamp: since,
-                                    sender_timestamps: sender_ts,
-                                },
+                                ws_cmd_tx, ws_room_peers, peer_str,
+                                super::sync_handler::channel_sync_request(&store, &sid, &cid, false),
                             );
                         }
                     }
@@ -7673,6 +7663,7 @@ async fn handle_incoming_request(
                                 peer_str, HavenMessage::DmSyncRequest {
                                     since_timestamp: since,
                                     both_directions: multi_device,
+                                    gap: None,
                                 },
                             );
                         }
@@ -7907,6 +7898,7 @@ async fn handle_incoming_request(
                                 ws_cmd_tx, ws_room_peers,
                                 &peer_str, HavenMessage::DmSiblingSyncRequest {
                                     per_convo_since: vec![(convo_peer.clone(), since)],
+                                    gaps: HashMap::new(),
                                 },
                             );
                         }
@@ -9186,16 +9178,9 @@ async fn handle_incoming_request(
                             .unwrap_or(None).unwrap_or(0);
                         if their_latest > our_latest || msg_count > store.count_channel_messages(&sid, &cid) {
                             channel_sync_sent.insert(dedup_key, std::time::Instant::now());
-                            let per_sender = store.get_per_sender_timestamps(&sid, &cid)
-                                .unwrap_or_default();
                             send_message_to_peer(
-                                ws_cmd_tx, ws_room_peers,
-                                peer_str, HavenMessage::ChannelSyncRequest {
-                                    server_id: sid.clone(),
-                                    channel_id: cid,
-                                    since_timestamp: our_latest,
-                                    sender_timestamps: per_sender,
-                                },
+                                ws_cmd_tx, ws_room_peers, peer_str,
+                                super::sync_handler::channel_sync_request(&store, &sid, &cid, true),
                             );
                         }
                     }
@@ -10537,7 +10522,7 @@ async fn handle_incoming_request(
             }
         }
 
-        HavenMessage::ChannelSyncRequest { server_id, channel_id, since_timestamp, sender_timestamps } => {
+        HavenMessage::ChannelSyncRequest { server_id, channel_id, since_timestamp, sender_timestamps, gap } => {
             
 
             // Room gating: only respond for servers we are a member of, and only
@@ -10562,13 +10547,13 @@ async fn handle_incoming_request(
             }
             channel_sync_sent.insert(resp_dedup_key, std::time::Instant::now());
 
-            hollow_log!("[HOLLOW-SYNC] ChannelSyncRequest from {peer_str} for {channel_id} in {server_id} since {since_timestamp} (per-sender: {} entries)", sender_timestamps.len());
+            hollow_log!("[HOLLOW-SYNC] ChannelSyncRequest from {peer_str} for {channel_id} in {server_id} since {since_timestamp} (per-sender: {} entries, gap={})", sender_timestamps.len(), gap.is_some());
 
             if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
                 // Per-sender sync when watermarks were sent, legacy single-timestamp
                 // fallback otherwise — shared with the MLS/Olm responders.
                 if let Ok((envelope, count)) = super::sync_handler::build_channel_sync_batch(
-                    &store, &server_id, &channel_id, since_timestamp, &sender_timestamps,
+                    &store, &server_id, &channel_id, since_timestamp, &sender_timestamps, gap.as_ref(),
                 ) {
                     hollow_log!("[HOLLOW-SYNC] Sending {count} sync messages for {channel_id}");
                     // Send via MLS if peer is in the group, otherwise Olm fallback.
@@ -10635,27 +10620,20 @@ async fn handle_incoming_request(
                     .unwrap_or(0);
                 let our_msg_count = store.count_channel_messages(&server_id, &channel_id);
 
-                // Sync if: peer has newer messages (timestamp check only).
+                // Sync if the peer has newer messages OR more of them: a message
+                // missed behind our newest one never moves `latest`.
                 // Dedup: skip if already syncing this channel recently.
                 let dedup_key = format!("{server_id}:{channel_id}");
                 let recently_synced = channel_sync_sent.get(&dedup_key)
                     .is_some_and(|t| t.elapsed() < Duration::from_secs(5));
-                if their_latest > our_latest && !recently_synced {
+                if (their_latest > our_latest || msg_count > our_msg_count) && !recently_synced {
                     channel_sync_sent.insert(dedup_key, std::time::Instant::now());
-                    let sender_ts = store
-                        .get_per_sender_timestamps(&server_id, &channel_id)
-                        .unwrap_or_default();
                     hollow_log!(
                         "[HOLLOW-SYNC] Probe response: {channel_id} needs sync (ts: ours={our_latest} peer={their_latest}, count: ours={our_msg_count} peer={msg_count}). Requesting from {peer_str}"
                     );
                     send_message_to_peer(
-                        ws_cmd_tx, ws_room_peers,
-                        peer_str, HavenMessage::ChannelSyncRequest {
-                            server_id: server_id.clone(),
-                            channel_id: channel_id.clone(),
-                            since_timestamp: our_latest,
-                            sender_timestamps: sender_ts,
-                        },
+                        ws_cmd_tx, ws_room_peers, peer_str,
+                        super::sync_handler::channel_sync_request(&store, &server_id, &channel_id, true),
                     );
                 } else {
                     hollow_log!(
@@ -10669,77 +10647,73 @@ async fn handle_incoming_request(
             }
         }
 
-        HavenMessage::DmSyncRequest { since_timestamp, both_directions } => {
-            hollow_log!("[HOLLOW-SYNC] DmSyncRequest from {peer_str} since {since_timestamp} (both_directions={both_directions})");
+        HavenMessage::DmSyncRequest { since_timestamp, both_directions, gap } => {
+            hollow_log!("[HOLLOW-SYNC] DmSyncRequest from {peer_str} since {since_timestamp} (both_directions={both_directions}, gap={})", gap.is_some());
 
             // Multi-device: the requester sends its DEVICE id, but our DM rows for
             // that person are keyed by their MASTER id. A multi-device requester
             // therefore matched ZERO rows under the raw device id and the catch-up
             // sync silently delivered nothing. Resolve to the master for the
             // lookup; the transport send still targets the raw device.
-            let convo_peer = super::resolver::resolve(&peer_str);
+            let convo_peer = super::resolver::resolve(peer_str);
 
             if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
                 // Multi-device peer-fallback: a multi-device requester sets
                 // `both_directions` so we re-serve the requester's OWN messages
                 // (stored here as is_mine=0) alongside ours, which are otherwise
                 // stranded when that device is offline.
+                let gap_rows = gap
+                    .map(|g| {
+                        store
+                            .get_dm_gap_messages(&convo_peer, &g, !both_directions, 200)
+                            .unwrap_or_default()
+                    })
+                    .unwrap_or_default();
+                if !gap_rows.is_empty() {
+                    let super::sync_handler::SyncPage { items, .. } =
+                        build_dm_sync_items(&store, &gap_rows);
+                    hollow_log!("[HOLLOW-SYNC] Re-serving {} DM(s) behind {since_timestamp} to {peer_str} (convo {convo_peer})", items.len());
+                    // Never paginated: whatever did not fit is still missing at the
+                    // next sync and is served then.
+                    send_dm_sync_reply(
+                        olm, crypto_store, event_tx, ws_cmd_tx, ws_room_peers,
+                        pending_messages, key_request_in_flight,
+                        device_keypair, device_peer_id, peer_str,
+                        &MessageEnvelope::DmSyncBatch { messages: items, has_more: None },
+                    ).await;
+                }
+
                 let messages_result = if both_directions {
                     store.get_dm_messages_for_sibling(&convo_peer, since_timestamp, 200)
                 } else {
                     store.get_dm_messages_since(&convo_peer, since_timestamp, 200)
                 };
                 if let Ok(messages) = messages_result {
-                        hollow_log!("[HOLLOW-SYNC] Sending {} DM sync messages to {peer_str} (convo {convo_peer}, both_directions={both_directions})", messages.len());
-                        let super::sync_handler::SyncPage { items, truncated } =
-                            build_dm_sync_items(&store, &messages);
+                    hollow_log!("[HOLLOW-SYNC] Sending {} DM sync messages to {peer_str} (convo {convo_peer}, both_directions={both_directions})", messages.len());
+                    let super::sync_handler::SyncPage { items, truncated } =
+                        build_dm_sync_items(&store, &messages);
 
-                        if !items.is_empty() {
-                            // `truncated` = the preview budget ended the page
-                            // early, so there is more to serve regardless of
-                            // how short it came out.
-                            let has_more = if truncated || items.len() >= 200 {
-                                Some(true)
-                            } else {
-                                None
-                            };
-                            let envelope = MessageEnvelope::DmSyncBatch {
-                                messages: items,
-                                has_more,
-                            };
-                            let envelope_json = serde_json::to_string(&envelope).unwrap_or_default();
-
-                            if olm.has_session(peer_str) {
-                                send_encrypted_message(
-                                    olm, crypto_store,
-                                    peer_str, &envelope_json, event_tx,
-                                    ws_cmd_tx, ws_room_peers,
-                                ).await;
-                            } else {
-                                // Asymmetric fresh-peer handshake: THEY built a session
-                                // and sent this catch-up request, but our half was never
-                                // built. Encrypting now would hit "No session" and surface
-                                // a user-visible MessageSendFailed for an internal sync
-                                // reply, so queue the batch and re-key instead.
-                                pending_messages
-                                    .entry(peer_str.to_string())
-                                    .or_default()
-                                    .push(envelope_json);
-                                if !key_request_is_fresh(key_request_in_flight, peer_str) {
-                                    send_message_to_peer(
-                                        ws_cmd_tx, ws_room_peers,
-                                        peer_str, signed_key_request(device_keypair, device_peer_id, peer_str),
-                                    );
-                                    key_request_in_flight
-                                        .insert(peer_str.to_string(), std::time::Instant::now());
-                                }
-                            }
-                        }
+                    if !items.is_empty() {
+                        // `truncated` = the preview budget ended the page
+                        // early, so there is more to serve regardless of
+                        // how short it came out.
+                        let has_more = if truncated || items.len() >= 200 {
+                            Some(true)
+                        } else {
+                            None
+                        };
+                        send_dm_sync_reply(
+                            olm, crypto_store, event_tx, ws_cmd_tx, ws_room_peers,
+                            pending_messages, key_request_in_flight,
+                            device_keypair, device_peer_id, peer_str,
+                            &MessageEnvelope::DmSyncBatch { messages: items, has_more },
+                        ).await;
                     }
+                }
             }
         }
 
-        HavenMessage::DmSiblingSyncRequest { per_convo_since } => {
+        HavenMessage::DmSiblingSyncRequest { per_convo_since, mut gaps } => {
             // Multi-device (Phase 6 / Step 5): a sibling device asks for our FULL
             // DM history across ALL conversations, both directions. Honor ONLY for
             // our own other device — a friend must never pull our whole DB.
@@ -10760,56 +10734,47 @@ async fn handle_incoming_request(
                 );
                 for convo in convos {
                     let since = since_map.get(&convo).copied().unwrap_or(0);
-                    let messages = match store.get_dm_messages_for_sibling(&convo, since, 200) {
-                        Ok(m) => m,
-                        Err(e) => {
-                            hollow_log!("[HOLLOW-SYNC] sibling sync read failed for {convo}: {e}");
-                            continue;
-                        }
-                    };
-                    if messages.is_empty() { continue; }
-                    let super::sync_handler::SyncPage { items, truncated } =
-                        build_dm_sync_items(&store, &messages);
-                    // `truncated` = the preview budget cut the page short, so
-                    // more remains even when the page is under the limit.
-                    let has_more = if truncated || messages.len() >= 200 { Some(true) } else { None };
-                    hollow_log!(
-                        "[HOLLOW-SYNC] Sending {} sibling DM(s) for convo {convo} to {peer_str} (has_more={has_more:?})",
-                        items.len()
-                    );
-                    let envelope = MessageEnvelope::DmSiblingSyncBatch {
-                        convo: convo.clone(),
-                        messages: items,
-                        has_more,
-                    };
-                    let envelope_json = serde_json::to_string(&envelope).unwrap_or_default();
-                    if olm.has_session(peer_str) {
-                        send_encrypted_message(
-                            olm, crypto_store,
-                            peer_str, &envelope_json, event_tx,
-                            ws_cmd_tx, ws_room_peers,
+                    // The gap batch goes first and is never paginated; see the
+                    // friend responder above.
+                    let gap_rows = gaps
+                        .remove(&convo)
+                        .map(|g| store.get_dm_gap_messages(&convo, &g, false, 200).unwrap_or_default())
+                        .unwrap_or_default();
+                    let mut batches: Vec<(Vec<crate::storage::messages::StoredMessage>, bool)> =
+                        Vec::with_capacity(2);
+                    if !gap_rows.is_empty() {
+                        batches.push((gap_rows, false));
+                    }
+                    match store.get_dm_messages_for_sibling(&convo, since, 200) {
+                        Ok(m) if !m.is_empty() => batches.push((m, true)),
+                        Ok(_) => {}
+                        Err(e) => hollow_log!("[HOLLOW-SYNC] sibling sync read failed for {convo}: {e}"),
+                    }
+                    for (messages, paged) in batches {
+                        let super::sync_handler::SyncPage { items, truncated } =
+                            build_dm_sync_items(&store, &messages);
+                        // `truncated` = the preview budget cut the page short, so
+                        // more remains even when the page is under the limit.
+                        let has_more = (paged && (truncated || messages.len() >= 200)).then_some(true);
+                        hollow_log!(
+                            "[HOLLOW-SYNC] Sending {} sibling DM(s) for convo {convo} to {peer_str} (gap={}, has_more={has_more:?})",
+                            items.len(),
+                            !paged
+                        );
+                        send_dm_sync_reply(
+                            olm, crypto_store, event_tx, ws_cmd_tx, ws_room_peers,
+                            pending_messages, key_request_in_flight,
+                            device_keypair, device_peer_id, peer_str,
+                            &MessageEnvelope::DmSiblingSyncBatch {
+                                convo: convo.clone(),
+                                messages: items,
+                                has_more,
+                            },
                         ).await;
-                    } else {
-                        // No session yet (asymmetric fresh handshake) — queue each
-                        // batch + re-key rather than hard-fail with MessageSendFailed.
-                        // See the DmSyncRequest responder above for the full rationale.
-                        pending_messages
-                            .entry(peer_str.to_string())
-                            .or_default()
-                            .push(envelope_json);
-                        if !key_request_is_fresh(key_request_in_flight, peer_str) {
-                            send_message_to_peer(
-                                ws_cmd_tx, ws_room_peers,
-                                peer_str, signed_key_request(device_keypair, device_peer_id, peer_str),
-                            );
-                            key_request_in_flight
-                                .insert(peer_str.to_string(), std::time::Instant::now());
-                        }
                     }
                 }
             }
         }
-
         HavenMessage::PeerDisconnecting => {
             hollow_log!("[HOLLOW-SWARM] Peer {peer_str} is disconnecting gracefully");
 
@@ -11255,11 +11220,11 @@ async fn handle_incoming_request(
                                 ).await;
                             }
 
-                            MessageEnvelope::ChannelSyncReq { sid, cid, since_timestamp, sender_timestamps, .. } => {
+                            MessageEnvelope::ChannelSyncReq { sid, cid, since_timestamp, sender_timestamps, gap, .. } => {
                                 sync_handler::handle_envelope_channel_sync_req(
                                     server_states, olm, bundle_keypair, event_tx,
                                     ws_cmd_tx, ws_room_peers,
-                                    &sender_peer_id, sid, cid, since_timestamp, sender_timestamps,
+                                    &sender_peer_id, sid, cid, since_timestamp, sender_timestamps, gap,
                                     crypto_store, crdt_store,
                                     db_path, db_passphrase,
                                 ).await;
@@ -11594,18 +11559,9 @@ async fn handle_incoming_request(
                                             .unwrap_or_default(),
                                     };
                                     for cid in &sync_cids {
-                                        let sender_ts = store.get_per_sender_timestamps(&server_id, cid)
-                                            .unwrap_or_default();
-                                        let our_latest = store.get_latest_channel_timestamp(&server_id, cid)
-                                            .unwrap_or(None).unwrap_or(0);
                                         send_message_to_peer(
-                                            ws_cmd_tx, ws_room_peers,
-                                            peer_str, HavenMessage::ChannelSyncRequest {
-                                                server_id: server_id.clone(),
-                                                channel_id: cid.clone(),
-                                                since_timestamp: our_latest,
-                                                sender_timestamps: sender_ts,
-                                            },
+                                            ws_cmd_tx, ws_room_peers, peer_str,
+                                            super::sync_handler::channel_sync_request(&store, &server_id, cid, true),
                                         );
                                     }
                                     hollow_log!("[HOLLOW-MLS] Requested immediate sync from {peer_str} for {} channel(s) in {group_key}", sync_cids.len());
@@ -12006,18 +11962,9 @@ async fn handle_incoming_request(
                                     None => state.channels.keys().cloned().collect(),
                                 };
                                 for cid in &sync_cids {
-                                    let sender_ts = store.get_per_sender_timestamps(&server_id, cid)
-                                        .unwrap_or_default();
-                                    let our_latest = store.get_latest_channel_timestamp(&server_id, cid)
-                                        .unwrap_or(None).unwrap_or(0);
                                     send_message_to_peer(
-                                        ws_cmd_tx, ws_room_peers,
-                                        &peer_str, HavenMessage::ChannelSyncRequest {
-                                            server_id: server_id.clone(),
-                                            channel_id: cid.clone(),
-                                            since_timestamp: our_latest,
-                                            sender_timestamps: sender_ts,
-                                        },
+                                        ws_cmd_tx, ws_room_peers, &peer_str,
+                                        super::sync_handler::channel_sync_request(&store, &server_id, cid, true),
                                     );
                                 }
                             }

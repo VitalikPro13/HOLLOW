@@ -10,6 +10,54 @@ use crate::crdt::operations::CrdtOp;
 /// the overlap by message_id, so the only cost is re-sent recent history.
 pub(crate) const SYNC_LOOKBACK_MS: i64 = 30 * 60 * 1000;
 
+const DAY_MS: i64 = 24 * 60 * 60 * 1000;
+
+/// How far behind `since` a DM gap digest reaches. Past it a missed message stays
+/// missed, which bounds both the digest on the wire and a responder's re-serve of
+/// a day that can never converge (a row the other side rejects).
+const SYNC_GAP_WINDOW_MS: i64 = 30 * DAY_MS;
+
+/// The widest digest a responder honours; see `gap_span_ok`.
+const SYNC_GAP_MAX_SPAN_MS: i64 = SYNC_GAP_WINDOW_MS + DAY_MS;
+
+/// The digest window behind a sync's lookback-adjusted `since`, or None when
+/// there is nothing behind it.
+fn gap_window(since: i64) -> Option<(i64, i64)> {
+    (since > 0).then(|| ((since - SYNC_GAP_WINDOW_MS).max(0), since))
+}
+
+/// A responder ignores a digest it did not ask for the shape of: empty, inverted
+/// or wider than the window, so a peer cannot make it hash and scan an entire
+/// history per request.
+fn gap_span_ok(g: &crate::node::types::GapDigest) -> bool {
+    g.from < g.until && g.until - g.from <= SYNC_GAP_MAX_SPAN_MS
+}
+
+/// The days (as an SQL list) where our digest differs from theirs. A day only
+/// they hold is left out: we have nothing to serve for it.
+fn differing_days(
+    ours: &crate::node::types::GapDigest,
+    theirs: &crate::node::types::GapDigest,
+) -> Option<String> {
+    let known: HashMap<i64, (u32, u64)> =
+        theirs.days.iter().map(|d| (d.d, (d.n, d.h))).collect();
+    let days: Vec<String> = ours
+        .days
+        .iter()
+        .filter(|o| known.get(&o.d) != Some(&(o.n, o.h)))
+        .map(|o| o.d.to_string())
+        .collect();
+    (!days.is_empty()).then(|| days.join(","))
+}
+
+/// Stable 64-bit FNV-1a of a message_id. Both ends of a sync must agree on it, so
+/// it can never change.
+fn mid_hash(mid: &str) -> u64 {
+    mid.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| {
+        (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
+    })
+}
+
 /// A user profile stored locally (ours or a peer's).
 pub(crate) struct StoredProfile {
     pub peer_id: String,
@@ -1617,6 +1665,171 @@ impl MessageStore {
             &[&peer_id, &since_timestamp, &limit],
             "dm_messages_for_sibling",
         )
+    }
+
+    /// Where a DM catch-up sync starts (newest row minus the lookback overlap) and
+    /// the digest of what we hold behind that point. `any_direction` picks the
+    /// multi-device high-water mark; see `get_latest_dm_timestamp_any`.
+    pub fn dm_sync_anchor(
+        &self,
+        peer_id: &str,
+        any_direction: bool,
+    ) -> (i64, Option<crate::node::types::GapDigest>) {
+        let latest = if any_direction {
+            self.get_latest_dm_timestamp_any(peer_id)
+        } else {
+            self.get_latest_dm_timestamp(peer_id)
+        };
+        let since = (latest.unwrap_or(None).unwrap_or(0) - SYNC_LOOKBACK_MS).max(0);
+        (since, gap_window(since).and_then(|(from, until)| self.dm_gap_digest(peer_id, from, until).ok()))
+    }
+
+    /// Digest of what we hold in one channel behind our newest message minus the
+    /// lookback overlap, which the per-sender watermarks already cover.
+    pub fn channel_gap_anchor(
+        &self,
+        server_id: &str,
+        channel_id: &str,
+    ) -> Option<crate::node::types::GapDigest> {
+        let latest = self.get_latest_channel_timestamp(server_id, channel_id).ok()??;
+        let (from, until) = gap_window((latest - SYNC_LOOKBACK_MS).max(0))?;
+        self.gap_digest(
+            "SELECT message_id, timestamp FROM channel_messages
+             WHERE server_id = ?1 AND channel_id = ?2 AND timestamp >= ?3 AND timestamp < ?4
+               AND message_id IS NOT NULL",
+            &[&server_id, &channel_id, &from, &until],
+            from,
+            until,
+        )
+        .ok()
+    }
+
+    /// Per-day digest of the DM rows in `[from, until)` of one conversation, both
+    /// directions.
+    pub fn dm_gap_digest(
+        &self,
+        peer_id: &str,
+        from: i64,
+        until: i64,
+    ) -> Result<crate::node::types::GapDigest, String> {
+        self.gap_digest(
+            "SELECT message_id, timestamp FROM messages
+             WHERE peer_id = ?1 AND timestamp >= ?2 AND timestamp < ?3
+               AND message_id IS NOT NULL",
+            &[&peer_id, &from, &until],
+            from,
+            until,
+        )
+    }
+
+    /// Fold `(message_id, timestamp)` rows into a per-day digest. Rows without a
+    /// message_id cannot be deduplicated, so every caller leaves them out.
+    fn gap_digest(
+        &self,
+        sql: &str,
+        params: &[&dyn rusqlite::types::ToSql],
+        from: i64,
+        until: i64,
+    ) -> Result<crate::node::types::GapDigest, String> {
+        let mut stmt = self
+            .conn
+            .prepare_cached(sql)
+            .map_err(|e| format!("Failed to prepare gap digest: {e}"))?;
+        let rows = stmt
+            .query_map(params, |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))
+            .map_err(|e| format!("Failed to query gap digest: {e}"))?;
+        let mut days: std::collections::BTreeMap<i64, (u32, u64)> = Default::default();
+        for (mid, ts) in rows.flatten() {
+            let day = days.entry(ts.div_euclid(DAY_MS)).or_default();
+            day.0 += 1;
+            day.1 ^= mid_hash(&mid);
+        }
+        Ok(crate::node::types::GapDigest {
+            from,
+            until,
+            days: days
+                .into_iter()
+                .map(|(d, (n, h))| crate::node::types::GapDay { d, n, h })
+                .collect(),
+        })
+    }
+
+    /// The DM rows a requester is missing in its digest's range: every row on a
+    /// day whose digest differs from ours, oldest first. `mine_only` keeps the
+    /// one-directional friend contract.
+    pub fn get_dm_gap_messages(
+        &self,
+        peer_id: &str,
+        theirs: &crate::node::types::GapDigest,
+        mine_only: bool,
+        limit: i32,
+    ) -> Result<Vec<StoredMessage>, String> {
+        if !gap_span_ok(theirs) {
+            return Ok(Vec::new());
+        }
+        let ours = self.dm_gap_digest(peer_id, theirs.from, theirs.until)?;
+        let Some(days) = differing_days(&ours, theirs) else {
+            return Ok(Vec::new());
+        };
+        let mine_filter = if mine_only { " AND is_mine = 1" } else { "" };
+        // Hidden rows are included, as in every sibling query: evidence must sync.
+        self.query_dm_messages(
+            &format!(
+                "SELECT {DM_MSG_COLS}
+                 FROM messages
+                 WHERE peer_id = ?1 AND timestamp >= ?2 AND timestamp < ?3
+                   AND message_id IS NOT NULL{mine_filter}
+                   AND (timestamp / {DAY_MS}) IN ({days})
+                 ORDER BY timestamp ASC, COALESCE(order_us, timestamp * 1000) ASC
+                 LIMIT ?4",
+            ),
+            &[&peer_id, &theirs.from, &theirs.until, &limit],
+            "dm_gap_messages",
+        )
+    }
+
+    /// The channel rows a requester is missing in its digest's range; see
+    /// [`Self::get_dm_gap_messages`].
+    pub fn get_channel_gap_messages(
+        &self,
+        server_id: &str,
+        channel_id: &str,
+        theirs: &crate::node::types::GapDigest,
+        limit: i32,
+    ) -> Result<Vec<StoredChannelMessage>, String> {
+        if !gap_span_ok(theirs) {
+            return Ok(Vec::new());
+        }
+        let ours = self.gap_digest(
+            "SELECT message_id, timestamp FROM channel_messages
+             WHERE server_id = ?1 AND channel_id = ?2 AND timestamp >= ?3 AND timestamp < ?4
+               AND message_id IS NOT NULL",
+            &[&server_id, &channel_id, &theirs.from, &theirs.until],
+            theirs.from,
+            theirs.until,
+        )?;
+        let Some(days) = differing_days(&ours, theirs) else {
+            return Ok(Vec::new());
+        };
+        let mut stmt = self
+            .conn
+            .prepare(&format!(
+                "SELECT {CHANNEL_MSG_COLS}
+                 FROM channel_messages
+                 WHERE server_id = ?1 AND channel_id = ?2 AND timestamp >= ?3 AND timestamp < ?4
+                   AND message_id IS NOT NULL
+                   AND (timestamp / {DAY_MS}) IN ({days})
+                 ORDER BY timestamp ASC
+                 LIMIT ?5",
+            ))
+            .map_err(|e| format!("Failed to prepare channel gap query: {e}"))?;
+        let rows = stmt
+            .query_map(
+                params![server_id, channel_id, theirs.from, theirs.until, limit],
+                channel_message_from_row,
+            )
+            .map_err(|e| format!("Failed to query channel gap: {e}"))?;
+        collect_rows(rows, "channel_gap_messages")
     }
 
     // -- CRDT persistence methods --
@@ -5992,6 +6205,88 @@ mod tests {
         assert_eq!(store.get_latest_dm_timestamp(convo).unwrap(), Some(100));
         // both-direction high-water sees our newer outgoing message.
         assert_eq!(store.get_latest_dm_timestamp_any(convo).unwrap(), Some(200));
+    }
+
+    /// #90: a row missing BEHIND the requester's `since` is re-served, only its
+    /// day is, and a day both sides hold identically costs nothing.
+    #[test]
+    fn gap_digest_serves_only_the_differing_day() {
+        let (full, partial) = (mem_store(), mem_store());
+        let convo = "friend_master";
+        let day = DAY_MS;
+        let since = 10 * day;
+        for store in [&full, &partial] {
+            store.insert(convo, "day2", true, 2 * day + 5, None, None, Some("a"), None, None, None, None).unwrap();
+            store.insert(convo, "day3 theirs", false, 3 * day + 5, None, None, Some("b"), None, None, None, None).unwrap();
+            store.insert(convo, "newest", false, since + 5, None, None, Some("z"), None, None, None, None).unwrap();
+        }
+        full.insert(convo, "day3 missed", true, 3 * day + 9, None, None, Some("c"), None, None, None, None).unwrap();
+
+        let theirs = partial.dm_gap_digest(convo, day, since).unwrap();
+        assert_eq!(theirs.days.len(), 2, "one entry per non-empty day");
+        let served: Vec<String> = full
+            .get_dm_gap_messages(convo, &theirs, false, 200)
+            .unwrap()
+            .into_iter()
+            .filter_map(|m| m.message_id)
+            .collect();
+        assert_eq!(served, ["b", "c"], "the whole differing day, and nothing past `since`");
+
+        let mine_only: Vec<String> = full
+            .get_dm_gap_messages(convo, &theirs, true, 200)
+            .unwrap()
+            .into_iter()
+            .filter_map(|m| m.message_id)
+            .collect();
+        assert_eq!(mine_only, ["c"], "a one-directional friend serves only its own sends");
+
+        let ours = full.dm_gap_digest(convo, day, since).unwrap();
+        assert!(
+            full.get_dm_gap_messages(convo, &ours, false, 200).unwrap().is_empty(),
+            "matching digests serve nothing"
+        );
+    }
+
+    /// A digest reaching further back than the window is ignored, so a peer cannot
+    /// make us scan and ship a whole history per request.
+    #[test]
+    fn gap_digest_wider_than_the_window_is_ignored() {
+        let store = mem_store();
+        let convo = "friend_master";
+        store.insert(convo, "old", true, DAY_MS, None, None, Some("a"), None, None, None, None).unwrap();
+        let empty = |from, until| crate::node::types::GapDigest { from, until, days: Vec::new() };
+        let too_wide = empty(0, SYNC_GAP_MAX_SPAN_MS + 2 * DAY_MS);
+        assert!(store.get_dm_gap_messages(convo, &too_wide, false, 200).unwrap().is_empty());
+        assert!(store.get_dm_gap_messages(convo, &empty(5, 5), false, 200).unwrap().is_empty());
+        assert_eq!(
+            store.get_dm_gap_messages(convo, &empty(0, 2 * DAY_MS), false, 200).unwrap().len(),
+            1,
+            "an in-bounds empty digest gets the whole window"
+        );
+    }
+
+    /// The channel half: a row missed behind our newest message comes back, and
+    /// the anchor leaves the lookback overlap to the per-sender watermarks.
+    #[test]
+    fn channel_gap_anchor_and_serve() {
+        let (full, partial) = (mem_store(), mem_store());
+        let newest = 10 * DAY_MS;
+        for store in [&full, &partial] {
+            store.insert_channel_message("s", "c", "alice", "early", false, 2 * DAY_MS, None, None, Some("e"), None, None, None, None).unwrap();
+            store.insert_channel_message("s", "c", "bob", "newest", false, newest, None, None, Some("n"), None, None, None, None).unwrap();
+        }
+        full.insert_channel_message("s", "c", "alice", "missed", false, 3 * DAY_MS, None, None, Some("m"), None, None, None, None).unwrap();
+
+        let theirs = partial.channel_gap_anchor("s", "c").expect("history behind the newest row");
+        assert_eq!(theirs.until, newest - SYNC_LOOKBACK_MS);
+        let served: Vec<String> = full
+            .get_channel_gap_messages("s", "c", &theirs, 200)
+            .unwrap()
+            .into_iter()
+            .filter_map(|m| m.message_id)
+            .collect();
+        assert_eq!(served, ["m"]);
+        assert!(mem_store().channel_gap_anchor("s", "c").is_none(), "an empty channel has no gap");
     }
 
     /// A same-MILLISECOND burst from two senders must display grouped by sender in true

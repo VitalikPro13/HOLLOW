@@ -15,7 +15,9 @@ Debian 12 or newer, and root access over SSH. One vCPU and 1 GB of memory is
 plenty; a relay uses around 17 MB when idle and 13.4 KB per connected person.
 Budget about twenty minutes.
 
-You do not need to know Docker. Every command below is written out.
+You do not need to know Docker. Every command below is written out. If you
+would rather not run Docker at all, [Without Docker](#without-docker) sets up
+the same relay directly on the host.
 
 ## Pick your address
 
@@ -206,18 +208,17 @@ messages when Hollow is open.
 
 ## What a self-hosted relay does not have
 
-Two things run only on the official relay.
+**The media forwarder** runs only on the official relay. Large screen shares to
+several viewers at once are carried by a separate blind forwarder on the
+official infrastructure. Without it, a share goes peer to peer to each viewer,
+which works and costs the sender more upload.
 
-**The media forwarder.** Large screen shares to several viewers at once are
-carried by a separate blind forwarder on the official infrastructure. Without
-it, a share goes peer to peer to each viewer, which works and costs the sender
-more upload.
-
-**Restart persistence.** On the official relay, offline message buffers survive
-a restart through a systemd handoff. Under Docker there is no such handoff, so
-buffers, channel history rings and push registrations end when the container stops.
-Upgrading the relay empties them. Certificate renewals no longer restart
-anything, so those cost nothing.
+**Restart persistence** needs the relay to run without Docker. On the official
+relay, offline message buffers survive a restart through a systemd handoff.
+Under Docker there is no such handoff, so buffers, channel history rings and
+push registrations end when the container stops, and upgrading the relay empties
+them. Certificate renewals no longer restart anything, so those cost nothing. A
+relay set up as in [Without Docker](#without-docker) gets the handoff too.
 
 Everything else is the same relay. The GIF, emote and game cover services are
 features of the app rather than the relay, so they keep working.
@@ -366,3 +367,232 @@ sudo systemctl enable --now hollow-relay-docker-compose
 It assumes the repository is at `/opt/HOLLOW` and that a user named `hollow`
 owns it and is in the docker group. Edit the `User` and `WorkingDirectory` lines
 if yours differs.
+
+## Without Docker
+
+The relay is a single program, and the official relay runs it directly under
+systemd rather than in a container. Setting it up that way takes a few more
+steps than Docker, and gets you one thing Docker cannot: offline messages
+survive a relay restart, updates included.
+
+Everything above about [picking an address](#pick-your-address), hardening the
+host, [connecting the app](#connect-the-app), members-only keys and
+[ports](#ports) still applies. Skip Install Docker, Configure and Start, and do
+this instead. The commands assume the repository lives at `/opt/HOLLOW`.
+
+### Build the relay
+
+Move the repository you cloned earlier into place, then build:
+
+```bash
+sudo mv ~/HOLLOW /opt/HOLLOW
+sudo apt install cmake g++ libssl-dev libsodium-dev zlib1g-dev
+cd /opt/HOLLOW/relay-uws
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j"$(nproc)"
+```
+
+The result is one file, `build/hollow-relay`. It runs as its own system user,
+which owns nothing but its certificate and its report count:
+
+```bash
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin hollow
+sudo install -d -o hollow -g hollow -m 0750 /etc/hollow-relay
+```
+
+### Get the certificate
+
+Install certbot from snap. The distribution packages are too old for IP address
+certificates.
+
+```bash
+sudo snap install --classic certbot
+```
+
+Port 80 has to reach the machine here, whichever address you picked, because
+this setup validates over HTTP. For a DuckDNS name or a domain you own:
+
+```bash
+sudo certbot certonly --standalone --cert-name relay -d myrelay.duckdns.org
+```
+
+For the bare IP address:
+
+```bash
+sudo certbot certonly --standalone --cert-name relay --ip-address 203.0.113.7 --preferred-profile shortlived
+```
+
+Certbot keeps the files where only root can read them, so a small hook hands a
+copy to the relay every time they renew. Create
+`/etc/letsencrypt/renewal-hooks/deploy/hollow-relay.sh`:
+
+```sh
+#!/bin/sh
+set -eu
+live=/etc/letsencrypt/live/relay
+install -o hollow -g hollow -m 0644 "$live/fullchain.pem" /etc/hollow-relay/fullchain.pem
+install -o hollow -g hollow -m 0600 "$live/privkey.pem" /etc/hollow-relay/privkey.pem
+# coturn reads its certificate once, at start. The relay needs no restart: it
+# picks up the new files within a minute.
+systemctl try-restart hollow-coturn || true
+```
+
+Make it executable and run it once, since certbot only calls it on renewals:
+
+```bash
+sudo chmod +x /etc/letsencrypt/renewal-hooks/deploy/hollow-relay.sh
+sudo /etc/letsencrypt/renewal-hooks/deploy/hollow-relay.sh
+```
+
+The snap renews on its own timer. With a DuckDNS name, also keep the name
+pointing at this machine, which the Docker setup does for you. Add this line
+with `crontab -e`, using your own subdomain and token:
+
+```
+*/5 * * * * curl -fsS "https://www.duckdns.org/update?domains=myrelay&token=YOUR_TOKEN&ip=" >/dev/null
+```
+
+### Run it as a service
+
+Replace the domain with your relay address. For `TURN_SECRET`, run
+`openssl rand -hex 32` and paste the result, or leave it empty to run without
+TURN.
+
+```bash
+sudo tee /etc/systemd/system/hollow-relay.service >/dev/null <<'EOF'
+[Unit]
+Description=Hollow relay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=hollow
+ExecStart=/opt/HOLLOW/relay-uws/build/hollow-relay \
+    --port 443 \
+    --domain myrelay.duckdns.org \
+    --keys-file /etc/hollow-relay/keys.json \
+    --reports-file /var/lib/hollow-relay/reports.json \
+    --cert-file /etc/hollow-relay/fullchain.pem \
+    --key-file /etc/hollow-relay/privkey.pem
+Environment=TURN_SECRET=
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+StateDirectory=hollow-relay
+Restart=always
+RestartSec=3
+LimitNOFILE=1048576
+NotifyAccess=main
+FileDescriptorStoreMax=1
+LimitCORE=0
+
+[Install]
+WantedBy=multi-user.target
+EOF
+sudo systemctl daemon-reload
+sudo systemctl enable --now hollow-relay
+```
+
+`AmbientCapabilities` lets the relay listen on 443 without running as root.
+Keep the last three lines: `NotifyAccess` and `FileDescriptorStoreMax` carry the
+offline messages across a restart, and `LimitCORE=0` stops a crash from writing
+them to the disk. Check it with the same `curl .../health` as above.
+
+For a members-only relay, put `keys.json` in `/etc/hollow-relay/` instead of
+`keys/`, and make it readable by the `hollow` user.
+
+### TURN
+
+Install coturn and turn off the service the package ships with:
+
+```bash
+sudo apt install coturn
+sudo systemctl disable --now coturn
+```
+
+Run it through the repository's start script instead, which uses the exact
+settings of the Docker setup. `TURN_SECRET` must be the same value as in the
+relay's service.
+
+```bash
+sudo tee /etc/systemd/system/hollow-coturn.service >/dev/null <<'EOF'
+[Unit]
+Description=coturn for the Hollow relay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=hollow
+Environment=TURN_SECRET=paste-the-same-secret-here
+Environment=CERT_DIR=/etc/hollow-relay
+ExecStart=/bin/sh /opt/HOLLOW/relay-uws/deploy/coturn/coturn-start.sh
+Restart=always
+RestartSec=3
+LimitCORE=0
+
+[Install]
+WantedBy=multi-user.target
+EOF
+sudo systemctl daemon-reload
+sudo systemctl enable --now hollow-coturn
+```
+
+The script works out the machine's public IPv4 on its own. If it gets it wrong,
+or the machine has an IPv6 you want calls to use, add
+`Environment=PUBLIC_IP=...` or `Environment=PUBLIC_IPV6=...` lines.
+
+### Push for Android phones
+
+The UnifiedPush sender described in
+[Push notifications on phones](#push-notifications-on-phones) needs Node.js 22.
+Install it from [nodejs.org](https://nodejs.org) or NodeSource, because the
+distribution packages are usually older. Then:
+
+```bash
+cd /opt/HOLLOW/push-sidecar
+npm install --omit=optional --omit=dev
+sudo tee /etc/systemd/system/hollow-push.service >/dev/null <<'EOF'
+[Unit]
+Description=Hollow push sender
+After=network-online.target hollow-relay.service
+
+[Service]
+User=hollow
+WorkingDirectory=/opt/HOLLOW/push-sidecar
+ExecStart=/usr/bin/node index.js
+Environment=PUSH_PORT=3001
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+EOF
+sudo systemctl daemon-reload
+sudo systemctl enable --now hollow-push
+```
+
+The relay reaches it on `127.0.0.1:3001`, so that port stays closed to the
+outside.
+
+### Updating
+
+```bash
+cd /opt/HOLLOW
+git pull --recurse-submodules
+cmake --build relay-uws/build -j"$(nproc)"
+sudo systemctl restart hollow-relay
+```
+
+Offline messages survive this restart. If `push-sidecar` changed, run
+`npm install --omit=optional --omit=dev` in it and
+`sudo systemctl restart hollow-push` as well.
+
+### When something is wrong
+
+The relay, coturn and the push sender log to the journal, which
+`harden-host.sh` keeps in memory for an hour:
+
+```bash
+journalctl -u hollow-relay -e
+```
+
+A relay that cannot read its certificate stops right away and says so. Check
+that `/etc/hollow-relay/` holds both files and that they belong to `hollow`.
