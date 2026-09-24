@@ -90,6 +90,18 @@ import 'package:hollow/src/ui/components/hollow_slider.dart';
 import 'package:hollow/src/ui/components/hollow_toggle.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
+/// Settings > Profile on its own page, from outside the Settings tab.
+void openMobileProfileSettings(BuildContext context) {
+  Navigator.of(context).push(
+    hollowMobileRoute(
+      builder: (_) => const _SettingsSubPage(
+        title: 'Profile',
+        child: _ProfileTab(key: ValueKey('profile')),
+      ),
+    ),
+  );
+}
+
 class MobileSettingsTab extends ConsumerWidget {
   const MobileSettingsTab({super.key});
 

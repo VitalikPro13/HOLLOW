@@ -101,49 +101,13 @@ class _HomeMain extends ConsumerStatefulWidget {
 
 class _HomeMainState extends ConsumerState<_HomeMain> {
   String _query = '';
-  Timer? _greetingTimer;
-
-  @override
-  void initState() {
-    super.initState();
-    _scheduleGreeting();
-  }
-
-  /// One wake-up at the next block boundary, never a periodic clock.
-  void _scheduleGreeting() {
-    final now = DateTime.now();
-    _greetingTimer = Timer(nextGreetingChange(now).difference(now), () {
-      if (!mounted) return;
-      setState(() {});
-      _scheduleGreeting();
-    });
-  }
-
-  @override
-  void dispose() {
-    _greetingTimer?.cancel();
-    super.dispose();
-  }
 
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
     final hasFriends = ref.watch(sortedFriendsProvider).isNotEmpty;
-    final hasServers = ref.watch(serverListProvider).isNotEmpty;
-    final setup = ref.watch(homeSetupProvider);
-    final firstRun = !hasFriends && !hasServers;
-    final showSetup =
-        setup.loaded && !setup.hidden && (!hasFriends || !hasServers);
-
-    final localId = ref.watch(identityProvider).peerId;
-    final name = (localId == null
-            ? null
-            : ref.watch(profileProvider
-                .select((p) => chosenNameForPeer(p[localId], localId)))) ??
-        kNamelessGreeting;
-    final title = firstRun
-        ? 'Welcome to Hollow, $name'
-        : '${greetingFor(DateTime.now())}, $name';
+    final firstRun = homeIsFirstRun(ref);
+    final showSetup = homeShowsSetup(ref);
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -162,18 +126,7 @@ class _HomeMainState extends ConsumerState<_HomeMain> {
             children: [
               Row(
                 children: [
-                  Expanded(
-                    child: Semantics(
-                      header: true,
-                      child: Text(
-                        title,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: HollowTypography.heading
-                            .copyWith(color: hollow.textPrimary),
-                      ),
-                    ),
-                  ),
+                  Expanded(child: HomeGreeting(firstRun: firstRun)),
                   if (hasFriends) ...[
                     const SizedBox(width: HollowSpacing.md),
                     SizedBox(
@@ -198,8 +151,7 @@ class _HomeMainState extends ConsumerState<_HomeMain> {
               if (firstRun) ...[
                 const SizedBox(height: HollowSpacing.xs),
                 Text(
-                  'Your identity lives on this device. A few steps make it '
-                  'yours.',
+                  kHomeFirstRunLine,
                   style:
                       HollowTypography.body.copyWith(color: hollow.textSecondary),
                 ),
@@ -245,6 +197,81 @@ class _HomeMainState extends ConsumerState<_HomeMain> {
           ),
         ),
       ],
+    );
+  }
+}
+
+/// No friend and no server yet.
+bool homeIsFirstRun(WidgetRef ref) =>
+    ref.watch(sortedFriendsProvider).isEmpty &&
+    ref.watch(serverListProvider).isEmpty;
+
+/// The checklist stays until there is a friend AND a server, or it is hidden.
+bool homeShowsSetup(WidgetRef ref) {
+  final setup = ref.watch(homeSetupProvider);
+  return setup.loaded &&
+      !setup.hidden &&
+      (ref.watch(sortedFriendsProvider).isEmpty ||
+          ref.watch(serverListProvider).isEmpty);
+}
+
+const kHomeFirstRunLine =
+    'Your identity lives on this device. A few steps make it yours.';
+
+/// Home's title: a greeting by the local clock and the chosen name, or the
+/// welcome on a first run.
+class HomeGreeting extends ConsumerStatefulWidget {
+  final bool firstRun;
+  const HomeGreeting({super.key, required this.firstRun});
+
+  @override
+  ConsumerState<HomeGreeting> createState() => _HomeGreetingState();
+}
+
+class _HomeGreetingState extends ConsumerState<HomeGreeting> {
+  Timer? _timer;
+
+  @override
+  void initState() {
+    super.initState();
+    _schedule();
+  }
+
+  /// One wake-up at the next block boundary, never a periodic clock.
+  void _schedule() {
+    final now = DateTime.now();
+    _timer = Timer(nextGreetingChange(now).difference(now), () {
+      if (!mounted) return;
+      setState(() {});
+      _schedule();
+    });
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
+    final localId = ref.watch(identityProvider).peerId;
+    final name = (localId == null
+            ? null
+            : ref.watch(profileProvider
+                .select((p) => chosenNameForPeer(p[localId], localId)))) ??
+        kNamelessGreeting;
+    return Semantics(
+      header: true,
+      child: Text(
+        widget.firstRun
+            ? 'Welcome to Hollow, $name'
+            : '${greetingFor(DateTime.now())}, $name',
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: HollowTypography.heading.copyWith(color: hollow.textPrimary),
+      ),
     );
   }
 }

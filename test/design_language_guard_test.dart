@@ -206,7 +206,7 @@ final _rules = <_Rule>[
         'not a literal',
     pattern: RegExp(r'\bfontSize\s*:'),
     excludeDirs: [_theme],
-    baseline: 565,
+    baseline: 556,
   ),
   _Rule(
     id: 'material-colors',
@@ -214,7 +214,7 @@ final _rules = <_Rule>[
     fix: 'use hollow.<token>; Colors.transparent is the only allowed one',
     pattern: RegExp(r'\bColors\.(?!transparent\b)\w+'),
     excludeDirs: [_theme],
-    baseline: 183,
+    baseline: 179,
   ),
   _Rule(
     id: 'color-literal',
@@ -231,7 +231,7 @@ final _rules = <_Rule>[
     fix: 'use hollow.radiusXs / radiusMd / radiusLg / radiusXl',
     pattern: RegExp(r'BorderRadius\.circular\(\s*[0-9]'),
     excludeDirs: [_theme],
-    baseline: 108,
+    baseline: 103,
   ),
   _Rule(
     id: 'letter-spacing',
@@ -350,7 +350,7 @@ final _rules = <_Rule>[
     pattern:
         RegExp(r'EdgeInsets\.(all|symmetric|only|fromLTRB)\([^)]*\b\d'),
     excludeDirs: [_theme],
-    baseline: 216,
+    baseline: 213,
   ),
   _Rule(
     id: 'sized-box-gap',
@@ -359,7 +359,7 @@ final _rules = <_Rule>[
         'chips), 12 grouped, 16 separated, 24 sectioned',
     pattern: RegExp(r'SizedBox\(\s*(width|height)\s*:\s*\d'),
     excludeDirs: [_theme],
-    baseline: 164,
+    baseline: 159,
   ),
   _Rule(
     id: 'gradient',
@@ -368,7 +368,7 @@ final _rules = <_Rule>[
     pattern: RegExp(r'\b(Linear|Radial|Sweep)Gradient\b'),
     excludeDirs: [_theme],
     excludeFiles: ['annotation_overlay.dart'],
-    baseline: 21,
+    baseline: 20,
   ),
   _Rule(
     id: 'big-shadow',

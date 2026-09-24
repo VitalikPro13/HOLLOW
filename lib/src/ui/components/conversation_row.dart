@@ -28,6 +28,11 @@ class ConversationRow extends StatelessWidget {
   final int unread;
   final bool mention;
   final VoidCallback onTap;
+  final VoidCallback? onLongPress;
+
+  /// Phone metrics: type one step up and a full-bleed row about 72 tall
+  /// (design language 5.4). Pass a 48 px leading with it.
+  final bool touch;
 
   const ConversationRow({
     super.key,
@@ -35,11 +40,13 @@ class ConversationRow extends StatelessWidget {
     required this.title,
     required this.preview,
     required this.onTap,
+    this.onLongPress,
     this.detail,
     this.fromMe = false,
     this.time,
     this.unread = 0,
     this.mention = false,
+    this.touch = false,
   });
 
   bool get _hot => unread > 0 || mention;
@@ -48,13 +55,21 @@ class ConversationRow extends StatelessWidget {
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
     final quiet = hollow.textSecondary;
+    final titleStyle = touch ? HollowTypography.subheading : HollowTypography.body;
+    final previewStyle = touch ? HollowTypography.body : HollowTypography.bodySmall;
+    final metaStyle = touch ? HollowTypography.bodySmall : HollowTypography.caption;
     return HollowPressable(
         onTap: onTap,
+        onLongPress: onLongPress,
         subtle: true,
         semanticButton: false,
         semanticLabel: _semanticLabel,
-        borderRadius: BorderRadius.circular(hollow.radiusMd),
-        padding: const EdgeInsets.all(HollowSpacing.sm),
+        borderRadius:
+            touch ? BorderRadius.zero : BorderRadius.circular(hollow.radiusMd),
+        padding: touch
+            ? const EdgeInsets.symmetric(
+                horizontal: HollowSpacing.lg, vertical: HollowSpacing.md)
+            : const EdgeInsets.all(HollowSpacing.sm),
         child: Row(
           children: [
             leading,
@@ -73,7 +88,7 @@ class ConversationRow extends StatelessWidget {
                           title,
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
-                          style: HollowTypography.body.copyWith(
+                          style: titleStyle.copyWith(
                             color: hollow.textPrimary,
                             fontWeight:
                                 _hot ? FontWeight.w600 : FontWeight.w500,
@@ -96,7 +111,7 @@ class ConversationRow extends StatelessWidget {
                         Text(
                           time!,
                           maxLines: 1,
-                          style: HollowTypography.caption.copyWith(
+                          style: metaStyle.copyWith(
                             color: hollow.textTertiary,
                             fontFeatures: const [FontFeature.tabularFigures()],
                           ),
@@ -115,7 +130,7 @@ class ConversationRow extends StatelessWidget {
                     ]),
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
-                    style: HollowTypography.bodySmall.copyWith(
+                    style: previewStyle.copyWith(
                       color: _hot ? hollow.textPrimary : quiet,
                     ),
                   ),
@@ -162,7 +177,7 @@ class PresenceAvatar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
-    final dot = size >= 36 ? 8.0 : 7.0;
+    final dot = size >= 44 ? 10.0 : (size >= 36 ? 8.0 : 7.0);
     return SizedBox(
       width: size,
       height: size,

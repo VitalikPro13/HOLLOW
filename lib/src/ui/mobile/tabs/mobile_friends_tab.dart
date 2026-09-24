@@ -207,13 +207,17 @@ class _MobileFriendsTabState extends ConsumerState<MobileFriendsTab> {
     return nicknames[peerId] ?? displayNameFor(profiles, peerId);
   }
 
-  void _showAddFriendDialog(BuildContext context, WidgetRef ref) {
-    showHollowSheet(
-      context: context,
-      scrollControlled: true,
-      builder: (_) => const _AddFriendSheet(),
-    );
-  }
+  void _showAddFriendDialog(BuildContext context, WidgetRef ref) =>
+      showMobileAddFriendSheet(context);
+}
+
+/// The phone's add-friend sheet: a peer id or nickname, then the request.
+void showMobileAddFriendSheet(BuildContext context) {
+  showHollowSheet(
+    context: context,
+    scrollControlled: true,
+    builder: (_) => const _AddFriendSheet(),
+  );
 }
 
 Widget _sectionHeaderSliver(String title, int count) => SliverToBoxAdapter(

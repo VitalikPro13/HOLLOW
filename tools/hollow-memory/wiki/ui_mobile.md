@@ -43,17 +43,22 @@ Bottom bar (56px) with 4 `_NavTab` widgets + center `_AddButton`. Uses `LayoutBu
 ### Floating Pill Layering
 `MobileShell` wraps its `Scaffold` in a `Stack` with `MobileNotificationBanner`, `MobileActiveCallPill`, and `MobileVoiceChannelPill` on top. These pills are also placed in `MobileChatRoute`'s Stack so they remain visible on pushed chat routes. Full-screen voice/call routes use `PageRouteBuilder` (slide-from-bottom) and cover the pills by being pushed on top in the navigator stack. **CRITICAL:** Pills must NOT go in `app.dart` builder — that layer is above the navigator and no route can cover it.
 
-### MobileChatsTab — Ambient Background & Header
+### MobileChatsTab: the phone's Home (2026-09-24)
 **File:** `lib/src/ui/mobile/tabs/mobile_chats_tab.dart`
-- **Ambient blob:** Wraps tab in `AmbientBackground(color1: accent, color2: accent, opacity: 0.12)`, which draws nothing unless the Ambient opt-in is on (off by default). Both blobs teal (no purple like desktop). Uses `SharedTickers.instance.ambient` (45s figure-8 at ~15fps). Same `_AmbientPainter` radial gradients as desktop.
-- **Header:** Row with teal "Hollow" text (24px, w700) + `_HeaderShimmerLine` — ping-pong shimmer using `SharedTickers.instance.ambient` at ~10s cycle. Gradient: border→accent(0.5)→border with ±0.15 glow width + subtle boxShadow.
+
+The desktop Home inbox on a phone, plus the server list (a phone has no dock). Wiki `ui_home_dashboard` has the shared pieces.
+- **Title row:** `HomeGreeting` (the same greeting as desktop), then two 44 px icon actions: Conferences and New message (`LucideIcons.squarePen`, only once there is a friend; `showNewMessageDialog` with the phone's `onOpen` / `onAddFriend`). New message is an icon, not a filled button, because the nav bar's centre + already carries the accent.
+- **One `CustomScrollView`:** the first-run line, a search field (`Search conversations`, once there is any DM or server), `HomeAttention` and `HomeSetupChecklist` with `_MobileHomeActions` (touch layout; no update row, the stores update phones; add friend = `showMobileAddFriendSheet`, add server = `showNewConversationDialog`, profile = `openMobileProfileSettings`), the `HomeFilters` chips, then the list.
+- **All:** Saved messages and parked joins pinned first, then DMs and servers ranked unread first, then newest, then by name (servers carry no time). **Unread:** the hot DMs and servers. **Mentions:** one `ConversationRow` per channel that mentioned us, which opens that channel. A server row carries its mention count (red, `@`) or else its unread count; mention rows are not repeated in All.
+- **Rows:** DMs, Saved messages and mentions are `ConversationRow(touch: true)` with 48 px leading, full-bleed, long press = the DM sheet. Servers are `_ServerRow` (`ServerAvatar(animate: expanded)`, members line, `HollowCountBadge`, chevron) expanding into the channel tree; the tree's rows use `HollowCountBadge` and a success `HollowBadge` for voice occupants. Geometry constants `_kAvatar` 48, `_kTreeIndent`, `_kTreeLeft`.
+- `AmbientBackground` still wraps the tab (draws nothing unless the Ambient opt-in is on). The old teal "Hollow" wordmark and `_HeaderShimmerLine` are gone.
 
 ### Pending Join Row (pending joins rung 1, 2026-08-29)
 **File:** `lib/src/ui/mobile/tabs/mobile_chats_tab.dart` (`_PendingJoinRow`), `lib/src/ui/components/pending_join_ui.dart` (`showPendingJoinSheet`, shared with desktop's menu)
 
 A join into a server whose members were all offline PARKS instead of failing (Rust persists the request, answers it whenever a member returns, which can be days). Each entry in `pendingJoinsProvider` becomes a `_PendingJoinRow`, PINNED above the sorted conversation list: inserted at the top, deliberately outside the unread/recency sort, since a parked join has no name to sort by and no activity to rank, and burying one under a month of chats is how a user forgets they ever asked to join.
 
-Row visual: greyed on purpose (`hollow.textTertiary` icon + text) — not a conversation, nothing to open. 44px icon box (`hollow.elevated`) with `LucideIcons.clock` (pending) or `LucideIcons.ban` (rejected), title (`pendingJoinTitle`) + subtitle (`pendingJoinSubtitle`, the reason text when rejected). No spinner — the wait is for another person to open their app.
+Row visual: greyed on purpose (`hollow.textTertiary` icon + text) — not a conversation, nothing to open. 48px icon box (`hollow.elevated`) with `LucideIcons.clock` (pending) or `LucideIcons.ban` (rejected), title (`pendingJoinTitle`) + subtitle (`pendingJoinSubtitle`, the reason text when rejected). No spinner — the wait is for another person to open their app.
 
 Tap AND long-press both open `showPendingJoinSheet()`, the mobile bottom-sheet idiom, built from the SAME action helpers as desktop's `showPendingJoinMenu` (`pending_join_ui.dart`): "Request again" (rejected only), "Copy invite link", "Discard request"/"Remove". A tile that did nothing on tap would read as broken, same reasoning as the desktop tile's click-and-right-click.
 
@@ -787,7 +792,7 @@ Staggered entrance (400ms): message preview fades+slides in first, then each act
 ## DM Long-Press Context Menu
 
 **File:** `lib/src/ui/mobile/tabs/mobile_chats_tab.dart` (`_DmContextSheet`)
-**Trigger:** `onLongPress` on `_DmRow` in the Chats tab conversation list.
+**Trigger:** `onLongPress` on a DM's `ConversationRow` in the Chats tab list.
 
 ### Actions
 - Mute/Unmute Notifications — toggles `notificationSettingsProvider.setDmEnabled`

@@ -3,9 +3,9 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/reduce_motion.dart';
 import 'package:hollow/src/core/providers/friends_provider.dart';
 import 'package:hollow/src/core/providers/unread_provider.dart';
-import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
+import 'package:hollow/src/ui/components/hollow_count_badge.dart';
 import 'package:hollow/src/ui/shell/mobile_nav.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
@@ -27,6 +27,13 @@ class MobileNavBar extends ConsumerWidget {
         total += count;
       }
       for (final count in u.channelUnreadCounts.values) {
+        total += count;
+      }
+      return total;
+    }));
+    final totalMentions = ref.watch(unreadProvider.select((u) {
+      int total = 0;
+      for (final count in u.channelMentionCounts.values) {
         total += count;
       }
       return total;
@@ -83,8 +90,10 @@ class MobileNavBar extends ConsumerWidget {
                         icon: LucideIcons.messageCircle,
                         label: 'Chats',
                         isActive: currentTab == 0,
-                        badge: totalUnread,
-                        badgeNoun: 'unread',
+                        // A mention outranks plain unread, as on the dock.
+                        badge: totalMentions > 0 ? totalMentions : totalUnread,
+                        badgeMention: totalMentions > 0,
+                        badgeNoun: totalMentions > 0 ? 'mention' : 'unread',
                         onTap: () =>
                             ref.read(mobileTabProvider.notifier).state = 0,
                       ),
@@ -176,6 +185,7 @@ class _NavTab extends StatelessWidget {
   final String label;
   final bool isActive;
   final int badge;
+  final bool badgeMention;
 
   /// What the [badge] count means, for the screen-reader label: the visible
   /// badge is only a number.
@@ -189,6 +199,7 @@ class _NavTab extends StatelessWidget {
     required this.badge,
     required this.badgeNoun,
     required this.onTap,
+    this.badgeMention = false,
   });
 
   /// Composes the screen-reader announcement: the tab, its count and noun, and
@@ -229,26 +240,10 @@ class _NavTab extends StatelessWidget {
                   Positioned(
                     top: -6,
                     right: -10,
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: HollowSpacing.xs,
-                        vertical: 1,
-                      ),
-                      constraints: const BoxConstraints(minWidth: 16),
-                      decoration: BoxDecoration(
-                        color: hollow.error,
-                        borderRadius: BorderRadius.circular(8),
-                      ),
-                      child: Text(
-                        badge > 99 ? '99+' : '$badge',
-                        textAlign: TextAlign.center,
-                        style: HollowTypography.caption.copyWith(
-                          color: Colors.white,
-                          fontSize: 10,
-                          fontWeight: FontWeight.w600,
-                          height: 1.2,
-                        ),
-                      ),
+                    child: HollowCountBadge(
+                      count: badge,
+                      mention: badgeMention,
+                      ring: hollow.surface,
                     ),
                   ),
               ],

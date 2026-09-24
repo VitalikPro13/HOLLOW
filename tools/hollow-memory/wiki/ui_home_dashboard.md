@@ -8,7 +8,9 @@ Source files:
 - `lib/src/ui/shell/home_rail.dart`: `HomeRail` (News card, Relay card, Active Now)
 - `lib/src/ui/shell/friends_bar.dart`: FriendsBar, `showFriendsManager()`, _FriendsManager dialog, _FriendChip
 
-Redesigned 2026-09-23 (design language section 5; plan `HOLLOW_DESIGN_LANGUAGE_PLAN.md` session 9). The old three columns (profile, recent conversations, network) are gone.
+Redesigned 2026-09-23 (design language section 5; plan `HOLLOW_DESIGN_LANGUAGE_PLAN.md` session 9). The old three columns (profile, recent conversations, network) are gone. The phone's Chats tab reuses the strips and the conversation data (2026-09-24, wiki `ui_mobile` "MobileChatsTab").
+
+**Shared with mobile:** `HomeActions` (abstract; `DesktopHomeActions` is the default, the phone passes `_MobileHomeActions`: `touch`, `installsUpdates`, `openUpdate`, `addFriend`, `addServer`, `editProfile`), `HomeGreeting`, `homeIsFirstRun` / `homeShowsSetup`, `kHomeFirstRunLine`, `HomeConversation` + `homeDmConversations` / `homeMentionConversations` / `homeConversationLeading` / `homeNewestFirst`, `HomeFilter` + `HomeFilters` (a `Wrap`, so a phone at 2x text wraps instead of overflowing), `homeNothingToShow`. With `touch` the attention and setup rows put their buttons under the text (full size, `Wrap`), type one step up.
 
 ---
 
@@ -30,7 +32,7 @@ An app pane anchored to the window, never a centred max-width group (design lang
 Absent when nothing waits. One `elevated` row each, ghost secondary + compact outline primary with per-row `loading:` and a failure toast:
 - Unacknowledged `securityAlertsProvider` entries grouped per master: new device(s), identity re-keyed, identity reappeared. Verify = `showVerifyContactDialog` (not awaited), Dismiss = `acknowledgeForPeer`.
 - Incoming friend requests (`friendsProvider`, pending + incoming): Accept / Decline.
-- An update ready (`hasUpdateProvider`): View update opens Settings on Updates.
+- An update ready (`hasUpdateProvider`): View update opens Settings on Updates. Desktop only (`installsUpdates`). The manifest is checked ONCE per launch (`newsProvider.build`), so a session left open for days only learns of a release on restart or from Settings > Updates.
 More than 3 collapse behind "Show all N".
 
 ## Get Set Up (`HomeSetupChecklist`)
@@ -41,7 +43,7 @@ Shown while the person has no friend OR no server, `homeSetupProvider.loaded`, a
 
 ## Conversations (`HomeConversations`, a sliver)
 
-- DMs: `sortedFriendsProvider` + `lastDmMessageProvider` + `dmUnreadCounts`; open with `openDmConversation`; right click = the shared user menu (`dmTile`).
+- DMs: `sortedFriendsProvider` + `lastDmMessageProvider` + `dmUnreadCounts` (a muted DM counts 0, as in the friends bar); open with `openDmConversation`; right click = the shared user menu (`dmTile`).
 - Channel mentions: every `channelMentionCounts` entry above 0 for a known server; title `#channel` + the server as detail, preview from `mentionPreviewProvider` (recorded in `event_provider` when a live channel message mentions us and we are not viewing it; in memory only, so after a restart the row says "Mentioned you" with no time and sorts first). Opens with `openServerChannel()` (`core/providers/channel_navigation.dart`, the same batch the notification path uses).
 - Filter chips All / Unread (DMs with unread + mention rows) / Mentions, and the title-row search.
 - Rows are `ConversationRow` (`components/conversation_row.dart`): `PresenceAvatar`, title + detail + time BESIDE the name (`conversationTimeLabel()`: 14:05 / Yesterday / weekday / Sep 17 / Sep 17, 2025, interface face at `textTertiary`), preview, `HollowCountBadge` (accent unread, error + `@` mention) at the far edge.

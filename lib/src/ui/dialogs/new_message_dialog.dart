@@ -16,15 +16,35 @@ import 'package:hollow/src/ui/shell/friends_bar.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Pick a friend and open the conversation with them.
-void showNewMessageDialog(BuildContext context) {
+///
+/// [onOpen] and [onAddFriend] default to the desktop shell; the phone passes
+/// its own, which push routes. Both run after the dialog has closed, with the
+/// context that opened it.
+void showNewMessageDialog(
+  BuildContext context, {
+  void Function(BuildContext context, String peerId)? onOpen,
+  void Function(BuildContext context)? onAddFriend,
+}) {
   showHollowDialog(
     context: context,
-    builder: (_) => const _NewMessageDialog(),
+    builder: (_) => _NewMessageDialog(
+      host: context,
+      onOpen: onOpen,
+      onAddFriend: onAddFriend,
+    ),
   );
 }
 
 class _NewMessageDialog extends ConsumerStatefulWidget {
-  const _NewMessageDialog();
+  final BuildContext host;
+  final void Function(BuildContext context, String peerId)? onOpen;
+  final void Function(BuildContext context)? onAddFriend;
+
+  const _NewMessageDialog({
+    required this.host,
+    this.onOpen,
+    this.onAddFriend,
+  });
 
   @override
   ConsumerState<_NewMessageDialog> createState() => _NewMessageDialogState();
@@ -84,6 +104,8 @@ class _NewMessageDialogState extends ConsumerState<_NewMessageDialog> {
                     // Shrinks to a short friend list instead of leaving a
                     // fixed-height hole under two names.
                     shrinkWrap: true,
+                    // Else it inherits the phone's safe-area insets as padding.
+                    padding: EdgeInsets.zero,
                     itemCount: matches.length,
                     itemBuilder: (context, i) {
                       final id = matches[i].peerId;
@@ -114,7 +136,12 @@ class _NewMessageDialogState extends ConsumerState<_NewMessageDialog> {
             final nav = Navigator.of(context);
             final host = nav.context;
             nav.pop();
-            showFriendsManager(host, addFriend: true);
+            final addFriend = widget.onAddFriend;
+            if (addFriend != null) {
+              if (widget.host.mounted) addFriend(widget.host);
+            } else {
+              showFriendsManager(host, addFriend: true);
+            }
           },
           icon: const Icon(LucideIcons.userPlus, size: 16),
           child: const Text('Add a friend'),
@@ -124,7 +151,9 @@ class _NewMessageDialogState extends ConsumerState<_NewMessageDialog> {
   }
 
   void _open(String peerId) {
-    openDmConversation(ref, peerId);
+    final onOpen = widget.onOpen;
+    if (onOpen == null) openDmConversation(ref, peerId);
     Navigator.of(context).pop();
+    if (onOpen != null && widget.host.mounted) onOpen(widget.host, peerId);
   }
 }

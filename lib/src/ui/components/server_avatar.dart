@@ -11,11 +11,15 @@ class ServerAvatar extends StatelessWidget {
   final String name;
   final double size;
 
+  /// Plays an animated icon, where there is no hover to start it.
+  final bool animate;
+
   const ServerAvatar({
     super.key,
     required this.serverId,
     required this.name,
     required this.size,
+    this.animate = false,
   });
 
   @override
@@ -30,6 +34,7 @@ class ServerAvatar extends StatelessWidget {
       child: ServerIconImage(
         serverId: serverId,
         size: size,
+        isSelected: animate,
         borderRadius: radius,
         fallback: Text(
           initialsFromName(name.isNotEmpty ? name : serverId),
