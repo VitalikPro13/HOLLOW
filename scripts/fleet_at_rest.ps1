@@ -247,7 +247,7 @@ function Wait-ForAnyTarget($peer, $targets, $timeoutSeconds, $sliceMs = 3000) {
 # booted into. `text:Online` is deliberately NOT in the list: the member panel
 # prints that word as a section divider, so it would pass for an offline peer.
 function Wait-ForConnected($peer, $timeoutSeconds = 120) {
-    $hit = Wait-ForAnyTarget $peer @('tooltip:Online', 'text:Connected') $timeoutSeconds
+    $hit = Wait-ForAnyTarget $peer @('semantics:Online', 'tooltip:Online', 'text:Connected') $timeoutSeconds
     if (-not $hit) {
         throw "peer $peer never reported a settled connection within ${timeoutSeconds}s (no user-bar 'Online' tooltip, no Home 'Connected')"
     }
@@ -713,8 +713,8 @@ function New-MarkerOgg($path, $marker) {
 # --------------------------------------------------------------------------
 
 function Open-Dm($peer, $friendName) {
-    Step $peer @{ op = 'wait_for'; target = "tooltip:$friendName"; timeout_ms = 60000 }
-    Step $peer @{ op = 'tap'; target = "tooltip:$friendName" }
+    Step $peer @{ op = 'wait_for'; target = "semantics:$friendName"; timeout_ms = 60000 }
+    Step $peer @{ op = 'tap'; target = "semantics:$friendName" }
     Step $peer @{ op = 'wait'; ms = 1500 }
     Step $peer @{ op = 'wait_for'; target = 'hint:Type a message...'; timeout_ms = 30000 }
 }

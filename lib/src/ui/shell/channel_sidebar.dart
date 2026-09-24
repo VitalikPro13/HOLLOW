@@ -221,7 +221,9 @@ class ChannelSidebar extends StatelessWidget {
                           ),
                 ),
 
-                const VoiceChannelPanel(),
+                // Dock mode carries the call at the dock's left, on every
+                // screen, so it is not repeated here.
+                if (!dockMode) const VoiceChannelPanel(),
 
                 if (showUserBar) const UserBar(),
               ],

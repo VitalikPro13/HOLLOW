@@ -129,7 +129,7 @@ function Stop-Peer($peer) {
 # DM's. The chip is addressed by TOOLTIP, the way the friend_dm scenario does
 # it: a bare name matches a friend row, a dialog row and a member row alike.
 function Open-Dm($peer, $friendName) {
-    Step $peer @{ op = 'tap'; target = "tooltip:$friendName" }
+    Step $peer @{ op = 'tap'; target = "semantics:$friendName" }
     Step $peer @{ op = 'wait_for'; target = 'hint:Type a message...'; timeout_ms = 30000 }
     # The pane is up before the Olm session behind it necessarily is, and a
     # send into that gap is delivered one way only. There is no widget for

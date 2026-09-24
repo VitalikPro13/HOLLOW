@@ -39,3 +39,13 @@ final anyShellTabOpenProvider = Provider<bool>(
       ref.watch(conferenceTabOpenProvider) ||
       ref.watch(shopTabOpenProvider),
 );
+
+/// Which centre tab is open, if any. They are exclusive, so at most one is.
+final openShellTabProvider = Provider<ShellTab?>((ref) {
+  if (ref.watch(guestTabOpenProvider)) return ShellTab.guest;
+  if (ref.watch(shareTabOpenProvider)) return ShellTab.share;
+  if (ref.watch(archiveTabOpenProvider)) return ShellTab.archive;
+  if (ref.watch(conferenceTabOpenProvider)) return ShellTab.conference;
+  if (ref.watch(shopTabOpenProvider)) return ShellTab.shop;
+  return null;
+});

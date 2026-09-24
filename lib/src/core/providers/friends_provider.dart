@@ -2,7 +2,9 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/favourite_friends_provider.dart';
+import 'package:hollow/src/core/providers/notification_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
+import 'package:hollow/src/core/providers/unread_provider.dart';
 import 'package:hollow/src/core/services/push_hints_cache.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
@@ -148,39 +150,79 @@ final sortedFriendsProvider = Provider<List<FriendInfo>>((ref) {
     final aOnline = online.contains(a.peerId) ? 0 : 1;
     final bOnline = online.contains(b.peerId) ? 0 : 1;
     if (aOnline != bOnline) return aOnline.compareTo(bOnline);
-    final aName = displayNameFor(profiles, a.peerId);
-    final bName = displayNameFor(profiles, b.peerId);
-    return aName.compareTo(bName);
+    return compareFriendNames(profiles, a.peerId, b.peerId);
   });
 
   return accepted;
 });
 
-/// The friend list to render in the horizontal FriendsBar DOCK only.
+/// Case-insensitive, so "alice" does not sort after "Zed"; the raw compare
+/// breaks ties so the order is total and stable.
+int compareFriendNames(
+    Map<String, storage_api.UserProfile> profiles, String a, String b) {
+  final an = displayNameFor(profiles, a);
+  final bn = displayNameFor(profiles, b);
+  final folded = an.toLowerCase().compareTo(bn.toLowerCase());
+  if (folded != 0) return folded;
+  final raw = an.compareTo(bn);
+  return raw != 0 ? raw : a.compareTo(b);
+}
+
+/// What the header's friend strip shows, in its own stable order.
+class FriendsBarContent {
+  /// Favourites in their drag order, or every friend by name when none are set.
+  final List<FriendInfo> leading;
+
+  /// Non-favourites with unread messages: unread beats the filter.
+  final List<FriendInfo> extras;
+
+  /// Friends the favourites filter keeps off the strip.
+  final int hidden;
+
+  const FriendsBarContent({
+    required this.leading,
+    this.extras = const [],
+    this.hidden = 0,
+  });
+
+  bool get isEmpty => leading.isEmpty && extras.isEmpty;
+}
+
+/// The header strip's friends. Only the strip reads this; every other surface
+/// reads [sortedFriendsProvider], so favouriting never hides a friend there.
 ///
-/// With favourites set the dock shows ONLY those, in their drag order;
-/// otherwise all accepted friends. Favourite ids are resolved device->master
-/// before matching, so a favourite saved under a device id still matches.
-///
-/// IMPORTANT: only the dock reads this. Every other surface reads
-/// [sortedFriendsProvider], so favouriting can never hide a friend from them.
-final friendsBarDisplayProvider = Provider<List<FriendInfo>>((ref) {
+/// Sorted by name rather than online-first, so chips never jump when someone
+/// connects. Favourite ids resolve device->master, and a list of ONLY stale
+/// favourites behaves as no favourites.
+final friendsBarProvider = Provider<FriendsBarContent>((ref) {
   final accepted = ref.watch(sortedFriendsProvider);
-  final favourites = ref.watch(favouriteFriendsProvider);
-  if (favourites.isEmpty) return accepted;
+  final profiles = ref.watch(profileProvider);
+  final byName = [...accepted]
+    ..sort((a, b) => compareFriendNames(profiles, a.peerId, b.peerId));
 
   final links = ref.watch(deviceLinkProvider);
-  // Index accepted friends by master so a favourite id (possibly a stale device
-  // id) resolves to the right friend.
   final byMaster = {for (final f in accepted) f.peerId: f};
-  final out = <FriendInfo>[];
-  final seen = <String>{};
-  for (final favId in favourites) {
-    final master = links.identityOf(favId);
-    final friend = byMaster[master];
-    if (friend != null && seen.add(master)) out.add(friend);
+  final favourites = <FriendInfo>[];
+  for (final favId in ref.watch(favouriteFriendsProvider)) {
+    final friend = byMaster[links.identityOf(favId)];
+    if (friend != null && !favourites.contains(friend)) favourites.add(friend);
   }
-  return out;
+  if (favourites.isEmpty) return FriendsBarContent(leading: byName);
+
+  final unread = ref.watch(unreadProvider.select((s) => s.dmUnreadCounts));
+  final notif = ref.watch(notificationSettingsProvider);
+  final extras = [
+    for (final f in byName)
+      if (!favourites.contains(f) &&
+          notif.isDmEnabled(f.peerId) &&
+          (unread[f.peerId] ?? 0) > 0)
+        f,
+  ];
+  return FriendsBarContent(
+    leading: favourites,
+    extras: extras,
+    hidden: byName.length - favourites.length - extras.length,
+  );
 });
 
 /// Count of incoming pending friend requests (for badge display).

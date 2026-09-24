@@ -1,8 +1,11 @@
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/display_scale_provider.dart';
+import 'package:hollow/src/core/providers/window_chrome_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
@@ -12,117 +15,163 @@ import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:window_manager/window_manager.dart';
 
-/// Custom 32px title bar replacing the native window chrome. On macOS the
-/// native traffic lights stay top-left and the layout works around them.
+/// The 32 px title bar replacing the native window chrome, for every screen
+/// whose own header cannot carry the window (Classic, welcome, the lock). On
+/// macOS the native traffic lights stay top-left and the layout works around
+/// them.
 class WindowTitleBar extends StatelessWidget {
   const WindowTitleBar({super.key});
 
-  /// Reserved on the left so nothing we draw overlaps the macOS traffic lights.
-  static const double _macTrafficLightGap = 78;
+  static const double height = 32;
 
   @override
   Widget build(BuildContext context) {
-    if (Platform.isMacOS) {
-      return _buildMacOS(context);
-    }
-    return _buildWindows(context);
-  }
-
-  Widget _buildMacOS(BuildContext context) {
     final hollow = HollowTheme.of(context);
-
-    // The title bar is fixed chrome that traffic-light alignment depends on, so
-    // the brand label's scale is capped rather than allowed to clip.
-    final title = MediaQuery.withClampedTextScaling(
-      maxScaleFactor: 1.3,
-      child: Text(
-        'Hollow',
-        style: HollowTypography.label.copyWith(
-          color: hollow.accent,
-          fontWeight: FontWeight.w700,
-          fontSize: 13,
-        ),
-      ),
-    );
-    const annotate = Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [AnnotationToggleButton(), ZoomIndicator()],
-    );
-
     return Container(
-      height: 32,
-      color: hollow.opaqueSurface,
-      child: Stack(
-        children: [
-          // Underneath everything, so the whole bar moves the window; the
-          // traffic lights and the button capture their own taps.
-          const Positioned.fill(child: DragToMoveArea(child: SizedBox.expand())),
-          // Ignores the pointer, so the drag area underneath still works.
-          Center(
-            child: IgnorePointer(child: title),
-          ),
-          const Padding(
-            padding: EdgeInsets.only(left: _macTrafficLightGap),
-            child: Align(
-              alignment: Alignment.centerLeft,
-              child: annotate,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildWindows(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-
-    final branding = Padding(
-      padding: const EdgeInsets.only(left: HollowSpacing.lg),
-      // Fixed-height chrome, so the brand label's scale is capped.
-      child: MediaQuery.withClampedTextScaling(
-        maxScaleFactor: 1.3,
-        child: Text(
-          'Hollow',
-          style: HollowTypography.label.copyWith(
-            color: hollow.accent,
-            fontWeight: FontWeight.w700,
-            fontSize: 13,
-          ),
-        ),
-      ),
-    );
-
-    const buttons = Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        ZoomIndicator(),
-        AnnotationToggleButton(),
-        SizedBox(width: 4),
-        _MinimizeButton(),
-        _MaximizeButton(),
-        _CloseButton(),
-      ],
-    );
-
-    return Container(
-      height: 32,
+      height: height,
       color: hollow.opaqueSurface,
       child: Row(
         children: [
-          branding,
+          if (Platform.isMacOS) const SizedBox(width: kMacTrafficLightGap),
           const Expanded(child: DragToMoveArea(child: SizedBox.expand())),
-          buttons,
+          const WindowControls(height: height),
         ],
       ),
     );
   }
 }
 
+/// Annotate, the zoom readout and, off macOS, minimise, maximise and close:
+/// the same order on every platform, at [height] tall.
+///
+/// Always drawn at OS size, outside the interface zoom: whatever the zoom is,
+/// these stay legible and one click from 100%. With [reportWidth] the width
+/// is published so a header underneath can keep its trailing end clear.
+class WindowControls extends ConsumerWidget {
+  final double height;
+  final bool reportWidth;
+
+  const WindowControls({
+    super.key,
+    required this.height,
+    this.reportWidth = false,
+  });
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final row = SizedBox(
+      height: height,
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const AnnotationToggleButton(),
+          const ZoomIndicator(),
+          if (!Platform.isMacOS) ...[
+            const SizedBox(width: HollowSpacing.xs),
+            _MinimizeButton(height: height),
+            _MaximizeButton(height: height),
+            _CloseButton(height: height),
+          ] else
+            const SizedBox(width: HollowSpacing.sm),
+        ],
+      ),
+    );
+    if (!reportWidth) return row;
+    final width = ref.read(windowControlsWidthProvider.notifier);
+    return _WidthReporter(
+      onWidth: (w) {
+        if (width.state != w) width.state = w;
+      },
+      child: row,
+    );
+  }
+}
+
+/// Centres the macOS traffic lights in a header [height] points tall, or hands
+/// them back to AppKit's title bar at 0. Sent after the frame, only on change.
+class MacTrafficLights extends StatefulWidget {
+  final double height;
+  final Widget child;
+
+  const MacTrafficLights({super.key, required this.height, required this.child});
+
+  static const _channel = MethodChannel('hollow/traffic_lights');
+
+  @override
+  State<MacTrafficLights> createState() => _MacTrafficLightsState();
+}
+
+class _MacTrafficLightsState extends State<MacTrafficLights> {
+  double? _sent;
+
+  void _sync() {
+    if (!Platform.isMacOS || _sent == widget.height) return;
+    final height = widget.height;
+    _sent = height;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      MacTrafficLights._channel
+          .invokeMethod<void>('setHeaderHeight', height)
+          .catchError((_) {});
+    });
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _sync();
+  }
+
+  @override
+  void didUpdateWidget(MacTrafficLights old) {
+    super.didUpdateWidget(old);
+    _sync();
+  }
+
+  @override
+  Widget build(BuildContext context) => widget.child;
+}
+
+/// Calls [onWidth] after a frame whenever its child's laid-out width changes,
+/// never during layout.
+class _WidthReporter extends SingleChildRenderObjectWidget {
+  final ValueChanged<double> onWidth;
+
+  const _WidthReporter({required this.onWidth, required super.child});
+
+  @override
+  RenderObject createRenderObject(BuildContext context) =>
+      _RenderWidthReporter(onWidth);
+
+  @override
+  void updateRenderObject(
+          BuildContext context, _RenderWidthReporter renderObject) =>
+      renderObject.onWidth = onWidth;
+}
+
+class _RenderWidthReporter extends RenderProxyBox {
+  _RenderWidthReporter(this.onWidth);
+
+  ValueChanged<double> onWidth;
+  double? _reported;
+
+  @override
+  void performLayout() {
+    super.performLayout();
+    final w = size.width;
+    if (w == _reported) return;
+    _reported = w;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (attached) onWidth(w);
+    });
+  }
+}
+
 /// Zoom readout, shown only while the interface scale is not 100%.
 ///
-/// It lives in the title bar because that is the one surface OUTSIDE the scale
-/// transform: whatever the user has done, this stays legible and one click from
-/// 100%. Without it the only way back is a shortcut you must already know.
+/// It lives with the window controls because they are the one surface
+/// OUTSIDE the scale transform: whatever the user has done, this stays legible
+/// and one click from 100%. Without it the only way back is a shortcut you
+/// must already know.
 class ZoomIndicator extends ConsumerWidget {
   const ZoomIndicator({super.key});
 
@@ -131,33 +180,32 @@ class ZoomIndicator extends ConsumerWidget {
     final scale = ref.watch(uiScaleProvider);
     if ((scale - kUiScaleDefault).abs() < 0.001) return const SizedBox.shrink();
     final hollow = HollowTheme.of(context);
-    // No HollowTooltip here: the title bar sits ABOVE the Navigator and has no
+    // No HollowTooltip here: the controls sit ABOVE the Navigator and have no
     // Overlay ancestor to host one.
     return Padding(
-      padding: const EdgeInsets.only(right: HollowSpacing.xs),
+      padding: const EdgeInsets.only(left: HollowSpacing.xs),
       child: HollowPressable(
         semanticLabel:
             'Interface scale ${scalePercentLabel(scale)}, reset to 100%',
         onTap: () => ref.read(uiScaleProvider.notifier).reset(),
         borderRadius: BorderRadius.circular(hollow.radiusMd),
         padding: const EdgeInsets.symmetric(
-          horizontal: HollowSpacing.xs + 2,
-          vertical: 2,
+          horizontal: HollowSpacing.sm,
+          vertical: HollowSpacing.xs,
         ),
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(LucideIcons.scaling, size: 12, color: hollow.textSecondary),
-            const SizedBox(width: 4),
+            Icon(LucideIcons.scaling, size: 14, color: hollow.textSecondary),
+            const SizedBox(width: HollowSpacing.xs),
             // Fixed chrome band, so a large OS text scale cannot grow it.
             MediaQuery.withClampedTextScaling(
               maxScaleFactor: 1.3,
               child: Text(
                 scalePercentLabel(scale),
-                style: HollowTypography.caption.copyWith(
+                style: HollowTypography.monoSmall.copyWith(
                   color: hollow.textSecondary,
-                  fontSize: 11,
-                  fontWeight: FontWeight.w600,
+                  fontFeatures: const [FontFeature.tabularFigures()],
                 ),
               ),
             ),
@@ -171,15 +219,21 @@ class ZoomIndicator extends ConsumerWidget {
 /// Base for window control buttons: no Material ripple, just instant colour.
 class _WindowButton extends StatefulWidget {
   final VoidCallback onTap;
+  final double height;
+  final IconData icon;
   final Color? hoverColor;
-  final Widget child;
-  final String? semanticLabel;
+
+  /// The glyph's colour while hovered, for a fill it would vanish into.
+  final Color? hoverGlyph;
+  final String semanticLabel;
 
   const _WindowButton({
     required this.onTap,
-    required this.child,
+    required this.height,
+    required this.icon,
+    required this.semanticLabel,
     this.hoverColor,
-    this.semanticLabel,
+    this.hoverGlyph,
   });
 
   @override
@@ -194,10 +248,10 @@ class _WindowButtonState extends State<_WindowButton> {
     final hollow = HollowTheme.of(context);
     // Rest colour is the hover colour at zero alpha, NEVER Colors.transparent:
     // that is transparent BLACK, and the lerp flashes through semi-opaque dark.
-    // Same-RGB endpoints make the transition a pure fade.
     final hoverColor = widget.hoverColor ?? hollow.elevated;
-    final bgColor =
-        _hovering ? hoverColor : hoverColor.withValues(alpha: 0.0);
+    final glyph = _hovering
+        ? widget.hoverGlyph ?? hollow.textSecondary
+        : hollow.textSecondary;
 
     return Semantics(
       button: true,
@@ -209,11 +263,11 @@ class _WindowButtonState extends State<_WindowButton> {
           onTap: widget.onTap,
           child: AnimatedContainer(
             duration: HollowDurations.fast,
-            width: 46,
-            height: 32,
-            color: bgColor,
+            width: _kWindowButtonWidth,
+            height: widget.height,
+            color: _hovering ? hoverColor : hoverColor.withValues(alpha: 0.0),
             alignment: Alignment.center,
-            child: widget.child,
+            child: Icon(widget.icon, size: 16, color: glyph),
           ),
         ),
       ),
@@ -221,27 +275,25 @@ class _WindowButtonState extends State<_WindowButton> {
   }
 }
 
+/// The platform's caption-button width.
+const double _kWindowButtonWidth = 46;
+
 class _MinimizeButton extends StatelessWidget {
-  const _MinimizeButton();
+  final double height;
+  const _MinimizeButton({required this.height});
 
   @override
-  Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-
-    return _WindowButton(
-      onTap: () => windowManager.minimize(),
-      semanticLabel: 'Minimize',
-      child: Icon(
-        LucideIcons.minus,
-        size: 16,
-        color: hollow.textSecondary,
-      ),
-    );
-  }
+  Widget build(BuildContext context) => _WindowButton(
+        onTap: () => windowManager.minimize(),
+        height: height,
+        icon: LucideIcons.minus,
+        semanticLabel: 'Minimize',
+      );
 }
 
 class _MaximizeButton extends StatefulWidget {
-  const _MaximizeButton();
+  final double height;
+  const _MaximizeButton({required this.height});
 
   @override
   State<_MaximizeButton> createState() => _MaximizeButtonState();
@@ -280,8 +332,6 @@ class _MaximizeButtonState extends State<_MaximizeButton> with WindowListener {
 
   @override
   Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-
     return _WindowButton(
       onTap: () async {
         if (_isMaximized) {
@@ -290,32 +340,25 @@ class _MaximizeButtonState extends State<_MaximizeButton> with WindowListener {
           await windowManager.maximize();
         }
       },
+      height: widget.height,
+      // Two stacked squares, the restore glyph every desktop draws.
+      icon: _isMaximized ? LucideIcons.copy : LucideIcons.square,
       semanticLabel: _isMaximized ? 'Restore' : 'Maximize',
-      child: Icon(
-        _isMaximized ? LucideIcons.columns : LucideIcons.square,
-        size: 14,
-        color: hollow.textSecondary,
-      ),
     );
   }
 }
 
 class _CloseButton extends StatelessWidget {
-  const _CloseButton();
+  final double height;
+  const _CloseButton({required this.height});
 
   @override
-  Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-
-    return _WindowButton(
-      onTap: () => windowManager.close(),
-      hoverColor: const Color(0xFFE81123), // Standard red close hover
-      semanticLabel: 'Close',
-      child: Icon(
-        LucideIcons.x,
-        size: 16,
-        color: hollow.textSecondary,
-      ),
-    );
-  }
+  Widget build(BuildContext context) => _WindowButton(
+        onTap: () => windowManager.close(),
+        height: height,
+        icon: LucideIcons.x,
+        hoverColor: const Color(0xFFE81123), // design-ignore: Windows close-button red
+        hoverGlyph: Colors.white, // design-ignore: Windows close-button glyph
+        semanticLabel: 'Close',
+      );
 }

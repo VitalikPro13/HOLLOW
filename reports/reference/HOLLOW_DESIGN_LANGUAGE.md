@@ -360,6 +360,16 @@ A screen is done when every one of these holds on a render, desktop and mobile, 
 13. **Keyboard.** Every action reachable by keyboard, Escape leaves the innermost layer, focus is visible through `HollowFocusRing`.
 14. **Five states.** Loaded, empty, loading, error, offline (section 6), each rendered once before the screen is called done.
 
+### 5.3.1 Chrome: the header and the dock
+
+The desktop Dock layout's two strips are chrome: they recede so the canvas wins, carry no focal point and no `filled` button.
+
+- **The header holds people:** add friend (a request count in the accent, never red), then the friend chips in a stable name order (favourites in their drag order, then anyone unread, then "+N more"). Unread lifts a name's colour and adds a count after it; it never changes the weight.
+- **The dock holds you, where you are, and tools.** Left: your identity with its connection dot and one line of status by exception (a link problem, the voice room you are in, your own status line), then mute, deafen and leave while in a call, on every screen. Middle: Home (the Hollow mark), your servers anchored straight after it, Add at the end of the list. Right: the places, then the tools.
+- **Places swap the centre; tools open on top of it.** Places are the `ShellTab`s (Conferences, Public channels, Share, Archive, the Shop), exclusive through `setShellTab()`, each toggling back to what it covered; a narrow dock folds them into one Places menu. Tools (Downloads, Help, Settings) never take the centre.
+- **ONE selection mark:** a 2 px x 20 accent bar on the bar's edge facing the content, over whichever of Home, a server, a folder or a place is active (a DM counts as Home), placed instantly. `NavSelectionMark` serves the phone's tab bar and the dock. Hover is a surface step and nothing else: no bar, no accent.
+- **The title bar folds into the header in Dock mode.** The window controls float over the header's trailing end at OS size (outside the zoom), the empty middle drags the window, and macOS centres its traffic lights in the header. Classic, the welcome screens (no identity yet) and the lock cover keep the 32 px title bar; while a dialog or menu covers the dock, a drag strip over the header keeps the window movable.
+
 ### 5.4 Platform metrics
 
 - **Desktop:** body 14, list rows 32 to 36 for one line and 48 to 56 for two, message rows grouped by sender with the timestamp in mono at `textTertiary`.

@@ -27,10 +27,15 @@ class ServerFolderIcon extends ConsumerWidget {
   final FolderStripItem folder;
   final double size;
 
+  /// Paints its own `elevated` square; false when the host tile owns the fill
+  /// and its hover step.
+  final bool filled;
+
   const ServerFolderIcon({
     super.key,
     required this.folder,
     required this.size,
+    this.filled = true,
   });
 
   @override
@@ -38,51 +43,7 @@ class ServerFolderIcon extends ConsumerWidget {
     final hollow = HollowTheme.of(context);
     final servers = ref.watch(serverListProvider);
     final avatars = ref.watch(serverAvatarProvider);
-
-    final cellSize = (size - 6) / 2; // 2 cells + 2px gap each side
     final previews = folder.serverIds.take(4).toList();
-
-    Widget cell(int i) {
-      if (i < previews.length) {
-        final sid = previews[i];
-        final avatar = avatars[sid];
-        final server = servers[sid];
-        final name = server?.name ?? '';
-
-        return ClipRRect(
-          borderRadius: BorderRadius.circular(cellSize * 0.2),
-          child: SizedBox(
-            width: cellSize,
-            height: cellSize,
-            child: avatar != null
-                ? Image.memory(avatar,
-                    width: cellSize,
-                    height: cellSize,
-                    fit: BoxFit.cover)
-                : Container(
-                    color: colorFromId(sid),
-                    alignment: Alignment.center,
-                    child: Text(
-                      initialsFromName(name.isNotEmpty ? name : sid),
-                      style: TextStyle(
-                        color: Colors.white,
-                        fontSize: cellSize * 0.4,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                  ),
-          ),
-        );
-      }
-      return Container(
-        width: cellSize,
-        height: cellSize,
-        decoration: BoxDecoration(
-          color: hollow.border.withValues(alpha: 0.3),
-          borderRadius: BorderRadius.circular(cellSize * 0.2),
-        ),
-      );
-    }
 
     // The grid adapts to the space actually available, which a parent border
     // eats into.
@@ -90,42 +51,34 @@ class ServerFolderIcon extends ConsumerWidget {
       final actualSize = constraints.biggest.shortestSide > 0
           ? constraints.biggest.shortestSide
           : size;
-      final actualCellSize = (actualSize - 8) / 2;
+      const gap = HollowSpacing.xxs;
+      final cellSize = (actualSize - gap * 4) / 2;
 
-      Widget adaptiveCell(int i) {
-        if (i < previews.length) {
-          final sid = previews[i];
-          final avatar = avatars[sid];
-          final server = servers[sid];
-          final cName = server?.name ?? '';
-          return ClipRRect(
-            borderRadius: BorderRadius.circular(actualCellSize * 0.2),
-            child: SizedBox(
-              width: actualCellSize,
-              height: actualCellSize,
-              child: avatar != null
-                  ? Image.memory(avatar, fit: BoxFit.cover)
-                  : Container(
-                      color: colorFromId(sid),
-                      alignment: Alignment.center,
-                      child: Text(
-                        initialsFromName(cName.isNotEmpty ? cName : sid),
-                        style: TextStyle(
-                          color: Colors.white,
-                          fontSize: actualCellSize * 0.38,
-                          fontWeight: FontWeight.w600,
-                        ),
+      Widget cell(int i) {
+        if (i >= previews.length) return SizedBox.square(dimension: cellSize);
+        final sid = previews[i];
+        final avatar = avatars[sid];
+        final name = servers[sid]?.name ?? '';
+        return ClipRRect(
+          borderRadius: BorderRadius.circular(hollow.radiusXs),
+          child: SizedBox.square(
+            dimension: cellSize,
+            child: avatar != null
+                ? Image.memory(avatar, fit: BoxFit.cover)
+                : Container(
+                    color: colorFromId(sid),
+                    alignment: Alignment.center,
+                    child: Text(
+                      initialsFromName(name.isNotEmpty ? name : sid),
+                      style: HollowTypography.micro.copyWith(
+                        color: Colors.white, // design-ignore: initials on an identity colour, as ServerAvatar
+                        fontWeight: FontWeight.w600,
+                        height: 1,
                       ),
+                      maxLines: 1,
+                      overflow: TextOverflow.clip,
                     ),
-            ),
-          );
-        }
-        return Container(
-          width: actualCellSize,
-          height: actualCellSize,
-          decoration: BoxDecoration(
-            color: hollow.border.withValues(alpha: 0.3),
-            borderRadius: BorderRadius.circular(actualCellSize * 0.2),
+                  ),
           ),
         );
       }
@@ -133,27 +86,19 @@ class ServerFolderIcon extends ConsumerWidget {
       return Container(
         width: actualSize,
         height: actualSize,
-        color: hollow.elevated,
-        padding: const EdgeInsets.all(2),
+        color: filled ? hollow.elevated : null,
+        padding: const EdgeInsets.all(gap),
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
             Row(
               mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                adaptiveCell(0),
-                const SizedBox(width: 2),
-                adaptiveCell(1),
-              ],
+              children: [cell(0), const SizedBox(width: gap), cell(1)],
             ),
-            const SizedBox(height: 2),
+            const SizedBox(height: gap),
             Row(
               mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                adaptiveCell(2),
-                const SizedBox(width: 2),
-                adaptiveCell(3),
-              ],
+              children: [cell(2), const SizedBox(width: gap), cell(3)],
             ),
           ],
         ),

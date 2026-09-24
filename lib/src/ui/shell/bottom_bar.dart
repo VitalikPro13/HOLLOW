@@ -1,820 +1,954 @@
-﻿import 'package:flutter/material.dart';
-import 'package:hollow/src/core/name_initials.dart';
-import 'package:hollow/src/ui/components/hollow_count_badge.dart';
-import 'package:hollow/src/ui/components/edge_scroll_row.dart';
-import 'package:hollow/src/ui/components/overlay_anchor.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/color_utils.dart';
+import 'package:hollow/src/core/models/strip_item.dart';
+import 'package:hollow/src/core/providers/archive_provider.dart';
+import 'package:hollow/src/core/providers/channel_navigation.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
-import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
-import 'package:hollow/src/core/providers/identity_provider.dart';
+import 'package:hollow/src/core/providers/conference_provider.dart';
 import 'package:hollow/src/core/providers/connection_status_provider.dart';
-import 'package:hollow/src/core/providers/settings_provider.dart';
+import 'package:hollow/src/core/providers/help_panel_provider.dart';
+import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/notification_provider.dart';
 import 'package:hollow/src/core/providers/pending_join_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/selected_peer_provider.dart';
-import 'package:hollow/src/core/models/strip_item.dart';
-import 'package:hollow/src/ui/components/server_icon_image.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/server_strip_layout_provider.dart';
+import 'package:hollow/src/core/providers/settings_provider.dart';
+import 'package:hollow/src/core/providers/shell_tab.dart';
+import 'package:hollow/src/core/providers/shop_tab_provider.dart';
 import 'package:hollow/src/core/providers/split_view_provider.dart';
 import 'package:hollow/src/core/providers/unread_provider.dart';
+import 'package:hollow/src/core/providers/voice_channel_provider.dart';
+import 'package:hollow/src/core/shop_availability.dart';
+import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/ui/components/connection_visual.dart';
+import 'package:hollow/src/ui/components/download_icon_button.dart';
+import 'package:hollow/src/ui/components/edge_scroll_row.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
-import 'package:hollow/src/ui/components/hollow_focus_ring.dart';
+import 'package:hollow/src/ui/components/hollow_count_badge.dart';
+import 'package:hollow/src/ui/components/hollow_divider.dart';
+import 'package:hollow/src/ui/components/hollow_icon_button.dart';
+import 'package:hollow/src/ui/components/hollow_mark.dart';
 import 'package:hollow/src/ui/components/hollow_menu.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_tooltip.dart';
-import 'package:hollow/src/core/providers/archive_provider.dart';
-import 'package:hollow/src/core/providers/share_tab_provider.dart';
-import 'package:hollow/src/core/providers/shell_tab.dart';
-import 'package:hollow/src/ui/components/download_icon_button.dart';
+import 'package:hollow/src/ui/components/hover_scope.dart';
+import 'package:hollow/src/ui/components/nav_selection_mark.dart';
+import 'package:hollow/src/ui/components/overlay_anchor.dart';
 import 'package:hollow/src/ui/components/pending_join_ui.dart';
-import 'package:hollow/src/ui/components/server_folder_popup.dart';
 import 'package:hollow/src/ui/components/profile_card_popup.dart';
+import 'package:hollow/src/ui/components/server_avatar.dart';
+import 'package:hollow/src/ui/components/server_folder_popup.dart';
+import 'package:hollow/src/ui/components/status_dot.dart';
+import 'package:hollow/src/ui/components/voice_here_badge.dart';
 import 'package:hollow/src/ui/dialogs/create_server_dialog.dart';
+import 'package:hollow/src/ui/dialogs/user_settings_dialog.dart';
 import 'package:hollow/src/ui/shell/new_server_entry.dart';
 import 'package:hollow/src/ui/shell/server_context_menus.dart';
-import 'package:hollow/src/ui/dialogs/mnemonic_dialog.dart';
-import 'package:hollow/src/ui/dialogs/user_settings_dialog.dart';
-import 'package:hollow/src/core/providers/guest_provider.dart';
+import 'package:hollow/src/ui/shell/voice_quick_controls.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-/// Horizontal bottom bar for the Dock layout.
-class BottomBar extends ConsumerStatefulWidget {
+/// The dock's height below its hairline.
+const double kDockHeight = 56;
+
+/// Server, folder, Home and Add tiles.
+const double _kTile = 40;
+
+/// Below this the five places fold into one menu, so a few server tiles still
+/// fit between Home and the tools.
+const double kDockPlacesFoldWidth = 1000;
+
+/// The Dock layout's bottom bar.
+///
+/// Left, you: identity, connection and the call. Then where you are: Home,
+/// your servers and the app's places, with ONE accent mark on the top edge
+/// above whichever is active. Right, the tools, which open on top.
+class BottomBar extends ConsumerWidget {
   const BottomBar({super.key});
 
   @override
-  ConsumerState<BottomBar> createState() => _BottomBarState();
+  Widget build(BuildContext context, WidgetRef ref) {
+    final hollow = HollowTheme.of(context);
+    final inVoice =
+        ref.watch(voiceChannelProvider.select((s) => s.isInVoiceChannel));
+    final location = ref.watch(dockLocationProvider);
+
+    return Container(
+      height: kDockHeight + 1,
+      decoration: BoxDecoration(
+        color: hollow.opaqueSurface,
+        border: Border(top: BorderSide(color: hollow.border)),
+      ),
+      // Fixed-height chrome, so the label scale is capped to keep it in the bar.
+      child: MediaQuery.withClampedTextScaling(
+        maxScaleFactor: 1.3,
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            final fold = constraints.maxWidth < kDockPlacesFoldWidth;
+            return Row(
+              children: [
+                const SizedBox(width: HollowSpacing.md),
+                const DockIdentity(),
+                if (inVoice) ...[
+                  const SizedBox(width: HollowSpacing.xs),
+                  const VoiceQuickControls(),
+                ],
+                const _DockDivider(),
+                _DockSlot(
+                  marked: location is _AtHome,
+                  child: _DockTile(
+                    tooltip: 'Home',
+                    fill: hollow.elevated,
+                    hoverFill: hollow.hover,
+                    onTap: () => _goHome(ref),
+                    // Right click is "mark all DMs as read" (#61).
+                    onContextMenu: (position) => showHomeMenu(
+                      context: context,
+                      ref: ref,
+                      anchor: position,
+                    ),
+                    child: HollowMark(size: 22, color: hollow.accentText),
+                  ),
+                ),
+                const SizedBox(width: HollowSpacing.sm),
+                // Servers anchor left; the space after Add is the gap before
+                // the places, so a short list never floats in the middle.
+                Expanded(
+                  child: Row(
+                    children: [
+                      Flexible(child: _ServerList(location: location)),
+                      _DockTile(
+                        tooltip: 'Create a server',
+                        fill: hollow.opaqueSurface,
+                        hoverFill: hollow.elevated,
+                        onTap: () => showCreateServerDialog(context),
+                        child: Icon(LucideIcons.plus,
+                            size: 20, color: hollow.textSecondary),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: HollowSpacing.sm),
+                _Places(location: location, fold: fold),
+                const _DockDivider(),
+                const DownloadIconButton(),
+                const SizedBox(width: HollowSpacing.xs),
+                const _HelpButton(),
+                const SizedBox(width: HollowSpacing.xs),
+                HollowIconButton(
+                  icon: LucideIcons.settings,
+                  label: 'Settings',
+                  onPressed: () => showUserSettingsDialog(context),
+                ),
+                const SizedBox(width: HollowSpacing.md),
+              ],
+            );
+          },
+        ),
+      ),
+    );
+  }
 }
 
-class _BottomBarState extends ConsumerState<BottomBar> {
+// ---------------------------------------------------------------------------
+// Where you are: the one thing the selection mark sits over.
+// ---------------------------------------------------------------------------
+
+sealed class DockLocation {
+  const DockLocation();
+}
+
+/// Home, a DM included.
+class _AtHome extends DockLocation {
+  const _AtHome();
+}
+
+class _AtServer extends DockLocation {
+  final String serverId;
+  const _AtServer(this.serverId);
+}
+
+class _AtPlace extends DockLocation {
+  final ShellTab tab;
+  const _AtPlace(this.tab);
+}
+
+/// The dock's single "you are here". In a split the focused pane decides, so
+/// the mark never sits over two items.
+final dockLocationProvider = Provider<DockLocation>((ref) {
+  final tab = ref.watch(openShellTabProvider);
+  if (tab != null) return _AtPlace(tab);
+  final split = ref.watch(splitViewProvider);
+  final serverId = split.isSplit && split.focusedPane == 1
+      ? split.rightPane?.serverId
+      : ref.watch(selectedServerProvider);
+  return serverId == null ? const _AtHome() : _AtServer(serverId);
+});
+
+void _clearSelection(WidgetRef ref) {
+  ref.read(selectedServerProvider.notifier).state = null;
+  ref.read(channelListProvider.notifier).clear();
+  ref.read(selectedChannelProvider.notifier).state = null;
+  ref.read(selectedPeerProvider.notifier).state = null;
+  ref.read(serverSettingsOpenProvider.notifier).state = false;
+}
+
+void _closeSplit(WidgetRef ref) {
+  if (ref.read(splitViewProvider).isSplit) {
+    ref.read(splitViewProvider.notifier).closeSplit();
+  }
+}
+
+void _goHome(WidgetRef ref) {
+  _closeSplit(ref);
+  setShellTab(ref.read, null);
+  _clearSelection(ref);
+}
+
+/// Opens [tab] the way each place always has; the Shop and Conferences keep
+/// their own openers.
+void _openPlace(WidgetRef ref, ShellTab tab) {
+  switch (tab) {
+    case ShellTab.conference:
+      ref.read(conferenceProvider.notifier).openTab();
+    case ShellTab.shop:
+      openShopTab(ref.read);
+    case ShellTab.archive:
+      _closeSplit(ref);
+      ref.invalidate(archiveDmListProvider);
+      ref.invalidate(archiveChannelListProvider);
+      ref.read(archiveSelectedDmProvider.notifier).state = null;
+      ref.read(archiveSelectedChannelProvider.notifier).state = null;
+      setShellTab(ref.read, tab);
+      _clearSelection(ref);
+    case ShellTab.guest || ShellTab.share:
+      _closeSplit(ref);
+      setShellTab(ref.read, tab);
+      _clearSelection(ref);
+  }
+}
+
+/// A place toggles: pressing the lit one goes back to what it covered (#28).
+void _togglePlace(WidgetRef ref, ShellTab tab) {
+  if (ref.read(openShellTabProvider) == tab) {
+    setShellTab(ref.read, null);
+  } else {
+    _openPlace(ref, tab);
+  }
+}
+
+/// Selects [serverId] then opens its settings: the panel reads the SELECTED
+/// server, so flipping the flag alone opens the wrong one.
+Future<void> _openServerSettings(WidgetRef ref, String serverId) async {
+  if (ref.read(selectedServerProvider) != serverId) {
+    await _selectServer(ref, serverId);
+  }
+  ref.read(serverSettingsOpenProvider.notifier).state = true;
+}
+
+Future<void> _selectServer(WidgetRef ref, String serverId) async {
+  final split = ref.read(splitViewProvider);
+  if (split.isSplit && split.focusedPane == 1) {
+    // Channels load straight from FFI so the global channelListProvider is
+    // not overwritten. A restricted channel the local user cannot see must
+    // never be auto-selected.
+    try {
+      final channels = (await crdt_api.getServerChannels(serverId: serverId))
+          .where((c) => c.meCanSee)
+          .toList();
+      final lastChannel = ref.read(lastChannelPerServerProvider)[serverId];
+      String? channelToSelect;
+      if (lastChannel != null &&
+          channels.any((c) => c.channelId == lastChannel)) {
+        channelToSelect = lastChannel;
+      } else if (channels.isNotEmpty) {
+        channelToSelect = channels
+                .where((c) => c.channelType == 'text')
+                .firstOrNull
+                ?.channelId ??
+            channels.first.channelId;
+      }
+      ref.read(splitViewProvider.notifier).navigateRightToServer(
+            serverId,
+            channelId: channelToSelect,
+          );
+    } catch (_) {
+      ref.read(splitViewProvider.notifier).navigateRightToServer(serverId);
+    }
+    return;
+  }
+
+  // Read the DB first, with no provider writes yet, so nothing rebuilds.
+  final channels = await ChannelListNotifier.fetchChannels(serverId);
+  final layout = await ChannelLayoutNotifier.fetchLayout(serverId);
+
+  final lastChannel = ref.read(lastChannelPerServerProvider)[serverId];
+  String? channelToSelect;
+  if (lastChannel != null && channels.containsKey(lastChannel)) {
+    channelToSelect = lastChannel;
+  } else if (channels.isNotEmpty) {
+    channelToSelect =
+        firstTextChannelInLayout(channels, layout) ?? channels.keys.first;
+  }
+
+  // Every provider write batches in ONE synchronous block, so the rebuild
+  // sees consistent server, channel and selection state. Closing EVERY centre
+  // tab belongs in that block: one left open covers the channel just selected
+  // (issue #28).
+  setShellTab(ref.read, null);
+  ref.read(selectedPeerProvider.notifier).state = null;
+  ref.read(serverSettingsOpenProvider.notifier).state = false;
+  ref.read(channelListProvider.notifier).setChannels(channels);
+  ref.read(channelLayoutProvider.notifier).setLayout(layout, serverId: serverId);
+  ref.read(selectedChannelProvider.notifier).state = channelToSelect;
+  ref.read(selectedServerProvider.notifier).state = serverId;
+  if (channelToSelect != null) {
+    ref.read(lastChannelPerServerProvider.notifier).state = {
+      ...ref.read(lastChannelPerServerProvider),
+      serverId: channelToSelect,
+    };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// You: identity, connection, the call.
+// ---------------------------------------------------------------------------
+
+/// Your avatar with its connection dot, your name, and one line of status by
+/// exception: a problem with the link, the voice room you are in, or your own
+/// status line. Silent when all is well.
+class DockIdentity extends ConsumerWidget {
+  const DockIdentity({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final hollow = HollowTheme.of(context);
+    final localPeerId = ref.watch(identityProvider.select((i) => i.peerId));
+    final profile = localPeerId == null
+        ? null
+        : ref.watch(profileProvider.select((p) => p[localPeerId]));
+    final name =
+        localPeerId == null ? '' : displayNameForPeer(profile, localPeerId);
+
+    // The REAL node and relay state, shared with the Classic user bar so the
+    // two layouts cannot disagree.
+    final invisible = ref.watch(invisibleModeProvider);
+    final overall = ref.watch(overallConnectionProvider);
+    final visual = connectionVisual(hollow, overall, invisible: invisible);
+
+    final voice = ref.watch(voiceChannelProvider.select((s) => (
+          s.isInVoiceChannel ? s.currentServerId : null,
+          s.currentChannelId,
+          s.currentChannelName,
+        )));
+    final voiceServerName = voice.$1 == null
+        ? null
+        : ref.watch(serverListProvider.select((m) => m[voice.$1]?.name));
+
+    final Widget? line;
+    if (!overall.isOnline && !invisible) {
+      line = _statusLine(visual.label, hollow.warning);
+    } else if (voice.$1 != null && voice.$2 != null) {
+      final room = voice.$3 ?? 'Voice';
+      final text =
+          voiceServerName == null ? room : '$room · $voiceServerName';
+      line = HollowPressable(
+        subtle: true,
+        semanticLabel: 'Open $room',
+        onTap: () => openServerChannel(
+          ProviderScope.containerOf(context, listen: false),
+          voice.$1!,
+          voice.$2!,
+        ).catchError((_) {}),
+        borderRadius: BorderRadius.circular(hollow.radiusXs),
+        child: _statusLine(text, hollow.success),
+      );
+    } else if (profile != null && profile.status.isNotEmpty) {
+      line = _statusLine(profile.status, hollow.textTertiary);
+    } else {
+      line = null;
+    }
+
+    return HollowTooltip(
+      message: 'Your profile and status',
+      child: HollowPressable(
+        semanticLabel: '$name, ${visual.label}',
+        onTap: localPeerId == null
+            ? null
+            : () => showProfileCardPopup(
+                  context: context,
+                  ref: ref,
+                  peerId: localPeerId,
+                  anchorOf: () {
+                    final pos = overlayAnchorOf(context);
+                    return Offset(
+                        pos.dx + HollowSpacing.sm, pos.dy - HollowSpacing.sm);
+                  },
+                  anchorBottom: true,
+                ),
+        borderRadius: BorderRadius.circular(hollow.radiusMd),
+        padding: const EdgeInsets.symmetric(
+          horizontal: HollowSpacing.sm,
+          vertical: HollowSpacing.xs,
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            _IdentityAvatar(peerId: localPeerId, visual: visual),
+            const SizedBox(width: HollowSpacing.sm),
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: _kIdentityTextWidth),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    name,
+                    style: HollowTypography.label
+                        .copyWith(color: hollow.textPrimary),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  ?line,
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _statusLine(String text, Color color) => Text(
+        text,
+        style: HollowTypography.caption.copyWith(color: color),
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+      );
+}
+
+const double _kIdentityTextWidth = 160;
+
+/// Your avatar with the connection dot cut into its corner. The cut-out
+/// follows the row's hover fill so it never shows a dark halo.
+class _IdentityAvatar extends StatelessWidget {
+  final String? peerId;
+  final ConnectionVisual visual;
+
+  const _IdentityAvatar({required this.peerId, required this.visual});
+
+  @override
+  Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
+    final hovered = HoverScope.maybeOf(context) ?? false;
+    final id = peerId;
+    return Stack(
+      clipBehavior: Clip.none,
+      children: [
+        if (id != null)
+          HollowAvatar(peerId: id, size: 28)
+        else
+          Container(
+            width: 28,
+            height: 28,
+            decoration: BoxDecoration(
+              color: hollow.elevated,
+              borderRadius: BorderRadius.circular(hollow.radiusMd),
+            ),
+          ),
+        Positioned(
+          right: -HollowSpacing.xxs,
+          bottom: -HollowSpacing.xxs,
+          child: AnimatedContainer(
+            duration: HollowDurations.fast,
+            width: 11,
+            height: 11,
+            decoration: BoxDecoration(
+              color: hovered ? hollow.elevated : hollow.opaqueSurface,
+              shape: BoxShape.circle,
+            ),
+            alignment: Alignment.center,
+            child: StatusDot(
+              color: visual.color,
+              size: 7,
+              filled: visual.filled,
+              semanticLabel: visual.label,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Tiles and the mark.
+// ---------------------------------------------------------------------------
+
+/// The hairline between the dock's three groups.
+class _DockDivider extends StatelessWidget {
+  const _DockDivider();
+
+  @override
+  Widget build(BuildContext context) => const Padding(
+        padding: EdgeInsets.symmetric(horizontal: HollowSpacing.md),
+        child: SizedBox(height: HollowSpacing.xl, child: HollowVerticalDivider()),
+      );
+}
+
+/// A dock item at the dock's full height, with the selection mark on the top
+/// edge when [marked]. Its badges sit inside this box, so a scrolling row
+/// never cuts them.
+class _DockSlot extends StatelessWidget {
+  final bool marked;
+  final Widget child;
+
+  const _DockSlot({required this.marked, required this.child});
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      height: kDockHeight,
+      child: Stack(
+        alignment: Alignment.center,
+        clipBehavior: Clip.none,
+        children: [
+          child,
+          if (marked) const Positioned(top: 0, child: NavSelectionMark()),
+        ],
+      ),
+    );
+  }
+}
+
+/// A 40 px square: Home, a server, a folder, Add, a parked join.
+///
+/// Hover steps the fill up one surface ([hoverFill]) or, on an identity
+/// colour or an image, lays a luminance-aware lift over it. Nothing else
+/// changes on hover: no bar, no accent, so only the active item looks active.
+class _DockTile extends StatelessWidget {
+  final Widget child;
+  final Color fill;
+  final Color? hoverFill;
+  final VoidCallback? onTap;
+  final void Function(Offset overlayPosition)? onContextMenu;
+  final String? tooltip;
+
+  /// Overrides [tooltip] as the screen-reader name, for a tile whose tooltip
+  /// states a CONDITION while its purpose is to open a menu.
+  final String? semanticLabel;
+
+  /// The context menu's screen-reader name, when "<label> actions" is wrong.
+  final String? menuLabel;
+
+  final int unreadCount;
+  final int mentionCount;
+  final bool awaitingSetup;
+  final bool voiceHere;
+
+  const _DockTile({
+    required this.child,
+    required this.fill,
+    this.hoverFill,
+    this.onTap,
+    this.onContextMenu,
+    this.tooltip,
+    this.semanticLabel,
+    this.menuLabel,
+    this.unreadCount = 0,
+    this.mentionCount = 0,
+    this.awaitingSetup = false,
+    this.voiceHere = false,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
+    final label = semanticLabel ?? tooltip;
+    final ring = hollow.opaqueSurface;
+
+    Widget tile = HollowPressable(
+      onTap: onTap,
+      semanticLabel: label,
+      borderRadius: BorderRadius.circular(hollow.radiusLg),
+      child: _TileFace(fill: fill, hoverFill: hoverFill, child: child),
+    );
+    if (tooltip != null) tile = HollowTooltip(message: tooltip!, child: tile);
+
+    // ABOVE the focus ring, so Menu and Shift+F10 reach it while the tile is
+    // keyboard-focused (issue #61).
+    final onContextMenu = this.onContextMenu;
+    if (onContextMenu != null) {
+      tile = ContextMenuTarget(
+        semanticLabel: menuLabel ?? '${label ?? 'Server'} actions',
+        onOpen: onContextMenu,
+        child: tile,
+      );
+    }
+
+    // Clip.none is load bearing: the badges sit on the corners.
+    return Stack(
+      clipBehavior: Clip.none,
+      children: [
+        tile,
+        // Top-LEFT, since the unread count owns the top-right corner.
+        if (awaitingSetup)
+          const Positioned(
+            left: -HollowSpacing.xs,
+            top: -HollowSpacing.xs,
+            child: HollowTooltip(
+              message: kAwaitingSetupTooltip,
+              child: AwaitingSetupBadge(size: HollowSpacing.lg),
+            ),
+          ),
+        if (unreadCount > 0 || mentionCount > 0)
+          Positioned(
+            right: -HollowSpacing.sm,
+            top: -HollowSpacing.xs,
+            child: IgnorePointer(
+              child: HollowCountBadge(
+                count: mentionCount > 0 ? mentionCount : unreadCount,
+                mention: mentionCount > 0,
+                ring: ring,
+              ),
+            ),
+          ),
+        if (voiceHere)
+          Positioned(
+            right: -HollowSpacing.xs,
+            bottom: -HollowSpacing.xs,
+            child: IgnorePointer(child: VoiceHereBadge(ring: ring)),
+          ),
+      ],
+    );
+  }
+}
+
+class _TileFace extends StatelessWidget {
+  final Color fill;
+  final Color? hoverFill;
+  final Widget child;
+
+  const _TileFace({required this.fill, required this.child, this.hoverFill});
+
+  @override
+  Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
+    final hovered = HoverScope.maybeOf(context) ?? false;
+    final hoverFill = this.hoverFill;
+    return AnimatedContainer(
+      duration: HollowDurations.fast,
+      curve: HollowCurves.subtle,
+      width: _kTile,
+      height: _kTile,
+      clipBehavior: Clip.antiAlias,
+      decoration: BoxDecoration(
+        color: hovered && hoverFill != null ? hoverFill : fill,
+        borderRadius: BorderRadius.circular(hollow.radiusLg),
+      ),
+      foregroundDecoration: hoverFill != null
+          ? null
+          : BoxDecoration(
+              // Same colour at both ends, so the fade never lerps via black.
+              color: hollow.textPrimary.withValues(alpha: hovered ? 0.1 : 0),
+              borderRadius: BorderRadius.circular(hollow.radiusLg),
+            ),
+      alignment: Alignment.center,
+      child: child,
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Servers.
+// ---------------------------------------------------------------------------
+
+/// The server strip model as tiles, reorderable by a held drag. Its scroll
+/// viewport is the dock's full height, so badges and the mark are never cut.
+class _ServerList extends ConsumerStatefulWidget {
+  final DockLocation location;
+  const _ServerList({required this.location});
+
+  @override
+  ConsumerState<_ServerList> createState() => _ServerListState();
+}
+
+class _ServerListState extends ConsumerState<_ServerList> {
   bool _isDragging = false;
 
   /// Servers that existed on first build skip the entrance animation.
   Set<String>? _initialServerIds;
 
+  void _setDragging(bool value) {
+    if (mounted) setState(() => _isDragging = value);
+  }
+
+  String? get _activeServerId => switch (widget.location) {
+        _AtServer(:final serverId) => serverId,
+        _ => null,
+      };
+
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
-    final identity = ref.watch(identityProvider);
-    final servers = ref.watch(serverListProvider);
-    final selectedServerId = ref.watch(selectedServerProvider);
-    final notifSettings = ref.watch(notificationSettingsProvider);
-
-    _initialServerIds ??= ref.read(serverStripLayoutProvider.notifier).allServerIds();
-
-    final localPeerId = identity.peerId;
-    final localProfile = localPeerId != null
-        ? ref.watch(profileProvider.select((p) => p[localPeerId]))
-        : null;
-    final myDisplayName =
-        localPeerId != null ? displayNameForPeer(localProfile, localPeerId) : '---';
-
-    // The REAL node and relay state, shared with the Classic user bar so the
-    // two layouts cannot disagree. Local node status alone goes "connected" the
-    // instant it boots, internet or not.
-    final amInvisible =
-        ref.watch(invisibleModeProvider);
-    final visual = connectionVisual(
-      hollow,
-      ref.watch(overallConnectionProvider),
-      invisible: amInvisible,
-    );
-
-    final dmUnreadTotal = ref.watch(dmUnreadBadgeProvider);
-
-    final archiveOpen = ref.watch(archiveTabOpenProvider);
-    final shareOpen = ref.watch(shareTabOpenProvider);
     final stripLayout = ref.watch(serverStripLayoutProvider);
-    final splitState = ref.watch(splitViewProvider);
+    _initialServerIds ??=
+        ref.read(serverStripLayoutProvider.notifier).allServerIds();
 
-    return Container(
-      height: 59,
-      decoration: BoxDecoration(
-        color: hollow.opaqueSurface,
-        border: Border(
-          top: BorderSide(color: hollow.border),
-        ),
-      ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.center,
-        children: [
-          // The dot is the only status surface here, so the tooltip carries the
-          // label the Classic user bar prints.
-          SizedBox(
-            width: 140,
-            child: HollowTooltip(
-              message: visual.label,
-              child: HollowPressable(
-                onTap: () {
-                  if (localPeerId != null) {
-                    showProfileCardPopup(
-                      context: context,
-                      ref: ref,
-                      peerId: localPeerId,
-                      anchorOf: () {
-                        final pos = overlayAnchorOf(context);
-                        return Offset(pos.dx + 8, pos.dy - 8);
-                      },
-                      anchorBottom: true,
-                    );
-                  }
-                },
-                borderRadius: BorderRadius.zero,
-                padding: const EdgeInsets.symmetric(
-                  horizontal: HollowSpacing.md,
-                ),
-                child: Row(
-                  children: [
-                    if (localPeerId != null)
-                      HollowAvatar(peerId: localPeerId, size: 28)
-                    else
-                      Container(
-                        width: 28,
-                        height: 28,
-                        decoration: BoxDecoration(
-                          color: hollow.elevated,
-                          borderRadius:
-                              BorderRadius.circular(hollow.radiusMd),
-                        ),
-                      ),
-                    const SizedBox(width: HollowSpacing.sm),
-                    Expanded(
-                      child: Row(
-                        children: [
-                          const SizedBox(width: 4),
-                          Expanded(
-                            // Fixed-height chrome, so the label scale is capped
-                            // to keep it in the bar.
-                            child: MediaQuery.withClampedTextScaling(
-                              maxScaleFactor: 1.3,
-                              child: Text(
-                                myDisplayName,
-                                style: HollowTypography.caption.copyWith(
-                                  color: hollow.textPrimary,
-                                  fontWeight: FontWeight.w600,
-                                  fontSize: 12,
-                                ),
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ),
+    void reorder(_StripDragData data, int to) =>
+        ref.read(serverStripLayoutProvider.notifier).reorder(data.sourceIndex, to);
 
-          Container(width: 1, height: 28, color: hollow.border),
-
-          Expanded(
-            child: Row(
-              crossAxisAlignment: CrossAxisAlignment.center,
-              children: [
-                const SizedBox(width: HollowSpacing.sm),
-
-                _BottomServerIcon(
-                  isSelected: selectedServerId == null &&
-                      !ref.watch(anyShellTabOpenProvider),
-                  unreadCount:
-                      selectedServerId != null ? dmUnreadTotal : 0,
-                  tooltip: 'Home',
-                  backgroundColor: hollow.accent,
-                  onTap: () => _goHome(ref),
-                  // Right click is "mark all DMs as read" (#61).
-                  onContextMenu: (position) => showHomeMenu(
-                    context: context,
-                    ref: ref,
-                    anchor: position,
-                  ),
-                  child: Text(
-                    'H',
-                    style: TextStyle(
-                      color: hollow.textOnAccent,
-                      fontSize: 18,
-                      fontWeight: FontWeight.w700,
-                    ),
-                  ),
-                ),
-
-                Container(
-                  width: 2,
-                  height: 24,
-                  margin: const EdgeInsets.symmetric(
-                    horizontal: HollowSpacing.sm,
-                  ),
-                  decoration: BoxDecoration(
-                    color: hollow.border,
-                    borderRadius: BorderRadius.circular(1),
-                  ),
-                ),
-
-                // `center: true` rather than an outer `Center`: the arrow slots
-                // make EdgeScrollRow's own row take the full width, leaving an
-                // outer Center nothing to centre. The arrows are SIBLINGS of the
-                // scroller, so they never sit on top of the _ReorderGap drop
-                // zones at either end.
-                Expanded(
-                  child: EdgeScrollRow(
-                      semanticLabel: 'servers',
-                      center: true,
-                      children: [
-                          _ReorderGap(index: 0, hollow: hollow, onAccept: (data) {
-                            ref.read(serverStripLayoutProvider.notifier).reorder(data.sourceIndex, 0);
-                          }),
-                          for (int i = 0;
-                              i < stripLayout.length;
-                              i++) ...[
-                            Builder(builder: (context) {
-                              final item = stripLayout[i];
-
-                              return switch (item) {
-                                ServerStripItem(:final serverId) =>
-                                  _buildServerIcon(
-                                    ref: ref,
-                                    index: i,
-                                    serverId: serverId,
-                                    servers: servers,
-                                    selectedServerId: selectedServerId,
-                                    splitState: splitState,
-                                    notifSettings: notifSettings,
-                                    hollow: hollow,
-                                  ),
-                                PendingStripItem(:final serverId) =>
-                                  _buildPendingIcon(
-                                    ref: ref,
-                                    serverId: serverId,
-                                  ),
-                                FolderStripItem() =>
-                                  _buildFolderIcon(
-                                    ref: ref,
-                                    index: i,
-                                    folder: item,
-                                    servers: servers,
-                                    selectedServerId: selectedServerId,
-                                    splitState: splitState,
-                                    notifSettings: notifSettings,
-                                    hollow: hollow,
-                                  ),
-                              };
-                            }),
-                            _ReorderGap(index: i + 1, hollow: hollow, onAccept: (data) {
-                              ref.read(serverStripLayoutProvider.notifier).reorder(data.sourceIndex, i + 1);
-                            }),
-                          ],
-                      ]),
-                ),
-
-                Container(
-                  width: 2,
-                  height: 24,
-                  margin: const EdgeInsets.symmetric(
-                    horizontal: HollowSpacing.sm,
-                  ),
-                  decoration: BoxDecoration(
-                    color: hollow.border,
-                    borderRadius: BorderRadius.circular(1),
-                  ),
-                ),
-
-                _BottomServerIcon(
-                  tooltip: 'Create a server',
-                  backgroundColor: hollow.elevated,
-                  onTap: () => showCreateServerDialog(context),
-                  child: Icon(
-                    LucideIcons.plus,
-                    color: hollow.accent,
-                    size: 18,
-                  ),
-                ),
-
-                const SizedBox(width: HollowSpacing.sm),
-              ],
-            ),
-          ),
-
-          Container(width: 1, height: 28, color: hollow.border),
-
-          SizedBox(
-            width: 170,
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Builder(builder: (ctx) {
-                  final guestOpen = ref.watch(guestTabOpenProvider);
-                  return HollowTooltip(
-                    message: 'Browse Public Channels',
-                    child: HollowPressable(
-                      semanticLabel: 'Browse public channels',
-                      onTap: () => guestOpen
-                          ? setShellTab(ref.read, null)
-                          : _openGuestPanel(ref),
-                      borderRadius:
-                          BorderRadius.circular(hollow.radiusMd),
-                      padding: const EdgeInsets.all(HollowSpacing.xs),
-                      child: Icon(
-                        LucideIcons.globe,
-                        size: 18,
-                        color: guestOpen
-                            ? hollow.accent
-                            : hollow.textSecondary,
-                      ),
-                    ),
-                  );
-                }),
-                HollowTooltip(
-                  message: 'Share',
-                  child: HollowPressable(
-                    semanticLabel: 'Share',
-                    // Every centre-tab button toggles: the accent icon reads as
-                    // "on", so pressing it again takes you back out (#28).
-                    onTap: () => shareOpen
-                        ? setShellTab(ref.read, null)
-                        : _openShare(ref),
-                    borderRadius:
-                        BorderRadius.circular(hollow.radiusMd),
-                    padding: const EdgeInsets.all(HollowSpacing.xs),
-                    child: Icon(
-                      LucideIcons.share2,
-                      size: 18,
-                      color: shareOpen
-                          ? hollow.accent
-                          : hollow.textSecondary,
-                    ),
-                  ),
-                ),
-                HollowTooltip(
-                  message: 'Archive',
-                  child: HollowPressable(
-                    semanticLabel: 'Archive',
-                    onTap: () => archiveOpen
-                        ? setShellTab(ref.read, null)
-                        : _openArchive(ref),
-                    borderRadius:
-                        BorderRadius.circular(hollow.radiusMd),
-                    padding: const EdgeInsets.all(HollowSpacing.xs),
-                    child: Icon(
-                      LucideIcons.archive,
-                      size: 18,
-                      color: archiveOpen
-                          ? hollow.accent
-                          : hollow.textSecondary,
-                    ),
-                  ),
-                ),
-                const DownloadIconButton(iconSize: 18),
-                HollowTooltip(
-                  message: 'Settings',
-                  child: HollowPressable(
-                    semanticLabel: 'Settings',
-                    onTap: () => showUserSettingsDialog(context, openSystemTab: true),
-                    borderRadius:
-                        BorderRadius.circular(hollow.radiusMd),
-                    padding: const EdgeInsets.all(HollowSpacing.xs),
-                    child: Icon(
-                      LucideIcons.settings,
-                      size: 18,
-                      color: hollow.textSecondary,
-                    ),
-                  ),
-                ),
-                if (identity.mnemonic != null)
-                  HollowTooltip(
-                    message: 'Recovery phrase',
-                    child: HollowPressable(
-                      semanticLabel: 'Recovery phrase',
-                      onTap: () => showMnemonicDialog(
-                          context, identity.mnemonic!),
-                      borderRadius:
-                          BorderRadius.circular(hollow.radiusMd),
-                      padding: const EdgeInsets.all(HollowSpacing.sm),
-                      child: Icon(
-                        LucideIcons.keyRound,
-                        size: 18,
-                        color: hollow.textSecondary,
-                      ),
-                    ),
-                  ),
-              ],
-            ),
-          ),
+    return EdgeScrollRow(
+      semanticLabel: 'servers',
+      height: kDockHeight,
+      fadeColor: hollow.opaqueSurface,
+      // Hugs the tiles, so Add follows the last one instead of the far edge.
+      shrinkWrap: true,
+      children: [
+        for (int i = 0; i < stripLayout.length; i++) ...[
+          _ReorderGap(index: i, onAccept: (data) => reorder(data, i)),
+          switch (stripLayout[i]) {
+            ServerStripItem(:final serverId) =>
+              _buildServer(index: i, serverId: serverId),
+            PendingStripItem(:final serverId) => _buildPending(serverId),
+            final FolderStripItem folder =>
+              _buildFolder(index: i, folder: folder),
+          },
         ],
-      ),
+        _ReorderGap(
+          index: stripLayout.length,
+          onAccept: (data) => reorder(data, stripLayout.length),
+        ),
+      ],
     );
   }
 
-  void _goHome(WidgetRef ref) {
-    final split = ref.read(splitViewProvider);
-    if (split.isSplit) {
-      ref.read(splitViewProvider.notifier).closeSplit();
-    }
-    setShellTab(ref.read, null);
-    ref.read(selectedServerProvider.notifier).state = null;
-    ref.read(channelListProvider.notifier).clear();
-    ref.read(selectedChannelProvider.notifier).state = null;
-    ref.read(selectedPeerProvider.notifier).state = null;
-    ref.read(serverSettingsOpenProvider.notifier).state = false;
-  }
-
-  void _openShare(WidgetRef ref) {
-    final split = ref.read(splitViewProvider);
-    if (split.isSplit) {
-      ref.read(splitViewProvider.notifier).closeSplit();
-    }
-    setShellTab(ref.read, ShellTab.share);
-    ref.read(selectedServerProvider.notifier).state = null;
-    ref.read(channelListProvider.notifier).clear();
-    ref.read(selectedChannelProvider.notifier).state = null;
-    ref.read(selectedPeerProvider.notifier).state = null;
-    ref.read(serverSettingsOpenProvider.notifier).state = false;
-  }
-
-  void _openArchive(WidgetRef ref) {
-    final split = ref.read(splitViewProvider);
-    if (split.isSplit) {
-      ref.read(splitViewProvider.notifier).closeSplit();
-    }
-    ref.invalidate(archiveDmListProvider);
-    ref.invalidate(archiveChannelListProvider);
-    ref.read(archiveSelectedDmProvider.notifier).state = null;
-    ref.read(archiveSelectedChannelProvider.notifier).state = null;
-    setShellTab(ref.read, ShellTab.archive);
-    ref.read(selectedServerProvider.notifier).state = null;
-    ref.read(channelListProvider.notifier).clear();
-    ref.read(selectedChannelProvider.notifier).state = null;
-    ref.read(selectedPeerProvider.notifier).state = null;
-    ref.read(serverSettingsOpenProvider.notifier).state = false;
-  }
-
-  void _openGuestPanel(WidgetRef ref) {
-    final split = ref.read(splitViewProvider);
-    if (split.isSplit) {
-      ref.read(splitViewProvider.notifier).closeSplit();
-    }
-    setShellTab(ref.read, ShellTab.guest);
-    ref.read(selectedServerProvider.notifier).state = null;
-    ref.read(channelListProvider.notifier).clear();
-    ref.read(selectedChannelProvider.notifier).state = null;
-    ref.read(selectedPeerProvider.notifier).state = null;
-    ref.read(serverSettingsOpenProvider.notifier).state = false;
-  }
-
-  /// Selects [serverId] then opens its settings: the panel reads the SELECTED
-  /// server, so flipping the flag alone opens the wrong one.
-  Future<void> _openServerSettings(WidgetRef ref, String serverId) async {
-    if (ref.read(selectedServerProvider) != serverId) {
-      await _selectServer(ref, serverId);
-    }
-    ref.read(serverSettingsOpenProvider.notifier).state = true;
-  }
-
-  Future<void> _selectServer(WidgetRef ref, String serverId) async {
-    final split = ref.read(splitViewProvider);
-    if (split.isSplit && split.focusedPane == 1) {
-      // Channels load straight from FFI so the global channelListProvider is
-      // not overwritten. A restricted channel the local user cannot see must
-      // never be auto-selected.
-      try {
-        final channels =
-            (await crdt_api.getServerChannels(serverId: serverId))
-                .where((c) => c.meCanSee)
-                .toList();
-        final lastChannels = ref.read(lastChannelPerServerProvider);
-        final lastChannel = lastChannels[serverId];
-        String? channelToSelect;
-        if (lastChannel != null &&
-            channels.any((c) => c.channelId == lastChannel)) {
-          channelToSelect = lastChannel;
-        } else if (channels.isNotEmpty) {
-          channelToSelect = channels
-              .where((c) => c.channelType == 'text')
-              .firstOrNull
-              ?.channelId ?? channels.first.channelId;
-        }
-        ref.read(splitViewProvider.notifier).navigateRightToServer(
-              serverId,
-              channelId: channelToSelect,
-            );
-      } catch (_) {
-        ref.read(splitViewProvider.notifier).navigateRightToServer(serverId);
-      }
-      return;
-    }
-
-    // Read the DB first, with no provider writes yet, so nothing rebuilds.
-    final channels = await ChannelListNotifier.fetchChannels(serverId);
-    final layout = await ChannelLayoutNotifier.fetchLayout(serverId);
-
-    final lastChannels = ref.read(lastChannelPerServerProvider);
-    final lastChannel = lastChannels[serverId];
-
-    String? channelToSelect;
-    if (lastChannel != null && channels.containsKey(lastChannel)) {
-      channelToSelect = lastChannel;
-    } else if (channels.isNotEmpty) {
-      channelToSelect = firstTextChannelInLayout(channels, layout)
-          ?? channels.keys.first;
-    }
-
-    // Every provider write batches in ONE synchronous block, so the rebuild
-    // sees consistent server, channel and selection state. Closing EVERY centre
-    // tab belongs in that block: one left open covers the channel just selected
-    // (issue #28).
-    setShellTab(ref.read, null);
-    ref.read(selectedPeerProvider.notifier).state = null;
-    ref.read(serverSettingsOpenProvider.notifier).state = false;
-    ref.read(channelListProvider.notifier).setChannels(channels);
-    ref.read(channelLayoutProvider.notifier).setLayout(layout, serverId: serverId);
-    ref.read(selectedChannelProvider.notifier).state = channelToSelect;
-    ref.read(selectedServerProvider.notifier).state = serverId;
-    if (channelToSelect != null) {
-      final map =
-          Map<String, String>.from(ref.read(lastChannelPerServerProvider));
-      map[serverId] = channelToSelect;
-      ref.read(lastChannelPerServerProvider.notifier).state = map;
-    }
-  }
-
-  Widget _buildServerIcon({
-    required WidgetRef ref,
-    required int index,
-    required String serverId,
-    required Map<String, dynamic> servers,
-    required String? selectedServerId,
-    required dynamic splitState,
-    required dynamic notifSettings,
-    required HollowTheme hollow,
-  }) {
-    final server = servers[serverId];
-    final isSelected = serverId == selectedServerId;
-    final isRightPaneServer =
-        splitState.isSplit && splitState.rightPane?.serverId == serverId;
-    final isNew = !_initialServerIds!.contains(serverId);
-    final isServerMuted = notifSettings.isServerMuted(serverId);
-    final serverUnreads = isServerMuted
+  Widget _buildServer({required int index, required String serverId}) {
+    final name = ref.watch(serverListProvider.select((m) => m[serverId]?.name)) ??
+        '';
+    final active = serverId == _activeServerId;
+    final muted = ref.watch(notificationSettingsProvider
+        .select((n) => n.isServerMuted(serverId)));
+    final unread = muted
         ? 0
         : ref.watch(unreadProvider.select((s) => s.serverUnreadCount(serverId)));
-    final serverMentions = isServerMuted
+    final mentions = muted
         ? 0
-        : ref.watch(
-            unreadProvider.select((s) => s.serverMentionCount(serverId)));
+        : ref.watch(unreadProvider.select((s) => s.serverMentionCount(serverId)));
     // Admitted after a parked join, still waiting on a member to add our MLS
     // leaf; the same flair the Classic strip shows.
-    final awaitingSetup = ref.watch(
-        awaitingSetupProvider.select((s) => s.contains(serverId)));
-    final name = server?.name ?? '';
+    final awaitingSetup =
+        ref.watch(awaitingSetupProvider.select((s) => s.contains(serverId)));
+    final voiceHere =
+        ref.watch(_voiceServerProvider.select((id) => id == serverId));
 
-    Widget serverIconChild = ServerIconImage(
-      serverId: serverId,
-      size: 38,
-      isSelected: isSelected || isRightPaneServer,
-      fallback: Text(
-        initialsFromName(name.isNotEmpty ? name : serverId),
-        style: const TextStyle(
-          color: Colors.white,
-          fontSize: 14,
-          fontWeight: FontWeight.w600,
-        ),
-      ),
-    );
-
-    Widget icon = DragTarget<_StripDragData>(
-      onWillAcceptWithDetails: (details) {
-        final data = details.data;
-        return data.serverId != null && data.serverId != serverId;
-      },
-      onAcceptWithDetails: (details) {
-        final data = details.data;
-        if (data.serverId != null) {
-          ref.read(serverStripLayoutProvider.notifier)
-              .createFolder(data.serverId!, serverId);
-        }
-      },
-      builder: (context, candidateData, rejectedData) {
-        final isMergeTarget = candidateData.isNotEmpty;
-        return LongPressDraggable<_StripDragData>(
-            data: _StripDragData(serverId: serverId, sourceIndex: index),
-            delay: const Duration(milliseconds: 300),
-            onDragStarted: () => setState(() => _isDragging = true),
-            onDragEnd: (_) => setState(() => _isDragging = false),
-            onDraggableCanceled: (_, __) => setState(() => _isDragging = false),
-            feedback: Material(
-              color: Colors.transparent,
-              child: AnimatedOpacity(
-                opacity: 0.8,
-                duration: Duration.zero,
-                child: _BottomServerIcon(
-                  backgroundColor: colorFromId(serverId),
-                  child: serverIconChild,
-                ),
-              ),
-            ),
-            childWhenDragging: AnimatedOpacity(
-              opacity: 0.3,
-              duration: HollowDurations.fast,
-              child: _BottomServerIcon(
-                backgroundColor: colorFromId(serverId),
-                child: serverIconChild,
-              ),
-            ),
-            child: AnimatedScale(
-              scale: isMergeTarget ? 1.08 : 1.0,
-              duration: HollowDurations.fast,
-              child: _BottomServerIcon(
-                  isSelected: isSelected || isRightPaneServer,
-                  unreadCount: serverUnreads,
-                  mentionCount: serverMentions,
-                  awaitingSetup: awaitingSetup,
-                  tooltip: _isDragging ? null : name,
-                  backgroundColor: colorFromId(serverId),
-                  onTap: () => _selectServer(ref, serverId),
-                  // The same server menu the Classic strip shows (#61).
-                  onContextMenu: (position) => showServerIconMenu(
+    Widget face({bool plain = false}) => _DockTile(
+          fill: colorFromId(serverId),
+          tooltip: plain || _isDragging ? null : name,
+          semanticLabel: plain ? null : name,
+          unreadCount: plain ? 0 : unread,
+          mentionCount: plain ? 0 : mentions,
+          awaitingSetup: !plain && awaitingSetup,
+          voiceHere: !plain && voiceHere,
+          onTap: plain ? null : () => _selectServer(ref, serverId),
+          // The same server menu the Classic strip shows (#61).
+          onContextMenu: plain
+              ? null
+              : (position) => showServerIconMenu(
                     context: context,
                     ref: ref,
                     serverId: serverId,
                     anchor: position,
                     onOpenSettings: () => _openServerSettings(ref, serverId),
                   ),
-                  child: serverIconChild,
-                ),
-            ),
-          );
-      },
+          child: ServerAvatar(
+              serverId: serverId, name: name, size: _kTile, animate: active),
+        );
+
+    Widget tile = DragTarget<_StripDragData>(
+      onWillAcceptWithDetails: (details) =>
+          details.data.serverId != null && details.data.serverId != serverId,
+      onAcceptWithDetails: (details) => ref
+          .read(serverStripLayoutProvider.notifier)
+          .createFolder(details.data.serverId!, serverId),
+      builder: (context, candidateData, _) => LongPressDraggable<_StripDragData>(
+        data: _StripDragData(serverId: serverId, sourceIndex: index),
+        delay: const Duration(milliseconds: 300),
+        onDragStarted: () => _setDragging(true),
+        onDragEnd: (_) => _setDragging(false),
+        onDraggableCanceled: (_, _) => _setDragging(false),
+        feedback: _DragFeedback(child: face(plain: true)),
+        childWhenDragging: AnimatedOpacity(
+          opacity: 0.3,
+          duration: HollowDurations.fast,
+          child: face(plain: true),
+        ),
+        child: AnimatedScale(
+          scale: candidateData.isNotEmpty ? 1.08 : 1.0,
+          duration: HollowDurations.fast,
+          child: face(),
+        ),
+      ),
     );
 
-    if (isNew) {
-      icon = NewServerEntry(
-        key: ValueKey('bounce-$serverId'),
-        child: icon,
-      );
+    if (!_initialServerIds!.contains(serverId)) {
+      tile = NewServerEntry(key: ValueKey('bounce-$serverId'), child: tile);
     }
-    return icon;
+    return _DockSlot(marked: active, child: tile);
   }
 
   /// The Dock's twin of the Classic strip's parked-join tile. Both shells
   /// render the same strip model, so a tile in one and not the other is a bug
   /// nobody notices until they switch layouts.
-  Widget _buildPendingIcon({
-    required WidgetRef ref,
-    required String serverId,
-  }) {
-    final info = ref.watch(pendingJoinsProvider)[serverId];
-    final rejected = info?.isRejected ?? false;
+  Widget _buildPending(String serverId) {
+    final hollow = HollowTheme.of(context);
+    final rejected = ref.watch(
+        pendingJoinsProvider.select((m) => m[serverId]?.isRejected ?? false));
     final title = pendingJoinTitle(rejected: rejected);
 
-    return Builder(builder: (iconContext) {
-      void open(Offset anchor) => showPendingJoinMenu(
-            context: iconContext,
-            ref: ref,
-            serverId: serverId,
-            anchor: anchor,
-          );
-
-      return ContextMenuTarget(
-        semanticLabel: '$title, show actions',
-        onOpen: open,
-        child: AnimatedOpacity(
+    return _DockSlot(
+      marked: false,
+      child: Builder(builder: (tileContext) {
+        return AnimatedOpacity(
           opacity: rejected ? 0.4 : 0.55,
           duration: HollowDurations.fast,
-          child: _BottomServerIcon(
-            backgroundColor: colorFromId(serverId),
+          child: _DockTile(
+            fill: hollow.elevated,
+            hoverFill: hollow.hover,
             tooltip: _isDragging ? null : title,
             semanticLabel: '$title, show actions',
-            // Anchored at the icon's top-left: the menu flips upward when
+            menuLabel: '$title, show actions',
+            // Anchored at the tile's top-left: the menu flips upward when
             // opening downward would leave the window, which a bar pinned to
             // the bottom always does.
-            onTap: () => open(overlayAnchorOf(iconContext)),
+            onTap: () => showPendingJoinMenu(
+              context: tileContext,
+              ref: ref,
+              serverId: serverId,
+              anchor: overlayAnchorOf(tileContext),
+            ),
+            onContextMenu: (anchor) => showPendingJoinMenu(
+              context: tileContext,
+              ref: ref,
+              serverId: serverId,
+              anchor: anchor,
+            ),
             child: Icon(
               rejected ? LucideIcons.ban : LucideIcons.clock,
-              size: 18,
-              color: Colors.white,
-            ),
-          ),
-        ),
-      );
-    });
-  }
-
-  Widget _buildFolderIcon({
-    required WidgetRef ref,
-    required int index,
-    required FolderStripItem folder,
-    required Map<String, dynamic> servers,
-    required String? selectedServerId,
-    required dynamic splitState,
-    required dynamic notifSettings,
-    required HollowTheme hollow,
-  }) {
-    final isSelected = folder.serverIds.contains(selectedServerId);
-    final isRightPaneServer = splitState.isSplit &&
-        folder.serverIds.contains(splitState.rightPane?.serverId);
-
-    int folderUnreads = 0;
-    for (final sid in folder.serverIds) {
-      if (!notifSettings.isServerMuted(sid)) {
-        folderUnreads +=
-            ref.watch(unreadProvider.select((s) => s.serverUnreadCount(sid)));
-      }
-    }
-
-    return DragTarget<_StripDragData>(
-      onWillAcceptWithDetails: (details) {
-        return details.data.serverId != null &&
-            !folder.serverIds.contains(details.data.serverId);
-      },
-      onAcceptWithDetails: (details) {
-        if (details.data.serverId != null) {
-          ref.read(serverStripLayoutProvider.notifier)
-              .addToFolder(folder.id, details.data.serverId!);
-        }
-      },
-      builder: (context, candidateData, rejectedData) {
-        final isDropTarget = candidateData.isNotEmpty;
-        return LongPressDraggable<_StripDragData>(
-            data: _StripDragData(folderId: folder.id, sourceIndex: index),
-            delay: const Duration(milliseconds: 300),
-            onDragStarted: () => setState(() => _isDragging = true),
-            onDragEnd: (_) => setState(() => _isDragging = false),
-            onDraggableCanceled: (_, __) => setState(() => _isDragging = false),
-          feedback: Material(
-            color: Colors.transparent,
-            child: AnimatedOpacity(
-              opacity: 0.8,
-              duration: Duration.zero,
-              child: _BottomServerIcon(
-                backgroundColor: hollow.elevated,
-                child: ServerFolderIcon(folder: folder, size: 38),
-              ),
-            ),
-          ),
-          childWhenDragging: AnimatedOpacity(
-            opacity: 0.3,
-            duration: HollowDurations.fast,
-            child: _BottomServerIcon(
-              backgroundColor: hollow.elevated,
-              child: ServerFolderIcon(folder: folder, size: 38),
-            ),
-          ),
-          child: AnimatedScale(
-            scale: isDropTarget ? 1.08 : 1.0,
-            duration: HollowDurations.fast,
-            child: ContextMenuTarget(
-              semanticLabel: 'Folder actions',
-              onOpen: (anchor) => showFolderIconMenu(
-                context: context,
-                ref: ref,
-                folder: folder,
-                anchor: anchor,
-              ),
-              child: _BottomServerIcon(
-                isSelected: isSelected || isRightPaneServer,
-                showBorder: false,
-                unreadCount:
-                    (isSelected || isRightPaneServer) ? 0 : folderUnreads,
-                tooltip: _isDragging ? null : folder.name,
-                backgroundColor: hollow.elevated,
-                onTap: () {
-                  final box = context.findRenderObject() as RenderBox?;
-                  if (box == null) return;
-                  final pos = overlayAnchorOf(context);
-                  showServerFolderPopup(
-                    context: context,
-                    ref: ref,
-                    folder: folder,
-                    anchor: Offset(pos.dx + box.size.width / 2, pos.dy),
-                    isDock: true,
-                    onServerSelected: (serverId) =>
-                        _selectServer(ref, serverId),
-                    onRenameRequested: () {
-                      showFolderRenameDialog(
-                        context: context,
-                        ref: ref,
-                        folder: folder,
-                      );
-                    },
-                  );
-                },
-                child: ServerFolderIcon(folder: folder, size: 38),
-              ),
+              size: 20,
+              color: hollow.textSecondary,
             ),
           ),
         );
-      },
+      }),
+    );
+  }
+
+  Widget _buildFolder({required int index, required FolderStripItem folder}) {
+    final hollow = HollowTheme.of(context);
+    final activeServerId = _activeServerId;
+    final active =
+        activeServerId != null && folder.serverIds.contains(activeServerId);
+
+    var unread = 0;
+    var mentions = 0;
+    for (final sid in folder.serverIds) {
+      if (ref.watch(notificationSettingsProvider
+          .select((n) => n.isServerMuted(sid)))) {
+        continue;
+      }
+      unread += ref.watch(unreadProvider.select((s) => s.serverUnreadCount(sid)));
+      mentions +=
+          ref.watch(unreadProvider.select((s) => s.serverMentionCount(sid)));
+    }
+    final voiceHere = ref.watch(_voiceServerProvider
+        .select((id) => id != null && folder.serverIds.contains(id)));
+
+    Widget face({bool plain = false}) => Builder(
+          builder: (tileContext) => _DockTile(
+            fill: hollow.elevated,
+            hoverFill: hollow.hover,
+            tooltip: plain || _isDragging ? null : folder.name,
+            semanticLabel: plain ? null : folder.name,
+            unreadCount: plain ? 0 : unread,
+            mentionCount: plain ? 0 : mentions,
+            voiceHere: !plain && voiceHere,
+            onTap: plain ? null : () => _openFolder(tileContext, folder),
+            onContextMenu: plain
+                ? null
+                : (anchor) => showFolderIconMenu(
+                      context: tileContext,
+                      ref: ref,
+                      folder: folder,
+                      anchor: anchor,
+                    ),
+            child: ServerFolderIcon(
+                folder: folder, size: _kTile, filled: false),
+          ),
+        );
+
+    return _DockSlot(
+      marked: active,
+      child: DragTarget<_StripDragData>(
+        onWillAcceptWithDetails: (details) =>
+            details.data.serverId != null &&
+            !folder.serverIds.contains(details.data.serverId),
+        onAcceptWithDetails: (details) => ref
+            .read(serverStripLayoutProvider.notifier)
+            .addToFolder(folder.id, details.data.serverId!),
+        builder: (context, candidateData, _) =>
+            LongPressDraggable<_StripDragData>(
+          data: _StripDragData(folderId: folder.id, sourceIndex: index),
+          delay: const Duration(milliseconds: 300),
+          onDragStarted: () => _setDragging(true),
+          onDragEnd: (_) => _setDragging(false),
+          onDraggableCanceled: (_, _) => _setDragging(false),
+          feedback: _DragFeedback(child: face(plain: true)),
+          childWhenDragging: AnimatedOpacity(
+            opacity: 0.3,
+            duration: HollowDurations.fast,
+            child: face(plain: true),
+          ),
+          child: AnimatedScale(
+            scale: candidateData.isNotEmpty ? 1.08 : 1.0,
+            duration: HollowDurations.fast,
+            child: face(),
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _openFolder(BuildContext tileContext, FolderStripItem folder) {
+    final box = tileContext.findRenderObject() as RenderBox?;
+    if (box == null) return;
+    final pos = overlayAnchorOf(tileContext);
+    showServerFolderPopup(
+      context: tileContext,
+      ref: ref,
+      folder: folder,
+      anchor: Offset(pos.dx + box.size.width / 2, pos.dy),
+      isDock: true,
+      onServerSelected: (serverId) => _selectServer(ref, serverId),
+      onRenameRequested: () => showFolderRenameDialog(
+        context: tileContext,
+        ref: ref,
+        folder: folder,
+      ),
     );
   }
 }
 
+/// The server holding the voice room you are in, if any.
+final _voiceServerProvider = Provider<String?>((ref) => ref.watch(
+    voiceChannelProvider
+        .select((s) => s.isInVoiceChannel ? s.currentServerId : null)));
 
 /// Drag data for server strip items.
 class _StripDragData {
@@ -829,190 +963,34 @@ class _StripDragData {
   });
 }
 
-/// Server icon for the bottom bar, with a bottom-edge selection indicator.
-class _BottomServerIcon extends StatefulWidget {
+/// What follows the pointer during a drag. It renders in the Overlay with no
+/// text style above it, so it brings its own.
+class _DragFeedback extends StatelessWidget {
   final Widget child;
-  final Color backgroundColor;
-  final VoidCallback? onTap;
-
-  /// Right click, position already resolved to OVERLAY space. Folder icons pass
-  /// their own detector, because they sit inside the drag machinery.
-  final void Function(Offset overlayPosition)? onContextMenu;
-
-  final String? tooltip;
-
-  /// Overrides [tooltip] as the screen-reader name, for a control whose tooltip
-  /// states a CONDITION while its purpose is to open a menu.
-  final String? semanticLabel;
-
-  final bool isSelected;
-  final bool showBorder;
-  final int unreadCount;
-  final int mentionCount;
-
-  /// Admitted, but waiting for a member to finish the MLS setup.
-  final bool awaitingSetup;
-
-  const _BottomServerIcon({
-    required this.child,
-    required this.backgroundColor,
-    this.onTap,
-    this.onContextMenu,
-    this.tooltip,
-    this.semanticLabel,
-    this.isSelected = false,
-    this.showBorder = true,
-    this.unreadCount = 0,
-    this.mentionCount = 0,
-    this.awaitingSetup = false,
-  });
+  const _DragFeedback({required this.child});
 
   @override
-  State<_BottomServerIcon> createState() => _BottomServerIconState();
+  Widget build(BuildContext context) => DefaultTextStyle(
+        style: HollowTypography.label,
+        child: AnimatedOpacity(
+          opacity: 0.8,
+          duration: Duration.zero,
+          child: child,
+        ),
+      );
 }
 
-class _BottomServerIconState extends State<_BottomServerIcon> {
-  bool _hovering = false;
+/// The gap between two tiles, which is also where a dragged tile drops to
+/// reorder. Its width never changes, so a drag never shoves the row.
+class _ReorderGap extends StatelessWidget {
+  final int index;
+  final void Function(_StripDragData data) onAccept;
+
+  const _ReorderGap({required this.index, required this.onAccept});
 
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
-
-    final radius =
-        (_hovering || widget.isSelected) ? 12.0 : hollow.radiusLg;
-    final effectiveBg = _hovering && !widget.isSelected
-        ? Color.lerp(widget.backgroundColor, hollow.accent, 0.15)!
-        : widget.backgroundColor;
-
-    final indicatorWidth =
-        widget.isSelected ? 28.0 : (_hovering ? 16.0 : 0.0);
-
-    // The indicator is Positioned so it cannot affect icon centring.
-    Widget icon = MouseRegion(
-      cursor: widget.onTap != null
-          ? SystemMouseCursors.click
-          : SystemMouseCursors.basic,
-      onEnter: (_) => setState(() => _hovering = true),
-      onExit: (_) => setState(() => _hovering = false),
-      child: HollowFocusRing(
-        enabled: widget.onTap != null,
-        onActivate: widget.onTap,
-        borderRadius: BorderRadius.circular(radius),
-        child: GestureDetector(
-        onTap: widget.onTap,
-        child: Stack(
-          alignment: Alignment.center,
-          clipBehavior: Clip.none,
-          children: [
-            // Clip.none is load bearing: an avatar frame paints outside the
-            // icon box and a clipping badge stack cuts it off.
-            Stack(
-              clipBehavior: Clip.none,
-              children: [
-                AnimatedContainer(
-                  duration: HollowDurations.fast,
-                  curve: Curves.easeOutCubic,
-                  width: 38,
-                  height: 38,
-                  clipBehavior: Clip.antiAlias,
-                  decoration: BoxDecoration(
-                    color: effectiveBg,
-                    borderRadius: BorderRadius.circular(radius),
-                    border: (widget.isSelected && widget.showBorder)
-                        ? Border.all(
-                            color: hollow.accent.withValues(alpha: 0.6),
-                            width: 2,
-                          )
-                        : null,
-                  ),
-                  alignment: Alignment.center,
-                  child: widget.child,
-                ),
-                // Top-LEFT here, not top-right like the Classic strip: on the
-                // Dock the unread badge owns the top-right corner.
-                if (widget.awaitingSetup)
-                  const Positioned(
-                    left: -5,
-                    top: -4,
-                    child: HollowTooltip(
-                      message: kAwaitingSetupTooltip,
-                      child: AwaitingSetupBadge(size: 14),
-                    ),
-                  ),
-                if (widget.unreadCount > 0 || widget.mentionCount > 0)
-                  Positioned(
-                    right: -6,
-                    top: -6,
-                    child: HollowCountBadge(
-                      count: widget.mentionCount > 0
-                          ? widget.mentionCount
-                          : widget.unreadCount,
-                      mention: widget.mentionCount > 0,
-                      ring: hollow.surface,
-                    ),
-                  ),
-              ],
-            ),
-            Positioned(
-              bottom: -8,
-              child: AnimatedContainer(
-                duration: HollowDurations.fast,
-                curve: HollowCurves.enter,
-                width: indicatorWidth,
-                height: 3,
-                decoration: BoxDecoration(
-                  color: hollow.textPrimary
-                      .withValues(alpha: indicatorWidth > 0 ? 1 : 0),
-                  borderRadius: BorderRadius.circular(2),
-                ),
-              ),
-            ),
-          ],
-        ),
-      ),
-      ),
-    );
-
-    if (widget.tooltip != null) {
-      icon = HollowTooltip(message: widget.tooltip!, child: icon);
-    }
-
-    // Tooltips do not surface to screen readers, so a tappable icon needs a
-    // name of its own.
-    final label = widget.semanticLabel ?? widget.tooltip;
-    if (label != null && widget.onTap != null) {
-      icon = Semantics(button: true, label: label, child: icon);
-    }
-
-    // ABOVE the focus ring, so Menu and Shift+F10 reach it while the icon is
-    // keyboard-focused (issue #61).
-    final onContextMenu = widget.onContextMenu;
-    if (onContextMenu != null) {
-      icon = ContextMenuTarget(
-        semanticLabel: '${label ?? 'Icon'} actions',
-        onOpen: onContextMenu,
-        child: icon,
-      );
-    }
-
-    return icon;
-  }
-}
-
-/// Thin drop zone between items, for reordering.
-class _ReorderGap extends StatelessWidget {
-  final int index;
-  final HollowTheme hollow;
-  final void Function(_StripDragData data) onAccept;
-
-  const _ReorderGap({
-    required this.index,
-    required this.hollow,
-    required this.onAccept,
-  });
-
-  @override
-  Widget build(BuildContext context) {
     return DragTarget<_StripDragData>(
       onWillAcceptWithDetails: (details) {
         // A drop right next to the source would be a no-op reorder.
@@ -1020,19 +998,123 @@ class _ReorderGap extends StatelessWidget {
         return src != index && src != index - 1;
       },
       onAcceptWithDetails: (details) => onAccept(details.data),
-      builder: (context, candidateData, rejectedData) {
-        final isActive = candidateData.isNotEmpty;
-        return AnimatedContainer(
-          duration: HollowDurations.fast,
-          width: isActive ? 8 : HollowSpacing.xs,
-          height: 38,
-          margin: EdgeInsets.symmetric(horizontal: isActive ? 2 : 0),
-          decoration: BoxDecoration(
-            color: hollow.accent.withValues(alpha: isActive ? 1 : 0),
-            borderRadius: BorderRadius.circular(2),
+      builder: (context, candidateData, _) => SizedBox(
+        width: HollowSpacing.sm,
+        height: _kTile,
+        child: Center(
+          child: AnimatedContainer(
+            duration: HollowDurations.fast,
+            width: HollowSpacing.xs,
+            decoration: BoxDecoration(
+              color: hollow.accent
+                  .withValues(alpha: candidateData.isNotEmpty ? 1 : 0),
+              borderRadius: BorderRadius.circular(hollow.radiusXs),
+            ),
           ),
-        );
-      },
+        ),
+      ),
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Places and tools.
+// ---------------------------------------------------------------------------
+
+class _PlaceSpec {
+  final ShellTab tab;
+  final String label;
+  final IconData icon;
+  const _PlaceSpec(this.tab, this.label, this.icon);
+}
+
+/// The app's other places, which swap the centre pane. Five buttons, or one
+/// "Places" menu when the dock is too narrow for them beside the servers.
+class _Places extends ConsumerWidget {
+  final DockLocation location;
+  final bool fold;
+
+  const _Places({required this.location, required this.fold});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final places = [
+      const _PlaceSpec(ShellTab.conference, 'Conferences', LucideIcons.video),
+      const _PlaceSpec(ShellTab.guest, 'Public channels', LucideIcons.globe),
+      const _PlaceSpec(ShellTab.share, 'Share', LucideIcons.share2),
+      const _PlaceSpec(ShellTab.archive, 'Archive', LucideIcons.archive),
+      // Absent entirely, not disabled, on store builds: Apple 3.1.1 and Play
+      // policy want no shop surface at all.
+      if (ref.watch(shopAvailableProvider))
+        const _PlaceSpec(ShellTab.shop, 'Hollow Shop', LucideIcons.store),
+    ];
+    final active = switch (location) {
+      _AtPlace(:final tab) => tab,
+      _ => null,
+    };
+
+    if (fold) {
+      return _DockSlot(
+        marked: active != null,
+        child: Builder(
+          builder: (buttonContext) => HollowIconButton(
+            icon: LucideIcons.layoutGrid,
+            label: 'Places',
+            selected: active != null,
+            onPressed: () {
+              final box = buttonContext.findRenderObject() as RenderBox?;
+              showHollowMenu(
+                context: buttonContext,
+                anchor: overlayAnchorOf(buttonContext,
+                    localOffset: Offset(box?.size.width ?? 0, 0)),
+                alignEnd: true,
+                builder: (_, _) => [
+                  for (final p in places)
+                    HollowMenuItem(
+                      icon: p.icon,
+                      label: p.label,
+                      isChecked: p.tab == active,
+                      onTap: () => _togglePlace(ref, p.tab),
+                    ),
+                ],
+              );
+            },
+          ),
+        ),
+      );
+    }
+
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        for (var i = 0; i < places.length; i++) ...[
+          if (i > 0) const SizedBox(width: HollowSpacing.xs),
+          _DockSlot(
+            marked: places[i].tab == active,
+            child: HollowIconButton(
+              icon: places[i].icon,
+              label: places[i].label,
+              selected: places[i].tab == active,
+              onPressed: () => _togglePlace(ref, places[i].tab),
+            ),
+          ),
+        ],
+      ],
+    );
+  }
+}
+
+class _HelpButton extends ConsumerWidget {
+  const _HelpButton();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final open = ref.watch(helpPanelOpenProvider);
+    return HollowIconButton(
+      icon: LucideIcons.circleHelp,
+      label: 'Help',
+      selected: open,
+      onPressed: () => ref.read(helpPanelOpenProvider.notifier).state = !open,
     );
   }
 }

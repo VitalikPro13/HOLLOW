@@ -33,8 +33,8 @@
     { "peer": "a", "op": "wait_for", "gone": "type:_FriendsManager", "timeout_ms": 10000 },
     { "peer": "b", "op": "tap", "target": "type:_FriendsManager > semantics:Close", "index": 0 },
     { "peer": "b", "op": "wait_for", "gone": "type:_FriendsManager", "timeout_ms": 10000 },
-    { "peer": "a", "op": "tap", "target": "tooltip:probe-b" },
-    { "peer": "b", "op": "tap", "target": "tooltip:probe-a" },
+    { "peer": "a", "op": "tap", "target": "semantics:probe-b" },
+    { "peer": "b", "op": "tap", "target": "semantics:probe-a" },
     { "peer": "all", "op": "wait", "ms": 1500 },
 
     { "peer": "a", "op": "log", "message": "album one: red, slow GIF, blue, with a caption" },

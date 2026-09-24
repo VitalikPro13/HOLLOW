@@ -27,7 +27,7 @@
     { "peer": "b", "op": "tap", "target": "type:_FriendsManager > semantics:Close", "index": 0 },
     { "peer": "b", "op": "wait_for", "gone": "type:_FriendsManager", "timeout_ms": 10000 },
 
-    { "peer": "b", "op": "tap", "target": "tooltip:probe-a" },
+    { "peer": "b", "op": "tap", "target": "semantics:probe-a" },
     { "peer": "b", "op": "wait", "ms": 1500 },
     { "peer": "b", "op": "enter_text", "target": "field", "value": "ok the stems are up, mind giving the second half a listen? ${RUN}" },
     { "peer": "b", "op": "key", "value": "enter" },
@@ -35,8 +35,8 @@
     { "peer": "b", "op": "enter_text", "target": "field", "value": "the low end on track 3 still feels muddy to me, no idea if it is the kick or the bass" },
     { "peer": "b", "op": "key", "value": "enter" },
 
-    { "peer": "a", "op": "wait_for", "target": "tooltip:probe-b", "timeout_ms": 60000 },
-    { "peer": "a", "op": "tap", "target": "tooltip:probe-b" },
+    { "peer": "a", "op": "wait_for", "target": "semantics:probe-b", "timeout_ms": 60000 },
+    { "peer": "a", "op": "tap", "target": "semantics:probe-b" },
     { "peer": "a", "op": "wait_for", "target": "text:ok the stems are up, mind giving the second half a listen? ${RUN}", "timeout_ms": 60000 },
     { "peer": "a", "op": "hover", "target": "text:the low end on track 3 still feels muddy to me, no idea if it is the kick or the bass" },
     { "peer": "a", "op": "tap", "target": "semantics:Reply" },
@@ -138,7 +138,7 @@
     { "peer": "a", "op": "wait", "ms": 800 },
     { "peer": "a", "op": "hover_at", "x": 5, "y": 400 },
     { "peer": "a", "op": "shot", "name": "c-04-channel-compact" },
-    { "peer": "a", "op": "tap", "target": "tooltip:probe-b" },
+    { "peer": "a", "op": "tap", "target": "semantics:probe-b" },
     { "peer": "a", "op": "wait", "ms": 1200 },
     { "peer": "a", "op": "hover_at", "x": 5, "y": 400 },
     { "peer": "a", "op": "shot", "name": "d-11-dm-compact" }

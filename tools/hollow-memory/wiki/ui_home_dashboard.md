@@ -6,7 +6,7 @@ Source files:
 - `lib/src/ui/shell/home_dashboard.dart`: layout, greeting title row, `homeShowsRail()`
 - `lib/src/ui/shell/home_inbox.dart`: `HomeAttention`, `HomeSetupChecklist`, `HomeConversations`
 - `lib/src/ui/shell/home_rail.dart`: `HomeRail` (News card, Relay card, Active Now)
-- `lib/src/ui/shell/friends_bar.dart`: FriendsBar, `showFriendsManager()`, _FriendsManager dialog, _FriendChip
+- `lib/src/ui/shell/friends_bar.dart`: FriendsBar, `showFriendsManager()` + `FriendsManagerTab`, _FriendsManager dialog, _FriendChip
 
 Redesigned 2026-09-23 (design language section 5; plan `HOLLOW_DESIGN_LANGUAGE_PLAN.md` session 9). The old three columns (profile, recent conversations, network) are gone. The phone's Chats tab reuses the strips and the conversation data (2026-09-24, wiki `ui_mobile` "MobileChatsTab").
 
@@ -32,6 +32,7 @@ An app pane anchored to the window, never a centred max-width group (design lang
 Absent when nothing waits. One `elevated` row each, ghost secondary + compact outline primary with per-row `loading:` and a failure toast:
 - Unacknowledged `securityAlertsProvider` entries grouped per master: new device(s), identity re-keyed, identity reappeared. Verify = `showVerifyContactDialog` (not awaited), Dismiss = `acknowledgeForPeer`.
 - Incoming friend requests (`friendsProvider`, pending + incoming): Accept / Decline.
+- "Your recovery phrase isn't backed up yet" (Back up now) while `homeSetupProvider` is loaded, the phrase is unsaved, and the setup checklist is NOT showing (hidden or finished), so the reminder never vanishes unanswered. Back up now calls `showRecoveryPhrase(context, ref)`, a top-level function in `home_inbox.dart` shared with the checklist (reads the phrase from storage when this session does not hold it, toasts on failure).
 - An update ready (`hasUpdateProvider`): View update opens Settings on Updates. Desktop only (`installsUpdates`). The manifest is checked at launch (`newsProvider.build`) and again every 2 h by `UpdateNotifier`'s own one-shot `Timer` (desktop only, re-armed by every check, so a manual check pushes the next one out; skipped while downloading / extracting / ready). A background check shows no progress and no error. Never tie it to `GuestFetchMode.periodic30m` or the 60 s status poll.
 More than 3 collapse behind "Show all N".
 
@@ -43,10 +44,11 @@ Shown while the person has no friend OR no server, `homeSetupProvider.loaded`, a
 
 ## Conversations (`HomeConversations`, a sliver)
 
-- DMs: `sortedFriendsProvider` + `lastDmMessageProvider` + `dmUnreadCounts` (a muted DM counts 0, as in the friends bar); open with `openDmConversation`; right click = the shared user menu (`dmTile`).
+- DMs: `sortedFriendsProvider` + `lastDmMessageProvider` + `dmUnreadCounts` (a muted DM counts 0, as in the friends bar); open with `openDmConversation`; right click = the shared user menu (`dmTile`). A friend with no messages has `at: null` ("No messages yet", no time); `homeNewestFirst` sinks those, while a mention with no time still leads.
+- Saved messages (`savedMessagesPeerIdProvider`, the self-DM) is pinned as the first row on desktop, under the All filter only (and a matching search), outside the ranking and the counts: `_SavedMessagesRow`, `SavedMessagesAvatar`, the last message as preview, no context menu, opens with `openDmConversation`.
 - Channel mentions: every `channelMentionCounts` entry above 0 for a known server; title `#channel` + the server as detail, preview from `mentionPreviewProvider` (recorded in `event_provider` when a live channel message mentions us and we are not viewing it; in memory only, so after a restart the row says "Mentioned you" with no time and sorts first). Opens with `openServerChannel()` (`core/providers/channel_navigation.dart`, the same batch the notification path uses).
 - Filter chips All / Unread (DMs with unread + mention rows) / Mentions, and the title-row search.
-- Rows are `ConversationRow` (`components/conversation_row.dart`): `PresenceAvatar`, title + detail + time BESIDE the name (`conversationTimeLabel()`: 14:05 / Yesterday / weekday / Sep 17 / Sep 17, 2025, interface face at `textTertiary`), preview, `HollowCountBadge` (accent unread, error + `@` mention) at the far edge.
+- Rows are `ConversationRow` (`components/conversation_row.dart`): `PresenceAvatar`, title + detail + time BESIDE the name (`conversationTimeLabel()`: 14:05 / Yesterday / weekday / Sep 17 / Sep 17, 2025, and '' for an epoch-or-earlier time, interface face at `textTertiary`), preview, `HollowCountBadge` (accent unread, error + `@` mention) at the far edge.
 - Empty states: no conversations at all, nothing unread, no mentions, no search match.
 
 ## Side panel (`HomeRail`)
@@ -101,86 +103,59 @@ Your Stats is Settings > Devices `SyncCheckCard`; the status card and relay bars
 
 ## FriendsBar — Horizontal Friend Strip
 
-`friends_bar.dart:FriendsBar` is a `ConsumerWidget`. Renders a 44px tall horizontal bar at the top of the Dock layout. Contains an "Add Friend" button, a vertical divider, and a horizontally scrolling list of friend chips.
+`friends_bar.dart:FriendsBar` is a `ConsumerWidget`. Renders a `kDockHeaderHeight` (44) px bar at the top of the Dock layout: your people on the left and, in Dock mode, the window's own strip. It carries no other buttons: Shop, Conferences and Help are on the dock (wiki `ui_server_strip`), Saved messages is the pinned first row of Home's conversations.
 
 **Providers read:**
-- `friendsProvider` — all friend entries
-- `peersProvider` — online peer detection
-- `invisiblePeersProvider` — exclude invisible peers from online status
-- `profileProvider` — display names and avatars
-- `unreadProvider` — `unreadState.dmUnreadCounts[peerId]`
-- `notificationSettingsProvider.notifier` — `isDmEnabled(peerId)` check for unread filtering
-- `selectedPeerProvider` — highlight currently selected friend
-- `favouriteFriendsProvider` — custom friend ordering
+- `friendsBarProvider` (`friends_provider.dart`): what the strip shows, a `FriendsBarContent`
+- `pendingFriendCountProvider`: incoming requests, for the Add friend badge
+- `dockOwnsWindowChromeProvider` + `windowControlsWidthProvider`: whether the header carries the window chrome, and how much of its trailing end to keep clear
 
-**Container:** Height 44px, `hollow.surface` background (alpha 1.0), bottom border in `hollow.border`.
+**Container:** Height 44px, `hollow.opaqueSurface` background, bottom border in `hollow.border`. Label scale clamped to 1.3 (fixed-height chrome).
 
-**Sorting logic for accepted friends:** Online first (not invisible), then alphabetical by display name. Online detection: `peers.containsKey(peerId) && !invisiblePeers.contains(peerId)`.
-
-**Favourites override:** If `favouriteFriendsProvider` returns a non-empty list, only those friends are displayed (in their custom order), filtered to valid accepted friends. Otherwise, all accepted friends are shown in the default online-first alphabetical order.
-
-**Pending request badge:** Counts friends with `status == 'pending' && direction == 'incoming'`. If > 0, a red circle (14px, `hollow.error`, 2px `hollow.surface` border) overlays the top-right of the Add Friend button, showing the count in white 8px w700 text.
+**`friendsBarProvider` → `FriendsBarContent {leading, extras, hidden}`:** sorted by name, case-insensitively (`compareFriendNames`), NOT online-first, so chips never jump when someone connects. With no favourites, `leading` is every accepted friend by name. With favourites (ids resolved device→master via `deviceLinkProvider`), `leading` is the favourites in their drag order, `extras` the non-favourites with unread (DM notifications enabled and a count above 0: unread beats the filter), and `hidden` the rest. A list of ONLY stale favourites behaves as no favourites. Only the strip reads it; every other surface reads `sortedFriendsProvider` (still online-first, its name compare now case-insensitive too), so favouriting never hides a friend elsewhere.
 
 **Layout (Row):**
-1. `HollowSpacing.sm` left padding
-2. **Add Friend button:** `HollowTooltip(message: 'Add Friend')` wrapping `HollowPressable` with `LucideIcons.userPlus` (18px, `hollow.textSecondary`). Tap calls `_showAddFriendDialog()`.
-3. Vertical divider: 1px wide, 24px tall, `hollow.border` color, `HollowSpacing.sm` horizontal margin.
-4. **Friends list (Expanded):** If `displayList` is empty, shows "No friends yet" caption. Otherwise, horizontal `ListView.builder` rendering `_FriendChip` widgets with `HollowSpacing.xs` horizontal padding.
-5. **Right-hand group** (each `HollowTooltip` > `HollowPressable`, 18px icon, accent when active):
-   - **Hollow Shop** — `LucideIcons.store`, rendered ONLY when `shopAvailableProvider` (absent, not disabled, on store builds). Active on `shopTabOpenProvider`. Tap toggles: `setShellTab(read, null)` when lit, else `openShopTab(read)`. Sits before Saved messages. (2026-09-02, wiki `hollowpack`.)
-   - **Saved messages** — `LucideIcons.bookmark`. Active when `savedMessagesPeerIdProvider == selectedPeerProvider`. Tap calls `_toggleSavedMessages`.
-   - **Conferences** — `LucideIcons.video`. Active on `conferenceTabOpenProvider`. Tap toggles: `setShellTab(read, null)` when lit, else `conferenceProvider.notifier.openTab()`.
-   - **Help** — `LucideIcons.circleHelp`, toggles `helpPanelOpenProvider`.
+1. Leading gap: `HollowSpacing.md`, or on macOS in Dock mode `kMacTrafficLightGap / scale` for the traffic lights.
+2. **Add friend** (`_AddFriendButton`): a `HollowIconButton` (`LucideIcons.userPlus`, label "Add friend"). With incoming requests an ACCENT `HollowCountBadge` (ring `opaqueSurface`, never red: a request is not a mention) sits on its top-right corner, and the press opens `showFriendsManager(tab: FriendsManagerTab.incoming)`; otherwise the manager's Friends tab.
+3. **Friends** (`Expanded` > `LayoutBuilder`): the chips take at most `maxWidth - 48` (`_kMinDragWidth`), so the middle always leaves room to drag the window. `_FriendStrip` renders `leading`, then a `HollowVerticalDivider` when there are extras or hidden friends, then `extras`, then "+N more" (`_MoreFriends`, opens the manager). An `EdgeScrollRow(shrinkWrap: true)`, or a lazy `ListView.builder` inside `EdgeScrollRow.builder` above 24 items. Chips are keyed `ValueKey(peerId)`.
+   - Empty (`content.isEmpty`): "No friends yet" (label, `textTertiary`) + `HollowTextLink` "Add a friend" (manager on the Add tab).
+4. **Drag area:** in Dock mode the rest of the middle is a `DragToMoveArea` (double click maximises too).
+5. Trailing: in Dock mode a gap the width of the floating window controls (`windowControlsWidthProvider` is in window pixels, so divided by the effective `UiScale`); otherwise `HollowSpacing.sm`.
 
-**Every strip button that lights up must also un-light (2026-07-31).** The accent colour reads as an on/off control, so pressing the lit button has to take you back out. Audit by ICON STATE, not by whether the thing it opens is a centre tab — Saved messages was the last hold-out and only ever selected, so pressing it again re-selected the same peer and looked dead. The two need different machinery for the same feel: **Conferences is a centre TAB layered over the selection**, so off = one `setShellTab(read, null)` and whatever was underneath reappears; **Saved messages IS the selection**, so there is nothing underneath and off has to mean Home. Pinned by `test/widget/friends_bar_toggle_test.dart`.
-
-**Saved-messages toggle (`_toggleSavedMessages`):** in split view with `focusedPane == 1` it forwards to `_selectFriend` (that press targets the right pane, so there is no global lit state to toggle). Otherwise, if `selectedPeerProvider == savedId` it calls `_clearToHome`, else `_selectFriend`.
-
-**`_clearToHome`:** the exact inverse of `_selectFriend`'s non-split branch — same providers, peer cleared instead of set. Deliberately does NOT close an open split: the press that lit the button didn't open one.
-
-**Friend selection (`_selectFriend`):** Checks `splitViewProvider` — if split mode is active and focus is on pane 1 (right), calls `navigateRightToPeer(peerId)`. Otherwise:
-- Calls `setShellTab(ref.read, null)` — closes every centre tab at once (see `feedback_shell_centre_tabs_exclusive`)
-- Sets `selectedPeerProvider` to peerId
-- Clears `selectedServerProvider`, `channelListProvider`, `selectedChannelProvider`, `serverSettingsOpenProvider`
-- Calls `unreadProvider.notifier.markDmSeen(peerId, null)`
+**Friend selection:** a chip tap calls `openDmConversation(ref, peerId)` (`core/providers/dm_navigation.dart`). In split view with `focusedPane == 1` it calls `navigateRightToPeer(peerId)`; otherwise it closes every centre tab via `setShellTab(ref.read, null)`, sets `selectedPeerProvider`, and clears `selectedServerProvider`, `channelListProvider`, `selectedChannelProvider`, `serverSettingsOpenProvider`. Either way it then calls `unreadProvider.notifier.markDmSeen(peerId, null)`.
 
 ---
 
 ## _FriendChip — Individual Friend Avatar in Bar
 
-`friends_bar.dart:_FriendChip` is a `StatelessWidget`. Renders a single friend as a compact chip in the horizontal FriendsBar.
+`friends_bar.dart:_FriendChip` is a `ConsumerWidget` keyed by peer id. Renders a single friend as a compact chip in the horizontal FriendsBar, reading its own profile, presence (`onlineIdentitiesProvider`), selection, DM notification setting and unread count.
 
-**Props:** `peerId`, `name`, `isOnline`, `isSelected`, `unreadCount`, `avatarBytes`, `onTap`.
+**Props:** `peerId`.
 
-**Layout:** `HollowTooltip(message: name)` wrapping `HollowPressable` with `hollow.elevated` hover color. Selected state: `hollow.accent` at 15% alpha background. Padding: `HollowSpacing.sm` horizontal, 4px vertical. Horizontal margin: 3px.
+**Layout:** `HollowPressable` with `radiusMd`. Selected: `hollow.accentMuted` fill and the name in `accentText`. Tooltip = the friend's status line, none when it is empty (never the name the chip already shows).
 
 **Contents (Row):**
-1. **Avatar stack:**
-   - `HollowAvatar(peerId, size: 24, imageBytes: avatarBytes)`
-   - `StatusDot` overlay at bottom-right (-2, -2): 7px dot inside 10px `hollow.surface` circle. Green + pulse when online, `hollow.textSecondary` when offline.
-   - **Unread indicator (conditional):** If `unreadCount > 0`, a `HollowCountBadge` (accent, `ring: hollow.surface`) at top-left (-4, -4).
+1. **Avatar** (`_FriendAvatar`): `HollowAvatar(peerId, size: 24)` with a 7px `StatusDot` (`filled: online`, success or `textSecondary`) in an 11px cut-out at the bottom-right. The cut-out follows the chip's current fill (selected wash blended over the strip, `elevated` on hover, else `opaqueSurface`), so it never reads as a dark halo.
+2. **Name text:** max 96 px (`_kChipNameWidth`), label style (13/500). `textPrimary` when unread, `textSecondary` otherwise. Unread never changes the weight, so the row never reflows under the pointer.
+3. **Unread:** an inline `HollowCountBadge` after the name (muted DMs count 0).
 
-2. **Name text:** `ConstrainedBox(maxWidth: 72)`. Caption style, 11px. `hollow.textPrimary` if selected, `hollow.textSecondary` if not. Bold (w600) if unread, normal (w400) otherwise. Single line ellipsis.
-
-**Right click** (issue #61 phase 4): wrapped in a `Consumer` + `ContextMenuTarget` opening the shared user menu with the `dmTile` surface. A `Consumer` rather than a `ref` constructor field, because passing a `WidgetRef` into a constructor cascades rebuilds.
+**Right click** (issue #61 phase 4): a `ContextMenuTarget` opening the shared user menu with the `dmTile` surface.
 
 ---
 
 ## _FriendsManager — Full Friends Dialog
 
-`friends_bar.dart:_FriendsManager` is a `ConsumerStatefulWidget`. A modal dialog opened by the Add Friend button in FriendsBar. Contains 5 tabs for managing all friend relationships.
+`friends_bar.dart:_FriendsManager` is a `ConsumerStatefulWidget`. A modal dialog opened by the Add friend button in FriendsBar. Contains 5 tabs for managing all friend relationships.
 
-**Dialog opening:** `showFriendsManager(context, {addFriend})` (public; Home's checklist and the New message dialog open it on the Add Friend tab). Historically `_showAddFriendDialog()` used `showGeneralDialog` with:
-- `barrierDismissible: true`, `barrierColor: Colors.black` at 50% alpha
-- Transition: `HollowDurations.normal`, fade + scale from 0.95 to 1.0, `Curves.easeOut`
+**Dialog opening:** `showFriendsManager(context, {addFriend, tab})` (public, via `showHollowDialog`). `tab` is the public enum `FriendsManagerTab {friends, favourites, incoming, outgoing, add}` and wins when given; `addFriend: true` still means the Add tab; neither = Friends. Home's checklist and the New message dialog open it on the Add tab, the header's Add friend button on Incoming while requests wait.
 
-**State:** `_activeTab` (`_FriendsTab` enum: `friends`, `favourites`, `incoming`, `outgoing`, `add`). Default: `_FriendsTab.friends`. `_addController` (`TextEditingController`) for the Add Friend input, disposed in `dispose()`.
+**State:** `_activeTab` (`_FriendsTab`, a typedef of `FriendsManagerTab`), initialised from `initialTab`. `_addController` (`TextEditingController`) for the Add Friend input, disposed in `dispose()`.
 
 **Providers read:**
-- `friendsProvider` — categorized into `accepted`, `incoming`, `outgoing`
-- `peersProvider` + `invisiblePeersProvider` — online sorting for accepted list
+- `friendsProvider`: pending requests split into `incoming`, `outgoing`
+- `sortedFriendsProvider`: the accepted list (master-collapsed)
 
-**Sorting for accepted friends:** Online first (respecting invisible peers), then alphabetical by peer ID.
+**Sorting for accepted friends:** `sortedFriendsProvider`, online first, then by display name case-insensitively (`compareFriendNames`).
 
 **Dialog container:** 520px wide, 480px tall, `hollow.background` color, `radiusLg` corners, `hollow.border` border, drop shadow (black 30% alpha, blur 24, offset (0,8)).
 
@@ -316,13 +291,14 @@ Your Stats is Settings > Devices `SyncCheckCard`; the status card and relay bars
 
 **HomeDashboard subtree reads:**
 - `friendsProvider`, `sortedFriendsProvider`, `serverListProvider`, `homeSetupProvider`, `identityProvider`, `profileProvider` - title row and checklist
-- `securityAlertsProvider`, `updaterProvider`, `hasUpdateProvider` - Needs Attention
-- `lastDmMessageProvider`, `onlineIdentitiesProvider`, `unreadProvider`, `mentionPreviewProvider`, `serverChannelsProvider` - Conversations
+- `securityAlertsProvider`, `updaterProvider`, `hasUpdateProvider`, `homeSetupProvider` - Needs Attention
+- `lastDmMessageProvider`, `onlineIdentitiesProvider`, `unreadProvider`, `mentionPreviewProvider`, `serverChannelsProvider`, `savedMessagesPeerIdProvider` - Conversations
 - `newsProvider`, `changelogProvider`, `overallConnectionProvider`, `relayDomainProvider`, `relayStatsProvider`, `voiceChannelProvider`, `deviceLinkProvider` - side panel
 
 **FriendsBar subtree reads:**
-- `friendsProvider`, `peersProvider`, `invisiblePeersProvider`, `profileProvider`, `unreadProvider`, `notificationSettingsProvider`, `selectedPeerProvider`, `favouriteFriendsProvider` — FriendsBar
-- `friendsProvider`, `peersProvider`, `invisiblePeersProvider` — _FriendsManager
+- `friendsBarProvider` (itself over `sortedFriendsProvider`, `profileProvider`, `deviceLinkProvider`, `favouriteFriendsProvider`, `unreadProvider`, `notificationSettingsProvider`), `pendingFriendCountProvider`, `dockOwnsWindowChromeProvider`, `windowControlsWidthProvider`: FriendsBar
+- `profileProvider`, `onlineIdentitiesProvider`, `selectedPeerProvider`, `notificationSettingsProvider`, `unreadProvider`: _FriendChip
+- `friendsProvider`, `sortedFriendsProvider`, `favouriteFriendsProvider`: _FriendsManager
 - `profileProvider`, `peersProvider`, `invisiblePeersProvider`, `favouriteFriendsProvider`, `splitViewProvider` — _FriendsListTab
 - `favouriteFriendsProvider`, `profileProvider`, `peersProvider`, `invisiblePeersProvider` — _FavouritesReorderTab
 - `profileProvider` — _RequestsTab

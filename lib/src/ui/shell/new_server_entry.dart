@@ -20,12 +20,12 @@ class _NewServerEntryState extends State<NewServerEntry>
   @override
   void initState() {
     super.initState();
-    _controller = AnimationController(
-      vsync: this,
-      duration: HollowDurations.normal,
-    );
+    _controller = AnimationController(vsync: this);
     _curved = CurvedAnimation(parent: _controller, curve: HollowCurves.enter);
-    _controller.forward();
+    // Read as it starts, so a live Reduce motion change applies.
+    _controller
+      ..duration = HollowDurations.normal
+      ..forward();
   }
 
   @override

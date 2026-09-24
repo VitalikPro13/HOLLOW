@@ -315,8 +315,8 @@ function Get-Thread($peer, $name, $convo) {
 }
 
 function Open-Dm($peer, $friendName) {
-    Step $peer @{ op = 'wait_for'; target = "tooltip:$friendName"; timeout_ms = 60000 }
-    Step $peer @{ op = 'tap'; target = "tooltip:$friendName" }
+    Step $peer @{ op = 'wait_for'; target = "semantics:$friendName"; timeout_ms = 60000 }
+    Step $peer @{ op = 'tap'; target = "semantics:$friendName" }
     Step $peer @{ op = 'wait'; ms = 1500 }
     Step $peer @{ op = 'wait_for'; target = 'hint:Type a message...'; timeout_ms = 30000 }
 }

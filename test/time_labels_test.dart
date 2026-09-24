@@ -26,4 +26,10 @@ void main() {
     expect(conversationTimeLabel(DateTime(2026, 9, 24, 0, 1), now: now),
         '00:01');
   });
+
+  test('an unset time is empty, never a 1970 date', () {
+    expect(
+        conversationTimeLabel(DateTime.fromMillisecondsSinceEpoch(0), now: now),
+        '');
+  });
 }

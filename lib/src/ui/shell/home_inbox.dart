@@ -13,6 +13,7 @@ import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/mention_preview_provider.dart';
 import 'package:hollow/src/core/providers/notification_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
+import 'package:hollow/src/core/providers/saved_messages_provider.dart';
 import 'package:hollow/src/core/providers/security_alerts_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/unread_provider.dart';
@@ -30,6 +31,7 @@ import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/hollow_menu.dart';
 import 'package:hollow/src/ui/components/hollow_section_header.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
+import 'package:hollow/src/ui/components/saved_messages_avatar.dart';
 import 'package:hollow/src/ui/components/server_avatar.dart';
 import 'package:hollow/src/ui/dialogs/create_server_dialog.dart';
 import 'package:hollow/src/ui/dialogs/device_link_dialog.dart';
@@ -37,7 +39,8 @@ import 'package:hollow/src/ui/dialogs/mnemonic_dialog.dart';
 import 'package:hollow/src/ui/dialogs/user_settings_dialog.dart';
 import 'package:hollow/src/ui/dialogs/verify_contact_dialog.dart';
 import 'package:hollow/src/ui/shell/friends_bar.dart';
-import 'package:hollow/src/ui/shell/home_dashboard.dart' show kHomeRowInset;
+import 'package:hollow/src/ui/shell/home_dashboard.dart'
+    show homeShowsSetup, kHomeRowInset;
 import 'package:hollow/src/ui/shell/user_context_menu.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
@@ -137,6 +140,7 @@ class _HomeAttentionState extends ConsumerState<HomeAttention> {
     final items = [
       ..._securityItems(),
       ..._requestItems(),
+      ..._phraseItems(),
       ..._updateItems(),
     ];
     if (items.isEmpty) return const SizedBox.shrink();
@@ -248,6 +252,26 @@ class _HomeAttentionState extends ConsumerState<HomeAttention> {
               ref.read(friendsProvider.notifier).acceptRequest(f.peerId),
           failure: "Couldn't answer the friend request",
         ),
+    ];
+  }
+
+  /// The checklist carries this step while it shows; once it is hidden or
+  /// finished, the reminder has to live here or it vanishes unanswered.
+  List<_AttentionItem> _phraseItems() {
+    final setup = ref.watch(homeSetupProvider);
+    if (!setup.loaded || setup.phraseSaved || homeShowsSetup(ref)) {
+      return const [];
+    }
+    return [
+      _AttentionItem(
+        id: 'phrase',
+        leading: _GlyphTile(LucideIcons.keyRound, size: _leadingSize),
+        title: "Your recovery phrase isn't backed up yet",
+        body: 'It is the only way back in if this device is lost.',
+        primaryLabel: 'Back up now',
+        onPrimary: () async => showRecoveryPhrase(context, ref),
+        failure: "Couldn't read your recovery phrase",
+      ),
     ];
   }
 
@@ -482,7 +506,7 @@ class _HomeSetupChecklistState extends ConsumerState<HomeSetupChecklist> {
             'included, can recover it for you.',
         done: setup.phraseSaved,
         action: 'Back up now',
-        onAction: () => _showPhrase(context),
+        onAction: () => showRecoveryPhrase(context, ref),
       ),
       _SetupStep(
         title: 'Add a friend',
@@ -553,23 +577,26 @@ class _HomeSetupChecklistState extends ConsumerState<HomeSetupChecklist> {
     );
   }
 
-  Future<void> _showPhrase(BuildContext context) async {
-    var phrase = ref.read(identityProvider).mnemonic;
-    if (phrase == null) {
-      try {
-        phrase = await storage_api.getMnemonic();
-      } catch (_) {
-        phrase = null;
-      }
+}
+
+/// Opens the recovery phrase, read from storage when this session has not
+/// held it in memory.
+Future<void> showRecoveryPhrase(BuildContext context, WidgetRef ref) async {
+  var phrase = ref.read(identityProvider).mnemonic;
+  if (phrase == null) {
+    try {
+      phrase = await storage_api.getMnemonic();
+    } catch (_) {
+      phrase = null;
     }
-    if (!context.mounted) return;
-    if (phrase == null || phrase.isEmpty) {
-      HollowToast.show(context, "Couldn't read your recovery phrase",
-          type: HollowToastType.error);
-      return;
-    }
-    showMnemonicDialog(context, phrase);
   }
+  if (!context.mounted) return;
+  if (phrase == null || phrase.isEmpty) {
+    HollowToast.show(context, "Couldn't read your recovery phrase",
+        type: HollowToastType.error);
+    return;
+  }
+  showMnemonicDialog(context, phrase);
 }
 
 class _SetupRow extends StatelessWidget {
@@ -721,12 +748,12 @@ Widget homeConversationLeading(
 }
 
 /// Newest first. A mention with no time (its words did not survive a restart)
-/// is still unread, so it leads rather than sinks.
-int homeNewestFirst(HomeConversation a, HomeConversation b) {
-  final at = a.at ?? DateTime(9999);
-  final bt = b.at ?? DateTime(9999);
-  return bt.compareTo(at);
-}
+/// is still unread, so it leads; a friend with no messages yet sinks.
+int homeNewestFirst(HomeConversation a, HomeConversation b) =>
+    _sortTime(b).compareTo(_sortTime(a));
+
+DateTime _sortTime(HomeConversation c) =>
+    c.at ?? (c.mention ? DateTime(9999) : DateTime(0));
 
 /// One row per friend. A muted DM counts nothing, as its badge elsewhere.
 List<HomeConversation> homeDmConversations(WidgetRef ref) {
@@ -748,7 +775,7 @@ List<HomeConversation> homeDmConversations(WidgetRef ref) {
           title: name,
           preview: last?.previewText ?? 'No messages yet',
           fromMe: last?.isMe ?? false,
-          at: last?.timestamp ?? DateTime(2000),
+          at: last?.timestamp,
           unread: notif.isDmEnabled(id) ? dmUnreads[id] ?? 0 : 0,
           searchText: name.toLowerCase(),
         );
@@ -895,6 +922,13 @@ class _HomeConversationsState extends ConsumerState<HomeConversations> {
       if (_filter == HomeFilter.mentions && !c.mention) return false;
       return q.isEmpty || c.searchText.contains(q);
     }).toList();
+    // Pinned above the ranking and outside the counts, as on the phone: a
+    // note to yourself is never unread.
+    final savedId = ref.watch(savedMessagesPeerIdProvider);
+    final showSaved = savedId != null &&
+        _filter == HomeFilter.all &&
+        (q.isEmpty || _kSavedTitle.toLowerCase().contains(q));
+    final pinned = showSaved ? 1 : 0;
 
     return SliverMainAxisGroup(
       slivers: [
@@ -914,7 +948,7 @@ class _HomeConversationsState extends ConsumerState<HomeConversations> {
             ),
           ),
         ),
-        if (shown.isEmpty)
+        if (shown.isEmpty && !showSaved)
           SliverToBoxAdapter(
             child: Padding(
               padding: const EdgeInsets.symmetric(vertical: HollowSpacing.xl),
@@ -927,13 +961,20 @@ class _HomeConversationsState extends ConsumerState<HomeConversations> {
           )
         else
           SliverList.builder(
-            itemCount: shown.length,
+            itemCount: pinned + shown.length,
             findChildIndexCallback: (key) {
+              if (showSaved && key == const ValueKey(_kSavedKey)) return 0;
               final i = shown.indexWhere((c) => ValueKey(c.key) == key);
-              return i < 0 ? null : i;
+              return i < 0 ? null : pinned + i;
             },
             itemBuilder: (context, i) {
-              final c = shown[i];
+              if (showSaved && i == 0) {
+                return KeyedSubtree(
+                  key: const ValueKey(_kSavedKey),
+                  child: _SavedMessagesRow(peerId: savedId),
+                );
+              }
+              final c = shown[i - pinned];
               final row = ConversationRow(
                 leading: homeConversationLeading(c,
                     size: _kRowAvatar, ring: hollow.background),
@@ -983,3 +1024,25 @@ class _HomeConversationsState extends ConsumerState<HomeConversations> {
 }
 
 const double _kRowAvatar = 36;
+
+const _kSavedTitle = 'Saved messages';
+const _kSavedKey = 'saved';
+
+/// The self-DM, pinned first. No context menu: none of its actions apply to a
+/// conversation with yourself, and every message in it is yours, so no "You:".
+class _SavedMessagesRow extends ConsumerWidget {
+  final String peerId;
+  const _SavedMessagesRow({required this.peerId});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final last = ref.watch(lastDmMessageProvider.select((m) => m[peerId]));
+    return ConversationRow(
+      leading: const SavedMessagesAvatar(size: _kRowAvatar),
+      title: _kSavedTitle,
+      preview: last?.previewText ?? '',
+      time: last == null ? null : conversationTimeLabel(last.timestamp),
+      onTap: () => openDmConversation(ref, peerId),
+    );
+  }
+}

@@ -110,7 +110,7 @@
     {
       "peer": "a",
       "op": "tap",
-      "target": "tooltip:probe-b"
+      "target": "semantics:probe-b"
     },
     {
       "peer": "a",
@@ -163,7 +163,7 @@
     {
       "peer": "b",
       "op": "tap",
-      "target": "tooltip:probe-a"
+      "target": "semantics:probe-a"
     },
     {
       "peer": "b",
@@ -210,7 +210,7 @@
     {
       "peer": "a",
       "op": "tap",
-      "target": "tooltip:probe-b"
+      "target": "semantics:probe-b"
     },
     {
       "peer": "a",
@@ -273,7 +273,7 @@
     {
       "peer": "a",
       "op": "tap",
-      "target": "tooltip:probe-b"
+      "target": "semantics:probe-b"
     },
     {
       "peer": "a",
@@ -540,7 +540,7 @@
     {
       "peer": "a",
       "op": "tap",
-      "target": "tooltip:probe-b"
+      "target": "semantics:probe-b"
     },
     {
       "peer": "a",

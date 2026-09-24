@@ -86,7 +86,7 @@
     {
       "peer": "b",
       "op": "tap",
-      "target": "tooltip:probe-a"
+      "target": "semantics:probe-a"
     },
     {
       "peer": "b",
@@ -107,13 +107,13 @@
     {
       "peer": "a",
       "op": "wait_for",
-      "target": "tooltip:probe-b",
+      "target": "semantics:probe-b",
       "timeout_ms": 60000
     },
     {
       "peer": "a",
       "op": "tap",
-      "target": "tooltip:probe-b"
+      "target": "semantics:probe-b"
     },
     {
       "peer": "a",

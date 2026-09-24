@@ -18,6 +18,7 @@ import 'package:hollow/src/core/models/channel_info.dart';
 import 'package:hollow/src/core/models/chat_message.dart';
 import 'package:hollow/src/core/models/node_status.dart';
 import 'package:hollow/src/core/models/server_info.dart';
+import 'package:hollow/src/core/providers/window_chrome_provider.dart';
 import 'package:hollow/src/core/providers/channel_chat_provider.dart';
 import 'package:hollow/src/core/providers/channel_navigation.dart';
 import 'package:hollow/src/core/providers/home_setup_provider.dart';
@@ -1930,7 +1931,7 @@ class _HollowShellState extends ConsumerState<HollowShell>
 
     return Column(
       children: [
-        const RepaintBoundary(child: FriendsBar()),
+        const _DockChromeClaim(child: RepaintBoundary(child: FriendsBar())),
 
         // Self-hides unless there is a banner-worthy notice, so it reaches
         // users whatever they are viewing.
@@ -2018,6 +2019,40 @@ class _HollowShellState extends ConsumerState<HollowShell>
     );
   }
 
+}
+
+/// Tells the app root the dock's header carries the window chrome while it is
+/// mounted, so the 32 px title bar folds away. Written after the frame and
+/// cleared in a microtask, never during a build.
+class _DockChromeClaim extends ConsumerStatefulWidget {
+  final Widget child;
+  const _DockChromeClaim({required this.child});
+
+  @override
+  ConsumerState<_DockChromeClaim> createState() => _DockChromeClaimState();
+}
+
+class _DockChromeClaimState extends ConsumerState<_DockChromeClaim> {
+  late final StateController<bool> _claim =
+      ref.read(dockOwnsWindowChromeProvider.notifier);
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _claim.state = true;
+    });
+  }
+
+  @override
+  void dispose() {
+    final claim = _claim;
+    Future.microtask(() => claim.state = false);
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => widget.child;
 }
 
 /// The member panel's place in the row. It shows and hides instantly: a width

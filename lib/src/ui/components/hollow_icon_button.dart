@@ -28,6 +28,10 @@ class HollowIconButton extends StatelessWidget {
   /// A short number after the icon (pinned messages), in the console voice.
   final String? count;
 
+  /// Replaces [label] as the tooltip only, for a tooltip that explains a mode
+  /// (push to talk) while the name stays the action.
+  final String? tooltip;
+
   const HollowIconButton({
     super.key,
     required this.icon,
@@ -37,13 +41,14 @@ class HollowIconButton extends StatelessWidget {
     this.size = 32,
     this.color,
     this.count,
+    this.tooltip,
   });
 
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
     return HollowTooltip(
-      message: label,
+      message: tooltip ?? label,
       child: HollowPressable(
         onTap: onPressed,
         disabled: onPressed == null,

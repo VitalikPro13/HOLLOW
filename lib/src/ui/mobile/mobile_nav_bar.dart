@@ -3,9 +3,9 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/reduce_motion.dart';
 import 'package:hollow/src/core/providers/friends_provider.dart';
 import 'package:hollow/src/core/providers/unread_provider.dart';
-import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
+import 'package:hollow/src/ui/components/nav_selection_mark.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/ui/components/hollow_count_badge.dart';
 import 'package:hollow/src/ui/shell/mobile_nav.dart';
@@ -67,14 +67,7 @@ class MobileNavBar extends ConsumerWidget {
                     left: slotIndex * slotWidth +
                         (slotWidth - _indicatorWidth) / 2,
                     top: 0,
-                    child: Container(
-                      width: _indicatorWidth,
-                      height: HollowSpacing.xxs,
-                      decoration: BoxDecoration(
-                        color: hollow.accent,
-                        borderRadius: BorderRadius.circular(hollow.radiusXs),
-                      ),
-                    ),
+                    child: const NavSelectionMark(width: _indicatorWidth),
                   ),
                   Row(
                     children: [

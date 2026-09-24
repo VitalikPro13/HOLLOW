@@ -17,6 +17,7 @@ import 'package:hollow/src/core/providers/theme_provider.dart'
     show themeModeProvider;
 import 'package:hollow/src/core/services/attachment_export.dart'
     show exportAttachmentTo;
+import 'package:hollow/src/core/providers/display_scale_provider.dart';
 import 'package:hollow/src/core/services/image_pick.dart';
 import 'package:hollow/src/core/services/window_fullscreen.dart'
     show fullscreenProvider;
@@ -76,6 +77,7 @@ import 'probe_targets.dart';
 /// | `window_state` | `name`, `expect` | the OS window: fullscreen, style, rect |
 /// | `focus_state` | | who owns the keyboard, in Flutter and in Win32 |
 /// | `expect_window_same` | `name` | fails unless the window matches a snapshot |
+/// | `zoom` | `value` (1.5 = 150%) | sets the interface zoom, not saved |
 /// | `log` | `message` | a note in the results |
 /// | `quit` | | ends a live session |
 ///
@@ -351,9 +353,23 @@ class ProbeRunner {
     return 'theme ${light ? 'light' : 'dark'}';
   }
 
+  /// The interface zoom for this run only: the state, never the saved setting,
+  /// so a probe cannot leave a fixture zoomed.
+  Future<String> _zoom(Map<String, dynamic> step) async {
+    final c = container;
+    if (c == null) throw _ProbeFailure('zoom needs the provider container');
+    final value = (step['value'] as num?)?.toDouble() ?? kUiScaleDefault;
+    c.read(uiScaleProvider.notifier).state = value;
+    await settle(frames: step['frames'] as int? ?? 20);
+    return 'zoom ${(value * 100).round()}%';
+  }
+
   Future<String> _dispatch(
       String op, Map<String, dynamic> step, Map<String, dynamic> extra) async {
     switch (op) {
+      case 'zoom':
+        return _zoom(step);
+
       case 'open_server':
         return _openServer('${step['name']}');
 

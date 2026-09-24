@@ -5,6 +5,8 @@ import 'package:hollow/src/core/providers/member_panel_provider.dart'
     show windowFocusedProvider;
 import 'package:hollow/src/core/providers/server_avatar_anim_provider.dart';
 import 'package:hollow/src/core/providers/server_avatar_provider.dart';
+import 'package:hollow/src/theme/hollow_theme.dart';
+
 import 'animated_gif_image.dart';
 
 /// A server's icon: the ANIMATED variant off the asset rail when there is one,
@@ -22,7 +24,8 @@ class ServerIconImage extends ConsumerStatefulWidget {
   /// Shown when neither icon variant is loaded (usually initials).
   final Widget fallback;
 
-  final BorderRadius borderRadius;
+  /// The icon's corners; null is the theme's `radiusMd`.
+  final BorderRadius? borderRadius;
 
   const ServerIconImage({
     super.key,
@@ -30,7 +33,7 @@ class ServerIconImage extends ConsumerStatefulWidget {
     required this.size,
     required this.fallback,
     this.isSelected = false,
-    this.borderRadius = const BorderRadius.all(Radius.circular(8)),
+    this.borderRadius,
   });
 
   @override
@@ -42,6 +45,8 @@ class _ServerIconImageState extends ConsumerState<ServerIconImage> {
 
   @override
   Widget build(BuildContext context) {
+    final radius = widget.borderRadius ??
+        BorderRadius.circular(HollowTheme.of(context).radiusMd);
     final anim = ref
         .watch(serverAvatarAnimProvider.select((m) => m[widget.serverId]));
     if (anim != null) {
@@ -50,7 +55,7 @@ class _ServerIconImageState extends ConsumerState<ServerIconImage> {
         onEnter: (_) => setState(() => _hovering = true),
         onExit: (_) => setState(() => _hovering = false),
         child: ClipRRect(
-          borderRadius: widget.borderRadius,
+          borderRadius: radius,
           child: AnimatedGifImage(
             bytes: anim.bytes,
             width: widget.size,
@@ -65,7 +70,7 @@ class _ServerIconImageState extends ConsumerState<ServerIconImage> {
         .watch(serverAvatarProvider.select((m) => m[widget.serverId]));
     if (still != null) {
       return ClipRRect(
-        borderRadius: widget.borderRadius,
+        borderRadius: radius,
         child: Image.memory(
           still,
           width: widget.size,

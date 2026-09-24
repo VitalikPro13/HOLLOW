@@ -527,7 +527,7 @@ class _MobileChatsTabState extends ConsumerState<MobileChatsTab> {
           title: c.title,
           preview: c.preview,
           fromMe: c.fromMe,
-          time: _timeFor(c),
+          time: c.at == null ? null : conversationTimeLabel(c.at!),
           unread: c.unread,
           onTap: () => _openDmChat(c.peerId!),
           onLongPress: () => _showDmSheet(context, c.peerId!, c.title),
@@ -567,13 +567,6 @@ class _MobileChatsTabState extends ConsumerState<MobileChatsTab> {
           },
         );
     }
-  }
-
-  /// A friend with no messages yet has no time to show.
-  String? _timeFor(HomeConversation c) {
-    final at = c.at;
-    if (at == null || at.year <= 2000) return null;
-    return conversationTimeLabel(at);
   }
 }
 

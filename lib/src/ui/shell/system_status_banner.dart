@@ -11,20 +11,22 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/ui/components/hollow_focus_ring.dart';
+import 'package:hollow/src/ui/components/hollow_icon_button.dart';
+import 'package:hollow/src/ui/components/hollow_text_link.dart';
 
 /// Visual mapping for a [StatusLevel], shared by the global banner and the Home
 /// status line so the two cannot drift.
 ///
-/// There is no info theme token, so `info` reuses the app accent: distinct from
-/// the amber alarm levels and the red critical one, which keeps a neutral note
-/// from reading as an incident.
+/// `info` is the quiet grey: not the accent, which marks what acts, and apart
+/// from the amber alarm levels and the red critical one, so a neutral note
+/// never reads as an incident.
 ({Color color, IconData icon}) statusVisual(
     StatusLevel level, HollowTheme hollow) {
   switch (level) {
     case StatusLevel.operational:
       return (color: hollow.success, icon: LucideIcons.circleCheck);
     case StatusLevel.info:
-      return (color: hollow.accentText, icon: LucideIcons.info);
+      return (color: hollow.textSecondary, icon: LucideIcons.info);
     case StatusLevel.maintenance:
       return (color: hollow.warning, icon: LucideIcons.wrench);
     case StatusLevel.warning:
@@ -128,7 +130,7 @@ class _StatusCountdownState extends State<StatusCountdown> {
       mainAxisSize: MainAxisSize.min,
       children: [
         Icon(LucideIcons.clock, size: widget.fontSize, color: widget.color),
-        const SizedBox(width: 4),
+        const SizedBox(width: HollowSpacing.xs),
         Text(
           text,
           style: HollowTypography.caption.copyWith(
@@ -196,70 +198,31 @@ class _SystemStatusBannerState extends ConsumerState<SystemStatusBanner> {
     // Only worth a tap when there is truncatable detail to show.
     final hasDetail = status.message.isNotEmpty;
 
-    final divider = BorderSide(color: hollow.border.withValues(alpha: 0.3));
+    final divider = BorderSide(color: hollow.border);
+    void toggle() => setState(() => _expanded = !_expanded);
 
     final dismissBtn = status.dismissible
-        ? HollowFocusRing(
-            enabled: true,
-            onActivate: () =>
-                ref.read(statusProvider.notifier).dismissCurrent(),
-            borderRadius: BorderRadius.circular(hollow.radiusMd),
-            child: GestureDetector(
-              // Absorbed so dismissing does not also toggle expansion.
-              behavior: HitTestBehavior.opaque,
-              onTap: () => ref.read(statusProvider.notifier).dismissCurrent(),
-              child: MouseRegion(
-                cursor: SystemMouseCursors.click,
-                child: Semantics(
-                  button: true,
-                  label: 'Dismiss status notice',
-                  child: Padding(
-                    padding: const EdgeInsets.all(2),
-                    child: Icon(LucideIcons.x,
-                        size: 14, color: color.withValues(alpha: 0.8)),
-                  ),
-                ),
-              ),
-            ),
+        ? HollowIconButton(
+            icon: LucideIcons.x,
+            label: 'Dismiss status notice',
+            size: _kControl,
+            onPressed: () => ref.read(statusProvider.notifier).dismissCurrent(),
           )
         : null;
 
     final chevron = hasDetail
-        ? Icon(
-            _expanded ? LucideIcons.chevronUp : LucideIcons.chevronDown,
-            size: 15,
-            color: color.withValues(alpha: 0.7),
+        ? HollowIconButton(
+            icon: _expanded ? LucideIcons.chevronUp : LucideIcons.chevronDown,
+            label: _expanded ? 'Show less' : 'Show the whole notice',
+            size: _kControl,
+            onPressed: toggle,
           )
         : null;
 
     final detailsLink = status.link.isNotEmpty
-        ? HollowFocusRing(
-            enabled: true,
-            onActivate: () => _openLink(status.link),
-            borderRadius: BorderRadius.circular(hollow.radiusMd),
-            child: GestureDetector(
-              behavior: HitTestBehavior.opaque,
-              onTap: () => _openLink(status.link),
-              child: MouseRegion(
-                cursor: SystemMouseCursors.click,
-                child: Semantics(
-                  button: true,
-                  label: status.linkLabel.isNotEmpty
-                      ? status.linkLabel
-                      : 'Details',
-                  child: Text(
-                    status.linkLabel.isNotEmpty ? status.linkLabel : 'Details',
-                    style: HollowTypography.caption.copyWith(
-                      color: color,
-                      fontSize: 11,
-                      fontWeight: FontWeight.w700,
-                      decoration: TextDecoration.underline,
-                      decorationColor: color,
-                    ),
-                  ),
-                ),
-              ),
-            ),
+        ? HollowTextLink(
+            status.linkLabel.isNotEmpty ? status.linkLabel : 'Details',
+            onTap: () => _openLink(status.link),
           )
         : null;
 
@@ -271,9 +234,13 @@ class _SystemStatusBannerState extends ConsumerState<SystemStatusBanner> {
           )
         : null;
 
+    final headlineStyle = HollowTypography.label.copyWith(color: color);
+    final messageStyle =
+        HollowTypography.bodySmall.copyWith(color: hollow.textSecondary);
+
     Widget collapsed = Row(
       children: [
-        Icon(vis.icon, size: 15, color: color),
+        Icon(vis.icon, size: _kIcon, color: color),
         const SizedBox(width: HollowSpacing.sm),
         Expanded(
           child: Row(
@@ -283,33 +250,17 @@ class _SystemStatusBannerState extends ConsumerState<SystemStatusBanner> {
                   headline,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: HollowTypography.body.copyWith(
-                    color: color,
-                    fontSize: 12,
-                    fontWeight: FontWeight.w600,
-                  ),
+                  style: headlineStyle,
                 ),
               ),
               if (status.title.isNotEmpty && status.message.isNotEmpty) ...[
-                const SizedBox(width: HollowSpacing.sm),
-                Container(
-                  width: 3,
-                  height: 3,
-                  decoration: BoxDecoration(
-                    color: color.withValues(alpha: 0.6),
-                    shape: BoxShape.circle,
-                  ),
-                ),
                 const SizedBox(width: HollowSpacing.sm),
                 Flexible(
                   child: Text(
                     status.message,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
-                    style: HollowTypography.caption.copyWith(
-                      color: color.withValues(alpha: 0.9),
-                      fontSize: 11,
-                    ),
+                    style: messageStyle,
                   ),
                 ),
               ],
@@ -331,27 +282,17 @@ class _SystemStatusBannerState extends ConsumerState<SystemStatusBanner> {
       ],
     );
 
+    // Under the headline, past the icon and its gap.
+    const indent = EdgeInsets.only(left: _kIcon + HollowSpacing.sm);
+
     Widget expanded = Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Padding(
-              padding: const EdgeInsets.only(top: 1),
-              child: Icon(vis.icon, size: 15, color: color),
-            ),
+            Icon(vis.icon, size: _kIcon, color: color),
             const SizedBox(width: HollowSpacing.sm),
-            Expanded(
-              child: Text(
-                headline,
-                style: HollowTypography.body.copyWith(
-                  color: color,
-                  fontSize: 12.5,
-                  fontWeight: FontWeight.w700,
-                ),
-              ),
-            ),
+            Expanded(child: Text(headline, style: headlineStyle)),
             if (chevron != null) ...[
               const SizedBox(width: HollowSpacing.sm),
               chevron,
@@ -364,23 +305,16 @@ class _SystemStatusBannerState extends ConsumerState<SystemStatusBanner> {
         ),
         // Full message, no truncation: the whole point of expanding.
         if (status.title.isNotEmpty && status.message.isNotEmpty) ...[
-          const SizedBox(height: 4),
+          const SizedBox(height: HollowSpacing.xs),
           Padding(
-            padding: const EdgeInsets.only(left: 23),
-            child: Text(
-              status.message,
-              style: HollowTypography.caption.copyWith(
-                color: color.withValues(alpha: 0.95),
-                fontSize: 11.5,
-                height: 1.35,
-              ),
-            ),
+            padding: indent,
+            child: Text(status.message, style: messageStyle),
           ),
         ],
         if (countdown != null || detailsLink != null) ...[
-          const SizedBox(height: 7),
+          const SizedBox(height: HollowSpacing.sm),
           Padding(
-            padding: const EdgeInsets.only(left: 23),
+            padding: indent,
             child: Row(
               children: [
                 ?countdown,
@@ -401,8 +335,10 @@ class _SystemStatusBannerState extends ConsumerState<SystemStatusBanner> {
       child: GestureDetector(
         // Tapping the bar toggles expansion, when there is detail to show.
         behavior: HitTestBehavior.opaque,
-        onTap: hasDetail ? () => setState(() => _expanded = !_expanded) : null,
-        child: AnimatedSize(
+        onTap: hasDetail ? toggle : null,
+        child: MouseRegion(
+          cursor: hasDetail ? SystemMouseCursors.click : MouseCursor.defer,
+          child: AnimatedSize(
           duration: HollowDurations.fast,
           curve: HollowCurves.subtle,
           alignment: Alignment.topCenter,
@@ -410,7 +346,7 @@ class _SystemStatusBannerState extends ConsumerState<SystemStatusBanner> {
             width: double.infinity,
             padding: const EdgeInsets.symmetric(
               horizontal: HollowSpacing.lg,
-              vertical: 9,
+              vertical: HollowSpacing.xs,
             ),
             decoration: BoxDecoration(
               // Tinted CHROME, not a translucent wash: over a wallpaper a
@@ -429,10 +365,16 @@ class _SystemStatusBannerState extends ConsumerState<SystemStatusBanner> {
             child: _expanded && hasDetail ? expanded : collapsed,
           ),
         ),
+        ),
       ),
     );
   }
 }
+
+/// The banner's small controls, a size that keeps the strip one line tall.
+const double _kControl = 24;
+
+const double _kIcon = 16;
 
 /// The calm Home-dashboard status line.
 ///

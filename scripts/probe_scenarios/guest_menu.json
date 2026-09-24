@@ -1,6 +1,6 @@
 [
   {"op": "log", "message": "The guest panel's server menu, which stopped being a hand-rolled second menu surface."},
-  {"op": "tap", "target": "semantics:Browse public channels"},
+  {"op": "tap", "target": "semantics:Public channels"},
   {"op": "wait", "ms": 1500},
   {"op": "shot", "name": "01-guest-panel"},
   {"op": "dump", "name": "01-guest-panel"},

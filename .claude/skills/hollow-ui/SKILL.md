@@ -272,6 +272,17 @@ Already-settled surfaces: `showHollowMenu` via
   it drops movement, never state.
 - Focus rings only through `HollowFocusRing`, on keyboard focus only.
 
+## Chrome (Dock layout)
+
+- The header holds **people**; the dock holds **you** (identity, connection,
+  the call), **where you are** (Home, servers, places) and **tools**. Places
+  swap the centre through `setShellTab()`; tools open on top.
+- **One** selection mark, `NavSelectionMark`, over whatever is active. Hover
+  is a surface step only. Unread never changes a name's weight.
+- In Dock mode the title bar folds into the header: the window controls float
+  unscaled over its end (`WindowControls`), the middle drags the window.
+  Classic, welcome and the lock cover keep the 32 px bar.
+
 ## Shadows and decoration
 
 Shadows only on things that float above the app (menus, popovers, dialogs,

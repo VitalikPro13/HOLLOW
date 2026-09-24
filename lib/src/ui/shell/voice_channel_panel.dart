@@ -13,6 +13,7 @@ import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_tooltip.dart';
 import 'package:hollow/src/ui/components/ptt_mic_visual.dart';
 import 'package:hollow/src/ui/dialogs/screen_share_dialog.dart';
+import 'package:hollow/src/ui/shell/voice_quick_controls.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Voice channel controls, at the bottom of the channel sidebar while the user
@@ -202,8 +203,7 @@ class VoiceChannelPanel extends ConsumerWidget {
                 message: 'Disconnect',
                 child: HollowPressable(
                   semanticLabel: 'Disconnect',
-                  onTap: () =>
-                      ref.read(voiceChannelProvider.notifier).leaveChannel(),
+                  onTap: () => leaveVoiceRoom(context, ref),
                   borderRadius: BorderRadius.circular(hollow.radiusMd),
                   padding: const EdgeInsets.all(HollowSpacing.sm),
                   child: Icon(

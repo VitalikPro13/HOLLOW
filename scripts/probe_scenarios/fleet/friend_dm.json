@@ -49,7 +49,7 @@
 
     { "peer": "a", "op": "tap", "target": "type:_FriendsManager > semantics:Close", "index": 0 },
     { "peer": "a", "op": "wait_for", "gone": "type:_FriendsManager", "timeout_ms": 10000 },
-    { "peer": "a", "op": "tap", "target": "tooltip:probe-b" },
+    { "peer": "a", "op": "tap", "target": "semantics:probe-b" },
     { "peer": "a", "op": "wait", "ms": 1500 },
     { "peer": "a", "op": "enter_text", "target": "field", "value": "dm from a ${RUN}" },
     { "peer": "a", "op": "key", "value": "enter" },
@@ -57,7 +57,7 @@
 
     { "peer": "b", "op": "tap", "target": "type:_FriendsManager > semantics:Close", "index": 0 },
     { "peer": "b", "op": "wait_for", "gone": "type:_FriendsManager", "timeout_ms": 10000 },
-    { "peer": "b", "op": "tap", "target": "tooltip:probe-a" },
+    { "peer": "b", "op": "tap", "target": "semantics:probe-a" },
     { "peer": "b", "op": "wait", "ms": 1500 },
     { "peer": "b", "op": "enter_text", "target": "field", "value": "dm from b ${RUN}" },
     { "peer": "b", "op": "key", "value": "enter" },

@@ -41,14 +41,19 @@ class HollowCountBadge extends StatelessWidget {
         borderRadius: BorderRadius.circular(_height),
         border: ring == null ? null : Border.all(color: ring!, width: ringWidth),
       ),
-      alignment: Alignment.center,
-      child: Text(
-        mention ? '@$shown' : shown,
-        style: HollowTypography.micro.copyWith(
-          color: mention ? hollow.textOnError : hollow.textOnAccent,
-          fontWeight: FontWeight.w600,
-          height: 1,
-          fontFeatures: const [FontFeature.tabularFigures()],
+      // Factors of 1, never a bare alignment: that fills whatever height a
+      // Row hands it, and the badge stretches to the height of the strip.
+      child: Center(
+        widthFactor: 1,
+        heightFactor: 1,
+        child: Text(
+          mention ? '@$shown' : shown,
+          style: HollowTypography.micro.copyWith(
+            color: mention ? hollow.textOnError : hollow.textOnAccent,
+            fontWeight: FontWeight.w600,
+            height: 1,
+            fontFeatures: const [FontFeature.tabularFigures()],
+          ),
         ),
       ),
     );

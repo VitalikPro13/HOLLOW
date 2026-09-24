@@ -1,6 +1,6 @@
 # HollowShell — Application Layout Container
 
-Primary source: `lib/src/ui/shell/hollow_shell.dart` (~1918 lines). Supporting files: `lib/src/ui/shell/window_title_bar.dart`, `lib/src/ui/shell/mobile_nav.dart`, `lib/src/ui/app.dart`.
+Primary source: `lib/src/ui/shell/hollow_shell.dart` (~1918 lines). Supporting files: `lib/src/ui/shell/window_title_bar.dart`, `lib/src/core/providers/window_chrome_provider.dart`, `lib/src/ui/shell/mobile_nav.dart`, `lib/src/ui/app.dart`.
 
 HollowShell is the root layout widget for the entire Hollow app. It sits inside `MaterialApp.home`, manages the bootstrap sequence (identity, license, node startup), owns the one startup fade, dispatches to one of three layout modes (dock, classic, mobile), handles global keyboard shortcuts, and orchestrates the split view system.
 
@@ -148,7 +148,7 @@ Column
       └── HelpPanelSlider
 ```
 
-**Reachability:** the `ServerStrip` is Classic's only permanent rail, so it carries Browse Public Channels, Conferences and Help alongside Home / Share / Archive / servers. Those three otherwise live only on the dock's `FriendsBar`/`BottomBar`, which Classic never renders, so without them the features had no entry point at all in this layout (issue #58 sweep). Full rail order in `ui_server_strip.md`.
+**Reachability:** the `ServerStrip` is Classic's only permanent rail, so it carries Browse Public Channels, Conferences and Help alongside Home / Share / Archive / servers. Those three otherwise live only on the dock's `BottomBar`, which Classic never renders, so without them the features had no entry point at all in this layout (issue #58 sweep). Full rail order in `ui_server_strip.md`.
 
 **Voice channel full-bleed detection:** When the selected channel is a voice channel AND the user is in that channel AND screen share or camera is active, the member panel is hidden (`vcScreenShareFullBleed = true`). This gives the video content maximum width.
 
@@ -160,7 +160,7 @@ Column
 
 ```
 Column
-  ├── FriendsBar (RepaintBoundary)
+  ├── _DockChromeClaim → FriendsBar (RepaintBoundary)
   ├── SystemStatusBanner
   ├── Expanded Row (ClipRect)
   │   ├── if server selected: Row(ChannelSidebar (240px, dockMode=true, no UserBar) + _ChannelSidebarSeam)
@@ -172,9 +172,10 @@ Column
 ```
 
 Key differences from classic:
-- No `ServerStrip` — servers are accessed through the `FriendsBar` and `BottomBar`.
+- No `ServerStrip`: servers, places and tools are all on the `BottomBar` (wiki `ui_server_strip`); the `FriendsBar` header carries only friends and, in Dock mode, the window chrome (see WindowTitleBar below).
 - Channel sidebar appears instantly when a server is selected (absent at home/DM view).
-- `dockMode=true` passed to `ChannelSidebar` (affects styling: no `UserBar` shown).
+- `dockMode=true` passed to `ChannelSidebar` (no `UserBar`, and no `VoiceChannelPanel`: the dock's left end carries the call on every screen, Classic keeps the panel).
+- `_DockChromeClaim` (in `hollow_shell.dart`) wraps the header: it sets `dockOwnsWindowChromeProvider` in a post-frame callback and clears it in a microtask on dispose, never during a build. That flag is what folds the 32 px title bar away.
 - Member panel is hidden during split view to save horizontal space.
 - When no peer or channel is selected, shows `HomeDashboard` instead of the empty chat placeholder.
 - **Pending join tiles (rung 1, 2026-08-29) ride the same `BottomBar` strip as real servers.** A `PendingStripItem` renders alongside `ServerStripItem`s, same as in Classic's `ServerStrip`. The one visual difference is the awaiting-setup badge's corner (top-left here vs top-right in Classic, since the Dock's unread badge already owns top-right); full detail in `ui_server_strip.md` § Pending Join Tile.
@@ -269,7 +270,7 @@ Because it only fires on a crossing, it never fights the header toggle: while na
 
 **Server settings:** `serverSettingsOpenProvider` (StateProvider<bool>, default `false`). In non-split mode, toggles between settings panel and chat. In split mode, opens as a dialog instead.
 
-**Help panel:** `helpPanelOpenProvider` (StateProvider<bool>, default `false`, in `core/providers/help_panel_provider.dart`). Toggled by the circled-`?` (`LucideIcons.circleHelp`) button on the RIGHT side of the `FriendsBar` (symmetric with Add Friend on the left). `helpPanelOpen` is watched in `build()` and threaded into both `_buildClassicLayout`/`_buildDockLayout` as a named param; each inserts `HelpPanelSlider(visible: helpPanelOpen)` as the right-most child after the member panel. `HelpPanelSlider` (in `lib/src/ui/guides/help_panel.dart`) is a `StatelessWidget` that shows or hides the panel instantly, like `_MemberPanelSlot`. See `wiki/ui_help.md` for the full Help resource center.
+**Help panel:** `helpPanelOpenProvider` (StateProvider<bool>, default `false`, in `core/providers/help_panel_provider.dart`). Toggled by the circled-`?` (`LucideIcons.circleHelp`) Help button in the `BottomBar`'s tools group (Dock) or on the `ServerStrip` (Classic). `helpPanelOpen` is watched in `build()` and threaded into both `_buildClassicLayout`/`_buildDockLayout` as a named param; each inserts `HelpPanelSlider(visible: helpPanelOpen)` as the right-most child after the member panel. `HelpPanelSlider` (in `lib/src/ui/guides/help_panel.dart`) is a `StatelessWidget` that shows or hides the panel instantly, like `_MemberPanelSlot`. See `wiki/ui_help.md` for the full Help resource center.
 
 ## Keyboard Shortcuts
 
@@ -339,40 +340,47 @@ The zoom trio ignores Shift on `+`/`-` (on most layouts `+` IS Shift+`=`) and ac
 
 ## WindowTitleBar — Placement and Rationale
 
-**CRITICAL ARCHITECTURE:** The `WindowTitleBar` is NOT inside `HollowShell`. It lives in `MaterialApp.builder` in `lib/src/ui/app.dart`. This is documented as a critical rule in CLAUDE.md.
+**CRITICAL ARCHITECTURE:** The window chrome (the `WindowTitleBar` or the floating `WindowControls`) is NOT inside `HollowShell`. It lives in `DesktopWindowFrame`, which `MaterialApp.builder` in `lib/src/ui/app.dart` wraps around the app on desktop. This is documented as a critical rule in CLAUDE.md.
 
-**Reason:** If the title bar were inside `HollowShell` (inside `MaterialApp.home`), then `showDialog`/`showGeneralDialog` calls would create overlays that cover the title bar, making the window controls inaccessible during dialogs. By placing it in `MaterialApp.builder`, it sits ABOVE the Navigator in the widget tree, so dialog routes cannot occlude it.
+**Reason:** If the chrome were inside `HollowShell` (inside `MaterialApp.home`), then `showDialog`/`showGeneralDialog` calls would create overlays that cover it, making the window controls inaccessible during dialogs. By placing it in `MaterialApp.builder`, it sits ABOVE the Navigator in the widget tree, so dialog routes cannot occlude it.
 
-**Implementation in HollowApp (`lib/src/ui/app.dart`):**
+**Two modes.** The 32 px `WindowTitleBar` shows for Classic, before an identity loads (Welcome and the password prompt are dialogs over the mounted dock, so the gate is `identityProvider.peerId != null`) and while app-locked (`appLockedProvider`: nothing on the lock cover can move the window). While any route sits above home (`routesAboveHome`, a navigator observer on `MaterialApp`), a translucent `DragToMoveArea` strip covers the header so a dialog's scrim never takes the window's drag away. In Dock mode the shell's `_DockChromeClaim` sets `dockOwnsWindowChromeProvider`; the title bar then collapses and `WindowControls` float unscaled at the top-right over the `FriendsBar`, at `kDockHeaderHeight` (44) x the effective `UiScale`, so they match the header's height in window pixels. They report their width (`windowControlsWidthProvider`) so the header keeps its trailing end clear. `dockHeaderCanOwnChrome` limits this to Windows, Linux and macOS.
+
+**Implementation (`DesktopWindowFrame`, `lib/src/ui/app.dart`):**
 ```
-MaterialApp(
-  builder: isDesktop
-      ? (context, child) => Material(
-            type: MaterialType.transparency,
-            child: Column(
-              children: [
-                if (!annotation && !fullscreen) const WindowTitleBar(),
-                Expanded(child: ClipRect(child: UiScale(child: child))),
-              ],
-            ),
-          )
-      : null,
-)
+chrome     = !annotation && !fullscreen
+dockChrome = chrome && dockHeaderCanOwnChrome && dockOwnsWindowChrome && !appLocked
+headerHeight = kDockHeaderHeight * effectiveUiScale(scale, constraints.biggest)
+
+MacTrafficLights(height: dockChrome ? headerHeight : 0,
+  child: Stack(
+    Column(
+      if (chrome && !dockChrome) WindowTitleBar(),
+      Expanded(ClipRect(UiScale(child))),
+    ),
+    if (dockChrome) Positioned(top: 0, right: 0,
+        WindowControls(height: headerHeight, reportWidth: true)),
+  ))
 ```
 
 The `ClipRect` around the navigator child prevents `BackdropFilter` blur from dialogs from bleeding up into the title bar area.
 
-`UiScale` (interface zoom, issue #20) wraps the navigator child but NOT the title bar — browser-chrome model, and on macOS the bar is aligned to OS-drawn traffic lights at a fixed offset. Two consequences worth knowing: (1) `UiScaleBox` must measure its own slot via `LayoutBuilder`, never `MediaQuery.size`, because its slot is 32px shorter than the window — sizing from the window pushed exactly the bottom dock off screen at every scale but 1.0; (2) below the transform, window coordinates are NOT overlay coordinates, so popup anchors go through `overlay_anchor.dart`. See `project_display_scaling`.
+`UiScale` (interface zoom, issue #20) wraps the navigator child but NOT the window chrome (browser-chrome model). Two consequences worth knowing: (1) `UiScaleBox` must measure its own slot via `LayoutBuilder`, never `MediaQuery.size`, because its slot is 32px shorter than the window whenever the title bar shows; sizing from the window pushed exactly the bottom dock off screen at every scale but 1.0; (2) below the transform, window coordinates are NOT overlay coordinates, so popup anchors go through `overlay_anchor.dart`. See `project_display_scaling`.
 
-**WindowTitleBar widget** (`lib/src/ui/shell/window_title_bar.dart`): 32px tall container with `hollow.opaqueBackground` color. Layout: `[Hollow branding] [DragToMoveArea ────] [─] [□] [✕]`. It has no startup animation of its own.
+**macOS traffic lights:** `MacTrafficLights` sends the header height (0 = hand them back to AppKit's title bar) after the frame, only on change, over the MethodChannel `hollow/traffic_lights` (`setHeaderHeight`); `macos/Runner/MainFlutterWindow.swift` centres the native traffic lights in it. The `FriendsBar` keeps `kMacTrafficLightGap` (78) clear at its leading end, and the `WindowTitleBar` does the same.
+
+**WindowTitleBar widget** (`lib/src/ui/shell/window_title_bar.dart`): 32px tall container with `hollow.opaqueSurface` color. Layout: `[macOS gap] [DragToMoveArea ────] [WindowControls]`. No wordmark. It has no startup animation of its own.
 
 Widget classes in window_title_bar.dart:
-- **`WindowTitleBar`** — StatelessWidget, the 32px bar.
-- **`_WindowButton`** — StatefulWidget base for window control buttons. No Material ripple, instant color change on hover. 46x32px size.
-- **`_MinimizeButton`** — calls `windowManager.minimize()`.
-- **`_MaximizeButton`** — StatefulWidget with `WindowListener` mixin. Tracks maximized state, shows square or columns icon, toggles between `windowManager.maximize()` and `unmaximize()`.
-- **`_CloseButton`** — calls `windowManager.close()`. Hover color is red (#E81123).
-- **`ZoomIndicator`** — browser-style zoom readout, rendered only while `uiScaleProvider != 1.0`; shows e.g. "125%" and resets to 100% on tap. It lives here because the title bar is the one surface OUTSIDE the scale transform, so no zoom can put it out of reach. **It deliberately carries no `HollowTooltip`:** the title bar sits ABOVE the Navigator and therefore has no `Overlay` ancestor — `Overlay.of` there would throw. Same reason `_WindowButton` rolls its own hover instead of using a tooltip.
+- **`WindowTitleBar`**: StatelessWidget, the 32px bar.
+- **`WindowControls`**: `ConsumerWidget`, the same order everywhere: `AnnotationToggleButton`, `ZoomIndicator`, then off macOS minimise / maximise / close. With `reportWidth` it wraps in `_WidthReporter` (a `RenderProxyBox` that publishes its width after the frame, never during layout).
+- **`MacTrafficLights`**: see above.
+- **`_WindowButton`**: StatefulWidget base for window control buttons. No Material ripple, instant color change on hover. 46 px wide (`_kWindowButtonWidth`), as tall as the controls. Optional `hoverGlyph` for a fill the glyph would vanish into.
+- **`_MinimizeButton`**: calls `windowManager.minimize()`.
+- **`_MaximizeButton`**: StatefulWidget with `WindowListener` mixin. Tracks maximized state, shows `LucideIcons.square` or the restore glyph `LucideIcons.copy`, toggles between `windowManager.maximize()` and `unmaximize()`.
+- **`_CloseButton`**: calls `windowManager.close()`. Hover color is red (#E81123) with a white glyph.
+- **`ZoomIndicator`**: browser-style zoom readout, rendered only while `uiScaleProvider != 1.0`; shows e.g. "125%" and resets to 100% on tap. It lives in the controls because they are the one surface OUTSIDE the scale transform, so no zoom can put it out of reach. **It deliberately carries no `HollowTooltip`:** the controls sit ABOVE the Navigator and therefore have no `Overlay` ancestor, so `Overlay.of` there would throw. Same reason `_WindowButton` rolls its own hover instead of using a tooltip.
+- The annotate button (`annotation_toggle_button.dart`) has the Semantics label "Annotate the screen" and a `HollowFocusRing`; its hover label floats to the LEFT, inside the window.
 
 ## HollowApp — Theme and Background Transparency
 
@@ -439,4 +447,4 @@ While `fullscreenProvider` is true the wrapper STAYS MOUNTED with `enableResizeE
 
 ## Fullscreen (2026-09-14)
 
-`fullscreenProvider` (`lib/src/core/services/window_fullscreen.dart`, sync `Notifier<bool>`): `enter`/`exit`/`toggle`, serialized, fails closed, exits on `appLockedProvider`. Backend by platform: Windows = the runner's own `hollow/window` method channel (`windows/runner/flutter_window.cpp`; `windowManager.setFullScreen` is a silent no-op for a frameless window and its exit path is the squished restore, memory `feedback_annotation_window_management`), macOS/Linux = `windowManager.setFullScreen`, mobile = none. `test/window_fullscreen_test.dart` confines `setFullScreen(` and the channel name to that one file. F11 = `AppShortcut.toggleFullscreen`, app-wide and rebindable, handled in `_handleGlobalKey`. The `WindowTitleBar` hides on `annotation || fullscreen` in `app.dart`. The video fullscreen view uses the same provider (wiki `ui_message_bubbles`, VideoMessageBubble).
+`fullscreenProvider` (`lib/src/core/services/window_fullscreen.dart`, sync `Notifier<bool>`): `enter`/`exit`/`toggle`, serialized, fails closed, exits on `appLockedProvider`. Backend by platform: Windows = the runner's own `hollow/window` method channel (`windows/runner/flutter_window.cpp`; `windowManager.setFullScreen` is a silent no-op for a frameless window and its exit path is the squished restore, memory `feedback_annotation_window_management`), macOS/Linux = `windowManager.setFullScreen`, mobile = none. `test/window_fullscreen_test.dart` confines `setFullScreen(` and the channel name to that one file. F11 = `AppShortcut.toggleFullscreen`, app-wide and rebindable, handled in `_handleGlobalKey`. The window chrome (title bar or floating controls) hides on `annotation || fullscreen` in `DesktopWindowFrame` (`app.dart`). The video fullscreen view uses the same provider (wiki `ui_message_bubbles`, VideoMessageBubble).

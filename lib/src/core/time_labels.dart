@@ -8,8 +8,9 @@ const _weekdays = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 /// a weekday within the week, then `Sep 17`, then `Sep 17, 2025`.
 ///
 /// Month names, never `9/17`: a numeric date reads as a different day in half
-/// the world.
+/// the world. An unset time (the epoch or earlier) is empty, never a 1970 date.
 String conversationTimeLabel(DateTime at, {DateTime? now}) {
+  if (at.millisecondsSinceEpoch <= 0) return '';
   final today = now ?? DateTime.now();
   final day = DateTime(at.year, at.month, at.day);
   final daysAgo = DateTime(today.year, today.month, today.day)

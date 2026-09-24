@@ -73,7 +73,7 @@ File: `lib/src/ui/shell/server_strip.dart`
 9. **Help icon**: `_ServerIcon` with `LucideIcons.circleHelp`, accent when `helpPanelOpenProvider`. Tap flips that provider. Not a shell tab, so no `_ServerIconWithIndicator` pill.
 10. **Add button** — `_ServerIcon` with `LucideIcons.plus` in accent color, tooltip `'Create a server'`. Tap: calls `showCreateServerDialog(context)`. Has bottom padding `HollowSpacing.md`.
 
-Items 3, 6 and 9 exist here because this strip is Classic mode's ONLY permanent rail: Browse Public Channels, Conferences and Help otherwise live only on the dock's `FriendsBar`/`BottomBar`, which Classic does not render, so in Classic they were unreachable (issue #58 sweep). The two centre tabs among them go through `setShellTab`, same as Share and Archive.
+Items 3, 6 and 9 exist here because this strip is Classic mode's ONLY permanent rail: Browse Public Channels, Conferences and Help otherwise live only on the dock's `BottomBar`, which Classic does not render, so in Classic they were unreachable (issue #58 sweep). The two centre tabs among them go through `setShellTab`, same as Share and Archive.
 
 ### Server Icon Rendering (_buildServerIcon)
 
@@ -111,7 +111,7 @@ For each `FolderStripItem`:
 
 ## Pending Join Tile (pending joins rung 1, 2026-08-29)
 
-File: `lib/src/ui/components/pending_join_ui.dart` (widget + menu/sheet + action helpers, shared by both shells); rendered in `_buildPendingIcon()` in both `server_strip.dart` and `bottom_bar.dart`.
+File: `lib/src/ui/components/pending_join_ui.dart` (widget + menu/sheet + action helpers, shared by both shells); rendered in `_buildPendingIcon()` (`server_strip.dart`) and `_buildPending()` (`bottom_bar.dart`), the Dock one as a dimmed `_DockTile` in `elevated`.
 
 A `PendingStripItem` in the strip data renders as a tile deliberately unlike every other icon on the rail: dimmed (`AnimatedOpacity`, GPU-composited, never the `Opacity` widget; opacity is 0.55 pending / 0.4 rejected, crossfading when a rejection lands), carrying a glyph rather than initials (`LucideIcons.clock` pending, `LucideIcons.ban` rejected: an invite link gives us an id and nothing else, no name, no icon, no initial to draw), and **NOT selectable**, since there is no server behind it yet to open.
 
@@ -120,7 +120,7 @@ Both a LEFT click and a right click open the SAME menu (`showPendingJoinMenu` vi
 ### AwaitingSetupBadge
 A 16px (10px clock icon) badge, `HollowTooltip` wrapping a small ring the colour of the surface behind it, shown on a server tile (not a pending tile) whose CRDT admission landed but whose MLS leaf has not formed yet (`awaitingSetupProvider.contains(serverId)`). It is a BADGE, not a spinner: the wait is for another human to open their app, which can be tomorrow.
 
-**Positioned differently per rail, and the reason is load-bearing:** `_ServerIconWithIndicator` (Classic, `server_strip.dart`) puts it top-RIGHT (`right: -4, top: -4`); `_BottomServerIcon` (Dock, `bottom_bar.dart`) puts it top-LEFT (`left: -5, top: -4`, `size: 14`), because on the Dock the unread badge already owns the top-right corner, and two badges in one corner would overlap. `Clip.none` on the enclosing `Stack` is load-bearing here too (`feedback_badge_stack_clips_avatar_frame`): the same reason an avatar frame needs it.
+**Positioned differently per rail, and the reason is load-bearing:** `_ServerIconWithIndicator` (Classic, `server_strip.dart`) puts it top-RIGHT (`right: -4, top: -4`); `_DockTile` (Dock, `bottom_bar.dart`) puts it top-LEFT (`left: -xs, top: -xs`, size `lg`), because on the Dock the unread badge already owns the top-right corner, and two badges in one corner would overlap. `Clip.none` on the enclosing `Stack` is load-bearing here too (`feedback_badge_stack_clips_avatar_frame`): the same reason an avatar frame needs it.
 
 ### _VerticalReorderGap
 
@@ -137,7 +137,7 @@ Private class carrying drag payload: `serverId: String?`, `folderId: String?`, `
 ## CRITICAL: Atomic Server Selection Pattern
 
 File: `lib/src/ui/shell/server_strip.dart`, method `_ServerStripState._selectServer()`
-File: `lib/src/ui/shell/bottom_bar.dart`, method `_BottomBarState._selectServer()`
+File: `lib/src/ui/shell/bottom_bar.dart`, top-level `_selectServer(ref, serverId)`
 
 This is the canonical pattern for switching servers. **All 4 core providers must be batched in a single synchronous block** to prevent intermediate rebuilds with inconsistent state (e.g., channel list from old server, selected server from new server).
 
@@ -176,92 +176,67 @@ If a channel was selected, updates `lastChannelPerServerProvider` map with `{ser
 
 File: `lib/src/ui/shell/bottom_bar.dart`
 
-`BottomBar` is a `ConsumerStatefulWidget`. Renders a 59px-tall horizontal bar at the bottom of the dock layout. Background: `hollow.opaqueBackground` with a `top: BorderSide` border.
-
-### State
-
-- `_isDragging: bool` — tracks whether any icon is currently being dragged. Used to suppress tooltips during drag (prevents tooltip from obscuring drop targets).
-- `_initialServerIds: Set<String>?` — same pattern as `ServerStrip` for entrance animation gating.
+`BottomBar` is a `ConsumerWidget`. Renders a `kDockHeight` (56) px bar plus a 1px top hairline at the bottom of the dock layout. Background: `hollow.opaqueSurface` with a `top: BorderSide` border. The label scale is clamped to 1.3 (fixed-height chrome). Left to right: you (identity, the call), where you are (Home, servers, places), then the tools, which open on top.
 
 ### Layout Structure (left to right)
 
-Three sections in a `Row`:
+One `Row` inside a `LayoutBuilder`:
 
-#### Left: Compact User Panel (140px)
+1. **`DockIdentity`** (public `ConsumerWidget`): `HollowPressable` with `HollowTooltip` "Your profile and status". Avatar 28 px with a `StatusDot` cut into its corner (colour, fill and label from `connectionVisual()` over `overallConnectionProvider` + `invisibleModeProvider`, the same source as the Classic user bar; the cut-out follows the row's hover fill). Then the name (label style) and ONE status line by exception: the connection label in `warning` when not connected (and not invisible); `"<room> · <server>"` in `success` while in voice, tappable, opening that room via `openServerChannel`; else the profile's own status line in `textTertiary`; else nothing. Text column max 160 px. Tap: `showProfileCardPopup()` with `anchorBottom: true`.
+2. **`VoiceQuickControls`** (`lib/src/ui/shell/voice_quick_controls.dart`), only while `isInVoiceChannel`: three `HollowIconButton`s, Mute/Unmute (`micButtonVisual`), Deafen/Undeafen, and "Disconnect" (`error`). Disconnect calls `leaveVoiceRoom()`, which toasts "Couldn't leave the voice room" on failure. Camera and screen share stay in the room's own pill.
+3. `_DockDivider` (a `HollowVerticalDivider`, `xl` tall, `md` either side).
+4. **Home tile**: `_DockTile`, 40 px, `hollow.elevated` fill (`hover` on hover), child `HollowMark` (`components/hollow_mark.dart`: the Hollow logo H with padlock and keyhole) at 22 px in `accentText`. No DM unread total. Tap: `_goHome(ref)`. Right click: `showHomeMenu`.
+5. **Servers** (`Expanded` > `Row`): `Flexible(_ServerList)` then a ghost Add tile (`_DockTile`, `opaqueSurface` fill, `elevated` on hover, `LucideIcons.plus` in `textSecondary`, tooltip "Create a server", `showCreateServerDialog`). The list anchors LEFT and Add follows the last tile; the space after it is the flexible gap before the places, so a short list never floats in the middle.
+6. **Places** (`_Places`): Conferences (`video`), Public channels (`globe`), Share (`share2`), Archive (`archive`), and Hollow Shop (`store`) ONLY when `shopAvailableProvider` (absent, not disabled, on store builds). Each is a `HollowIconButton` with `selected:` on its tab. Below `kDockPlacesFoldWidth` (1000 px of dock) they fold into ONE "Places" button (`LucideIcons.layoutGrid`) opening a `showHollowMenu` with check-marked rows.
+7. `_DockDivider`, then the tools: **Downloads** (`DownloadIconButton`, a `HollowIconButton` with a `HollowCountBadge` of transfers in flight), **Help** (`_HelpButton`, toggles `helpPanelOpenProvider`, `selected` while open), **Settings** (`showUserSettingsDialog(context)`, which opens on Profile, same as Classic).
 
-`HollowPressable` with zero border radius, full height. Contains:
-- `HollowAvatar` (28px) of local peer, or a placeholder `Container` with `hollow.elevated` background.
-- `StatusDot` (7px) showing connection status color (`success` = connected, `warning` = starting, `textSecondary` = loading, `error` = error). `pulse: true` when connected. If `invisibleModeProvider` is active, uses `textSecondary` with no pulse.
-- Display name text (caption style, 12px, w600, ellipsis truncation).
-- Tap: opens `showProfileCardPopup()` anchored at the bar's position, `anchorBottom: true`.
+The recovery phrase key is not on the dock (the phrase lives on Home's Needs Attention and the setup checklist, wiki `ui_home_dashboard`).
 
-Vertical 1px border divider (28px height) between left and center.
+### Places toggle
 
-#### Center: Server Strip (Expanded)
+`_togglePlace(ref, tab)`: pressing the lit place calls `setShellTab(ref.read, null)` and drops back to what it covered (issue #28); otherwise `_openPlace`: Conferences via `conferenceProvider.notifier.openTab()`, the Shop via `openShopTab(read)`, Archive closes split, invalidates the archive lists, resets archive selection, then `setShellTab`; Public channels and Share close split and `setShellTab`. Every non-Conference/Shop open also clears server/channel/peer/settings selection (`_clearSelection`).
 
-Nested `Row` with:
+### The selection mark (`dockLocationProvider`)
 
-1. **Home button** — `_BottomServerIcon` with `'H'` text, accent background. Selected when `selectedServerId == null && !archiveOpen && !shareOpen`. Unread count shows DM unreads when server is selected. Tap: `_goHome(ref)` — closes split view, clears all server/channel/archive/share/peer/settings state.
+ONE `NavSelectionMark` (`components/nav_selection_mark.dart`: a 2 x 20 accent bar; the phone's `MobileNavBar` uses the same widget) sits on the dock's TOP edge over the one active item. `dockLocationProvider` (sealed `DockLocation`: `_AtHome` (a DM included), `_AtServer(serverId)`, `_AtPlace(tab)`) decides: an open centre tab (`openShellTabProvider`, new in `shell_tab.dart`) wins, else the server (the right pane's in a split with `focusedPane == 1`, else `selectedServerProvider`), else Home. A folder is marked when it holds the active server. Hover never paints a bar or accent, so only the active item looks active.
 
-2. **Vertical divider** — 2px wide, 24px tall, `hollow.border`, `HollowSpacing.sm` horizontal margin.
+`_DockSlot(marked:, child:)` gives each item the dock's full height and draws the mark at `top: 0`; badges sit inside that box.
 
-3. **Server icons** — `Expanded` > `EdgeScrollRow(center: true)` (2026-07-30; was `Center` > `SingleChildScrollView(horizontal)` > `Row(min)`). Centred while the icons fit, then arrows + wheel-panning once they overflow — before that, servers past the edge were unreachable on a plain wheel mouse. `center: true` rather than an outer `Center`: the arrow slots make the internal row take full width, so an outer Center has nothing to centre and the strip silently LEFT-ALIGNS. The arrows are siblings of the scroller, not an overlay, so they never cover the `_ReorderGap` drop zones at either end. Interleaved with `_ReorderGap` widgets (one before first, one after each item). Uses `Builder` per item to get a local `BuildContext` for render object access. Pattern-matches `StripItem` to call `_buildServerIcon()` or `_buildFolderIcon()`.
+### BottomBar Server Icon Rendering (`_ServerListState._buildServer`)
 
-4. **Vertical divider** — same as above.
+`_ServerList` is a `ConsumerStatefulWidget` over `serverStripLayoutProvider`, rendered as an `EdgeScrollRow(shrinkWrap: true, height: kDockHeight)`: the scroll viewport is the dock's full height, so badges and the mark are never clipped, and it hugs its tiles so Add follows the last one. Interleaved with `_ReorderGap`s (one before each item plus one at the end).
 
-5. **Add server button** — `_BottomServerIcon` with `LucideIcons.plus`, accent color, `hollow.elevated` background. Tap: `showCreateServerDialog(context)`.
-
-#### Right: Utility Buttons (170px)
-
-Centered `Row` of `HollowPressable` icon buttons, each wrapped in `HollowTooltip`:
-
-**All three centre-tab buttons TOGGLE** (issue #28): the accent-coloured icon reads as an on/off control, so pressing the lit one calls `setShellTab(ref.read, null)` and drops back to Home. The Conferences button (in `FriendsBar`, not here) behaves the same way.
-
-- **Browse Public Channels** — `LucideIcons.globe`. Color: accent when `guestTabOpenProvider`, textSecondary otherwise. Tap: open → `setShellTab(null)`; closed → `_openGuestPanel(ref)` (opens `PublicChannelBrowser`, clears server/channel/peer selection).
-- **Share** — `LucideIcons.share2`. Color: accent when `shareOpen`, textSecondary otherwise. Tap: open → `setShellTab(null)`; closed → `_openShare(ref)` (closes split, `setShellTab(ShellTab.share)`, clears other state).
-- **Archive** — `LucideIcons.archive`. Color: accent when `archiveOpen`, textSecondary otherwise. Tap: open → `setShellTab(null)`; closed → `_openArchive(ref)` (closes split, invalidates archive lists, resets archive selection, `setShellTab(ShellTab.archive)`).
-- **Download** — `DownloadIconButton(iconSize: 18)` (separate component).
-- **Settings** — `LucideIcons.settings`, textSecondary. Tap: `showUserSettingsDialog(context, openSystemTab: true)`.
-- **Recovery phrase** — `LucideIcons.keyRound`, textSecondary. Only visible when `identity.mnemonic != null`. Tap: `showMnemonicDialog(context, identity.mnemonic!)`.
-
-Vertical 1px divider between center and right sections.
-
-### BottomBar Server Icon Rendering (_buildServerIcon)
-
-Similar to `ServerStrip._buildServerIcon()` but with dock-specific differences:
-
-- Icon/avatar size: 38px (vs 44px in ServerStrip). Initials font: 14px (vs 18px). Avatar border radius: 8px.
-- **Split view awareness:** `isRightPaneServer = splitState.isSplit && splitState.rightPane?.serverId == serverId`. The icon shows as selected if `isSelected || isRightPaneServer`.
-- `LongPressDraggable` callbacks also manage `_isDragging` state via `onDragStarted`, `onDragEnd`, `onDraggableCanceled` (all call `setState`).
-- When `isMergeTarget` (server being dragged onto), the icon scales to 1.08x (`AnimatedScale`), with no glow.
+- Tile: `_DockTile`, 40 px, radius `lg`, filled with `colorFromId(serverId)` and showing `ServerAvatar(size: 40, animate: active)`. Hover lays a luminance lift (`textPrimary` at 10% alpha) over it.
+- Badges: `HollowCountBadge` top-right (`right: -sm, top: -xs`, ring `opaqueSurface`): mentions (`@N`, error) when any, else unread (accent). Muted servers pass 0. `AwaitingSetupBadge` top-LEFT. `VoiceHereBadge` (`components/voice_here_badge.dart`, a `success` disc with `volume2`) bottom-right on the server holding your voice room (`_voiceServerProvider`).
+- `LongPressDraggable` (300 ms) with `_setDragging` in `onDragStarted` / `onDragEnd` / `onDraggableCanceled`; drag feedback and `childWhenDragging` use a `plain` face (no badges, no tooltip).
+- When a server is dragged onto it (`isMergeTarget`), the tile scales to 1.08x (`AnimatedScale`), with no glow.
 - Tooltip suppressed during drag: `tooltip: _isDragging ? null : name`.
-- Tap calls `_selectServer(ref, serverId)` which handles split view routing.
+- Tap calls `_selectServer(ref, serverId)`, which handles split view routing. Right click: `showServerIconMenu`.
+- New servers get `NewServerEntry`.
 
-### BottomBar Folder Icon Rendering (_buildFolderIcon)
+### BottomBar Folder Icon Rendering (`_buildFolder`)
 
-Similar to `ServerStrip._buildFolderIcon()` but:
-
-- Uses `_BottomServerIcon` instead of `_ServerIcon` + `_ServerIconWithIndicator`.
-- `ServerFolderIcon` size: 38 (vs 48 in ServerStrip).
-- `isSelected || isRightPaneServer` for visual selection state.
+- `_DockTile` with `elevated` fill (`hover` on hover) and `ServerFolderIcon(size: 40, filled: false)`.
+- Sums unread AND mentions over the folder's non-muted servers and keeps the count when the folder is selected. `VoiceHereBadge` when it holds your voice room.
+- Marked when it contains the active server (split right pane included, via `dockLocationProvider`).
 - Folder popup anchor: `Offset(pos.dx + box.size.width / 2, pos.dy)` with `isDock: true` (popup appears above the bar).
-- Right-click (`onSecondaryTapUp`) opens `showFolderRenameDialog()`.
+- Right click opens `showFolderIconMenu` (Rename is a row in it).
 - Tooltip suppressed during drag.
 
 ### BottomBar Split View Server Selection
 
-In `_BottomBarState._selectServer()`, if `splitState.isSplit && splitState.focusedPane == 1` (right pane focused):
+In the top-level `_selectServer(ref, serverId)`, if `splitState.isSplit && splitState.focusedPane == 1` (right pane focused):
 
-1. Calls `crdt_api.getServerChannels(serverId: serverId)` directly (FFI, not through provider) to avoid overwriting the global `channelListProvider` which belongs to the left pane.
+1. Calls `crdt_api.getServerChannels(serverId: serverId)` directly (FFI, not through provider) to avoid overwriting the global `channelListProvider` which belongs to the left pane, keeping only channels with `meCanSee`.
 2. Picks a channel: prefers `lastChannelPerServerProvider[serverId]`, then first text channel, then first channel.
 3. Calls `splitViewProvider.notifier.navigateRightToServer(serverId, channelId: channelToSelect)`.
 4. Returns early (does NOT touch the global channel/server providers).
 
 If not in split right-pane mode, falls through to the standard atomic selection pattern.
 
-### _goHome, _openShare, _openArchive
+### _goHome and _openPlace
 
-All three close the split view first via `splitViewProvider.notifier.closeSplit()` if `split.isSplit`. Then clear/set the relevant tab providers and reset server/channel/peer/settings state. `_openArchive` additionally invalidates archive list providers and resets archive selection providers.
+Both close the split view first (`_closeSplit`) where the place needs it, then `setShellTab` and `_clearSelection` (server, channel list, channel, peer, settings). `_openPlace(ShellTab.archive)` additionally invalidates the archive list providers and resets the archive selection providers.
 
 ## _ServerIcon (Vertical Strip Icon Widget)
 
@@ -304,30 +279,16 @@ Layout: `SizedBox(72x48)` containing a `Row`: indicator | `Spacer` | `Stack(chil
 
 Tracks `_hovering` via `MouseRegion` for the indicator height animation.
 
-## _BottomServerIcon (Horizontal Strip Icon Widget)
+## _DockTile (Horizontal Strip Icon Widget)
 
 File: `lib/src/ui/shell/bottom_bar.dart`
 
-Private `StatefulWidget`. 38x38 rounded square with a bottom-edge indicator. Combines the roles of both `_ServerIcon` and `_ServerIconWithIndicator` from the vertical strip.
+Private `StatelessWidget`: a 40 px square (Home, a server, a folder, Add, a parked join) with radius `lg`, built from `HollowPressable` > `_TileFace`. Takes `fill`, optional `hoverFill`, `tooltip`, `semanticLabel`, `menuLabel`, `onTap`, `onContextMenu`, `unreadCount`, `mentionCount`, `awaitingSetup`, `voiceHere`.
 
-- **Border radius animation:** `radiusLg` transitions to 12.0 (pill-ish) on hover or selected.
-- **Hover color:** same `Color.lerp` pattern as `_ServerIcon`.
-- **Selection border:** same 2px accent border pattern, gated by `isSelected && showBorder`.
-
-### Bottom-Edge Indicator
-
-Instead of a left-edge pill, uses a bottom-edge horizontal bar:
-- `Positioned(bottom: -8)` — pinned below the icon via `Stack(clipBehavior: Clip.none)`.
-- Width: 28px (selected), 16px (hovering), 0px (default). Height: 3px constant.
-- Color: `hollow.textPrimary`, at alpha 0 when the width is 0 (never `Colors.transparent`, which lerps through black).
-- `AnimatedContainer` with `HollowDurations.fast` and `HollowCurves.enter`.
-
-### Unread Badge
-
-`Positioned(right: -5, top: -4)` — overlaps top-right corner (vs bottom-right in vertical strip).
-- Min width: 14px, height: 14px, horizontal padding: 3px.
-- A `HollowCountBadge` (accent unread, error `@N` mention).
-- Text: white, 8px, w700. Caps at `'99+'`.
+- **Hover:** with a `hoverFill` the fill steps up one surface; without one (identity colour or image) a `textPrimary` lift at 10% alpha fades in over it (same colour at both ends, so it never lerps via black). No bar, no accent, no radius change, no selection border.
+- **Selection:** not drawn by the tile. The ONE `NavSelectionMark` on the dock's top edge (via `_DockSlot`) shows the active item.
+- **Context menu:** `ContextMenuTarget` wraps the tile ABOVE its focus ring, so Menu and Shift+F10 reach it while keyboard-focused (issue #61).
+- **Badges** in a `Stack(clipBehavior: Clip.none)`: `AwaitingSetupBadge` top-left (`left: -xs, top: -xs`, size `lg`); `HollowCountBadge` top-right (`right: -sm, top: -xs`, ring `opaqueSurface`), mention count when any, else unread; `VoiceHereBadge` bottom-right (`right: -xs, bottom: -xs`).
 
 ## _ReorderGap (Horizontal Strip Drop Zone)
 
@@ -335,7 +296,7 @@ File: `lib/src/ui/shell/bottom_bar.dart`
 
 `DragTarget<_StripDragData>`. Same no-op guard as `_VerticalReorderGap` (`src != index && src != index - 1`).
 
-Visual: `AnimatedContainer` — height: 38px (matches icon height), width transitions from `HollowSpacing.xs` (transparent, dormant) to 8px wide accent-colored bar when active. Margin: 2px horizontal when active. Duration: `HollowDurations.fast`.
+Visual: a fixed `HollowSpacing.sm` wide, 40 px tall slot whose width never changes, so a drag never shoves the row. Inside it an `xs` wide accent bar fades from alpha 0 to 1 while a drag hovers. Duration: `HollowDurations.fast`.
 
 ## NewServerEntry (Entrance Animation)
 
@@ -360,14 +321,14 @@ Both strips interleave `_ReorderGap`/`_VerticalReorderGap` widgets between every
 
 ### Visual Feedback
 
-- **Gap active:** colored accent bar appears (4px tall vertical, 8px wide horizontal).
+- **Gap active:** colored accent bar appears (4px tall vertical; in the dock an `xs` wide bar fades in inside the fixed-width gap).
 - **Merge target (server-on-server):** `AnimatedScale` to 1.08x in both strips. No glow.
 - **Drop target (server-on-folder):** `AnimatedScale` to 1.08x.
 - **Drag source:** 30% opacity fade.
 
 ### BottomBar Drag State Tracking
 
-`_isDragging` boolean is set in `onDragStarted` and cleared in `onDragEnd`/`onDraggableCanceled`. While true, tooltips are suppressed (`tooltip: _isDragging ? null : name`) to prevent them from interfering with drop targets. The vertical `ServerStrip` does not track this state (tooltips always show).
+`_ServerListState._isDragging` is set in `onDragStarted` and cleared in `onDragEnd`/`onDraggableCanceled`. While true, tooltips are suppressed (`tooltip: _isDragging ? null : name`) to prevent them from interfering with drop targets. The vertical `ServerStrip` does not track this state (tooltips always show).
 
 ## Folder System
 
@@ -454,7 +415,7 @@ leave one behind with no tile to click. See `markAllDmsSeen` in `providers_serve
 
 **Where the right click is wired.** Server and folder icons carry their own `ContextMenuTarget` in
 `_buildServerIcon` / `_buildFolderIcon`, because they also sit inside the `DragTarget` + `LongPressDraggable`
-machinery. The Home button uses the `onContextMenu` prop on `_ServerIcon` / `_BottomServerIcon`, which wraps the
+machinery. The Home button uses the `onContextMenu` prop on `_ServerIcon` / `_DockTile`, which wraps the
 icon ABOVE its `HollowFocusRing` — the `Shortcuts` has to be an ancestor of the focus node or the key route
 never fires.
 
@@ -540,7 +501,7 @@ File: `lib/src/ui/components/server_folder_popup.dart`
 `ConsumerWidget`. Renders a 2x2 grid preview of up to 4 servers from the folder. Used as the icon content for folder items in both `ServerStrip` and `BottomBar`.
 
 **Construction:**
-- Takes `folder: FolderStripItem` and `size: double` (48 for ServerStrip, 38 for BottomBar).
+- Takes `folder: FolderStripItem` and `size: double` (48 for ServerStrip, 40 for BottomBar), plus `filled` (default true; the dock passes false, so the tile's own fill shows through).
 - Watches `serverListProvider` and `serverAvatarProvider`.
 - Takes first 4 server IDs from `folder.serverIds`.
 
@@ -559,7 +520,7 @@ Outer container: `actualSize` x `actualSize`, `hollow.elevated` background, 2px 
 
 ### DM Unreads (Home Icon)
 
-Both `ServerStrip` and `BottomBar` compute `dmUnreadTotal` by iterating `unreadState.dmUnreadCounts.entries` and summing values only where `notifSettings.isDmEnabled(entry.key)` returns true. The badge appears on the home icon only when a server is currently selected (`selectedServerId != null`), hiding it when already viewing DMs.
+`ServerStrip` computes `dmUnreadTotal` by iterating `unreadState.dmUnreadCounts.entries` and summing values only where `notifSettings.isDmEnabled(entry.key)` returns true. The badge appears on the home icon only when a server is currently selected (`selectedServerId != null`), hiding it when already viewing DMs. The dock's Home tile carries no DM unread total (the friend chips and Home's list show DM unread).
 
 ### Server Unreads
 
@@ -567,7 +528,7 @@ Each server icon checks `notificationSettingsProvider.notifier.isServerMuted(ser
 
 ### Folder Unreads
 
-Folder unread count is the sum of all non-muted server unreads within the folder. The badge is hidden when the folder is selected (`isSelected ? 0 : folderUnreads`) to avoid showing a badge for the server you're already viewing.
+Folder unread count is the sum of all non-muted server unreads within the folder. In `ServerStrip` the badge is hidden when the folder is selected (`isSelected ? 0 : folderUnreads`). The dock sums unread AND mentions (a mention shows `@N`) and keeps the count when the folder is selected.
 
 ### Folder Popup Item Unreads
 
@@ -576,10 +537,10 @@ Each `_FolderServerItem` receives `unreadCount` directly, computed as `notifSett
 ### Badge Positioning
 
 - **ServerStrip (vertical):** bottom-right (`right: -6, bottom: -4`), 16px height, 9px text.
-- **BottomBar (horizontal):** top-right (`right: -5, top: -4`), 14px height, 8px text.
+- **BottomBar (horizontal):** top-right (`right: -sm, top: -xs`), ring `opaqueSurface`, inside the full-height `_DockSlot` so the scroll row never clips it.
 - **Folder popup items:** top-right (`top: -4, right: -4`), no minimum width constraint, 9px text.
 
-All badges: `hollow.error` background, `hollow.background` border (2px in strip icons, none in popup), white text, caps at `'99+'`, `Clip.none` on parent Stack.
+All badges: `HollowCountBadge` (accent unread, `error` with `@N` for mentions), a ring the colour of the surface behind, caps at `'99+'`, `Clip.none` on parent Stack.
 
 ## Shared Helper Functions
 

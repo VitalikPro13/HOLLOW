@@ -1,4 +1,4 @@
-﻿import 'package:flutter/material.dart';
+import 'package:flutter/material.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/ui/components/overlay_anchor.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -13,6 +13,7 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/connection_visual.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
+import 'package:hollow/src/ui/components/hollow_icon_button.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_tooltip.dart';
 import 'package:hollow/src/ui/components/download_icon_button.dart';
@@ -55,7 +56,7 @@ class UserBar extends ConsumerWidget {
       visual = switch (syncStatus) {
         ServerSyncStatus.syncing => ConnectionVisual(
             label: 'Syncing...',
-            color: hollow.accentText,
+            color: hollow.textSecondary,
             filled: false,
           ),
         ServerSyncStatus.retrying => ConnectionVisual(
@@ -91,7 +92,7 @@ class UserBar extends ConsumerWidget {
       // name and status stacked in a hard box overflow at a large OS text size,
       // which desktop passes through unclamped.
       constraints: const BoxConstraints(minHeight: 52),
-      padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.sm + 2),
+      padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.md),
       decoration: BoxDecoration(
         color: hollow.opaqueSurface,
         border: Border(
@@ -116,7 +117,7 @@ class UserBar extends ConsumerWidget {
 
           Expanded(
             child: HollowTooltip(
-              message: localPeerId ?? 'Loading...',
+              message: 'Your profile and status',
               child: HollowPressable(
                 borderRadius: BorderRadius.circular(hollow.radiusMd),
                 onTap: () {
@@ -148,15 +149,11 @@ class UserBar extends ConsumerWidget {
                   children: [
                     Text(
                       myDisplayName,
-                      style: HollowTypography.body.copyWith(
-                        color: hollow.textPrimary,
-                        fontSize: 13,
-                        fontWeight: FontWeight.w600,
-                      ),
+                      style: HollowTypography.label
+                          .copyWith(color: hollow.textPrimary),
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                     ),
-                    const SizedBox(height: 1),
                     Row(
                       children: [
                         StatusDot(
@@ -190,35 +187,21 @@ class UserBar extends ConsumerWidget {
             ),
           ),
 
-          const DownloadIconButton(iconSize: 16),
-
-          HollowTooltip(
-            message: 'Settings',
-            child: HollowPressable(
-              semanticLabel: 'Settings',
-              onTap: () => showUserSettingsDialog(context),
-              borderRadius: BorderRadius.circular(hollow.radiusMd),
-              padding: const EdgeInsets.all(HollowSpacing.xs),
-              child: Icon(
-                LucideIcons.settings,
-                size: 16,
-                color: hollow.textSecondary,
-              ),
-            ),
+          const DownloadIconButton(),
+          const SizedBox(width: HollowSpacing.xs),
+          HollowIconButton(
+            icon: LucideIcons.settings,
+            label: 'Settings',
+            onPressed: () => showUserSettingsDialog(context),
           ),
-
-          if (identity.mnemonic != null)
-            HollowTooltip(
-              message: 'Recovery phrase',
-              child: HollowPressable(
-                semanticLabel: 'Recovery phrase',
-                onTap: () =>
-                    showMnemonicDialog(context, identity.mnemonic!),
-                borderRadius: BorderRadius.circular(hollow.radiusMd),
-                padding: const EdgeInsets.all(HollowSpacing.xs),
-                child: Icon(LucideIcons.keyRound, size: 16, color: hollow.textSecondary),
-              ),
+          if (identity.mnemonic != null) ...[
+            const SizedBox(width: HollowSpacing.xs),
+            HollowIconButton(
+              icon: LucideIcons.keyRound,
+              label: 'Recovery phrase',
+              onPressed: () => showMnemonicDialog(context, identity.mnemonic!),
             ),
+          ],
         ],
       ),
     ),
@@ -234,11 +217,12 @@ class _RoomBudgetBar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
+    // Not a control, so never the accent: grey until it is a problem.
     final color = budget.isAtLimit
         ? hollow.error
         : budget.isNearLimit
             ? hollow.warning
-            : hollow.accent;
+            : hollow.textTertiary;
 
     return HollowTooltip(
       message: '${budget.joined} / ${budget.limit} connections used',
@@ -251,11 +235,11 @@ class _RoomBudgetBar extends StatelessWidget {
         child: FractionallySizedBox(
           widthFactor: budget.usage.clamp(0.0, 1.0),
           child: AnimatedContainer(
-            duration: HollowDurations.normal,
+            duration: HollowDurations.slow,
             decoration: BoxDecoration(
               color: color,
-              borderRadius: const BorderRadius.horizontal(
-                right: Radius.circular(2),
+              borderRadius: BorderRadius.horizontal(
+                right: Radius.circular(hollow.radiusXs),
               ),
             ),
           ),

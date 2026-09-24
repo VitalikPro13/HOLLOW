@@ -1,69 +1,68 @@
-﻿import 'package:flutter/material.dart';
+import 'dart:io' show Platform;
+
+import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:hollow/src/ui/components/hollow_count_badge.dart';
-import 'package:hollow/src/ui/components/hollow_divider.dart';
-import 'package:hollow/src/core/providers/conference_provider.dart';
+import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/dm_navigation.dart';
-import 'package:hollow/src/core/providers/shell_tab.dart';
-import 'package:hollow/src/core/providers/shop_tab_provider.dart';
-import 'package:hollow/src/core/shop_availability.dart';
 import 'package:hollow/src/core/providers/favourite_friends_provider.dart';
 import 'package:hollow/src/core/providers/friends_provider.dart';
-import 'package:hollow/src/core/providers/device_link_provider.dart';
-import 'package:hollow/src/core/providers/profile_provider.dart';
-import 'package:hollow/src/rust/api/storage.dart' as storage_api;
-import 'package:hollow/src/core/providers/saved_messages_provider.dart';
-import 'package:hollow/src/core/providers/selected_peer_provider.dart';
-import 'package:hollow/src/core/providers/server_provider.dart';
-import 'package:hollow/src/core/providers/split_view_provider.dart';
-import 'package:hollow/src/core/providers/unread_provider.dart';
 import 'package:hollow/src/core/providers/notification_provider.dart';
-import 'package:hollow/src/core/providers/channel_provider.dart';
+import 'package:hollow/src/core/providers/profile_provider.dart';
+import 'package:hollow/src/core/providers/selected_peer_provider.dart';
+import 'package:hollow/src/core/providers/split_view_provider.dart';
 import 'package:hollow/src/core/providers/temporary_nickname_provider.dart';
+import 'package:hollow/src/core/providers/unread_provider.dart';
+import 'package:hollow/src/core/providers/window_chrome_provider.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
+import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
+import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/ui/components/edge_scroll_row.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
+import 'package:hollow/src/ui/components/hollow_count_badge.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
+import 'package:hollow/src/ui/components/hollow_divider.dart';
 import 'package:hollow/src/ui/components/hollow_empty_state.dart';
+import 'package:hollow/src/ui/components/hollow_icon_button.dart';
+import 'package:hollow/src/ui/components/hollow_menu.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
+import 'package:hollow/src/ui/components/hollow_text_link.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
-import 'package:hollow/src/ui/components/hollow_menu.dart';
 import 'package:hollow/src/ui/components/hollow_tooltip.dart';
-import 'package:hollow/src/ui/shell/user_context_menu.dart';
+import 'package:hollow/src/ui/components/hover_scope.dart';
 import 'package:hollow/src/ui/components/status_dot.dart';
-import 'package:hollow/src/core/providers/help_panel_provider.dart';
+import 'package:hollow/src/ui/components/ui_scale.dart';
+import 'package:hollow/src/ui/shell/user_context_menu.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:window_manager/window_manager.dart';
 
-/// Horizontal friends bar for the Dock layout.
+/// The Dock layout's header: your people on the left, and in Dock mode the
+/// window's own strip, its empty middle moving the window and its trailing
+/// end kept clear for the floating window controls.
 class FriendsBar extends ConsumerWidget {
   const FriendsBar({super.key});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final hollow = HollowTheme.of(context);
-    // The DOCK shows favourites only once any are set, which is its purpose.
-    // Every other surface uses the unfiltered list, so favouriting never hides
-    // a friend there.
-    final displayList = ref.watch(friendsBarDisplayProvider);
+    final content = ref.watch(friendsBarProvider);
     final pendingCount = ref.watch(pendingFriendCountProvider);
-    final online = ref.watch(onlineIdentitiesProvider);
-    final profiles = ref.watch(profileProvider);
-    final unreadState = ref.watch(unreadProvider);
-    final notifSettings = ref.watch(notificationSettingsProvider);
-    final selectedPeerId = ref.watch(selectedPeerProvider);
+
+    // In window pixels, so divided by the zoom this strip is drawn at.
+    final ownsChrome = ref.watch(dockOwnsWindowChromeProvider);
+    final scale = UiScaleInfo.maybeOf(context)?.effective ?? 1.0;
+    final controlsWidth =
+        ownsChrome ? ref.watch(windowControlsWidthProvider) / scale : 0.0;
 
     return Container(
-      height: 44,
+      height: kDockHeaderHeight,
       decoration: BoxDecoration(
-        color: hollow.surface.withValues(alpha: 1.0),
-        border: Border(
-          bottom: BorderSide(color: hollow.border),
-        ),
+        color: hollow.opaqueSurface,
+        border: Border(bottom: BorderSide(color: hollow.border)),
       ),
       // Fixed-height chrome, so the label scale is capped across the strip to
       // keep it in the bar at high OS text size. Content areas honour the full
@@ -71,292 +70,237 @@ class FriendsBar extends ConsumerWidget {
       child: MediaQuery.withClampedTextScaling(
         maxScaleFactor: 1.3,
         child: Row(
-        children: [
-          const SizedBox(width: HollowSpacing.sm),
-
-          Stack(
-            clipBehavior: Clip.none,
-            children: [
-              HollowTooltip(
-                message: 'Add Friend',
-                child: HollowPressable(
-                  semanticLabel: 'Add friend',
-                  onTap: () => _showAddFriendDialog(context, ref, hollow),
-                  borderRadius: BorderRadius.circular(hollow.radiusMd),
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: HollowSpacing.sm,
-                    vertical: HollowSpacing.xs,
-                  ),
-                  child: Icon(
-                    LucideIcons.userPlus,
-                    size: 18,
-                    color: hollow.textSecondary,
-                  ),
-                ),
-              ),
-              if (pendingCount > 0)
-                Positioned(
-                  right: 0,
-                  top: 0,
-                  child: Container(
-                    constraints: const BoxConstraints(minWidth: 14),
-                    height: 14,
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: HollowSpacing.xxs),
-                    decoration: BoxDecoration(
-                      color: hollow.error,
-                      borderRadius: BorderRadius.circular(HollowRadius.pill),
-                      border: Border.all(color: hollow.surface, width: 2),
+          children: [
+            // The traffic lights sit in the header's leading end on macOS.
+            if (ownsChrome && Platform.isMacOS)
+              SizedBox(width: kMacTrafficLightGap / scale)
+            else
+              const SizedBox(width: HollowSpacing.md),
+            _AddFriendButton(pendingCount: pendingCount),
+            const SizedBox(width: HollowSpacing.md),
+            Expanded(
+              child: LayoutBuilder(builder: (context, constraints) {
+                // The middle never shrinks below this, so the window can
+                // always be dragged however many friends there are.
+                final chipsMax = (constraints.maxWidth - _kMinDragWidth)
+                    .clamp(0.0, double.infinity);
+                return Row(
+                  children: [
+                    ConstrainedBox(
+                      constraints: BoxConstraints(maxWidth: chipsMax),
+                      child: content.isEmpty
+                          ? const _NoFriendsYet()
+                          : _FriendStrip(content: content),
                     ),
-                    alignment: Alignment.center,
-                    child: Text(
-                      '$pendingCount',
-                      style: HollowTypography.micro.copyWith(
-                        color: Colors.white,
-                        fontWeight: FontWeight.w600,
-                        height: 1,
-                      ),
+                    Expanded(
+                      child: ownsChrome
+                          // Double click maximises too: DragToMoveArea's own.
+                          ? const DragToMoveArea(child: SizedBox.expand())
+                          : const SizedBox.shrink(),
                     ),
-                  ),
-                ),
-            ],
-          ),
-
-          Container(
-            width: 1,
-            height: 24,
-            margin: const EdgeInsets.symmetric(horizontal: HollowSpacing.sm),
-            color: hollow.border,
-          ),
-
-          Expanded(
-            child: displayList.isEmpty
-                ? const Padding(
-                    padding: EdgeInsets.only(left: HollowSpacing.sm),
-                    child: HollowEmptyState(title: 'No friends yet', dense: true),
-                  )
-                // .builder, not the children: form, so a long friends list
-                // stays LAZY. Arrows and wheel appear only while it overflows,
-                // or friends past the edge are unreachable on a wheel mouse.
-                : EdgeScrollRow.builder(
-                    semanticLabel: 'friends',
-                    builder: (context, scrollController) =>
-                        ListView.builder(
-                    controller: scrollController,
-                    scrollDirection: Axis.horizontal,
-                    itemCount: displayList.length,
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: HollowSpacing.xs,
-                    ),
-                    itemBuilder: (context, index) {
-                      final friend = displayList[index];
-                      final isOnline = online.contains(friend.peerId);
-                      final isSelected = friend.peerId == selectedPeerId;
-                      final name = displayNameFor(profiles, friend.peerId);
-
-                      final unreadCount =
-                          notifSettings.isDmEnabled(friend.peerId)
-                          ? (unreadState.dmUnreadCounts[friend.peerId] ?? 0)
-                          : 0;
-
-                      return _FriendChip(
-                        peerId: friend.peerId,
-                        name: name,
-                        isOnline: isOnline,
-                        isSelected: isSelected,
-                        unreadCount: unreadCount,
-                        onTap: () => _selectFriend(ref, friend.peerId),
-                      );
-                    },
-                  )),
-          ),
-
-          Container(
-            width: 1,
-            height: 24,
-            margin: const EdgeInsets.symmetric(horizontal: HollowSpacing.sm),
-            color: hollow.border,
-          ),
-
-          // Absent entirely, not disabled, on store builds: Apple 3.1.1 and
-          // Play policy want no shop surface at all.
-          if (ref.watch(shopAvailableProvider)) ...[
-            Builder(builder: (context) {
-              final shopOpen = ref.watch(shopTabOpenProvider);
-              return HollowTooltip(
-                message: 'Hollow Shop',
-                child: HollowPressable(
-                  semanticLabel: 'Hollow Shop',
-                  // Toggles like every other lit button on this strip
-                  // (issue #28).
-                  onTap: () => shopOpen
-                      ? setShellTab(ref.read, null)
-                      : openShopTab(ref.read),
-                  borderRadius: BorderRadius.circular(hollow.radiusMd),
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: HollowSpacing.sm,
-                    vertical: HollowSpacing.xs,
-                  ),
-                  child: Icon(
-                    LucideIcons.store,
-                    size: 18,
-                    color: shopOpen ? hollow.accent : hollow.textSecondary,
-                  ),
-                ),
-              );
-            }),
-            const SizedBox(width: HollowSpacing.xs),
+                  ],
+                );
+              }),
+            ),
+            SizedBox(width: ownsChrome ? controlsWidth : HollowSpacing.sm),
           ],
-
-          // Saved messages is the DM with your own master identity.
-          Builder(builder: (context) {
-            final savedId = ref.watch(savedMessagesPeerIdProvider);
-            final isActive = savedId != null && savedId == selectedPeerId;
-            return HollowTooltip(
-              message: 'Saved messages',
-              child: HollowPressable(
-                semanticLabel: 'Saved messages',
-                // Toggles, like Conferences beside it. Every other button on
-                // this strip that lights up also unlights, so one that does not
-                // reads as a dead press.
-                onTap: savedId == null
-                    ? null
-                    : () => _toggleSavedMessages(ref, savedId),
-                borderRadius: BorderRadius.circular(hollow.radiusMd),
-                padding: const EdgeInsets.symmetric(
-                  horizontal: HollowSpacing.sm,
-                  vertical: HollowSpacing.xs,
-                ),
-                child: Icon(
-                  LucideIcons.bookmark,
-                  size: 18,
-                  color: isActive ? hollow.accent : hollow.textSecondary,
-                ),
-              ),
-            );
-          }),
-          const SizedBox(width: HollowSpacing.xs),
-
-          Builder(builder: (context) {
-            final conferencesOpen = ref.watch(conferenceTabOpenProvider);
-            return HollowTooltip(
-              message: 'Conferences',
-              child: HollowPressable(
-                semanticLabel: 'Conferences',
-                // Toggles: the lit button is how you get back to what you were
-                // doing (issue #28).
-                onTap: () => conferencesOpen
-                    ? setShellTab(ref.read, null)
-                    : ref.read(conferenceProvider.notifier).openTab(),
-                borderRadius: BorderRadius.circular(hollow.radiusMd),
-                padding: const EdgeInsets.symmetric(
-                  horizontal: HollowSpacing.sm,
-                  vertical: HollowSpacing.xs,
-                ),
-                child: Icon(
-                  LucideIcons.video,
-                  size: 18,
-                  color: conferencesOpen
-                      ? hollow.accent
-                      : hollow.textSecondary,
-                ),
-              ),
-            );
-          }),
-          const SizedBox(width: HollowSpacing.xs),
-
-          Builder(builder: (context) {
-            final helpOpen = ref.watch(helpPanelOpenProvider);
-            return HollowTooltip(
-              message: 'Help',
-              child: HollowPressable(
-                semanticLabel: 'Help',
-                onTap: () => ref
-                    .read(helpPanelOpenProvider.notifier)
-                    .state = !helpOpen,
-                borderRadius: BorderRadius.circular(hollow.radiusMd),
-                padding: const EdgeInsets.symmetric(
-                  horizontal: HollowSpacing.sm,
-                  vertical: HollowSpacing.xs,
-                ),
-                child: Icon(
-                  LucideIcons.circleHelp,
-                  size: 18,
-                  color: helpOpen ? hollow.accent : hollow.textSecondary,
-                ),
-              ),
-            );
-          }),
-          const SizedBox(width: HollowSpacing.sm),
-        ],
-      ),
+        ),
       ),
     );
   }
+}
 
-  /// Press to show, press again to put away, like the Conferences button.
-  ///
-  /// The two need different machinery for the same feel: Conferences is a
-  /// centre tab layered over the selection, while Saved messages IS the
-  /// selection, so there is nothing underneath to reveal and "away" means Home.
-  void _toggleSavedMessages(WidgetRef ref, String savedId) {
-    final split = ref.read(splitViewProvider);
-    // In split view the button targets the right pane rather than the global
-    // selection, so there is no global "lit" state to toggle off.
-    if (split.isSplit && split.focusedPane == 1) {
-      _selectFriend(ref, savedId);
-      return;
-    }
-    if (ref.read(selectedPeerProvider) == savedId) {
-      _clearToHome(ref);
-      return;
-    }
-    _selectFriend(ref, savedId);
-  }
+const double _kMinDragWidth = 48;
 
-  /// The exact inverse of [_selectFriend]'s non-split branch. Deliberately does
-  /// NOT close an open split: the press that lit this button did not open one.
-  void _clearToHome(WidgetRef ref) {
-    setShellTab(ref.read, null);
-    ref.read(selectedPeerProvider.notifier).state = null;
-    ref.read(selectedServerProvider.notifier).state = null;
-    ref.read(channelListProvider.notifier).clear();
-    ref.read(selectedChannelProvider.notifier).state = null;
-    ref.read(serverSettingsOpenProvider.notifier).state = false;
-  }
+class _AddFriendButton extends StatelessWidget {
+  final int pendingCount;
+  const _AddFriendButton({required this.pendingCount});
 
-  void _selectFriend(WidgetRef ref, String peerId) {
-    openDmConversation(ref, peerId);
-  }
-
-  void _showAddFriendDialog(
-      BuildContext context, WidgetRef ref, HollowTheme hollow) {
-    showFriendsManager(context);
+  @override
+  Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
+    return Stack(
+      clipBehavior: Clip.none,
+      children: [
+        HollowIconButton(
+          icon: LucideIcons.userPlus,
+          label: 'Add friend',
+          // With requests waiting, the badge is what the press is for.
+          onPressed: () => showFriendsManager(
+            context,
+            tab: pendingCount > 0 ? FriendsManagerTab.incoming : null,
+          ),
+        ),
+        if (pendingCount > 0)
+          Positioned(
+            right: -HollowSpacing.xs,
+            top: -HollowSpacing.xxs,
+            child: IgnorePointer(
+              // A request is not a mention: the accent kind, never red.
+              child: Semantics(
+                label: pendingCount == 1
+                    ? '1 friend request'
+                    : '$pendingCount friend requests',
+                child: ExcludeSemantics(
+                  child: HollowCountBadge(
+                    count: pendingCount,
+                    ring: hollow.opaqueSurface,
+                  ),
+                ),
+              ),
+            ),
+          ),
+      ],
+    );
   }
 }
 
-/// The Friends Manager dialog; [addFriend] opens it on the Add Friend tab.
-void showFriendsManager(BuildContext context, {bool addFriend = false}) {
+class _NoFriendsYet extends StatelessWidget {
+  const _NoFriendsYet();
+
+  @override
+  Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Flexible(
+          child: Text(
+            'No friends yet',
+            style: HollowTypography.label.copyWith(color: hollow.textTertiary),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+          ),
+        ),
+        const SizedBox(width: HollowSpacing.sm),
+        HollowTextLink(
+          'Add a friend',
+          onTap: () => showFriendsManager(context, tab: FriendsManagerTab.add),
+        ),
+      ],
+    );
+  }
+}
+
+/// Above this many chips the strip overflows anyway, so it builds lazily
+/// rather than measuring every chip to fit.
+const int _kEagerChipLimit = 24;
+
+class _FriendStrip extends StatelessWidget {
+  final FriendsBarContent content;
+  const _FriendStrip({required this.content});
+
+  @override
+  Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
+    final friends = [...content.leading, ...content.extras];
+    final divider = content.extras.isNotEmpty || content.hidden > 0
+        ? content.leading.length
+        : -1;
+    final more = content.hidden > 0;
+    final count = friends.length + (divider >= 0 ? 1 : 0) + (more ? 1 : 0);
+
+    Widget item(int index) {
+      if (index == divider) {
+        return const Padding(
+          padding: EdgeInsets.symmetric(horizontal: HollowSpacing.xs),
+          child: SizedBox(
+            height: HollowSpacing.lg + HollowSpacing.xs,
+            child: HollowVerticalDivider(),
+          ),
+        );
+      }
+      if (more && index == count - 1) {
+        return _MoreFriends(hidden: content.hidden);
+      }
+      final friend =
+          friends[divider >= 0 && index > divider ? index - 1 : index];
+      return Padding(
+        padding: EdgeInsets.only(left: index == 0 ? 0 : HollowSpacing.xs),
+        child: _FriendChip(key: ValueKey(friend.peerId), peerId: friend.peerId),
+      );
+    }
+
+    if (count > _kEagerChipLimit) {
+      return EdgeScrollRow.builder(
+        semanticLabel: 'friends',
+        fadeColor: hollow.opaqueSurface,
+        builder: (context, controller) => ListView.builder(
+          controller: controller,
+          scrollDirection: Axis.horizontal,
+          itemCount: count,
+          itemBuilder: (context, index) => Center(child: item(index)),
+        ),
+      );
+    }
+    return EdgeScrollRow(
+      semanticLabel: 'friends',
+      fadeColor: hollow.opaqueSurface,
+      shrinkWrap: true,
+      children: [for (var i = 0; i < count; i++) item(i)],
+    );
+  }
+}
+
+/// How many friends the favourites filter hides; opens the whole list.
+class _MoreFriends extends StatelessWidget {
+  final int hidden;
+  const _MoreFriends({required this.hidden});
+
+  @override
+  Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
+    return Padding(
+      padding: const EdgeInsets.only(left: HollowSpacing.xs),
+      child: HollowPressable(
+        semanticLabel: 'Show all friends, $hidden more',
+        onTap: () => showFriendsManager(context),
+        borderRadius: BorderRadius.circular(hollow.radiusMd),
+        padding: const EdgeInsets.symmetric(
+          horizontal: HollowSpacing.sm,
+          vertical: HollowSpacing.xs,
+        ),
+        child: Text(
+          '+$hidden more',
+          style: HollowTypography.label.copyWith(color: hollow.textSecondary),
+        ),
+      ),
+    );
+  }
+}
+
+/// The Friends Manager's tabs.
+enum FriendsManagerTab { friends, favourites, incoming, outgoing, add }
+
+/// The Friends Manager dialog, open on [tab] (Friends when null); [addFriend]
+/// is shorthand for the Add Friend tab.
+void showFriendsManager(
+  BuildContext context, {
+  bool addFriend = false,
+  FriendsManagerTab? tab,
+}) {
   showHollowDialog(
     context: context,
-    builder: (context) => _FriendsManager(addFriend: addFriend),
+    builder: (context) => _FriendsManager(
+      initialTab:
+          tab ?? (addFriend ? FriendsManagerTab.add : FriendsManagerTab.friends),
+    ),
   );
 }
 
 /// Full Friends Manager dialog with tabs.
 class _FriendsManager extends ConsumerStatefulWidget {
-  final bool addFriend;
-  const _FriendsManager({this.addFriend = false});
+  final FriendsManagerTab initialTab;
+  const _FriendsManager({required this.initialTab});
 
   @override
   ConsumerState<_FriendsManager> createState() => _FriendsManagerState();
 }
 
-enum _FriendsTab { friends, favourites, incoming, outgoing, add }
+typedef _FriendsTab = FriendsManagerTab;
 
 class _FriendsManagerState extends ConsumerState<_FriendsManager> {
-  late _FriendsTab _activeTab =
-      widget.addFriend ? _FriendsTab.add : _FriendsTab.friends;
+  late _FriendsTab _activeTab = widget.initialTab;
   final _addController = TextEditingController();
 
   @override
@@ -1255,116 +1199,134 @@ class _AddFriendTabState extends ConsumerState<_AddFriendTab> {
   }
 }
 
-/// Single friend chip in the horizontal bar.
-class _FriendChip extends StatelessWidget { // design-ignore: an avatar tab in the friends bar, not a label
+/// One friend in the header strip: avatar with presence, name, and an unread
+/// count after the name. Unread lifts the name's colour, never its weight, so
+/// the row never reflows under the pointer.
+class _FriendChip extends ConsumerWidget { // design-ignore: an avatar tab in the friends bar, not a label
   final String peerId;
-  final String name;
-  final bool isOnline;
-  final bool isSelected;
-  final int unreadCount;
-  final VoidCallback onTap;
 
-  const _FriendChip({
-    required this.peerId,
-    required this.name,
-    required this.isOnline,
-    required this.isSelected,
-    required this.unreadCount,
-    required this.onTap,
-  });
+  const _FriendChip({super.key, required this.peerId});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final hollow = HollowTheme.of(context);
+    final profile = ref.watch(profileProvider.select((p) => p[peerId]));
+    final name = displayNameForPeer(profile, peerId);
+    final online =
+        ref.watch(onlineIdentitiesProvider.select((s) => s.contains(peerId)));
+    final selected =
+        ref.watch(selectedPeerProvider.select((id) => id == peerId));
+    final enabled = ref.watch(
+        notificationSettingsProvider.select((n) => n.isDmEnabled(peerId)));
+    final unread = enabled
+        ? ref.watch(
+            unreadProvider.select((s) => s.dmUnreadCounts[peerId] ?? 0))
+        : 0;
+    final status = profile?.status ?? '';
+    final fill = selected ? hollow.accentMuted : null;
+
+    Widget chip = HollowPressable(
+      onTap: () => openDmConversation(ref, peerId),
+      semanticLabel: unread > 0 ? '$name, $unread unread' : name,
+      borderRadius: BorderRadius.circular(hollow.radiusMd),
+      backgroundColor: fill,
+      padding: const EdgeInsets.fromLTRB(
+        HollowSpacing.xs,
+        HollowSpacing.xs,
+        HollowSpacing.sm,
+        HollowSpacing.xs,
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _FriendAvatar(peerId: peerId, online: online, restFill: fill),
+          const SizedBox(width: HollowSpacing.sm),
+          ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: _kChipNameWidth),
+            child: Text(
+              name,
+              style: HollowTypography.label.copyWith(
+                color: selected
+                    ? hollow.accentText
+                    : unread > 0
+                        ? hollow.textPrimary
+                        : hollow.textSecondary,
+              ),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+          if (unread > 0) ...[
+            const SizedBox(width: HollowSpacing.xs),
+            ExcludeSemantics(child: HollowCountBadge(count: unread)),
+          ],
+        ],
+      ),
+    );
+    // Their status line, never the name the chip already shows.
+    if (status.isNotEmpty) chip = HollowTooltip(message: status, child: chip);
+
+    // The same conversation menu the sidebar DM tile has (issue #61).
+    return ContextMenuTarget(
+      semanticLabel: 'Conversation actions',
+      onOpen: (anchor) => showUserContextMenu(
+        context: context,
+        ref: ref,
+        peerId: peerId,
+        surface: UserMenuSurface.dmTile,
+        anchor: anchor,
+      ),
+      child: chip,
+    );
+  }
+}
+
+const double _kChipNameWidth = 96;
+
+/// The avatar with its presence dot, cut out of whatever fill the chip shows
+/// right now, so the cut-out never reads as a dark halo.
+class _FriendAvatar extends StatelessWidget {
+  final String peerId;
+  final bool online;
+  final Color? restFill;
+
+  const _FriendAvatar(
+      {required this.peerId, required this.online, required this.restFill});
 
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
-
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 3),
-      // The same conversation menu the sidebar DM tile has (issue #61). A
-      // Consumer rather than a ref field, because passing a WidgetRef into a
-      // constructor cascades rebuilds.
-      child: Consumer(
-        builder: (context, ref, child) => ContextMenuTarget(
-          semanticLabel: 'Conversation actions',
-          onOpen: (anchor) => showUserContextMenu(
-            context: context,
-            ref: ref,
-            peerId: peerId,
-            surface: UserMenuSurface.dmTile,
-            anchor: anchor,
-          ),
-          child: child!,
-        ),
-        child: HollowTooltip(
-        message: name,
-        child: HollowPressable(
-          onTap: onTap,
-          borderRadius: BorderRadius.circular(hollow.radiusMd),
-          hoverColor: hollow.elevated,
-          backgroundColor:
-              isSelected ? hollow.accent.withValues(alpha: 0.15) : null,
-          padding: const EdgeInsets.symmetric(
-            horizontal: HollowSpacing.sm,
-            vertical: 4,
-          ),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Stack(
-                clipBehavior: Clip.none,
-                children: [
-                  HollowAvatar(peerId: peerId, size: 24),
-                  Positioned(
-                    right: -2,
-                    bottom: -2,
-                    child: Container(
-                      width: 10,
-                      height: 10,
-                      decoration: BoxDecoration(
-                        color: hollow.surface,
-                        shape: BoxShape.circle,
-                      ),
-                      alignment: Alignment.center,
-                      child: StatusDot(
-                        color: isOnline ? hollow.success : hollow.textSecondary,
-                        size: 7,
-                        filled: isOnline,
-                        semanticLabel: isOnline ? 'Online' : 'Offline',
-                      ),
-                    ),
-                  ),
-                  if (unreadCount > 0)
-                    Positioned(
-                      left: -4,
-                      top: -4,
-                      child: HollowCountBadge(
-                        count: unreadCount,
-                        ring: hollow.surface,
-                      ),
-                    ),
-                ],
-              ),
-              const SizedBox(width: 6),
-              ConstrainedBox(
-                constraints: const BoxConstraints(maxWidth: 72),
-                child: Text(
-                  name,
-                  style: HollowTypography.caption.copyWith(
-                    color: isSelected
-                        ? hollow.textPrimary
-                        : hollow.textSecondary,
-                    fontWeight:
-                        unreadCount > 0 ? FontWeight.w600 : FontWeight.w400,
-                    fontSize: 11,
-                  ),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ),
-            ],
+    final hovered = HoverScope.maybeOf(context) ?? false;
+    final restFill = this.restFill;
+    // The selected fill is a translucent wash, so the cut-out blends it over
+    // the strip rather than showing the avatar through.
+    final cut = restFill != null
+        ? Color.alphaBlend(restFill, hollow.opaqueSurface)
+        : hovered
+            ? hollow.elevated
+            : hollow.opaqueSurface;
+    return Stack(
+      clipBehavior: Clip.none,
+      children: [
+        HollowAvatar(peerId: peerId, size: 24),
+        Positioned(
+          right: -HollowSpacing.xxs,
+          bottom: -HollowSpacing.xxs,
+          child: AnimatedContainer(
+            duration: HollowDurations.fast,
+            width: 11,
+            height: 11,
+            decoration: BoxDecoration(color: cut, shape: BoxShape.circle),
+            alignment: Alignment.center,
+            child: StatusDot(
+              color: online ? hollow.success : hollow.textSecondary,
+              size: 7,
+              filled: online,
+              semanticLabel: online ? 'Online' : 'Offline',
+            ),
           ),
         ),
-      ),
-      ),
+      ],
     );
   }
 }

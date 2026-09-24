@@ -1,9 +1,11 @@
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 
+import '../../theme/hollow_spacing.dart';
 import '../../theme/hollow_theme.dart';
 import 'hollow_pressable.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Make a vertical mouse wheel pan a horizontal scroller.
 ///
@@ -58,6 +60,14 @@ class EdgeScrollRow extends StatefulWidget {
   /// Purpose label for the arrows (they are icon-only controls).
   final String semanticLabel;
 
+  /// The surface the row sits on, which the edge fades blend into. Null is
+  /// `surface`; an opaque strip passes its opaque colour.
+  final Color? fadeColor;
+
+  /// Takes the children's width rather than all it is given, so what follows
+  /// the row in a Row can use the rest.
+  final bool shrinkWrap;
+
   /// Centres the content while it FITS, then scrolls normally.
   ///
   /// A `Center` around this widget cannot do it, because the arrow slots make
@@ -73,6 +83,8 @@ class EdgeScrollRow extends StatefulWidget {
     this.padding = EdgeInsets.zero,
     this.semanticLabel = 'items',
     this.center = false,
+    this.fadeColor,
+    this.shrinkWrap = false,
   }) : builder = null;
 
   const EdgeScrollRow.builder({
@@ -82,7 +94,9 @@ class EdgeScrollRow extends StatefulWidget {
     this.height,
     this.padding = EdgeInsets.zero,
     this.semanticLabel = 'items',
+    this.fadeColor,
   })  : children = null,
+        shrinkWrap = false,
         // Centring needs the viewport width, which only the children form
         // controls; a custom builder centres its own content.
         center = false;
@@ -202,9 +216,11 @@ class _EdgeScrollRowState extends State<EdgeScrollRow> {
           return false;
         },
         child: Row(
+          mainAxisSize: widget.shrinkWrap ? MainAxisSize.min : MainAxisSize.max,
           children: [
             if (_overflowing) _arrow(hollow, left: true, enabled: _canLeft),
-            Expanded(
+            Flexible(
+              fit: widget.shrinkWrap ? FlexFit.loose : FlexFit.tight,
               child: Stack(
                 children: [
                   wheelToScroll(controller: _controller, child: scroller),
@@ -232,10 +248,11 @@ class _EdgeScrollRowState extends State<EdgeScrollRow> {
       borderRadius: BorderRadius.circular(hollow.radiusMd),
       padding: EdgeInsets.zero,
       child: SizedBox(
-        width: 20,
+        width: HollowSpacing.xl,
+        height: HollowSpacing.xxl,
         child: Icon(
-          left ? Icons.chevron_left_rounded : Icons.chevron_right_rounded,
-          size: 18,
+          left ? LucideIcons.chevronLeft : LucideIcons.chevronRight,
+          size: 16,
           color: enabled ? hollow.textSecondary : hollow.textTertiary,
         ),
       ),
@@ -243,6 +260,7 @@ class _EdgeScrollRowState extends State<EdgeScrollRow> {
   }
 
   Widget _fade(HollowTheme hollow, {required bool left}) {
+    final surface = widget.fadeColor ?? hollow.surface;
     return Positioned(
       key: ValueKey(left ? 'edge-fade-left' : 'edge-fade-right'),
       left: left ? 0 : null,
@@ -255,10 +273,10 @@ class _EdgeScrollRowState extends State<EdgeScrollRow> {
           decoration: BoxDecoration(
             // Fade FROM the surface colour: a transparent stop lerps through
             // black and shows as a grey smear.
-            gradient: LinearGradient(
+            gradient: LinearGradient( // design-ignore: edge fade, a scroll affordance not decoration
               colors: left
-                  ? [hollow.surface, hollow.surface.withValues(alpha: 0)]
-                  : [hollow.surface.withValues(alpha: 0), hollow.surface],
+                  ? [surface, surface.withValues(alpha: 0)]
+                  : [surface.withValues(alpha: 0), surface],
             ),
           ),
         ),
