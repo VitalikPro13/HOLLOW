@@ -7,10 +7,12 @@ import 'package:hollow/src/core/time_labels.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/shared_tickers.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
+import 'package:hollow/src/theme/hollow_shadows.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
+import 'package:hollow/src/ui/chat/message_row.dart' show kMessageIndent;
 import 'package:hollow/src/ui/chat/emote_composer.dart';
 import 'package:hollow/src/ui/chat/hollow_link_utils.dart';
 import 'package:hollow/src/ui/chat/message_text_parser.dart';
@@ -1288,6 +1290,10 @@ class ChatComposerRow extends StatelessWidget {
   /// Off on a phone, where focus raises the keyboard over half the chat.
   final bool autofocus;
 
+  /// The phone's picker sits where the keyboard was, so the smiley offers the
+  /// keyboard back.
+  final bool expressionsOpen;
+
   const ChatComposerRow({
     super.key,
     required this.controller,
@@ -1303,6 +1309,7 @@ class ChatComposerRow extends StatelessWidget {
     this.hasStaged = false,
     this.beforeSend,
     this.autofocus = true,
+    this.expressionsOpen = false,
   });
 
   @override
@@ -1336,8 +1343,12 @@ class ChatComposerRow extends StatelessWidget {
                   padding: const EdgeInsets.only(right: HollowSpacing.xs),
                   child: Builder(
                     builder: (buttonContext) => HollowIconButton(
-                      icon: LucideIcons.smile,
-                      label: 'Emoji, GIFs and stickers',
+                      icon: expressionsOpen
+                          ? LucideIcons.keyboard
+                          : LucideIcons.smile,
+                      label: expressionsOpen
+                          ? 'Show keyboard'
+                          : 'Emoji, GIFs and stickers',
                       onPressed: () => onExpressions(buttonContext),
                     ),
                   ),
@@ -1486,6 +1497,40 @@ class UnreadJumpPill extends StatelessWidget { // design-ignore: the unread jump
   }
 }
 
+/// [UnreadJumpPill] fading in and out; a [count] of 0 hides it.
+class UnreadJumpFade extends StatefulWidget {
+  final int count;
+  final VoidCallback onTap;
+
+  const UnreadJumpFade(
+      {super.key, required this.count, required this.onTap});
+
+  @override
+  State<UnreadJumpFade> createState() => _UnreadJumpFadeState();
+}
+
+class _UnreadJumpFadeState extends State<UnreadJumpFade> {
+  // The last shown count, so the label does not read "0" on the way out.
+  int _shown = 0;
+
+  @override
+  Widget build(BuildContext context) {
+    final visible = widget.count > 0;
+    if (visible) _shown = widget.count;
+    return IgnorePointer(
+      ignoring: !visible,
+      child: AnimatedOpacity(
+        opacity: visible ? 1.0 : 0.0,
+        duration: HollowDurations.fast,
+        curve: visible ? HollowCurves.enter : HollowCurves.exit,
+        child: _shown == 0
+            ? const SizedBox.shrink()
+            : UnreadJumpPill(count: _shown, onTap: widget.onTap),
+      ),
+    );
+  }
+}
+
 /// Collapses typing peer ids to MASTER identities, excluding every id that is
 /// "us".
 ///
@@ -1510,12 +1555,14 @@ Set<String> typingMastersFor(WidgetRef ref, Set<String> typingPeers) {
       .toSet();
 }
 
-/// Typing indicator bar shown above the input area: up to 3 names, then
-/// "Several people are typing...".
+/// Who is typing: up to three names, then "Several people are typing".
 class TypingIndicatorBar extends StatelessWidget {
   final List<String> names;
 
   const TypingIndicatorBar({super.key, required this.names});
+
+  /// The label's height; [TypingIndicatorHost] lets 8 px of it cross the seam.
+  static const double height = 20;
 
   @override
   Widget build(BuildContext context) {
@@ -1533,11 +1580,16 @@ class TypingIndicatorBar extends StatelessWidget {
     }
 
     return Container(
-      constraints: const BoxConstraints(minHeight: 24),
-      padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.md),
-      alignment: Alignment.centerLeft,
-      color: hollow.surface,
+      height: height,
+      padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.sm),
+      decoration: BoxDecoration(
+        color: hollow.overlay,
+        border: Border.all(color: hollow.border),
+        borderRadius: BorderRadius.circular(hollow.radiusMd),
+        boxShadow: HollowShadows.float,
+      ),
       child: Row(
+        mainAxisSize: MainAxisSize.min,
         children: [
           Flexible(
             child: Text(
@@ -1547,7 +1599,6 @@ class TypingIndicatorBar extends StatelessWidget {
               style: HollowTypography.caption.copyWith(
                 color: hollow.textSecondary,
                 fontStyle: FontStyle.italic,
-                fontSize: 11,
               ),
             ),
           ),
@@ -1555,6 +1606,83 @@ class TypingIndicatorBar extends StatelessWidget {
           TypingDots(color: hollow.textSecondary),
         ],
       ),
+    );
+  }
+}
+
+/// Floats [TypingIndicatorBar] across the top edge of [child] (the composer
+/// and whatever sits on it) only while someone types.
+///
+/// It reserves no space, so neither the message list nor the composer moves.
+/// It sits mostly above the seam, over the list's bottom padding, and stops
+/// short of the composer field; it starts on the message text's edge.
+class TypingIndicatorHost extends StatefulWidget {
+  final List<String> names;
+  final Widget child;
+
+  const TypingIndicatorHost({
+    super.key,
+    required this.names,
+    required this.child,
+  });
+
+  @override
+  State<TypingIndicatorHost> createState() => _TypingIndicatorHostState();
+}
+
+class _TypingIndicatorHostState extends State<TypingIndicatorHost> {
+  // Kept through the fade-out, then dropped so the dots stop watching the
+  // shared ticker.
+  List<String>? _shown;
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.names.isNotEmpty) _shown = widget.names;
+  }
+
+  @override
+  void didUpdateWidget(TypingIndicatorHost oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.names.isNotEmpty) {
+      _shown = widget.names;
+    } else if (HollowDurations.animationsDisabled) {
+      _shown = null;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final visible = widget.names.isNotEmpty;
+    final shown = _shown;
+    return Stack(
+      clipBehavior: Clip.none,
+      children: [
+        widget.child,
+        // Always mounted at zero opacity so an arrival fades in; an implicit
+        // animation built already visible would pop.
+        Positioned(
+            left: HollowSpacing.lg + kMessageIndent,
+            right: HollowSpacing.lg,
+            top: -TypingIndicatorBar.height + HollowSpacing.sm,
+            child: IgnorePointer(
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: AnimatedOpacity(
+                  opacity: visible ? 1.0 : 0.0,
+                  duration: visible ? HollowDurations.fast : HollowDurations.exit,
+                  curve: visible ? HollowCurves.enter : HollowCurves.exit,
+                  onEnd: () {
+                    if (!visible && mounted) setState(() => _shown = null);
+                  },
+                  child: shown == null
+                      ? const SizedBox.shrink()
+                      : TypingIndicatorBar(names: shown),
+                ),
+              ),
+            ),
+          ),
+      ],
     );
   }
 }

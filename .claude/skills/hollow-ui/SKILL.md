@@ -244,20 +244,32 @@ Already-settled surfaces: `showHollowMenu` via
 
 ## Motion and state
 
-- `HollowDurations.fast` 150 ms (press, hover colour), `normal` 250 ms
-  (tooltip, dropdown, chip, toast), `slow` 400 ms (route, sheet).
-- `HollowCurves.enter` brings something in, `subtle` moves something already on
-  screen, `exit` takes it away, `spring` is the press release only. Transform
-  and opacity only, enter from scale 0.96 plus a fade.
-- **Hover never moves layout and never changes font weight.** No bounce.
-- Frequent actions (send, switch channel, open a menu) animate nothing beyond
-  the 120 ms colour.
+- `HollowDurations.exit` 100 ms (leaving, the press), `fast` 150 (popover and
+  menu entrance, press release, hover colour, toggles), `normal` 250 (dialogs,
+  toasts, sheets, pushed pages), `slow` 400 (progress bars only).
+- `HollowCurves.enter` in, `exit` as the REVERSE curve of a pair, `subtle` for
+  something already on screen. **Nothing overshoots: no spring, elastic,
+  bounce.**
+- **Switching what a region shows is instant** (conversation, channel, server,
+  tabs). **Side panels toggle instantly.** Only what arrives on top moves.
+- **Travel is 8 px (`HollowMotion.rise`), whatever the size.** Small popovers
+  scale from 0.96 around the click point; big panels (pickers) fade and rise 8
+  px (`PopupAnimator(rise: true)`). Only edge-attached, gesture-dismissed
+  surfaces (sheets, phone pages, the phone banner) travel their full size.
+- Exits are quicker than entrances; a popover's barrier stops taking clicks as
+  its exit starts.
+- **Hover never moves layout and never changes font weight.**
+- Frequent actions (send, react, hover a message) animate nothing beyond the
+  hover colour and the press.
 - **Never animate a colour from `Colors.transparent`** (it lerps through black):
   pass `backgroundColor: null`. Hover never paints outside its control, and
   hover belongs to the **row**, not the artwork inside it.
+- Read durations when the animation starts, never once in `initState`, so a
+  live Reduce motion change applies.
 - A running `Ticker` requests a frame every vsync. Decorative motion is a
   `Timer` plus a `GatedNotifier`, never an `AnimationController`.
-- Reduce motion only through `ReduceMotionController` and `hollowMobileRoute()`.
+- Reduce motion only through `ReduceMotionController` and `hollowMobileRoute()`;
+  it drops movement, never state.
 - Focus rings only through `HollowFocusRing`, on keyboard focus only.
 
 ## Shadows and decoration

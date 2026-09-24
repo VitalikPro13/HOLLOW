@@ -1,5 +1,6 @@
 import 'dart:io' show Platform;
 import 'package:flutter/material.dart';
+import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/chat/emote_image.dart';
@@ -815,7 +816,7 @@ class _SpoilerTextState extends State<_SpoilerText> {
       child: GestureDetector(
         onTap: () => setState(() => _revealed = !_revealed),
         child: AnimatedContainer(
-          duration: const Duration(milliseconds: 200),
+          duration: HollowDurations.fast,
           padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
           decoration: BoxDecoration(
             color: _revealed

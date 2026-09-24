@@ -51,10 +51,10 @@ Ad-hoc meetings between people who share no server and no friendship. A host cre
 ## Desktop UI (`lib/src/ui/shell/conference_dashboard.dart`)
 
 - Entry: FriendsBar icon between Saved Messages and Help (ONLY there — bottom-bar button removed by request). Opens via `conferenceProvider.openTab()` (canonical sibling-clear sequence).
-- Views fade via the house AnimatedSwitcher pattern: rooms list (create/edit/delete/copy-link/start + **Join Meeting** dialog `showJoinConferenceDialog` — accepts either link form or a bare id) ↔ lobby ↔ denied (wrong_code → access-code prompt + retry) ↔ call.
+- Views switch instantly (`KeyedSubtree` keyed by `_viewKey`, which resets each view's state): rooms list (create/edit/delete/copy-link/start + **Join Meeting** dialog `showJoinConferenceDialog` — accepts either link form or a bare id) ↔ lobby ↔ denied (wrong_code → access-code prompt + retry) ↔ call.
 - Lobby copy keys on hostName: null = "Waiting for the host to start the meeting" (LobbyInfo is the proof the meeting runs; re-knock delivers it); set = "waiting room for X's meeting". Host avatar collapses `identityOf(hostPeerId)` — LobbyInfo carries the DEVICE id.
 - Call surface: video states embed `VoiceChannelPane(hideControlsPill: true)` + static `_ConferenceControls` bar below (the floating pill's Disconnect stranded the meeting — crash fixed by removal); audio-only = participant tile grid + the same controls + `VcChatOverlay`. Camera control paints red when active (parity with screen share).
-- **`_ManageDrawer`**: left-edge mirror of the chat slider — search field, Waiting Room rows (admit ✓ / decline ✗, Friend chip, avatar via identityOf), Participants roster (speaking rings, kick with confirm dialog, host-only). Auto-opens on a knock; collapsed toggle shows a pending-count badge.
+- **`_ManageDrawer`**: left-edge mirror of the chat slider — search field, Waiting Room rows (admit ✓ / decline ✗, Friend chip, avatar via identityOf), Participants roster (speaking rings, kick with confirm dialog, host-only). Auto-opens on a knock; collapsed toggle shows a pending-count badge. Opens and closes instantly (a width animation re-lays the stage every frame).
 
 ## Mobile (`lib/src/ui/mobile/mobile_conferences_route.dart`)
 

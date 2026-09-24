@@ -9,7 +9,6 @@ import 'package:hollow/src/ui/chat/message_text_parser.dart';
 import 'package:hollow/src/ui/chat/sticker_picker.dart';
 import 'package:hollow/src/ui/components/hollow_divider.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
-import 'package:hollow/src/ui/components/hollow_sheet.dart';
 import 'package:hollow/src/ui/components/overlay_hosts.dart';
 import 'package:hollow/src/ui/components/popup_animator.dart';
 
@@ -61,7 +60,7 @@ void showExpressionPicker({
       anim: anim,
       hidden: hidden,
       onDismiss: teardown,
-      child: _ExpressionPanel(
+      child: ExpressionPanel(
         serverId: serverId,
         assets: assets,
         hidden: hidden,
@@ -85,42 +84,6 @@ void showExpressionPicker({
 
   overlay.insert(entry);
   OverlayHosts.register(entry, teardown);
-}
-
-/// The phone's picker: the same three tabs in a sheet over the composer, with
-/// the same rules for what closes it.
-Future<void> showExpressionSheet({
-  required BuildContext context,
-  required void Function(String emoji) onEmoji,
-  required void Function(String token) onAsset,
-  Future<void> Function(String path, String fileName)? onSharePack,
-  String? serverId,
-  bool assets = true,
-}) {
-  return showHollowSheet<void>(
-    context: context,
-    scrollControlled: true,
-    builder: (sheetContext) => SafeArea(
-      child: SizedBox(
-        height: MediaQuery.sizeOf(sheetContext).height * 0.62,
-        child: _ExpressionPanel(
-          serverId: serverId,
-          assets: assets,
-          onEmoji: (emoji) {
-            Navigator.pop(sheetContext);
-            onEmoji(emoji);
-          },
-          onAsset: onAsset,
-          onSharePack: onSharePack == null
-              ? null
-              : (path, name) async {
-                  Navigator.pop(sheetContext);
-                  await onSharePack(path, name);
-                },
-        ),
-      ),
-    ),
-  );
 }
 
 /// Places the panel above its button, flipping below when there is no room,
@@ -181,6 +144,7 @@ class _PickerHost extends StatelessWidget {
             top: top,
             child: PopupAnimator(
               controller: anim,
+              rise: true,
               alignment:
                   flippedBelow ? Alignment.topRight : Alignment.bottomRight,
               child: Container(
@@ -205,7 +169,9 @@ class _PickerHost extends StatelessWidget {
   }
 }
 
-class _ExpressionPanel extends StatefulWidget {
+/// The three tabs themselves, for a host that places them: the desktop
+/// popover, or the phone composer where the panel takes the keyboard's place.
+class ExpressionPanel extends StatefulWidget {
   final String? serverId;
   final bool assets;
 
@@ -216,7 +182,8 @@ class _ExpressionPanel extends StatefulWidget {
   final void Function(String token) onAsset;
   final Future<void> Function(String path, String fileName)? onSharePack;
 
-  const _ExpressionPanel({
+  const ExpressionPanel({
+    super.key,
     required this.serverId,
     required this.assets,
     this.hidden,
@@ -226,10 +193,10 @@ class _ExpressionPanel extends StatefulWidget {
   });
 
   @override
-  State<_ExpressionPanel> createState() => _ExpressionPanelState();
+  State<ExpressionPanel> createState() => ExpressionPanelState();
 }
 
-class _ExpressionPanelState extends State<_ExpressionPanel> {
+class ExpressionPanelState extends State<ExpressionPanel> {
   late ExpressionTab _tab = widget.assets ? _lastTab : ExpressionTab.emoji;
 
   void _pick(ExpressionTab tab) {

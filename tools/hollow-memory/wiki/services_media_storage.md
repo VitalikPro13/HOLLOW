@@ -441,7 +441,7 @@ File: `lib/src/core/shared_tickers.dart`
 
 Singleton that provides centralized animation clocks shared across the entire app. Instead of each animated widget spawning its own `AnimationController` + `Ticker`, all decorative animations read from shared `ValueNotifier`s driven by **one 30fps `Timer`**, never a `Ticker` (see memory `feedback_ticker_is_a_frame_request`) — and it stops when nothing listens (`GatedNotifier`). (Historically one `Ticker` plus a low-framerate `Timer` for ambient; then briefly a second 1fps lane for `ambient`, reverted 2026-08-26 because slowing visible motion reads as lag.)
 
-Used by: `SelectionShimmer`, `TypingDots`, `AmbientBackground` and the mobile Chats header glow. Section headers and dividers are static. `pulse` is GONE — `StatusDot` is always static.
+Used by: `TypingDots`, `AmbientBackground` and the mobile Chats header glow (selected rows are a flat fill; there is no shimmer). Section headers and dividers are static. `pulse` is GONE — `StatusDot` is always static.
 
 ### Initialization
 
@@ -451,19 +451,17 @@ Called once in `main()`: `SharedTickers.instance.start()`. Registers as a `Widge
 
 | Notifier | Cycle | Shape | Used By |
 |----------|-------|-------|---------|
-| `shimmer` | 4s (`_shimmerCycleUs = 4000000`) | Linear 0.0 -> 1.0, repeating | SelectionShimmer (selected rows) |
 | `typingDots` | 1.2s (`_typingCycleUs = 1200000`) | Linear 0.0 -> 1.0, repeating | TypingDots indicator |
 | `ambient` | 45s (`_ambientCycleUs = 45000000`) | Linear 0.0 -> 1.0, repeating | AmbientBackground drift; mobile Chats header glow at 4.5x |
 
 ### Tick implementation
 
-**One `Timer.periodic(33ms)`** (`_ticker`, `_fastIntervalMs = 33`) drives all three notifiers. `_onTick()` reads a `Stopwatch` and computes each value from `elapsedMicroseconds` modulo its cycle duration.
+**One `Timer.periodic(33ms)`** (`_ticker`, `_fastIntervalMs = 33`) drives both notifiers. `_onTick()` reads a `Stopwatch` and computes each value from `elapsedMicroseconds` modulo its cycle duration.
 
-- **Shimmer:** `(us % 4000000) / 4000000` -- straight linear ramp.
 - **TypingDots:** `(us % 1200000) / 1200000` -- straight linear ramp.
 - **Ambient:** `(us % 45000000) / 45000000` -- straight linear ramp.
 
-`_syncFast()` starts the timer only while `shimmer`, `typingDots` or `ambient` has a listener, and cancels it when the last one goes away. Writing a value nobody listens to is free, so the three are computed unconditionally.
+`_syncFast()` starts the timer only while `typingDots` or `ambient` has a listener, and cancels it when the last one goes away. Writing a value nobody listens to is free, so both are computed unconditionally.
 
 ### Pause/Resume
 
@@ -491,7 +489,7 @@ Widgets use `ValueListenableBuilder<double>` to listen to a specific notifier:
 
 ```dart
 ValueListenableBuilder<double>(
-  valueListenable: SharedTickers.instance.shimmer,
+  valueListenable: SharedTickers.instance.typingDots,
   builder: (_, value, child) => /* use value 0.0-1.0 */,
 );
 ```

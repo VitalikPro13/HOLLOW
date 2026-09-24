@@ -280,9 +280,9 @@ class _MessageHoverWrapperState extends ConsumerState<MessageHoverWrapper> {
       widget.onCopyImage != null ||
       widget.onInfo != null;
 
-  /// Where the bar may paint, in overlay space: the message list plus the
-  /// bar's overhang above it, so the top row's bar is not cut in half and no
-  /// bar ever floats over the composer.
+  /// Where the bar may paint, in overlay space: the message list plus half a
+  /// bar above it, so a compact top row's bar is not cut and no bar ever
+  /// floats over the composer.
   Rect _barClip(RenderBox overlayBox) {
     final viewport =
         Scrollable.maybeOf(context)?.context.findRenderObject() as RenderBox?;
@@ -310,9 +310,9 @@ class _MessageHoverWrapperState extends ConsumerState<MessageHoverWrapper> {
               CompositedTransformFollower(
                 link: _link,
                 showWhenUnlinked: false,
-                // Straddles the row's top edge, so on a one-line row it never
-                // covers the message's own text.
-                targetAnchor: Alignment.topRight,
+                // Centred on the row, so the pointer reaches it without
+                // crossing into the row above and losing the hover.
+                targetAnchor: Alignment.centerRight,
                 followerAnchor: Alignment.centerRight,
                 offset: const Offset(-HollowSpacing.lg, 0),
                 child: MouseRegion(
@@ -642,7 +642,7 @@ class _MessageHoverWrapperState extends ConsumerState<MessageHoverWrapper> {
   }
 }
 
-/// Height of the hover bar; it straddles its row's top edge by half.
+/// Height of the hover bar, centred on its row.
 const double kActionBarHeight = 32;
 
 /// How many one-click reactions lead the hover bar.

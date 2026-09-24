@@ -424,9 +424,8 @@ Values: `none`, `move`, `topLeft`, `topRight`, `bottomLeft`, `bottomRight`
 Uses `SingleTickerProviderStateMixin` for animation.
 
 **State fields:**
-- `_controller` -- `AnimationController` (duration: `HollowDurations.normal`)
-- `_slideAnim` -- slide from `Offset(0, -1)` to `Offset.zero` with `HollowCurves.enter`
-- `_fadeAnim` -- fade 0 -> 1 with `HollowCurves.enter`
+- `_controller` -- `AnimationController` (duration: `HollowDurations.normal`; the exit sets `reverseDuration = HollowDurations.fast`)
+- `_fadeAnim` -- one `CurvedAnimation` (`HollowCurves.enter`, reverse `HollowCurves.exit`) that drives the fade AND an 8 px drop from above (`Transform.translate` of `-HollowMotion.rise * (1 - t)`), not the card's full height
 - `_wasVisible` -- tracks previous visibility for enter/exit transitions
 - `_ringtonePlayer` -- `AudioPlayer?` for ringtone playback (custom file or bundled default)
 - `_countdownTimer` -- 30-second countdown `Timer.periodic`
@@ -667,42 +666,24 @@ shieldCheck button is unchanged.
 - `publicKeyFingerprint` -- base64-decoded key -> hex -> groups of 4 uppercase chars (first 32 hex chars = 16 bytes)
 - `toProofJson()` -- structured JSON with version, protocol, message, sender, context, signature, verification instructions
 
-### Widget: `_MessageProofDialogContent` (StatefulWidget + SingleTickerProviderStateMixin)
+### Widget: `_MessageProofDialogContent` (StatefulWidget)
 
 **State fields:**
 - `_verified` -- `bool?` (null = pending, true = valid, false = invalid)
-- `_staggerController` -- AnimationController (600ms forward / 200ms reverse)
-- `_fadeAnims` / `_slideAnims` -- per-item stagger animations (7 items, overlapping intervals)
 
-**Stagger animation:** 7 content sections fade+slide in sequentially on open (600ms). On close (Close button or barrier tap), `_closeDialog()` reverses the stagger (200ms) before popping. `PopScope` intercepts barrier dismiss to play the reverse animation.
+No entrance animation of its own: the content renders in place and the dialog route's scale-and-fade is the only motion (the old per-section stagger and its `PopScope` reverse are gone). The close X pops normally.
 
 **`_verifySignature()` (called in initState):**
 - Calls `network_api.verifyMessageProof(senderPeerId:, signatureB64:, publicKeyB64:, canonicalPayload:)`
 - Sets `_verified` accordingly
 
-**Layout (520px max):**
+**Layout:** `HollowDialog(title: 'Message proof', showClose: true, maxWidth: 520)`.
 
-**Header row:**
-- Dynamic shield icon: `shieldCheck` (verified), `shieldAlert` (invalid), `shield` (pending), `shieldOff` (unsigned). Uses `AnimatedSwitcher` + `ScaleTransition` to pop on state change.
-- "Message Proof" heading
-- Badge: `_buildBadge()` -- hidden during verification (returns `SizedBox.shrink`), then fades in as "UNSIGNED", "VERIFIED", or "INVALID" via `AnimatedSwitcher`
+- **Status:** `_buildStatus(hasSig)` in an `AnimatedSwitcher` (fade, `HollowDurations.normal`): nothing while verification is pending, then ONE `HollowBadge`: "Unsigned" (neutral), "Verified" (success) or "Invalid" (error).
+- **Message preview (`_MessagePreview`):** chat-bubble style, `HollowAvatar` + sender name + time + optional media thumbnail (48px from `file.diskPath`; paperclip + filename for other files) + text (200 chars / 3 lines).
+- **Info rows (`_InfoRow`):** Sender peer ID (mono, copyable), Timestamp (ISO 8601 + raw ms), Message ID (conditional, mono, copyable), Public key fingerprint (conditional, mono, copyable), Ed25519 signature (when signed, mono, copyable, truncated).
 
-**Message preview (`_MessagePreview`):**
-- Chat-bubble style: `HollowAvatar` + sender name + timestamp + optional media thumbnail + text
-- Media: if image/video, shows 48px thumbnail from `file.diskPath`; if other file, shows paperclip + filename
-- Text truncated to 200 chars / 3 lines
-
-**Info rows (`_InfoRow` widgets):**
-- Sender peer ID (mono, copyable)
-- Timestamp (ISO 8601 + raw ms)
-- Message ID (conditional, mono, copyable)
-- Public key fingerprint (conditional, mono, copyable)
-- Ed25519 signature (conditional, mono, copyable, truncated: first 24 + "..." + last 24 chars)
-
-**Actions:**
-- "Copy Proof" ghost button -- copies full proof JSON to clipboard
-- "Export Proof" ghost button -- opens `FilePicker.platform.saveFile()`, writes JSON to file
-- "Close" filled button
+**Actions** (`leadingActions`, only when `_canExport`, i.e. Rust produced the canonical v2 payload): ghost "Copy proof" (full proof JSON to the clipboard, success toast) and ghost "Export proof" (`_exportProofFile`, save dialog).
 
 ### Widget: `_MessagePreview` (StatelessWidget)
 Renders chat-style message with avatar, name, time, optional media, text.

@@ -18,9 +18,6 @@ class SharedTickers with WidgetsBindingObserver {
 
   static final SharedTickers instance = SharedTickers._();
 
-  /// 4-second shimmer sweep cycle.
-  late final shimmer = GatedNotifier(_syncFast);
-
   /// 1.2-second typing dots cycle (used by TypingDots).
   late final typingDots = GatedNotifier(_syncFast);
 
@@ -43,7 +40,6 @@ class SharedTickers with WidgetsBindingObserver {
   bool disabled = false;
 
   // Cycle durations in microseconds for precision.
-  static const _shimmerCycleUs = 4000000; // 4s
   static const _typingCycleUs = 1200000; // 1.2s
   static const _ambientCycleUs = 45000000; // 45s
 
@@ -74,11 +70,11 @@ class SharedTickers with WidgetsBindingObserver {
 
   /// Run the clock only while something is listening to it.
   ///
-  /// This is the whole saving: on a screen with no shimmer, no typing dots and
-  /// no ambient blobs, 30fps would render frames in which nothing can change.
+  /// This is the whole saving: on a screen with no typing dots and no ambient
+  /// blobs, 30fps would render frames in which nothing can change.
   void _syncFast() {
     final wanted = _live &&
-        (shimmer.isWatched || typingDots.isWatched || ambient.isWatched);
+        (typingDots.isWatched || ambient.isWatched);
     if (wanted == (_ticker != null)) return;
     if (!wanted) {
       _ticker?.cancel();
@@ -94,8 +90,6 @@ class SharedTickers with WidgetsBindingObserver {
 
   void _onTick() {
     final us = _tickerStopwatch.elapsedMicroseconds;
-
-    shimmer.value = (us % _shimmerCycleUs) / _shimmerCycleUs;
 
     typingDots.value = (us % _typingCycleUs) / _typingCycleUs;
 

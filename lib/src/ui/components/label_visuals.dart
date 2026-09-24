@@ -4,6 +4,7 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_focus_ring.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:hollow/src/ui/animations/hollow_curves.dart';
 
 /// Canonical preset palette for label colours, shared by desktop and mobile.
 const kLabelPresetColors = <Color>[
@@ -153,7 +154,7 @@ class LabelChip extends StatelessWidget {
           child: locked
               ? AnimatedOpacity(
                   opacity: 0.55,
-                  duration: const Duration(milliseconds: 120),
+                  duration: HollowDurations.fast,
                   child: chip,
                 )
               : chip,

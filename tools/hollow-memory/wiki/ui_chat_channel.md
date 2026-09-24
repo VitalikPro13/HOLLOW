@@ -92,7 +92,7 @@ Reversed-list model (2026-07-03 overhaul — see the "Reversed message list" sec
 - `_isNearBottom` -- getter: any visible position has `index <= 0` (length-independent, burst-immune). Used for the unread pill and freeze transitions.
 - `_frozenLen` -- non-null while the user is scrolled up; `_displayMessages()` caps the display list there so arrivals never shift the reading position.
 - `_jumpToBottom()` / `_scrollToBottom()` -- release the freeze + post-frame instant `jumpTo(index: 0, alignment: 0)`. NEVER animated.
-- `_scrollToMessage(index)` -- takes a CHRONOLOGICAL index, converts to reversed at the boundary, animated `scrollTo` (300ms, easeOutCubic, alignment 0.6 = measured from the bottom edge), highlights for 1500ms.
+- `_scrollToMessage(index)` -- takes a CHRONOLOGICAL index, converts to reversed at the boundary, animated `scrollTo` (300ms, `HollowCurves.enter`, alignment 0.6 = measured from the bottom edge; a `jumpTo` to the same spot under Reduce motion), highlights for 1500ms.
 - `_onScrollPositionChanged()` -- updates `_showScrollPill`, sets `chatAtBottomProvider`; edge-triggered: on bottom re-entry releases the freeze + marks seen, on leaving the bottom freezes at the current raw length. Debounce-calls `_requestViewportFiles()`.
 
 **New-message growth** (`_onMessageListGrowth`, registered via `_registerBuildListeners()`): raw-list growth while at bottom → instant `_jumpToBottom()`; while scrolled up (or already frozen) → freeze at the pre-growth length so the pill takes over.
@@ -110,10 +110,10 @@ Reversed-list model (2026-07-03 overhaul — see the "Reversed message list" sec
 5. **Spacer**.
 5. **Pinned messages button** -- only shown when `pinnedIds.isNotEmpty`. Shows pin icon + count. Tooltip shows count. Taps open `_showPinnedMessages()` dialog.
 6. **Search button** -- toggles `chatSearchOpenProvider`. Icon tints accent when search is open.
-7. **Member panel toggle** -- toggles `memberPanelProvider`. Icon tints accent when panel is open.
-8. **Split view toggle** -- only shown in dock layout mode (`layoutModeProvider`) AND when the header is at least 200px wide. Shows columns icon. When split is active, closes this pane; when not split, opens split. Icon tints accent when split is active.
+7. **Split view toggle** -- only shown in dock layout mode (`layoutModeProvider`) AND when the header is at least 200px wide (and never in a conference). Shows columns icon. When split is active, closes this pane; when not split, opens split.
+8. **Member panel toggle** (LAST, next to the panel it opens; hidden in a conference) -- `LucideIcons.users`, "Show members" / "Hide members", toggles `memberPanelProvider`.
 
-**Rebuilt 2026-09-24 on the shared `ChatHeaderBar`** (see wiki ui_chat_pane_shared): the channel glyph (`hash`, `volume2` for a voice channel's chat via `ChannelChatPane(isVoice: true)`, `video` for a meeting) in `textTertiary`, the name in `subheading`, Ephemeral/NSFW as `HollowBadge`s, then `HollowIconButton`s 4 apart: pins (with a mono count, grey), search, members, split. A toggle that is on is a grey fill, never the accent. The status shows below 480 px of header no longer.
+**Rebuilt 2026-09-24 on the shared `ChatHeaderBar`** (see wiki ui_chat_pane_shared): the channel glyph (`hash`, `volume2` for a voice channel's chat via `ChannelChatPane(isVoice: true)`, `video` for a meeting) in `textTertiary`, the name in `subheading`, Ephemeral/NSFW as `HollowBadge`s, then `HollowIconButton`s 4 apart: pins (with a mono count, grey), search, split, members (last). A toggle that is on is a grey fill, never the accent. The status shows below 480 px of header no longer.
 
 **Narrow-header shed order (2026-07-27).** `_buildHeader` wraps its `Row` in a `LayoutBuilder` and drops content as the chat narrows — status pill below 280px, split toggle below 200px. Opening the member panel in a small window (or at a high interface scale) can leave this header a couple hundred pixels, and the BUTTONS are the only way back out: an overflow that hid the members toggle would strand the panel open. Information goes first, controls go last.
 
@@ -191,7 +191,7 @@ These are UI-only restrictions. All members still receive all messages via the s
 
 ## Message List Rendering
 
-Wrapped in `ChatDropZone` (for drag-and-drop file attach). Main structure is a `Column` of: header, optional search bar, message list (Expanded), typing indicator, reply preview, staged attachments strip, staged link preview, input bar.
+Wrapped in `ChatDropZone` (for drag-and-drop file attach). Main structure is a `Column` of: header, optional search bar, message list (Expanded), then ONE `TypingIndicatorHost` whose child is a `Column` of reply preview, staged attachments strip, staged link preview and input bar.
 
 **Empty state**: If `messages.isEmpty` and `_historyLoaded`, shows welcome message: large hash icon, "Welcome to #channelName", "This is the beginning of the channel." If not loaded yet, shows nothing.
 
@@ -227,7 +227,7 @@ For each message in the list, the code checks: `msg.text.contains('@everyone')` 
 
 ## Typing Indicator
 
-Watches `typingProvider[stateKey]` which returns a `Set<String>` of peer IDs currently typing. `_buildTypingBar` collapses/self-filters them via the shared `typingMastersFor()` (chat_pane_shared.dart — the Step 9C/C1 robust self-filter, also used by mobile's `_TypingBar`), maps each master to a display name via `serverNicknamesProvider` + `serverDisplayNameFor()`, and renders `TypingIndicatorBar(names: [...])` below the message list when non-empty.
+Watches `typingProvider[stateKey]` which returns a `Set<String>` of peer IDs currently typing. `_typingNames` collapses/self-filters them via the shared `typingMastersFor()` (chat_pane_shared.dart, the Step 9C/C1 robust self-filter, also used by the phone's chat route), maps each master to a display name via `serverNicknamesProvider` + `serverDisplayNameFor()`, and hands the list to `TypingIndicatorHost`, which floats the compact label on the seam above the composer cluster and reserves no space (see wiki ui_chat_pane_shared).
 
 ## Reply Preview Bar
 
@@ -250,7 +250,7 @@ Two types of staged preview shown above the input bar:
 
 ## Unread Pill
 
-`_UnreadPill`: Floating pill shown when `unreadCount > 0` AND `_showScrollPill` (user scrolled away from bottom). Shows "N new messages" text with arrow-down icon. Tapping scrolls to bottom and marks channel as read.
+The shared `UnreadJumpFade(count: _showScrollPill ? unreadCount : 0)` (always mounted, bottom-centre) fades the `UnreadJumpPill` in when there are unread messages and the user has scrolled away from the bottom, and out again. Tapping scrolls to bottom and marks the channel as read.
 
 The unread count comes from `unreadProvider.channelUnreadCounts['serverId:channelId']`.
 
@@ -361,7 +361,8 @@ The `onDownload` callback in `MessageHoverWrapper` handles three scenarios:
 - `ConnectionProgress`, `ConnectionStage` -- `lib/src/ui/components/connection_progress.dart`
 - `GifFileImage` -- `lib/src/ui/components/animated_gif_image.dart`
 - `showMessageProofDialog`, `MessageProofData` -- `lib/src/ui/dialogs/message_proof_dialog.dart`
-- `DateSeparator`, `shouldShowDateSeparator`, `shouldGroup`, `TypingIndicatorBar`, `displayNameFor`, `serverDisplayNameFor`, `copyImageToClipboard` -- `lib/src/ui/chat/chat_pane.dart`
+- `DateSeparator`, `shouldShowDateSeparator`, `shouldGroup`, `displayNameFor`, `serverDisplayNameFor`, `copyImageToClipboard` -- `lib/src/ui/chat/chat_pane.dart`
+- `TypingIndicatorHost`, `UnreadJumpFade`, `typingMastersFor` -- `lib/src/ui/chat/chat_pane_shared.dart` (imported directly)
 - `generateMessageId` -- `lib/src/core/providers/chat_provider.dart`
 - `Permission` -- `lib/src/core/providers/server_provider.dart`
 

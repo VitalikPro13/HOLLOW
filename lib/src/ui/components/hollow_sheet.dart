@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
+import 'package:hollow/src/ui/animations/hollow_curves.dart';
 
 /// The one bottom sheet: the floating surface, the sheet radius on its top
 /// corners, and the drag handle, so no call site styles its own.
@@ -39,6 +40,7 @@ Future<T?> showHollowSheet<T>({
     useRootNavigator: useRootNavigator,
     routeSettings: routeSettings,
     clipBehavior: Clip.antiAlias,
+    sheetAnimationStyle: _sheetMotion(),
     shape: RoundedRectangleBorder(
       borderRadius: BorderRadius.vertical(top: Radius.circular(hollow.radiusXl)),
     ),
@@ -63,6 +65,19 @@ Future<T?> showHollowSheet<T>({
         child: sheet,
       );
     },
+  );
+}
+
+/// Read per open, so Reduce motion reaches the next sheet. A reverse curve runs
+/// backwards, so the enter curve doubles as the easing-in exit. A drag still
+/// tracks the finger: the route rebinds to the raw controller while dragging.
+AnimationStyle _sheetMotion() {
+  if (HollowDurations.animationsDisabled) return AnimationStyle.noAnimation;
+  return AnimationStyle(
+    curve: HollowCurves.enter,
+    reverseCurve: HollowCurves.enter,
+    duration: HollowDurations.normal,
+    reverseDuration: HollowDurations.fast,
   );
 }
 

@@ -38,6 +38,7 @@ import 'package:hollow/src/ui/components/pending_join_ui.dart';
 import 'package:hollow/src/ui/components/server_folder_popup.dart';
 import 'package:hollow/src/ui/components/profile_card_popup.dart';
 import 'package:hollow/src/ui/dialogs/create_server_dialog.dart';
+import 'package:hollow/src/ui/shell/new_server_entry.dart';
 import 'package:hollow/src/ui/shell/server_context_menus.dart';
 import 'package:hollow/src/ui/dialogs/mnemonic_dialog.dart';
 import 'package:hollow/src/ui/dialogs/user_settings_dialog.dart';
@@ -629,20 +630,7 @@ class _BottomBarState extends ConsumerState<BottomBar> {
             child: AnimatedScale(
               scale: isMergeTarget ? 1.08 : 1.0,
               duration: HollowDurations.fast,
-              child: AnimatedContainer(
-                duration: HollowDurations.fast,
-                decoration: isMergeTarget
-                    ? BoxDecoration(
-                        borderRadius: BorderRadius.circular(12),
-                        boxShadow: [
-                          BoxShadow(
-                            color: hollow.accent.withValues(alpha: 0.4),
-                            blurRadius: 8,
-                          ),
-                        ],
-                      )
-                    : null,
-                child: _BottomServerIcon(
+              child: _BottomServerIcon(
                   isSelected: isSelected || isRightPaneServer,
                   unreadCount: serverUnreads,
                   mentionCount: serverMentions,
@@ -660,14 +648,13 @@ class _BottomBarState extends ConsumerState<BottomBar> {
                   ),
                   child: serverIconChild,
                 ),
-              ),
             ),
           );
       },
     );
 
     if (isNew) {
-      icon = _ScaleBounceEntry(
+      icon = NewServerEntry(
         key: ValueKey('bounce-$serverId'),
         child: icon,
       );
@@ -974,9 +961,8 @@ class _BottomServerIconState extends State<_BottomServerIcon> {
                 width: indicatorWidth,
                 height: 3,
                 decoration: BoxDecoration(
-                  color: indicatorWidth > 0
-                      ? hollow.textPrimary
-                      : Colors.transparent,
+                  color: hollow.textPrimary
+                      .withValues(alpha: indicatorWidth > 0 ? 1 : 0),
                   borderRadius: BorderRadius.circular(2),
                 ),
               ),
@@ -1042,58 +1028,11 @@ class _ReorderGap extends StatelessWidget {
           height: 38,
           margin: EdgeInsets.symmetric(horizontal: isActive ? 2 : 0),
           decoration: BoxDecoration(
-            color: isActive ? hollow.accent : Colors.transparent,
+            color: hollow.accent.withValues(alpha: isActive ? 1 : 0),
             borderRadius: BorderRadius.circular(2),
           ),
         );
       },
     );
-  }
-}
-
-class _ScaleBounceEntry extends StatefulWidget {
-  final Widget child;
-
-  const _ScaleBounceEntry({super.key, required this.child});
-
-  @override
-  State<_ScaleBounceEntry> createState() => _ScaleBounceEntryState();
-}
-
-class _ScaleBounceEntryState extends State<_ScaleBounceEntry>
-    with SingleTickerProviderStateMixin {
-  late final AnimationController _controller;
-  late final Animation<double> _scale;
-
-  @override
-  void initState() {
-    super.initState();
-    _controller = AnimationController(
-      vsync: this,
-      duration: HollowDurations.animationsDisabled ? Duration.zero : const Duration(milliseconds: 400),
-    );
-    _scale = TweenSequence<double>([
-      TweenSequenceItem(
-          tween: Tween(begin: 0.0, end: 1.1), weight: 60),
-      TweenSequenceItem(
-          tween: Tween(begin: 1.1, end: 0.95), weight: 20),
-      TweenSequenceItem(
-          tween: Tween(begin: 0.95, end: 1.0), weight: 20),
-    ]).animate(CurvedAnimation(
-      parent: _controller,
-      curve: Curves.easeOut,
-    ));
-    _controller.forward();
-  }
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return ScaleTransition(scale: _scale, child: widget.child);
   }
 }

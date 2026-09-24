@@ -6,11 +6,11 @@ Primary file: `lib/src/ui/chat/chat_pane.dart` (~4500 lines). The ChatPane is th
 
 ## Top-Level Providers Defined in This File
 
-- `dmProfilePanelProvider` -- `StateProvider<bool>`, defaults `true`. Controls visibility of the left-side DM profile panel. Toggled by the user icon button in the chat header.
+- `dmProfilePanelProvider` -- `StateProvider<bool>`, defaults `true`. Controls visibility of the DM profile panel on the right. Toggled by the `circleUser` button, the last action in the chat header.
 
 ## Top-Level Helper Functions
 
-`shouldGroup()`, `shouldShowDateSeparator()`, and the `DateSeparator` widget MOVED to `chat_pane_shared.dart` (2026-07-15) and are re-exported from this file -- see wiki ui_chat_pane_shared for their behavior. `TypingIndicatorBar`, `TypingDots`, and the unread pill (`UnreadJumpPill`, was private `_UnreadPill`) moved there too.
+`shouldGroup()`, `shouldShowDateSeparator()`, and the `DateSeparator` widget MOVED to `chat_pane_shared.dart` (2026-07-15) and are re-exported from this file -- see wiki ui_chat_pane_shared for their behavior. `TypingIndicatorBar`, `TypingIndicatorHost`, `TypingDots`, the unread pill (`UnreadJumpPill`) and its fading wrapper `UnreadJumpFade` live there too.
 
 ## ChatPane Widget
 
@@ -77,10 +77,10 @@ A `ref.listen(windowFocusedProvider)` in `build()` (next to the auto-scroll list
 Post-frame callback. Calls `_itemScrollController.jumpTo(index: messages.length, alignment: 1.0)` to instantly jump to the sentinel item at the end. Used after history load and after sending a file.
 
 ### _scrollToBottom()
-Post-frame callback. Calls `_scrollOffsetController.animateScroll(offset: 100000, duration: 150ms, curve: easeOut)` for a smooth animated scroll to the bottom. Used after sending a text message and when auto-scroll triggers on new incoming messages.
+Delegates to `_jumpToBottom()`: releases the display freeze, then a post-frame `jumpTo(index: 0, alignment: 0.0)`. Instant, never animated (see Reverse list below). Used after sending and when auto-scroll triggers on new incoming messages.
 
 ### _scrollToMessage(int index)
-Animated scroll to a specific message index (used for reply-tap navigation). Sets `_highlightIndex = index` to trigger a visual flash. Scrolls with 300ms duration, easeOutCubic curve, alignment 0.3 (message appears ~30% from top). After 1500ms, clears `_highlightIndex` to remove the highlight.
+Scroll to a CHRONOLOGICAL message index (reply-tap and search navigation; the reversed builder index is computed here). Sets `_highlightIndex = index` to trigger a visual flash. Scrolls 300ms with `HollowCurves.enter` at alignment 0.6 (reversed alignment measures from the BOTTOM edge, so the target lands upper-middle); under Reduce motion it `jumpTo`s the same index and alignment instead. After 1500ms, clears `_highlightIndex`.
 
 ## Message History Loading
 
@@ -170,7 +170,7 @@ The `build()` method reads:
 
 Top-level structure is a `Row`:
 1. `Expanded` containing `ChatDropZone` wrapping a `Column`
-2. RIGHT (since 2026-09-24): `_DmProfilePanelSlider` (animated from the right edge, shown unless screen share is active) holding `DmProfilePanel`
+2. RIGHT (since 2026-09-24): `_DmProfilePanelSlider` (instant show/hide, shown unless screen share is active) holding `DmProfilePanel`
 
 The Column's children depend on whether screen share is active:
 
@@ -181,8 +181,8 @@ The Column's children depend on whether screen share is active:
 - Layer 2: `_ScreenShareControlsOverlay` floating pill (bottom center, `AnimatedOpacity`). When the REMOTE side is sharing (`call.remoteScreenSharing`), the pill includes a `ShareVolumeButton` (`ui/components/share_volume_control.dart`) between the share toggle and end-call — popover with the received-share-audio volume slider (0–200%, `shareAudioVolumeProvider`) and the voice-activity duck toggle (`shareAudioDuckProvider`), applied via the `ShareAudioLevel` bus.
 
 **If no screen share**: Standard column layout with:
-- `_InlineCallPanelSlider` (slides down when in call with this peer)
-- `..._buildMessageArea()` -- message list, typing, reply bar, input bar
+- `_InlineCallPanelSlider` (appears instantly when in call with this peer)
+- `..._buildMessageArea()` -- message list, then the composer cluster (reply bar, staged strip, link area, input bar) under a `TypingIndicatorHost`
 
 ## Chat Header Bar
 
@@ -191,11 +191,11 @@ The shared `ChatHeaderBar` (`chat_pane_shared.dart`, 48 px, `surface`, bottom ha
 1. **Leading:** `PresenceAvatar(size 28, online: identityIsOnline)` (Saved messages: `SavedMessagesAvatar`).
 2. **Title** `subheading`: the local nickname if set, else the profile name; **subline**: the real name when a nickname is set, else the person's status line.
 3. **No status while healthy.** The old `ConnectionProgress` ("Encrypted") is gone from the DM header; presence is the avatar's dot and verification lives in the panel.
-4. **Actions** (`HollowIconButton`, 32 px, 4 apart): voice call (green `phoneCall` while in a call with them), video call, search (selected while open), profile panel toggle (`panelRight`, selected = grey fill, never accent), split view (dock mode). Mute moved into the panel.
+4. **Actions** (`HollowIconButton`, 32 px, 4 apart): voice call (green `phoneCall` while in a call with them), video call, search (selected while open), split view (dock mode), then the profile panel toggle LAST, next to the panel it opens (`circleUser`, "Show profile" / "Hide profile", selected = grey fill, never accent). Mute moved into the panel.
 
 ## _buildMessageArea() -- Message List, Typing, Reply, Input
 
-Returns a `List<Widget>` used by both the normal layout and the screen-share overlay chat panel.
+Returns a `List<Widget>` used by both the normal layout and the screen-share overlay chat panel: the message list, then ONE `TypingIndicatorHost(names: _typingNames(typingPeers))` whose child is a `Column` of the reply preview bar, the staged attachment strip, `StagedLinkArea` and `_buildInputBar`.
 
 ### Message List
 
@@ -221,11 +221,11 @@ Returns a `List<Widget>` used by both the normal layout and the screen-share ove
 
 The wrapper's child is `_buildBubble(...)`: resolves reply preview via `replyIndexById` + `_messagePreviewText` (a reply to an album item reads that item via `_albumItemById`), then returns `MessageBubble` with `album: dmAlbumItems(...)` for an album anchor and `onReplyTap: _scrollToMessage(replyIndex)`. The row returns through the shared `dateSeparatedChatRow()` (keyed subtree, optional DateSeparator, group-header padding).
 
-**_buildUnreadPillOverlay** -- reads `unreadProvider.dmUnreadCounts[peerId]`. Shown only when count > 0 AND `_showScrollPill`. Bottom-center `UnreadJumpPill`; tapping calls `_scrollToBottom()` and `markDmSeen()` against the TRUE newest message.
+**_buildUnreadPillOverlay** -- reads `unreadProvider.dmUnreadCounts[peerId]`. Always mounted: a bottom-center `UnreadJumpFade(count: _showScrollPill ? unreadCount : 0)`, which fades the `UnreadJumpPill` in and out; tapping calls `_scrollToBottom()` and `markDmSeen()` against the TRUE newest message.
 
 ### Typing Indicator
 
-`_buildTypingBar` -> shared `TypingIndicatorBar` when `typingPeers.isNotEmpty`. Names resolved via `displayNameForPeer()` per-pid profile selects.
+`_typingNames(typingPeers)` resolves names via `displayNameForPeer()` per-pid profile selects and feeds the shared `TypingIndicatorHost` around the composer cluster (see wiki ui_chat_pane_shared). The label floats on the seam above the composer and reserves no space.
 
 ### Reply Preview Bar
 
@@ -310,9 +310,7 @@ Takes controller, before string, and after string. If no text is selected, inser
 
 ## _InlineCallPanelSlider
 
-`ConsumerStatefulWidget` with `SingleTickerProviderStateMixin`. Animated wrapper that slides the `_InlineCallPanel` down from the header when a call is active with this DM peer.
-
-Watches `callProvider`. Drives `AnimationController` forward when `call.peerId == peerId && (status == active || connecting)`, reverse otherwise. Uses `HollowDurations.normal` duration, `HollowCurves.enter`/`exit`. Renders with `ClipRect` + `Align(heightFactor)` + `FadeTransition`. At value 0.0, renders `SizedBox.shrink()`.
+`ConsumerWidget`. Selects `callProvider` for `call.peerId == peerId && (status == active || connecting)` and renders `_InlineCallPanel` when true, else `SizedBox.shrink()`. Instant: an animation here replayed every time the DM opened.
 
 ## _InlineCallPanel
 
@@ -365,9 +363,7 @@ Handles three cases:
 
 ## _ChatOverlaySlider
 
-`StatefulWidget` with `SingleTickerProviderStateMixin`. Animated horizontal slider for the chat panel during screen-share view. Slides in from the right when `visible` is true.
-
-Uses `ClipRect` + `Align(widthFactor)` + `FadeTransition`. At value 0.0 returns `SizedBox.shrink()`. Wraps child in `MouseRegion` to relay hover events to `onHoverEnter`/`onHoverExit` callbacks (for overlay timer management).
+`StatelessWidget`. The chat panel over a screen share, shown and hidden instantly (a width animation would re-wrap the chat text every frame). Hidden = `SizedBox.shrink()`; visible = child in a `MouseRegion` that relays hover to `onHoverEnter`/`onHoverExit` (overlay timer management).
 
 ## _ScreenShareFullView
 
@@ -398,37 +394,22 @@ Has its own `_durationTimer` and `_handleScreenShareToggle()` (same pattern as i
 
 ## _DmProfilePanelSlider
 
-Animated slider (`ClipRect` + `Align(widthFactor, centerRight)` + fade) holding `DmProfilePanel`.
+`StatelessWidget`: `DmProfilePanel` when `visible`, else `SizedBox.shrink()`. Instant, like every side panel (design language 3.8).
 
 ## DmProfilePanel (2026-09-24)
 
 **File:** `lib/src/ui/chat/dm_profile_panel.dart`. The person you are talking to, on the RIGHT, built and sized like a server's member panel: it uses `memberPanelWidthProvider` (default 280 since 2026-09-24, was 240) and a `PanelResizeHandle` seam on its left edge.
 
 - **Banner** at 2.5:1 of the panel width: their banner (animated via `watchAnimatedBanner`, else `bannerProvider`), else a FLAT tone of their avatar colour (no gradient).
-- **Avatar** 72 in a 4 px `surface` ring overlapping the banner, left-aligned on the text edge, `StatusDot` corner.
-- **Icon strip** under the banner's right edge: Set/Edit nickname, Mute notifications (selected when muted), More (Copy user ID; Remove friend with a confirm, through `removeFriendAndTidy` shared with the friends bar; then Block/Unblock and Report in the error tint). Hidden for Saved messages.
+- **Avatar** in a 4 px `surface` ring overlapping the banner, left-aligned on the text edge, `StatusDot` corner. It scales with the banner: `_avatarSizeFor(width)` = `width * 0.26` clamped 48 to 88 (72 at the default 280), so a narrow panel never pushes it into the icon strip.
+- **Icon strip** (`_Actions`, three 32 px buttons) under the banner's right edge while it fits beside the avatar (`actionsBeside`: avatar + ring + gaps + `_kActionsWidth` within the width); otherwise it moves UNDER the name block, left-aligned so its first glyph lines up with the name. Buttons: Set/Edit nickname, Mute notifications (selected when muted), More (Copy user ID; Remove friend with a confirm, through `removeFriendAndTidy` shared with the friends bar; then Block/Unblock and Report in the error tint). Hidden for Saved messages.
 - **Names:** nickname or profile name in `heading`, the profile name as a caption when a nickname is set, the status line in `bodySmall`, the verified Twitch badge.
-- **Sections** (`HollowSectionHeader` dense, 24 apart): About Me, Now Playing (the showcase board's `nowPlaying` block via `ShowcaseGameRow`), Encryption ("Not verified yet" / "Verified" over "End-to-end encrypted", with compact outline Verify or ghost View). The raw peer id is no longer shown.
+- **Sections** (`HollowSectionHeader` dense, 24 apart): About Me, Now Playing (the showcase board's `nowPlaying` block via `ShowcaseGameRow`), Encryption ("Not verified yet" / "Verified" over "End-to-end encrypted", with compact outline Verify or ghost View; `_Verification` stacks the button under its text when the row's content width is below `_kVerificationStackWidth` = 220). The raw peer id is no longer shown.
 - **Footer:** ghost "View full profile" -> `showProfileDialog`.
-- **Known issue (Vitalik, 2026-09-24):** below about 260 px the avatar collides with the icon strip and the Encryption row wraps a word per line; next session.
 
-## TypingIndicatorBar
+## TypingIndicatorBar, TypingIndicatorHost, TypingDots
 
-`StatelessWidget`. 24px tall bar shown above the input area. Displays:
-- 1 name: "{name} is typing"
-- 2 names: "{name1} and {name2} are typing"
-- 3 names: "{name1}, {name2}, and {name3} are typing"
-- 4+ names: "Several people are typing"
-
-Text in italic caption style 11px + `TypingDots` widget alongside.
-
-## TypingDots
-
-`StatelessWidget`. Three 4px circles with animated bounce opacity. Uses `SharedTickers.instance.typingDots` (`ValueListenable<double>`) instead of per-instance `AnimationController`. Each dot has a 0.2 offset delay, creating a wave effect. Opacity ranges from 0.4 to 1.0 based on bounce value.
-
-## _UnreadPill
-
-`StatelessWidget`. Floating accent-colored pill shown when scrolled away from bottom and there are unread messages. Shows "{count} new message(s)" with a down-arrow icon. Tapping calls `onTap` (scrolls to bottom and marks as read). Uses `HollowPressable` with `borderRadius: 20`, accent background, and bold caption text.
+Shared, in `chat_pane_shared.dart`; see wiki ui_chat_pane_shared.
 
 ## Split View Integration
 
@@ -444,7 +425,7 @@ When a DM call involves screen sharing (`isScreenShareActive` = the call peer's 
 
 1. **Background**: `_ScreenShareFullView` renders the focused video source
 2. **Source pill**: Top-center floating pill for switching between video sources (only if 2+ active). Unwatched remote-share tabs show an EYE icon and tapping them opts in (`watchRemoteScreenShare()`); a trailing grid toggle flips `dmShareGridViewProvider`
-3. **Chat overlay**: Right-side 360px panel that slides in/out via `_ChatOverlaySlider`. Toggle button (chevron left/right) is always visible when overlays are visible. The chat panel contains the same `_buildMessageArea()` content as normal mode
+3. **Chat overlay**: Right-side 360px panel shown and hidden instantly by `_ChatOverlaySlider`. Toggle button (chevron left/right) is always visible when overlays are visible. The chat panel contains the same `_buildMessageArea()` content as normal mode
 4. **Controls pill**: Bottom-center `_ScreenShareControlsOverlay` with all call controls
 
 All overlays fade out after 1 second of inactivity via `_overlayHideTimer`. Mouse movement or hover over overlay elements pins them visible. The chat panel can be permanently pinned open via `_chatOverlayPinned`.

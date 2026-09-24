@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 
 import '../../theme/hollow_theme.dart';
 import 'hollow_pressable.dart';
+import 'package:hollow/src/ui/animations/hollow_curves.dart';
 
 /// Make a vertical mouse wheel pan a horizontal scroller.
 ///
@@ -143,8 +144,8 @@ class _EdgeScrollRowState extends State<EdgeScrollRow> {
         .clamp(0.0, _controller.position.maxScrollExtent);
     _controller.animateTo(
       target,
-      duration: const Duration(milliseconds: 180),
-      curve: Curves.easeOut,
+      duration: HollowDurations.fast,
+      curve: HollowCurves.enter,
     );
   }
 

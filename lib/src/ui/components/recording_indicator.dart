@@ -50,9 +50,8 @@ class _RecordingIndicatorState extends State<RecordingIndicator>
       vsync: this,
       duration: const Duration(milliseconds: 900),
     );
-    if (!ReduceMotionController.instance.isReduced) {
-      _pulse.repeat(reverse: true);
-    }
+    ReduceMotionController.instance.effective.addListener(_syncPulse);
+    _syncPulse();
 
     if (widget.startedAt != null) {
       _elapsed = DateTime.now().difference(widget.startedAt!);
@@ -85,6 +84,7 @@ class _RecordingIndicatorState extends State<RecordingIndicator>
 
   @override
   void dispose() {
+    ReduceMotionController.instance.effective.removeListener(_syncPulse);
     _pulse.dispose();
     _tickTimer?.cancel();
     super.dispose();
@@ -97,6 +97,15 @@ class _RecordingIndicatorState extends State<RecordingIndicator>
     final s = d.inSeconds.remainder(60);
     if (h > 0) return '${two(h)}:${two(m)}:${two(s)}';
     return '${two(m)}:${two(s)}';
+  }
+
+  /// The dot holds still under Reduce motion, and starts or stops live.
+  void _syncPulse() {
+    if (ReduceMotionController.instance.isReduced) {
+      _pulse.value = 1;
+    } else if (!_pulse.isAnimating) {
+      _pulse.repeat(reverse: true);
+    }
   }
 
   @override

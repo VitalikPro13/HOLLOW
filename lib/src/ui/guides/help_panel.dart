@@ -20,67 +20,16 @@ import 'package:hollow/src/ui/components/hollow_spinner.dart';
 /// Width of the desktop Help slide-out panel.
 const double kHelpPanelWidth = 340;
 
-/// Animates the Help panel sliding in and out from the RIGHT edge.
-class HelpPanelSlider extends StatefulWidget {
+/// The Help panel's place on the RIGHT edge. It shows and hides instantly: a
+/// width animation would re-wrap the chat text on every frame.
+class HelpPanelSlider extends StatelessWidget {
   final bool visible;
   const HelpPanelSlider({super.key, required this.visible});
 
   @override
-  State<HelpPanelSlider> createState() => _HelpPanelSliderState();
-}
-
-class _HelpPanelSliderState extends State<HelpPanelSlider>
-    with SingleTickerProviderStateMixin {
-  late final AnimationController _controller;
-  late final CurvedAnimation _curved;
-
-  @override
-  void initState() {
-    super.initState();
-    _controller = AnimationController(
-      vsync: this,
-      duration: HollowDurations.normal,
-      value: widget.visible ? 1.0 : 0.0,
-    );
-    _curved = CurvedAnimation(
-      parent: _controller,
-      curve: HollowCurves.enter,
-      reverseCurve: HollowCurves.exit,
-    );
-  }
-
-  @override
-  void didUpdateWidget(HelpPanelSlider oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (widget.visible != oldWidget.visible) {
-      _controller.duration = HollowDurations.normal;
-      widget.visible ? _controller.forward() : _controller.reverse();
-    }
-  }
-
-  @override
-  void dispose() {
-    _curved.dispose();
-    _controller.dispose();
-    super.dispose();
-  }
-
-  @override
   Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: _curved,
-      builder: (context, child) {
-        if (_curved.value == 0.0) return const SizedBox.shrink();
-        return ClipRect(
-          child: Align(
-            alignment: Alignment.centerRight,
-            widthFactor: _curved.value,
-            child: FadeTransition(opacity: _curved, child: child),
-          ),
-        );
-      },
-      child: const RepaintBoundary(child: _HelpPanelChrome()),
-    );
+    if (!visible) return const SizedBox.shrink();
+    return const RepaintBoundary(child: _HelpPanelChrome());
   }
 }
 

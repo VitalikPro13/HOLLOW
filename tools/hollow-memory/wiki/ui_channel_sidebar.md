@@ -32,21 +32,19 @@ The ChannelSidebar is the 240px left-hand panel that shows either the server cha
 - `dockMode` -- `bool`, default `false`. When true and no server is selected, the entire sidebar renders as `SizedBox.shrink()` (invisible).
 - `showUserBar` -- `bool`, default `true`. When false (dock layout), the `UserBar` at the bottom is hidden.
 
-## Build Method -- Dual Mode and Startup Reveal
+## Build Method -- Dual Mode
 
 The `build()` method first checks `dockMode && selectedServer == null` -- if true, returns `SizedBox.shrink()` immediately. This is how the dock layout hides the sidebar when the user is on the home dashboard.
 
-The sidebar uses two startup reveal animations from `StartupRevealScope`:
-- `sidebarReveal` at interval `(0.12, 0.30)` -- wraps the entire sidebar in a `RevealClip` with `Axis.horizontal` + `Alignment.centerLeft` so it clips open from the left edge.
-- `userBarReveal` at interval `(0.50, 0.60)` -- wraps the `UserBar` in a combined `FadeTransition` + `SlideTransition` (slides up from `Offset(0, 0.5)`).
+The sidebar has no startup animation of its own (the shell fades in as one piece; see wiki ui_shell_layout, Startup Fade).
 
 The main container is a `Container` with `hollow.surface` background color, a right `BorderSide` (vertical divider), and — inside a `LayoutBuilder`, which measures the column so the banner header can size itself against it — a `Column` of:
-1. Header (animated crossfade between server name and "Direct Messages")
-2. Content area (animated crossfade between `_ServerContent` and `_HomeContent`)
+1. Header (server name or "Direct Messages")
+2. Content area (`_ServerContent` or `_HomeContent`)
 3. `VoiceChannelPanel` (always present, self-hides when not in a voice channel)
-4. Optional `UserBar` (null-aware `?userBar` insertion)
+4. `UserBar` when `showUserBar`
 
-Both the header and the content use `AnimatedSwitcher` for crossfade transitions. The content switcher uses `HollowDurations.normal` with `HollowCurves.enter`/`HollowCurves.exit`. Each mode's content widget has a `ValueKey` so the switcher can detect changes: `ValueKey('server-${serverId}')` for server mode, `ValueKey('home')` for home mode.
+Switching between Home and a server, or between servers, is instant: no `AnimatedSwitcher` on the header or the content. Each mode's content widget still carries a `ValueKey` (`ValueKey('server-${serverId}')` / `ValueKey('home')`) so its state resets per server.
 
 ## Header Area -- Server Name, Icons, and DM Label
 
@@ -54,13 +52,13 @@ Both the header and the content use `AnimatedSwitcher` for crossfade transitions
 
 **No banner** (always in home/DM mode, and for servers with no banner bytes): a 48px-high `Container` with a bottom border, keyed `ValueKey('header-$label')`.
 
-**Banner header** (issue #25): a `SizedBox` of `bannerHeight`, keyed `ValueKey('header-$label-${banner.hash}')` so a re-upload crossfades even when the label is unchanged. Holds the `AnimatedGifImage` under a bottom-up scrim, with the name + action row overlaid.
+**Banner header** (issue #25): a `SizedBox` of `bannerHeight`, keyed `ValueKey('header-$label-${banner.hash}')` so a re-upload rebuilds the header even when the label is unchanged. Holds the `AnimatedGifImage` under a bottom-up scrim, with the name + action row overlaid.
 
 **`bannerHeaderHeight(available)` — why the banner height is not a constant (issue #37, 2026-07-31).** The interface zoom lays the app out at `viewport / scale`, so raising the zoom does not just magnify the sidebar, it SHORTENS it: on 1080p the sidebar column is ~905 logical px at 100% but only ~401 at 200%. A flat 120px banner therefore went from 13% of the column to 30%, and stacked with the voice panel over half the sidebar was chrome — which is why the reported 200% screenshot fits three channels. The function returns `min(120, max(72, available * 0.22))`; 120/0.22 ≈ 545, so it is INERT at any normal desktop height and engages only on a genuinely short column. Guarded by `test/widget/banner_header_test.dart`.
 
 Inside either shape is a `Row` containing:
 
-1. `TypewriterText` (from reveal_widgets) showing either the server name or "Direct Messages". Uses `HollowTypography.subheading`, `FontWeight.w600`, with `TextOverflow.ellipsis`. The typewriter animation is driven by `headerTextReveal` from `StartupRevealScope.interval(context, 0.25, 0.40)`.
+1. A plain `Text` showing either the server name or "Direct Messages" (text scale clamped at 1.3). Uses `HollowTypography.subheading`, `FontWeight.w600`, with `TextOverflow.ellipsis`.
 
 2. **Server-only action icons** (conditionally rendered when `selectedServer != null`):
    - **Invite people** -- `LucideIcons.userPlus` (16px). Tapping constructs the web-form invite `webServerInviteLink(serverId)` (`https://hollow.anonlisten.com/join#server={id}` — clickable anywhere, renders as a Join card in-app) and calls `showInviteDialog(context, link, serverId)`.
@@ -125,7 +123,7 @@ Padding: `fromLTRB(HollowSpacing.sm + 2, HollowSpacing.md, HollowSpacing.sm, Hol
 
 `file:_AnimatedChannelTile` extends `StatelessWidget`. Props: `visible` (bool), `child` (Widget).
 
-Uses `AnimatedSize` with `HollowDurations.fast` and `Curves.easeOutCubic`. When `visible` is true, the child renders at natural height. When false, forces `SizedBox(height: 0)` containing `SizedBox.shrink()`. The `AnimatedSize` smoothly transitions the height to zero, creating a folding animation.
+Uses `AnimatedSize` with `HollowDurations.fast` and `HollowCurves.enter`. When `visible` is true, the child renders at natural height. When false, forces `SizedBox(height: 0)` containing `SizedBox.shrink()`. The `AnimatedSize` smoothly transitions the height to zero, creating a folding animation.
 
 Alignment is `Alignment.topCenter` so the collapse visually shrinks from the bottom.
 
@@ -140,15 +138,14 @@ Alignment is `Alignment.topCenter` so the collapse visually shrinks from the bot
 **Visual rendering:**
 - Outer padding `evenListRowPadding(context, inset: HollowSpacing.sm, vertical: HollowSpacing.xxs)`: the desktop scroll gutter (10 px, `HollowScrollBehavior`) already insets the right, so the row gives it back and the selected pill sits evenly (10/10 desktop, 8/8 touch). The Home friend and request rows use the same helper.
 - `HollowPressable` with `subtle: true`, `borderRadius: hollow.radiusMd`.
-- Background: `hollow.accentMuted` when selected, `Colors.transparent` otherwise. Hover: `hollow.elevated`.
-- `AnimatedDefaultTextStyle` transitions text color and weight: selected or unread channels use `hollow.textPrimary` + `FontWeight.w600`; otherwise `hollow.textSecondary` + `FontWeight.w400`.
+- Background: `hollow.accentMuted` when selected (a flat fill, the ONE selected-row treatment), `backgroundColor: null` otherwise. Hover: `hollow.elevated`.
+- A plain `DefaultTextStyle` (not animated: a weight tween shifts the name's width every frame): selected or unread channels use `hollow.textPrimary` + `FontWeight.w600`; otherwise `hollow.textSecondary` + `FontWeight.w400`.
 
 **Row contents:**
 - Channel icon: `LucideIcons.hash` for text channels, `LucideIcons.volume2` for voice (18px). Color follows the same selected/unread logic as text.
 - Channel name with `TextOverflow.ellipsis`.
 - Unread dot: 8x8 `Container` with `hollow.accent` color, `BoxShape.circle`. Only rendered when `hasUnread` is true.
 
-**Selection shimmer:** When `isSelected` is true, the tile is wrapped in `SelectionShimmer` with `highlightColor: hollow.accent.withValues(alpha: 0.12)` and matching `borderRadius`.
 
 ## _VoiceChannelTile -- Voice Channel Rendering and Participants
 
@@ -174,7 +171,7 @@ Each build compares `_prevParticipants` with current `participants`. Any peer in
 **Visual rendering:**
 - Same outer padding as `_ChannelTile`.
 - `HollowPressable` row with `LucideIcons.volume2` (18px, accent color when connected, textSecondary otherwise) + channel name.
-- Selection shimmer wraps the row when connected, with `vertical: true`.
+- Connected = the same flat `hollow.accentMuted` fill as a selected text channel.
 
 **Participant list:**
 Below the channel row, an `AnimatedSize` container (duration: `HollowDurations.normal`, `Curves.easeOutCubic`) holds a `Column` of `_AnimatedParticipantRow` widgets. The column is left-padded by `HollowSpacing.sm + 2 + 18 + HollowSpacing.sm` to align under the channel name (past the volume icon).
@@ -185,7 +182,7 @@ Each participant row has `ValueKey('vp-$peerId')` and passes `leaving: _leavingP
 
 `file:_AnimatedParticipantRow` extends `StatefulWidget` with `SingleTickerProviderStateMixin`. Props: `child`, `leaving` (bool), `onLeaveComplete` (nullable VoidCallback).
 
-Uses a 180ms `AnimationController` (or `Duration.zero` when animations are disabled via `HollowDurations.animationsDisabled`).
+Uses an `AnimationController` at `HollowDurations.fast` (zero under Reduce motion).
 
 **Init behavior:**
 - If `leaving` is true at init, the controller starts at 1.0 and reverses. When reverse completes, calls `onLeaveComplete`.
@@ -355,7 +352,7 @@ Deleting a category removes only the header; its channels survive and become unc
 When `dockMode` is `true`:
 - If `selectedServer == null`, the entire sidebar returns `SizedBox.shrink()` -- it is completely invisible. The dock layout shows the home dashboard instead.
 - If a server is selected, the sidebar renders normally but with `showUserBar: false` (the user bar lives in the dock's bottom bar instead).
-- In the shell, the dock mode sidebar is wrapped in `_DockSidebarSlider` which animates the sidebar sliding in/out when `selectedServerId` changes between null and non-null.
+- In the shell, the dock layout adds the sidebar (plus its seam) only while `selectedServerId` is non-null; it appears and leaves instantly.
 
 ## Right-Pane Sidebar for Split View
 
@@ -397,21 +394,17 @@ Defined in `lib/src/core/models/channel_info.dart`. Fields:
 
 Used in three places:
 1. Classic mode -- 240px width, `dockMode: false`.
-2. Dock mode -- 240px width, `dockMode: true`, wrapped in `_DockSidebarSlider`.
+2. Dock mode -- 240px width, `dockMode: true`, present only while a server is selected.
 3. Mobile mode -- `width: null` (fills available space), `dockMode: false`.
 
 ## Animation Summary
 
 | Element | Animation | Duration | Curve |
 |---|---|---|---|
-| Sidebar reveal | `RevealClip` horizontal from left | interval 0.12-0.30 | startup |
-| Header crossfade | `AnimatedSwitcher` | `HollowDurations.fast` | default |
-| Content crossfade | `AnimatedSwitcher` | `HollowDurations.normal` | enter/exit |
-| UserBar reveal | Fade + slide up | interval 0.50-0.60 | startup |
-| Category chevron | `AnimatedRotation` | `HollowDurations.fast` | default |
-| Channel fold | `AnimatedSize` | `HollowDurations.fast` | easeOutCubic |
-| Participant fade | `FadeTransition` | 180ms | linear |
+| Category chevron | `AnimatedRotation` | `HollowDurations.fast` | `HollowCurves.enter` |
+| Channel fold | `AnimatedSize` | `HollowDurations.fast` | `HollowCurves.enter` |
+| Participant fade | `FadeTransition` | `HollowDurations.fast` | linear |
 | Participant list resize | `AnimatedSize` | `HollowDurations.normal` | easeOutCubic |
 | Speaking dot | `AnimatedOpacity` | `HollowDurations.fast` | default |
-| Text style transitions | `AnimatedDefaultTextStyle` | `HollowDurations.fast` | HollowCurves.subtle |
-| Selection shimmer | `SelectionShimmer` | continuous | -- |
+
+Header and content switches, the selected-row fill and the text style are NOT animated.

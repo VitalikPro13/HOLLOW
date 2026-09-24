@@ -57,7 +57,7 @@ File: `lib/src/ui/shell/server_strip.dart`
 
 ### State
 
-- `_initialServerIds: Set<String>?` — populated once on first build via `ref.read(serverStripLayoutProvider.notifier).allServerIds()`. Servers NOT in this set get the `_ScaleBounceEntry` entrance animation. Prevents startup bounce.
+- `_initialServerIds: Set<String>?` — populated once on first build via `ref.read(serverStripLayoutProvider.notifier).allServerIds()`. Servers NOT in this set get the `NewServerEntry` entrance animation, so existing servers never animate at startup.
 
 ### Layout Structure (top to bottom)
 
@@ -233,7 +233,7 @@ Similar to `ServerStrip._buildServerIcon()` but with dock-specific differences:
 - Icon/avatar size: 38px (vs 44px in ServerStrip). Initials font: 14px (vs 18px). Avatar border radius: 8px.
 - **Split view awareness:** `isRightPaneServer = splitState.isSplit && splitState.rightPane?.serverId == serverId`. The icon shows as selected if `isSelected || isRightPaneServer`.
 - `LongPressDraggable` callbacks also manage `_isDragging` state via `onDragStarted`, `onDragEnd`, `onDraggableCanceled` (all call `setState`).
-- When `isMergeTarget` (server being dragged onto), an `AnimatedContainer` adds an accent-colored `boxShadow` glow (blurRadius: 8, alpha: 0.4).
+- When `isMergeTarget` (server being dragged onto), the icon scales to 1.08x (`AnimatedScale`), with no glow.
 - Tooltip suppressed during drag: `tooltip: _isDragging ? null : name`.
 - Tap calls `_selectServer(ref, serverId)` which handles split view routing.
 
@@ -319,7 +319,7 @@ Private `StatefulWidget`. 38x38 rounded square with a bottom-edge indicator. Com
 Instead of a left-edge pill, uses a bottom-edge horizontal bar:
 - `Positioned(bottom: -8)` — pinned below the icon via `Stack(clipBehavior: Clip.none)`.
 - Width: 28px (selected), 16px (hovering), 0px (default). Height: 3px constant.
-- Color: `hollow.textPrimary` when width > 0, transparent otherwise.
+- Color: `hollow.textPrimary`, at alpha 0 when the width is 0 (never `Colors.transparent`, which lerps through black).
 - `AnimatedContainer` with `HollowDurations.fast` and `HollowCurves.enter`.
 
 ### Unread Badge
@@ -337,19 +337,13 @@ File: `lib/src/ui/shell/bottom_bar.dart`
 
 Visual: `AnimatedContainer` — height: 38px (matches icon height), width transitions from `HollowSpacing.xs` (transparent, dormant) to 8px wide accent-colored bar when active. Margin: 2px horizontal when active. Duration: `HollowDurations.fast`.
 
-## _ScaleBounceEntry (Entrance Animation)
+## NewServerEntry (Entrance Animation)
 
-File: both `server_strip.dart` and `bottom_bar.dart` (duplicated)
+File: `lib/src/ui/shell/new_server_entry.dart`, shared by `server_strip.dart` and `bottom_bar.dart`.
 
-`StatefulWidget` with `SingleTickerProviderStateMixin`. Plays a scale bounce animation on first build. Used for newly created/joined server icons (those not in `_initialServerIds`).
+`StatefulWidget` with `SingleTickerProviderStateMixin`. Plays once on first build, for newly created/joined server icons (those not in `_initialServerIds`): the popover motion, a fade plus a scale from `HollowMotion.popoverScale` (0.96) to 1.0 over `HollowDurations.normal` with `HollowCurves.enter`. No overshoot. Keyed with `ValueKey('bounce-$serverId')` (the key name is historical).
 
-- `AnimationController`: 400ms duration (or `Duration.zero` if `HollowDurations.animationsDisabled`).
-- `TweenSequence<double>`: 0.0 -> 1.1 (60% weight, overshoot) -> 0.95 (20% weight, undershoot) -> 1.0 (20% weight, settle).
-- Curve: `Curves.easeOut`.
-- Wraps child in `ScaleTransition`.
-- Keyed with `ValueKey('bounce-$serverId')` or `ValueKey('bounce-${folder.id}')`.
-
-Folders never get the bounce (both files check `isNew` and folders always return false).
+Folders never get the entrance (both files check `isNew` and folders always return false).
 
 ## Drag-Reorder System
 
@@ -367,7 +361,7 @@ Both strips interleave `_ReorderGap`/`_VerticalReorderGap` widgets between every
 ### Visual Feedback
 
 - **Gap active:** colored accent bar appears (4px tall vertical, 8px wide horizontal).
-- **Merge target (server-on-server):** `AnimatedScale` to 1.08x. In BottomBar, also adds accent glow `boxShadow`.
+- **Merge target (server-on-server):** `AnimatedScale` to 1.08x in both strips. No glow.
 - **Drop target (server-on-folder):** `AnimatedScale` to 1.08x.
 - **Drag source:** 30% opacity fade.
 
@@ -481,12 +475,11 @@ Creates an `OverlayEntry` containing `_FolderPopupOverlay`. Parameters:
 
 `ConsumerStatefulWidget` with `SingleTickerProviderStateMixin`. Manages entrance/exit animation.
 
-**Animation:**
-- `AnimationController`: 180ms duration (or zero if animations disabled).
-- Scale: 0.92 -> 1.0 (`Curves.easeOutCubic`).
-- Fade: 0.0 -> 1.0 (`Curves.easeOut`).
+**Animation:** the shared popover motion (design language 3.8).
+- `AnimationController` at `HollowDurations.fast`; one `CurvedAnimation` (`HollowCurves.enter`, reverse `HollowCurves.exit`) drives both.
+- Scale: `HollowMotion.popoverScale` (0.96) -> 1.0. Fade: 0 -> 1.
 - Scale alignment: `Alignment.bottomCenter` for dock mode, `Alignment.centerLeft` for classic mode.
-- Dismiss (`_dismiss()`) reverses the animation then calls `onDismiss`.
+- Dismiss (`_dismiss()`) sets `reverseDuration = HollowDurations.exit`, reverses, then calls `onDismiss`; a dismiss while already reversing is ignored.
 
 **Auto-dismiss on folder dissolution:**
 Watches `serverStripLayoutProvider` live. If `currentFolder` (found by `folder.id`) is null (folder was dissolved during drag-out), schedules `onDismiss` in a post-frame callback and renders `SizedBox.shrink`.
@@ -508,10 +501,11 @@ Watches `serverStripLayoutProvider` live. If `currentFolder` (found by `folder.i
 1. Full-screen dismiss barrier (`GestureDetector(onTap: _dismiss)`, transparent).
 2. Positioned popup card:
    - `Focus(autofocus: true)` with Escape key handler.
-   - `ScaleTransition` > `FadeTransition` > `Material(transparent)` > `Container`:
-     - Background: `hollow.surface`.
+   - `ScaleTransition` (anchored `bottomCenter` in dock mode, `centerLeft` in classic) > `FadeTransition` > `Material(transparent)` > `Container`:
+     - Background: `hollow.overlay`.
      - Border: `hollow.border`, `radiusLg` corners.
-     - Shadow: black 30% alpha, 16px blur, 4px Y offset.
+     - Shadow: `HollowShadows.float`.
+   - Motion: the shared popover motion (design language 3.8). Scale from `HollowMotion.popoverScale` plus fade, `HollowDurations.fast` in with `HollowCurves.enter`, out in `HollowDurations.exit` with `HollowCurves.exit`; a second dismiss during the exit is ignored.
 
 **Card contents:**
 1. **Header row:** folder name (body text, 13px, w600, ellipsis) + pencil edit button (`HollowPressable` with `LucideIcons.pencil` 12px). Pencil tap calls `onRenameRequested`.

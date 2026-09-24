@@ -613,7 +613,7 @@ Icon row with the Follow group, a divider, then the Support group:
 - Ko-Fi (SimpleIcons.kofi) -> ko-fi.com/AnonListen
 
 ### _BrandIcon
-`StatefulWidget`. Hover state: elevated background, 1.15x scale animation, icon color transitions from textSecondary to brand color. Uses `HollowTooltip` for platform name. Click opens URL externally.
+`StatefulWidget`. Hover state: elevated background (no scale: hover never moves layout), icon color transitions from textSecondary to brand color. Uses `HollowTooltip` for platform name. Click opens URL externally.
 
 ### _KickBotIcon
 Variant with custom green color (#C0FF00). Same hover pattern. Uses `assets/kickbot-logo.svg`.

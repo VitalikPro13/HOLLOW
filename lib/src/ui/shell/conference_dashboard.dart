@@ -10,7 +10,6 @@ import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/speaking_provider.dart';
 import 'package:hollow/src/core/providers/voice_channel_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
-import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/chat/hollow_link_utils.dart';
@@ -91,25 +90,10 @@ class _ConferenceDashboardState extends ConsumerState<ConferenceDashboard> {
   Widget build(BuildContext context) {
     final conf = ref.watch(conferenceProvider);
 
-    // Internal view transitions fade like every other panel, on the same
-    // switcher pattern the shell uses for tabs.
-    return AnimatedSwitcher(
-      duration: HollowDurations.normal,
-      switchInCurve: HollowCurves.enter,
-      switchOutCurve: HollowCurves.exit,
-      layoutBuilder: (currentChild, previousChildren) {
-        return Stack(
-          alignment: Alignment.topCenter,
-          children: [
-            ...previousChildren,
-            ?currentChild,
-          ],
-        );
-      },
-      child: KeyedSubtree(
-        key: ValueKey(_viewKey(conf)),
-        child: _buildView(context, conf),
-      ),
+    // Switching views is instant; the key resets each view's state.
+    return KeyedSubtree(
+      key: ValueKey(_viewKey(conf)),
+      child: _buildView(context, conf),
     );
   }
 
@@ -926,42 +910,13 @@ class _ManageDrawer extends ConsumerStatefulWidget {
   ConsumerState<_ManageDrawer> createState() => _ManageDrawerState();
 }
 
-class _ManageDrawerState extends ConsumerState<_ManageDrawer>
-    with SingleTickerProviderStateMixin {
-  late final AnimationController _controller;
-  late final CurvedAnimation _curved;
+class _ManageDrawerState extends ConsumerState<_ManageDrawer> {
   bool _open = false;
 
-  @override
-  void initState() {
-    super.initState();
-    _controller = AnimationController(
-      vsync: this,
-      duration: HollowDurations.normal,
-      value: 0.0,
-    );
-    _curved = CurvedAnimation(
-      parent: _controller,
-      curve: HollowCurves.enter,
-      reverseCurve: HollowCurves.exit,
-    );
-  }
-
-  @override
-  void dispose() {
-    _curved.dispose();
-    _controller.dispose();
-    super.dispose();
-  }
-
+  // Opens and closes instantly: a width animation re-lays the stage every frame.
   void _setOpen(bool open) {
     if (_open == open) return;
     setState(() => _open = open);
-    if (open) {
-      _controller.forward();
-    } else {
-      _controller.reverse();
-    }
   }
 
   @override
@@ -981,19 +936,8 @@ class _ManageDrawerState extends ConsumerState<_ManageDrawer>
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.center,
       children: [
-        AnimatedBuilder(
-          animation: _curved,
-          builder: (context, child) {
-            if (_curved.value == 0.0) return const SizedBox.shrink();
-            return ClipRect(
-              child: Align(
-                alignment: Alignment.centerLeft,
-                widthFactor: _curved.value,
-                child: FadeTransition(opacity: _curved, child: child),
-              ),
-            );
-          },
-          child: Container(
+        if (_open)
+          Container(
             width: 300,
             decoration: BoxDecoration(
               color: hollow.overlay.withValues(alpha: 0.88),
@@ -1003,7 +947,6 @@ class _ManageDrawerState extends ConsumerState<_ManageDrawer>
             ),
             child: _ManagePanelContent(conf: widget.conf),
           ),
-        ),
         GestureDetector(
           onTap: () => _setOpen(!_open),
           child: Semantics(

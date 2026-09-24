@@ -654,14 +654,19 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
         _displayMessages(ref.read(chatProvider)[widget.peerId] ?? []);
     if (index < 0 || index >= messages.length) return;
     setState(() => _highlightIndex = index);
-    _itemScrollController.scrollTo(
-      index: messages.length - 1 - index,
-      duration: const Duration(milliseconds: 300),
-      curve: Curves.easeOutCubic,
-      // Reversed alignment measures from the BOTTOM edge, so this lands the
-      // target in the upper-middle area.
-      alignment: 0.6,
-    );
+    // Reversed alignment measures from the BOTTOM edge, so 0.6 lands the
+    // target in the upper-middle area.
+    if (HollowDurations.animationsDisabled) {
+      _itemScrollController.jumpTo(
+          index: messages.length - 1 - index, alignment: 0.6);
+    } else {
+      _itemScrollController.scrollTo(
+        index: messages.length - 1 - index,
+        duration: const Duration(milliseconds: 300),
+        curve: HollowCurves.enter,
+        alignment: 0.6,
+      );
+    }
     Future.delayed(const Duration(milliseconds: 1500), () {
       if (mounted) setState(() => _highlightIndex = null);
     });
@@ -1265,13 +1270,6 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
             }
           },
         ),
-        HollowIconButton(
-          icon: LucideIcons.panelRight,
-          label: showProfilePanel ? 'Hide profile' : 'Show profile',
-          selected: showProfilePanel,
-          onPressed: () => ref.read(dmProfilePanelProvider.notifier).state =
-              !showProfilePanel,
-        ),
         if (ref.watch(layoutModeProvider) == LayoutMode.dock)
           HollowIconButton(
             icon: LucideIcons.columns,
@@ -1279,6 +1277,14 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
             selected: isSplit,
             onPressed: () => _handleSplitToggle(ref),
           ),
+        // Last, next to the panel it opens.
+        HollowIconButton(
+          icon: LucideIcons.circleUser,
+          label: showProfilePanel ? 'Hide profile' : 'Show profile',
+          selected: showProfilePanel,
+          onPressed: () => ref.read(dmProfilePanelProvider.notifier).state =
+              !showProfilePanel,
+        ),
       ],
     );
   }
@@ -1593,35 +1599,42 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
         ),
       ),
 
-      if (typingPeers.isNotEmpty) _buildTypingBar(typingPeers),
+      TypingIndicatorHost(
+        names: _typingNames(typingPeers),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+          if (_replyToMessageId != null)
+            ChatReplyPreviewBar(
+              senderName: _replyToSenderName,
+              text: _replyToText,
+              imagePath: _replyToImagePath,
+              onCancel: _cancelReply,
+            ),
 
-      if (_replyToMessageId != null)
-        ChatReplyPreviewBar(
-          senderName: _replyToSenderName,
-          text: _replyToText,
-          imagePath: _replyToImagePath,
-          onCancel: _cancelReply,
+          if (_staged.isNotEmpty)
+            StagedAttachmentStrip(
+              items: _staged,
+              onRemove: (i) =>
+                  setState(() => _staged = [..._staged]..removeAt(i)),
+              onReorder: (from, to) =>
+                  setState(() => _staged = reorderStaged(_staged, from, to)),
+            ),
+
+          StagedLinkArea(
+            hollowLink: _stagedHollowLink,
+            previewUrl: _stagedPreviewUrl,
+            preview: _stagedPreview,
+            previewLoading: _stagedPreviewLoading,
+            onDismissHollowLink: _dismissStagedHollowLink,
+            onDismissPreview: _dismissStagedPreview,
+          ),
+
+          _buildInputBar(hollow),
+          ],
         ),
-
-      if (_staged.isNotEmpty)
-        StagedAttachmentStrip(
-          items: _staged,
-          onRemove: (i) =>
-              setState(() => _staged = [..._staged]..removeAt(i)),
-          onReorder: (from, to) =>
-              setState(() => _staged = reorderStaged(_staged, from, to)),
-        ),
-
-      StagedLinkArea(
-        hollowLink: _stagedHollowLink,
-        previewUrl: _stagedPreviewUrl,
-        preview: _stagedPreview,
-        previewLoading: _stagedPreviewLoading,
-        onDismissHollowLink: _dismissStagedHollowLink,
-        onDismissPreview: _dismissStagedPreview,
       ),
-
-      _buildInputBar(hollow),
     ];
   }
 
@@ -2187,14 +2200,13 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
   Widget _buildUnreadPillOverlay(List<ChatMessage> allMessages) { // design-ignore: places the unread jump pill, not a label
     final unreadCount = ref.watch(
         unreadProvider.select((s) => s.dmUnreadCounts[widget.peerId] ?? 0));
-    if (unreadCount <= 0 || !_showScrollPill) return const SizedBox.shrink();
     return Positioned(
       bottom: HollowSpacing.md,
       left: 0,
       right: 0,
       child: Center(
-        child: UnreadJumpPill(
-          count: unreadCount,
+        child: UnreadJumpFade(
+          count: _showScrollPill ? unreadCount : 0,
           onTap: () {
             _scrollToBottom();
             // The display list may be frozen, so mark seen against the TRUE
@@ -2209,14 +2221,10 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
     );
   }
 
-  Widget _buildTypingBar(Set<String> typingPeers) {
-    return TypingIndicatorBar(
-      names: typingPeers
-          .map((pid) => displayNameForPeer(
-              ref.watch(profileProvider.select((p) => p[pid])), pid))
-          .toList(),
-    );
-  }
+  List<String> _typingNames(Set<String> typingPeers) => typingPeers
+      .map((pid) => displayNameForPeer(
+          ref.watch(profileProvider.select((p) => p[pid])), pid))
+      .toList();
 
   Widget _buildInputBar(HollowTheme hollow) {
     return chatInputBarShell(
@@ -2265,78 +2273,20 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
   }
 }
 
-/// Slide animation wrapper for the DM profile panel.
-
-/// Animated slider for the inline call panel, shown under the DM header during
-/// a call with this peer.
-class _InlineCallPanelSlider extends ConsumerStatefulWidget {
+/// The inline call panel under the DM header during a call with this peer. It
+/// appears instantly: it was re-animating every time the DM opened.
+class _InlineCallPanelSlider extends ConsumerWidget {
   final String peerId;
   const _InlineCallPanelSlider({required this.peerId});
 
   @override
-  ConsumerState<_InlineCallPanelSlider> createState() =>
-      _InlineCallPanelSliderState();
-}
-
-class _InlineCallPanelSliderState extends ConsumerState<_InlineCallPanelSlider>
-    with SingleTickerProviderStateMixin {
-  late final AnimationController _controller;
-  late final CurvedAnimation _curved;
-
-  @override
-  void initState() {
-    super.initState();
-    _controller = AnimationController(
-      vsync: this,
-      duration: HollowDurations.normal,
-      value: 0.0,
-    );
-    _curved = CurvedAnimation(
-      parent: _controller,
-      curve: HollowCurves.enter,
-      reverseCurve: HollowCurves.exit,
-    );
-  }
-
-  @override
-  void dispose() {
-    _curved.dispose();
-    _controller.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final call = ref.watch(callProvider);
-    final isCallWithThisPeer = call.peerId == widget.peerId &&
+  Widget build(BuildContext context, WidgetRef ref) {
+    final isCallWithThisPeer = ref.watch(callProvider.select((call) =>
+        call.peerId == peerId &&
         (call.status == CallStatus.active ||
-         call.status == CallStatus.connecting);
-
-    // Re-evaluated so the reduce-motion toggle takes effect.
-    _controller.duration = HollowDurations.normal;
-    if (isCallWithThisPeer) {
-      _controller.forward();
-    } else {
-      _controller.reverse();
-    }
-
-    return AnimatedBuilder(
-      animation: _curved,
-      builder: (context, child) {
-        if (_curved.value == 0.0) return const SizedBox.shrink();
-        return ClipRect(
-          child: Align(
-            alignment: Alignment.topCenter,
-            heightFactor: _curved.value,
-            child: FadeTransition(
-              opacity: _curved,
-              child: child,
-            ),
-          ),
-        );
-      },
-      child: _InlineCallPanel(peerId: widget.peerId),
-    );
+            call.status == CallStatus.connecting)));
+    if (!isCallWithThisPeer) return const SizedBox.shrink();
+    return _InlineCallPanel(peerId: peerId);
   }
 }
 
@@ -2859,7 +2809,7 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
             top: 8,
             child: AnimatedOpacity(
               opacity: 0.7,
-              duration: const Duration(milliseconds: 200),
+              duration: HollowDurations.fast,
               child: Container(
                 padding: const EdgeInsets.symmetric(
                   horizontal: HollowSpacing.sm,
@@ -3174,9 +3124,9 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
   }
 }
 
-// Chat overlay slider: slides the chat panel in and out during a screen share.
-
-class _ChatOverlaySlider extends StatefulWidget {
+/// The chat panel over a screen share. It shows and hides instantly: a width
+/// animation would re-wrap the chat text on every frame.
+class _ChatOverlaySlider extends StatelessWidget {
   final bool visible;
   final Widget child;
   final VoidCallback onHoverEnter;
@@ -3190,71 +3140,12 @@ class _ChatOverlaySlider extends StatefulWidget {
   });
 
   @override
-  State<_ChatOverlaySlider> createState() => _ChatOverlaySliderState();
-}
-
-class _ChatOverlaySliderState extends State<_ChatOverlaySlider>
-    with SingleTickerProviderStateMixin {
-  late final AnimationController _controller;
-  late final CurvedAnimation _curved;
-
-  @override
-  void initState() {
-    super.initState();
-    _controller = AnimationController(
-      vsync: this,
-      duration: HollowDurations.normal,
-      value: widget.visible ? 1.0 : 0.0,
-    );
-    _curved = CurvedAnimation(
-      parent: _controller,
-      curve: HollowCurves.enter,
-      reverseCurve: HollowCurves.exit,
-    );
-  }
-
-  @override
-  void didUpdateWidget(covariant _ChatOverlaySlider oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (widget.visible != oldWidget.visible) {
-      _controller.duration = HollowDurations.normal;
-      if (widget.visible) {
-        _controller.forward();
-      } else {
-        _controller.reverse();
-      }
-    }
-  }
-
-  @override
-  void dispose() {
-    _curved.dispose();
-    _controller.dispose();
-    super.dispose();
-  }
-
-  @override
   Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: _curved,
-      builder: (context, child) {
-        if (_curved.value == 0.0) return const SizedBox.shrink();
-        return ClipRect(
-          child: Align(
-            alignment: Alignment.centerRight,
-            widthFactor: _curved.value,
-            child: FadeTransition(
-              opacity: _curved,
-              child: MouseRegion(
-                onEnter: (_) => widget.onHoverEnter(),
-                onExit: (_) => widget.onHoverExit(),
-                child: child,
-              ),
-            ),
-          ),
-        );
-      },
-      child: widget.child,
+    if (!visible) return const SizedBox.shrink();
+    return MouseRegion(
+      onEnter: (_) => onHoverEnter(),
+      onExit: (_) => onHoverExit(),
+      child: child,
     );
   }
 }
@@ -4072,69 +3963,16 @@ class _ScreenShareControlsOverlayState
   }
 }
 
-class _DmProfilePanelSlider extends StatefulWidget {
+/// The DM profile panel's place on the right. It shows and hides instantly: a
+/// width animation would re-wrap the chat text on every frame.
+class _DmProfilePanelSlider extends StatelessWidget {
   final bool visible;
   final String peerId;
   const _DmProfilePanelSlider({required this.visible, required this.peerId});
 
   @override
-  State<_DmProfilePanelSlider> createState() => _DmProfilePanelSliderState();
-}
-
-class _DmProfilePanelSliderState extends State<_DmProfilePanelSlider>
-    with SingleTickerProviderStateMixin {
-  late final AnimationController _controller;
-  late final CurvedAnimation _curved;
-
-  @override
-  void initState() {
-    super.initState();
-    _controller = AnimationController(
-      vsync: this,
-      duration: HollowDurations.normal,
-      value: widget.visible ? 1.0 : 0.0,
-    );
-    _curved = CurvedAnimation(
-      parent: _controller,
-      curve: HollowCurves.enter,
-      reverseCurve: HollowCurves.exit,
-    );
-  }
-
-  @override
-  void didUpdateWidget(_DmProfilePanelSlider old) {
-    super.didUpdateWidget(old);
-    if (widget.visible != old.visible) {
-      _controller.duration = HollowDurations.normal;
-      widget.visible ? _controller.forward() : _controller.reverse();
-    }
-  }
-
-  @override
-  void dispose() {
-    _curved.dispose();
-    _controller.dispose();
-    super.dispose();
-  }
-
-  @override
   Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: _curved,
-      builder: (context, child) {
-        if (_curved.value == 0.0) return const SizedBox.shrink();
-        return ClipRect(
-          child: Align(
-            alignment: Alignment.centerRight,
-            widthFactor: _curved.value,
-            child: FadeTransition(
-              opacity: _curved,
-              child: child,
-            ),
-          ),
-        );
-      },
-      child: DmProfilePanel(peerId: widget.peerId),
-    );
+    if (!visible) return const SizedBox.shrink();
+    return DmProfilePanel(peerId: peerId);
   }
 }

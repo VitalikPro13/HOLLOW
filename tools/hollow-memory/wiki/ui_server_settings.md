@@ -31,7 +31,7 @@ Each tab is a record `({IconData icon, String label, bool isDanger})`. The Dange
 **Layout structure:**
 1. **Header bar** (48px) -- settings icon, "Server Settings -- {serverName}" title with ellipsis, close button (X icon). Close button calls `onClose` if provided, otherwise sets `serverSettingsOpenProvider` to false.
 2. **Tab bar** (40px) -- `EdgeScrollRow` of `_TabButton` widgets on `hollow.surface` background with bottom border. Arrows + wheel-panning appear only while the tabs overflow (a narrow panel or a larger text setting); before 2026-07-30 the overflowing tabs were unreachable on a plain wheel mouse.
-3. **Tab content** -- `AnimatedSwitcher` with `HollowDurations.normal` crossfade, `Stack` layout builder for overlap during transition.
+3. **Tab content** -- `_buildTabContent` inside a `FocusTraversalGroup`. Switching tabs is instant (no crossfade).
 
 **`_TabButton`:** `HollowPressable` with `subtle: true`. Shows icon (14px) + label text. Selected state: accent color (or error for danger), `FontWeight.w600`. Unselected: `hollow.textSecondary`, `FontWeight.w400`.
 
@@ -44,7 +44,7 @@ Each tab is a record `({IconData icon, String label, bool isDanger})`. The Dange
 - `'Notifications'` -> `NotificationsTab(serverId)`
 - `'Danger'` -> `DangerZoneTab(server)`
 
-Each tab has a stable `ValueKey` for AnimatedSwitcher identity.
+Each tab has a stable `ValueKey`, so its state resets on a tab switch.
 
 ## OverviewTab -- Server Identity and Settings
 

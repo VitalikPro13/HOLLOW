@@ -471,9 +471,9 @@ that only knows a PEER has to resolve a watermark first, which is what `markDmSe
 
 ### An animated popup must stop taking pointers when its exit starts
 
-**Rule:** wrap the whole overlay entry (dismiss barrier included) in an `IgnorePointer` gated on "exiting" -- `PopupAnimationController.wrapEntry` does this for the emoji/GIF/sticker pickers.
+**Rule:** wrap the whole overlay entry (dismiss barrier included) in an `IgnorePointer` gated on "exiting" -- `PopupAnimationController.wrapEntry` does this for the emoji/GIF/sticker pickers, and the profile card popup gates its Stack on `_dismissing`.
 
-**Why:** the barrier stays mounted, full screen and on top for the length of the exit animation, so a click that dismisses a popup and a click on the button that reopens it arrive well inside 140ms of each other and the second one lands on a corpse. Invisible before the pickers had exit animations, because teardown was instantaneous.
+**Why:** the barrier stays mounted, full screen and on top for the length of the exit animation, so a click that dismisses a popup and a click on the button that reopens it arrive well inside the exit's 100 ms of each other and the second one lands on a corpse. Invisible before the pickers had exit animations, because teardown was instantaneous.
 
 Related: `FadeTransition` drops its subtree from the SEMANTICS tree at opacity 0 while `Opacity` still passes hit tests, so an entering popup is clickable but invisible to screen readers. Pass `alwaysIncludeSemantics: true`.
 

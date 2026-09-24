@@ -64,7 +64,6 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/ui/animations/ambient_background.dart';
-import 'package:hollow/src/ui/animations/startup_reveal.dart';
 import 'package:hollow/src/core/providers/voice_channel_provider.dart';
 import 'package:hollow/src/core/services/desktop_notification_service.dart';
 import 'package:hollow/src/ui/chat/channel_chat_pane.dart';
@@ -179,15 +178,9 @@ class _HollowShellState extends ConsumerState<HollowShell>
   bool _silentStart = false;
   DateTime? _pausedAt;
 
-  // Master startup controller, shared down the tree by an InheritedWidget.
-  late final AnimationController _revealController;
-  bool _revealComplete = false;
-
-  late final Animation<double> _chatReveal;
-
-  late final Animation<double> _friendsBarReveal;
-  late final Animation<double> _bottomBarReveal;
-  late final Animation<double> _dockChatReveal;
+  // The desktop shell fades in once at startup; nothing inside it moves.
+  late final AnimationController _shellFade;
+  late final CurvedAnimation _shellFadeCurve;
 
   // The member panel auto-collapses below the desktop breakpoint, which a high
   // interface scale can cross on its own. `_memberPanelWasOpen` holds what the
@@ -277,34 +270,12 @@ class _HollowShellState extends ConsumerState<HollowShell>
   void initState() {
     super.initState();
 
-    _revealController = AnimationController(
+    _shellFade = AnimationController(
       vsync: this,
-      duration: const Duration(milliseconds: 2500),
+      value: HollowDurations.animationsDisabled ? 1.0 : 0.0,
     );
-
-    _chatReveal = CurvedAnimation(
-      parent: _revealController,
-      curve: const Interval(0.30, 0.70, curve: Curves.easeOutCubic),
-    );
-
-    _friendsBarReveal = CurvedAnimation(
-      parent: _revealController,
-      curve: const Interval(0.0, 0.25, curve: Curves.easeOutCubic),
-    );
-    _bottomBarReveal = CurvedAnimation(
-      parent: _revealController,
-      curve: const Interval(0.05, 0.30, curve: Curves.easeOutCubic),
-    );
-    _dockChatReveal = CurvedAnimation(
-      parent: _revealController,
-      curve: const Interval(0.20, 0.60, curve: Curves.easeOutCubic),
-    );
-
-    _revealController.addStatusListener((status) {
-      if (status == AnimationStatus.completed) {
-        setState(() => _revealComplete = true);
-      }
-    });
+    _shellFadeCurve =
+        CurvedAnimation(parent: _shellFade, curve: HollowCurves.enter);
 
     HardwareKeyboard.instance.addHandler(_handleGlobalKey);
 
@@ -315,7 +286,11 @@ class _HollowShellState extends ConsumerState<HollowShell>
 
     // After the first frame, so the window is visible before anything moves.
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      _revealController.forward();
+      if (HollowDurations.animationsDisabled) {
+        _shellFade.value = 1.0;
+      } else {
+        _shellFade.animateTo(1.0, duration: HollowDurations.normal);
+      }
       // A cold-start protocol launch buffers in the service until the shell is
       // mounted.
       DeepLinkService.instance.notifyShellReady();
@@ -881,9 +856,7 @@ class _HollowShellState extends ConsumerState<HollowShell>
     try {
       await ref.read(reduceMotionProvider.future);
       if (ReduceMotionController.instance.isReduced) {
-        if (!_revealController.isCompleted) {
-          _revealController.value = 1.0;
-        }
+        if (!_shellFade.isCompleted) _shellFade.value = 1.0;
       }
     } catch (_) {}
 
@@ -1258,7 +1231,8 @@ class _HollowShellState extends ConsumerState<HollowShell>
     }
     HardwareKeyboard.instance.removeHandler(_handleGlobalKey);
     _idleTimer?.cancel();
-    _revealController.dispose();
+    _shellFadeCurve.dispose();
+    _shellFade.dispose();
     super.dispose();
   }
 
@@ -1591,16 +1565,6 @@ class _HollowShellState extends ConsumerState<HollowShell>
     );
   }
 
-  /// Wraps the chat pane with a fade for the startup reveal. The FadeTransition
-  /// stays in the tree so the child's State survives the reveal completing,
-  /// which would otherwise reset the ambient blob positions.
-  Widget _chatRevealWrap(Widget child) {
-    return FadeTransition(
-      opacity: _chatReveal,
-      child: child,
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
     // Desktop only: the controller self-activates in a call and idles otherwise
@@ -1768,7 +1732,10 @@ class _HollowShellState extends ConsumerState<HollowShell>
           child: body,
         );
 
-        return _ShellScaffold(body: body);
+        return FadeTransition(
+          opacity: _shellFadeCurve,
+          child: _ShellScaffold(body: body),
+        );
       },
     );
 
@@ -1810,87 +1777,82 @@ class _HollowShellState extends ConsumerState<HollowShell>
         && vc.$1 == selectedChannelId
         && vc.$3;
 
-    return StartupRevealScope(
-      controller: _revealController,
-      isComplete: _revealComplete,
-      child: Column(
-        children: [
-          // Full-width strip at the very top, self-hiding when there is nothing
-          // to announce.
-          const SystemStatusBanner(),
-          Expanded(
-            child: Row(
-              children: [
-                const RepaintBoundary(child: ServerStrip()),
-                _buildChannelSidebar(
-                  peers: peers,
-                  lastMessages: lastMessages,
-                  selectedPeerId: selectedPeerId,
-                  nodeStatus: nodeStatus,
-                  selectedServer: selectedServer,
-                  channels: channels,
-                  selectedChannelId: selectedChannelId,
-                  channelLayoutJson: channelLayout,
-                ),
-                const _ChannelSidebarSeam(),
-                Expanded(
-                  child: _chatRevealWrap(
-                    RepaintBoundary(
-                      child: AmbientBackground(
-                        color1: hollow.accent,
-                        color2: const Color(0xFF6366F1),
-                        child: AnimatedSwitcher(
-                          duration: HollowDurations.normal,
-                          switchInCurve: HollowCurves.enter,
-                          switchOutCurve: HollowCurves.exit,
-                          layoutBuilder: (currentChild, previousChildren) {
-                            return Stack(
-                              alignment: Alignment.topCenter,
-                              children: [
-                                ...previousChildren,
-                                ?currentChild,
-                              ],
-                            );
-                          },
-                          child: Container(
-                            key: ValueKey(
-                                ref.watch(guestTabOpenProvider) ? 'guest'
-                                    : ref.watch(shareTabOpenProvider) ? 'share'
-                                    : ref.watch(archiveTabOpenProvider) ? 'archive'
-                                    : ref.watch(conferenceTabOpenProvider) ? 'conference'
-                                    : ref.watch(shopTabOpenProvider) ? 'shop'
-                                    : settingsOpen && selectedServer != null
-                                    ? 'settings-${selectedServer.serverId}'
-                                    : selectedChannelId ?? selectedPeerId ?? 'empty'),
-                            color: hollow.background,
-                            child: settingsOpen && selectedServer != null
-                                ? ServerSettingsPanel(server: selectedServer)
-                                : _buildChatOrEmpty(
-                                    hollow: hollow,
-                                    selectedPeerId: selectedPeerId,
-                                    peers: peers,
-                                    selectedChannelId: selectedChannelId,
-                                    channels: channels,
-                                  ),
-                          ),
-                        ),
-                      ),
+    return Column(
+      children: [
+        // Full-width strip at the very top, self-hiding when there is nothing
+        // to announce.
+        const SystemStatusBanner(),
+        Expanded(
+          child: Row(
+            children: [
+              const RepaintBoundary(child: ServerStrip()),
+              _buildChannelSidebar(
+                peers: peers,
+                lastMessages: lastMessages,
+                selectedPeerId: selectedPeerId,
+                nodeStatus: nodeStatus,
+                selectedServer: selectedServer,
+                channels: channels,
+                selectedChannelId: selectedChannelId,
+                channelLayoutJson: channelLayout,
+              ),
+              const _ChannelSidebarSeam(),
+              Expanded(
+                child: RepaintBoundary(
+                  child: AmbientBackground(
+                    color1: hollow.accent,
+                    color2: const Color(0xFF6366F1),
+                    // Switching conversations is instant; the key resets the
+                    // pane's state per conversation.
+                    child: Container(
+                      key: ValueKey(_mainPaneKey(
+                          settingsOpen: settingsOpen,
+                          selectedServer: selectedServer,
+                          selectedChannelId: selectedChannelId,
+                          selectedPeerId: selectedPeerId)),
+                      color: hollow.background,
+                      child: settingsOpen && selectedServer != null
+                          ? ServerSettingsPanel(server: selectedServer)
+                          : _buildChatOrEmpty(
+                              hollow: hollow,
+                              selectedPeerId: selectedPeerId,
+                              peers: peers,
+                              selectedChannelId: selectedChannelId,
+                              channels: channels,
+                            ),
                     ),
                   ),
                 ),
-                // Docked at every width: re-opening it has to PUSH the chat
-                // over, because an overlay would cover the header's own toggle.
-                _MemberPanelSlider(
-                  visible: selectedServerId != null && memberPanelOpen && !vcScreenShareFullBleed,
-                  serverId: selectedServerId,
-                ),
-                HelpPanelSlider(visible: helpPanelOpen),
-              ],
-            ),
+              ),
+              // Docked at every width: re-opening it has to PUSH the chat
+              // over, because an overlay would cover the header's own toggle.
+              _MemberPanelSlot(
+                visible: selectedServerId != null && memberPanelOpen && !vcScreenShareFullBleed,
+              ),
+              HelpPanelSlider(visible: helpPanelOpen),
+            ],
           ),
-        ],
-      ),
+        ),
+      ],
     );
+  }
+
+  /// Identifies what the main pane shows, so its state resets on a switch.
+  String _mainPaneKey({
+    required bool settingsOpen,
+    required ServerInfo? selectedServer,
+    required String? selectedChannelId,
+    required String? selectedPeerId,
+  }) {
+    if (ref.watch(guestTabOpenProvider)) return 'guest';
+    if (ref.watch(shareTabOpenProvider)) return 'share';
+    if (ref.watch(archiveTabOpenProvider)) return 'archive';
+    if (ref.watch(conferenceTabOpenProvider)) return 'conference';
+    if (ref.watch(shopTabOpenProvider)) return 'shop';
+    if (settingsOpen && selectedServer != null) {
+      return 'settings-${selectedServer.serverId}';
+    }
+    return selectedChannelId ?? selectedPeerId ?? 'empty';
   }
 
   /// Dock layout: FriendsBar, then ChannelSidebar + ChatPane + MemberPanel,
@@ -1962,277 +1924,113 @@ class _HollowShellState extends ConsumerState<HollowShell>
         ? splitState.rightPane?.serverId
         : selectedServerId;
 
-    return StartupRevealScope(
-      controller: _revealController,
-      isComplete: _revealComplete,
-      child: Column(
-        children: [
+    final singleKey = settingsOpen && selectedServer != null
+        ? 'settings-${selectedServer.serverId}'
+        : selectedChannelId ?? selectedPeerId ?? 'empty';
 
-          ClipRect(
-            child: AnimatedBuilder(
-              animation: _friendsBarReveal,
-              builder: (context, child) => Align(
-                alignment: Alignment.bottomCenter,
-                heightFactor: _friendsBarReveal.value.clamp(0.0, 1.0),
-                child: child,
-              ),
-              child: FadeTransition(
-                opacity: _friendsBarReveal,
-                child: const RepaintBoundary(child: FriendsBar()),
-              ),
-            ),
-          ),
+    return Column(
+      children: [
+        const RepaintBoundary(child: FriendsBar()),
 
-          // Self-hides unless there is a banner-worthy notice, so it reaches
-          // users whatever they are viewing.
-          const SystemStatusBanner(),
+        // Self-hides unless there is a banner-worthy notice, so it reaches
+        // users whatever they are viewing.
+        const SystemStatusBanner(),
 
-          Expanded(
-            child: ClipRect(child: Row(
-              children: [
-                _DockSidebarSlider(
-                  visible: selectedServerId != null,
-                  // The seam rides INSIDE the slider so it slides away with the
-                  // panel it sizes.
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      _buildChannelSidebar(
-                        peers: peers,
-                        lastMessages: lastMessages,
-                        selectedPeerId: selectedPeerId,
-                        nodeStatus: nodeStatus,
-                        selectedServer: selectedServer,
-                        channels: channels,
-                        selectedChannelId: selectedChannelId,
-                        channelLayoutJson: channelLayout,
-                        dockMode: true,
-                      ),
-                      const _ChannelSidebarSeam(),
-                    ],
-                  ),
-                ),
-
-                Expanded(
-                  child: FadeTransition(
-                    opacity: _dockChatReveal,
-                    child: AnimatedSwitcher(
-                      duration: HollowDurations.normal,
-                      switchInCurve: HollowCurves.enter,
-                      switchOutCurve: HollowCurves.exit,
-                      layoutBuilder: (currentChild, previousChildren) {
-                        return Stack(
-                          alignment: Alignment.topCenter,
-                          children: [
-                            ...previousChildren,
-                            ?currentChild,
-                          ],
-                        );
-                      },
-                      child: splitState.isSplit
-                          ? _SplitChatArea(
-                              key: const ValueKey('split'),
-                              hollow: hollow,
-                              selectedPeerId: selectedPeerId,
-                              selectedChannelId: selectedChannelId,
-                              channels: channels,
-                              settingsOpen: settingsOpen,
-                              selectedServer: selectedServer,
-                            )
-                          : RepaintBoundary(
-                              key: ValueKey(
-                                  'single-${settingsOpen && selectedServer != null ? 'settings-${selectedServer.serverId}' : selectedChannelId ?? selectedPeerId ?? 'empty'}'),
-                              child: AmbientBackground(
-                                color1: hollow.accent,
-                                color2: const Color(0xFF6366F1),
-                                child: AnimatedSwitcher(
-                                  duration: HollowDurations.normal,
-                                  switchInCurve: HollowCurves.enter,
-                                  switchOutCurve: HollowCurves.exit,
-                                  layoutBuilder: (currentChild,
-                                      previousChildren) {
-                                    return Stack(
-                                      alignment: Alignment.topCenter,
-                                      children: [
-                                        ...previousChildren,
-                                        ?currentChild,
-                                      ],
-                                    );
-                                  },
-                                  child: Container(
-                                    key: ValueKey(ref.watch(guestTabOpenProvider)
-                                        ? 'guest'
-                                        : ref.watch(shareTabOpenProvider)
-                                        ? 'share'
-                                        : ref.watch(archiveTabOpenProvider)
-                                        ? 'archive'
-                                        : ref.watch(conferenceTabOpenProvider)
-                                        ? 'conference'
-                                        : ref.watch(shopTabOpenProvider)
-                                        ? 'shop'
-                                        : settingsOpen &&
-                                            selectedServer != null
-                                        ? 'settings-${selectedServer.serverId}'
-                                        : selectedChannelId ??
-                                            selectedPeerId ??
-                                            'empty'),
-                                    color: hollow.background,
-                                    child: settingsOpen &&
-                                            selectedServer != null
-                                        ? ServerSettingsPanel(
-                                            server: selectedServer)
-                                        : _buildChatOrEmpty(
-                                            hollow: hollow,
-                                            selectedPeerId:
-                                                selectedPeerId,
-                                            peers: peers,
-                                            selectedChannelId:
-                                                selectedChannelId,
-                                            channels: channels,
-                                          ),
-                                  ),
-                                ),
-                              ),
-                            ),
+        Expanded(
+          child: ClipRect(child: Row(
+            children: [
+              if (selectedServerId != null)
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    _buildChannelSidebar(
+                      peers: peers,
+                      lastMessages: lastMessages,
+                      selectedPeerId: selectedPeerId,
+                      nodeStatus: nodeStatus,
+                      selectedServer: selectedServer,
+                      channels: channels,
+                      selectedChannelId: selectedChannelId,
+                      channelLayoutJson: channelLayout,
+                      dockMode: true,
                     ),
-                  ),
+                    const _ChannelSidebarSeam(),
+                  ],
                 ),
 
-                // Hidden during split view and VC screen share. Width is not
-                // gated: below the breakpoint it starts collapsed and re-opening
-                // pushes the chat over, keeping the header's toggle reachable.
-                if (!splitState.isSplit)
-                  _MemberPanelSlider(
-                    visible:
-                        effectiveServerId != null && memberPanelOpen && !vcScreenShareFullBleed,
-                    serverId: effectiveServerId,
-                  ),
-                HelpPanelSlider(visible: helpPanelOpen),
-              ],
-            )),
-          ),
+              // Switching conversations is instant; the keys reset the pane's
+              // state per conversation while the ambient layer stays put.
+              Expanded(
+                child: splitState.isSplit
+                    ? _SplitChatArea(
+                        key: const ValueKey('split'),
+                        hollow: hollow,
+                        selectedPeerId: selectedPeerId,
+                        selectedChannelId: selectedChannelId,
+                        channels: channels,
+                        settingsOpen: settingsOpen,
+                        selectedServer: selectedServer,
+                      )
+                    : RepaintBoundary(
+                        key: const ValueKey('single'),
+                        child: AmbientBackground(
+                          color1: hollow.accent,
+                          color2: const Color(0xFF6366F1),
+                          child: Container(
+                            key: ValueKey((
+                              singleKey,
+                              _mainPaneKey(
+                                  settingsOpen: settingsOpen,
+                                  selectedServer: selectedServer,
+                                  selectedChannelId: selectedChannelId,
+                                  selectedPeerId: selectedPeerId),
+                            )),
+                            color: hollow.background,
+                            child: settingsOpen && selectedServer != null
+                                ? ServerSettingsPanel(server: selectedServer)
+                                : _buildChatOrEmpty(
+                                    hollow: hollow,
+                                    selectedPeerId: selectedPeerId,
+                                    peers: peers,
+                                    selectedChannelId: selectedChannelId,
+                                    channels: channels,
+                                  ),
+                          ),
+                        ),
+                      ),
+              ),
 
-          ClipRect(
-            child: AnimatedBuilder(
-              animation: _bottomBarReveal,
-              builder: (context, child) => Align(
-                alignment: Alignment.topCenter,
-                heightFactor: _bottomBarReveal.value.clamp(0.0, 1.0),
-                child: child,
-              ),
-              child: FadeTransition(
-                opacity: _bottomBarReveal,
-                child: const RepaintBoundary(child: BottomBar()),
-              ),
-            ),
-          ),
-        ],
-      ),
+              // Hidden during split view and VC screen share. Width is not
+              // gated: below the breakpoint it starts collapsed and re-opening
+              // pushes the chat over, keeping the header's toggle reachable.
+              if (!splitState.isSplit)
+                _MemberPanelSlot(
+                  visible:
+                      effectiveServerId != null && memberPanelOpen && !vcScreenShareFullBleed,
+                ),
+              HelpPanelSlider(visible: helpPanelOpen),
+            ],
+          )),
+        ),
+
+        const RepaintBoundary(child: BottomBar()),
+      ],
     );
   }
 
 }
 
-/// Animates the member panel sliding in and out from the right edge.
-///
-/// While closing, [selectedServerProvider] is overridden with the last known
-/// server id so the content cannot flash "No peers online" on the way out.
-class _MemberPanelSlider extends StatefulWidget {
+/// The member panel's place in the row. It shows and hides instantly: a width
+/// animation would re-wrap the chat text on every frame.
+class _MemberPanelSlot extends StatelessWidget {
   final bool visible;
-  final String? serverId;
 
-  const _MemberPanelSlider({
-    required this.visible,
-    this.serverId,
-  });
-
-  @override
-  State<_MemberPanelSlider> createState() => _MemberPanelSliderState();
-}
-
-class _MemberPanelSliderState extends State<_MemberPanelSlider>
-    with SingleTickerProviderStateMixin {
-  late final AnimationController _controller;
-  late final CurvedAnimation _curved;
-
-  /// Kept while closing so the panel cannot flash.
-  String? _frozenServerId;
-
-  @override
-  void initState() {
-    super.initState();
-    _frozenServerId = widget.serverId;
-    _controller = AnimationController(
-      vsync: this,
-      duration: HollowDurations.normal,
-      value: widget.visible ? 1.0 : 0.0,
-    );
-    _curved = CurvedAnimation(
-      parent: _controller,
-      curve: HollowCurves.enter,
-      reverseCurve: HollowCurves.exit,
-    );
-  }
-
-  /// True while the panel animates closed, which freezes its content.
-  bool _isClosing = false;
-
-  @override
-  void didUpdateWidget(_MemberPanelSlider oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (widget.visible != oldWidget.visible) {
-      _controller.duration = HollowDurations.normal;
-      if (widget.visible) {
-        _isClosing = false;
-        _frozenServerId = widget.serverId;
-        _controller.forward();
-      } else {
-        // Freeze the content so it cannot flash "No peers online".
-        _isClosing = true;
-        _controller.reverse();
-      }
-    } else if (widget.visible && widget.serverId != oldWidget.serverId) {
-      _frozenServerId = widget.serverId;
-    }
-  }
-
-  @override
-  void dispose() {
-    _curved.dispose();
-    _controller.dispose();
-    super.dispose();
-  }
+  const _MemberPanelSlot({required this.visible});
 
   @override
   Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: _curved,
-      builder: (context, child) {
-        if (_curved.value == 0.0) return const SizedBox.shrink();
-
-        return ClipRect(
-          child: Align(
-            alignment: Alignment.centerRight,
-            widthFactor: _curved.value,
-            child: FadeTransition(
-              opacity: _curved,
-              child: child,
-            ),
-          ),
-        );
-      },
-      // Overridden only while closing; otherwise the real provider wins.
-      child: _isClosing && _frozenServerId != null
-          ? ProviderScope(
-              overrides: [
-                selectedServerProvider.overrideWith(
-                  (ref) => _frozenServerId,
-                ),
-              ],
-              child: const _MemberPanelWithSeam(),
-            )
-          : const _MemberPanelWithSeam(),
-    );
+    if (!visible) return const SizedBox.shrink();
+    return const _MemberPanelWithSeam();
   }
 }
 
@@ -2277,93 +2075,6 @@ class _MemberPanelWithSeam extends ConsumerWidget {
         // The seam paints the divider on this panel's left edge.
         const RepaintBoundary(child: MemberPanel(edgeBorder: false)),
       ],
-    );
-  }
-}
-
-/// Animates the channel sidebar sliding in/out from the left in dock mode.
-class _DockSidebarSlider extends StatefulWidget {
-  final bool visible;
-  final Widget child;
-
-  const _DockSidebarSlider({
-    required this.visible,
-    required this.child,
-  });
-
-  @override
-  State<_DockSidebarSlider> createState() => _DockSidebarSliderState();
-}
-
-class _DockSidebarSliderState extends State<_DockSidebarSlider>
-    with SingleTickerProviderStateMixin {
-  late final AnimationController _controller;
-  late final CurvedAnimation _curved;
-
-  /// Kept while closing so the content cannot collapse before the slide-out
-  /// finishes.
-  Widget? _frozenChild;
-  bool _isClosing = false;
-
-  @override
-  void initState() {
-    super.initState();
-    _controller = AnimationController(
-      vsync: this,
-      duration: HollowDurations.normal,
-      value: widget.visible ? 1.0 : 0.0,
-    );
-    _curved = CurvedAnimation(
-      parent: _controller,
-      curve: HollowCurves.enter,
-      reverseCurve: HollowCurves.exit,
-    );
-    if (widget.visible) _frozenChild = widget.child;
-  }
-
-  @override
-  void didUpdateWidget(_DockSidebarSlider oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (widget.visible != oldWidget.visible) {
-      _controller.duration = HollowDurations.normal;
-      if (widget.visible) {
-        _isClosing = false;
-        _frozenChild = widget.child;
-        _controller.forward();
-      } else {
-        _isClosing = true;
-        _controller.reverse();
-      }
-    } else if (widget.visible) {
-      _frozenChild = widget.child;
-    }
-  }
-
-  @override
-  void dispose() {
-    _curved.dispose();
-    _controller.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: _curved,
-      builder: (context, child) {
-        if (_curved.value == 0.0) return const SizedBox.shrink();
-        return ClipRect(
-          child: Align(
-            alignment: Alignment.centerLeft,
-            widthFactor: _curved.value,
-            child: FadeTransition(
-              opacity: _curved,
-              child: child,
-            ),
-          ),
-        );
-      },
-      child: _isClosing ? _frozenChild : widget.child,
     );
   }
 }
@@ -2429,7 +2140,7 @@ class _SplitChatAreaState extends ConsumerState<_SplitChatArea> {
                     top: BorderSide(
                       color: focusedPane == 0
                           ? hollow.accent
-                          : Colors.transparent,
+                          : hollow.accent.withValues(alpha: 0),
                       width: 2,
                     ),
                   ),
@@ -2438,33 +2149,19 @@ class _SplitChatAreaState extends ConsumerState<_SplitChatArea> {
                   child: AmbientBackground(
                     color1: hollow.accent,
                     color2: const Color(0xFF6366F1),
-                    child: AnimatedSwitcher(
-                      duration: HollowDurations.normal,
-                      switchInCurve: HollowCurves.enter,
-                      switchOutCurve: HollowCurves.exit,
-                      layoutBuilder: (currentChild, previousChildren) {
-                        return Stack(
-                          alignment: Alignment.topCenter,
-                          children: [
-                            ...previousChildren,
-                            ?currentChild,
-                          ],
-                        );
-                      },
-                      child: Container(
-                        key: ValueKey(widget.settingsOpen &&
-                                widget.selectedServer != null
-                            ? 'settings-${widget.selectedServer!.serverId}'
-                            : widget.selectedChannelId ??
-                                widget.selectedPeerId ??
-                                'empty-left'),
-                        color: hollow.background,
-                        child: widget.settingsOpen &&
-                                widget.selectedServer != null
-                            ? ServerSettingsPanel(
-                                server: widget.selectedServer!)
-                            : _buildLeftChatOrEmpty(hollow),
-                      ),
+                    child: Container(
+                      key: ValueKey(widget.settingsOpen &&
+                              widget.selectedServer != null
+                          ? 'settings-${widget.selectedServer!.serverId}'
+                          : widget.selectedChannelId ??
+                              widget.selectedPeerId ??
+                              'empty-left'),
+                      color: hollow.background,
+                      child: widget.settingsOpen &&
+                              widget.selectedServer != null
+                          ? ServerSettingsPanel(
+                              server: widget.selectedServer!)
+                          : _buildLeftChatOrEmpty(hollow),
                     ),
                   ),
                 ),
@@ -2501,7 +2198,7 @@ class _SplitChatAreaState extends ConsumerState<_SplitChatArea> {
                     top: BorderSide(
                       color: focusedPane == 1
                           ? hollow.accent
-                          : Colors.transparent,
+                          : hollow.accent.withValues(alpha: 0),
                       width: 2,
                     ),
                   ),
@@ -2787,9 +2484,7 @@ class _SplitDividerState extends State<_SplitDivider> {
         child: AnimatedContainer(
           duration: HollowDurations.fast,
           width: 6,
-          color: isActive
-              ? hollow.accent.withValues(alpha: 0.3)
-              : Colors.transparent,
+          color: hollow.accent.withValues(alpha: isActive ? 0.3 : 0),
           child: Center(
             child: AnimatedContainer(
               duration: HollowDurations.fast,

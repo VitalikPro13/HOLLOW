@@ -132,7 +132,7 @@ class ProbeRunner {
 
   /// Pumps [frames] frames.
   ///
-  /// Never `pumpAndSettle`: the shimmer, typewriter and GIF tickers are
+  /// Never `pumpAndSettle`: the typing dots, ambient and GIF tickers are
   /// perpetual, so "wait until nothing animates" is a deadlock by
   /// construction.
   Future<void> settle({
@@ -397,6 +397,18 @@ class ProbeRunner {
         await _hover(point);
         await settle(frames: step['frames'] as int? ?? 25);
         return 'hovering ${point.dx.round()},${point.dy.round()}';
+
+      case 'drag_at':
+        // A drag from a fixed point, for gestures that care where they start
+        // (the iOS back swipe from the screen's left edge).
+        final from = _point(step);
+        final delta = Offset((step['dx'] as num?)?.toDouble() ?? 0,
+            (step['dy'] as num?)?.toDouble() ?? 0);
+        await tester.timedDragFrom(from, delta,
+            Duration(milliseconds: step['duration_ms'] as int? ?? 400));
+        await settle(frames: step['frames'] as int? ?? 25);
+        return 'dragged from ${from.dx.round()},${from.dy.round()} by '
+            '${delta.dx.round()},${delta.dy.round()}';
 
       case 'tap_at':
       case 'right_click_at':

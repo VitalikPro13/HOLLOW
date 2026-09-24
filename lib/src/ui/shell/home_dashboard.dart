@@ -11,7 +11,6 @@ import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
-import 'package:hollow/src/ui/animations/startup_reveal.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/dialogs/new_message_dialog.dart';
@@ -32,8 +31,6 @@ class HomeDashboard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
-    final mainReveal = StartupRevealScope.interval(context, 0.30, 0.55);
-    final railReveal = StartupRevealScope.interval(context, 0.40, 0.65);
 
     // An app pane, not a page: both regions are anchored to the window's edges
     // and share the width between them, never centred with gutters beside them
@@ -46,7 +43,7 @@ class HomeDashboard extends StatelessWidget {
           return Row(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              Expanded(child: _revealed(const _HomeMain(), mainReveal)),
+              const Expanded(child: _HomeMain()),
               if (showRail)
                 // The same side panel as a server's member list: chrome, a
                 // hairline on its inner edge, full height.
@@ -61,23 +58,11 @@ class HomeDashboard extends StatelessWidget {
                     left: HollowSpacing.sm,
                     right: HollowSpacing.sm,
                   ),
-                  child: _revealed(const HomeRail(), railReveal),
+                  child: const HomeRail(),
                 ),
             ],
           );
         },
-      ),
-    );
-  }
-
-  Widget _revealed(Widget child, Animation<double>? reveal) {
-    if (reveal == null) return child;
-    return FadeTransition(
-      opacity: reveal,
-      child: SlideTransition(
-        position: Tween<Offset>(begin: const Offset(0, 0.04), end: Offset.zero)
-            .animate(reveal),
-        child: child,
       ),
     );
   }

@@ -3,6 +3,7 @@ import 'package:flutter/semantics.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/ui/components/overlay_anchor.dart';
+import 'package:hollow/src/theme/hollow_shadows.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
@@ -238,9 +239,7 @@ Future<void> showHollowMenu({
     barrierDismissible: true,
     barrierLabel: 'Dismiss menu',
     barrierColor: Colors.transparent,
-    transitionDuration: HollowDurations.animationsDisabled
-        ? Duration.zero
-        : const Duration(milliseconds: 120),
+    transitionDuration: HollowDurations.fast,
     // Built ONCE in pageBuilder: transitionBuilder reruns every animation
     // frame, and the host owns the drill-in state.
     pageBuilder: (_, _, _) => _HollowMenuHost(
@@ -251,20 +250,37 @@ Future<void> showHollowMenu({
       maxWidth: maxWidth,
     ),
     transitionBuilder: (_, animation, _, child) {
-      final curved = CurvedAnimation(
+      final scale = CurvedAnimation(
         parent: animation,
         curve: HollowCurves.enter,
-        reverseCurve: Curves.easeIn,
+        reverseCurve: HollowCurves.exit,
       );
-      return FadeTransition(
-        opacity: curved,
-        child: ScaleTransition(
-          scale: Tween<double>(begin: 0.96, end: 1.0).animate(curved),
-          // The menu grows out of the click point, not the screen centre.
-          alignment: alignEnd ? Alignment.topRight : Alignment.topLeft,
-          child: child,
-        ),
+      // The route has one duration, so the exit fade finishes in its first
+      // two thirds: a menu leaves in HollowDurations.exit.
+      final fade = CurvedAnimation(
+        parent: animation,
+        curve: HollowCurves.enter,
+        reverseCurve: const Interval(1 / 3, 1, curve: HollowCurves.exit),
       );
+      // The transition wraps the full-screen host, so the scale origin must
+      // be the click point in screen fractions; a corner of the SCREEN would
+      // slide the menu in from across the window.
+      return LayoutBuilder(builder: (context, constraints) {
+        final size = constraints.biggest;
+        final origin = Alignment(
+          size.width > 0 ? anchor.dx / size.width * 2 - 1 : 0,
+          size.height > 0 ? anchor.dy / size.height * 2 - 1 : 0,
+        );
+        return FadeTransition(
+          opacity: fade,
+          child: ScaleTransition(
+            scale: Tween<double>(begin: HollowMotion.popoverScale, end: 1.0)
+                .animate(scale),
+            alignment: origin,
+            child: child,
+          ),
+        );
+      });
     },
   );
 }
@@ -367,13 +383,7 @@ class _HollowMenuHostState extends State<_HollowMenuHost> {
                 color: hollow.overlay,
                 borderRadius: BorderRadius.circular(hollow.radiusMd),
                 border: Border.all(color: hollow.border),
-                boxShadow: [
-                  BoxShadow(
-                    color: Colors.black.withValues(alpha: 0.22),
-                    blurRadius: 16,
-                    offset: const Offset(0, 4),
-                  ),
-                ],
+                boxShadow: HollowShadows.float,
               ),
               clipBehavior: Clip.antiAlias,
               child: AnimatedSize(

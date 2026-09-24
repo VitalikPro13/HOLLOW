@@ -8,8 +8,6 @@ import 'package:hollow/src/core/providers/unread_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
-import 'package:hollow/src/ui/animations/hollow_curves.dart';
-import 'package:hollow/src/ui/animations/selection_shimmer.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_menu.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
@@ -50,7 +48,7 @@ class PeerCard extends ConsumerWidget {
         !isDmMuted &&
         ref.watch(unreadProvider.select((s) => s.isDmUnread(peerId)));
 
-    Widget card = HollowPressable(
+    final card = HollowPressable(
       onTap: onTap,
       subtle: true,
       borderRadius: radius,
@@ -60,10 +58,7 @@ class PeerCard extends ConsumerWidget {
           horizontal: HollowSpacing.md,
           vertical: HollowSpacing.sm + 2,
         ),
-        child: AnimatedContainer(
-          duration: HollowDurations.fast,
-          curve: HollowCurves.subtle,
-          child: Row(
+        child: Row(
             children: [
               Stack(
                 clipBehavior: Clip.none,
@@ -166,16 +161,7 @@ class PeerCard extends ConsumerWidget {
                 ),
             ],
           ),
-        ),
       );
-
-    if (isSelected) {
-      card = SelectionShimmer(
-        highlightColor: hollow.accent.withValues(alpha: 0.12),
-        borderRadius: radius,
-        child: card,
-      );
-    }
 
     return Padding(
       padding: const EdgeInsets.symmetric(

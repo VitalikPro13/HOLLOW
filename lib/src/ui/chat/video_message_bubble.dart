@@ -9,6 +9,7 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:video_player/video_player.dart';
 import 'package:visibility_detector/visibility_detector.dart';
 
+import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/core/models/file_attachment.dart';
 import 'package:hollow/src/core/providers/audio_playback_provider.dart';
 import 'package:hollow/src/core/providers/file_transfer_provider.dart';
@@ -834,7 +835,7 @@ class InlineVideoPlayerState extends State<InlineVideoPlayer> {
               bottom: 0,
               child: AnimatedOpacity(
                 opacity: _controlsVisible ? 1.0 : 0.0,
-                duration: const Duration(milliseconds: 200),
+                duration: HollowDurations.fast,
                 child: IgnorePointer(
                   ignoring: !_controlsVisible,
                   child: _ControlBar(

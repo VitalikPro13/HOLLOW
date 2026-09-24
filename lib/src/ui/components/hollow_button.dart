@@ -110,31 +110,16 @@ class _HollowButtonState extends State<HollowButton>
   @override
   void initState() {
     super.initState();
-    _controller = AnimationController(
-      vsync: this,
-      duration: HollowDurations.animationsDisabled
-          ? Duration.zero
-          : const Duration(milliseconds: 120),
-      reverseDuration: HollowDurations.animationsDisabled
-          ? Duration.zero
-          : const Duration(milliseconds: 200),
+    _controller = AnimationController(vsync: this);
+    // Same press as HollowPressable: the reverse curve runs on t going 1 to 0,
+    // so ease-in is a release that leaves quickly and settles.
+    final curve = CurvedAnimation(
+      parent: _controller,
+      curve: HollowCurves.enter,
+      reverseCurve: HollowCurves.exit,
     );
-
-    _scaleAnimation = Tween<double>(begin: 1.0, end: 0.98).animate(
-      CurvedAnimation(
-        parent: _controller,
-        curve: Curves.easeOutCubic,
-        reverseCurve: HollowCurves.spring,
-      ),
-    );
-
-    _opacityAnimation = Tween<double>(begin: 1.0, end: 0.85).animate(
-      CurvedAnimation(
-        parent: _controller,
-        curve: Curves.easeOutCubic,
-        reverseCurve: Curves.easeOutCubic,
-      ),
-    );
+    _scaleAnimation = Tween<double>(begin: 1.0, end: 0.98).animate(curve);
+    _opacityAnimation = Tween<double>(begin: 1.0, end: 0.85).animate(curve);
   }
 
   @override
@@ -275,7 +260,10 @@ class _HollowButtonState extends State<HollowButton>
           onPointerDown: (_) {
             if (!isInteractive) return;
             setState(() => _pressing = true);
-            _controller.forward();
+            _controller
+              ..duration = HollowDurations.exit
+              ..reverseDuration = HollowDurations.fast
+              ..forward();
           },
           onPointerUp: (_) {
             if (!_pressing) return;

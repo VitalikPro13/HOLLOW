@@ -1,0 +1,415 @@
+{
+  "_": [
+    "Chat follow-ups on two throwaway peers: the DM profile panel at its",
+    "default width, dragged narrow and dragged to the minimum (the avatar",
+    "shrinks with the banner, the icon strip moves under the name, Verify",
+    "stacks under its text), the header order (split view, then the panel",
+    "toggle last) and the hover bar centred on a one-line row.",
+    "The server chat-probe is created by this run and deleted by its cleanup;",
+    "p-06 shows the channel with nobody typing: no strip above the composer.",
+    "The typing label itself is shot by test/screenshots/typing_label_screenshot_test.dart.",
+    "run: powershell -File scripts\fleet.ps1 -Scenario chat_panel_fixes -Peers a,b"
+  ],
+  "peers": [
+    "a",
+    "b"
+  ],
+  "steps": [
+    {
+      "peer": "all",
+      "op": "wait_for",
+      "provider": "connection",
+      "equals": "connected",
+      "timeout_ms": 120000
+    },
+    {
+      "peer": "a",
+      "op": "capture",
+      "from": "provider",
+      "key": "peerId",
+      "as": "PEER_A"
+    },
+    {
+      "peer": "b",
+      "op": "tap",
+      "target": "semantics:Add friend",
+      "index": 0
+    },
+    {
+      "peer": "b",
+      "op": "tap",
+      "target": "text:Add Friend",
+      "index": 0
+    },
+    {
+      "peer": "b",
+      "op": "enter_text",
+      "target": "hint:Peer ID or nickname...",
+      "value": "${PEER_A}"
+    },
+    {
+      "peer": "b",
+      "op": "tap",
+      "target": "text:Send Request",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "target": "text:Needs Attention",
+      "timeout_ms": 60000
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "text:Accept",
+      "index": 0
+    },
+    {
+      "peer": "b",
+      "op": "wait_for",
+      "target": "text:probe-a",
+      "timeout_ms": 60000
+    },
+    {
+      "peer": "b",
+      "op": "tap",
+      "target": "type:_FriendsManager > semantics:Close",
+      "index": 0
+    },
+    {
+      "peer": "b",
+      "op": "wait_for",
+      "gone": "type:_FriendsManager",
+      "timeout_ms": 10000
+    },
+    {
+      "peer": "b",
+      "op": "tap",
+      "target": "tooltip:probe-a"
+    },
+    {
+      "peer": "b",
+      "op": "wait",
+      "ms": 1500
+    },
+    {
+      "peer": "b",
+      "op": "enter_text",
+      "target": "field",
+      "value": "thanks! ${RUN}"
+    },
+    {
+      "peer": "b",
+      "op": "key",
+      "value": "enter"
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "target": "tooltip:probe-b",
+      "timeout_ms": 60000
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "tooltip:probe-b"
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "target": "text:thanks! ${RUN}",
+      "timeout_ms": 60000
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 1500
+    },
+    {
+      "peer": "a",
+      "op": "hover_at",
+      "x": 5,
+      "y": 400
+    },
+    {
+      "peer": "a",
+      "op": "shot",
+      "name": "p-01-panel-default"
+    },
+    {
+      "peer": "a",
+      "op": "hover",
+      "target": "text:thanks! ${RUN}"
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 300
+    },
+    {
+      "peer": "a",
+      "op": "shot",
+      "name": "p-02-hover-centred"
+    },
+    {
+      "peer": "a",
+      "op": "scroll",
+      "target": "semantics:Resize the profile panel",
+      "dx": 50,
+      "dy": 0
+    },
+    {
+      "peer": "a",
+      "op": "hover_at",
+      "x": 5,
+      "y": 400
+    },
+    {
+      "peer": "a",
+      "op": "shot",
+      "name": "p-03-panel-230"
+    },
+    {
+      "peer": "a",
+      "op": "scroll",
+      "target": "semantics:Resize the profile panel",
+      "dx": 200,
+      "dy": 0
+    },
+    {
+      "peer": "a",
+      "op": "hover_at",
+      "x": 5,
+      "y": 400
+    },
+    {
+      "peer": "a",
+      "op": "shot",
+      "name": "p-04-panel-min"
+    },
+    {
+      "peer": "a",
+      "op": "scroll",
+      "target": "semantics:Resize the profile panel",
+      "dx": -400,
+      "dy": 0
+    },
+    {
+      "peer": "a",
+      "op": "hover_at",
+      "x": 5,
+      "y": 400
+    },
+    {
+      "peer": "a",
+      "op": "shot",
+      "name": "p-05-panel-max"
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "semantics:Hide profile"
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 200
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "semantics:Show profile"
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "semantics:Create a server"
+    },
+    {
+      "peer": "a",
+      "op": "enter_text",
+      "target": "hint:My Awesome Server",
+      "value": "chat-probe"
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "text:Create",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "target": "server:chat-probe",
+      "timeout_ms": 30000
+    },
+    {
+      "peer": "a",
+      "op": "right_click",
+      "target": "server:chat-probe"
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "menu > text:Invite people"
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "target": "type:SelectableText",
+      "timeout_ms": 20000
+    },
+    {
+      "peer": "a",
+      "op": "capture",
+      "target": "type:SelectableText",
+      "as": "INVITE"
+    },
+    {
+      "peer": "a",
+      "op": "key",
+      "value": "escape"
+    },
+    {
+      "peer": "b",
+      "op": "tap",
+      "target": "semantics:Create a server"
+    },
+    {
+      "peer": "b",
+      "op": "enter_text",
+      "target": "hint:Invite link or server ID",
+      "value": "${INVITE}"
+    },
+    {
+      "peer": "b",
+      "op": "tap",
+      "target": "text:Join",
+      "index": 0
+    },
+    {
+      "peer": "b",
+      "op": "wait_for",
+      "target": "server:chat-probe",
+      "timeout_ms": 90000
+    },
+    {
+      "peer": "b",
+      "op": "open_server",
+      "name": "chat-probe"
+    },
+    {
+      "peer": "b",
+      "op": "open_channel",
+      "name": "general"
+    },
+    {
+      "peer": "b",
+      "op": "wait",
+      "ms": 4000
+    },
+    {
+      "peer": "b",
+      "op": "enter_text",
+      "target": "field",
+      "value": "anyone tried the new firmware? ${RUN}"
+    },
+    {
+      "peer": "b",
+      "op": "key",
+      "value": "enter"
+    },
+    {
+      "peer": "a",
+      "op": "open_server",
+      "name": "chat-probe"
+    },
+    {
+      "peer": "a",
+      "op": "open_channel",
+      "name": "general"
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "target": "text:anyone tried the new firmware? ${RUN}",
+      "timeout_ms": 60000
+    },
+    {
+      "peer": "a",
+      "op": "hover_at",
+      "x": 5,
+      "y": 400
+    },
+    {
+      "peer": "a",
+      "op": "shot",
+      "name": "p-06-channel-idle"
+    }
+  ],
+  "cleanup": [
+    {
+      "peer": "a",
+      "op": "key",
+      "value": "escape"
+    },
+    {
+      "peer": "a",
+      "op": "right_click",
+      "target": "server:chat-probe"
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "menu > text:Server settings"
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "semantics:Scroll settings tabs right",
+      "allowMiss": true
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "semantics:Scroll settings tabs right",
+      "allowMiss": true
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 400
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "text:Danger",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "text:Delete server",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "dialog > text:Delete server",
+      "index": 1
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "gone": "server:chat-probe",
+      "timeout_ms": 30000
+    },
+    {
+      "peer": "b",
+      "op": "wait_for",
+      "gone": "server:chat-probe",
+      "timeout_ms": 90000
+    }
+  ]
+}

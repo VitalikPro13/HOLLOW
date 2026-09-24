@@ -42,10 +42,7 @@ class _HollowTooltipState extends State<HollowTooltip>
   @override
   void initState() {
     super.initState();
-    _controller = AnimationController(
-      vsync: this,
-      duration: HollowDurations.animationsDisabled ? Duration.zero : const Duration(milliseconds: 100),
-    );
+    _controller = AnimationController(vsync: this);
     _opacity = CurvedAnimation(
       parent: _controller,
       curve: Curves.easeOut,
@@ -101,7 +98,9 @@ class _HollowTooltipState extends State<HollowTooltip>
     final size = renderBox.size;
     final position = overlayAnchorOf(context);
     // Safe rewind: no entry is mounted, so there is no listener to rebuild.
-    _controller.value = 0.0;
+    _controller
+      ..value = 0.0
+      ..duration = HollowDurations.exit;
 
     _entry = OverlayEntry(
       builder: (context) {

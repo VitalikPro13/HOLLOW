@@ -1,4 +1,5 @@
 ﻿import 'package:flutter/material.dart';
+import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/ui/components/overlay_anchor.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/connection_status_provider.dart';
@@ -250,7 +251,7 @@ class _RoomBudgetBar extends StatelessWidget {
         child: FractionallySizedBox(
           widthFactor: budget.usage.clamp(0.0, 1.0),
           child: AnimatedContainer(
-            duration: const Duration(milliseconds: 300),
+            duration: HollowDurations.normal,
             decoration: BoxDecoration(
               color: color,
               borderRadius: const BorderRadius.horizontal(

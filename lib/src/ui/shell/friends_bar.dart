@@ -21,7 +21,6 @@ import 'package:hollow/src/core/providers/notification_provider.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
 import 'package:hollow/src/core/providers/temporary_nickname_provider.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
-import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
@@ -471,34 +470,32 @@ class _FriendsManagerState extends ConsumerState<_FriendsManager> {
               ),
             ),
 
+            // Switching tabs is instant.
             Expanded(
-              child: AnimatedSwitcher(
-                duration: HollowDurations.fast,
-                child: switch (_activeTab) {
-                  _FriendsTab.friends => _FriendsListTab(
-                      key: const ValueKey('friends'),
-                      accepted: accepted,
-                    ),
-                  _FriendsTab.favourites => _FavouritesReorderTab(
-                      key: const ValueKey('favourites'),
-                      accepted: accepted,
-                    ),
-                  _FriendsTab.incoming => _RequestsTab(
-                      key: const ValueKey('incoming'),
-                      requests: incoming,
-                      direction: 'incoming',
-                    ),
-                  _FriendsTab.outgoing => _RequestsTab(
-                      key: const ValueKey('outgoing'),
-                      requests: outgoing,
-                      direction: 'outgoing',
-                    ),
-                  _FriendsTab.add => _AddFriendTab(
-                      key: const ValueKey('add'),
-                      controller: _addController,
-                    ),
-                },
-              ),
+              child: switch (_activeTab) {
+                _FriendsTab.friends => _FriendsListTab(
+                    key: const ValueKey('friends'),
+                    accepted: accepted,
+                  ),
+                _FriendsTab.favourites => _FavouritesReorderTab(
+                    key: const ValueKey('favourites'),
+                    accepted: accepted,
+                  ),
+                _FriendsTab.incoming => _RequestsTab(
+                    key: const ValueKey('incoming'),
+                    requests: incoming,
+                    direction: 'incoming',
+                  ),
+                _FriendsTab.outgoing => _RequestsTab(
+                    key: const ValueKey('outgoing'),
+                    requests: outgoing,
+                    direction: 'outgoing',
+                  ),
+                _FriendsTab.add => _AddFriendTab(
+                    key: const ValueKey('add'),
+                    controller: _addController,
+                  ),
+              },
             ),
           ],
         ),

@@ -21,7 +21,7 @@ sections. Content ships **bundled in the app** (`assets/help/`), loaded locally,
 
 ## Widgets (help_panel.dart)
 
-- `HelpPanelSlider` — right-edge slide-in (ClipRect + Align centerRight widthFactor + fade, mirrors `_MemberPanelSlider`). Inserted into both shell layouts. Wraps `_HelpPanelChrome`.
+- `HelpPanelSlider` — `StatelessWidget`, the panel's place on the right edge. Shows and hides instantly (a width animation would re-wrap the chat text every frame), like the shell's `_MemberPanelSlot`. Inserted into both shell layouts. Wraps `_HelpPanelChrome` in a `RepaintBoundary`.
 - `_HelpPanelChrome` — fixed-width (`kHelpPanelWidth` = 340) panel with a left border; holds `HelpResourceCenter` with an `onClose` that sets the provider false.
 - `HelpResourceCenter` (`ConsumerStatefulWidget`, shared desktop + mobile) — watches `helpManifestProvider` (`.when` loading/error/data). Header (`?` + "Help" + optional X) → search field (live filter by title) → body. Body shows `_SearchResults` when querying, else a `ListView` of `_CategorySection` (first module expanded once via `_seededExpansion`). Opening a lesson sets `_openLesson` and swaps the whole body to `HelpLessonView`. `onClose` null on mobile (route has its own back chrome).
 - `_CategorySection` — collapsible module header (title + subtitle + `AnimatedRotation` chevron) revealing inset `_LessonRow`s.

@@ -14,6 +14,9 @@ Covers all mobile-specific UI: the shell layout, chat route, message actions bot
 `initState` (mobile platforms only) registers `PushNotificationService.registerOpenChatHandler(_openChatFromPush)` and `registerOpenChannelHandler(...)`. `_openChatFromPush(peerId)`: no-op if `selectedPeerProvider` already == peerId; else set selectedPeer, null selectedServer, `markDmSeen`, push `MobileChatRoute(peerId)` via rootNavigator, clear selection in `.then()` — identical to the in-app banner pattern. Taps that arrive BEFORE the shell mounts (cold start) are buffered inside PushNotificationService and delivered on registration.
 
 ### Tabs (indexed 0-3)
+
+The tab body is a `Stack` with one `Offstage` per tab: switching is instant, and every tab stays mounted so its scroll and state survive the switch.
+
 | Index | Tab | Widget | Icon |
 |-------|-----|--------|------|
 | 0 | Chats | `MobileChatsTab` | `LucideIcons.messageCircle` |
@@ -161,15 +164,16 @@ Scaffold
 │       ├── Expanded → Stack   (or _buildNoReadPermission when read gate denies)
 │       │   ├── reversedChatList (shared shell, selectionArea: false)
 │       │   │   └── LongPressMessage → MessageBubble / ChannelMessageBubble (isHighlighted for search)
-│       │   └── _buildUnreadPillOverlay → shared UnreadJumpPill
+│       │   └── _buildUnreadPillOverlay → shared UnreadJumpFade
 │       ├── SystemStatusBanner (bottom anchor)
-│       ├── _TypingBar → typingMastersFor + shared TypingIndicatorBar
-│       ├── _buildMentionPanel / _buildEmotePanel (autocomplete)
-│       ├── ChatReplyPreviewBar (if replying, shared)
-│       ├── StagedLinkArea (shared; hollow-link or OG preview)
-│       ├── StagedAttachmentStrip (if files staged, shared; reorderable for an album)
-│       ├── _buildSlowModePill (channel, cooldown active)
-│       └── _buildComposerOrBanner: blocked banner (no-post/muted) OR VoiceRecorderBar OR the shared `ChatComposerRow` (2026-09-24: [+] attach sheet (Photo or video, File) + text with the expression button inside (`showExpressionSheet`: Emoji / GIFs / Stickers) + mic that becomes Send; no autofocus)
+│       └── _TypingBar → typingMastersFor + shared TypingIndicatorHost, floating the label over this cluster:
+│           ├── _buildMentionPanel / _buildEmotePanel (autocomplete)
+│           ├── ChatReplyPreviewBar (if replying, shared)
+│           ├── StagedLinkArea (shared; hollow-link or OG preview)
+│           ├── StagedAttachmentStrip (if files staged, shared; reorderable for an album)
+│           ├── _buildSlowModePill (channel, cooldown active)
+│           ├── _buildComposerOrBanner: blocked banner (no-post/muted) OR VoiceRecorderBar OR the shared `ChatComposerRow` ([+] attach sheet (Photo or video, File) + text with the expression button inside + mic that becomes Send; no autofocus; `expressionsOpen` swaps the smiley for a keyboard icon, "Show keyboard")
+│           └── MobileKeyboardPanelDock (the keyboard's inset, or the expression panel in its place)
 ```
 
 ### Message Rendering
@@ -212,8 +216,15 @@ Both DM and channel builders wire:
 - **Post gate:** If `canPostInChannelProvider` returns false, replaces input bar with "no permission to send" notice. Checks bitmask AND channel posting mode.
 - **Sync indicator:** Below header for channel chats. Uses `serverSyncStatusProvider`. Shows spinner + "Syncing..."/"Retrying..." (warning color) / "Sync failed" with tappable "Retry" link. Hidden when idle/synced/connecting.
 
-### Emoji Picker in Input Bar
-Smiley icon (`LucideIcons.smile`) between mic and send buttons. Opens `showHollowSheet` with 30-emoji grid (from `kReactionEmojis`). Inserts selected emoji at cursor position via `_controller.text.replaceRange()`.
+### Expression panel in the keyboard's place (2026-09-24)
+The smiley inside the composer (`_toggleExpressions`) swaps the software keyboard for the shared `ExpressionPanel` (Emoji / GIFs / Stickers, from `expression_picker.dart`) at the same height, and the button becomes a keyboard icon ("Show keyboard") that swaps back. There is no sheet any more (`showExpressionSheet` is deleted).
+
+- `_expressionsOpen` flag. Opening unfocuses the composer; closing requests focus, and the focus listener `_onComposerFocus` drops the panel once the keyboard is on its way (so a tap on the field also brings the keyboard back).
+- The panel is `MobileKeyboardPanelDock(open, keyboardFocus: _focusNode, panelBuilder: _buildExpressionPanel)` (`lib/src/ui/mobile/mobile_keyboard_panel.dart`), the last child under the composer. The route's `Scaffold` sets `resizeToAvoidBottomInset: false` and its `SafeArea` `bottom: false`: the dock itself makes room for the keyboard, so the composer never moves while keyboard and panel swap.
+- Dock sizing: remembers the last keyboard height seen this run (`_lastKeyboardHeight`; 40% of the screen before any keyboard). Open = max(stored, inset). When the panel's own search field raises the keyboard, the panel sits above it at most 45% of the remaining space. A panel closing while the composer has focus stays up until the rising keyboard covers it (a 700 ms timeout covers hardware keyboards that never raise one). The panel is on the composer's `surface` with a top hairline, no scrim, and pads for the home indicator.
+- An emoji goes into the text and the panel stays open for the next one (`refocus: false`); a GIF or sticker sends (issue #36); sharing a pack closes the panel first. Editing, search and voice recording close it.
+- Back (`PopScope(canPop: !_expressionsOpen)`) closes the panel before it leaves the chat, and a tap on the message area closes it (an always-present translucent `GestureDetector`, so opening the panel never remounts the list).
+- Pinned by `test/widget/mobile_keyboard_panel_test.dart`.
 
 ---
 
@@ -444,6 +455,10 @@ Unified input: auto-detects peer ID (`12D3KooW` prefix) vs temporary nickname. B
 - Remove Friend → confirmation dialog → `friendsProvider.removeFriend()`
 
 ---
+
+## Bottom Sheet Motion
+
+`showHollowSheet` passes `sheetAnimationStyle: _sheetMotion()`, read per open so Reduce motion reaches the next sheet: `AnimationStyle.noAnimation` when `HollowDurations.animationsDisabled`, else `HollowCurves.enter` both ways (a reverse curve runs backwards, so the enter curve is also the easing-in exit), `HollowDurations.normal` in and `fast` out. A drag still tracks the finger (the route rebinds to the raw controller while dragging). A sheet travels its full height: it is attached to an edge and dismissed by a gesture (design language 3.8).
 
 ## Bottom Sheet SafeArea Pattern
 
@@ -683,7 +698,7 @@ Watches `mobileTabProvider` — returns `SizedBox.shrink()` when `activeTab != 2
 
 ### Top-Level Structure
 - "Archive" heading + pill sub-tab row: "My Data" | "Imported" (uses `archiveSubTabProvider`)
-- `AnimatedSwitcher` (200ms) switches between `_MobileMyDataView` and `_MobileImportedArchivesView`
+- Switches between `_MobileMyDataView` and `_MobileImportedArchivesView` instantly
 
 ### _MobileMyDataView (ConsumerStatefulWidget)
 - Inner pill tabs: DMs | Channels (uses `myDataInnerTabProvider`, no Vault Files — deferred to Section 25)
@@ -718,7 +733,7 @@ Watches `mobileTabProvider` — returns `SizedBox.shrink()` when `activeTab != 2
 Back button, avatar (DM) or # icon (channel), title, subtitle "in serverName" (channel), icon buttons: filter (channels, >1 sender), calendar (jump-to-date), search toggle, export, "read-only" badge. From `lib/src/ui/archive/shared/archive_toolbar.dart`.
 
 ### Message List (shared core)
-Renders `ArchiveDmMessageList` / `ArchiveChannelMessageList` from `lib/src/ui/archive/shared/archive_message_list.dart` (`desktopChrome: false`, ReduceMotionController-aware `scrollDuration`), with `LongPressMessage` action wrapper → `showMobileArchiveMessageActions()`. `AnimatedSwitcher` crossfade from loading spinner to content stays in the route. See wiki `ui_archive` "Shared Viewer Core" for the full rendering stack.
+Renders `ArchiveDmMessageList` / `ArchiveChannelMessageList` from `lib/src/ui/archive/shared/archive_message_list.dart` (`desktopChrome: false`, ReduceMotionController-aware `scrollDuration`), with `LongPressMessage` action wrapper → `showMobileArchiveMessageActions()`. Loading spinner to content is an instant swap. See wiki `ui_archive` "Shared Viewer Core" for the full rendering stack.
 
 ### Search
 `ArchiveListSearchBar` (shared) rendered OUTSIDE the list, above loading/empty states; drives scroll-to-match via `ArchiveMessageListController` (1.5s highlight).
@@ -749,7 +764,7 @@ Resets `archiveFilterSenderProvider`, search/jump providers in `dispose()` via `
 | `path` | `String` | File path of the `.hollow-archive` |
 
 ### Data Loading
-Uses `importedArchiveDataProvider(path)` with `AnimatedSwitcher` crossfade from spinner to content.
+Uses `importedArchiveDataProvider(path)`; spinner to content is an instant swap.
 
 ### Derivation + Rendering (shared)
 All conversion/filtering/banner derivation happens in one `prepareImportedArchive(..., mobile: true)` call (`lib/src/ui/archive/shared/imported_archive_prep.dart`); the route renders `ArchiveVerificationBanner` (`dense: true`) → `ArchiveChannelSelector` (server archives; resets filter/search on switch, uses `importedArchiveSelectedChannelProvider`) → `ArchiveMobileToolbar` → the shared message lists, same as `MobileArchiveViewerRoute` but with exporter-relative DM proof contexts from prep.
@@ -768,7 +783,7 @@ All conversion/filtering/banner derivation happens in one `prepareImportedArchiv
 - Message Info — opens message proof dialog
 
 ### Animation
-Staggered entrance (400ms): message preview fades+slides in first, then each action row with 0.15 offset. Exit handled by `showModalBottomSheet`'s built-in slide-down.
+None of its own: the rows render in place and the sheet's own slide (`showHollowSheet`) is the only motion.
 
 ## MobileInChatBanner (in-app notification)
 
@@ -780,7 +795,7 @@ Staggered entrance (400ms): message preview fades+slides in first, then each act
 - Mounted in `MobileChatRoute`'s return Stack with `currentPeerId`/`currentServerId`/`currentChannelId` (suppresses the conversation being read) and `topOffset = MediaQuery.paddingOf(context).top + 64` (clears the chat header).
 - Watches `systemNotificationProvider`; iterates `cards.reversed` (newest first) and picks the newest FRESH card that isn't the current conversation.
 - **Freshness window (10s, UX audit 2026-07-02):** only surfaces a card whose newest message is ≤10s old (`_freshnessWindow`, keyed on `messages.last.timestamp`). Cards can be created while NO banner is mounted (user on a main tab), so stale cards are PRUNED post-frame instead of replayed when a chat opens. Current-conversation cards are pruned too (not just hidden), and `dispose()` dismisses the card being shown (post-frame) so it doesn't replay in the next chat. `MobileChatRoute.initState` additionally dismisses the opened conversation's card via `dismissDm`/`dismissChannel` — POST-FRAME ONLY (synchronous provider write in initState throws "Tried to modify a provider while the widget tree was building").
-- Slides down from top (~280ms easeOutCubic) + fade. Body wrapped in `Material(type: transparency)` (avoids the yellow debug double-underline on a Positioned-in-Stack `Text`).
+- Slides down from top by its FULL height (it hangs from the edge and is swiped up, the one exception to the 8 px rule) + fade: `HollowDurations.normal` in, `fast` out, `HollowCurves.enter`, durations re-read at every run. Body wrapped in `Material(type: transparency)` (avoids the yellow debug double-underline on a Positioned-in-Stack `Text`).
 - **Accumulation:** adopts the FRESH card when the same source grows (the cached `_currentCard` is an immutable snapshot — must re-point to it). Shows the last **3** messages (provider caps the stack at 5).
 - **Countdown ring (`_CountdownRing`):** depleting `CircularProgressIndicator` + remaining seconds (5→1) in the banner's right space, driven by a 5s `AnimationController` that auto-dismisses on complete. Swipe-up or tap also dismiss; tap navigates to the source conversation.
 - **Emote tokens:** message lines render via `Text.rich` + `emotePreviewSpans` inside an `EmoteScope(serverId, peerHint)` (see wiki `emotes` > Notification Previews) — never raw text.
@@ -914,10 +929,18 @@ One-pass fixes from the production-readiness audit:
 
 ### Accessibility — Reduce Motion + Larger Text (2026-06-25)
 
-- **ALL mobile page pushes go through `hollowMobileRoute()`** (`lib/src/ui/mobile/mobile_page_route.dart`), NOT raw `MaterialPageRoute`/`PageRouteBuilder`. (Docs elsewhere in this file that still say "pushed as `PageRouteBuilder`" / `MaterialPageRoute(...)` are describing the pre-2026-06-25 code — the transition mechanism is now `hollowMobileRoute()` everywhere; the destination widgets are unchanged.) `hollowMobileRoute({builder, transition: slideRight|slideUp|fade, duration, settings})` gates the transition duration on `ReduceMotionController.instance.isReduced` (`Duration.zero` when reduced). **Why it matters:** a raw `MaterialPageRoute`'s transition is governed ONLY by Flutter's built-in `MediaQuery.disableAnimations` (OS reduce-motion flag) — the in-app tri-state control couldn't stop it (On) nor force it back on (Off, when OS was on). Routing through `hollowMobileRoute()` makes `ReduceMotionController` the single authority: **On = instant, Off = animates even with OS reduce-motion on, Auto = follows OS.** Default `slideRight`; voice-channel/call routes use `slideUp`.
-- **Noticeable one-shot animations (300ms+)** that hardcode their own durations also gate on `isReduced`: nav-bar glow `AnimatedPositioned` (`mobile_nav_bar.dart`), storage usage-bar `TweenAnimationBuilder` (`mobile_storage_route.dart`), scroll-to-message `scrollTo` (`mobile_chat_route.dart` + both archive viewers), archive-viewer `AnimatedSwitcher` content swaps. `Future.delayed` LOGIC timers are NOT animations — left alone. Sub-200ms micro-fades intentionally left. Implicit `Animated*` using `HollowDurations.fast/normal/slow` already snap to zero via the controller.
+- **ALL mobile page pushes go through `hollowMobileRoute()`** (`lib/src/ui/mobile/mobile_page_route.dart`), NOT raw `MaterialPageRoute`/`PageRouteBuilder`. (Docs elsewhere in this file that still say "pushed as `PageRouteBuilder`" / `MaterialPageRoute(...)` are describing the pre-2026-06-25 code — the transition mechanism is now `hollowMobileRoute()` everywhere; the destination widgets are unchanged.) `hollowMobileRoute({builder, transition: slideRight|slideUp|fade, duration (default HollowDurations.normal), settings})` builds its own `_HollowPageRoute` and gates the transition duration on `ReduceMotionController.instance.isReduced` (`Duration.zero` when reduced). See "Pushed pages: iOS swipe back" below. **Why it matters:** a raw `MaterialPageRoute`'s transition is governed ONLY by Flutter's built-in `MediaQuery.disableAnimations` (OS reduce-motion flag) — the in-app tri-state control couldn't stop it (On) nor force it back on (Off, when OS was on). Routing through `hollowMobileRoute()` makes `ReduceMotionController` the single authority: **On = instant, Off = animates even with OS reduce-motion on, Auto = follows OS.** Default `slideRight`; voice-channel/call routes use `slideUp`.
+- **Noticeable one-shot animations (300ms+)** that hardcode their own durations also gate on `isReduced`: nav-bar glow `AnimatedPositioned` (`mobile_nav_bar.dart`), storage usage-bar `TweenAnimationBuilder` (`mobile_storage_route.dart`), scroll-to-message `scrollTo` (`mobile_chat_route.dart` + both archive viewers), (the archive viewers' content swaps are instant now). `Future.delayed` LOGIC timers are NOT animations — left alone. Sub-200ms micro-fades intentionally left. Implicit `Animated*` using `HollowDurations.fast/normal/slow` already snap to zero via the controller.
 - **Interface scale + chat text size (issue #20, 2026-07-26):** in-app display scaling on top of the OS setting. `UiScale` wraps the mobile Stack in `app.dart` (INSIDE `withClampedTextScaling`, so the text clamp still applies), capped at 1.5x on mobile — a 360dp phone lays out at 240dp there and the shell is verified to fit (`text_scale_overflow_test.dart` "Interface scale" group). `ChatTextScale` wraps the message list (via `reversedChatList`) and `_MobileInputBar`. Mobile has no title bar, so there is no `ZoomIndicator` escape hatch — the ceiling and the un-clippable Settings list are what keep it recoverable.
 - **Larger Text (P3 stage 1):** mobile text-scale cap raised to **2.0×** (`app.dart` `withClampedTextScaling(0.8, 2.0)`). Mobile chrome bars stay fixed-height but **cap their labels** with `MediaQuery.withClampedTextScaling(maxScaleFactor: 1.3, child: Text(...))` (tab-bar norm): `mobile_nav.dart` + `mobile_nav_bar.dart` nav captions. Mobile chat header (`mobile_chat_route.dart`) uses `Container(constraints: BoxConstraints(minHeight: 52))` to GROW. **NEVER wrap a full-width bar in a bare `ConstrainedBox(minHeight:)`** — it unbounds width and collapses the layout; put `constraints:` on the Container or cap the label. CI: `test/widget/text_scale_overflow_test.dart` pumps the mobile shell at 1.0×/1.5×/2.0× asserting no RenderFlex overflow.
+
+### Pushed pages: iOS swipe back (2026-09-24)
+
+`hollowMobileRoute()` returns `_HollowPageRoute`, a `PageRoute` of its own (`mobile_page_route.dart`):
+- `slideRight` pages slide in from the right with `HollowCurves.enter`; `slideUp` from the bottom; `fade` fades. Reduce motion = no transition (except that a swipe back still drags the page, since the finger drives it).
+- **iOS only**, for `slideRight` pages: `_BackSwipeDetector` puts a 20 px strip on the leading edge (widened by a notch's padding, RTL-aware); a horizontal drag starting there drives the route's own controller (`_BackSwipe`), then pops on a fling or past halfway, or settles back (350 ms `fastEaseInToSlowEaseOut`). It respects `popGestureEnabled` (so a `PopScope` that refuses the pop, like the chat's open expression panel, blocks the swipe) and keeps `navigator.userGestureInProgress` until the settle lands. Android's system back gesture owns the edge there, so no strip.
+- The page below shifts 30% of the width to the left while covered, iOS style, through `delegatedTransition` (an instance tear-off, so two stacked Hollow pages never compare equal and the lower one still gets the parallax). Linear while the finger drives it, `HollowCurves.enter` otherwise.
+- Pinned by `test/widget/mobile_back_swipe_test.dart`; driven on the iOS Simulator by the fleet scenario `fleet/mobile_swipe_back.json` (wiki fleet_probe).
 
 ## MobileChatRoute reversed lists + lifecycle guards (2026-07-03)
 

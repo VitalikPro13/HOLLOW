@@ -221,6 +221,25 @@ sends two captioned albums with the slow GIF between stills and both sides must 
 strip order with the caption visible. It is the journey that found items reordering by conversion
 time (the send stamp was minted after the image encode).
 
+**`drag_at`** (2026-09-24): `x`, `y`, `dx`, `dy`, `duration_ms` (default 400), `frames`. A timed drag
+(`tester.timedDragFrom`) from a fixed POINT rather than a target's centre, for gestures that care
+where they start: the iOS back swipe must begin in the 20 px strip on the screen's left edge. Also
+the way to scroll a phone list by finger. Two scenarios use it or came with it:
+
+- `fleet/mobile_swipe_back.json` (iOS Simulator, one peer, no server): opens Saved messages, a
+  70 px drag from `x: 6` settles back, a 300 px one pops to Chats; then with the expression panel
+  open the same long drag does nothing (the chat's `PopScope` refuses, so the swipe is blocked and
+  Back closes the panel first); "Show keyboard" brings the keyboard back.
+- `fleet/chat_panel_fixes.json` (desktop, a and b, creates and deletes `chat-probe`): the DM profile
+  panel at its default width, dragged narrow and to the minimum (avatar shrinks with the banner,
+  icon strip moves under the name, Verify stacks under its text) and to the maximum through
+  `scroll` on `semantics:Resize the profile panel`; the header order (split view, then the panel
+  toggle last); the hover bar centred on a one-line row; and a channel with nobody typing (no strip
+  above the composer).
+
+`chat_mobile.json` shoots the expression panel in the keyboard's place on each tab; it has no scrim,
+so the scenario closes it by tapping a message, not the space above it.
+
 ## Rules that are not optional
 
 - **The fleet talks only to servers the fleet creates.** These are real identities on the real
@@ -273,6 +292,11 @@ time (the send stamp was minted after the image encode).
    added once and only moved afterwards. Related: the hover bar is an `OverlayEntry` that hides
    60 ms after the row loses the mouse, so park the pointer somewhere harmless (the composer hint)
    before tapping a control the bar could sit over.
+10. **A peer's typing notice cannot be screenshotted (2026-09-24).** Typing sends are throttled to
+   one per 3 s, and a second `enter_text` into the composer is cleared before the next frame, so
+   the receiving peer never holds the label long enough for a `shot`. The label's placement is
+   shot by `test/screenshots/typing_label_screenshot_test.dart` instead; a fleet scenario can only
+   prove the idle case (nothing above the composer).
 
 ## What the dump adds for a fleet
 
@@ -475,8 +499,8 @@ pwsh scripts/fleet.ps1 -Stop
   notifier exist; it is derived, so nothing but a watching widget ever created it, and the
   mobile shell watches it only inside a chat.
 - A target with no `index` and several matches picks the first one a finger can REACH. The
-  mobile shell keeps every tab mounted (faded, ignoring pointers), so a friend's name exists once
-  per tab within four pixels of itself, and tree order says nothing about which one shows. An
+  mobile shell keeps every tab mounted (under `Offstage` now), so a friend's name can exist once
+  per tab, and tree order says nothing about which one shows. An
   explicit `index` stays literal.
 - The tap guard accepts a hit on a box ABOVE the target when that box is on the target's own
   ancestor chain (a row whose label is not itself hit-testable). The failure text now also

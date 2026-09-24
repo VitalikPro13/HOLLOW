@@ -1,5 +1,5 @@
 // The message hover: the row paints its own highlight (no layout change, it
-// scrolls with the row) and the action bar rides the row's top edge through a
+// scrolls with the row) and the action bar rides the row's centre through a
 // scroll instead of staying where the pointer first found it.
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
@@ -77,8 +77,9 @@ void main() {
         .ancestor(of: find.text(t), matching: find.byType(MessageHoverWrapper))
         .first);
     expect(
-        (barRect().center.dy - rowRect('message 3').top).abs(), lessThan(16),
-        reason: 'the bar straddles the hovered row\'s top edge');
+        (barRect().center.dy - rowRect('message 3').center.dy).abs(),
+        lessThan(2),
+        reason: 'the bar is centred on the hovered row');
 
     // Scroll under a still pointer: the bar follows whichever row is under
     // it now, never staying at the old screen position.
@@ -89,6 +90,6 @@ void main() {
         find.text(t).evaluate().isNotEmpty &&
         _paintedBehind(tester, t) == hollow.rowHover);
     expect(
-        (barRect().center.dy - rowRect(hovered).top).abs(), lessThan(16));
+        (barRect().center.dy - rowRect(hovered).center.dy).abs(), lessThan(2));
   });
 }

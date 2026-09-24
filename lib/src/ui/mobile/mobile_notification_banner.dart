@@ -61,20 +61,13 @@ class _MobileInChatBannerState extends ConsumerState<MobileInChatBanner>
   @override
   void initState() {
     super.initState();
-    _controller = AnimationController(
-      vsync: this,
-      duration: HollowDurations.animationsDisabled
-          ? Duration.zero
-          : const Duration(milliseconds: 280),
-      reverseDuration: HollowDurations.animationsDisabled
-          ? Duration.zero
-          : const Duration(milliseconds: 180),
-    );
+    _controller = AnimationController(vsync: this);
+    // Travels its full height: it hangs from the top edge and is swiped up.
     _slide = Tween<Offset>(
       begin: const Offset(0, -1),
       end: Offset.zero,
-    ).animate(CurvedAnimation(parent: _controller, curve: Curves.easeOutCubic));
-    _opacity = CurvedAnimation(parent: _controller, curve: Curves.easeOut);
+    ).animate(CurvedAnimation(parent: _controller, curve: HollowCurves.enter));
+    _opacity = CurvedAnimation(parent: _controller, curve: HollowCurves.enter);
     _countdown = AnimationController(
       vsync: this,
       duration: const Duration(seconds: _countdownSeconds),
@@ -102,8 +95,16 @@ class _MobileInChatBannerState extends ConsumerState<MobileInChatBanner>
   void _show(NotificationCard card) {
     _currentCard = card;
     _lastMessageCount = card.messages.length;
+    _applyMotion();
     _controller.forward();
     _startDismissTimer();
+  }
+
+  /// Read per run, so a live Reduce motion change reaches the next banner.
+  void _applyMotion() {
+    _controller
+      ..duration = HollowDurations.normal
+      ..reverseDuration = HollowDurations.fast;
   }
 
   void _startDismissTimer() {
@@ -114,6 +115,7 @@ class _MobileInChatBannerState extends ConsumerState<MobileInChatBanner>
 
   void _dismiss() {
     _countdown.stop();
+    _applyMotion();
     _controller.reverse().then((_) {
       if (mounted) {
         final key = _currentCard?.sourceKey;
@@ -201,6 +203,7 @@ class _MobileInChatBannerState extends ConsumerState<MobileInChatBanner>
     }
 
     _currentCard = null;
+    _applyMotion();
     _controller.reverse();
   }
 

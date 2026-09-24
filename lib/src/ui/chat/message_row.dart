@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/core/album_grouping.dart';
 import 'package:hollow/src/core/color_utils.dart';
 import 'package:hollow/src/core/models/file_attachment.dart';
@@ -207,8 +208,8 @@ class MessageRow extends ConsumerWidget {
       // Every row carries its own time and name, so a grouped run reads the
       // same as the first line of it.
       return AnimatedContainer(
-        duration: const Duration(milliseconds: 400),
-        curve: Curves.easeOut,
+        duration: HollowDurations.normal,
+        curve: HollowCurves.subtle,
         decoration: wash,
         padding: const EdgeInsets.symmetric(
           horizontal: HollowSpacing.lg,
@@ -250,8 +251,8 @@ class MessageRow extends ConsumerWidget {
       // A tiled seam drops the row padding on that side, and the block asset
       // drops its own to match.
       return AnimatedContainer(
-        duration: const Duration(milliseconds: 400),
-        curve: Curves.easeOut,
+        duration: HollowDurations.normal,
+        curve: HollowCurves.subtle,
         decoration: wash,
         padding: EdgeInsets.only(
           top: tileWithPrev ? 0 : HollowSpacing.xxs,
@@ -277,8 +278,8 @@ class MessageRow extends ConsumerWidget {
     }
 
     return AnimatedContainer(
-      duration: const Duration(milliseconds: 400),
-      curve: Curves.easeOut,
+      duration: HollowDurations.normal,
+      curve: HollowCurves.subtle,
       decoration: wash,
       padding: EdgeInsets.only(
         top: HollowSpacing.xs,

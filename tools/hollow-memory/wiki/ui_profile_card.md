@@ -53,7 +53,11 @@ Density metrics: compact banner 104 / avatar 64 / width 300
 
 `lib/src/ui/components/profile_card_popup.dart`. Keeps the OverlayEntry +
 anchoring/flip/clamp shell (estimated height 400, flip-up when overflowing
-the bottom, horizontal clamp) and the 180ms scale+fade animation; the card
+the bottom, horizontal clamp) and the shared popover motion (scale from
+`HollowMotion.popoverScale` + fade, `HollowDurations.fast` in, `exit` out,
+growing from the anchor corner: `topLeft` when it opens downward, else
+`bottomLeft`; plain `hollow.border` hairline, `HollowShadows.float`). The
+barrier stops taking clicks as the exit starts. The card
 interior is `ProfileCardBody(compact)`. Member panel anchors derive from
 `kProfileCardPopupWidth`. `showLocalNicknameDialog` moved to
 profile_card_body.dart and is RE-EXPORTED here (chat_pane imports it).

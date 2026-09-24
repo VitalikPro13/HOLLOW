@@ -10,6 +10,7 @@ import 'package:hollow/src/core/providers/server_avatar_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/server_strip_layout_provider.dart';
 import 'package:hollow/src/core/providers/unread_provider.dart';
+import 'package:hollow/src/theme/hollow_shadows.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
@@ -235,14 +236,16 @@ class _FolderPopupOverlayState extends ConsumerState<_FolderPopupOverlay>
     super.initState();
     _controller = AnimationController(
       vsync: this,
-      duration: HollowDurations.animationsDisabled ? Duration.zero : const Duration(milliseconds: 180),
+      duration: HollowDurations.fast,
     );
-    _scaleAnim = Tween<double>(begin: 0.92, end: 1.0).animate(
-      CurvedAnimation(parent: _controller, curve: Curves.easeOutCubic),
+    final curve = CurvedAnimation(
+      parent: _controller,
+      curve: HollowCurves.enter,
+      reverseCurve: HollowCurves.exit,
     );
-    _fadeAnim = Tween<double>(begin: 0.0, end: 1.0).animate(
-      CurvedAnimation(parent: _controller, curve: Curves.easeOut),
-    );
+    _scaleAnim = Tween<double>(begin: HollowMotion.popoverScale, end: 1.0)
+        .animate(curve);
+    _fadeAnim = curve;
     _controller.forward();
   }
 
@@ -253,6 +256,8 @@ class _FolderPopupOverlayState extends ConsumerState<_FolderPopupOverlay>
   }
 
   void _dismiss() {
+    if (_controller.status == AnimationStatus.reverse) return;
+    _controller.reverseDuration = HollowDurations.exit;
     _controller.reverse().then((_) => widget.onDismiss());
   }
 
@@ -343,13 +348,7 @@ class _FolderPopupOverlayState extends ConsumerState<_FolderPopupOverlay>
                       borderRadius:
                           BorderRadius.circular(hollow.radiusLg),
                       border: Border.all(color: hollow.border),
-                      boxShadow: [
-                        BoxShadow(
-                          color: Colors.black.withValues(alpha: 0.3),
-                          blurRadius: 16,
-                          offset: const Offset(0, 4),
-                        ),
-                      ],
+                      boxShadow: HollowShadows.float,
                     ),
                     child: Column(
                       mainAxisSize: MainAxisSize.min,

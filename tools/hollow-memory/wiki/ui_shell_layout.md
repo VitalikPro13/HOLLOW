@@ -2,15 +2,14 @@
 
 Primary source: `lib/src/ui/shell/hollow_shell.dart` (~1918 lines). Supporting files: `lib/src/ui/shell/window_title_bar.dart`, `lib/src/ui/shell/mobile_nav.dart`, `lib/src/ui/app.dart`.
 
-HollowShell is the root layout widget for the entire Hollow app. It sits inside `MaterialApp.home`, manages the bootstrap sequence (identity, license, node startup), owns the startup reveal animation, dispatches to one of three layout modes (dock, classic, mobile), handles global keyboard shortcuts, and orchestrates the split view system.
+HollowShell is the root layout widget for the entire Hollow app. It sits inside `MaterialApp.home`, manages the bootstrap sequence (identity, license, node startup), owns the one startup fade, dispatches to one of three layout modes (dock, classic, mobile), handles global keyboard shortcuts, and orchestrates the split view system.
 
 ## Widget Classes Defined in hollow_shell.dart
 
 The file defines the following widget classes:
 
-- **`HollowShell`** — `ConsumerStatefulWidget`. The root layout. Owns the master reveal animation controller, bootstrap logic, keyboard handler, and the top-level `build()` that dispatches to dock/classic/mobile.
-- **`_MemberPanelSlider`** — `StatefulWidget`. Animates the member panel sliding in/out from the right edge. Uses `ClipRect` + `Align(widthFactor)` + `FadeTransition`. Freezes content during close animation via `ProviderScope` override of `selectedServerProvider` to prevent "No peers online" flash.
-- **`_DockSidebarSlider`** — `StatefulWidget`. Animates the channel sidebar sliding in/out from the left edge in dock mode. Same clip+align+fade pattern. Freezes the child widget during close so content does not collapse before the slide-out finishes.
+- **`HollowShell`** — `ConsumerStatefulWidget`. The root layout. Owns the startup fade controller (`_shellFade`), bootstrap logic, keyboard handler, and the top-level `build()` that dispatches to dock/classic/mobile.
+- **`_MemberPanelSlot`** — `StatelessWidget`. The member panel's place in the row: `_MemberPanelWithSeam` when `visible`, else `SizedBox.shrink()`. It shows and hides instantly; a width animation would re-wrap the chat text on every frame.
 - **`_SplitChatArea`** — `ConsumerStatefulWidget`. Renders two chat panes side by side with a draggable divider. The right pane gets its own `ProviderScope` overriding `selectedServerProvider`, `selectedChannelProvider`, and `selectedPeerProvider`.
 - **`_RightPaneSidebar`** — `ConsumerStatefulWidget`. Channel sidebar for the right split pane. Loads channels from FFI (`crdt_api.getServerChannels`) independently of the global `channelListProvider`. Fixed width 200px.
 - **`_RightPaneChatContent`** — `ConsumerWidget`. Chat content for the right split pane. Reads from the overridden providers to show either a channel chat, DM chat, or empty state.
@@ -26,7 +25,7 @@ Top-level function:
 
 1. **Check existing identity** — `storage_api.hasIdentity()`. If no identity exists, show `WelcomeDialog` (first launch). Result can be `'restored_mnemonic'`, `'restored_backup'`, `'create_new'`, or `null`.
 2. **Load identity** — `identityProvider.notifier.load()`. If error, return early.
-3. **Restore animation toggle** — `storage_api.loadSetting(key: 'disable_animations')`. If `'true'`, sets `HollowDurations.animationsDisabled = true`, pauses `SharedTickers`, and jumps the reveal controller to completion (`value = 1.0`).
+3. **Restore Reduce motion** — `await ref.read(reduceMotionProvider.future)` right after the identity load opens the DB (building the provider applies the persisted mode to `ReduceMotionController`). If motion is reduced, the startup fade snaps to completion (`_shellFade.value = 1.0`).
 4. **Show mnemonic dialog** — If `identity.mnemonic != null` (newly generated identity), saves it to DB and shows `MnemonicDialog`.
 5. **License key gate** — Loads cached key from DB. Calls `fetchRelayStatus()`. If `licenseRequired` and no cached key, shows `LicenseKeyDialog`. Sets key via `network_api.setLicenseKey()`.
 6. **Load servers** — `serverListProvider.notifier.loadFromDb()`.
@@ -66,26 +65,11 @@ Top-level function:
 5. Shows `LicenseKeyDialog` with the error message.
 6. If user enters a new key, saves it and restarts the node.
 
-## Startup Reveal Animation
+## Startup Fade
 
-The master animation is a single `AnimationController` with 2500ms duration, started on the first post-frame callback. It drives multiple sub-animations via `CurvedAnimation` with `Interval`:
+The desktop shell fades in ONCE at startup and nothing inside it moves. `_shellFade` is an `AnimationController` (starting at 1.0 when `HollowDurations.animationsDisabled`, else 0.0) under a `HollowCurves.enter` curve. The first post-frame callback runs `animateTo(1.0, duration: HollowDurations.normal)` (or snaps to 1.0 under Reduce motion), so the window is visible before anything moves. `build()` wraps `_ShellScaffold` in a `FadeTransition` over it.
 
-**Classic layout sub-animations:**
-- `_chatReveal` — Interval 0.30 to 0.70, `easeOutCubic`. Wraps the main chat area in a `FadeTransition`.
-
-**Dock layout sub-animations:**
-- `_friendsBarReveal` — Interval 0.0 to 0.25, `easeOutCubic`. Drives both `Align(heightFactor)` (slide down from top) and `FadeTransition` on the `FriendsBar`.
-- `_bottomBarReveal` — Interval 0.05 to 0.30, `easeOutCubic`. Drives both `Align(heightFactor)` (slide up from bottom) and `FadeTransition` on the `BottomBar`.
-- `_dockChatReveal` — Interval 0.20 to 0.60, `easeOutCubic`. Fades in the dock mode chat area.
-
-**Child widget animations (via StartupRevealScope InheritedWidget):**
-The `StartupRevealScope` wraps the entire layout. Child widgets call `StartupRevealScope.of(context)` to get the controller (returns `null` after completion — they skip all animation wrapping). `StartupRevealScope.interval(context, begin, end)` creates sub-interval `CurvedAnimation` objects for stagger effects. The `ServerStrip`, `WindowTitleBar`, and other shell widgets use this to stagger their own entrance.
-
-When the master controller completes, `_revealComplete` is set to `true` and passed to `StartupRevealScope.isComplete`. This causes `of(context)` to return `null`, letting all child widgets render without animation overhead.
-
-**Animations disabled mode:** If `disable_animations` setting is `'true'` in DB, the controller is jumped to `value = 1.0` immediately (no animation plays), and `HollowDurations.animationsDisabled` + `SharedTickers` are set accordingly.
-
-**Important implementation detail:** `_chatRevealWrap()` always keeps the `FadeTransition` in the tree (even after reveal completes) so the child's `State` (particularly `AmbientBackground`'s `AnimationController`) is preserved — avoids resetting the ambient blob positions.
+There are no per-panel startup intervals: the friends bar, bottom bar, sidebars, title bar, Home and member list all render in place under that one fade. The old `StartupRevealScope` stagger (with `RevealClip`, `TypewriterText` and `StaggeredListItem`) is deleted.
 
 ## Providers Read by HollowShell build()
 
@@ -152,44 +136,44 @@ The transparency levels for panels are NOT handled here — they're in `HollowAp
 `_buildClassicLayout()` renders the traditional Discord-like 4-panel layout:
 
 ```
-StartupRevealScope
-  └── Column
-      └── Expanded Row
-          ├── ServerStrip (RepaintBoundary, 72px implicit width)
-          ├── ChannelSidebar (240px fixed width)
-          ├── Expanded: chat area
-          │   └── _chatRevealWrap → RepaintBoundary → AmbientBackground → AnimatedSwitcher → Container
-          │       └── ServerSettingsPanel OR _buildChatOrEmpty()
-          └── _MemberPanelSlider (conditional on server selected + panel open + no VC full-bleed)
+Column
+  ├── SystemStatusBanner
+  └── Expanded Row
+      ├── ServerStrip (RepaintBoundary, 72px implicit width)
+      ├── ChannelSidebar (240px fixed width) + _ChannelSidebarSeam
+      ├── Expanded: chat area
+      │   └── RepaintBoundary → AmbientBackground → Container(key: _mainPaneKey)
+      │       └── ServerSettingsPanel OR _buildChatOrEmpty()
+      ├── _MemberPanelSlot (conditional on server selected + panel open + no VC full-bleed)
+      └── HelpPanelSlider
 ```
 
 **Reachability:** the `ServerStrip` is Classic's only permanent rail, so it carries Browse Public Channels, Conferences and Help alongside Home / Share / Archive / servers. Those three otherwise live only on the dock's `FriendsBar`/`BottomBar`, which Classic never renders, so without them the features had no entry point at all in this layout (issue #58 sweep). Full rail order in `ui_server_strip.md`.
 
 **Voice channel full-bleed detection:** When the selected channel is a voice channel AND the user is in that channel AND screen share or camera is active, the member panel is hidden (`vcScreenShareFullBleed = true`). This gives the video content maximum width.
 
-**AnimatedSwitcher keying:** The chat area uses a `ValueKey` based on: `shareTabOpenProvider` → `'share'`, `archiveTabOpenProvider` → `'archive'`, `settingsOpen` → `'settings-{serverId}'`, else `selectedChannelId ?? selectedPeerId ?? 'empty'`. This drives cross-fade transitions when switching between views.
+**Main pane keying:** `_mainPaneKey()` names what the pane shows: `'guest'`, `'share'`, `'archive'`, `'conference'`, `'shop'`, `'settings-{serverId}'`, else `selectedChannelId ?? selectedPeerId ?? 'empty'`. The `Container`'s `ValueKey` resets the pane's state per view. Switching is instant, with no cross-fade.
 
 ## Dock Layout Mode
 
 `_buildDockLayout()` renders the modern Hollow layout with `FriendsBar` on top and `BottomBar` at the bottom:
 
 ```
-StartupRevealScope
-  └── Column
-      ├── FriendsBar (ClipRect + AnimatedBuilder heightFactor + FadeTransition)
-      ├── Expanded Row (ClipRect)
-      │   ├── _DockSidebarSlider (visible when server selected)
-      │   │   └── ChannelSidebar (240px, dockMode=true, no UserBar)
-      │   ├── Expanded: chat area
-      │   │   └── FadeTransition(_dockChatReveal) → AnimatedSwitcher
-      │   │       └── _SplitChatArea OR single-pane (RepaintBoundary → AmbientBackground → AnimatedSwitcher → Container)
-      │   └── _MemberPanelSlider (if not in split view; + server selected, panel open, not VC full-bleed)
-      └── BottomBar (ClipRect + AnimatedBuilder heightFactor + FadeTransition)
+Column
+  ├── FriendsBar (RepaintBoundary)
+  ├── SystemStatusBanner
+  ├── Expanded Row (ClipRect)
+  │   ├── if server selected: Row(ChannelSidebar (240px, dockMode=true, no UserBar) + _ChannelSidebarSeam)
+  │   ├── Expanded: chat area
+  │   │   └── _SplitChatArea (key 'split') OR RepaintBoundary (key 'single') → AmbientBackground → Container(key: (singleKey, _mainPaneKey))
+  │   ├── _MemberPanelSlot (if not in split view; + server selected, panel open, not VC full-bleed)
+  │   └── HelpPanelSlider
+  └── BottomBar (RepaintBoundary)
 ```
 
 Key differences from classic:
 - No `ServerStrip` — servers are accessed through the `FriendsBar` and `BottomBar`.
-- Channel sidebar slides in/out via `_DockSidebarSlider` when a server is selected (hidden at home/DM view).
+- Channel sidebar appears instantly when a server is selected (absent at home/DM view).
 - `dockMode=true` passed to `ChannelSidebar` (affects styling: no `UserBar` shown).
 - Member panel is hidden during split view to save horizontal space.
 - When no peer or channel is selected, shows `HomeDashboard` instead of the empty chat placeholder.
@@ -205,7 +189,7 @@ Mobile layout is fully decoupled from the desktop shell. When `width < 600px`, `
 
 **Files:** `lib/src/ui/mobile/mobile_shell.dart`, `lib/src/ui/mobile/mobile_nav_bar.dart`, `lib/src/ui/mobile/mobile_chat_route.dart`, `lib/src/ui/mobile/tabs/*.dart`.
 
-**MobileShell** (`ConsumerWidget`): Uses a `Stack` of `AnimatedOpacity` widgets (one per tab, 150ms fade) with `IgnorePointer` on inactive tabs. All tabs stay mounted to preserve scroll state.
+**MobileShell**: a `Stack` with one `Offstage` per tab. Switching tabs is instant; every tab stays mounted so its scroll and state survive the switch.
 
 **MobileNavBar** (`ConsumerWidget`): 56px, `hollow.surface` bg, top border. 4 tabs:
 - **Tab 0 (Chats):** `LucideIcons.messageCircle`. Badge: total DM + channel unread count.
@@ -249,14 +233,14 @@ Split view is dock-mode only. Activated by `Ctrl+Shift+\` or programmatically vi
 ```
 Row
   ├── Flexible(leftFlex): Left pane chat (uses global providers)
-  │   └── GestureDetector(onTap: setFocus(0)) → AnimatedContainer(border) → RepaintBoundary → AmbientBackground → AnimatedSwitcher → content
+  │   └── GestureDetector(onTap: setFocus(0)) → AnimatedContainer(border) → RepaintBoundary → AmbientBackground → Container(keyed) → content
   ├── _SplitDivider (6px, draggable)
   ├── _RightPaneSidebar (200px fixed, if server selected)
   └── Flexible(rightFlex): Right pane chat (uses overridden providers)
       └── GestureDetector(onTap: setFocus(1)) → AnimatedContainer(border) → RepaintBoundary → AmbientBackground → content
 ```
 
-**Focus indicator:** The focused pane gets a 2px accent-colored top border. The unfocused pane has a transparent top border.
+**Focus indicator:** The focused pane gets a 2px accent-colored top border. The unfocused pane's border is `accent` at alpha 0, never `Colors.transparent` (which lerps through black in the `AnimatedContainer`); the divider's rest colour follows the same rule.
 
 **Divider position:** Stored as a 0.0-1.0 ratio, clamped to 0.3-0.7. Converted to flex values by multiplying by 1000 and rounding. Dragging uses delta-based computation (`details.delta.dx / totalWidth`) to avoid snap-to-center behavior.
 
@@ -270,7 +254,7 @@ Row
 
 ## Panel Toggling
 
-**Member panel:** Controlled by `memberPanelProvider` (StateProvider<bool>, default `true`). Toggle via `Ctrl+Shift+M` keyboard shortcut or the users icon button in channel headers. It is docked in BOTH layouts at every width the desktop shell runs at — the old `isDesktop &&` gate in the dock layout is gone (see "Responsive member panel" below). The `_MemberPanelSlider` animates the panel in/out with `HollowDurations.normal` duration. During close animation, it freezes the content by wrapping `MemberPanel` in a `ProviderScope` that overrides `selectedServerProvider` with the cached `_frozenServerId`. This prevents the panel from showing stale "No peers online" state while sliding out.
+**Member panel:** Controlled by `memberPanelProvider` (StateProvider<bool>, default `true`). Toggle via `Ctrl+Shift+M` keyboard shortcut or the users icon button in channel headers. It is docked in BOTH layouts at every width the desktop shell runs at — the old `isDesktop &&` gate in the dock layout is gone (see "Responsive member panel" below). `_MemberPanelSlot` shows and hides the panel instantly: a width animation would re-wrap the chat text on every frame.
 
 **Responsive member panel (2026-07-27, GitHub issue #20 follow-up):** `_syncMemberPanelToWidth(isDesktop)` is called from the shell's `LayoutBuilder` (after the mobile early-return, so it never runs for `MobileShell`). It fires **only on a breakpoint CROSSING** — guarded by `bool? _wideEnoughForMembers` — and writes `memberPanelProvider` from an `addPostFrameCallback` (never during build):
 
@@ -279,13 +263,13 @@ Row
 
 Because it only fires on a crossing, it never fights the header toggle: while narrow you can still open the panel, it just costs chat width. It previously did the opposite — the dock layout DROPPED the panel below 1024 while the header button kept toggling the provider, so the control did nothing visible. An overlay/floating variant was built and rejected: it covered the channel header, which is where the toggle that dismisses it lives.
 
-**Channel sidebar (dock mode):** The `_DockSidebarSlider` shows/hides the sidebar based on whether a server is selected (`selectedServerId != null`). Same clip+align+fade animation pattern. During close, it shows the frozen child widget to prevent content collapse.
+**Channel sidebar (dock mode):** shown only while a server is selected (`selectedServerId != null`), appearing and leaving instantly.
 
 **Message search:** `chatSearchOpenProvider` (StateProvider<bool>, default `false`). Toggled by the `quickSearch` shortcut (`Ctrl+K` by default). ONE flag for both chat panes -- it was `channelSearchOpenProvider` until 2026-08-21, which only the channel pane read, so the shortcut was a silent no-op in a DM.
 
 **Server settings:** `serverSettingsOpenProvider` (StateProvider<bool>, default `false`). In non-split mode, toggles between settings panel and chat. In split mode, opens as a dialog instead.
 
-**Help panel:** `helpPanelOpenProvider` (StateProvider<bool>, default `false`, in `core/providers/help_panel_provider.dart`). Toggled by the circled-`?` (`LucideIcons.circleHelp`) button on the RIGHT side of the `FriendsBar` (symmetric with Add Friend on the left). `helpPanelOpen` is watched in `build()` and threaded into both `_buildClassicLayout`/`_buildDockLayout` as a named param; each inserts `HelpPanelSlider(visible: helpPanelOpen)` as the right-most child after the member panel. `HelpPanelSlider` (in `lib/src/ui/guides/help_panel.dart`) mirrors `_MemberPanelSlider`/`_DockSidebarSlider` (ClipRect + Align centerRight widthFactor + fade, `HollowDurations.normal`). See `wiki/ui_help.md` for the full Help resource center.
+**Help panel:** `helpPanelOpenProvider` (StateProvider<bool>, default `false`, in `core/providers/help_panel_provider.dart`). Toggled by the circled-`?` (`LucideIcons.circleHelp`) button on the RIGHT side of the `FriendsBar` (symmetric with Add Friend on the left). `helpPanelOpen` is watched in `build()` and threaded into both `_buildClassicLayout`/`_buildDockLayout` as a named param; each inserts `HelpPanelSlider(visible: helpPanelOpen)` as the right-most child after the member panel. `HelpPanelSlider` (in `lib/src/ui/guides/help_panel.dart`) is a `StatelessWidget` that shows or hides the panel instantly, like `_MemberPanelSlot`. See `wiki/ui_help.md` for the full Help resource center.
 
 ## Keyboard Shortcuts
 
@@ -348,8 +332,8 @@ The zoom trio ignores Shift on `+`/`-` (on most layouts `+` IS Shift+`=`) and ac
 
 **It paints as an extension of the PANEL and owns the divider** (2026-08-21). Its first version painted nothing at rest, which left a 6px hole between panel and chat. Invisible across the message area (both sides are `hollow.background`) and glaring at the chat's HEADER BAR and COMPOSER BAR, which are opaque `hollow.surface` and stopped 6px short of the divider at both ends — four dark notches at the chat's corners, measured at the header's y as seam `13,15,20` against chat `20,22,28`. The seam now fills with `hollow.surface` and draws the 1px `hollow.border` on its CHAT side, so the panel simply reads 6px wider and the chat's chrome runs edge to edge. Because the seam owns the divider, the panel beside it must NOT draw its own: `ChannelSidebar.edgeBorder` / `MemberPanel.edgeBorder`, both defaulting TRUE — the split view's right sidebar has no seam and still draws its own. Its accent line on hover/focus is aligned to that divider, not centred in the strip; centred it lit up 2.5px away from the border and the two read as a double rule.
 
-- `_ChannelSidebarSeam` sits directly after the channel sidebar in BOTH layouts. In Dock mode it rides INSIDE `_DockSidebarSlider`'s child Row, so it slides away with the panel it sizes instead of hanging in empty space.
-- `_MemberPanelWithSeam` is what `_MemberPanelSlider` renders: the seam on the panel's LEFT edge (`panelOnRight: true`, so dragging left widens it) plus the panel.
+- `_ChannelSidebarSeam` sits directly after the channel sidebar in BOTH layouts. In Dock mode it sits in the same conditional Row as the sidebar, so it leaves with the panel it sizes instead of hanging in empty space.
+- `_MemberPanelWithSeam` is what `_MemberPanelSlot` renders: the seam on the panel's LEFT edge (`panelOnRight: true`, so dragging left widens it) plus the panel.
 - Widths live in `channelSidebarWidthProvider` / `memberPanelWidthProvider` (`core/providers/layout_prefs_provider.dart`), clamped in the notifier, persisted, and loaded from `_bootstrap` via `loadLayoutPrefs(ref)` — never from a provider's `build()`.
 - `panelScaleProvider` zooms the CONTENTS of the server strip, channel sidebar and member panel through `PanelScale` (the same `_ScaledViewport` render object the interface zoom uses). The server strip is the one panel whose WIDTH scales too (`kServerStripWidth * panelScale`): its icon rows are sized for exactly 72px, so zooming the content inside a fixed-width rail just pushes them out of the column. `PanelScale.minContentHeight` caps the zoom for panels with unshrinkable chrome — a zoomed panel lays out at `slot / scale`, so raising the zoom SHRINKS the room its fixed stack of icons gets.
 
@@ -380,7 +364,7 @@ The `ClipRect` around the navigator child prevents `BackdropFilter` blur from di
 
 `UiScale` (interface zoom, issue #20) wraps the navigator child but NOT the title bar — browser-chrome model, and on macOS the bar is aligned to OS-drawn traffic lights at a fixed offset. Two consequences worth knowing: (1) `UiScaleBox` must measure its own slot via `LayoutBuilder`, never `MediaQuery.size`, because its slot is 32px shorter than the window — sizing from the window pushed exactly the bottom dock off screen at every scale but 1.0; (2) below the transform, window coordinates are NOT overlay coordinates, so popup anchors go through `overlay_anchor.dart`. See `project_display_scaling`.
 
-**WindowTitleBar widget** (`lib/src/ui/shell/window_title_bar.dart`): 32px tall container with `hollow.opaqueBackground` color. Layout: `[Hollow branding] [DragToMoveArea ────] [─] [□] [✕]`. The branding and buttons have their own startup reveal intervals (0.0-0.15 for branding, 0.08-0.20 for buttons).
+**WindowTitleBar widget** (`lib/src/ui/shell/window_title_bar.dart`): 32px tall container with `hollow.opaqueBackground` color. Layout: `[Hollow branding] [DragToMoveArea ────] [─] [□] [✕]`. It has no startup animation of its own.
 
 Widget classes in window_title_bar.dart:
 - **`WindowTitleBar`** — StatelessWidget, the 32px bar.
@@ -439,9 +423,9 @@ selectedChannel?.channelType == ChannelType.voice
 
 When true (`vcScreenShareFullBleed`), the member panel is hidden to give the video/screen share content maximum horizontal space.
 
-## AnimatedSwitcher Pattern
+## Instant View Switches
 
-The chat area consistently uses `AnimatedSwitcher` with `HollowDurations.normal` for cross-fade transitions. The `layoutBuilder` uses a `Stack` with `Alignment.topCenter` to layer the outgoing and incoming children. The `switchInCurve` uses `HollowCurves.enter` and `switchOutCurve` uses `HollowCurves.exit`. View identity is driven by `ValueKey` based on the current view state (share/archive/settings/channel/peer/empty).
+Main pane, conversation, channel, server and shell-tab switches are instant in both layouts and in the split panes: there is no `AnimatedSwitcher`. Identity lives in the keyed `Container` (see Main pane keying), which resets the pane's state per view while the `AmbientBackground` layer around it stays put. Design language 3.8: things that arrive ON TOP of the app move, the app's own navigation does not.
 
 ## RepaintBoundary Usage
 

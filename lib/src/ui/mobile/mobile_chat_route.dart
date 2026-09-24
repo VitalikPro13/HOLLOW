@@ -38,6 +38,7 @@ import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/core/providers/link_preview_settings_provider.dart';
+import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/ui/chat/album_bubble.dart';
 import 'package:hollow/src/ui/chat/chat_pane_shared.dart';
 import 'package:hollow/src/ui/chat/expression_picker.dart';
@@ -70,6 +71,7 @@ import 'package:hollow/src/ui/components/security_alert_banner.dart';
 import 'package:hollow/src/ui/components/status_dot.dart';
 import 'package:hollow/src/ui/dialogs/message_proof_dialog.dart';
 import 'package:hollow/src/ui/mobile/mobile_active_call_pill.dart';
+import 'package:hollow/src/ui/mobile/mobile_keyboard_panel.dart';
 import 'package:hollow/src/ui/mobile/mobile_page_route.dart';
 import 'package:hollow/src/ui/mobile/mobile_call_video_view.dart';
 import 'package:hollow/src/ui/mobile/mobile_member_panel.dart';
@@ -160,6 +162,9 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
   bool _isRecordingVoice = false;
   bool _searchOpen = false;
 
+  /// The emoji, GIF and sticker panel sits in the keyboard's place.
+  bool _expressionsOpen = false;
+
   // @mention autocomplete, server channels only.
   List<_MobileMentionCandidate> _mentionCandidates = [];
   int _mentionAtPosition = -1;
@@ -196,6 +201,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
   void initState() {
     super.initState();
     _positionsListener.itemPositions.addListener(_checkAutoScroll);
+    _focusNode.addListener(_onComposerFocus);
     if (widget.isDm) {
       _initDmOpen();
     } else {
@@ -390,17 +396,32 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     final count = _displayLength();
     if (index < 0 || index >= count) return;
     setState(() => _highlightIndex = index);
-    _scrollController.scrollTo(
-      index: count - 1 - index,
-      duration: ReduceMotionController.instance.isReduced
-          ? Duration.zero
-          : const Duration(milliseconds: 300),
-      curve: Curves.easeOutCubic,
+    _scrollToBuilderIndex(
+      count - 1 - index,
       alignment: 0.6,
+      duration: HollowDurations.normal,
     );
     Future.delayed(const Duration(milliseconds: 1500), () {
       if (mounted) setState(() => _highlightIndex = null);
     });
+  }
+
+  /// A jump under Reduce motion, read live at the call.
+  void _scrollToBuilderIndex(
+    int index, {
+    required double alignment,
+    required Duration duration,
+  }) {
+    if (ReduceMotionController.instance.isReduced) {
+      _scrollController.jumpTo(index: index, alignment: alignment);
+      return;
+    }
+    _scrollController.scrollTo(
+      index: index,
+      alignment: alignment,
+      duration: duration,
+      curve: HollowCurves.enter,
+    );
   }
 
   int _displayLength() => widget.isDm
@@ -436,6 +457,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
 
   void _startEditing(String messageId) {
     setState(() {
+      _expressionsOpen = false;
       _editingMessageId = messageId;
       _editSeededFor = null;
     });
@@ -454,13 +476,12 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
         index = msgs.indexWhere((m) => m.messageId == messageId);
       }
       if (index >= 0) {
-        _scrollController.scrollTo(
-          // Chronological to reversed builder index; alignment measures from
-          // the BOTTOM edge under reverse:true.
-          index: _displayLength() - 1 - index,
+        // Chronological to reversed builder index; alignment measures from
+        // the BOTTOM edge under reverse:true.
+        _scrollToBuilderIndex(
+          _displayLength() - 1 - index,
           alignment: 0.7,
-          duration: const Duration(milliseconds: 200),
-          curve: Curves.easeOutCubic,
+          duration: HollowDurations.fast,
         );
       }
     });
@@ -1050,25 +1071,47 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
       if (mounted) _focusNode.requestFocus();
     });
   }
-  /// Emoji, GIFs and stickers in one sheet. An emoji goes into the text and
-  /// closes it; a GIF or sticker sends and leaves it open (issue #36).
-  void _showExpressions() {
-    // The software keyboard otherwise stays up under the sheet and covers half
-    // of it.
+  /// The smiley swaps the keyboard for the emoji, GIF and sticker panel at
+  /// the same height, and back. An emoji goes into the text and the panel
+  /// stays for the next one; a GIF or sticker sends (issue #36).
+  void _toggleExpressions() {
+    if (_expressionsOpen) {
+      // The focus listener closes the panel once the keyboard is on its way.
+      _focusNode.requestFocus();
+      return;
+    }
     _focusNode.unfocus();
-    showExpressionSheet(
-      context: context,
-      // Emote tokens become 1-char placeholders rendered inline as the image.
-      onEmoji: (emoji) => _insertAtCursor(_controller.displayTextFor(emoji)),
-      onAsset: _sendAsset,
-      onSharePack: _shareFileToChat,
-      // Null in a DM or a conference: the rating clamp, the Server tabs and
-      // server emotes only apply to real servers.
-      serverId: (widget.serverId?.startsWith('conf:') ?? true)
-          ? null
-          : widget.serverId,
-    );
+    setState(() => _expressionsOpen = true);
   }
+
+  void _closeExpressions() {
+    if (_expressionsOpen) setState(() => _expressionsOpen = false);
+  }
+
+  /// A tap on the composer brings the keyboard back over the panel.
+  void _onComposerFocus() {
+    if (_focusNode.hasFocus) _closeExpressions();
+  }
+
+  Widget _buildExpressionPanel(BuildContext context) => ExpressionPanel(
+        // Null in a DM or a conference: the rating clamp, the Server tabs and
+        // server emotes only apply to real servers.
+        serverId: (widget.serverId?.startsWith('conf:') ?? true)
+            ? null
+            : widget.serverId,
+        assets: true,
+        // Emote tokens become 1-char placeholders rendered inline as the
+        // image. No refocus: that would raise the keyboard over the panel.
+        onEmoji: (emoji) =>
+            _insertAtCursor(_controller.displayTextFor(emoji), refocus: false),
+        onAsset: _sendAsset,
+        onSharePack: (path, name) async {
+          // Sharing sends, so the panel gets out of the way of the result.
+          _closeExpressions();
+          await _shareFileToChat(path, name);
+        },
+      );
+
   /// Inserts [text] at the composer's cursor, replacing any selection.
   void _insertAtCursor(String text, {bool refocus = true}) {
     final sel = _controller.selection;
@@ -1083,9 +1126,8 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     if (refocus) _focusNode.requestFocus();
   }
 
-  /// Send-on-click (issue #36). Focus stays put: the sheet is open over the
-  /// composer, and refocusing would raise the keyboard on top of it on every
-  /// pick.
+  /// Send-on-click (issue #36). Focus stays put: the panel is open in the
+  /// keyboard's place, and refocusing would swap it out on every pick.
   Future<void> _sendAsset(String token) async {
     _insertAtCursor(_controller.displayTextFor(token), refocus: false);
     await _handleSend(refocus: false);
@@ -1357,12 +1399,16 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     Widget scaffold = Scaffold(
       backgroundColor:
           bg.hasBackground ? Colors.transparent : hollow.background,
+      // The dock under the composer makes room for the keyboard itself, so the
+      // expression panel can take its place without the composer moving.
+      resizeToAvoidBottomInset: false,
       // Custom-emote pull source for every token and reaction: a DM asks the
       // counterpart's devices, a channel asks a room member.
       body: EmoteScope(
         serverId: widget.serverId,
         peerHint: widget.peerId,
         child: SafeArea(
+          bottom: false,
           child: Column(
             children: [
               _buildHeader(),
@@ -1383,35 +1429,46 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
               const SystemStatusBanner(anchor: StatusBannerAnchor.bottom),
               _TypingBar(
                 contextKey: widget.isDm ? widget.peerId! : _channelKey,
-              ),
-              if (_mentionCandidates.isNotEmpty) _buildMentionPanel(hollow),
-              if (_emoteCandidates.isNotEmpty) _buildEmotePanel(hollow),
-              if (_replyToMessageId != null)
-                ChatReplyPreviewBar(
-                  senderName: _replyToSenderName ?? '',
-                  text: _replyToText ?? '',
-                  imagePath: null,
-                  onCancel: _cancelReply,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    if (_mentionCandidates.isNotEmpty) _buildMentionPanel(hollow),
+                    if (_emoteCandidates.isNotEmpty) _buildEmotePanel(hollow),
+                    if (_replyToMessageId != null)
+                      ChatReplyPreviewBar(
+                        senderName: _replyToSenderName ?? '',
+                        text: _replyToText ?? '',
+                        imagePath: null,
+                        onCancel: _cancelReply,
+                      ),
+                    StagedLinkArea(
+                      hollowLink: _stagedHollowLink,
+                      previewUrl: _stagedPreviewUrl,
+                      preview: _stagedPreview,
+                      previewLoading: _stagedPreviewLoading,
+                      onDismissHollowLink: _dismissStagedHollowLink,
+                      onDismissPreview: _dismissStagedPreview,
+                    ),
+                    if (_staged.isNotEmpty)
+                      StagedAttachmentStrip(
+                        items: _staged,
+                        onRemove: (i) =>
+                            setState(() => _staged = [..._staged]..removeAt(i)),
+                        onReorder: (from, to) => setState(
+                            () => _staged = reorderStaged(_staged, from, to)),
+                      ),
+                    if (!widget.isDm && _slowModeReadyAt != null)
+                      _buildSlowModeNotice(hollow),
+                    _buildComposerOrBanner(hollow),
+                    MobileKeyboardPanelDock(
+                      open: _expressionsOpen,
+                      keyboardFocus: _focusNode,
+                      panelBuilder: _buildExpressionPanel,
+                    ),
+                  ],
                 ),
-              StagedLinkArea(
-                hollowLink: _stagedHollowLink,
-                previewUrl: _stagedPreviewUrl,
-                preview: _stagedPreview,
-                previewLoading: _stagedPreviewLoading,
-                onDismissHollowLink: _dismissStagedHollowLink,
-                onDismissPreview: _dismissStagedPreview,
               ),
-              if (_staged.isNotEmpty)
-                StagedAttachmentStrip(
-                  items: _staged,
-                  onRemove: (i) =>
-                      setState(() => _staged = [..._staged]..removeAt(i)),
-                  onReorder: (from, to) => setState(
-                      () => _staged = reorderStaged(_staged, from, to)),
-                ),
-              if (!widget.isDm && _slowModeReadyAt != null)
-                _buildSlowModeNotice(hollow),
-              _buildComposerOrBanner(hollow),
             ],
           ),
         ),
@@ -1422,20 +1479,27 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
       scaffold = _wrapWithBackground(scaffold, bg, hollow);
     }
 
-    return Stack(
-      children: [
-        scaffold,
-        // For messages arriving in OTHER conversations. Offset below the status
-        // bar and chat header so it cannot cover the header controls.
-        MobileInChatBanner(
-          currentPeerId: widget.peerId,
-          currentServerId: widget.serverId,
-          currentChannelId: widget.channelId,
-          topOffset: MediaQuery.paddingOf(context).top + 64,
-        ),
-        const MobileActiveCallPill(),
-        const MobileVoiceChannelPill(),
-      ],
+    // Back closes the expression panel before it leaves the chat.
+    return PopScope(
+      canPop: !_expressionsOpen,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop) _closeExpressions();
+      },
+      child: Stack(
+        children: [
+          scaffold,
+          // For messages arriving in OTHER conversations. Offset below the status
+          // bar and chat header so it cannot cover the header controls.
+          MobileInChatBanner(
+            currentPeerId: widget.peerId,
+            currentServerId: widget.serverId,
+            currentChannelId: widget.channelId,
+            topOffset: MediaQuery.paddingOf(context).top + 64,
+          ),
+          const MobileActiveCallPill(),
+          const MobileVoiceChannelPill(),
+        ],
+      ),
     );
   }
 
@@ -1486,6 +1550,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
 
   void _toggleSearch() {
     setState(() {
+      _expressionsOpen = false;
       _searchOpen = !_searchOpen;
       if (!_searchOpen) {
         _searchController.clear();
@@ -1515,11 +1580,17 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
             ? MediaContext(contextType: 'dm', contextId: widget.peerId ?? '')
             : MediaContext(contextType: 'channel', contextId: _channelKey),
         actions: _mediaActions(),
-        child: Stack(
-          children: [
-            widget.isDm ? _buildDmMessages() : _buildChannelMessages(),
-            _buildUnreadPillOverlay(),
-          ],
+        // A tap on the chat closes the panel; rows that take taps win first.
+        // Always present, so opening the panel never remounts the list.
+        child: GestureDetector(
+          behavior: HitTestBehavior.translucent,
+          onTap: _expressionsOpen ? _closeExpressions : null,
+          child: Stack(
+            children: [
+              widget.isDm ? _buildDmMessages() : _buildChannelMessages(),
+              _buildUnreadPillOverlay(),
+            ],
+          ),
         ),
       ),
     );
@@ -1599,15 +1670,15 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
             .select((s) => s.dmUnreadCounts[widget.peerId!] ?? 0))
         : ref.watch(unreadProvider
             .select((s) => s.channelUnreadCounts[_channelKey] ?? 0));
-    if (unreadCount <= 0 || _isInAutoScrollZone) {
-      return const SizedBox.shrink();
-    }
     return Positioned(
       bottom: HollowSpacing.md,
       left: 0,
       right: 0,
       child: Center(
-        child: UnreadJumpPill(count: unreadCount, onTap: _scrollToBottom),
+        child: UnreadJumpFade(
+          count: _isInAutoScrollZone ? 0 : unreadCount,
+          onTap: _scrollToBottom,
+        ),
       ),
     );
   }
@@ -1720,10 +1791,11 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
         onKey: (_) => KeyEventResult.ignored,
         onAttach: _showAttachSheet,
         onRecord: _startVoiceRecording,
-        onExpressions: (_) => _showExpressions(),
+        onExpressions: (_) => _toggleExpressions(),
         onSend: _handleSend,
         hasStaged: _staged.isNotEmpty,
         autofocus: false,
+        expressionsOpen: _expressionsOpen,
       ),
     );
   }
@@ -1749,7 +1821,10 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
       );
       return;
     }
-    setState(() => _isRecordingVoice = true);
+    setState(() {
+      _expressionsOpen = false;
+      _isRecordingVoice = true;
+    });
   }
 
   Widget _wrapWithBackground(
@@ -3226,25 +3301,24 @@ class _DmCallButtons extends ConsumerWidget {
 
 class _TypingBar extends ConsumerWidget {
   final String contextKey;
+  final Widget child;
 
-  const _TypingBar({required this.contextKey});
+  const _TypingBar({required this.contextKey, required this.child});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final typingPeers = ref.watch(typingProvider)[contextKey] ?? {};
-    if (typingPeers.isEmpty) return const SizedBox.shrink();
-
     // Collapses devices to their master and excludes every device of ours; see
     // [typingMastersFor].
-    final masters = typingMastersFor(ref, typingPeers);
+    final masters = typingPeers.isEmpty
+        ? const <String>{}
+        : typingMastersFor(ref, typingPeers);
     final profiles = ref.watch(profileProvider);
     final names = masters
         .map((master) => displayNameFor(profiles, master))
         .toSet()
         .toList();
-    if (names.isEmpty) return const SizedBox.shrink();
-
-    return TypingIndicatorBar(names: names);
+    return TypingIndicatorHost(names: names, child: child);
   }
 }
 

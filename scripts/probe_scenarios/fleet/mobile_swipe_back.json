@@ -1,0 +1,196 @@
+{
+  "_": [
+    "The iOS back swipe and the keyboard-place expression panel, one peer.",
+    "a opens Saved messages (a pushed page), a short drag from the left edge",
+    "settles back, a long one pops to Chats; then with the expression panel",
+    "open the same long drag does nothing (back closes the panel first).",
+    "No server, nothing to clean up.",
+    "",
+    "run (on the Mac mini): pwsh scripts/fleet.ps1 -Scenario mobile_swipe_back -Peers a"
+  ],
+  "peers": [
+    "a"
+  ],
+  "steps": [
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "provider": "connection",
+      "equals": "connected",
+      "timeout_ms": 120000
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 1500
+    },
+    {
+      "peer": "a",
+      "op": "drag_at",
+      "x": 200,
+      "y": 650,
+      "dx": 0,
+      "dy": -900,
+      "duration_ms": 300,
+      "_": "the first-run checklist pushes the list below the fold"
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "target": "text:Saved messages",
+      "timeout_ms": 5000
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "text:Saved messages",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "target": "hint:Note to self",
+      "timeout_ms": 15000
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 800
+    },
+    {
+      "peer": "a",
+      "op": "shot",
+      "name": "s-01-chat"
+    },
+    {
+      "peer": "a",
+      "op": "drag_at",
+      "x": 6,
+      "y": 420,
+      "dx": 70,
+      "dy": 0,
+      "duration_ms": 500
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 600
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "target": "hint:Note to self",
+      "timeout_ms": 2000
+    },
+    {
+      "peer": "a",
+      "op": "shot",
+      "name": "s-02-short-drag-stays"
+    },
+    {
+      "peer": "a",
+      "op": "drag_at",
+      "x": 6,
+      "y": 420,
+      "dx": 300,
+      "dy": 0,
+      "duration_ms": 600
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "gone": "hint:Note to self",
+      "timeout_ms": 5000
+    },
+    {
+      "peer": "a",
+      "op": "shot",
+      "name": "s-03-long-drag-pops"
+    },
+    {
+      "peer": "a",
+      "op": "drag_at",
+      "x": 200,
+      "y": 650,
+      "dx": 0,
+      "dy": -900,
+      "duration_ms": 300,
+      "_": "the first-run checklist pushes the list below the fold"
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "target": "text:Saved messages",
+      "timeout_ms": 5000
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "text:Saved messages",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "target": "hint:Note to self",
+      "timeout_ms": 15000
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 800
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "semantics:Emoji, GIFs and stickers",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 800
+    },
+    {
+      "peer": "a",
+      "op": "drag_at",
+      "x": 6,
+      "y": 300,
+      "dx": 300,
+      "dy": 0,
+      "duration_ms": 600
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 800
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "target": "hint:Note to self",
+      "timeout_ms": 2000
+    },
+    {
+      "peer": "a",
+      "op": "shot",
+      "name": "s-04-panel-open-blocks-swipe"
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "semantics:Show keyboard",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 1200
+    },
+    {
+      "peer": "a",
+      "op": "shot",
+      "name": "s-05-keyboard-back"
+    }
+  ]
+}

@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/download_manager_provider.dart';
 import 'package:hollow/src/core/providers/share_tab_provider.dart';
+import 'package:hollow/src/theme/hollow_shadows.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
@@ -74,14 +75,16 @@ class _DownloadManagerOverlayState
     super.initState();
     _controller = AnimationController(
       vsync: this,
-      duration: HollowDurations.animationsDisabled ? Duration.zero : const Duration(milliseconds: 180),
+      duration: HollowDurations.fast,
     );
-    _scaleAnim = Tween<double>(begin: 0.92, end: 1.0).animate(
-      CurvedAnimation(parent: _controller, curve: Curves.easeOutCubic),
+    final curve = CurvedAnimation(
+      parent: _controller,
+      curve: HollowCurves.enter,
+      reverseCurve: HollowCurves.exit,
     );
-    _fadeAnim = Tween<double>(begin: 0.0, end: 1.0).animate(
-      CurvedAnimation(parent: _controller, curve: Curves.easeOut),
-    );
+    _scaleAnim = Tween<double>(begin: HollowMotion.popoverScale, end: 1.0)
+        .animate(curve);
+    _fadeAnim = curve;
     _controller.forward();
   }
 
@@ -92,6 +95,8 @@ class _DownloadManagerOverlayState
   }
 
   void _dismiss() {
+    if (_controller.status == AnimationStatus.reverse) return;
+    _controller.reverseDuration = HollowDurations.exit;
     _controller.reverse().then((_) => widget.onDismiss());
   }
 
@@ -155,13 +160,7 @@ class _DownloadManagerOverlayState
                     border: Border.all(
                       color: hollow.accent.withValues(alpha: 0.15),
                     ),
-                    boxShadow: [
-                      BoxShadow(
-                        color: Colors.black.withValues(alpha: 0.35),
-                        blurRadius: 28,
-                        offset: const Offset(0, 8),
-                      ),
-                    ],
+                    boxShadow: HollowShadows.float,
                   ),
                   clipBehavior: Clip.antiAlias,
                   child: Column(

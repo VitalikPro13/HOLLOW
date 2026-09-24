@@ -13,7 +13,6 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/ui/chat/hollow_link_utils.dart';
-import 'package:hollow/src/ui/animations/selection_shimmer.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/hollow_menu.dart';
@@ -151,7 +150,7 @@ class _GuestServerSidebarState extends ConsumerState<GuestServerSidebar> {
           ),
 
           AnimatedSize(
-            duration: HollowDurations.normal,
+            duration: HollowDurations.fast,
             curve: HollowCurves.enter,
             child: _showAddField
                 ? Padding(
@@ -421,6 +420,7 @@ class _GuestServerSection extends ConsumerWidget {
                   AnimatedRotation(
                     turns: isExpanded ? 0.25 : 0.0,
                     duration: HollowDurations.fast,
+                    curve: HollowCurves.enter,
                     child: Icon(
                       LucideIcons.chevronRight,
                       size: 14,
@@ -436,7 +436,7 @@ class _GuestServerSection extends ConsumerWidget {
         // The strip stays STILL here (animate: false); only the selected
         // server's sidebar header animates.
         AnimatedSize(
-          duration: HollowDurations.normal,
+          duration: HollowDurations.fast,
           curve: HollowCurves.enter,
           alignment: Alignment.topCenter,
           child: isExpanded
@@ -557,7 +557,7 @@ class _GuestChannelTile extends StatelessWidget {
     final hollow = HollowTheme.of(context);
     final radius = BorderRadius.circular(hollow.radiusMd);
 
-    Widget tile = HollowPressable(
+    final tile = HollowPressable(
       onTap: onTap,
       subtle: true,
       borderRadius: radius,
@@ -567,9 +567,8 @@ class _GuestChannelTile extends StatelessWidget {
         horizontal: HollowSpacing.sm,
         vertical: HollowSpacing.sm - 2,
       ),
-      child: AnimatedDefaultTextStyle(
-        duration: HollowDurations.fast,
-        curve: HollowCurves.subtle,
+      // Not animated: a weight tween shifts the name's width every frame.
+      child: DefaultTextStyle(
         style: HollowTypography.body.copyWith(
           color: isSelected ? hollow.textPrimary : hollow.textSecondary,
           fontWeight: isSelected ? FontWeight.w600 : FontWeight.w400,
@@ -600,14 +599,6 @@ class _GuestChannelTile extends StatelessWidget {
         ),
       ),
     );
-
-    if (isSelected) {
-      tile = SelectionShimmer(
-        highlightColor: hollow.accent.withValues(alpha: 0.12),
-        borderRadius: radius,
-        child: tile,
-      );
-    }
 
     return Padding(
       padding: const EdgeInsets.only(

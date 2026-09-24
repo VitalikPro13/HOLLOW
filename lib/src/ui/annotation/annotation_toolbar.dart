@@ -1,4 +1,6 @@
 ﻿import 'package:flutter/material.dart';
+import 'package:hollow/src/ui/animations/hollow_curves.dart';
+import 'package:hollow/src/ui/components/hollow_tooltip.dart';
 import 'package:hollow/src/ui/components/hollow_slider.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
@@ -103,7 +105,7 @@ class AnnotationToolbar extends StatelessWidget {
 
   Widget _styleButton(LineStyle s, String tooltip) {
     final active = controller.style == s;
-    return Tooltip(
+    return HollowTooltip(
       message: tooltip,
       child: InkResponse(
         radius: 18,
@@ -127,7 +129,7 @@ class AnnotationToolbar extends StatelessWidget {
 
   Widget _colorSwatch(Color c) {
     final active = controller.color.toARGB32() == c.toARGB32();
-    return Tooltip(
+    return HollowTooltip(
       message: '#${c.toARGB32().toRadixString(16).padLeft(8, '0').substring(2)}',
       child: InkResponse(
         radius: 16,
@@ -151,13 +153,13 @@ class AnnotationToolbar extends StatelessWidget {
 
   Widget _iconButton(IconData icon, String tooltip,
       {VoidCallback? onPressed, bool enabled = true, bool active = false}) {
-    return Tooltip(
+    return HollowTooltip(
       message: tooltip,
       child: InkResponse(
         radius: 18,
         onTap: enabled ? onPressed : null,
         child: AnimatedOpacity(
-          duration: const Duration(milliseconds: 150),
+          duration: HollowDurations.fast,
           opacity: enabled ? 1.0 : 0.35,
           child: Container(
             width: 36,

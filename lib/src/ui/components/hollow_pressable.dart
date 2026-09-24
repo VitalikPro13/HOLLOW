@@ -73,29 +73,16 @@ class _HollowPressableState extends State<HollowPressable>
   void initState() {
     super.initState();
     if (!widget.subtle) {
-      _controller = AnimationController(
-        vsync: this,
-        duration: HollowDurations.animationsDisabled
-            ? Duration.zero
-            : const Duration(milliseconds: 120),
-        reverseDuration: HollowDurations.animationsDisabled
-            ? Duration.zero
-            : const Duration(milliseconds: 200),
+      _controller = AnimationController(vsync: this);
+      // A reverse curve runs on t going 1 to 0, so ease-in here is a release
+      // that leaves quickly and settles, the mirror of the press.
+      final curve = CurvedAnimation(
+        parent: _controller!,
+        curve: HollowCurves.enter,
+        reverseCurve: HollowCurves.exit,
       );
-      _scaleAnimation = Tween<double>(begin: 1.0, end: 0.98).animate(
-        CurvedAnimation(
-          parent: _controller!,
-          curve: Curves.easeOutCubic,
-          reverseCurve: HollowCurves.spring,
-        ),
-      );
-      _opacityAnimation = Tween<double>(begin: 1.0, end: 0.85).animate(
-        CurvedAnimation(
-          parent: _controller!,
-          curve: Curves.easeOutCubic,
-          reverseCurve: Curves.easeOutCubic,
-        ),
-      );
+      _scaleAnimation = Tween<double>(begin: 1.0, end: 0.98).animate(curve);
+      _opacityAnimation = Tween<double>(begin: 1.0, end: 0.85).animate(curve);
     }
   }
 
@@ -109,7 +96,10 @@ class _HollowPressableState extends State<HollowPressable>
   void _onPointerDown(PointerDownEvent _) {
     if (widget.disabled || widget.onTap == null || widget.subtle) return;
     setState(() => _pressing = true);
-    _controller?.forward();
+    _controller
+      ?..duration = HollowDurations.exit
+      ..reverseDuration = HollowDurations.fast
+      ..forward();
   }
 
   void _onPointerUp(PointerUpEvent _) {

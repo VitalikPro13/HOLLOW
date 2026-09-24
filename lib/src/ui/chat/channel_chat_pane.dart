@@ -55,6 +55,7 @@ import 'package:hollow/src/ui/chat/emote_composer.dart';
 import 'package:hollow/src/ui/chat/emote_image.dart';
 import 'package:hollow/src/ui/components/hollow_badge.dart';
 import 'package:hollow/src/core/providers/emote_provider.dart';
+import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/ui/chat/chat_pane_shared.dart';
 import 'package:hollow/src/ui/chat/expression_picker.dart';
 import 'package:hollow/src/ui/chat/message_action_bar.dart';
@@ -367,12 +368,17 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
         _displayMessages(ref.read(channelChatProvider)[_stateKey] ?? []);
     if (index < 0 || index >= messages.length) return;
     setState(() => _highlightIndex = index);
-    _itemScrollController.scrollTo(
-      index: messages.length - 1 - index,
-      duration: const Duration(milliseconds: 300),
-      curve: Curves.easeOutCubic,
-      alignment: 0.6,
-    );
+    if (HollowDurations.animationsDisabled) {
+      _itemScrollController.jumpTo(
+          index: messages.length - 1 - index, alignment: 0.6);
+    } else {
+      _itemScrollController.scrollTo(
+        index: messages.length - 1 - index,
+        duration: const Duration(milliseconds: 300),
+        curve: HollowCurves.enter,
+        alignment: 0.6,
+      );
+    }
     Future.delayed(const Duration(milliseconds: 1500), () {
       if (mounted) setState(() => _highlightIndex = null);
     });
@@ -1482,20 +1488,26 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
 
             _buildMessageArea(hollow, messages, allMessages),
 
-            if (typingPeers.isNotEmpty) _buildTypingBar(typingPeers),
-
-            if (_replyToMessageId != null) _buildReplyPreviewBar(),
-            if (_staged.isNotEmpty) _buildStagedFilePreview(),
-            StagedLinkArea(
-              hollowLink: _stagedHollowLink,
-              previewUrl: _stagedPreviewUrl,
-              preview: _stagedPreview,
-              previewLoading: _stagedPreviewLoading,
-              onDismissHollowLink: _dismissStagedHollowLink,
-              onDismissPreview: _dismissStagedPreview,
+            TypingIndicatorHost(
+              names: _typingNames(typingPeers),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  if (_replyToMessageId != null) _buildReplyPreviewBar(),
+                  if (_staged.isNotEmpty) _buildStagedFilePreview(),
+                  StagedLinkArea(
+                    hollowLink: _stagedHollowLink,
+                    previewUrl: _stagedPreviewUrl,
+                    preview: _stagedPreview,
+                    previewLoading: _stagedPreviewLoading,
+                    onDismissHollowLink: _dismissStagedHollowLink,
+                    onDismissPreview: _dismissStagedPreview,
+                  ),
+                  _buildInputBar(hollow),
+                ],
+              ),
             ),
-
-            _buildInputBar(hollow),
           ],
         ),
       ),
@@ -1654,15 +1666,8 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
             },
           ),
           // Members and split view are server concepts; a conference shows
-          // its participants in the call area instead.
-          if (!_isConference)
-            HollowIconButton(
-              icon: LucideIcons.users,
-              label: membersOpen ? 'Hide members' : 'Show members',
-              selected: membersOpen,
-              onPressed: () =>
-                  ref.read(memberPanelProvider.notifier).state = !membersOpen,
-            ),
+          // its participants in the call area instead. Members come last,
+          // next to the panel they open.
           if (width >= 200 &&
               !_isConference &&
               ref.watch(layoutModeProvider) == LayoutMode.dock)
@@ -1671,6 +1676,14 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
               label: isSplit ? 'Close this pane' : 'Split view',
               selected: isSplit,
               onPressed: _handleSplitToggle,
+            ),
+          if (!_isConference)
+            HollowIconButton(
+              icon: LucideIcons.users,
+              label: membersOpen ? 'Hide members' : 'Show members',
+              selected: membersOpen,
+              onPressed: () =>
+                  ref.read(memberPanelProvider.notifier).state = !membersOpen,
             ),
         ],
       );
@@ -2392,14 +2405,13 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
   Widget _buildUnreadPillOverlay(List<ChannelChatMessage> allMessages) { // design-ignore: places the unread jump pill, not a label
     final unreadCount = ref.watch(unreadProvider.select((s) =>
         s.channelUnreadCounts['${widget.serverId}:${widget.channelId}'] ?? 0));
-    if (unreadCount <= 0 || !_showScrollPill) return const SizedBox.shrink();
     return Positioned(
       bottom: HollowSpacing.md,
       left: 0,
       right: 0,
       child: Center(
-        child: UnreadJumpPill(
-          count: unreadCount,
+        child: UnreadJumpFade(
+          count: _showScrollPill ? unreadCount : 0,
           onTap: () {
             _scrollToBottom();
             // The display list may be frozen, so mark seen against the TRUE
@@ -2419,20 +2431,18 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
   /// the master-keyed name lookup hits and one person shows once; our own
   /// identity is excluded so a sibling never reads as "you are typing" (see
   /// [typingMastersFor]).
-  Widget _buildTypingBar(Set<String> typingPeers) {
+  List<String> _typingNames(Set<String> typingPeers) {
+    if (typingPeers.isEmpty) return const [];
     final masters = typingMastersFor(ref, typingPeers);
     final nicknames = ref.watch(serverNicknamesProvider(widget.serverId));
     final profiles = ref.watch(profileProvider);
-    if (masters.isEmpty) return const SizedBox.shrink();
-    return TypingIndicatorBar(
-      names: masters
+    return masters
           .map((master) => serverDisplayNameFor(
                 profiles,
                 master,
                 nickname: nicknames[master] ?? '',
               ))
-          .toList(),
-    );
+          .toList();
   }
 
   Widget _buildReplyPreviewBar() {

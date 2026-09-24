@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/core/providers/gif_provider.dart';
 import 'package:hollow/src/core/providers/link_preview_settings_provider.dart';
 import 'package:hollow/src/core/providers/relay_domain_provider.dart';
@@ -158,7 +159,7 @@ class NetworkSettingsView extends ConsumerWidget {
       child: GestureDetector(
         onTap: () => onSelectRelay(domain),
         child: AnimatedContainer(
-          duration: const Duration(milliseconds: 150),
+          duration: HollowDurations.fast,
           padding: const EdgeInsets.symmetric(
             horizontal: HollowSpacing.md,
             vertical: HollowSpacing.sm,

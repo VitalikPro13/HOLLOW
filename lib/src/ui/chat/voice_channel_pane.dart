@@ -461,7 +461,7 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
             top: 8,
             child: AnimatedOpacity(
               opacity: 0.7,
-              duration: const Duration(milliseconds: 200),
+              duration: HollowDurations.fast,
               child: Container(
                 padding: const EdgeInsets.symmetric(
                   horizontal: HollowSpacing.sm,
@@ -1652,7 +1652,9 @@ class _VcChatOverlayState extends State<VcChatOverlay> {
   }
 }
 
-class _OverlaySlider extends StatefulWidget {
+/// The chat panel over a voice channel's stage. It shows and hides instantly:
+/// a width animation would re-wrap the chat text on every frame.
+class _OverlaySlider extends StatelessWidget {
   final bool visible;
   final VoidCallback onHoverEnter;
   final VoidCallback onHoverExit;
@@ -1666,71 +1668,12 @@ class _OverlaySlider extends StatefulWidget {
   });
 
   @override
-  State<_OverlaySlider> createState() => _OverlaySliderState();
-}
-
-class _OverlaySliderState extends State<_OverlaySlider>
-    with SingleTickerProviderStateMixin {
-  late final AnimationController _controller;
-  late final CurvedAnimation _curved;
-
-  @override
-  void initState() {
-    super.initState();
-    _controller = AnimationController(
-      vsync: this,
-      duration: HollowDurations.normal,
-      value: widget.visible ? 1.0 : 0.0,
-    );
-    _curved = CurvedAnimation(
-      parent: _controller,
-      curve: HollowCurves.enter,
-      reverseCurve: HollowCurves.exit,
-    );
-  }
-
-  @override
-  void didUpdateWidget(covariant _OverlaySlider oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (widget.visible != oldWidget.visible) {
-      _controller.duration = HollowDurations.normal;
-      if (widget.visible) {
-        _controller.forward();
-      } else {
-        _controller.reverse();
-      }
-    }
-  }
-
-  @override
-  void dispose() {
-    _curved.dispose();
-    _controller.dispose();
-    super.dispose();
-  }
-
-  @override
   Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: _curved,
-      builder: (context, child) {
-        if (_curved.value == 0.0) return const SizedBox.shrink();
-        return ClipRect(
-          child: Align(
-            alignment: Alignment.centerRight,
-            widthFactor: _curved.value,
-            child: FadeTransition(
-              opacity: _curved,
-              child: MouseRegion(
-                onEnter: (_) => widget.onHoverEnter(),
-                onExit: (_) => widget.onHoverExit(),
-                child: child,
-              ),
-            ),
-          ),
-        );
-      },
-      child: widget.child,
+    if (!visible) return const SizedBox.shrink();
+    return MouseRegion(
+      onEnter: (_) => onHoverEnter(),
+      onExit: (_) => onHoverExit(),
+      child: child,
     );
   }
 }

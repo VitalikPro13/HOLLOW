@@ -40,10 +40,18 @@ import 'package:hollow/src/ui/shell/friends_bar.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:url_launcher/url_launcher.dart';
 
-const double _kAvatarSize = 72;
-
 /// The ring of panel colour that lifts the avatar off the banner.
 const double _kAvatarRing = HollowSpacing.xs;
+
+/// Nickname, mute and More: three 32 px buttons, [HollowSpacing.xs] apart.
+const double _kActionsWidth = 3 * 32 + 2 * HollowSpacing.xs;
+
+/// Below this content width the Encryption row puts Verify under its text.
+const double _kVerificationStackWidth = 220;
+
+/// The avatar scales with the banner, 72 at the default width, so a narrow
+/// panel never pushes it into the icon strip.
+double _avatarSizeFor(double width) => (width * 0.26).clamp(48.0, 88.0);
 
 /// The person you are talking to, on the right of a DM, built like a server's
 /// member panel and sharing its width and seam.
@@ -102,7 +110,19 @@ class _Panel extends ConsumerWidget {
         .firstOrNull;
 
     final bannerHeight = width / 2.5;
-    final avatarTop = bannerHeight - _kAvatarSize / 2 - _kAvatarRing;
+    final avatarSize = _avatarSizeFor(width);
+    final avatarLeft = HollowSpacing.lg - _kAvatarRing;
+    final avatarTop = bannerHeight - avatarSize / 2 - _kAvatarRing;
+    // Too narrow for avatar and strip side by side: the strip moves under the
+    // name instead of sliding beneath the avatar.
+    final actionsBeside = avatarLeft +
+            avatarSize +
+            2 * _kAvatarRing +
+            HollowSpacing.lg +
+            _kActionsWidth +
+            HollowSpacing.md <=
+        width;
+    final actions = isSaved ? null : _Actions(peerId: peerId, master: master);
 
     final sections = <Widget>[
       if (aboutMe.isNotEmpty)
@@ -132,7 +152,7 @@ class _Panel extends ConsumerWidget {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           SizedBox(
-            height: bannerHeight + _kAvatarSize / 2 + _kAvatarRing,
+            height: bannerHeight + avatarSize / 2 + _kAvatarRing,
             child: Stack(
               children: [
                 Positioned(
@@ -143,15 +163,15 @@ class _Panel extends ConsumerWidget {
                   child: _Banner(peerId: peerId, height: bannerHeight),
                 ),
                 Positioned(
-                  left: HollowSpacing.lg - _kAvatarRing,
+                  left: avatarLeft,
                   top: avatarTop,
-                  child: _RingedAvatar(peerId: peerId),
+                  child: _RingedAvatar(peerId: peerId, size: avatarSize),
                 ),
-                if (!isSaved)
+                if (actions != null && actionsBeside)
                   Positioned(
                     right: HollowSpacing.md,
                     top: bannerHeight + HollowSpacing.sm,
-                    child: _Actions(peerId: peerId, master: master),
+                    child: actions,
                   ),
               ],
             ),
@@ -196,6 +216,16 @@ class _Panel extends ConsumerWidget {
               ],
             ),
           ),
+          if (actions != null && !actionsBeside)
+            // The first glyph lines up with the name: a 20 px icon sits 6 px
+            // inside its 32 px button.
+            Padding(
+              padding: const EdgeInsets.only(
+                left: HollowSpacing.lg - HollowSpacing.xs - HollowSpacing.xxs,
+                top: HollowSpacing.sm,
+              ),
+              child: Align(alignment: Alignment.centerLeft, child: actions),
+            ),
           Expanded(
             child: ListView(
               padding: const EdgeInsets.fromLTRB(HollowSpacing.lg,
@@ -264,8 +294,9 @@ class _Banner extends ConsumerWidget {
 
 class _RingedAvatar extends ConsumerWidget {
   final String peerId;
+  final double size;
 
-  const _RingedAvatar({required this.peerId});
+  const _RingedAvatar({required this.peerId, required this.size});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -280,7 +311,7 @@ class _RingedAvatar extends ConsumerWidget {
             color: hollow.surface,
             borderRadius: BorderRadius.circular(hollow.radiusLg),
           ),
-          child: HollowAvatar(peerId: peerId, size: _kAvatarSize, animate: true),
+          child: HollowAvatar(peerId: peerId, size: size, animate: true),
         ),
         Positioned(
           right: 0,
@@ -420,45 +451,62 @@ class _Verification extends ConsumerWidget {
     final hollow = HollowTheme.of(context);
     final verified = ref.watch(isPeerVerifiedProvider(master));
     void open() => showVerifyContactDialog(context, peerId: master);
-    return Row(
+    final button = verified
+        ? HollowButton.ghost(
+            compact: true,
+            onPressed: open,
+            child: const Text('View'),
+          )
+        : HollowButton.outline(
+            compact: true,
+            onPressed: open,
+            child: const Text('Verify'),
+          );
+    final text = Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Icon(
-          verified ? LucideIcons.shieldCheck : LucideIcons.shield,
-          size: 20,
-          color: verified ? hollow.success : hollow.textSecondary,
+        Text(
+          verified ? 'Verified' : 'Not verified yet',
+          style: HollowTypography.label.copyWith(
+              color: verified ? hollow.success : hollow.textPrimary),
         ),
-        const SizedBox(width: HollowSpacing.md),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                verified ? 'Verified' : 'Not verified yet',
-                style: HollowTypography.label.copyWith(
-                    color: verified ? hollow.success : hollow.textPrimary),
-              ),
-              Text(
-                'End-to-end encrypted',
-                style: HollowTypography.caption
-                    .copyWith(color: hollow.textTertiary),
-              ),
-            ],
-          ),
+        Text(
+          'End-to-end encrypted',
+          style: HollowTypography.caption.copyWith(color: hollow.textTertiary),
         ),
-        const SizedBox(width: HollowSpacing.sm),
-        verified
-            ? HollowButton.ghost(
-                compact: true,
-                onPressed: open,
-                child: const Text('View'),
-              )
-            : HollowButton.outline(
-                compact: true,
-                onPressed: open,
-                child: const Text('Verify'),
-              ),
       ],
     );
+    return LayoutBuilder(builder: (context, constraints) {
+      final stacked = constraints.maxWidth < _kVerificationStackWidth;
+      return Row(
+        crossAxisAlignment:
+            stacked ? CrossAxisAlignment.start : CrossAxisAlignment.center,
+        children: [
+          Icon(
+            verified ? LucideIcons.shieldCheck : LucideIcons.shield,
+            size: 20,
+            color: verified ? hollow.success : hollow.textSecondary,
+          ),
+          const SizedBox(width: HollowSpacing.md),
+          Expanded(
+            child: stacked
+                ? Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      text,
+                      const SizedBox(height: HollowSpacing.sm),
+                      button,
+                    ],
+                  )
+                : text,
+          ),
+          if (!stacked) ...[
+            const SizedBox(width: HollowSpacing.sm),
+            button,
+          ],
+        ],
+      );
+    });
   }
 }
 

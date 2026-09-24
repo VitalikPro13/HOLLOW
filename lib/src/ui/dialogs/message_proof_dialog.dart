@@ -92,7 +92,7 @@ class _MessageProofDialogContent extends StatefulWidget {
 
 class _MessageProofDialogContentState
     extends State<_MessageProofDialogContent>
-    with SingleTickerProviderStateMixin {
+{
   bool? _verified;
 
   /// The v2 verification result when the row is in the local DB; null means
@@ -102,57 +102,12 @@ class _MessageProofDialogContentState
   /// A proof is copyable only once Rust has produced its canonical v2 payload;
   /// everything else has no payload to put in the file.
   bool get _canExport => _v2 != null;
-  late final AnimationController _staggerController;
-  late final List<Animation<double>> _fadeAnims;
-  late final List<Animation<Offset>> _slideAnims;
-
   MessageProofData get proof => widget.proof;
-
-  static const _itemCount = 7;
 
   @override
   void initState() {
     super.initState();
-    _staggerController = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 600),
-      reverseDuration: const Duration(milliseconds: 200),
-    );
-
-    _fadeAnims = List.generate(_itemCount, (i) {
-      final start = (i * 0.1).clamp(0.0, 0.7);
-      final end = (start + 0.4).clamp(0.0, 1.0);
-      return CurvedAnimation(
-        parent: _staggerController,
-        curve: Interval(start, end, curve: Curves.easeOut),
-      );
-    });
-
-    _slideAnims = List.generate(_itemCount, (i) {
-      final start = (i * 0.1).clamp(0.0, 0.7);
-      final end = (start + 0.4).clamp(0.0, 1.0);
-      return Tween<Offset>(
-        begin: const Offset(0, 0.08),
-        end: Offset.zero,
-      ).animate(CurvedAnimation(
-        parent: _staggerController,
-        curve: Interval(start, end, curve: Curves.easeOutCubic),
-      ));
-    });
-
-    _staggerController.forward();
     _verifySignature();
-  }
-
-  @override
-  void dispose() {
-    _staggerController.dispose();
-    super.dispose();
-  }
-
-  Future<void> _closeDialog() async {
-    await _staggerController.reverse();
-    if (mounted) Navigator.of(context).pop();
   }
 
   Future<void> _verifySignature() async {
@@ -274,17 +229,6 @@ class _MessageProofDialogContentState
     }
   }
 
-  Widget _stagger(int index, {required Widget child}) {
-    final i = index.clamp(0, _itemCount - 1);
-    return SlideTransition(
-      position: _slideAnims[i],
-      child: FadeTransition(
-        opacity: _fadeAnims[i],
-        child: child,
-      ),
-    );
-  }
-
   Widget _buildStatus(bool hasSig) {
     final verified = _verified;
     if (hasSig && verified == null) {
@@ -305,101 +249,93 @@ class _MessageProofDialogContentState
     final timestamp = DateTime.fromMillisecondsSinceEpoch(proof.timestampMs);
     final fingerprint = proof.publicKeyFingerprint;
 
-    // The close X pops through here, so the stagger plays out before the exit.
-    return PopScope(
-      canPop: false,
-      onPopInvokedWithResult: (didPop, _) {
-        if (!didPop) _closeDialog();
-      },
-      child: HollowDialog(
-        title: 'Message proof',
-        showClose: true,
-        maxWidth: 520,
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            _stagger(0, child: AnimatedSwitcher(
-              duration: HollowDurations.normal,
-              transitionBuilder: (child, anim) =>
-                  FadeTransition(opacity: anim, child: child),
-              child: _buildStatus(hasSig),
-            )),
-            const SizedBox(height: HollowSpacing.md),
-            _stagger(1,
-                child: _MessagePreview(hollow: hollow, proof: proof)),
-            const SizedBox(height: HollowSpacing.lg),
-            _stagger(2, child: _InfoRow(
+    return HollowDialog(
+      title: 'Message proof',
+      showClose: true,
+      maxWidth: 520,
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          AnimatedSwitcher(
+            duration: HollowDurations.normal,
+            transitionBuilder: (child, anim) =>
+                FadeTransition(opacity: anim, child: child),
+            child: _buildStatus(hasSig),
+          ),
+          const SizedBox(height: HollowSpacing.md),
+          _MessagePreview(hollow: hollow, proof: proof),
+          const SizedBox(height: HollowSpacing.lg),
+          _InfoRow(
+            hollow: hollow,
+            label: 'Sender peer ID',
+            value: proof.senderPeerId,
+            mono: true,
+            copyable: true,
+          ),
+          const SizedBox(height: HollowSpacing.sm),
+          _InfoRow(
+            hollow: hollow,
+            label: 'Timestamp',
+            value:
+                '${timestamp.toUtc().toIso8601String()} (${proof.timestampMs})',
+          ),
+          if (proof.messageId != null) ...[
+            const SizedBox(height: HollowSpacing.sm),
+            _InfoRow(
               hollow: hollow,
-              label: 'Sender peer ID',
-              value: proof.senderPeerId,
+              label: 'Message ID',
+              value: proof.messageId!,
               mono: true,
               copyable: true,
-            )),
-            const SizedBox(height: HollowSpacing.sm),
-            _stagger(3, child: _InfoRow(
-              hollow: hollow,
-              label: 'Timestamp',
-              value:
-                  '${timestamp.toUtc().toIso8601String()} (${proof.timestampMs})',
-            )),
-            if (proof.messageId != null) ...[
-              const SizedBox(height: HollowSpacing.sm),
-              _stagger(4, child: _InfoRow(
-                hollow: hollow,
-                label: 'Message ID',
-                value: proof.messageId!,
-                mono: true,
-                copyable: true,
-              )),
-            ],
-            if (fingerprint != null) ...[
-              const SizedBox(height: HollowSpacing.sm),
-              _stagger(5, child: _InfoRow(
-                hollow: hollow,
-                label: 'Public key fingerprint',
-                value: fingerprint,
-                mono: true,
-                copyable: true,
-              )),
-            ],
-            if (hasSig) ...[
-              const SizedBox(height: HollowSpacing.sm),
-              _stagger(6, child: _InfoRow(
-                hollow: hollow,
-                label: 'Ed25519 signature',
-                value: proof.signature!,
-                mono: true,
-                copyable: true,
-                truncate: true,
-              )),
-            ],
-          ],
-        ),
-        // Copy and Export need Rust's canonical v2 payload, so they key on
-        // `_canExport` and not on "has a signature".
-        leadingActions: [
-          if (_canExport) ...[
-            HollowButton.ghost(
-              onPressed: () {
-                Clipboard.setData(ClipboardData(text: _proofJsonString()));
-                HollowToast.show(
-                  context,
-                  'Proof copied to clipboard',
-                  type: HollowToastType.success,
-                );
-              },
-              icon: const Icon(LucideIcons.copy, size: 14),
-              child: const Text('Copy proof'),
             ),
-            HollowButton.ghost(
-              onPressed: () => _exportProofFile(context),
-              icon: const Icon(LucideIcons.download, size: 14),
-              child: const Text('Export proof'),
+          ],
+          if (fingerprint != null) ...[
+            const SizedBox(height: HollowSpacing.sm),
+            _InfoRow(
+              hollow: hollow,
+              label: 'Public key fingerprint',
+              value: fingerprint,
+              mono: true,
+              copyable: true,
+            ),
+          ],
+          if (hasSig) ...[
+            const SizedBox(height: HollowSpacing.sm),
+            _InfoRow(
+              hollow: hollow,
+              label: 'Ed25519 signature',
+              value: proof.signature!,
+              mono: true,
+              copyable: true,
+              truncate: true,
             ),
           ],
         ],
       ),
+      // Copy and Export need Rust's canonical v2 payload, so they key on
+      // `_canExport` and not on "has a signature".
+      leadingActions: [
+        if (_canExport) ...[
+          HollowButton.ghost(
+            onPressed: () {
+              Clipboard.setData(ClipboardData(text: _proofJsonString()));
+              HollowToast.show(
+                context,
+                'Proof copied to clipboard',
+                type: HollowToastType.success,
+              );
+            },
+            icon: const Icon(LucideIcons.copy, size: 14),
+            child: const Text('Copy proof'),
+          ),
+          HollowButton.ghost(
+            onPressed: () => _exportProofFile(context),
+            icon: const Icon(LucideIcons.download, size: 14),
+            child: const Text('Export proof'),
+          ),
+        ],
+      ],
     );
   }
 }

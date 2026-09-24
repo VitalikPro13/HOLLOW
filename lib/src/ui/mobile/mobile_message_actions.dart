@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/ui/components/hollow_divider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
@@ -123,8 +124,8 @@ class _MessageActionsSheetState extends State<_MessageActionsSheet> {
             Flexible(
               child: SingleChildScrollView(
                 child: AnimatedSize(
-                  duration: const Duration(milliseconds: 200),
-                  curve: Curves.easeOutCubic,
+                  duration: HollowDurations.fast,
+                  curve: HollowCurves.enter,
                   child: switch (_view) {
                     _SheetView.actions => _buildActionsView(hollow),
                     _SheetView.allEmojis => _buildAllEmojisView(hollow),

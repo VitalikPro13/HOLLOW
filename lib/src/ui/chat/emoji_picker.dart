@@ -16,6 +16,7 @@ import '../../core/services/image_pick.dart';
 import '../../rust/api/emotes.dart' as emotes_api;
 import '../../rust/api/network.dart' as network_api;
 import '../../rust/api/storage.dart' as storage_api;
+import '../../theme/hollow_shadows.dart';
 import '../../theme/hollow_spacing.dart';
 import '../../theme/hollow_theme.dart';
 import '../../theme/hollow_typography.dart';
@@ -326,6 +327,7 @@ class _EmojiPickerOverlay extends StatelessWidget {
           top: top,
           child: PopupAnimator(
             controller: anim,
+            rise: true,
             alignment:
                 flippedBelow ? Alignment.topRight : Alignment.bottomRight,
             child: Material(
@@ -335,18 +337,12 @@ class _EmojiPickerOverlay extends StatelessWidget {
                 height: pickerHeight,
                 decoration: BoxDecoration(
                   color: hollow.overlay,
-                  borderRadius: BorderRadius.circular(hollow.radiusMd),
+                  borderRadius: BorderRadius.circular(hollow.radiusLg),
                   border: Border.all(color: hollow.border),
-                  boxShadow: [
-                    BoxShadow(
-                      color: Colors.black.withValues(alpha: 0.25),
-                      blurRadius: 12,
-                      offset: const Offset(0, 4),
-                    ),
-                  ],
+                  boxShadow: HollowShadows.float,
                 ),
                 child: ClipRRect(
-                  borderRadius: BorderRadius.circular(hollow.radiusMd),
+                  borderRadius: BorderRadius.circular(hollow.radiusLg),
                   child: EmojiPickerBody(
                     serverId: serverId,
                     onSelect: onSelect,

@@ -20,15 +20,18 @@ Future<T?> showHollowDialog<T>({
     barrierColor: HollowTheme.of(context).scrim,
     transitionDuration: HollowDurations.normal,
     transitionBuilder: (context, animation, secondaryAnimation, child) {
+      // One duration per route, so the exit runs in the last 60% of the
+      // reverse: a dialog leaves in about 150 ms, quicker than it came.
       final curvedAnimation = CurvedAnimation(
         parent: animation,
         curve: HollowCurves.enter,
-        reverseCurve: HollowCurves.exit,
+        reverseCurve: const Interval(0.4, 1, curve: HollowCurves.exit),
       );
       return FadeTransition(
         opacity: curvedAnimation,
         child: ScaleTransition(
-          scale: Tween<double>(begin: 0.96, end: 1.0).animate(curvedAnimation),
+          scale: Tween<double>(begin: HollowMotion.popoverScale, end: 1.0)
+              .animate(curvedAnimation),
           child: child,
         ),
       );
@@ -38,7 +41,7 @@ Future<T?> showHollowDialog<T>({
       // content shifts up, and strip viewInsets so a builder cannot double-pad.
       return AnimatedPadding(
         padding: MediaQuery.viewInsetsOf(context),
-        duration: const Duration(milliseconds: 100),
+        duration: HollowDurations.exit,
         curve: Curves.decelerate,
         child: MediaQuery.removeViewInsets(
           context: context,

@@ -11,6 +11,7 @@ import 'package:hollow/src/core/providers/voice_channel_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
+import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/mobile/mobile_call_video_view.dart';
 import 'package:hollow/src/ui/mobile/mobile_page_route.dart';
@@ -44,11 +45,8 @@ class _MobileIncomingCallOverlayState
   @override
   void initState() {
     super.initState();
-    _controller = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 250),
-    );
-    _fadeAnim = CurvedAnimation(parent: _controller, curve: Curves.easeOut);
+    _controller = AnimationController(vsync: this);
+    _fadeAnim = CurvedAnimation(parent: _controller, curve: HollowCurves.enter);
   }
 
   @override
@@ -127,6 +125,10 @@ class _MobileIncomingCallOverlayState
           vc.isInVoiceChannel ? (vc.currentChannelName ?? 'voice') : null;
     }
 
+    // Durations read per start, so a live Reduce motion change applies.
+    _controller
+      ..duration = HollowDurations.normal
+      ..reverseDuration = HollowDurations.fast;
     if (isVisible && !_wasVisible) {
       _controller.forward(from: 0);
       _startRingtone();

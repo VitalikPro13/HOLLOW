@@ -20,7 +20,7 @@ An app pane anchored to the window, never a centred max-width group (design lang
 - **Inbox** (`_HomeMain`, `Expanded`): a FIXED title row (greeting, search, New message) over ONE `CustomScrollView` that spans the pane with its padding inside, so the scrollbar sits on the panel's edge. Everything below the title scrolls together (Needs Attention, Get Set Up, Conversations), because variable-height strips above an `Expanded` list overflow under interface zoom.
 - **Side panel** (`HomeRail`): 300 px (`kHomeRailWidth`), `hollow.surface` with a left hairline, full height, like the member panel. Leaves below 840 px of pane (`kHomeRailBreakpoint`, `homeShowsRail()`), never squeezes.
 - Non-row content is inset by the rows' own padding (`kHomeRowInset` in the inbox, `_Inset` md in the panel) so headings, cards and row text share one left edge and only hover fills bleed past it.
-- Startup reveal: fade + small slide via `StartupRevealScope.interval()` (inbox 0.30-0.55, panel 0.40-0.65).
+- No startup animation of its own: it appears under the shell's one startup fade.
 
 ## Title row
 
@@ -194,7 +194,7 @@ Your Stats is Settings > Devices `SyncCheckCard`; the status card and relay bars
    - "Outgoing" — shows `outgoing.length` count
    - "Add Friend" — no count, icon `LucideIcons.userPlus`
 
-3. **Tab content (Expanded):** `AnimatedSwitcher` with `HollowDurations.fast`. Switch expression maps `_activeTab` to:
+3. **Tab content (Expanded):** switching tabs is instant. Switch expression maps `_activeTab` to:
    - `_FriendsTab.friends` -> `_FriendsListTab(accepted: accepted)`
    - `_FriendsTab.favourites` -> `_FavouritesReorderTab(accepted: accepted)`
    - `_FriendsTab.incoming` -> `_RequestsTab(requests: incoming, direction: 'incoming')`

@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
+import 'package:hollow/src/ui/animations/hollow_curves.dart';
 
 /// Long-press wrapper with accent-tint highlight + full-width hit target.
 /// Used by the mobile chat route and the mobile archive viewers.
@@ -33,8 +34,8 @@ class _LongPressMessageState extends State<LongPressMessage> {
       onLongPressCancel: () => setState(() => _pressing = false),
       onLongPressEnd: (_) => setState(() => _pressing = false),
       child: AnimatedContainer(
-        duration: const Duration(milliseconds: 150),
-        curve: Curves.easeOut,
+        duration: HollowDurations.fast,
+        curve: HollowCurves.enter,
         decoration: BoxDecoration(
           color: _pressing ? hollow.accent.withValues(alpha: 0.08) : null,
           borderRadius: BorderRadius.circular(hollow.radiusMd),

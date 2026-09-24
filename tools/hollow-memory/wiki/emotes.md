@@ -126,7 +126,7 @@ The in-app picker over the GIF proxy. **STATUS: complete.** The "searches never 
 - **Context menu z-order** — the picker is a raw OverlayEntry above navigator routes, so `showDialog` renders BEHIND it; `_showEmoteContextMenu` inserts its own topmost OverlayEntry (double-remove guarded) instead.
 - **`ui/chat/message_text_parser.dart`** — `_TokenKind.customEmote` WidgetSpan; **`reaction_bar.dart`** renders token reactions as EmoteImage pills.
 - **`ui/settings/emotes_tab.dart`** — server settings Emotes tab (view for all, add/remove gated on `Permission.manageEmotes`, 50 cap); registered in `server_settings_panel.dart`.
-- Composer entry points (2026-09-24): the ONE expression button inside the composer opens `showExpressionPicker` (desktop) / `showExpressionSheet` (mobile), whose Emoji tab is `EmojiPickerBody`; a pick goes to `_insertEmojiAtCursor` (desktop) / `_insertAtCursor` (mobile).
+- Composer entry points (2026-09-24): the ONE expression button inside the composer opens `showExpressionPicker` (desktop popover) or, on the phone, swaps the keyboard for the public `ExpressionPanel` in a `MobileKeyboardPanelDock`; its Emoji tab is `EmojiPickerBody`. A pick goes to `_insertEmojiAtCursor` (desktop) / `_insertAtCursor(refocus: false)` (phone, so the keyboard does not return over the panel).
 
 ## Tests
 

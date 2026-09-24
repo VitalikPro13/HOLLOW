@@ -171,24 +171,37 @@ Lucide (`lucide_icons_flutter`), plus `brand_icons.dart` and `atlas_icons`. Size
 
 ### 3.8 Motion
 
-`HollowDurations` and `HollowCurves` in `lib/src/ui/animations/hollow_curves.dart`. These are today's values, kept as they are so nothing moves differently than it does now:
+`HollowDurations`, `HollowCurves` and `HollowMotion` in `lib/src/ui/animations/hollow_curves.dart`. Set in the animation pass (2026-09-24):
 
 | Token | Duration | Use |
 |---|---|---|
-| `fast` | 150 ms | Press, hover colour, state layers. |
-| `normal` | 250 ms | Tooltip, dropdown, chip, toast, popover. |
-| `slow` | 400 ms | Route and sheet transitions. |
+| `exit` | 100 ms | Something leaving: a popover, a menu, a tooltip. Also the press itself. |
+| `fast` | 150 ms | Popover and menu entrance, press release, hover colour, toggles, collapses. |
+| `normal` | 250 ms | Dialogs, toasts, notification cards, sheets, pushed pages. |
+| `slow` | 400 ms | Progress bars filling. Nothing a person waits on. |
 
-Curves: `HollowCurves.enter` (ease-out-cubic) brings something in, `subtle` (ease-in-out) moves something already on screen, `exit` (ease-in-cubic) takes something away, `spring` is the press release only.
+Curves: `HollowCurves.enter` (ease-out-cubic) brings something in, `subtle` (ease-in-out) moves something already on screen, `exit` (ease-in-cubic) is the REVERSE curve of an enter/exit pair (a reverse curve runs on t going 1 to 0, so ease-in there reads as leaving quickly and settling). **Nothing overshoots:** there is no spring, elastic or bounce curve, and adding one is a review failure.
 
-`HollowDurations.animationsDisabled` turns every token to zero, which is how reduce motion reaches widgets that never go through a route.
+**What moves and what does not**
+- **Switching what a region shows is instant:** a conversation, a channel, a server, a tab inside a panel or a phone tab. No cross-fade.
+- **Side panels toggle instantly** (member panel, DM profile, channel sidebar, help). Animating a width re-wraps the chat text on every frame.
+- **Only what arrives on top moves:** popovers, menus, dialogs, toasts, notification cards, sheets, pushed pages.
+- Frequent actions animate nothing beyond the hover colour and the press: send, react, hover a message, open the hover bar.
 
-- Transform and opacity only. Enter from scale 0.96 plus a fade, never from zero.
-- Popovers scale from their trigger, dialogs from centre.
-- **Hover never moves layout and never changes font weight.** No bounce, ever.
-- Things done a hundred times a day (send, switch channel, open a menu) animate nothing beyond the 120 ms colour.
-- Reduce motion keeps fades and drops the rest, only through `ReduceMotionController` and `hollowMobileRoute()`.
+**How things arrive**
+- **Travel is 8 px (`HollowMotion.rise`), whatever the size.** A small popover or menu grows from its trigger at `HollowMotion.popoverScale` (0.96), scaled around the click point, never a screen corner. A big panel (the pickers, anything over about 300 px) does not scale, because 0.94 on 440 px moves the far corner 25 px and reads as a stretchy slide: it fades and rises 8 px toward its place instead (`PopupAnimator(rise: true)`). Toasts rise 8 px, notification cards step 8 px in from the edge, the incoming call card drops 8 px.
+- **The one exception is a surface attached to a screen edge and dismissed by a gesture** (bottom sheets, pushed phone pages, the phone's top banner): it travels its full size, because the finger follows it back.
+- Exits are quicker than entrances and play the same motion in reverse; a popover's barrier stops taking clicks the moment its exit starts.
+- Dialogs scale from 0.96 at the centre over a flat scrim.
+- Transform and opacity only.
+
+**Rules that stay**
+- **Hover never moves layout and never changes font weight.** Selection never animates a font weight either.
+- **Never animate a colour from `Colors.transparent`** (it lerps through black): animate from the target colour at zero alpha.
+- Read durations when the animation starts (`controller.duration = HollowDurations.fast` before `forward()`), never once in `initState`, so a live Reduce motion change reaches widgets already on screen. `HollowDurations.animationsDisabled` turns every token to zero.
+- Reduce motion drops movement and keeps state: a toggle still flips, a spinner still spins, an error still shows (its shake does not). Only through `ReduceMotionController` and `hollowMobileRoute()`.
 - A running `Ticker` requests a frame every vsync. Decorative motion is a `Timer` plus a `GatedNotifier`, never an `AnimationController`. See `feedback_ticker_is_a_frame_request`.
+- The phone's pushed pages take an edge swipe back on iOS (Android's system gesture owns the edge there).
 
 ### 3.9 State layers
 

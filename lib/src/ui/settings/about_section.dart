@@ -320,11 +320,7 @@ class _BrandHoverBoxState extends State<_BrandHoverBox> {
                   : hollow.elevated.withValues(alpha: 0.0),
               borderRadius: BorderRadius.circular(hollow.radiusMd),
             ),
-            child: AnimatedScale(
-              scale: _hovering ? 1.15 : 1.0,
-              duration: HollowDurations.fast,
-              child: widget.iconBuilder(_hovering, hollow),
-            ),
+            child: widget.iconBuilder(_hovering, hollow),
           ),
         ),
       ),

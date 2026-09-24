@@ -19,11 +19,8 @@ import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
-import 'package:hollow/src/ui/animations/reveal_widgets.dart';
-import 'package:hollow/src/ui/animations/selection_shimmer.dart';
 import 'package:hollow/src/ui/dialogs/storage_dashboard_dialog.dart';
 import 'package:hollow/src/ui/shell/channel_context_menus.dart';
-import 'package:hollow/src/ui/animations/startup_reveal.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/friends_provider.dart';
@@ -172,29 +169,7 @@ class ChannelSidebar extends StatelessWidget {
       return const SizedBox.shrink();
     }
 
-    final sidebarReveal =
-        StartupRevealScope.interval(context, 0.12, 0.30);
-    final userBarReveal =
-        StartupRevealScope.interval(context, 0.50, 0.60);
-
-    Widget? userBar;
-    if (showUserBar) {
-      userBar = const UserBar();
-      if (userBarReveal != null) {
-        userBar = FadeTransition(
-          opacity: userBarReveal,
-          child: SlideTransition(
-            position: Tween<Offset>(
-              begin: const Offset(0, 0.5),
-              end: Offset.zero,
-            ).animate(userBarReveal),
-            child: userBar,
-          ),
-        );
-      }
-    }
-
-    Widget sidebar = Container(
+    return Container(
       width: width,
       decoration: BoxDecoration(
         color: hollow.surface,
@@ -217,17 +192,11 @@ class ChannelSidebar extends StatelessWidget {
             return Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                AnimatedSwitcher(
-                  duration: HollowDurations.fast,
-                  child: _buildHeader(context, hollow, bannerHeight),
-                ),
+                _buildHeader(context, hollow, bannerHeight),
 
+                // Switching between Home and a server is instant.
                 Expanded(
-                  child: AnimatedSwitcher(
-                    duration: HollowDurations.normal,
-                    switchInCurve: HollowCurves.enter,
-                    switchOutCurve: HollowCurves.exit,
-                    child: selectedServer != null
+                  child: selectedServer != null
                         ? _ServerContent(
                             key: ValueKey('server-${selectedServer!.serverId}'),
                             hollow: hollow,
@@ -250,24 +219,16 @@ class ChannelSidebar extends StatelessWidget {
                             lastMessage: lastMessage,
                             formatTime: formatTime,
                           ),
-                  ),
                 ),
 
                 const VoiceChannelPanel(),
 
-                ?userBar,
+                if (showUserBar) const UserBar(),
               ],
             );
           },
         ),
       ),
-    );
-
-    return RevealClip(
-      animation: sidebarReveal,
-      axis: Axis.horizontal,
-      alignment: Alignment.centerLeft,
-      child: sidebar,
     );
   }
 
@@ -382,8 +343,6 @@ class ChannelSidebar extends StatelessWidget {
 
   Widget _buildHeaderRow(BuildContext context, HollowTheme hollow) {
     final label = selectedServer?.name ?? 'Direct Messages';
-    final headerTextReveal =
-        StartupRevealScope.interval(context, 0.25, 0.40);
 
     return Row(
         children: [
@@ -392,9 +351,8 @@ class ChannelSidebar extends StatelessWidget {
             // to keep it in the bar at high OS text size.
             child: MediaQuery.withClampedTextScaling(
               maxScaleFactor: 1.3,
-              child: TypewriterText(
-                text: label,
-                animation: headerTextReveal,
+              child: Text(
+                label,
                 style: HollowTypography.subheading.copyWith(
                   color: hollow.textPrimary,
                   fontWeight: FontWeight.w600,
@@ -666,7 +624,7 @@ class _AnimatedChannelTile extends StatelessWidget {
   Widget build(BuildContext context) {
     return AnimatedSize(
       duration: HollowDurations.fast,
-      curve: Curves.easeOutCubic,
+      curve: HollowCurves.enter,
       alignment: Alignment.topCenter,
       child: SizedBox(
         height: visible ? null : 0,
@@ -754,6 +712,7 @@ class _CategoryHeaderState extends State<_CategoryHeader> {
             AnimatedRotation(
               turns: _collapsed ? -0.25 : 0,
               duration: HollowDurations.fast,
+              curve: HollowCurves.enter,
               child: Icon(LucideIcons.chevronDown,
                   size: 10, color: widget.hollow.textSecondary),
             ),
@@ -1040,14 +999,6 @@ class _SavedMessagesCard extends StatelessWidget {
       ),
     );
 
-    if (isSelected) {
-      card = SelectionShimmer(
-        highlightColor: hollow.accent.withValues(alpha: 0.12),
-        borderRadius: radius,
-        child: card,
-      );
-    }
-
     return Padding(
       padding: evenListRowPadding(context,
           inset: HollowSpacing.sm, vertical: HollowSpacing.xxs),
@@ -1267,9 +1218,8 @@ class _ChannelTile extends ConsumerWidget {
         horizontal: HollowSpacing.sm + 2,
         vertical: HollowSpacing.sm,
       ),
-      child: AnimatedDefaultTextStyle(
-        duration: HollowDurations.fast,
-        curve: HollowCurves.subtle,
+      // Not animated: a weight tween shifts the name's width every frame.
+      child: DefaultTextStyle(
         style: HollowTypography.body.copyWith(
           color: isSelected || hasUnread
               ? hollow.textPrimary
@@ -1316,14 +1266,6 @@ class _ChannelTile extends ConsumerWidget {
         ),
       ),
     );
-
-    if (isSelected) {
-      tile = SelectionShimmer(
-        highlightColor: hollow.accent.withValues(alpha: 0.12),
-        borderRadius: radius,
-        child: tile,
-      );
-    }
 
     return ContextMenuTarget(
       semanticLabel: 'Channel actions',
@@ -1434,15 +1376,6 @@ class _VoiceChannelTileState extends ConsumerState<_VoiceChannelTile> {
       ),
     );
 
-    if (isConnected) {
-      channelRow = SelectionShimmer(
-        highlightColor: hollow.accent.withValues(alpha: 0.12),
-        borderRadius: radius,
-        vertical: true,
-        child: channelRow,
-      );
-    }
-
     // The channel row only: participant rows below keep their own secondary-tap
     // volume popup.
     channelRow = ContextMenuTarget(
@@ -1525,7 +1458,7 @@ class _AnimatedParticipantRowState extends State<_AnimatedParticipantRow>
     super.initState();
     _controller = AnimationController(
       vsync: this,
-      duration: HollowDurations.animationsDisabled ? Duration.zero : const Duration(milliseconds: 180),
+      duration: HollowDurations.fast,
     );
     if (widget.leaving) {
       _controller.value = 1.0;

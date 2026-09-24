@@ -394,7 +394,7 @@ Only one row shows its bar at a time: `claim(key, forceClose)` closes the previo
 The old version inserted a highlight OverlayEntry and a bar OverlayEntry at the row's position measured on hover, so any scroll stranded them over the wrong message, and each pane hid it by calling `dismissAll()` on every ScrollUpdate. Now:
 
 - **Highlight:** painted by the row itself, a `DecoratedBox` behind the message driven by `_highlighted` (row hovered OR bar hovered), colour `hollow.rowHover` (half a step from canvas to `elevated`, so a card inside the row still shows). No layout change, scrolls with the row.
-- **Bar:** an OverlayEntry of `Positioned.fromRect(list viewport, extended up by half the bar) > ClipRect > Stack > CompositedTransformFollower(link: the row's LayerLink, targetAnchor: topRight, followerAnchor: centerRight, offset -16)`. It straddles the row's top edge and the compositor carries it with the row. The theme is read from the ENTRY's context so a theme switch repaints it.
+- **Bar:** an OverlayEntry of `Positioned.fromRect(list viewport, extended up by half the bar) > ClipRect > Stack > CompositedTransformFollower(link: the row's LayerLink, targetAnchor: centerRight, followerAnchor: centerRight, offset -16)`. It is centred vertically on its row, so the pointer reaches it without crossing into the row above and losing the hover; the compositor carries it with the row. The half-bar extension above the list keeps a compact top row's bar from being cut. The theme is read from the ENTRY's context so a theme switch repaints it.
 - **Handoff:** row exit starts a 60 ms timer; entering the bar cancels it (overlay regions are opaque, so the row always sees the exit first). A scroll under a still pointer moves the hover to the next row by itself (MouseTracker re-hit-tests after frames).
 - Pinned by `test/widget/message_hover_test.dart`.
 
@@ -624,7 +624,7 @@ Unit tests: `test/hollow_link_utils_test.dart`.
 
 Top-level function: `showEmojiPicker({context, anchorPosition, onSelect, serverId})`.
 
-Creates an `OverlayEntry` (360x440, anchor-clamped) with a dismiss barrier hosting `EmojiPickerBody`. `onSelect` receives either a Unicode emoji OR a custom-emote wire token `[e:name:hash]` — callers treat both as opaque strings. Teardown goes through ONE `removed`-guarded closure: a rapid double-tap fires onSelect twice before the removal frame builds out, and a second `entry.remove()` crashes (see memory `feedback_textfield_overlay_selectioncontrols`; regression tests in `test/widget/emoji_picker_crash_test.dart`).
+Creates an `OverlayEntry` (360x440, anchor-clamped) with a dismiss barrier hosting `EmojiPickerBody` on a `radiusLg` card with `HollowShadows.float`. It enters through `PopupAnimator(rise: true)`: a fade and an 8 px rise toward its anchor, not a scale (the GIF and sticker pickers do the same). `onSelect` receives either a Unicode emoji OR a custom-emote wire token `[e:name:hash]` — callers treat both as opaque strings. Teardown goes through ONE `removed`-guarded closure: a rapid double-tap fires onSelect twice before the removal frame builds out, and a second `entry.remove()` crashes (see memory `feedback_textfield_overlay_selectioncontrols`; regression tests in `test/widget/emoji_picker_crash_test.dart`).
 
 ### EmojiPickerBody (public, reusable)
 
@@ -646,7 +646,7 @@ Creates an `OverlayEntry` (360x440, anchor-clamped) with a dismiss barrier hosti
 
 ## ExpressionPicker (2026-09-24)
 
-**File:** `lib/src/ui/chat/expression_picker.dart`. The composer's ONE picker for emoji, GIFs and stickers, replacing three composer buttons. `showExpressionPicker()` (desktop Overlay host, 360 x 440, above its button, flips below when there is no room, steps aside via `hidden` while an emoji-tab dialog runs, #76) and `showExpressionSheet()` (phone, `showHollowSheet` at 62% height). Tabs Emoji / GIFs / Stickers with a 2 px accent bar under the open one (48 tall on touch); each tab is the existing body (`EmojiPickerBody`, `GifPickerBody`, `StickerPickerBody`) and ONLY the open tab is built, so the GIF tab never calls the proxy unless opened. The last tab is remembered for the run. An emoji inserts and closes; a GIF or sticker SENDS and the picker stays open (#36); sharing a pack closes it. The emoji body's first chip is "Standard" (was "Emoji", which repeated the tab).
+**File:** `lib/src/ui/chat/expression_picker.dart`. The composer's ONE picker for emoji, GIFs and stickers, replacing three composer buttons. `showExpressionPicker()` (desktop Overlay host, 360 x 440, above its button, flips below when there is no room, steps aside via `hidden` while an emoji-tab dialog runs, #76; enters through `PopupAnimator(rise: true)`, fading and rising 8 px from its button side rather than scaling). The tabs themselves are the public `ExpressionPanel`, which the phone places in the keyboard's slot under its composer (`MobileKeyboardPanelDock`, wiki ui_mobile); there is no sheet. Tabs Emoji / GIFs / Stickers with a 2 px accent bar under the open one (48 tall on touch); each tab is the existing body (`EmojiPickerBody`, `GifPickerBody`, `StickerPickerBody`) and ONLY the open tab is built, so the GIF tab never calls the proxy unless opened. The last tab is remembered for the run. On desktop an emoji inserts and closes; on the phone the panel stays open for the next emoji. A GIF or sticker SENDS and the picker stays open (#36); sharing a pack closes it. The emoji body's first chip is "Standard" (was "Emoji", which repeated the tab).
 
 ## VoiceRecorderBar
 
@@ -724,7 +724,7 @@ Row:
   HollowPressable (send icon, accent background, textOnAccent color) -- Send
 ```
 
-The red recording dot pulses between 35% and 100% opacity on a 900ms cycle.
+The red recording dot pulses between 35% and 100% opacity on a 900ms cycle; under Reduce motion it holds solid, switching live with `ReduceMotionController.effective`.
 
 ---
 

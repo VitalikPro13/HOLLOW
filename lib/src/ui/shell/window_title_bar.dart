@@ -7,7 +7,6 @@ import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
-import 'package:hollow/src/ui/animations/startup_reveal.dart';
 import 'package:hollow/src/ui/annotation/annotation_toggle_button.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -31,12 +30,10 @@ class WindowTitleBar extends StatelessWidget {
 
   Widget _buildMacOS(BuildContext context) {
     final hollow = HollowTheme.of(context);
-    final brandReveal = StartupRevealScope.interval(context, 0.0, 0.15);
-    final buttonsReveal = StartupRevealScope.interval(context, 0.08, 0.20);
 
     // The title bar is fixed chrome that traffic-light alignment depends on, so
     // the brand label's scale is capped rather than allowed to clip.
-    Widget title = MediaQuery.withClampedTextScaling(
+    final title = MediaQuery.withClampedTextScaling(
       maxScaleFactor: 1.3,
       child: Text(
         'Hollow',
@@ -47,17 +44,10 @@ class WindowTitleBar extends StatelessWidget {
         ),
       ),
     );
-    if (brandReveal != null) {
-      title = FadeTransition(opacity: brandReveal, child: title);
-    }
-
-    Widget annotate = const Row(
+    const annotate = Row(
       mainAxisSize: MainAxisSize.min,
       children: [AnnotationToggleButton(), ZoomIndicator()],
     );
-    if (buttonsReveal != null) {
-      annotate = FadeTransition(opacity: buttonsReveal, child: annotate);
-    }
 
     return Container(
       height: 32,
@@ -71,8 +61,8 @@ class WindowTitleBar extends StatelessWidget {
           Center(
             child: IgnorePointer(child: title),
           ),
-          Padding(
-            padding: const EdgeInsets.only(left: _macTrafficLightGap),
+          const Padding(
+            padding: EdgeInsets.only(left: _macTrafficLightGap),
             child: Align(
               alignment: Alignment.centerLeft,
               child: annotate,
@@ -85,10 +75,8 @@ class WindowTitleBar extends StatelessWidget {
 
   Widget _buildWindows(BuildContext context) {
     final hollow = HollowTheme.of(context);
-    final brandReveal = StartupRevealScope.interval(context, 0.0, 0.15);
-    final buttonsReveal = StartupRevealScope.interval(context, 0.08, 0.20);
 
-    Widget branding = Padding(
+    final branding = Padding(
       padding: const EdgeInsets.only(left: HollowSpacing.lg),
       // Fixed-height chrome, so the brand label's scale is capped.
       child: MediaQuery.withClampedTextScaling(
@@ -104,14 +92,7 @@ class WindowTitleBar extends StatelessWidget {
       ),
     );
 
-    if (brandReveal != null) {
-      branding = FadeTransition(
-        opacity: brandReveal,
-        child: branding,
-      );
-    }
-
-    Widget buttons = const Row(
+    const buttons = Row(
       mainAxisSize: MainAxisSize.min,
       children: [
         ZoomIndicator(),
@@ -122,13 +103,6 @@ class WindowTitleBar extends StatelessWidget {
         _CloseButton(),
       ],
     );
-
-    if (buttonsReveal != null) {
-      buttons = FadeTransition(
-        opacity: buttonsReveal,
-        child: buttons,
-      );
-    }
 
     return Container(
       height: 32,

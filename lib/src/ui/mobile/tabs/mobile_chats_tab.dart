@@ -937,7 +937,8 @@ class _ServerRow extends ConsumerWidget {
               ],
               AnimatedRotation(
                 turns: isExpanded ? 0.5 : 0.0,
-                duration: HollowDurations.normal,
+                duration: HollowDurations.fast,
+                curve: HollowCurves.enter,
                 child: Icon(
                   LucideIcons.chevronDown,
                   size: 20,
@@ -955,7 +956,8 @@ class _ServerRow extends ConsumerWidget {
           ),
           crossFadeState:
               isExpanded ? CrossFadeState.showSecond : CrossFadeState.showFirst,
-          duration: HollowDurations.normal,
+          duration: HollowDurations.fast,
+          sizeCurve: HollowCurves.enter,
         ),
       ],
     );
@@ -1255,7 +1257,8 @@ class _CategoryHeaderRow extends StatelessWidget {
         children: [
           AnimatedRotation(
             turns: isCollapsed ? -0.25 : 0,
-            duration: const Duration(milliseconds: 200),
+            duration: HollowDurations.fast,
+            curve: HollowCurves.enter,
             child: Icon(LucideIcons.chevronDown, size: 14, color: hollow.textSecondary),
           ),
           const SizedBox(width: HollowSpacing.xs),

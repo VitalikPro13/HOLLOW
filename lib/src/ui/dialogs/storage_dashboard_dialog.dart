@@ -2,6 +2,7 @@
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/vault_status_provider.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
@@ -705,8 +706,8 @@ class _StorageDashboardContentState
             Container(color: hollow.border),
             TweenAnimationBuilder<double>(
               tween: Tween(end: clamped),
-              duration: const Duration(milliseconds: 500),
-              curve: Curves.easeOutCubic,
+              duration: HollowDurations.slow,
+              curve: HollowCurves.enter,
               builder: (context, value, _) => FractionallySizedBox(
                 widthFactor: value,
                 child: Container(

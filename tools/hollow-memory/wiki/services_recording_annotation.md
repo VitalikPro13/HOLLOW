@@ -40,7 +40,7 @@ File: `lib/src/core/providers/recording_provider.dart`
 
 File: `lib/src/ui/components/recording_indicator.dart`
 
-Pulsing red "REC" dot + elapsed timer. Three constructors: default (full), `.compact` (smaller), `.dotOnly` (just the dot). Uses `FadeTransition` for GPU-composited pulse animation.
+Pulsing red "REC" dot + elapsed timer. Three constructors: default (full), `.compact` (smaller), `.dotOnly` (just the dot). Uses `FadeTransition` for GPU-composited pulse animation. `_syncPulse` listens to `ReduceMotionController.effective`: under Reduce motion the dot holds solid, and the pulse starts or stops live when the setting changes.
 
 ## Annotation Overlay
 
@@ -84,7 +84,7 @@ Floating dark panel with tool buttons, line style picker, color palette, width s
 
 File: `lib/src/ui/annotation/annotation_toggle_button.dart`
 
-In `WindowTitleBar`. Visible on macOS and Windows only. Hover reveals "Annotate" text label. Uses LucideIcons.pencil.
+In `WindowTitleBar`. Visible on macOS and Windows only. Uses LucideIcons.pencil (16 px) in a fixed square. Hover fades in an "Annotate" caption label that floats to the LEFT of the button (`Positioned(right: size)`, `IgnorePointer`) instead of widening it, so hover never shoves the title bar's other controls.
 
 ## WinScreenRecorder (C++)
 

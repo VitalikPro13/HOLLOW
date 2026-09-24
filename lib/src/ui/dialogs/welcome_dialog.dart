@@ -2,6 +2,7 @@
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/core/app_relaunch.dart';
 import 'package:hollow/src/core/hollow_data_dir.dart';
 import 'package:hollow/src/core/profile_registry.dart';
@@ -517,7 +518,7 @@ class _OptionCardState extends State<_OptionCard> {
         child: GestureDetector(
           onTap: widget.onTap,
           child: AnimatedContainer(
-            duration: const Duration(milliseconds: 150),
+            duration: HollowDurations.fast,
             padding: const EdgeInsets.all(HollowSpacing.md),
             decoration: BoxDecoration(
               color: _hovered

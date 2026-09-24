@@ -57,10 +57,19 @@ class _VoiceRecorderBarState extends ConsumerState<VoiceRecorderBar>
       vsync: this,
       duration: const Duration(milliseconds: 900),
     );
-    if (!ReduceMotionController.instance.isReduced) {
+    _syncPulse();
+    ReduceMotionController.instance.effective.addListener(_syncPulse);
+    WidgetsBinding.instance.addPostFrameCallback((_) => _start());
+  }
+
+  /// Pulses the recording dot, or holds it solid while motion is reduced.
+  void _syncPulse() {
+    if (ReduceMotionController.instance.isReduced) {
+      _pulse.stop();
+      _pulse.value = 1.0;
+    } else if (!_pulse.isAnimating) {
       _pulse.repeat(reverse: true);
     }
-    WidgetsBinding.instance.addPostFrameCallback((_) => _start());
   }
 
   Future<void> _start() async {
@@ -111,6 +120,7 @@ class _VoiceRecorderBarState extends ConsumerState<VoiceRecorderBar>
   void dispose() {
     _ampSub?.cancel();
     _elapsedSub?.cancel();
+    ReduceMotionController.instance.effective.removeListener(_syncPulse);
     _pulse.dispose();
     // A teardown mid-recording drops the file.
     if (_started && !_stopping) {

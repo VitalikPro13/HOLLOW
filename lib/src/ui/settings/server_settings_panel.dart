@@ -3,7 +3,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/models/server_info.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
-import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/edge_scroll_row.dart';
@@ -277,19 +276,7 @@ class _ServerSettingsPanelState extends ConsumerState<ServerSettingsPanel> {
         Expanded(
           child: FocusTraversalGroup(
             policy: ReadingOrderTraversalPolicy(),
-            child: AnimatedSwitcher(
-              duration: HollowDurations.normal,
-              layoutBuilder: (currentChild, previousChildren) {
-                return Stack(
-                  alignment: Alignment.topCenter,
-                  children: [
-                    ...previousChildren,
-                    ?currentChild,
-                  ],
-                );
-              },
-              child: _buildTabContent(currentServer, tabs, permissions),
-            ),
+            child: _buildTabContent(currentServer, tabs, permissions),
           ),
         ),
       ],

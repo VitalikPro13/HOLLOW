@@ -95,27 +95,20 @@ class _HollowToastWidgetState extends State<_HollowToastWidget>
     with SingleTickerProviderStateMixin {
   late final AnimationController _controller;
   late final Animation<double> _opacity;
-  late final Animation<Offset> _slide;
 
   @override
   void initState() {
     super.initState();
     _controller = AnimationController(
       vsync: this,
-      duration: HollowDurations.animationsDisabled ? Duration.zero : const Duration(milliseconds: 200),
-      reverseDuration: HollowDurations.animationsDisabled ? Duration.zero : const Duration(milliseconds: 150),
+      duration: HollowDurations.normal,
+      reverseDuration: HollowDurations.fast,
     );
     _opacity = CurvedAnimation(
       parent: _controller,
-      curve: Curves.easeOut,
+      curve: HollowCurves.enter,
+      reverseCurve: HollowCurves.exit,
     );
-    _slide = Tween<Offset>(
-      begin: const Offset(0, 0.3),
-      end: Offset.zero,
-    ).animate(CurvedAnimation(
-      parent: _controller,
-      curve: Curves.easeOutCubic,
-    ));
 
     _controller.forward();
     widget.onControllerReady(_controller);
@@ -160,8 +153,12 @@ class _HollowToastWidgetState extends State<_HollowToastWidget>
       left: 0,
       right: 0,
       child: Center(
-        child: SlideTransition(
-          position: _slide,
+        child: AnimatedBuilder(
+          animation: _opacity,
+          builder: (_, child) => Transform.translate(
+            offset: Offset(0, HollowMotion.rise * (1 - _opacity.value)),
+            child: child,
+          ),
           child: FadeTransition(
             opacity: _opacity,
             child: Material(

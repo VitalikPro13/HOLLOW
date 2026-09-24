@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/layout_prefs_provider.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
+import 'package:hollow/src/theme/hollow_shadows.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/ui/components/overlay_hosts.dart';
@@ -121,14 +122,16 @@ class _ProfileCardOverlayState extends ConsumerState<_ProfileCardOverlay>
     HardwareKeyboard.instance.addHandler(_onKey);
     _controller = AnimationController(
       vsync: this,
-      duration: HollowDurations.animationsDisabled ? Duration.zero : const Duration(milliseconds: 180),
+      duration: HollowDurations.fast,
     );
-    _scaleAnim = Tween<double>(begin: 0.92, end: 1.0).animate(
-      CurvedAnimation(parent: _controller, curve: Curves.easeOutCubic),
+    final curve = CurvedAnimation(
+      parent: _controller,
+      curve: HollowCurves.enter,
+      reverseCurve: HollowCurves.exit,
     );
-    _fadeAnim = Tween<double>(begin: 0.0, end: 1.0).animate(
-      CurvedAnimation(parent: _controller, curve: Curves.easeOut),
-    );
+    _scaleAnim = Tween<double>(begin: HollowMotion.popoverScale, end: 1.0)
+        .animate(curve);
+    _fadeAnim = curve;
     _controller.forward();
   }
 
@@ -189,7 +192,10 @@ class _ProfileCardOverlayState extends ConsumerState<_ProfileCardOverlay>
 
   void _dismiss() {
     if (_dismissing) return;
-    _dismissing = true;
+    // The barrier stops taking clicks as the exit starts, so a click on
+    // whatever sits behind it lands.
+    setState(() => _dismissing = true);
+    _controller.reverseDuration = HollowDurations.exit;
     _controller.reverse().then((_) => widget.onDismiss());
   }
 
@@ -244,7 +250,9 @@ class _ProfileCardOverlayState extends ConsumerState<_ProfileCardOverlay>
       }
     }
 
-    return Stack(
+    return IgnorePointer(
+      ignoring: _dismissing,
+      child: Stack(
       children: [
         Positioned.fill(
           child: GestureDetector(
@@ -262,7 +270,10 @@ class _ProfileCardOverlayState extends ConsumerState<_ProfileCardOverlay>
             opacity: _fadeAnim,
             child: ScaleTransition(
               scale: _scaleAnim,
-              alignment: Alignment.bottomCenter,
+              // Grows from the corner at its anchor, which is the top when it
+              // opens downward.
+              alignment:
+                  top != null ? Alignment.topLeft : Alignment.bottomLeft,
               child: Material(
                 color: Colors.transparent,
                 child: Container(
@@ -270,16 +281,8 @@ class _ProfileCardOverlayState extends ConsumerState<_ProfileCardOverlay>
                   decoration: BoxDecoration(
                     color: hollow.overlay,
                     borderRadius: BorderRadius.circular(hollow.radiusLg),
-                    border: Border.all(
-                      color: hollow.accent.withValues(alpha: 0.15),
-                    ),
-                    boxShadow: [
-                      BoxShadow(
-                        color: Colors.black.withValues(alpha: 0.35),
-                        blurRadius: 28,
-                        offset: const Offset(0, 8),
-                      ),
-                    ],
+                    border: Border.all(color: hollow.border),
+                    boxShadow: HollowShadows.float,
                   ),
                   clipBehavior: Clip.antiAlias,
                   child: ProfileCardBody(
@@ -298,6 +301,7 @@ class _ProfileCardOverlayState extends ConsumerState<_ProfileCardOverlay>
           ),
         ),
       ],
+      ),
     );
   }
 }

@@ -1,7 +1,10 @@
 ﻿import 'package:flutter/material.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
+import 'package:hollow/src/ui/animations/hollow_curves.dart';
+import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
+import 'package:hollow/src/theme/hollow_typography.dart';
 import 'annotation_overlay.dart';
 
 /// Small icon button that toggles the [AnnotationOverlay], sitting in the title
@@ -29,48 +32,53 @@ class _AnnotationToggleButtonState extends State<AnnotationToggleButton> {
     // themes; hardcoded white vanishes on the light title bar.
     final hollow = HollowTheme.of(context);
     final color = widget.color ?? hollow.textSecondary;
+    // The label floats left of the button instead of widening it, so hover
+    // never shoves the title bar's other controls.
     return MouseRegion(
       cursor: SystemMouseCursors.click,
       onEnter: (_) => setState(() => _hovered = true),
       onExit: (_) => setState(() => _hovered = false),
       child: GestureDetector(
         onTap: () => AnnotationOverlay.toggle(context),
-        child: AnimatedContainer(
-          duration: const Duration(milliseconds: 150),
-          curve: Curves.easeOut,
-          height: widget.size,
-          // Zero-alpha rest colour, not Colors.transparent, which is
-          // transparent BLACK and makes the hover lerp flash dark.
-          color: _hovered
-              ? hollow.elevated
-              : hollow.elevated.withValues(alpha: 0.0),
-          padding: EdgeInsets.symmetric(horizontal: _hovered ? 10 : 0),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              AnimatedSize(
-                duration: const Duration(milliseconds: 150),
-                curve: Curves.easeOut,
-                child: _hovered
-                    ? Padding(
-                        padding: const EdgeInsets.only(right: 6),
-                        child: Text(
-                          'Annotate',
-                          style: TextStyle(
-                            color: color,
-                            fontSize: 11,
-                            fontWeight: FontWeight.w500,
-                          ),
-                        ),
-                      )
-                    : const SizedBox.shrink(),
+        child: Stack(
+          clipBehavior: Clip.none,
+          children: [
+            AnimatedContainer(
+              duration: HollowDurations.fast,
+              curve: HollowCurves.subtle,
+              width: widget.size,
+              height: widget.size,
+              // Zero-alpha rest colour, not Colors.transparent, which is
+              // transparent BLACK and makes the hover lerp flash dark.
+              color: _hovered
+                  ? hollow.elevated
+                  : hollow.elevated.withValues(alpha: 0.0),
+              child: Icon(LucideIcons.pencil, size: 16, color: color),
+            ),
+            Positioned(
+              right: widget.size,
+              top: 0,
+              bottom: 0,
+              child: IgnorePointer(
+                child: AnimatedOpacity(
+                  opacity: _hovered ? 1 : 0,
+                  duration: HollowDurations.fast,
+                  child: Container(
+                    alignment: Alignment.center,
+                    padding: const EdgeInsets.only(left: HollowSpacing.sm),
+                    color: hollow.elevated,
+                    child: Text(
+                      'Annotate',
+                      style: HollowTypography.caption.copyWith(
+                        color: color,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                  ),
+                ),
               ),
-              SizedBox(
-                width: widget.size,
-                child: Icon(LucideIcons.pencil, size: 18, color: color),
-              ),
-            ],
-          ),
+            ),
+          ],
         ),
       ),
     );

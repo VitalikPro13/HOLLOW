@@ -29,7 +29,6 @@ class IncomingCallOverlay extends ConsumerStatefulWidget {
 class _IncomingCallOverlayState extends ConsumerState<IncomingCallOverlay>
     with SingleTickerProviderStateMixin {
   late AnimationController _controller;
-  late Animation<Offset> _slideAnim;
   late Animation<double> _fadeAnim;
 
   bool _wasVisible = false;
@@ -50,17 +49,11 @@ class _IncomingCallOverlayState extends ConsumerState<IncomingCallOverlay>
       vsync: this,
       duration: HollowDurations.normal,
     );
-    _slideAnim = Tween<Offset>(
-      begin: const Offset(0, -1),
-      end: Offset.zero,
-    ).animate(CurvedAnimation(
+    _fadeAnim = CurvedAnimation(
       parent: _controller,
       curve: HollowCurves.enter,
-    ));
-    _fadeAnim = Tween<double>(begin: 0, end: 1).animate(CurvedAnimation(
-      parent: _controller,
-      curve: HollowCurves.enter,
-    ));
+      reverseCurve: HollowCurves.exit,
+    );
   }
 
   @override
@@ -155,7 +148,7 @@ class _IncomingCallOverlayState extends ConsumerState<IncomingCallOverlay>
       _startRingtone();
       _startCountdown();
     } else if (!isVisible && _wasVisible) {
-      _controller.duration = HollowDurations.normal;
+      _controller.reverseDuration = HollowDurations.fast;
       _controller.reverse();
       _stopRingtone();
       _stopCountdown();
@@ -173,8 +166,13 @@ class _IncomingCallOverlayState extends ConsumerState<IncomingCallOverlay>
       top: safePadding + HollowSpacing.xl,
       left: 0,
       right: 0,
-      child: SlideTransition(
-        position: _slideAnim,
+      // Drops a short step from above, not its full height.
+      child: AnimatedBuilder(
+        animation: _fadeAnim,
+        builder: (_, child) => Transform.translate(
+          offset: Offset(0, -HollowMotion.rise * (1 - _fadeAnim.value)),
+          child: child,
+        ),
         child: FadeTransition(
           opacity: _fadeAnim,
           child: Center(

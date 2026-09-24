@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
+import 'package:hollow/src/ui/animations/hollow_curves.dart';
 /// Custom Hollow text field: flat, with no Material floating label.
 class HollowTextField extends StatefulWidget {
   final TextEditingController? controller;
@@ -98,6 +99,8 @@ class _HollowTextFieldState extends State<HollowTextField>
   }
 
   void _triggerShake() {
+    // The error text still appears; only the shake is motion.
+    if (HollowDurations.animationsDisabled) return;
     _shakeController ??= AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 300),

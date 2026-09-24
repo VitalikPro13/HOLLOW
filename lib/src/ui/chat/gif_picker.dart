@@ -129,6 +129,7 @@ class _GifPickerOverlay extends StatelessWidget {
           top: top,
           child: PopupAnimator(
             controller: anim,
+            rise: true,
             alignment:
                 flippedBelow ? Alignment.topRight : Alignment.bottomRight,
             child: Material(

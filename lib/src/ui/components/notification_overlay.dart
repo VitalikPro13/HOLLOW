@@ -101,7 +101,6 @@ class _NotificationCardWidgetState
     with SingleTickerProviderStateMixin {
   late final AnimationController _controller;
   late final Animation<double> _opacity;
-  late final Animation<Offset> _slide;
   Timer? _dismissTimer;
   bool _hovering = false;
 
@@ -112,20 +111,14 @@ class _NotificationCardWidgetState
     super.initState();
     _controller = AnimationController(
       vsync: this,
-      duration: HollowDurations.animationsDisabled ? Duration.zero : const Duration(milliseconds: 250),
-      reverseDuration: HollowDurations.animationsDisabled ? Duration.zero : const Duration(milliseconds: 200),
+      duration: HollowDurations.normal,
+      reverseDuration: HollowDurations.fast,
     );
     _opacity = CurvedAnimation(
       parent: _controller,
-      curve: Curves.easeOut,
+      curve: HollowCurves.enter,
+      reverseCurve: HollowCurves.exit,
     );
-    _slide = Tween<Offset>(
-      begin: const Offset(1.0, 0),
-      end: Offset.zero,
-    ).animate(CurvedAnimation(
-      parent: _controller,
-      curve: Curves.easeOutCubic,
-    ));
     _controller.forward();
     _startDismissTimer();
   }
@@ -209,8 +202,13 @@ class _NotificationCardWidgetState
     final hollow = HollowTheme.of(context);
     final card = widget.card;
 
-    return SlideTransition(
-      position: _slide,
+    // A short step in from the screen edge, not the card's full width.
+    return AnimatedBuilder(
+      animation: _opacity,
+      builder: (_, child) => Transform.translate(
+        offset: Offset(HollowMotion.rise * (1 - _opacity.value), 0),
+        child: child,
+      ),
       child: FadeTransition(
         opacity: _opacity,
         child: MouseRegion(

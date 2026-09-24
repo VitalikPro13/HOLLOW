@@ -20,8 +20,6 @@ import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
-import 'package:hollow/src/ui/animations/reveal_widgets.dart';
-import 'package:hollow/src/ui/animations/startup_reveal.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_menu.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
@@ -55,10 +53,7 @@ class MemberPanel extends ConsumerWidget {
     final selectedServerId = ref.watch(selectedServerProvider);
     final panelWidth = width ?? ref.watch(memberPanelWidthProvider);
 
-    final panelReveal =
-        StartupRevealScope.interval(context, 0.45, 0.60);
-
-    Widget panel = Container(
+    return Container(
       width: panelWidth,
       decoration: BoxDecoration(
         color: hollow.surface,
@@ -71,28 +66,17 @@ class MemberPanel extends ConsumerWidget {
         ),
       ),
       // Panel zoom (issue #54): avatars, names and status dots together.
+      // Switching servers swaps the list instantly.
       child: PanelScale(
-        child: AnimatedSwitcher(
-          duration: HollowDurations.normal,
-          switchInCurve: HollowCurves.enter,
-          switchOutCurve: HollowCurves.exit,
-          child: selectedServerId != null
-              ? _ServerMemberContent(
-                  key: ValueKey('server-members-$selectedServerId'),
-                  serverId: selectedServerId,
-                )
-              : const _PeerMemberContent(
-                  key: ValueKey('peer-members'),
-                ),
-        ),
+        child: selectedServerId != null
+            ? _ServerMemberContent(
+                key: ValueKey('server-members-$selectedServerId'),
+                serverId: selectedServerId,
+              )
+            : const _PeerMemberContent(
+                key: ValueKey('peer-members'),
+              ),
       ),
-    );
-
-    return RevealClip(
-      animation: panelReveal,
-      axis: Axis.horizontal,
-      alignment: Alignment.centerRight,
-      child: panel,
     );
   }
 }
@@ -509,8 +493,6 @@ class _PeerMemberContent extends ConsumerWidget {
       folded[master] = (folded[master] ?? false) || e.value.isEncrypted;
     }
     final peers = folded;
-    final memberListReveal =
-        StartupRevealScope.interval(context, 0.60, 0.80);
 
     return peers.isEmpty
         ? const HollowEmptyState(title: 'No peers online')
@@ -528,15 +510,9 @@ class _PeerMemberContent extends ConsumerWidget {
               final peerIndex = index - 1;
               final peerId = peers.keys.elementAt(peerIndex);
 
-              return StaggeredListItem(
-                parentAnimation: memberListReveal,
-                index: peerIndex,
-                totalItems: peers.length,
-                slideFrom: const Offset(0.3, 0),
-                child: _MemberTile(
-                  peerId: peerId,
-                  isEncrypted: peers[peerId] ?? false,
-                ),
+              return _MemberTile(
+                peerId: peerId,
+                isEncrypted: peers[peerId] ?? false,
               );
             },
           );

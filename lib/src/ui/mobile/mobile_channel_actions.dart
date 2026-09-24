@@ -1,4 +1,5 @@
 ﻿import 'package:flutter/material.dart';
+import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/ui/components/hollow_divider.dart';
 import 'package:hollow/src/core/models/channel_info.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
@@ -77,8 +78,8 @@ class _ChannelActionsSheetState extends State<_ChannelActionsSheet> {
         mainAxisSize: MainAxisSize.min,
         children: [
           AnimatedSize(
-            duration: const Duration(milliseconds: 200),
-            curve: Curves.easeOutCubic,
+            duration: HollowDurations.fast,
+            curve: HollowCurves.enter,
             child: switch (_view) {
               _SheetView.actions => _buildActionsView(hollow),
               _SheetView.deleteConfirm => _buildDeleteConfirmView(hollow),

@@ -116,22 +116,16 @@ class _MobileArchiveViewerRouteState
                 controller: _listController,
               ),
             Expanded(
-              child: AnimatedSwitcher(
-                duration: ReduceMotionController.instance.isReduced
-                    ? Duration.zero
-                    : const Duration(milliseconds: 300),
-                switchInCurve: Curves.easeOut,
-                child: messagesAsync.when(
-                  loading: () =>
-                      const Center(key: ValueKey('loading'), child: HollowSpinner.large()),
-                  error: (e, _) => Center(
-                    key: const ValueKey('error'),
-                    child: Text('Failed to load: $e',
-                        style: TextStyle(color: hollow.error)),
-                  ),
-                  data: (messages) =>
-                      _buildDmMessageList(messages, peerId),
+              child: messagesAsync.when(
+                loading: () =>
+                    const Center(key: ValueKey('loading'), child: HollowSpinner.large()),
+                error: (e, _) => Center(
+                  key: const ValueKey('error'),
+                  child: Text('Failed to load: $e',
+                      style: TextStyle(color: hollow.error)),
                 ),
+                data: (messages) =>
+                    _buildDmMessageList(messages, peerId),
               ),
             ),
           ],
@@ -298,22 +292,16 @@ class _MobileArchiveViewerRouteState
                 controller: _listController,
               ),
             Expanded(
-              child: AnimatedSwitcher(
-                duration: ReduceMotionController.instance.isReduced
-                    ? Duration.zero
-                    : const Duration(milliseconds: 300),
-                switchInCurve: Curves.easeOut,
-                child: messagesAsync.when(
-                  loading: () =>
-                      const Center(key: ValueKey('loading'), child: HollowSpinner.large()),
-                  error: (e, _) => Center(
-                    key: const ValueKey('error'),
-                    child: Text('Failed to load: $e',
-                        style: TextStyle(color: hollow.error)),
-                  ),
-                  data: (_) => _buildChannelMessageList(
-                      filtered, allMessages),
+              child: messagesAsync.when(
+                loading: () =>
+                    const Center(key: ValueKey('loading'), child: HollowSpinner.large()),
+                error: (e, _) => Center(
+                  key: const ValueKey('error'),
+                  child: Text('Failed to load: $e',
+                      style: TextStyle(color: hollow.error)),
                 ),
+                data: (_) => _buildChannelMessageList(
+                    filtered, allMessages),
               ),
             ),
           ],

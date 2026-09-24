@@ -53,12 +53,7 @@ class _HollowFocusRingState extends State<HollowFocusRing>
 
   // Drives the ring fade so a CustomPaint can repaint it (an AnimatedOpacity
   // can't wrap a foregroundPainter without changing layout/size).
-  late final AnimationController _fade = AnimationController(
-    vsync: this,
-    duration: HollowDurations.animationsDisabled
-        ? Duration.zero
-        : const Duration(milliseconds: 150),
-  );
+  late final AnimationController _fade = AnimationController(vsync: this);
 
   // Declared locally so activation works regardless of what shortcuts an
   // ancestor installed.
@@ -87,9 +82,13 @@ class _HollowFocusRingState extends State<HollowFocusRing>
     if (show == _focused) return;
     _focused = show;
     if (show) {
-      _fade.forward();
+      _fade
+        ..duration = HollowDurations.fast
+        ..forward();
     } else {
-      _fade.reverse();
+      _fade
+        ..duration = HollowDurations.fast
+        ..reverse();
     }
   }
 

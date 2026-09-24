@@ -173,7 +173,7 @@ Top-level function. Takes `context`, `anchor` (Offset), `anchorBottom` (bool). C
 
 `ConsumerStatefulWidget` with `SingleTickerProviderStateMixin`.
 
-**Animation:** Scale 0.92 to 1.0 (`easeOutCubic`) + fade 0.0 to 1.0 (`easeOut`), 180ms duration. Respects `HollowDurations.animationsDisabled`. Dismiss reverses animation then calls `onDismiss`.
+**Animation:** the shared popover motion (design language 3.8): scale from `HollowMotion.popoverScale` (0.96) + fade, `HollowDurations.fast` in with `HollowCurves.enter`. Dismiss reverses in `HollowDurations.exit` with `HollowCurves.exit`, then calls `onDismiss`; a second dismiss during the exit is ignored.
 
 **Data sources:**
 - `downloadManagerEntriesProvider` — `List<DownloadManagerEntry>` for saved files and rebalance ops.
@@ -188,7 +188,7 @@ Top-level function. Takes `context`, `anchor` (Offset), `anchorBottom` (bool). C
 **Structure:**
 - Stack with dismiss barrier (full-screen `GestureDetector`) + positioned animated card.
 - Card: `FadeTransition` + `ScaleTransition` (alignment `Alignment.bottomCenter`).
-- Card decoration: surface at 96% alpha, `radiusLg` corners, accent border at 15% alpha, heavy shadow (35% black, 28px blur).
+- Card decoration: surface at 96% alpha, `radiusLg` corners, accent border at 15% alpha, `HollowShadows.float`.
 
 **Header:** Download icon + "Downloads" text + "Clear" button (calls `downloadManagerStateProvider.notifier.clearAll()`). Clear button only visible when entries exist.
 
@@ -240,57 +240,56 @@ On error: shows error toast "Could not open folder".
 
 File: `lib/src/ui/animations/hollow_curves.dart`
 
-Abstract final class with static `Curve` constants for consistent animation curves across all Hollow UI.
+Abstract final class with static `Curve` constants. Nothing overshoots: there is no spring, elastic or bounce curve (design language 3.8; adding one is a review failure).
 
 | Name | Value | Usage |
 |------|-------|-------|
-| `enter` | `Curves.easeOutCubic` | Default enter curve, snappy with small overshoot |
-| `exit` | `Curves.easeInCubic` | Default exit curve, smooth deceleration |
-| `spring` | `Curves.elasticOut` | Interactive elements (buttons, cards) |
-| `subtle` | `Curves.easeInOut` | Hover/focus transitions |
+| `enter` | `Curves.easeOutCubic` | Something arriving; also the forward curve of every enter/exit pair |
+| `exit` | `Curves.easeInCubic` | The REVERSE curve of an enter/exit pair: a reverse curve runs on t going 1 to 0, so ease-in there reads as leaving quickly and settling |
+| `subtle` | `Curves.easeInOut` | Something already on screen moving: hover/focus transitions |
 
 ## HollowDurations
 
-Same file. Abstract final class with static duration getters that return `Duration.zero` when `_disabled` is true (set via `animationsDisabled` setter). Used throughout all animated components.
+Same file. Abstract final class with static duration getters that return `Duration.zero` when `_disabled` is true (set via `animationsDisabled` setter).
 
 | Name | Duration | Usage |
 |------|----------|-------|
-| `fast` | 150ms | Hover, focus, status changes |
-| `normal` | 250ms | Panels, dialogs |
-| `slow` | 400ms | Page changes, layout shifts |
+| `exit` | 100ms | Something leaving (popover, menu, tooltip), and the press itself |
+| `fast` | 150ms | Popover and menu entrance, press release, hover colour, toggles, collapses |
+| `normal` | 250ms | Dialogs, toasts, notification cards, sheets, pushed pages |
+| `slow` | 400ms | Progress bars filling; nothing a person waits on |
 
-All duration getters check `_disabled` flag and return `Duration.zero` when true. Components also check `HollowDurations.animationsDisabled` directly for `AnimationController` durations.
+Read a token when the animation starts (`controller.duration = HollowDurations.fast` right before `forward()`), never once in `initState`, so a live Reduce motion change reaches widgets already on screen.
 
-**Reduce Motion ownership (2026-06-24):** `HollowDurations.animationsDisabled` and `SharedTickers.instance.disabled` are no longer written directly by settings UI. The single source of truth is `ReduceMotionController` (`lib/src/core/reduce_motion.dart`): a singleton that combines the OS accessibility flag (`PlatformDispatcher.accessibilityFeatures.disableAnimations`) with the tri-state in-app override (`ReduceMotionMode` Auto/On/Off, persisted via `reduceMotionProvider`, key `reduce_motion_mode`; migrates the legacy `disable_animations` bool). Effective = `mode==on || (mode==auto && OS flag)`. It seeds from the OS flag in `main()` BEFORE `SharedTickers.start()`, listens to `onAccessibilityFeaturesChanged` for live OS changes, and writes both statics + pauses/resumes the ticker. Exposes `effective` (a `ValueListenable<bool>`) and `isReduced`. Continuous animations that hardcode their own `AnimationController`/`..repeat()` (channel spinner, voice/recording pulse, speaking border, home poll bar, GIF ticker → static first frame) consult `ReduceMotionController.instance.isReduced` directly. Mobile route transitions go through `hollowMobileRoute()` (`lib/src/ui/mobile/mobile_page_route.dart`), which uses zero duration + no transition when reduced.
+## HollowMotion
 
+Same file. The one motion for things that arrive on top of the app (popovers, pickers, toasts, notification cards):
 
-## FadeSlideTransition
+- `rise` = 8: how far anything travels on its way in, whatever its size.
+- `popoverScale` = 0.96: a small popover (menu, card) grows from its trigger at this scale. Big panels rise instead, since a scale on a 440 px panel moves its far corner about 25 px.
 
-File: `lib/src/ui/animations/hollow_transitions.dart`
+Rules: `reports/reference/HOLLOW_DESIGN_LANGUAGE.md` 3.8. Switching what a region shows (conversation, channel, server, tab) and toggling a side panel are instant; only what arrives on top moves.
 
-`StatefulWidget` with `SingleTickerProviderStateMixin`. Combines opacity fade + slide-up for message bubbles and list items.
-
-**Parameters:**
-- `child` — widget to animate.
-- `duration` — defaults to `HollowDurations.normal` (250ms).
-- `beginOffset` — defaults to `Offset(0, 0.1)` (10% slide from below).
-
-**Animation:** Single `AnimationController` drives both `_opacity` (CurvedAnimation with `HollowCurves.enter`) and `_offset` (Tween from `beginOffset` to `Offset.zero`, same curve). Auto-forwards on init.
-
-**Build:** `FadeTransition` wrapping `SlideTransition`.
+**Reduce Motion ownership (2026-06-24):** `HollowDurations.animationsDisabled` and `SharedTickers.instance.disabled` are no longer written directly by settings UI. The single source of truth is `ReduceMotionController` (`lib/src/core/reduce_motion.dart`): a singleton that combines the OS accessibility flag (`PlatformDispatcher.accessibilityFeatures.disableAnimations`) with the tri-state in-app override (`ReduceMotionMode` Auto/On/Off, persisted via `reduceMotionProvider`, key `reduce_motion_mode`; migrates the legacy `disable_animations` bool). Effective = `mode==on || (mode==auto && OS flag)`. It seeds from the OS flag in `main()` BEFORE `SharedTickers.start()`, listens to `onAccessibilityFeaturesChanged` for live OS changes, and writes both statics + pauses/resumes the ticker. Exposes `effective` (a `ValueListenable<bool>`) and `isReduced`. Continuous animations that hardcode their own `AnimationController`/`..repeat()` (channel spinner, voice/recording pulse, speaking border, home poll bar, GIF ticker → static first frame) consult `ReduceMotionController.instance.isReduced` directly. Mobile route transitions go through `hollowMobileRoute()` (`lib/src/ui/mobile/mobile_page_route.dart`), which uses zero duration + no transition when reduced; `showHollowSheet` switches to `AnimationStyle.noAnimation`.
 
 
-## ScaleFadeTransition
+## PopupAnimator
 
-Same file. `StatefulWidget` for dialog and popup entrances.
+File: `lib/src/ui/components/popup_animator.dart`
 
-**Parameters:**
-- `child` — widget to animate.
-- `duration` — defaults to `HollowDurations.normal` (250ms).
+Entry and exit for anchored popups living in a raw `OverlayEntry` or a transparent route (the emoji, GIF and sticker pickers and the expression picker). A raw overlay entry otherwise appears and vanishes on one frame, which reads as a flicker.
 
-**Animation:** Scale 0.95 to 1.0 + opacity fade, both using `HollowCurves.enter`. Auto-forwards on init.
+**Parameters:** `child`, `alignment` (the side it grows or rises from, default centre), `controller` (`PopupAnimationController`, lets the host play the exit before removing the entry), `rise` (default false).
 
-**Build:** `FadeTransition` wrapping `ScaleTransition`.
+**Animation:** `HollowDurations.fast` in with `HollowCurves.enter`; the exit sets `reverseDuration = HollowDurations.exit` and reverses with `HollowCurves.exit`, and a second dismiss during the exit is ignored. Fade + either:
+- `rise: false`: `ScaleTransition` from `HollowMotion.popoverScale` around `alignment`.
+- `rise: true` (big panels, every picker passes it): `Transform.translate` of `alignment.y * HollowMotion.rise * (1 - t)`, so a panel above its button starts lower and one below starts higher.
+
+`FadeTransition(alwaysIncludeSemantics: true)` so assistive tech agrees with what a click does during the fade.
+
+The profile card, server folder and download popups hand-roll the same popover motion (scale 0.96 + fade, fast in, exit out, `HollowShadows.float`).
+
+**`showHollowMenu` motion** (`components/hollow_menu.dart`): route `transitionDuration` = `HollowDurations.fast`. Scale from `HollowMotion.popoverScale` with `HollowCurves.enter` / `exit`; the fade's reverse curve is `Interval(1/3, 1, curve: HollowCurves.exit)`, so the exit fade finishes in the first two thirds of the reverse (about `HollowDurations.exit`). The transition wraps the FULL-SCREEN `_HollowMenuHost`, not the menu card, so the scale origin is the click point converted to screen fractions inside a `LayoutBuilder` (`Alignment(anchor.dx / width * 2 - 1, anchor.dy / height * 2 - 1)`); a corner of the screen would slide the menu in from across the window. The card uses `HollowShadows.float`.
 
 
 ## AmbientBackground
@@ -324,105 +323,12 @@ around both means a blob repaint re-rasters the whole pane underneath it.
 `shouldRepaint` returns true when center positions change.
 
 
-## StartupRevealScope
-
-File: `lib/src/ui/animations/startup_reveal.dart`
-
-`InheritedWidget` that shares the master startup animation controller with the entire widget subtree.
-
-**Properties:**
-- `controller` — `AnimationController` for the startup sequence.
-- `isComplete` — bool, when true all child lookups return null (skip animation).
-
-**Static methods:**
-- `of(BuildContext)` — returns `AnimationController?`. Returns null if scope not found or `isComplete` is true. Widgets should render fully when null.
-- `interval(BuildContext, begin, end, {curve})` — creates a `CurvedAnimation` sub-interval of the master timeline for staggering child elements. Returns null when complete.
-
-**Update notification:** Only notifies when `isComplete` changes.
-
-
-## RevealClip
-
-File: `lib/src/ui/animations/reveal_widgets.dart`
-
-`StatelessWidget`. Reveals child by animating a clip from one edge ("carpet roll" effect).
-
-**Parameters:**
-- `animation` — `Animation<double>?`. When null, renders child directly (zero overhead).
-- `axis` — `Axis.vertical` (top to bottom) or `Axis.horizontal` (left to right).
-- `alignment` — defaults to `Alignment.topLeft`.
-
-**Build:** `AnimatedBuilder` + `ClipRect` + `Align`. Sets `heightFactor` (vertical) or `widthFactor` (horizontal) to `animation.value`.
-
-
-## TypewriterText
-
-Same file. `StatelessWidget`. Reveals text character by character over an animation interval.
-
-**Parameters:**
-- `text` — full text string.
-- `animation` — `Animation<double>?`. Null shows full text immediately.
-- `style`, `overflow`, `maxLines` — standard text styling.
-
-**Build:** `AnimatedBuilder` that computes `charCount = (value * text.length).round()` and shows `text.substring(0, charCount)`.
-
-
-## LineDrawDivider
-
-Same file. `StatelessWidget`. A divider that "draws" itself from one side to the other.
-
-**Parameters:**
-- `animation` — `Animation<double>?`. Null renders full width immediately.
-- `height` — defaults to 1.
-- `color` — defaults to `Theme.of(context).dividerColor`.
-- `alignment` — defaults to `Alignment.centerLeft`.
-
-**Build:** `AnimatedBuilder` + `FractionallySizedBox` with `widthFactor: animation.value`.
-
-
-## StaggeredListItem
-
-Same file. `StatelessWidget`. Per-item fade + slide entrance with stagger delay based on index.
-
-**Parameters:**
-- `parentAnimation` — `Animation<double>?`. Null renders child directly.
-- `index` — item position in list.
-- `totalItems` — total list length.
-- `slideFrom` — defaults to `Offset(-0.3, 0)` (slide from left).
-
-**Stagger calculation:**
-- `itemDuration = 0.4` (each item animates over 40% of total timeline).
-- `totalStagger = 0.6` (remaining 60% distributed as delays).
-- `step = totalStagger / (totalItems - 1)`.
-- Item interval: `[index * step, index * step + 0.4]`, clamped to `[0.0, 1.0]`.
-- Curve: `Interval(begin, end, curve: Curves.easeOutCubic)`.
-
-**Build:** `FadeTransition` + `SlideTransition` using the computed item animation.
-
-
-## SelectionShimmer
-
-File: `lib/src/ui/animations/selection_shimmer.dart`
-
-`StatelessWidget`. A subtle transparent-to-highlight-to-transparent gradient that sweeps across the widget on a 4-second cycle.
-
-**Parameters:**
-- `child` — widget to overlay shimmer on.
-- `highlightColor` — gradient peak color.
-- `borderRadius` — optional clip radius.
-- `vertical` — defaults to false. True for top-to-bottom sweep (voice channels), false for left-to-right.
-
-**Animation:** Uses `SharedTickers.instance.shimmer` (4s cycle, `ValueNotifier<double>`). Sweep position: `value * 4.0 - 1.5` (range -1.5 to 2.5). Gradient alignment computed from position with 0.5 spread.
-
-**Build:** `ValueListenableBuilder` + Stack: child (cached) + `Positioned.fill` with `IgnorePointer` + `ClipRRect` + `DecoratedBox` with `LinearGradient` (3 stops: transparent, highlight, transparent).
-
-
 ## SharedTickers
 
 File: `lib/src/core/shared_tickers.dart`
 
 Singleton (`SharedTickers.instance`) that centralizes all repeating decorative
-animation into **ONE 30fps `Timer` lane** (`shimmer`, `typingDots`, `ambient`).
+animation into **ONE 30fps `Timer` lane** (`typingDots`, `ambient`).
 Implements `WidgetsBindingObserver` for lifecycle management.
 
 **Deliberately timers, NOT `Ticker`s (2026-08-23).** A running `Ticker` requests
@@ -449,7 +355,6 @@ seven steps to fill, then stops. That is a countdown, not motion.
 
 | Notifier | Cycle | Driven By | Used By |
 |----------|-------|-----------|---------|
-| `shimmer` | 4s linear | 30fps lane | `SelectionShimmer` (selected rows) |
 | `typingDots` | 1.2s linear | 30fps lane | Typing indicator dots |
 | `ambient` | 45s linear | 30fps lane | `AmbientBackground`, mobile Chats header glow (reads it at 4.5x for a ~10s ping-pong sweep) |
 
@@ -489,10 +394,9 @@ File: `lib/src/ui/components/hollow_pressable.dart`
 - `semanticButton` (a11y, default `true`) — whether to announce the "button" role. Set `false` for tappable content rows/cards (e.g. a conversation row) so they're an actionable node without the button role.
 
 **Animation (non-subtle):**
-- `AnimationController`: 120ms forward, 200ms reverse.
-- Scale: 1.0 to 0.98, forward curve `easeOutCubic`, reverse curve `HollowCurves.spring` (elasticOut for bounce-back).
-- Opacity: 1.0 to 0.85, both curves `easeOutCubic`.
-- Triggered by `Listener` pointer events (`onPointerDown` → forward, `onPointerUp`/`onPointerCancel` → reverse).
+- One `CurvedAnimation`: curve `HollowCurves.enter`, reverseCurve `HollowCurves.exit` (the release leaves quickly and settles, the mirror of the press). No overshoot.
+- Scale 1.0 to 0.98 and opacity 1.0 to 0.85 ride it.
+- Durations are set at press time: `onPointerDown` sets `duration = HollowDurations.exit` and `reverseDuration = HollowDurations.fast`, then forwards; `onPointerUp`/`onPointerCancel` reverse.
 
 **Hover (rewritten 2026-07-05 — see memory `feedback_hover_state_patterns`):**
 - `MouseRegion` sets cursor to click when interactive.
@@ -533,7 +437,7 @@ File: `lib/src/ui/components/hollow_focus_ring.dart` (a11y Phase 2.6)
 
 File: `lib/src/ui/components/hollow_button.dart`
 
-`StatefulWidget` with `SingleTickerProviderStateMixin`. Four-variant button with spring physics interactions.
+`StatefulWidget` with `SingleTickerProviderStateMixin`. Four-variant button with the shared press animation.
 
 **Variants (`HollowButtonVariant`):**
 
@@ -556,7 +460,7 @@ Ghost/outline rest bg is the hover color at ZERO ALPHA, not `Colors.transparent`
 
 **Keyboard focus (Phase 2.6):** wrapped in `HollowFocusRing` (ring radius `radiusMd`) → Tab-focusable + Enter/Space activates. Disabled buttons (`onPressed == null`) are not focusable.
 
-**Animation:** Same pattern as `HollowPressable` — scale 1.0 to 0.98 + opacity 1.0 to 0.85, 120ms/200ms durations with spring reverse.
+**Animation:** Same press as `HollowPressable`: scale 1.0 to 0.98 + opacity 1.0 to 0.85, `HollowCurves.enter` in and `HollowCurves.exit` on the release, `HollowDurations.exit` / `fast` set at press time.
 
 **Hover effects:**
 - NO hover glow (the old 8px BoxShadow halo painted outside the button's outline — removed 2026-07-05).
@@ -598,6 +502,7 @@ File: `lib/src/ui/components/hollow_text_field.dart`
 - Triggered in `didUpdateWidget` when `errorText` transitions from null to non-null.
 - `TweenSequence`: 0 → 3 → -3 → 2 → 0 over 300ms with `easeInOut`.
 - Applied via `AnimatedBuilder` + `Transform.translate` on X axis.
+- Skipped under Reduce motion (`HollowDurations.animationsDisabled`): the error text still appears, only the shake is motion.
 
 **Focus glow:**
 - `AnimatedContainer` (duration `HollowDurations.fast`, curve `HollowCurves.subtle`).
@@ -620,13 +525,12 @@ Top-level function wrapping `showGeneralDialog`. Returns `Future<T?>`.
 
 **Parameters:** `context`, `builder` (WidgetBuilder), `barrierDismissible` (default true).
 
-**Barrier:** `Colors.black` at 8% alpha. Label "Dismiss".
+**Barrier:** the flat `HollowTheme.scrim` (no blur).
 
-**Transition (duration: `HollowDurations.normal` = 250ms):**
-- `CurvedAnimation`: forward `HollowCurves.enter` (easeOutCubic), reverse `Curves.easeIn`.
-- `AnimatedBuilder` renders Stack:
-  - Blur layer: `AnimatedOpacity` (opacity tied to animation.value, zero duration) wrapping `BackdropFilter` with `ImageFilter.blur(sigmaX: 12, sigmaY: 12)` on `SizedBox.expand`.
-  - Dialog: `FadeTransition` + `ScaleTransition` (0.95 to 1.0).
+**Transition (route duration `HollowDurations.normal` = 250ms):**
+- `CurvedAnimation`: forward `HollowCurves.enter`, reverse `Interval(0.4, 1, curve: HollowCurves.exit)`. The route has one duration, so the exit runs in the last 60% of the reverse: a dialog leaves in about 150 ms, quicker than it came.
+- `FadeTransition` + `ScaleTransition` from `HollowMotion.popoverScale` (0.96) at the centre.
+- `pageBuilder` pads by `viewInsets` with an `AnimatedPadding` of `HollowDurations.exit` (keyboard avoidance for every dialog).
 
 ### HollowDialog Widget
 
@@ -655,7 +559,7 @@ File: `lib/src/ui/components/hollow_tooltip.dart`
 
 **Hover timing:** 400ms delay via `Future.delayed` before showing. Tracks `_hovering` flag to prevent stale shows.
 
-**Animation:** `AnimationController` at 100ms. Fade + slide (0.15 vertical offset to zero), both with `Curves.easeOut`.
+**Animation:** fade + slide (0.15 vertical offset to zero), both `Curves.easeOut`. The controller's duration (`HollowDurations.exit`) is set in `_showTooltip()` at each show, next to the rewind, so a live Reduce motion change applies.
 
 **Dismiss (`_dismiss()`):**
 - **Critical pattern:** Immediate overlay removal, no reverse animation. Prevents orphaned tooltips when parent rebuilds or leaves tree during hover (e.g., call bar buttons disappearing).
@@ -697,7 +601,7 @@ Static class + `_HollowToastWidget` `StatefulWidget`.
 
 `StatefulWidget` with `SingleTickerProviderStateMixin`.
 
-**Animation:** `AnimationController` 200ms forward / 150ms reverse. Opacity with `easeOut` curve. Slide from `Offset(0, 0.3)` with `easeOutCubic`.
+**Animation:** `HollowDurations.normal` in / `HollowDurations.fast` out, one `CurvedAnimation` (`HollowCurves.enter` / `HollowCurves.exit`) driving the fade and an 8 px rise (`Transform.translate` of `HollowMotion.rise * (1 - t)`).
 
 **Auto-dismiss:** `Future.delayed(duration)` then reverse animation, then remove entry.
 
@@ -720,7 +624,7 @@ The ONLY slider (guard `raw-slider` at 0; the accent hue picker in `settings_sha
 
 File: `lib/src/ui/components/hollow_toggle.dart`
 
-`StatefulWidget` with `SingleTickerProviderStateMixin`. Toggle switch with spring physics.
+`StatefulWidget` with `SingleTickerProviderStateMixin`. Toggle switch.
 
 **Parameters:** `value` (bool), `onChanged` (ValueChanged<bool>?), `semanticLabel` (a11y, Phase 2.1 — names what the switch controls, e.g. "Reduce motion").
 
@@ -729,8 +633,8 @@ File: `lib/src/ui/components/hollow_toggle.dart`
 **Dimensions:** Track: 36x20px pill. Thumb: 16px circle. 2px padding on each side. On Android/iOS the hit area is padded to 48x48 around the same painted switch (so a mobile row holding one is 48 tall); desktop stays 36x20. It is the ONLY switch: Material/Cupertino `Switch`/`Checkbox`/`Radio` are guarded at 0 (`raw-switch`), and every call site passes `semanticLabel` (the row title).
 
 **Animation:**
-- `AnimationController` at 200ms, initial value matches `widget.value`.
-- `CurvedAnimation` with `HollowCurves.spring` (elasticOut) for both forward and reverse.
+- `AnimationController`, initial value matches `widget.value`; `didUpdateWidget` sets `duration = HollowDurations.fast` before each flip.
+- `CurvedAnimation`: curve `HollowCurves.enter`, reverseCurve `HollowCurves.exit`, so the thumb decelerates into place in both directions and never overshoots.
 - Thumb position: `2.0 + (value * 16.0)` (slides from left 2px to left 18px).
 - Track color: `ColorTween` from `hollow.border` (off) to `hollow.accent` (on).
 
@@ -924,7 +828,7 @@ File: `lib/src/ui/components/notification_overlay.dart`
 
 `ConsumerStatefulWidget` with `SingleTickerProviderStateMixin`.
 
-**Animation:** Slide from right (`Offset(1.0, 0)` to zero) + fade, 250ms forward / 200ms reverse, `easeOutCubic`.
+**Animation:** fade + an 8 px step in from the screen edge (`Transform.translate` of `HollowMotion.rise * (1 - t)` on X), not the card's full width. `HollowDurations.normal` in / `fast` out, `HollowCurves.enter` / `exit`.
 
 **Auto-dismiss:** 5-second timer. Hover pauses timer (cancels on `MouseRegion.onEnter`, restarts on `onExit`). Timer resets when new messages arrive (`didUpdateWidget` checks message count).
 
@@ -974,7 +878,7 @@ Top-level function. Creates `OverlayEntry` with `_FolderPopupOverlay`. Callbacks
 
 ### _FolderPopupOverlay
 
-`ConsumerStatefulWidget` with `SingleTickerProviderStateMixin`. Scale 0.92 to 1.0 + fade, 180ms.
+`ConsumerStatefulWidget` with `SingleTickerProviderStateMixin`. The shared popover motion: scale from `HollowMotion.popoverScale` + fade, `HollowDurations.fast` in, `HollowDurations.exit` out; `HollowShadows.float`.
 
 **Layout constants:** `iconSize = 38`, `columns = 5`, `iconSpacing = 6`.
 
@@ -1003,7 +907,7 @@ Top-level function. Creates `OverlayEntry` with `_ProfileCardOverlay`. Accepts `
 
 ### _ProfileCardOverlay
 
-`ConsumerStatefulWidget` with `SingleTickerProviderStateMixin`. Scale 0.92 to 1.0 + fade, 180ms, same pattern as download manager.
+`ConsumerStatefulWidget` with `SingleTickerProviderStateMixin`. The shared popover motion, same as the download manager: scale from `HollowMotion.popoverScale` + fade, `HollowDurations.fast` in, `HollowDurations.exit` out. It grows from the corner at its anchor (`topLeft` when it opens downward, else `bottomLeft`). Decoration: `hollow.overlay`, plain `hollow.border` hairline, `HollowShadows.float`. `_dismiss()` sets `_dismissing` in `setState`, and an `IgnorePointer(ignoring: _dismissing)` around the whole Stack lets a click on whatever sits behind the barrier land while the exit plays.
 
 **Twitch resolution:** On init, if no Twitch username provided and viewing own profile, calls `twitchGetUsername()` FFI to resolve.
 

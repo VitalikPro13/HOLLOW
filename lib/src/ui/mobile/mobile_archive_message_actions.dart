@@ -1,5 +1,4 @@
 import 'package:flutter/material.dart';
-import 'package:hollow/src/core/reduce_motion.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
@@ -29,7 +28,7 @@ void showMobileArchiveMessageActions({
   );
 }
 
-class _ArchiveActionsSheet extends StatefulWidget {
+class _ArchiveActionsSheet extends StatelessWidget {
   final String messageText;
   final String senderName;
   final String timestamp;
@@ -47,91 +46,46 @@ class _ArchiveActionsSheet extends StatefulWidget {
   });
 
   @override
-  State<_ArchiveActionsSheet> createState() => _ArchiveActionsSheetState();
-}
-
-class _ArchiveActionsSheetState extends State<_ArchiveActionsSheet>
-    with SingleTickerProviderStateMixin {
-  late final AnimationController _controller;
-
-  @override
-  void initState() {
-    super.initState();
-    _controller = AnimationController(
-      vsync: this,
-      duration: ReduceMotionController.instance.isReduced
-          ? Duration.zero
-          : const Duration(milliseconds: 400),
-    )..forward();
-  }
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
-
-  Widget _stagger(int index, {required Widget child}) {
-    final start = (index * 0.15).clamp(0.0, 0.6);
-    final end = (start + 0.5).clamp(0.0, 1.0);
-    final curve = CurvedAnimation(
-      parent: _controller,
-      curve: Interval(start, end, curve: Curves.easeOutCubic),
-    );
-    return FadeTransition(
-      opacity: curve,
-      child: SlideTransition(
-        position: Tween<Offset>(
-          begin: const Offset(0, 0.06),
-          end: Offset.zero,
-        ).animate(curve),
-        child: child,
-      ),
-    );
-  }
-
-  @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
 
     final actions = <Widget>[];
-    int actionIndex = 1;
-    if (widget.onCopy != null) {
-      actions.add(_stagger(actionIndex++, child: _ActionRow(
+    if (onCopy != null) {
+      actions.add(_ActionRow(
         icon: LucideIcons.copy,
         label: 'Copy text',
         onTap: () {
           Navigator.pop(context);
-          widget.onCopy!();
+          onCopy!();
         },
-      )));
+      ));
     }
-    if (widget.onDownload != null) {
-      actions.add(_stagger(actionIndex++, child: _ActionRow(
+    if (onDownload != null) {
+      actions.add(_ActionRow(
         icon: LucideIcons.download,
         label: 'Save file',
         onTap: () {
           Navigator.pop(context);
-          widget.onDownload!();
+          onDownload!();
         },
-      )));
+      ));
     }
-    if (widget.onInfo != null) {
-      actions.add(_stagger(actionIndex, child: _ActionRow(
+    if (onInfo != null) {
+      actions.add(_ActionRow(
         icon: LucideIcons.shieldCheck,
         label: 'Message proof',
         onTap: () {
           Navigator.pop(context);
-          widget.onInfo!();
+          onInfo!();
         },
-      )));
+      ));
     }
 
     return SafeArea(
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          _stagger(0, child: Padding(
+          Padding(
             padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.md),
             child: Container(
               width: double.infinity,
@@ -149,7 +103,7 @@ class _ArchiveActionsSheetState extends State<_ArchiveActionsSheet>
                     children: [
                       Expanded(
                         child: Text(
-                          widget.senderName,
+                          senderName,
                           style: HollowTypography.caption.copyWith(
                             color: hollow.accent,
                             fontWeight: FontWeight.w600,
@@ -158,7 +112,7 @@ class _ArchiveActionsSheetState extends State<_ArchiveActionsSheet>
                         ),
                       ),
                       Text(
-                        widget.timestamp,
+                        timestamp,
                         style: HollowTypography.caption.copyWith(
                           color: hollow.textSecondary,
                           fontSize: 10,
@@ -166,10 +120,10 @@ class _ArchiveActionsSheetState extends State<_ArchiveActionsSheet>
                       ),
                     ],
                   ),
-                  if (widget.messageText.isNotEmpty) ...[
+                  if (messageText.isNotEmpty) ...[
                     const SizedBox(height: 2),
                     Text(
-                      widget.messageText,
+                      messageText,
                       style: HollowTypography.body
                           .copyWith(color: hollow.textPrimary),
                       maxLines: 2,
@@ -179,7 +133,7 @@ class _ArchiveActionsSheetState extends State<_ArchiveActionsSheet>
                 ],
               ),
             ),
-          )),
+          ),
           const SizedBox(height: HollowSpacing.md),
 
           ...actions,

@@ -13,7 +13,6 @@ import 'package:hollow/src/core/services/channel_topic_service.dart';
 import 'package:hollow/src/core/services/push_notification_service.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/theme/hollow_theme.dart';
-import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/ui/mobile/mobile_active_call_pill.dart';
 import 'package:hollow/src/ui/mobile/mobile_chat_route.dart';
 import 'package:hollow/src/ui/mobile/mobile_nav_bar.dart';
@@ -173,16 +172,10 @@ class _MobileShellState extends ConsumerState<MobileShell> {
             Expanded(
               child: Stack(
                 children: [
+                  // Switching tabs is instant; every tab stays mounted so
+                  // its scroll and state survive the switch.
                   for (int i = 0; i < _tabs.length; i++)
-                    AnimatedOpacity(
-                      opacity: i == currentTab ? 1.0 : 0.0,
-                      duration: HollowDurations.fast,
-                      curve: HollowCurves.subtle,
-                      child: IgnorePointer(
-                        ignoring: i != currentTab,
-                        child: _tabs[i],
-                      ),
-                    ),
+                    Offstage(offstage: i != currentTab, child: _tabs[i]),
                 ],
               ),
             ),

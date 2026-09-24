@@ -96,12 +96,7 @@ class _MobileImportedArchiveViewerRouteState
     return Scaffold(
       backgroundColor: hollow.background,
       body: SafeArea(
-        child: AnimatedSwitcher(
-          duration: ReduceMotionController.instance.isReduced
-              ? Duration.zero
-              : const Duration(milliseconds: 300),
-          switchInCurve: Curves.easeOut,
-          child: dataAsync.when(
+        child: dataAsync.when(
           loading: () =>
               const Center(key: ValueKey('loading'), child: HollowSpinner.large()),
           error: (e, _) => Column(
@@ -117,7 +112,6 @@ class _MobileImportedArchiveViewerRouteState
             ],
           ),
           data: (data) => _buildArchiveViewer(hollow, data),
-        ),
         ),
       ),
     );

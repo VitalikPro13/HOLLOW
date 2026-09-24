@@ -32,6 +32,7 @@ import 'package:hollow/src/ui/components/hollow_tooltip.dart';
 import 'package:hollow/src/ui/components/pending_join_ui.dart';
 import 'package:hollow/src/ui/components/ui_scale.dart';
 import 'package:hollow/src/ui/dialogs/create_server_dialog.dart';
+import 'package:hollow/src/ui/shell/new_server_entry.dart';
 import 'package:hollow/src/ui/shell/server_context_menus.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
@@ -358,7 +359,7 @@ class _ServerStripState extends ConsumerState<ServerStrip> {
                       FolderStripItem() => false,
                     };
                     if (isNew) {
-                      icon = _ScaleBounceEntry(
+                      icon = NewServerEntry(
                         key: ValueKey('bounce-${switch (item) {
                           ServerStripItem(:final serverId) => serverId,
                           PendingStripItem(:final serverId) => serverId,
@@ -726,7 +727,7 @@ class _VerticalReorderGap extends StatelessWidget {
             height: isActive ? 4 : HollowSpacing.xs,
             margin: EdgeInsets.symmetric(vertical: isActive ? 2 : 0),
             decoration: BoxDecoration(
-              color: isActive ? hollow.accent : Colors.transparent,
+              color: hollow.accent.withValues(alpha: isActive ? 1 : 0),
               borderRadius: BorderRadius.circular(2),
             ),
           ),
@@ -949,53 +950,5 @@ class _ServerIconState extends State<_ServerIcon> {
     }
 
     return icon;
-  }
-}
-
-/// Plays a scale-bounce on first build, for a newly created server icon.
-class _ScaleBounceEntry extends StatefulWidget {
-  final Widget child;
-
-  const _ScaleBounceEntry({super.key, required this.child});
-
-  @override
-  State<_ScaleBounceEntry> createState() => _ScaleBounceEntryState();
-}
-
-class _ScaleBounceEntryState extends State<_ScaleBounceEntry>
-    with SingleTickerProviderStateMixin {
-  late final AnimationController _controller;
-  late final Animation<double> _scale;
-
-  @override
-  void initState() {
-    super.initState();
-    _controller = AnimationController(
-      vsync: this,
-      duration: HollowDurations.animationsDisabled ? Duration.zero : const Duration(milliseconds: 400),
-    );
-    _scale = TweenSequence<double>([
-      TweenSequenceItem(
-          tween: Tween(begin: 0.0, end: 1.1), weight: 60),
-      TweenSequenceItem(
-          tween: Tween(begin: 1.1, end: 0.95), weight: 20),
-      TweenSequenceItem(
-          tween: Tween(begin: 0.95, end: 1.0), weight: 20),
-    ]).animate(CurvedAnimation(
-      parent: _controller,
-      curve: Curves.easeOut,
-    ));
-    _controller.forward();
-  }
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return ScaleTransition(scale: _scale, child: widget.child);
   }
 }

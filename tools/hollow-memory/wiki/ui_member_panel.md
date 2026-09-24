@@ -10,9 +10,7 @@ The panel watches `selectedServerProvider` to determine which content mode to di
 - **Server selected (`selectedServerId != null`):** Shows `_ServerMemberContent` keyed by `server-members-$serverId`.
 - **No server selected (DM/home mode):** Shows `_PeerMemberContent` keyed by `peer-members`.
 
-Content switches use `AnimatedSwitcher` with `HollowDurations.normal` duration, `HollowCurves.enter`/`HollowCurves.exit` curves.
-
-The entire panel is wrapped in a `RevealClip` startup animation that clips horizontally from `Alignment.centerRight`, using `StartupRevealScope.interval(context, 0.45, 0.60)` for staggered reveal during app startup.
+Switching servers swaps the list instantly (no `AnimatedSwitcher`; the key resets the content's state). The panel itself opens and closes instantly too: the shell's `_MemberPanelSlot` either renders it or renders nothing, since a width animation would re-wrap the chat text every frame. No startup animation of its own.
 
 Container styling: `hollow.surface` background, left `BorderSide` using `hollow.border`. The content inside that container is wrapped in `PanelScale` (issue #54) — the panel keeps its slot and its avatars, names, status dots and counts zoom together with `panelScaleProvider`. Widening is the seam's job, zooming is this one's.
 
@@ -129,8 +127,7 @@ Creates a filtered copy of the peers map by removing all peer IDs present in `in
 - **Empty state:** centered "No peers online" text
 - **Non-empty:** `ListView.builder` with `peers.length + 1` items (first item is an "Online N" `_SectionDivider`)
 
-### Startup Animation
-Uses `StartupRevealScope.interval(context, 0.60, 0.80)` for parent animation. Each `_MemberTile` is wrapped in a `StaggeredListItem` that animates with a slide from `Offset(0.3, 0)` (slight right-to-left slide-in), staggered by index.
+Rows render in place: no stagger or slide-in.
 
 ## _ServerMemberTile — Server Member Row
 

@@ -103,14 +103,9 @@ class MobileArchiveTab extends ConsumerWidget {
         ),
 
         Expanded(
-          child: AnimatedSwitcher(
-            duration: const Duration(milliseconds: 200),
-            child: subTab == ArchiveSubTab.myData
-                ? const _MobileMyDataView(
-                    key: ValueKey('myData'))
-                : const _MobileImportedArchivesView(
-                    key: ValueKey('imported')),
-          ),
+          child: subTab == ArchiveSubTab.myData
+              ? const _MobileMyDataView(key: ValueKey('myData'))
+              : const _MobileImportedArchivesView(key: ValueKey('imported')),
         ),
       ],
     );
@@ -869,7 +864,7 @@ class _ChannelListItem {
 }
 
 class _MobileVaultFilesView extends ConsumerWidget {
-  const _MobileVaultFilesView({super.key});
+  const _MobileVaultFilesView();
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {

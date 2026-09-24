@@ -10,8 +10,7 @@ Voice channel composite view located at `lib/src/ui/chat/voice_channel_pane.dart
 - `_VoiceChannelPaneState` -- main state class (~1000 lines). Manages overlay visibility, chat overlay pin, focused video peer, and builds all layout modes.
 - `_VoiceControlsPill` -- `ConsumerStatefulWidget`, the floating controls bar at bottom center during camera/screen share modes. Contains mute, deafen, camera, screen share, disconnect buttons plus call duration timer. When any REMOTE peer is sharing (`peerScreenSharing.values.any`), a `ShareVolumeButton` (`ui/components/share_volume_control.dart`) appears left of Disconnect — popover above the button with the received-share-audio volume slider (0–200%, persisted `shareAudioVolumeProvider`) and the "Quieter when people talk" duck toggle (`shareAudioDuckProvider`); values flow through the `ShareAudioLevel` bus.
 - `_VoiceControlsPillState` -- manages duration timer, screen share toggle.
-- `_OverlaySlider` -- `StatefulWidget`, animated slide-in/out panel for the chat overlay during camera/screen share modes.
-- `_OverlaySliderState` -- `SingleTickerProviderStateMixin`, manages `AnimationController` for slide animation.
+- `_OverlaySlider` -- `StatelessWidget`, the chat overlay panel during camera/screen share modes; shows and hides instantly.
 
 ## Four Layout Modes
 
@@ -144,12 +143,10 @@ Identical structure in both camera grid and screen share views. Right-aligned, f
 ### Toggle Button
 The shared `ChatOverlayToggleButton` from `chat_pane_shared.dart` (2026-07-15 — replaced two inline copies in this file): 24px wide, 48px tall tab with chevron icon, semi-transparent surface background (88% alpha), left-rounded corners (8px), left/top/bottom border. Shows `chevronLeft` when closed, `chevronRight` when open. Tapping toggles `_chatOverlayPinned`; hover enter/exit call `_pinOverlays()` / `_resetOverlayTimer()`; visibility rides `_overlaysVisible`.
 
-### Sliding Chat Panel (_OverlaySlider)
-360px wide panel that slides in from the right when `_chatOverlayPinned = true`. Contains a full `ChannelChatPane` instance with the same `serverId`, `channelId`, `channelName`.
+### Chat Panel (_OverlaySlider)
+360px wide panel on the right edge, shown when `_chatOverlayPinned = true`. Contains a full `ChannelChatPane` instance with the same `serverId`, `channelId`, `channelName`.
 
-**`_OverlaySlider`**: `StatefulWidget` with `SingleTickerProviderStateMixin`. Creates `AnimationController` with `HollowDurations.normal` duration. Uses `CurvedAnimation` with `HollowCurves.enter` forward curve and `HollowCurves.exit` reverse curve. `didUpdateWidget` triggers `_controller.forward()` or `_controller.reverse()` when visibility changes.
-
-**Build**: `AnimatedBuilder` with the curved animation. When value is 0.0, renders nothing (`SizedBox.shrink()`). Otherwise renders `ClipRect` > `Align(widthFactor: _curved.value)` > `FadeTransition(opacity: _curved)` > `MouseRegion` (for hover enter/exit) > child. This creates a slide+fade effect where the panel clips from the right edge.
+**`_OverlaySlider`**: `StatelessWidget`. Hidden = `SizedBox.shrink()`; visible = `MouseRegion` (hover enter/exit) > child. It shows and hides instantly: a width animation would re-wrap the chat text on every frame.
 
 Container styling: 88% alpha surface background, left border at 50% alpha.
 

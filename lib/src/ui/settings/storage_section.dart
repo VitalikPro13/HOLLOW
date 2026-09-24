@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
+import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
@@ -421,7 +422,7 @@ class _ContextRowState extends ConsumerState<_ContextRow> {
       onEnter: (_) => setState(() => _hovered = true),
       onExit: (_) => setState(() => _hovered = false),
       child: AnimatedContainer(
-        duration: const Duration(milliseconds: 120),
+        duration: HollowDurations.fast,
         margin: const EdgeInsets.only(top: HollowSpacing.xs),
         padding: const EdgeInsets.symmetric(
             horizontal: HollowSpacing.sm, vertical: HollowSpacing.sm),
@@ -465,7 +466,7 @@ class _ContextRowState extends ConsumerState<_ContextRow> {
             // only brightens it.
             AnimatedOpacity(
               opacity: _hovered ? 1 : 0.55,
-              duration: const Duration(milliseconds: 120),
+              duration: HollowDurations.fast,
               child: _RowTrashButton(
                 label: label,
                 onConfirmed: () => ref

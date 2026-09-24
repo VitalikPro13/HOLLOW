@@ -49,15 +49,14 @@ class _HollowToggleState extends State<HollowToggle>
     super.initState();
     _controller = AnimationController(
       vsync: this,
-      duration: HollowDurations.animationsDisabled
-          ? Duration.zero
-          : const Duration(milliseconds: 200),
       value: widget.value ? 1.0 : 0.0,
     );
+    // Ease-in on the reverse run (t going 1 to 0) decelerates too, so the
+    // thumb settles the same way in both directions and never overshoots.
     _thumbPosition = CurvedAnimation(
       parent: _controller,
-      curve: HollowCurves.spring,
-      reverseCurve: HollowCurves.spring,
+      curve: HollowCurves.enter,
+      reverseCurve: HollowCurves.exit,
     );
   }
 
@@ -75,6 +74,7 @@ class _HollowToggleState extends State<HollowToggle>
   void didUpdateWidget(HollowToggle oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (widget.value != oldWidget.value) {
+      _controller.duration = HollowDurations.fast;
       if (widget.value) {
         _controller.forward();
       } else {

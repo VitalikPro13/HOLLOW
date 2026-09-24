@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/core/services/hotkeys/hotkey_binding.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
@@ -95,7 +96,7 @@ class _KeybindCaptureFieldState extends ConsumerState<KeybindCaptureField> {
           vertical: HollowSpacing.xs,
         ),
         child: AnimatedContainer(
-          duration: const Duration(milliseconds: 120),
+          duration: HollowDurations.fast,
           padding: const EdgeInsets.symmetric(
             horizontal: HollowSpacing.xs,
             vertical: 2,
